@@ -23,7 +23,7 @@ export function ChatView({ sessionId }: { sessionId: string }) {
 
   return (
     <div className="flex flex-col h-full min-h-0">
-      {/* CLI disconnected banner */}
+      {/* CLI disconnected banner — upgraded to reconnecting/error states when #593 lands */}
       {connStatus === "connected" && !cliConnected && (
         <div className="px-4 py-2 bg-cc-warning/10 border-b border-cc-warning/20 text-center flex items-center justify-center gap-3">
           <span className="text-xs text-cc-warning font-medium">
@@ -40,7 +40,8 @@ export function ChatView({ sessionId }: { sessionId: string }) {
 
       {/* WebSocket disconnected banner */}
       {connStatus === "disconnected" && (
-        <div className="px-4 py-2 bg-cc-warning/10 border-b border-cc-warning/20 text-center">
+        <div className="px-4 py-2.5 bg-gradient-to-r from-cc-warning/8 to-cc-warning/4 border-b border-cc-warning/15 flex items-center justify-center gap-2 animate-[fadeSlideIn_0.3s_ease-out]">
+          <span className="w-3 h-3 rounded-full border-2 border-cc-warning/30 border-t-cc-warning animate-spin" />
           <span className="text-xs text-cc-warning font-medium">
             Reconnecting to session...
           </span>

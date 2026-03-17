@@ -140,6 +140,7 @@ export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> 
         gitChangedFilesCount: deleteFromMap(s.gitChangedFilesCount, sessionId),
         sessionProcesses: deleteFromMap(s.sessionProcesses, sessionId),
         toolProgress: deleteFromMap(s.toolProgress, sessionId),
+        toolActivity: deleteFromMap(s.toolActivity, sessionId),
         // UI slice fields
         diffPanelSelectedFile: deleteFromMap(s.diffPanelSelectedFile, sessionId),
         chatTabReentryTickBySession: deleteFromMap(s.chatTabReentryTickBySession, sessionId),
