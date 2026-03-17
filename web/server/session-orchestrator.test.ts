@@ -118,6 +118,7 @@ vi.mock("./container-manager.js", () => ({
       errors: [],
     })),
     execInContainerAsync: vi.fn(async () => ({ exitCode: 0, output: "ok" })),
+    isContainerAlive: vi.fn(() => "not_found"),
   },
 }));
 
@@ -336,6 +337,44 @@ describe("SessionOrchestrator", () => {
       expect(deps.launcher.relaunch).toHaveBeenCalledWith("s1");
       expect(containerManager.createContainer).not.toHaveBeenCalled();
 
+      vi.useRealTimers();
+    });
+
+    it("idle kill clears auto-relaunch counter so session can be fully relaunched later", async () => {
+      // After idle-kill, the auto-relaunch counter must be reset. Without this,
+      // a session that previously had failed relaunch attempts would be stuck at
+      // max and never relaunch when the user returns.
+      vi.useFakeTimers();
+      deps.launcher.getSession.mockReturnValue({ archived: false, state: "exited", pid: undefined } as any);
+      deps.wsBridge.isCliConnected.mockReturnValue(false);
+      deps.launcher.relaunch.mockResolvedValue({ ok: false, error: "failed" });
+      orchestrator.initialize();
+
+      // Exhaust 2 of 3 relaunch attempts
+      for (let i = 0; i < 2; i++) {
+        companionBus.emit("session:relaunch-needed", { sessionId: "s1" });
+        await vi.advanceTimersByTimeAsync(15_000);
+        await vi.advanceTimersByTimeAsync(0);
+      }
+      expect(deps.launcher.relaunch).toHaveBeenCalledTimes(2);
+
+      // Now idle-kill the session — this should clear the counter
+      companionBus.emit("session:idle-kill", { sessionId: "s1" });
+      await vi.advanceTimersByTimeAsync(0);
+
+      // After idle-kill, we should get a fresh budget of 3 relaunch attempts.
+      // Reset the mock to track new calls.
+      deps.launcher.relaunch.mockClear();
+      deps.launcher.relaunch.mockResolvedValue({ ok: false, error: "failed" });
+
+      for (let i = 0; i < 3; i++) {
+        companionBus.emit("session:relaunch-needed", { sessionId: "s1" });
+        await vi.advanceTimersByTimeAsync(15_000);
+        await vi.advanceTimersByTimeAsync(0);
+      }
+
+      // All 3 attempts should succeed (not blocked by previous count)
+      expect(deps.launcher.relaunch).toHaveBeenCalledTimes(3);
       vi.useRealTimers();
     });
 
@@ -1360,12 +1399,12 @@ describe("SessionOrchestrator", () => {
       expect(deps.launcher.relaunch).not.toHaveBeenCalled();
     });
 
-    it("skips relaunch when PID is still alive after grace", async () => {
-      // Use state "exited" to ensure we reach the PID check (line 699), not stopped
-      // by the "connected"/"running" state guard or "starting" guard.
+    it("skips relaunch when session is still starting", async () => {
+      // A session in "starting" state should not be relaunched — it's still
+      // initializing. The starting guard at line 771 prevents this.
       deps.launcher.getSession
         .mockReturnValueOnce({ archived: false } as any) // check archived
-        .mockReturnValueOnce({ state: "exited", pid: process.pid } as any); // after grace: PID is alive
+        .mockReturnValueOnce({ state: "starting", pid: process.pid } as any); // after grace: still starting
       deps.wsBridge.isCliConnected.mockReturnValue(false);
       orchestrator.initialize();
 
@@ -1416,9 +1455,9 @@ describe("SessionOrchestrator", () => {
     });
 
     it("relaunches exited containerized session even when container was removed", async () => {
-      // If a container was removed externally (e.g. docker prune), the session
-      // state becomes "exited". The fix skips PID/container checks for exited
-      // sessions entirely, so relaunch proceeds.
+      // After idle-kill, the container is removed and state becomes "exited".
+      // The fix skips PID/container checks for exited sessions entirely, so
+      // relaunch proceeds. This is the core Docker bug scenario.
       vi.mocked(containerManager.isContainerAlive).mockReturnValue("not_found" as any);
       deps.launcher.getSession
         .mockReturnValueOnce({ archived: false } as any) // check archived

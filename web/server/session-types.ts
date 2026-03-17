@@ -255,7 +255,9 @@ export type CLIMessage =
   | CLIUserEchoMessage
   | CLIRateLimitEventMessage
   | CLIKeepAliveMessage
-  | CLIAuthStatusMessage;
+  | CLIAuthStatusMessage
+  | CLIUserEchoMessage
+  | CLIRateLimitEventMessage;
 
 // ─── Content Block Types ──────────────────────────────────────────────────────
 
