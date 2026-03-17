@@ -46,6 +46,7 @@ interface MockStoreState {
   currentSessionId: string | null;
   connectionStatus: Map<string, "connecting" | "connected" | "disconnected">;
   cliConnected: Map<string, boolean>;
+  cliReconnecting: Map<string, boolean>;
   sessionStatus: Map<string, "idle" | "running" | "compacting" | null>;
   sessionNames: Map<string, string>;
   recentlyRenamed: Set<string>;
@@ -113,6 +114,7 @@ function createMockState(overrides: Partial<MockStoreState> = {}): MockStoreStat
     currentSessionId: null,
     connectionStatus: new Map(),
     cliConnected: new Map(),
+    cliReconnecting: new Map(),
     sessionStatus: new Map(),
     sessionNames: new Map(),
     recentlyRenamed: new Set(),
@@ -394,6 +396,22 @@ describe("Sidebar", () => {
     render(<Sidebar />);
     const awaitingDot = document.querySelector(".bg-cc-warning.animate-\\[ring-pulse_1\\.5s_ease-out_infinite\\]");
     expect(awaitingDot).toBeTruthy();
+  });
+
+  it("reconnecting session renders a spinning status dot", () => {
+    // Validates that a session in reconnecting state shows a spinning border dot
+    const session = makeSession("s1");
+    const sdk = makeSdkSession("s1");
+    mockState = createMockState({
+      sessions: new Map([["s1", session]]),
+      sdkSessions: [sdk],
+      cliConnected: new Map([["s1", false]]),
+      cliReconnecting: new Map([["s1", true]]),
+    });
+
+    render(<Sidebar />);
+    const reconnectingDot = document.querySelector(".animate-spin.border-t-cc-warning");
+    expect(reconnectingDot).toBeTruthy();
   });
 
   it("archived sessions section shows count", () => {
