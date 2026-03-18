@@ -294,7 +294,7 @@ describe("SessionOrchestrator", () => {
       expect(deps.launcher.kill).not.toHaveBeenCalled();
     });
 
-    it("idle kill callback kills non-archived sessions", async () => {
+    it("idle kill callback kills CLI but preserves container", async () => {
       deps.launcher.getSession.mockReturnValue({ archived: false });
       orchestrator.initialize();
 
@@ -302,6 +302,41 @@ describe("SessionOrchestrator", () => {
       await new Promise(r => setTimeout(r, 0));
 
       expect(deps.launcher.kill).toHaveBeenCalledWith("s1");
+      // Container must NOT be removed — idle-kill only stops the CLI process
+      // so the container can be reused on relaunch.
+      expect(containerManager.removeContainer).not.toHaveBeenCalled();
+    });
+
+    it("after idle-kill, relaunch reuses preserved container without creating a new one", async () => {
+      // End-to-end scenario: idle-kill fires, container survives, browser
+      // reconnects, and the CLI is relaunched into the existing container.
+      vi.useFakeTimers();
+      deps.launcher.getSession.mockReturnValue({
+        archived: false,
+        state: "exited",
+        containerId: "cid-preserved",
+        pid: undefined,
+      } as any);
+      deps.wsBridge.isCliConnected.mockReturnValue(false);
+      deps.launcher.relaunch.mockResolvedValue({ ok: true });
+      orchestrator.initialize();
+
+      // 1. Idle-kill fires — CLI killed, container preserved
+      companionBus.emit("session:idle-kill", { sessionId: "s1" });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(deps.launcher.kill).toHaveBeenCalledWith("s1");
+      expect(containerManager.removeContainer).not.toHaveBeenCalled();
+
+      // 2. Browser reconnects — triggers auto-relaunch
+      companionBus.emit("session:relaunch-needed", { sessionId: "s1" });
+      await vi.advanceTimersByTimeAsync(15_000);
+      await vi.advanceTimersByTimeAsync(0);
+
+      // 3. Relaunch succeeds using the preserved container — no new container created
+      expect(deps.launcher.relaunch).toHaveBeenCalledWith("s1");
+      expect(containerManager.createContainer).not.toHaveBeenCalled();
+
+      vi.useRealTimers();
     });
 
     it("is idempotent — calling initialize() twice does not double-register listeners", () => {
@@ -1339,6 +1374,64 @@ describe("SessionOrchestrator", () => {
       await vi.advanceTimersByTimeAsync(0);
 
       expect(deps.launcher.relaunch).not.toHaveBeenCalled();
+    });
+
+    it("relaunches exited session even when PID was recycled to a live process", async () => {
+      // After idle-kill, the session state is "exited" but the PID field stays
+      // set. If the kernel recycles the PID to a different process, we must NOT
+      // let the PID check prevent relaunch. The fix skips PID liveness for
+      // exited sessions entirely.
+      deps.launcher.getSession
+        .mockReturnValueOnce({ archived: false } as any) // check archived
+        .mockReturnValueOnce({ state: "exited", pid: process.pid } as any); // after grace: PID is alive (recycled!)
+      deps.wsBridge.isCliConnected.mockReturnValue(false);
+      orchestrator.initialize();
+
+      companionBus.emit("session:relaunch-needed", { sessionId: "s1" });
+      await vi.advanceTimersByTimeAsync(15_000);
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Should relaunch despite the PID being alive — exited sessions skip PID check
+      expect(deps.launcher.relaunch).toHaveBeenCalledWith("s1");
+    });
+
+    it("skips relaunch for containerized session when container is still running", async () => {
+      // For non-exited containerized sessions, use container liveness instead
+      // of PID check. If the container is running, skip relaunch to let the
+      // CLI reconnect on its own. Use state "starting" to bypass the earlier
+      // connected/running guard and actually exercise the container check path.
+      vi.mocked(containerManager.isContainerAlive).mockReturnValue("running" as any);
+      deps.launcher.getSession
+        .mockReturnValueOnce({ archived: false } as any) // check archived
+        .mockReturnValueOnce({ state: "starting", containerId: "cid-abc", pid: 99999 } as any); // after grace
+      deps.wsBridge.isCliConnected.mockReturnValue(false);
+      orchestrator.initialize();
+
+      companionBus.emit("session:relaunch-needed", { sessionId: "s1" });
+      await vi.advanceTimersByTimeAsync(15_000);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(containerManager.isContainerAlive).toHaveBeenCalledWith("cid-abc");
+      expect(deps.launcher.relaunch).not.toHaveBeenCalled();
+    });
+
+    it("relaunches exited containerized session even when container was removed", async () => {
+      // If a container was removed externally (e.g. docker prune), the session
+      // state becomes "exited". The fix skips PID/container checks for exited
+      // sessions entirely, so relaunch proceeds.
+      vi.mocked(containerManager.isContainerAlive).mockReturnValue("not_found" as any);
+      deps.launcher.getSession
+        .mockReturnValueOnce({ archived: false } as any) // check archived
+        .mockReturnValueOnce({ state: "exited", containerId: "cid-dead", pid: 99999 } as any); // after grace
+      deps.wsBridge.isCliConnected.mockReturnValue(false);
+      orchestrator.initialize();
+
+      companionBus.emit("session:relaunch-needed", { sessionId: "s1" });
+      await vi.advanceTimersByTimeAsync(15_000);
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Exited sessions skip the container/PID check entirely, so relaunch proceeds
+      expect(deps.launcher.relaunch).toHaveBeenCalledWith("s1");
     });
 
     it("relaunches when CLI does not reconnect after grace period", async () => {
