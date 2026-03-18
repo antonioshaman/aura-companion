@@ -9,7 +9,9 @@ import type { LinearAgentBridge } from "../linear-agent-bridge.js";
 import * as linearAgent from "../linear-agent.js";
 import type { AgentSessionEventPayload } from "../linear-agent.js";
 import * as agentStore from "../agent-store.js";
+import * as staging from "../linear-staging.js";
 import { getSettings, updateSettings } from "../settings-manager.js";
+import { findOAuthConnectionByClientId } from "../linear-oauth-connections.js";
 
 /**
  * Register the Linear Agent SDK pre-auth routes (before auth middleware).
@@ -38,19 +40,31 @@ export function registerLinearAgentWebhookRoute(
       return c.json({ ok: true, ignored: true });
     }
 
-    // Look up the agent by oauthClientId to get the correct webhook secret
-    const agent = agentStore.listAgents().find(
-      (a) => a.enabled && a.triggers?.linear?.enabled
-        && a.triggers.linear.oauthClientId === payload.oauthClientId,
-    );
+    // Look up credentials: first try OAuth connection (new model), then inline (legacy)
+    const oauthConn = payload.oauthClientId ? findOAuthConnectionByClientId(payload.oauthClientId) : null;
+    let webhookSecret: string;
+    let agent: ReturnType<typeof agentStore.listAgents>[number] | undefined;
+
+    if (oauthConn) {
+      // New model: find agent referencing this connection
+      webhookSecret = oauthConn.webhookSecret;
+      agent = agentStore.listAgents().find(
+        (a) => a.enabled && a.triggers?.linear?.enabled
+          && a.triggers.linear.oauthConnectionId === oauthConn.id,
+      );
+    } else {
+      // Legacy: find agent by inline oauthClientId
+      agent = agentStore.listAgents().find(
+        (a) => a.enabled && a.triggers?.linear?.enabled
+          && a.triggers.linear.oauthClientId === payload.oauthClientId,
+      );
+      webhookSecret = agent?.triggers?.linear?.webhookSecret || "";
+    }
 
     if (!agent) {
       console.error(`[linear-agent-routes] No agent found for oauthClientId: ${payload.oauthClientId}`);
       return c.json({ error: "No agent configured for this OAuth client" }, 404);
     }
-
-    // Verify webhook signature with this agent's webhook secret
-    const webhookSecret = agent.triggers?.linear?.webhookSecret || "";
     if (!linearAgent.verifyWebhookSignature(webhookSecret, rawBody, signature ?? null)) {
       return c.json({ error: "Invalid signature" }, 401);
     }
@@ -95,9 +109,30 @@ export function registerLinearAgentWebhookRoute(
     const baseUrl = settings.publicUrl || `http://localhost:${process.env.PORT || 3456}`;
     const redirectUri = `${baseUrl}/api/linear/oauth/callback`;
 
-    // Use staged credentials from global settings for the token exchange
+    // Determine which credentials to use for token exchange:
+    // 1. OAuth connection (new model) — connectionId in state
+    // 2. Staging slot (wizard flow) — stagingId in state
+    // 3. Global settings (legacy fallback)
+    const { getOAuthConnection, updateOAuthConnection } = await import("../linear-oauth-connections.js");
+    const oauthConnection = stateResult.connectionId ? getOAuthConnection(stateResult.connectionId) : null;
+    const stagingSlot = stateResult.stagingId ? staging.getSlot(stateResult.stagingId) : null;
+
+    // If a connectionId was in the state but the connection is gone, fail
+    if (stateResult.connectionId && !oauthConnection) {
+      return c.redirect(`${redirectBase}?oauth_error=${encodeURIComponent("connection_not_found")}`);
+    }
+
+    // If a stagingId was in the state but the slot is gone (expired/deleted), don't silently
+    // fall back to global settings — that would use the wrong OAuth app's credentials
+    if (stateResult.stagingId && !stagingSlot) {
+      return c.redirect(`${redirectBase}?oauth_error=${encodeURIComponent("staging_slot_expired")}`);
+    }
+
+    const clientId = oauthConnection?.oauthClientId || stagingSlot?.clientId || settings.linearOAuthClientId;
+    const clientSecret = oauthConnection?.oauthClientSecret || stagingSlot?.clientSecret || settings.linearOAuthClientSecret;
+
     const tokens = await linearAgent.exchangeCodeForTokens(
-      { clientId: settings.linearOAuthClientId, clientSecret: settings.linearOAuthClientSecret },
+      { clientId, clientSecret },
       code,
       redirectUri,
     );
@@ -105,11 +140,22 @@ export function registerLinearAgentWebhookRoute(
       return c.redirect(`${redirectBase}?oauth_error=token_exchange_failed`);
     }
 
-    // Persist tokens to global staging (will be moved to agent on creation)
-    updateSettings({
-      linearOAuthAccessToken: tokens.accessToken,
-      linearOAuthRefreshToken: tokens.refreshToken,
-    });
+    // Persist tokens to the appropriate store
+    if (stateResult.connectionId && oauthConnection) {
+      // New model: store tokens directly in the OAuth connection
+      updateOAuthConnection(stateResult.connectionId, {
+        accessToken: tokens.accessToken,
+        refreshToken: tokens.refreshToken,
+        status: "connected",
+      });
+    } else if (stateResult.stagingId) {
+      staging.updateSlotTokens(stateResult.stagingId, tokens);
+    } else {
+      updateSettings({
+        linearOAuthAccessToken: tokens.accessToken,
+        linearOAuthRefreshToken: tokens.refreshToken,
+      });
+    }
 
     console.log("[linear-agent-routes] OAuth tokens obtained successfully");
     return c.redirect(`${redirectBase}?oauth_success=true`);
@@ -118,18 +164,81 @@ export function registerLinearAgentWebhookRoute(
 
 /**
  * Register protected Linear Agent SDK routes (after auth middleware).
- * Status + authorize URL + disconnect endpoints.
+ * Status + authorize URL + disconnect + staging slot endpoints.
  */
 export function registerLinearAgentProtectedRoutes(api: Hono): void {
+  // ── Staging slot CRUD ──────────────────────────────────────────────────
+
+  // Create a staging slot for the wizard flow
+  api.post("/linear/oauth/staging", async (c) => {
+    const body = await c.req.json() as {
+      clientId?: string;
+      clientSecret?: string;
+      webhookSecret?: string;
+    };
+
+    const clientId = (body.clientId || "").trim();
+    const clientSecret = (body.clientSecret || "").trim();
+    const webhookSecret = (body.webhookSecret || "").trim();
+
+    if (!clientId || !clientSecret || !webhookSecret) {
+      return c.json({ error: "clientId, clientSecret, and webhookSecret are required" }, 400);
+    }
+
+    const stagingId = staging.createSlot({ clientId, clientSecret, webhookSecret });
+    return c.json({ stagingId });
+  });
+
+  // Check staging slot status
+  api.get("/linear/oauth/staging/:id/status", (c) => {
+    const id = c.req.param("id");
+    const slot = staging.getSlot(id);
+    if (!slot) {
+      return c.json({ exists: false, hasAccessToken: false, hasClientId: false, hasClientSecret: false });
+    }
+    return c.json({
+      exists: true,
+      hasAccessToken: !!slot.accessToken,
+      hasClientId: !!slot.clientId,
+      hasClientSecret: !!slot.clientSecret,
+    });
+  });
+
+  // Delete a staging slot
+  api.delete("/linear/oauth/staging/:id", (c) => {
+    const id = c.req.param("id");
+    staging.deleteSlot(id);
+    return c.json({ ok: true });
+  });
+
+  // ── OAuth flow endpoints ───────────────────────────────────────────────
+
   // Get OAuth authorize URL for installing the app
   api.get("/linear/oauth/authorize-url", (c) => {
     const settings = getSettings();
     const baseUrl = settings.publicUrl || `http://localhost:${process.env.PORT || 3456}`;
     const redirectUri = `${baseUrl}/api/linear/oauth/callback`;
     const returnTo = c.req.query("returnTo");
+    const stagingId = c.req.query("stagingId");
+
     // Validate returnTo is a safe relative hash-router path to prevent open redirects
     const safeReturnTo = returnTo && /^\/?#\//.test(returnTo) ? returnTo : undefined;
-    const result = linearAgent.getOAuthAuthorizeUrl(settings.linearOAuthClientId, redirectUri, safeReturnTo);
+
+    // Use staging slot's clientId if provided, fall back to global settings
+    const slot = stagingId ? staging.getSlot(stagingId) : null;
+
+    // If a stagingId was provided but the slot is expired/missing, fail early
+    // rather than generating a URL that will fail at callback time
+    if (stagingId && !slot) {
+      return c.json({ error: "Staging slot expired or not found" }, 404);
+    }
+
+    const clientId = slot?.clientId || settings.linearOAuthClientId;
+
+    const result = linearAgent.getOAuthAuthorizeUrl(clientId, redirectUri, {
+      returnTo: safeReturnTo,
+      stagingId,
+    });
 
     if (!result) {
       return c.json({ error: "OAuth client ID not configured" }, 400);
@@ -138,8 +247,21 @@ export function registerLinearAgentProtectedRoutes(api: Hono): void {
     return c.json({ url: result.url });
   });
 
-  // Check OAuth configuration status
+  // Check OAuth configuration status (global or staging slot)
   api.get("/linear/oauth/status", (c) => {
+    const stagingId = c.req.query("stagingId");
+
+    if (stagingId) {
+      const slot = staging.getSlot(stagingId);
+      return c.json({
+        configured: !!(slot?.clientId && slot?.clientSecret && slot?.accessToken),
+        hasClientId: !!slot?.clientId,
+        hasClientSecret: !!slot?.clientSecret,
+        hasWebhookSecret: !!slot?.webhookSecret,
+        hasAccessToken: !!slot?.accessToken,
+      });
+    }
+
     const settings = getSettings();
     return c.json({
       configured: linearAgent.isLinearOAuthConfigured({
