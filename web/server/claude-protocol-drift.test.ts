@@ -40,11 +40,18 @@ describe("Claude ws-bridge method drift vs upstream Agent SDK snapshot", () => {
     // - control_request / keep_alive: core transport types not in SDK
     // - user: CLI echoes back user messages (silently dropped, #592)
     // - rate_limit_event: Claude API rate-limit status (silently consumed, #592)
+    // - control_cancel_request: cancels a pending control_request (v2.1.81+, #613)
+    // - streamlined_text / streamlined_tool_use_summary: simplified output mode (@internal, v2.1.81+, #613)
+    // - prompt_suggestion: predicted next user prompts (v2.1.81+, #613)
     const localRawTransportTypes = new Set([
       "control_request",
       "keep_alive",
       "user",
       "rate_limit_event",
+      "control_cancel_request",
+      "streamlined_text",
+      "streamlined_tool_use_summary",
+      "prompt_suggestion",
     ]);
 
     for (const method of handledFromCLI) {
