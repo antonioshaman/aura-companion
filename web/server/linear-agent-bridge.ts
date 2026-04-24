@@ -213,7 +213,7 @@ export class LinearAgentBridge {
           type: "error",
           body: isOverlap
             ? `Agent "${agent.name}" is currently busy with another session. Please wait for it to complete.`
-            : "Failed to start Companion session. Check The Companion for details.",
+            : "Failed to start Companion session. Check Aura Companion for details.",
         });
         return;
       }

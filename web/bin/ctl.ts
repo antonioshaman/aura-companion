@@ -521,7 +521,7 @@ export async function handleCtlCommand(command: string, rawArgv: string[]): Prom
     const message = e instanceof Error ? e.message : String(e);
     // Check if it's a connection error
     if (message.includes("ECONNREFUSED") || message.includes("fetch failed")) {
-      err(`Cannot connect to The Companion at ${base}. Is the server running?`);
+      err(`Cannot connect to Aura Companion at ${base}. Is the server running?`);
     }
     err(message);
   }

@@ -193,7 +193,7 @@ describe("generateSystemdUnit", () => {
 
   it("includes the description", () => {
     const unit = service.generateSystemdUnit({ binPath: "/usr/local/bin/the-companion" });
-    expect(unit).toContain("Description=The Companion");
+    expect(unit).toContain("Description=Aura Companion");
   });
 
   it("uses the provided binary path in ExecStart", () => {

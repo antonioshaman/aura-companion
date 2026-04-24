@@ -1,6 +1,6 @@
 # Codex App-Server Protocol Mapping
 
-This document describes how the Codex `app-server` JSON-RPC protocol maps to The Companion's internal browser message protocol. The adapter (`web/server/codex-adapter.ts`) performs this translation so the frontend doesn't need to know which backend is running.
+This document describes how the Codex `app-server` JSON-RPC protocol maps to Aura Companion's internal browser message protocol. The adapter (`web/server/codex-adapter.ts`) performs this translation so the frontend doesn't need to know which backend is running.
 
 ## Architecture
 

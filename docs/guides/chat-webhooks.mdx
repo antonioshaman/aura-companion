@@ -10,7 +10,7 @@ Chat webhooks let your agents respond to mentions and messages on external platf
 ## How it works
 
 1. An external platform sends a webhook when someone mentions your agent
-2. The Companion matches the mention to a configured agent
+2. Aura Companion matches the mention to a configured agent
 3. A new session is created and the agent processes the message
 4. The agent's response is posted back to the platform thread
 5. Follow-up messages in the same thread continue the conversation in the same session
@@ -35,7 +35,7 @@ LINEAR_API_KEY=lin_api_...
 LINEAR_WEBHOOK_SECRET=lin_wh_...
 ```
 
-The Companion checks for these on startup. If both are present, the Linear chat adapter is initialized automatically.
+Aura Companion checks for these on startup. If both are present, the Linear chat adapter is initialized automatically.
 
 ### 3. Configure the Linear webhook
 
@@ -62,7 +62,7 @@ The webhook endpoint (`/api/chat/webhooks/linear`) is intentionally **unauthenti
 
 ### 5. Test it
 
-In a Linear issue, post a comment mentioning your bot. The Companion picks up the webhook, finds the matching agent, starts a session, and posts the response back as a comment on the issue.
+In a Linear issue, post a comment mentioning your bot. Aura Companion picks up the webhook, finds the matching agent, starts a session, and posts the response back as a comment on the issue.
 
 ## Mention patterns
 

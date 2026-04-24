@@ -1,8 +1,8 @@
 /**
  * Companion Relay Worker
  *
- * A Cloudflare Worker that acts as a webhook relay for The Companion app.
- * The Companion runs behind a firewall but needs to receive external platform
+ * A Cloudflare Worker that acts as a webhook relay for Aura Companion app.
+ * Aura Companion runs behind a firewall but needs to receive external platform
  * webhooks (e.g. from Linear, GitHub, etc.).
  *
  * Architecture:
@@ -115,7 +115,7 @@ function handleHealth(): Response {
 /**
  * GET /ws/relay?secret=... — WebSocket upgrade for the Companion client.
  *
- * The Companion connects here and keeps an open WebSocket to receive
+ * Aura Companion connects here and keeps an open WebSocket to receive
  * webhook requests and send back responses.
  */
 async function handleRelayWebSocket(request: Request, env: Env): Promise<Response> {

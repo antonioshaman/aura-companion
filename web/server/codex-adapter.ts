@@ -2,7 +2,7 @@
  * Codex App-Server Adapter
  *
  * Translates between the Codex app-server JSON-RPC protocol (stdin/stdout)
- * and The Companion's BrowserIncomingMessage/BrowserOutgoingMessage types.
+ * and Aura Companion's BrowserIncomingMessage/BrowserOutgoingMessage types.
  *
  * This allows the browser to be completely unaware of which backend is running —
  * it sees the same message types regardless of whether Claude Code or Codex is
@@ -933,7 +933,7 @@ export class CodexAdapter implements IBackendAdapter {
       const result = await this.transport.call("initialize", {
         clientInfo: {
           name: "thecompanion",
-          title: "The Companion",
+          title: "Aura Companion",
           version: "1.0.0",
         },
         capabilities: {

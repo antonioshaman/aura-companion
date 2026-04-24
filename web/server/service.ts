@@ -129,7 +129,7 @@ export function generateSystemdUnit(opts: UnitOptions): string {
   const home = homedir();
 
   return `[Unit]
-Description=The Companion - Web UI for Claude Code
+Description=Aura Companion - Web UI for Claude Code
 After=network.target
 
 [Service]
@@ -240,7 +240,7 @@ async function installDarwin(opts?: { port?: number }): Promise<void> {
   migrateLegacyInstallIfNeeded();
 
   if (existsSync(PLIST_PATH)) {
-    console.error("The Companion is already installed as a service.");
+    console.error("Aura Companion is already installed as a service.");
     console.error("Run 'the-companion uninstall' first to reinstall.");
     process.exit(1);
   }
@@ -268,7 +268,7 @@ async function installDarwin(opts?: { port?: number }): Promise<void> {
     process.exit(1);
   }
 
-  console.log("The Companion has been installed as a background service.");
+  console.log("Aura Companion has been installed as a background service.");
   console.log("");
   console.log(`  URL:    http://localhost:${port}`);
   console.log(`  Logs:   ${LOG_DIR}`);
@@ -280,7 +280,7 @@ async function installDarwin(opts?: { port?: number }): Promise<void> {
 
 async function installLinux(opts?: { port?: number }): Promise<void> {
   if (isSystemdUnitInstalled()) {
-    console.error("The Companion is already installed as a service.");
+    console.error("Aura Companion is already installed as a service.");
     console.error("Run 'the-companion uninstall' first to reinstall.");
     process.exit(1);
   }
@@ -319,7 +319,7 @@ async function installLinux(opts?: { port?: number }): Promise<void> {
     console.warn("  sudo loginctl enable-linger $(whoami)");
   }
 
-  console.log("The Companion has been installed as a background service.");
+  console.log("Aura Companion has been installed as a background service.");
   console.log("");
   console.log(`  URL:    http://localhost:${port}`);
   console.log(`  Logs:   ${LOG_DIR}`);
@@ -343,20 +343,20 @@ export async function uninstall(): Promise<void> {
 async function uninstallDarwin(): Promise<void> {
   const installedService = getInstalledLaunchdService();
   if (!installedService) {
-    console.log("The Companion is not installed as a service.");
+    console.log("Aura Companion is not installed as a service.");
     return;
   }
 
   unloadLaunchdService(installedService.plistPath);
   removePlist(installedService.plistPath);
 
-  console.log("The Companion service has been removed.");
+  console.log("Aura Companion service has been removed.");
   console.log(`Logs are preserved at ${LOG_DIR}`);
 }
 
 async function uninstallLinux(): Promise<void> {
   if (!isSystemdUnitInstalled()) {
-    console.log("The Companion is not installed as a service.");
+    console.log("Aura Companion is not installed as a service.");
     return;
   }
 
@@ -378,7 +378,7 @@ async function uninstallLinux(): Promise<void> {
     // Best-effort reload
   }
 
-  console.log("The Companion service has been removed.");
+  console.log("Aura Companion service has been removed.");
   console.log(`Logs are preserved at ${LOG_DIR}`);
 }
 
@@ -396,7 +396,7 @@ export async function start(): Promise<void> {
 async function startDarwin(): Promise<void> {
   const installedService = getInstalledLaunchdService();
   if (!installedService) {
-    console.log("The Companion is not installed as a service.");
+    console.log("Aura Companion is not installed as a service.");
     console.log("Run 'the-companion install' first.");
     return;
   }
@@ -423,7 +423,7 @@ async function startDarwin(): Promise<void> {
     }
   }
 
-  console.log("The Companion service has been started.");
+  console.log("Aura Companion service has been started.");
 }
 
 async function startLinux(): Promise<void> {
@@ -446,7 +446,7 @@ async function startLinux(): Promise<void> {
     process.exit(1);
   }
 
-  console.log("The Companion service has been started.");
+  console.log("Aura Companion service has been started.");
 }
 
 export async function stop(): Promise<void> {
@@ -461,7 +461,7 @@ export async function stop(): Promise<void> {
 async function stopDarwin(): Promise<void> {
   const installedService = getInstalledLaunchdService();
   if (!installedService) {
-    console.log("The Companion is not installed as a service.");
+    console.log("Aura Companion is not installed as a service.");
     return;
   }
 
@@ -478,13 +478,13 @@ async function stopDarwin(): Promise<void> {
     unloadLaunchdService(installedService.plistPath);
   }
 
-  console.log("The Companion service has been stopped.");
+  console.log("Aura Companion service has been stopped.");
   console.log("Run 'the-companion restart' to start it again.");
 }
 
 async function stopLinux(): Promise<void> {
   if (!isSystemdUnitInstalled()) {
-    console.log("The Companion is not installed as a service.");
+    console.log("Aura Companion is not installed as a service.");
     return;
   }
 
@@ -496,7 +496,7 @@ async function stopLinux(): Promise<void> {
     process.exit(1);
   }
 
-  console.log("The Companion service has been stopped.");
+  console.log("Aura Companion service has been stopped.");
   console.log("Run 'the-companion restart' to start it again.");
 }
 
@@ -512,7 +512,7 @@ export async function restart(): Promise<void> {
 async function restartDarwin(): Promise<void> {
   const installedService = getInstalledLaunchdService();
   if (!installedService) {
-    console.log("The Companion is not installed as a service.");
+    console.log("Aura Companion is not installed as a service.");
     return;
   }
 
@@ -535,12 +535,12 @@ async function restartDarwin(): Promise<void> {
     }
   }
 
-  console.log("The Companion service has been restarted.");
+  console.log("Aura Companion service has been restarted.");
 }
 
 async function restartLinux(): Promise<void> {
   if (!isSystemdUnitInstalled()) {
-    console.log("The Companion is not installed as a service.");
+    console.log("Aura Companion is not installed as a service.");
     return;
   }
 
@@ -555,7 +555,7 @@ async function restartLinux(): Promise<void> {
     process.exit(1);
   }
 
-  console.log("The Companion service has been restarted.");
+  console.log("Aura Companion service has been restarted.");
 }
 
 // ─── Status ─────────────────────────────────────────────────────────────────────

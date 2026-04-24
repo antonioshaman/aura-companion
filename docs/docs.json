@@ -1,7 +1,7 @@
 {
   "$schema": "https://mintlify.com/docs.json",
   "theme": "maple",
-  "name": "The Companion",
+  "name": "Aura Companion",
   "description": "Web UI for Claude Code and Codex sessions. Run multiple agents, inspect tool calls, and gate risky actions with explicit approvals.",
   "colors": {
     "primary": "#5B5FEA",

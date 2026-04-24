@@ -1,11 +1,11 @@
 ---
 title: Deploy on a Cloud VM
-description: Deploy The Companion on a private cloud VM with Tailscale access
+description: Deploy Aura Companion on a private cloud VM with Tailscale access
 ---
 
 # Deploy on a Cloud VM
 
-The Companion runs locally by default, but you can deploy it on a remote server for always-on access, shared team usage, or dedicated development environments.
+Aura Companion runs locally by default, but you can deploy it on a remote server for always-on access, shared team usage, or dedicated development environments.
 
 ## Choosing a setup
 
@@ -24,7 +24,7 @@ You can combine approaches — for example, deploy on a GCP VM and use Docker se
 
 Regardless of where you deploy, the architecture stays the same:
 
-1. The Companion server runs on the host (port 3456 by default)
+1. Aura Companion server runs on the host (port 3456 by default)
 2. It spawns Claude Code or Codex CLI processes as child subprocesses
 3. Your browser connects to the server over WebSocket
 4. A reverse proxy or tunnel (like Tailscale) provides secure remote access
@@ -33,7 +33,7 @@ The server is stateless enough to restart cleanly — sessions persist to disk a
 
 ## GCP Virtual Machine
 
-This guide walks you through deploying The Companion on a private GCP VM in the `europe-west9` (Paris) region. The VM has no public IP — you'll access it securely through Tailscale, which gives you an HTTPS endpoint without exposing anything to the internet.
+This guide walks you through deploying Aura Companion on a private GCP VM in the `europe-west9` (Paris) region. The VM has no public IP — you'll access it securely through Tailscale, which gives you an HTTPS endpoint without exposing anything to the internet.
 
 By the end, you'll have a dedicated Companion server running at `https://<hostname>.<tailnet>.ts.net/`.
 
@@ -41,7 +41,7 @@ By the end, you'll have a dedicated Companion server running at `https://<hostna
 
 | Component | Purpose |
 |---|---|
-| GCP Compute Engine VM | Runs The Companion (no public IP) |
+| GCP Compute Engine VM | Runs Aura Companion (no public IP) |
 | IAP tunnel | SSH access to the private VM |
 | Cloud NAT | Outbound internet for package installs |
 | Tailscale | Secure access via your private network |
@@ -204,9 +204,9 @@ gcloud compute ssh "$INSTANCE" \
   --command 'bash -s' < ./provision-devbox.sh
 ```
 
-### 6. Install Bun and The Companion
+### 6. Install Bun and Aura Companion
 
-SSH into the VM and install The Companion as a global package with a background service:
+SSH into the VM and install Aura Companion as a global package with a background service:
 
 ```bash
 gcloud compute ssh "$INSTANCE" \
@@ -222,7 +222,7 @@ if ! command -v bun >/dev/null 2>&1; then
 fi
 export PATH=\$HOME/.bun/bin:\$PATH
 
-# Install The Companion globally
+# Install Aura Companion globally
 bun install -g the-companion
 
 # Register as a systemd service and start
@@ -266,7 +266,7 @@ sudo -E tailscale up \
   --ssh
 unset TS_AUTHKEY
 
-# Serve The Companion over HTTPS
+# Serve Aura Companion over HTTPS
 sudo tailscale serve --bg 3456
 '"
 ```
@@ -348,7 +348,7 @@ sudo apt-get install -y unzip
 - Verify the node is connected: `sudo tailscale status`
 - Make sure your local device is also on the same tailnet
 
-### The Companion UI loads but sessions fail
+### Aura Companion UI loads but sessions fail
 
 - Confirm the Claude Code CLI is authenticated: SSH in and run `claude` once
 - Check that your API key or subscription is valid
@@ -359,7 +359,7 @@ sudo apt-get install -y unzip
 - The VM has **no public IP** — it's only reachable via IAP (SSH) and Tailscale (HTTPS)
 - **Revoke and regenerate** the Tailscale auth key after provisioning
 - Use [Tailscale ACLs](https://tailscale.com/kb/1018/acls) to restrict which devices and users can reach the VM
-- The Companion generates an auth token automatically — see [Authentication](/get-started/installation#authentication) for details
+- Aura Companion generates an auth token automatically — see [Authentication](/get-started/installation#authentication) for details
 - Consider enabling GCP [OS Login](https://cloud.google.com/compute/docs/instances/managing-instance-access) for centralized SSH access control
 - Clear shell history after provisioning to remove any sensitive values: `history -c && history -w`
 
