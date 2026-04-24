@@ -847,7 +847,7 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                   <div>
                     <span className="block text-sm font-medium">Auto-update Docker image</span>
                     <p className="mt-0.5 text-xs text-cc-muted">
-                      Automatically re-pull the sandbox Docker image when updating The Companion
+                      Automatically re-pull the sandbox Docker image when updating Aura Companion
                     </p>
                   </div>
                   <button

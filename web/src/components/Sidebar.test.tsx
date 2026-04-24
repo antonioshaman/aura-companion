@@ -1656,9 +1656,9 @@ describe("Sidebar", () => {
     expect(githubLink).toBeInTheDocument();
     expect(websiteLink).toBeInTheDocument();
 
-    expect(docsLink).toHaveAttribute("href", "https://docs.thecompanion.sh");
+    expect(docsLink).toHaveAttribute("href", "https://docs.aura-companion.sh");
     expect(githubLink).toHaveAttribute("href", "https://github.com/The-Vibe-Company/companion");
-    expect(websiteLink).toHaveAttribute("href", "https://thecompanion.sh");
+    expect(websiteLink).toHaveAttribute("href", "https://aura-companion.sh");
   });
 
   it("external links open in new tab with secure attributes", () => {

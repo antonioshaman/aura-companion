@@ -831,9 +831,9 @@ export function HomePage() {
       <div className="w-full max-w-[720px]">
         {/* Logo + Title — minimal, centered */}
         <div className="flex flex-col items-center mb-6 sm:mb-10">
-          <img src={logoSrc} alt="The Companion" className="w-10 h-10 sm:w-12 sm:h-12 mb-3" />
+          <img src={logoSrc} alt="Aura Companion" className="w-10 h-10 sm:w-12 sm:h-12 mb-3" />
           <h1 className="text-xl sm:text-2xl font-semibold tracking-tight text-cc-fg">
-            The Companion
+            Aura Companion
           </h1>
         </div>
 

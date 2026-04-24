@@ -116,7 +116,7 @@ export function DockerUpdateDialog() {
               Update Sandbox Image?
             </h2>
             <p className="text-sm text-cc-muted mb-5">
-              A new version of The Companion was installed. Would you like to also
+              A new version of Aura Companion was installed. Would you like to also
               update the sandbox Docker image?
             </p>
 
@@ -269,7 +269,7 @@ export function PlaygroundDockerUpdateDialog({ phase }: { phase: DialogPhase }) 
           <div className="p-5">
             <h2 className="text-sm font-semibold text-cc-fg mb-1.5">Update Sandbox Image?</h2>
             <p className="text-xs text-cc-muted mb-4">
-              A new version of The Companion was installed. Would you like to also update the sandbox Docker image?
+              A new version of Aura Companion was installed. Would you like to also update the sandbox Docker image?
             </p>
             <div className="flex items-center justify-between px-2 py-2 rounded-lg bg-cc-hover text-xs text-cc-fg mb-4">
               <span>Always update automatically</span>

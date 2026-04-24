@@ -341,10 +341,10 @@ describe("HomePage", () => {
     render(<HomePage />);
 
     // Title
-    expect(screen.getByText("The Companion")).toBeInTheDocument();
+    expect(screen.getByText("Aura Companion")).toBeInTheDocument();
 
     // Logo image (the claude logo is the default)
-    const logo = screen.getByAltText("The Companion");
+    const logo = screen.getByAltText("Aura Companion");
     expect(logo).toBeInTheDocument();
     expect(logo).toHaveAttribute("src", "/logo.svg");
 
@@ -524,7 +524,7 @@ describe("HomePage", () => {
 
     // Logo should change to codex
     await waitFor(() => {
-      const logo = screen.getByAltText("The Companion");
+      const logo = screen.getByAltText("Aura Companion");
       expect(logo).toHaveAttribute("src", "/logo-codex.svg");
     });
 
@@ -935,7 +935,7 @@ describe("HomePage", () => {
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
 
     // Logo should be the codex logo since backend was restored from localStorage
-    const logo = screen.getByAltText("The Companion");
+    const logo = screen.getByAltText("Aura Companion");
     expect(logo).toHaveAttribute("src", "/logo-codex.svg");
   });
 
@@ -1152,7 +1152,7 @@ describe("HomePage", () => {
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
 
     // Component should still render without errors
-    expect(screen.getByText("The Companion")).toBeInTheDocument();
+    expect(screen.getByText("Aura Companion")).toBeInTheDocument();
   });
 
   // ─── getHome fallback ──────────────────────────────────────────────────────
