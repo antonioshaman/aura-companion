@@ -1,12 +1,12 @@
 {
-  "name": "the-companion",
-  "version": "0.90.0",
+  "name": "aura-companion",
+  "version": "1.0.0",
   "type": "module",
-  "description": "Web UI for launching and interacting with Claude Code agents",
+  "description": "Self-learning AI companion — web UI for Claude Code & Codex with adaptive knowledge base",
   "license": "MIT",
-  "author": "The Vibe Company",
+  "author": "Aura Shaman",
   "bin": {
-    "the-companion": "./bin/cli.ts",
+    "aura-companion": "./bin/cli.ts",
     "companion": "./bin/cli.ts"
   },
   "files": [
@@ -23,7 +23,9 @@
     "ai",
     "agent",
     "web-ui",
-    "vibe-coding"
+    "self-learning",
+    "knowledge-base",
+    "aura-companion"
   ],
   "scripts": {
     "dev": "bun dev.ts",

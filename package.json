@@ -1,15 +1,15 @@
 {
-  "name": "the-companion",
-  "version": "0.90.0",
+  "name": "aura-companion",
+  "version": "1.0.0",
   "private": true,
-  "description": "Web UI for Claude Code agents",
+  "description": "Self-learning AI companion — web UI for Claude Code & Codex with adaptive knowledge base",
   "scripts": {
     "dev": "cd web && bun run dev",
     "build": "cd web && bun run build",
     "start": "cd web && bun run start",
     "prepare": "husky"
   },
-  "author": "The Vibe Company",
+  "author": "Aura Shaman",
   "license": "MIT",
   "dependencies": {
     "the-companion": "^0.2.2"

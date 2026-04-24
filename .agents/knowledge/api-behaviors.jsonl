@@ -1,0 +1,1 @@
+{"id":"api-001","type":"api-behavior","fact":"Claude Code CLI uses NDJSON over WebSocket, Codex uses JSON-RPC","recommendation":"Protocol-specific logic must be in ws-bridge.ts, not in routes","confidence":"high","provenance":[{"source":"codebase","reference":"web/server/ws-bridge.ts"}],"tags":["protocol","websocket","cli"],"createdAt":"2026-04-24T00:00:00Z"}

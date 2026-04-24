@@ -4,7 +4,9 @@ This file provides guidance to Claude Code & Codex when working with code in thi
 
 ## What This Is
 
-The Companion — a web UI for Claude Code & Codex. 
+Aura Companion — a self-learning web UI for Claude Code & Codex.
+Built on top of [Vibe-Companion](https://github.com/nikolaiklein/Vibe-Companion), it adds an adaptive knowledge base and self-improvement skills that make every development session smarter than the last.
+
 It reverse-engineers the undocumented `--sdk-url` WebSocket protocol in the Claude Code CLI to provide a browser-based interface for running multiple Claude Code sessions with streaming, tool call visibility, and permission control.
 
 ## Development Commands
@@ -185,6 +187,44 @@ gh pr edit --body-file /tmp/pr_body.md
 ## Codex & Claude Code
 - All features must be compatible with both Codex and Claude Code. If a feature is only compatible with one, it must be gated behind a clear UI affordance (e.g. "This feature requires Claude Code") and the incompatible option should be hidden or disabled.
 - When implementing a new feature, always consider how it will work with both models and test with both if possible. If a feature is only implemented for one model, document that clearly in the code and in the UI.
+
+## Self-Learning System
+
+This project uses a file-based knowledge system that improves with every session. The knowledge base lives in `.agents/knowledge/` and accumulates patterns, gotchas, decisions, and anti-patterns discovered during development.
+
+### Knowledge Base
+
+```
+.agents/knowledge/
+├── patterns.jsonl        # Reusable approaches that work well
+├── gotchas.jsonl         # Surprising behaviors and tricky edge cases
+├── decisions.jsonl       # Architectural choices and rationale
+├── anti-patterns.jsonl   # Approaches to avoid
+├── codebase-facts.jsonl  # Structural knowledge about the repo
+└── api-behaviors.jsonl   # Model/tool/API quirks
+```
+
+Each file contains one JSON object per line (JSONL format) with: `id`, `type`, `fact`, `recommendation`, `confidence`, `provenance`, `tags`, `affectedFiles`, `createdAt`.
+
+### Skills
+
+- `/prime [focus]` — Load relevant knowledge before starting work. Auto-filters by branch, modified files, or provided keywords. Run at session start.
+- `/learn <insight>` — Quick-capture a learning mid-session without breaking flow. Auto-classifies and appends to the right knowledge file.
+- `/self-reflect [scope]` — End-of-session reflection. Reviews what happened, extracts learnings, prunes stale entries. Run after completing significant work.
+
+### Self-Learning Protocol
+
+1. **Session start**: Automatically scan the last 3 entries from each knowledge file. If any are relevant to the current branch/task, surface them.
+2. **During work**: When you encounter surprising behavior, test failures, or user corrections — capture them immediately via `/learn`.
+3. **Session end**: Run `/self-reflect` to consolidate learnings. This is the most important step — it closes the feedback loop.
+
+### Evolution
+
+The knowledge base grows organically. Over time:
+- Recurring gotchas → get promoted to patterns or CLAUDE.md rules
+- Low-confidence entries that get re-confirmed → get bumped to high confidence
+- Stale entries (fixed bugs, reversed decisions) → get pruned during `/self-reflect`
+- Cross-cutting patterns → may spawn new skills
 
 ## Cursor Cloud specific instructions
 
