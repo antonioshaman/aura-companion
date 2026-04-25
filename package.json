@@ -1,6 +1,6 @@
 {
   "name": "aura-companion",
-  "version": "1.0.0",
+  "version": "0.91.0",
   "private": true,
   "description": "Self-learning AI companion — web UI for Claude Code & Codex with adaptive knowledge base",
   "scripts": {
