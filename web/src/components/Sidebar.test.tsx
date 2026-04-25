@@ -54,6 +54,7 @@ interface MockStoreState {
   setCurrentSession: ReturnType<typeof vi.fn>;
   toggleProjectCollapse: ReturnType<typeof vi.fn>;
   removeSession: ReturnType<typeof vi.fn>;
+  removeBridgeSession: ReturnType<typeof vi.fn>;
   newSession: ReturnType<typeof vi.fn>;
   setSidebarOpen: ReturnType<typeof vi.fn>;
   setSessionName: ReturnType<typeof vi.fn>;
@@ -119,6 +120,7 @@ function createMockState(overrides: Partial<MockStoreState> = {}): MockStoreStat
     setCurrentSession: vi.fn(),
     toggleProjectCollapse: vi.fn(),
     removeSession: vi.fn(),
+    removeBridgeSession: vi.fn(),
     newSession: vi.fn(),
     setSidebarOpen: vi.fn(),
     setSessionName: vi.fn(),

@@ -46,6 +46,7 @@ export interface SessionsSlice {
   addSession: (session: SessionState) => void;
   updateSession: (sessionId: string, updates: Partial<SessionState>) => void;
   removeSession: (sessionId: string) => void;
+  removeBridgeSession: (sessionId: string) => void;
   setSdkSessions: (sessions: SdkSessionInfo[]) => void;
   setConnectionStatus: (sessionId: string, status: "connecting" | "connected" | "disconnected") => void;
   setCliConnected: (sessionId: string, connected: boolean) => void;
@@ -143,6 +144,14 @@ export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> 
         diffPanelSelectedFile: deleteFromMap(s.diffPanelSelectedFile, sessionId),
         chatTabReentryTickBySession: deleteFromMap(s.chatTabReentryTickBySession, sessionId),
       };
+    }),
+
+  removeBridgeSession: (sessionId) =>
+    set((s) => {
+      if (!s.sessions.has(sessionId)) return {};
+      const sessions = new Map(s.sessions);
+      sessions.delete(sessionId);
+      return { sessions };
     }),
 
   setSdkSessions: (sessions) => set({ sdkSessions: sessions }),

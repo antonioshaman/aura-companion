@@ -369,6 +369,9 @@ export function Sidebar() {
       navigateHome();
       useStore.getState().newSession();
     }
+    // Remove from bridge sessions map so orphaned sessions (e.g. sub-agents
+    // not tracked by the launcher) don't linger as "active" in the sidebar.
+    useStore.getState().removeBridgeSession(sessionId);
     try {
       const list = await api.listSessions();
       useStore.getState().setSdkSessions(list);
@@ -449,7 +452,16 @@ export function Sidebar() {
     };
   }).sort((a, b) => b.createdAt - a.createdAt);
 
-  const activeSessions = allSessionList.filter((s) => !s.archived && !s.cronJobId && !s.agentId);
+  // Build a set of server-known session IDs for orphan detection
+  const sdkSessionIds = new Set(sdkSessions.map((s) => s.sessionId));
+
+  const activeSessions = allSessionList.filter((s) => {
+    if (s.archived || s.cronJobId || s.agentId) return false;
+    // Hide orphaned bridge-only sessions (e.g. finished sub-agents) that
+    // the server doesn't track and are no longer connected.
+    if (!sdkSessionIds.has(s.id) && !s.isConnected) return false;
+    return true;
+  });
   const cronSessions = allSessionList.filter((s) => !s.archived && !!s.cronJobId);
   const agentSessions = allSessionList.filter((s) => !s.archived && !!s.agentId);
   const archivedSessions = allSessionList.filter((s) => s.archived);
