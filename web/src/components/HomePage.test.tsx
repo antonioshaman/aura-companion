@@ -81,6 +81,14 @@ vi.mock("../utils/routing.js", () => ({
 }));
 
 import { HomePage } from "./HomePage.js";
+import { CLAUDE_MODELS } from "../utils/backends.js";
+
+// Source of truth for default model labels — keeps tests in sync with the
+// CLAUDE_MODELS list when models are bumped (e.g. Opus 4.6 → 4.7), so we never
+// have to chase string literals across the test file again.
+const DEFAULT_MODEL_LABEL = CLAUDE_MODELS[0].label;
+const SECOND_MODEL_LABEL = CLAUDE_MODELS[1].label;
+const THIRD_MODEL_LABEL = CLAUDE_MODELS[2].label;
 
 /** Helper to build a default store mock with overridable fields. */
 function buildStoreMock(overrides: Record<string, unknown> = {}) {
@@ -386,23 +394,23 @@ describe("HomePage", () => {
     render(<HomePage />);
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
 
-    // The default model label for claude backend is "Opus 4.6"
-    const modelButton = screen.getByText("Opus 4.6");
+    // The default model label for claude backend is CLAUDE_MODELS[0]
+    const modelButton = screen.getByText(DEFAULT_MODEL_LABEL);
     expect(modelButton).toBeInTheDocument();
 
     // Open model dropdown
     fireEvent.click(modelButton);
 
     // Should see model options
-    const sonnetOption = screen.getByText("Sonnet 4.6");
-    expect(sonnetOption).toBeInTheDocument();
+    const secondOption = screen.getByText(SECOND_MODEL_LABEL);
+    expect(secondOption).toBeInTheDocument();
 
-    // Select Sonnet
-    fireEvent.click(sonnetOption);
+    // Select the second model
+    fireEvent.click(secondOption);
 
-    // Verify dropdown closed and Sonnet is now shown
-    expect(screen.queryByText("Haiku 4.5")).not.toBeInTheDocument(); // dropdown closed
-    expect(screen.getByText("Sonnet 4.6")).toBeInTheDocument(); // now selected
+    // Verify dropdown closed and the second model is now shown
+    expect(screen.queryByText(THIRD_MODEL_LABEL)).not.toBeInTheDocument(); // dropdown closed
+    expect(screen.getByText(SECOND_MODEL_LABEL)).toBeInTheDocument(); // now selected
   });
 
   // ─── Mode dropdown interaction ──────────────────────────────────────────────
@@ -663,7 +671,7 @@ describe("HomePage", () => {
     await waitFor(() => {
       expect(createSessionStreamMock).toHaveBeenCalledWith(
         expect.objectContaining({
-          model: "claude-opus-4-6",
+          model: CLAUDE_MODELS[0].value,
           permissionMode: "bypassPermissions",
           cwd: "/repo",
           backend: "claude",
@@ -893,16 +901,16 @@ describe("HomePage", () => {
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
 
     // Open model dropdown
-    const modelButton = screen.getByText("Opus 4.6");
+    const modelButton = screen.getByText(DEFAULT_MODEL_LABEL);
     fireEvent.click(modelButton);
-    expect(screen.getByText("Sonnet 4.6")).toBeInTheDocument();
+    expect(screen.getByText(SECOND_MODEL_LABEL)).toBeInTheDocument();
 
     // Click outside (on the document body)
     fireEvent.pointerDown(document.body);
 
     // Dropdown should close
     await waitFor(() => {
-      expect(screen.queryByText("Haiku 4.5")).not.toBeInTheDocument();
+      expect(screen.queryByText(THIRD_MODEL_LABEL)).not.toBeInTheDocument();
     });
   });
 

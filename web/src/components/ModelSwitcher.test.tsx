@@ -19,10 +19,10 @@ let storeState: MockStoreState;
 function resetStore(overrides: Partial<MockStoreState> = {}) {
   storeState = {
     sdkSessions: [
-      { sessionId: "s1", model: "claude-opus-4-7", backendType: "claude", cwd: "/repo" },
+      { sessionId: "s1", model: DEFAULT_MODEL.value, backendType: "claude", cwd: "/repo" },
     ],
     cliConnected: new Map([["s1", true]]),
-    sessions: new Map([["s1", { model: "claude-opus-4-7" }]]),
+    sessions: new Map([["s1", { model: DEFAULT_MODEL.value }]]),
     ...overrides,
   };
 }
@@ -43,6 +43,11 @@ vi.mock("../store.js", () => ({
 }));
 
 import { ModelSwitcher } from "./ModelSwitcher.js";
+import { CLAUDE_MODELS } from "../utils/backends.js";
+
+// Resolve model fixtures from CLAUDE_MODELS so a model bump
+// (e.g. Opus 4.7 → 4.8) doesn't require touching this test.
+const DEFAULT_MODEL = CLAUDE_MODELS[0];
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -52,8 +57,8 @@ beforeEach(() => {
 describe("ModelSwitcher", () => {
   it("renders current model icon and label", () => {
     render(<ModelSwitcher sessionId="s1" />);
-    // Opus label with version
-    expect(screen.getByText("Opus 4.7")).toBeInTheDocument();
+    // Default model label (driven by CLAUDE_MODELS[0])
+    expect(screen.getByText(DEFAULT_MODEL.label)).toBeInTheDocument();
     expect(screen.getByLabelText("Switch model")).toBeInTheDocument();
   });
 

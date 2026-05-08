@@ -383,6 +383,11 @@ function ToolGroupBlock({ name, items }: { name: string; items: ToolGroupItem[] 
 function ThinkingBlock({ text }: { text: string }) {
   const normalized = text.trim();
   const [expanded, setExpanded] = useState(false);
+
+  // Empty/whitespace thinking blocks are common after Opus 4.7 — render nothing
+  // rather than a "No thinking text captured." placeholder.
+  if (!normalized) return null;
+
   const lines = normalized.split("\n");
   const isLong = lines.length > 8 || normalized.length > 600;
   const displayed = isLong && !expanded
@@ -406,7 +411,7 @@ function ThinkingBlock({ text }: { text: string }) {
             ),
           }}
         >
-          {displayed || "No thinking text captured."}
+          {displayed}
         </Markdown>
       </div>
       {isLong && !expanded && (

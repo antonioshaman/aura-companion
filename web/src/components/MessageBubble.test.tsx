@@ -412,8 +412,11 @@ describe("MessageBubble - streaming", () => {
 // ─── ThinkingBlock edge cases ───────────────────────────────────────────────
 
 describe("MessageBubble - ThinkingBlock", () => {
-  it("shows 'No thinking text captured.' for empty thinking content", () => {
-    // When thinking text is empty/whitespace, the block shows fallback text
+  it("renders nothing for empty/whitespace thinking content", () => {
+    // Empty thinking blocks are common after the Opus 4.7 bump — they used to
+    // surface as a literal "No thinking text captured." placeholder between
+    // assistant turns, which read as garbage. The block must now render null
+    // so the chat stays clean.
     const msg = makeMessage({
       role: "assistant",
       content: "",
@@ -423,7 +426,7 @@ describe("MessageBubble - ThinkingBlock", () => {
     });
     render(<MessageBubble message={msg} />);
 
-    expect(screen.getByText("No thinking text captured.")).toBeTruthy();
+    expect(screen.queryByText("No thinking text captured.")).toBeNull();
   });
 
   it("does not show 'Show more' for short thinking content", () => {
