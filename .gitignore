@@ -17,3 +17,4 @@ scripts/test-codex-*.ts
 web/dev-dist/
 bun.log
 web/bun.log
+.aura-server.pid
