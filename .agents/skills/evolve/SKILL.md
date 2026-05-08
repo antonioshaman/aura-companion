@@ -41,6 +41,8 @@ An entry is stale when:
 - It describes a bug that's been fixed (check git log)
 - Its recommendation contradicts a newer entry
 - It has `confidence: low` and is older than 14 days without re-confirmation
+- `outdatedReports >= helpfulCount` and `outdatedReports >= 2` (the field-driven signal — at least two flags and no fresh confirmations to balance them)
+- `usageCount >= 10` and `helpfulCount == 0` (surfaced often but never re-confirmed → too generic to be useful)
 
 **Actions:**
 - Remove clearly stale entries

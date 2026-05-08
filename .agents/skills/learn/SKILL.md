@@ -23,12 +23,16 @@ From the user's input or the current context, determine:
 ### 2. Check for Duplicates
 
 Read the target `.jsonl` file and check if a similar entry already exists:
-- If yes → update the existing entry (bump confidence if re-confirmed, update recommendation)
+- If yes → **re-confirm the existing entry** (do NOT append a duplicate):
+  - bump `helpfulCount` by 1
+  - bump `confidence` if previously `low`/`medium` and the new evidence is strong
+  - set `updatedAt` to now
+  - update `recommendation` only if it's clearly better
 - If no → append a new entry
 
 ### 3. Write Entry
 
-Append to the appropriate file in `.agents/knowledge/`:
+Append to the appropriate file in `.agents/knowledge/`. Field order matches `.agents/knowledge/README.md`:
 
 ```json
 {
@@ -37,12 +41,18 @@ Append to the appropriate file in `.agents/knowledge/`:
   "fact": "<concise insight>",
   "recommendation": "<what to do about it>",
   "confidence": "<detected-confidence>",
-  "provenance": [{"source": "<human|agent|test-failure>", "reference": "<context>"}],
+  "provenance": [{"source": "<human|agent|test-failure>", "reference": "<context>", "date": "<today>"}],
   "tags": ["<relevant>", "<tags>"],
   "affectedFiles": ["<paths>"],
-  "createdAt": "<now ISO>"
+  "createdAt": "<now ISO>",
+  "updatedAt": "<now ISO>",
+  "usageCount": 0,
+  "helpfulCount": 0,
+  "outdatedReports": 0
 }
 ```
+
+`usageCount` is bumped by `/prime` when surfacing, `helpfulCount` by `/learn` on re-confirmation, `outdatedReports` by `/self-reflect` or the user when an entry is flagged stale.
 
 ### 4. Confirm
 

@@ -75,6 +75,10 @@ Output a compact brief:
 - If nothing matches, say so and suggest running `/self-reflect` after this session
 - Never load ALL entries — that defeats the purpose
 
+### 5. Bump Usage Counters
+
+For each entry actually surfaced in the brief, increment its `usageCount` by 1 and set `updatedAt` to now. This is a relevance signal `/evolve` uses later — entries that get surfaced often but never re-confirmed (low `helpfulCount`) may be too generic; entries with high `outdatedReports` relative to `helpfulCount` are pruning candidates.
+
 ## Auto-Prime
 
 When working on this project, automatically run a lightweight prime at session start:

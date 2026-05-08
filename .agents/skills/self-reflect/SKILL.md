@@ -37,7 +37,7 @@ Extract insights across these categories:
 
 ### 3. Write Entries
 
-For each learning, append a JSONL entry:
+For each learning, append a JSONL entry. Field order matches `.agents/knowledge/README.md`:
 
 ```json
 {
@@ -46,15 +46,19 @@ For each learning, append a JSONL entry:
   "fact": "Core insight in one sentence",
   "recommendation": "How to apply this in future sessions",
   "confidence": "<high|medium|low>",
-  "provenance": [{"source": "<human|agent|review|test-failure>", "reference": "PR #X or file path"}],
+  "provenance": [{"source": "<human|agent|review|test-failure>", "reference": "PR #X or file path", "date": "<today>"}],
   "tags": ["relevant", "tags"],
   "affectedFiles": ["paths/that/this/applies/to"],
-  "createdAt": "<ISO timestamp>"
+  "createdAt": "<ISO timestamp>",
+  "updatedAt": "<ISO timestamp>",
+  "usageCount": 0,
+  "helpfulCount": 0,
+  "outdatedReports": 0
 }
 ```
 
 **Rules:**
-- Check for duplicates before writing — update existing entries instead of creating new ones
+- Check for duplicates before writing — re-confirm existing entries (bump `helpfulCount`, set `updatedAt`) instead of creating new ones
 - Use `high` confidence only for facts verified by tests or explicit user confirmation
 - Keep `fact` under 120 characters — it's the headline
 - `recommendation` should be actionable — what should an agent DO differently
@@ -63,7 +67,8 @@ For each learning, append a JSONL entry:
 ### 4. Prune Stale Entries
 
 If you notice existing entries that are outdated (e.g., a gotcha that was fixed, a decision that was reversed):
-- Remove the stale entry
+- Bump `outdatedReports` by 1 and set `updatedAt` to now if you're not sure — let `/evolve` decide
+- Remove the entry only when the staleness is unambiguous (referenced file gone, contradicted by a newer entry, or `outdatedReports` already exceeds `helpfulCount`)
 - Or update it with the new information and reset `confidence`
 
 ### 5. Report Summary
