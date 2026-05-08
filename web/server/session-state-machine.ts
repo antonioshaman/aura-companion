@@ -101,7 +101,7 @@ export const VALID_TRANSITIONS: ReadonlyMap<
   ],
   [
     "reconnecting",
-    new Set<SessionPhase>(["initializing", "starting", "terminated"]),
+    new Set<SessionPhase>(["initializing", "starting", "ready", "streaming", "terminated"]),
   ],
   ["terminated", new Set<SessionPhase>(["starting"])],
 ]);

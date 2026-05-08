@@ -126,7 +126,7 @@ describe("OAuth state nonce (CSRF protection)", () => {
   });
 
   it("preserves returnTo path in state", () => {
-    const state = generateOAuthState("/#/setup/linear-agent");
+    const state = generateOAuthState({ returnTo: "/#/setup/linear-agent" });
     const result = validateOAuthState(state);
     expect(result).toEqual({ valid: true, returnTo: "/#/setup/linear-agent" });
   });
@@ -322,6 +322,31 @@ describe("linearGraphQL", () => {
     // Should have made 3 fetch calls: initial GraphQL, token refresh, retry GraphQL
     expect(mockFetch).toHaveBeenCalledTimes(3);
   });
+
+  it("persists refreshed tokens via callback when a 401 is recovered", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 401 });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        access_token: "new-token",
+        refresh_token: "new-refresh",
+        expires_in: 86400,
+      }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ data: { viewer: { id: "user-1" } } }),
+    });
+
+    const onTokensRefreshed = vi.fn();
+    await linearGraphQL(testCreds, "{ viewer { id } }", undefined, onTokensRefreshed);
+
+    expect(onTokensRefreshed).toHaveBeenCalledWith({
+      accessToken: "new-token",
+      refreshToken: "new-refresh",
+    });
+  });
 });
 
 // ─── Activity posting ───────────────────────────────────────────────────────
@@ -359,6 +384,31 @@ describe("postActivity", () => {
       "Session not found"
     );
     consoleSpy.mockRestore();
+  });
+
+  it("passes token refresh callback through to linearGraphQL", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 401 });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        access_token: "new-access",
+        refresh_token: "new-refresh",
+        expires_in: 86400,
+      }),
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ data: { agentActivityCreate: { success: true } } }),
+    });
+
+    const onTokensRefreshed = vi.fn();
+    await postActivity(testCreds, "session-123", { type: "response", body: "Done" }, onTokensRefreshed);
+
+    expect(onTokensRefreshed).toHaveBeenCalledWith({
+      accessToken: "new-access",
+      refreshToken: "new-refresh",
+    });
   });
 });
 

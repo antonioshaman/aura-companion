@@ -19,10 +19,10 @@ let storeState: MockStoreState;
 function resetStore(overrides: Partial<MockStoreState> = {}) {
   storeState = {
     sdkSessions: [
-      { sessionId: "s1", model: "claude-opus-4-6", backendType: "claude", cwd: "/repo" },
+      { sessionId: "s1", model: "claude-opus-4-7", backendType: "claude", cwd: "/repo" },
     ],
     cliConnected: new Map([["s1", true]]),
-    sessions: new Map([["s1", { model: "claude-opus-4-6" }]]),
+    sessions: new Map([["s1", { model: "claude-opus-4-7" }]]),
     ...overrides,
   };
 }
@@ -53,7 +53,7 @@ describe("ModelSwitcher", () => {
   it("renders current model icon and label", () => {
     render(<ModelSwitcher sessionId="s1" />);
     // Opus label with version
-    expect(screen.getByText("Opus 4.6")).toBeInTheDocument();
+    expect(screen.getByText("Opus 4.7")).toBeInTheDocument();
     expect(screen.getByLabelText("Switch model")).toBeInTheDocument();
   });
 

@@ -6,6 +6,12 @@ import { FolderPicker } from "../FolderPicker.js";
 interface WizardStepAgentProps {
   onNext: (agentId: string, agentName: string) => void;
   onBack: () => void;
+  /** OAuth connection ID to link to the agent */
+  oauthConnectionId: string | null;
+  /** @deprecated Staging slot ID for credentials (legacy per-wizard flow) */
+  stagingId?: string | null;
+  /** @deprecated Clone credentials from this agent instead of using staging */
+  cloneFromAgentId?: string | null;
   /** When set, the wizard edits an existing agent instead of creating one */
   existingAgent?: {
     id: string;
@@ -23,7 +29,7 @@ Read the issue details carefully, then complete the requested task. When done, s
 
 {{input}}`;
 
-export function WizardStepAgent({ onNext, onBack, existingAgent }: WizardStepAgentProps) {
+export function WizardStepAgent({ onNext, onBack, oauthConnectionId, stagingId, cloneFromAgentId, existingAgent }: WizardStepAgentProps) {
   const isEditing = !!existingAgent;
 
   const [name, setName] = useState(existingAgent?.name ?? "Linear Agent");
@@ -65,7 +71,10 @@ export function WizardStepAgent({ onNext, onBack, existingAgent }: WizardStepAge
         triggers: {
           webhook: { enabled: false, secret: "" },
           schedule: { enabled: false, expression: "", recurring: true },
-          linear: { enabled: true },
+          linear: {
+            enabled: true,
+            ...(oauthConnectionId ? { oauthConnectionId } : {}),
+          },
         },
         enabled: true,
       };
@@ -74,7 +83,12 @@ export function WizardStepAgent({ onNext, onBack, existingAgent }: WizardStepAge
         await api.updateAgent(existingAgent.id, data);
         onNext(existingAgent.id, name.trim());
       } else {
-        const agent = await api.createAgent(data);
+        const agent = await api.createAgent({
+          ...data,
+          // Legacy support: staging slot or clone from agent
+          ...(stagingId ? { stagingId } : {}),
+          ...(cloneFromAgentId ? { cloneFromAgentId } : {}),
+        });
         onNext(agent.id, agent.name);
       }
     } catch (e: unknown) {

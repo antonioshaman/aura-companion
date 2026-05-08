@@ -2,13 +2,11 @@ import type {
   BrowserIncomingMessage,
   BrowserOutgoingMessage,
   PermissionRequest,
-  SessionState,
 } from "./session-types.js";
 import type { CodexAdapter } from "./codex-adapter.js";
 import type { Session } from "./ws-bridge-types.js";
 import { appendHistory } from "./ws-bridge-persist.js";
 import { validatePermission } from "./ai-validator.js";
-import { getSettings } from "./settings-manager.js";
 import { getEffectiveAiValidation } from "./ai-validation-settings.js";
 import { companionBus } from "./event-bus.js";
 
@@ -44,7 +42,10 @@ export function attachCodexAdapterHandlers(
     if (msg.type === "session_init") {
       // Preserve pre-populated commands/skills when adapter sends empty arrays
       // (Codex does not provide its own commands/skills)
-      const { slash_commands, skills, ...rest } = msg.session;
+      // Exclude session_id: the adapter may report its own internal session ID
+      // which differs from the Companion's session ID.  Allowing it to overwrite
+      // session.state.session_id causes duplicate sidebar entries.
+      const { slash_commands, skills, session_id: _cliSessionId, ...rest } = msg.session;
       session.state = {
         ...session.state,
         ...rest,
@@ -56,7 +57,8 @@ export function attachCodexAdapterHandlers(
       deps.persistSession(session);
       session.stateMachine.transition("ready", "codex_session_init");
     } else if (msg.type === "session_update") {
-      const { slash_commands, skills, ...rest } = msg.session;
+      // Exclude session_id — same rationale as session_init above.
+      const { slash_commands, skills, session_id: _cliSessionId, ...rest } = msg.session;
       session.state = {
         ...session.state,
         ...rest,
@@ -99,6 +101,10 @@ export function attachCodexAdapterHandlers(
     if (msg.type === "permission_cancelled") {
       const reqId = (msg as { request_id: string }).request_id;
       session.pendingPermissions.delete(reqId);
+      // If no more pending permissions, transition back to streaming
+      if (session.pendingPermissions.size === 0 && session.stateMachine.phase === "awaiting_permission") {
+        session.stateMachine.transition("streaming", "permission_cancelled");
+      }
       deps.persistSession(session);
     }
 
@@ -116,8 +122,9 @@ export function attachCodexAdapterHandlers(
         // Run AI validation async — don't broadcast yet
         handleCodexAiValidation(session, adapter, perm, deps).catch((err) => {
           console.warn(`[ws-bridge-codex] AI validation error for tool=${perm.tool_name} request_id=${perm.request_id} session=${session.id}, falling through to manual:`, err);
-          // On error, fall through to normal flow
+          // On error, fall through to normal permission flow
           session.pendingPermissions.set(perm.request_id, perm);
+          session.stateMachine.transition("awaiting_permission", "ai_validation_error_fallback");
           deps.persistSession(session);
           deps.broadcastToBrowsers(session, msg);
         });
@@ -250,6 +257,7 @@ async function handleCodexAiValidation(
 
   // Uncertain or auto-action disabled: fall through to manual
   session.pendingPermissions.set(perm.request_id, perm);
+  session.stateMachine.transition("awaiting_permission", "ai_validation_manual_fallback");
   deps.persistSession(session);
   deps.broadcastToBrowsers(session, {
     type: "permission_request",

@@ -31,6 +31,9 @@ const RELAUNCH_GRACE_MS = 10_000;
 const RELAUNCH_COOLDOWN_MS = 5_000;
 const RECONNECT_GRACE_MS = Number(process.env.COMPANION_RECONNECT_GRACE_MS || "30000");
 
+// Proactive keepalive: base delay before relaunching a crashed CLI (doubles per attempt)
+const KEEPALIVE_BASE_DELAY_MS = 3_000;
+
 const VSCODE_EDITOR_CONTAINER_PORT = 13337;
 const CODEX_APP_SERVER_CONTAINER_PORT = Number(
   process.env.COMPANION_CODEX_CONTAINER_WS_PORT || "4502",
@@ -127,6 +130,12 @@ export class SessionOrchestrator {
   // Prevents repeated "keeps crashing" warnings for dead sessions.
   private relaunchExhaustedNotified = new Set<string>();
 
+  // Tracks sessions intentionally killed (idle-kill, manual delete/archive)
+  // so the proactive keepalive doesn't relaunch them.
+  private intentionalKills = new Set<string>();
+  // Timers for proactive keepalive relaunches (for cancellation on delete)
+  private keepaliveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
   // Idempotency guard for initialize()
   private _initialized = false;
 
@@ -179,6 +188,14 @@ export class SessionOrchestrator {
       }
     });
 
+    // Proactive keepalive: auto-relaunch crashed CLI processes even without
+    // a browser connected. This ensures long-running sessions (agents, cron
+    // jobs) stay alive. Intentional kills (idle-kill, manual delete/archive)
+    // are excluded via the intentionalKills set.
+    companionBus.on("session:exited", ({ sessionId }) => {
+      this.scheduleProactiveRelaunch(sessionId);
+    });
+
     // Start watching PRs when git info is resolved
     companionBus.on("session:git-info-ready", ({ sessionId, cwd, branch }) => {
       this.prPoller.watch(sessionId, cwd, branch);
@@ -189,12 +206,22 @@ export class SessionOrchestrator {
       await this.handleAutoRelaunch(sessionId);
     });
 
-    // Kill CLI when idle with no browsers for 20 minutes
+    // Kill CLI process when idle with no browsers for 24 hours.
+    // Only kills the CLI process — containers are preserved so the session
+    // can be relaunched without recreating the container.
     companionBus.on("session:idle-kill", async ({ sessionId }) => {
       const info = this.launcher.getSession(sessionId);
       if (!info || info.archived) return;
-      log.info("orchestrator", "Idle-killing session", { sessionId, reason: "no browsers, no activity" });
-      await this.killSession(sessionId);
+      log.info("orchestrator", "Idle-killing session (preserving container)", { sessionId, reason: "no browsers, no activity" });
+      this.intentionalKills.add(sessionId);
+      // Cancel the CLI disconnect debounce timer so it doesn't fire
+      // session:relaunch-needed after we intentionally kill the process.
+      this.wsBridge.cancelDisconnectTimer(sessionId);
+      await this.launcher.kill(sessionId);
+      // Clear relaunch counters so the session gets a fresh budget when the user
+      // returns. Idle-kill is intentional cleanup, not a crash — the session
+      // should be fully relaunchable.
+      this.clearAutoRelaunchCount(sessionId);
     });
 
     // Auto-generate session title after first turn completes
@@ -247,6 +274,18 @@ export class SessionOrchestrator {
         envVars = { ...companionEnv.variables, ...body.env };
       } else if (body.envSlug) {
         console.warn(`[orchestrator] Environment "${body.envSlug}" not found, ignoring`);
+      }
+
+      // Inject provider tokens from global settings (if not already set by env profile).
+      // Note: these tokens also flow into containerized sessions intentionally — the
+      // global onboarding tokens serve as defaults for all session types, including
+      // containers, so that container auth preflight checks pass automatically.
+      const globalSettings = getSettings();
+      if (backend === "claude" && globalSettings.claudeCodeOAuthToken && !("CLAUDE_CODE_OAUTH_TOKEN" in (envVars ?? {}))) {
+        envVars = { ...envVars, CLAUDE_CODE_OAUTH_TOKEN: globalSettings.claudeCodeOAuthToken };
+      }
+      if (backend === "codex" && globalSettings.openaiApiKey && !("OPENAI_API_KEY" in (envVars ?? {}))) {
+        envVars = { ...envVars, OPENAI_API_KEY: globalSettings.openaiApiKey };
       }
 
       // Resolve sandbox configuration
@@ -420,6 +459,7 @@ export class SessionOrchestrator {
           ports: containerPorts,
           volumes: body.container?.volumes,
           env: { ...(envVars ?? {}), DISPLAY: ":99" },
+          privileged: sandboxEnabled && effectiveImage === "the-companion:latest",
         };
         try {
           containerInfo = containerManager.createContainer(tempId, cwd!, cConfig);
@@ -647,6 +687,9 @@ export class SessionOrchestrator {
       }
     }
 
+    this.intentionalKills.add(sessionId);
+    this.cancelKeepaliveTimer(sessionId);
+    this.wsBridge.cancelDisconnectTimer(sessionId);
     await this.launcher.kill(sessionId);
     containerManager.removeContainer(sessionId);
     this.prPoller.unwatch(sessionId);
@@ -661,6 +704,9 @@ export class SessionOrchestrator {
   // ── Delete ─────────────────────────────────────────────────────────────────
 
   async deleteSession(sessionId: string): Promise<DeleteSessionResult> {
+    this.intentionalKills.add(sessionId);
+    this.cancelKeepaliveTimer(sessionId);
+    this.wsBridge.cancelDisconnectTimer(sessionId);
     await this.launcher.kill(sessionId);
     containerManager.removeContainer(sessionId);
     const worktreeResult = this.cleanupWorktree(sessionId, true);
@@ -671,6 +717,7 @@ export class SessionOrchestrator {
     this.autoRelaunchCounts.delete(sessionId);
     this.relaunchExhaustedNotified.delete(sessionId);
     this.relaunchingSet.delete(sessionId);
+    this.intentionalKills.delete(sessionId);
     return { ok: true, worktree: worktreeResult };
   }
 
@@ -732,8 +779,23 @@ export class SessionOrchestrator {
     if (freshInfo && (freshInfo.state === "connected" || freshInfo.state === "running")) {
       this.relaunchingSet.delete(sessionId); return;
     }
-    if (freshInfo?.pid) {
-      try { process.kill(freshInfo.pid, 0); this.relaunchingSet.delete(sessionId); return; } catch {}
+    // Only check PID liveness if the session is NOT already "exited".
+    // After idle-kill or explicit kill(), the PID field stays set but the
+    // process is dead. If the kernel recycles the PID to a different process,
+    // kill(pid, 0) would incorrectly succeed, preventing any relaunch.
+    // For containerized sessions, use container liveness instead of PID check
+    // (the PID is the `docker exec` wrapper, which exits immediately for some
+    // transports and is unreliable for container health).
+    if (freshInfo && freshInfo.state !== "exited") {
+      if (freshInfo.containerId) {
+        const containerState = containerManager.isContainerAlive(freshInfo.containerId);
+        if (containerState === "running") {
+          this.relaunchingSet.delete(sessionId);
+          return;
+        }
+      } else if (freshInfo.pid) {
+        try { process.kill(freshInfo.pid, 0); this.relaunchingSet.delete(sessionId); return; } catch {}
+      }
     }
 
     const count = this.autoRelaunchCounts.get(sessionId) ?? 0;
@@ -765,6 +827,10 @@ export class SessionOrchestrator {
           metricsCollector.recordRelaunchSucceeded();
           this.autoRelaunchCounts.delete(sessionId);
           this.relaunchExhaustedNotified.delete(sessionId);
+          // Clear intentionalKills so future crashes can use proactive keepalive.
+          // After a successful relaunch, the session is alive again — any prior
+          // idle-kill intent no longer applies.
+          this.intentionalKills.delete(sessionId);
         }
         // ok=false without error: keep count to preserve the retry budget
       } finally {
@@ -772,6 +838,70 @@ export class SessionOrchestrator {
       }
     } else {
       this.relaunchingSet.delete(sessionId);
+    }
+  }
+
+  // ── Private: Proactive keepalive ────────────────────────────────────────────
+
+  /**
+   * Schedules a proactive relaunch of a crashed CLI process, regardless of
+   * whether any browsers are connected. Uses exponential backoff (3s, 6s, 12s)
+   * based on the auto-relaunch attempt count.
+   *
+   * Skips relaunch for:
+   * - Intentional kills (idle-kill, manual delete/archive)
+   * - Archived sessions
+   * - Sessions that have exhausted their relaunch budget
+   */
+  private scheduleProactiveRelaunch(sessionId: string): void {
+    // Skip if this was an intentional kill. Use has() instead of delete() so
+    // the guard is preserved for handleAutoRelaunch (debounce path fires later).
+    if (this.intentionalKills.has(sessionId)) return;
+
+    const info = this.launcher.getSession(sessionId);
+    if (!info || info.archived) return;
+
+    // Skip if already at relaunch limit
+    if (this.relaunchExhaustedNotified.has(sessionId)) return;
+
+    // Skip if a relaunch is already in progress (e.g. triggered by browser reconnect)
+    if (this.relaunchingSet.has(sessionId)) return;
+
+    // Exponential backoff: 3s → 6s → 12s based on attempt count
+    const attempt = this.autoRelaunchCounts.get(sessionId) ?? 0;
+    const delay = KEEPALIVE_BASE_DELAY_MS * Math.pow(2, attempt);
+
+    log.info("orchestrator", "Scheduling proactive keepalive relaunch", {
+      sessionId,
+      attempt: attempt + 1,
+      maxAttempts: MAX_AUTO_RELAUNCHES,
+      delayMs: delay,
+    });
+
+    // Cancel any existing keepalive timer for this session
+    this.cancelKeepaliveTimer(sessionId);
+
+    const timer = setTimeout(async () => {
+      this.keepaliveTimers.delete(sessionId);
+
+      // Re-check conditions — state may have changed during the delay
+      const freshInfo = this.launcher.getSession(sessionId);
+      if (!freshInfo || freshInfo.archived) return;
+      if (freshInfo.state === "connected" || freshInfo.state === "running") return;
+
+      // Delegate to the existing auto-relaunch mechanism which handles
+      // budget, PID checks, state transitions, and cooldowns.
+      await this.handleAutoRelaunch(sessionId);
+    }, delay);
+
+    this.keepaliveTimers.set(sessionId, timer);
+  }
+
+  private cancelKeepaliveTimer(sessionId: string): void {
+    const timer = this.keepaliveTimers.get(sessionId);
+    if (timer) {
+      clearTimeout(timer);
+      this.keepaliveTimers.delete(sessionId);
     }
   }
 

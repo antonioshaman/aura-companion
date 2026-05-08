@@ -106,10 +106,6 @@ interface CodexReasoningItem extends CodexItem {
   content?: string;
 }
 
-interface CodexContextCompactionItem extends CodexItem {
-  type: "contextCompaction";
-}
-
 interface CodexCollabAgentToolCallItem extends CodexItem {
   type: "collabAgentToolCall";
   tool: string;
@@ -242,11 +238,11 @@ export class StdioTransport implements ICodexTransport {
       this.connected = false;
       // Clear all pending RPC timers and reject promises so callers don't
       // hang indefinitely when the Codex process crashes or exits.
-      for (const [id, timer] of this.pendingTimers) {
+      for (const [, timer] of this.pendingTimers) {
         clearTimeout(timer);
       }
       this.pendingTimers.clear();
-      for (const [id, { reject }] of this.pending) {
+      for (const [, { reject }] of this.pending) {
         reject(new Error("Transport closed"));
       }
       this.pending.clear();
@@ -324,11 +320,11 @@ export class StdioTransport implements ICodexTransport {
           console.warn(
             `[codex-adapter] WS proxy reconnected — rejecting ${pendingCount} orphaned RPC call(s)`,
           );
-          for (const [id, timer] of this.pendingTimers) {
+          for (const [, timer] of this.pendingTimers) {
             clearTimeout(timer);
           }
           this.pendingTimers.clear();
-          for (const [id, { reject }] of this.pending) {
+          for (const [, { reject }] of this.pending) {
             reject(new Error("Transport reconnected"));
           }
           this.pending.clear();
@@ -434,6 +430,10 @@ export class CodexAdapter implements IBackendAdapter {
   private initialized = false;
   private initFailed = false;
   private initInProgress = false;
+  /** Monotonically increasing epoch — incremented on every WS reconnect or
+   *  resetForReconnect so that a stale in-flight initialize() can detect that
+   *  a newer one has been triggered and bail out early. */
+  private initEpoch = 0;
   /** Guard against multiple cleanupAndDisconnect() calls firing disconnectCb twice. */
   private disconnectFired = false;
 
@@ -475,6 +475,9 @@ export class CodexAdapter implements IBackendAdapter {
   private static readonly MAX_RECONNECT_RETRIES = 5;
   /** Timer handle for the -32001 overload backoff retry, so we can cancel it on reconnect. */
   private overloadRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The message captured in the overload retry timer closure, so it can be
+   *  rescued to pendingOutgoing if the timer is cancelled by a reconnect. */
+  private overloadRetryMsg: BrowserOutgoingMessage | null = null;
 
   // Pending approval requests (Codex sends these as JSON-RPC requests with an id)
   private pendingApprovals = new Map<string, number>(); // request_id -> JSON-RPC id
@@ -667,16 +670,31 @@ export class CodexAdapter implements IBackendAdapter {
     // NOTE: Do NOT reset reconnectRetryCount here. The rejection microtask
     // from StdioTransport.dispatch() hasn't fired yet — resetting the counter
     // would defeat the MAX_RECONNECT_RETRIES guard. The counter is reset on
-    // successful turn/start instead.
-    // Clear pending outgoing messages to prevent duplicate sends — each
-    // reconnect cycle would otherwise accumulate another copy of the message.
-    if (this.overloadRetryTimer) { clearTimeout(this.overloadRetryTimer); this.overloadRetryTimer = null; }
+    // successful initialize() and turn/start instead.
+    //
+    // IMPORTANT: Do NOT clear pendingOutgoing here. The rejection microtask
+    // from the turn/start call hasn't fired yet. When it fires, the catch
+    // handler in handleOutgoingUserMessage will re-queue the user message.
+    // Clearing pendingOutgoing here would race with that microtask and lose
+    // the user's message. The queue is naturally drained by flushPendingOutgoing()
+    // after re-initialization completes.
+    // Rescue any message pending in the overload retry timer before cancelling.
+    if (this.overloadRetryTimer) {
+      if (this.overloadRetryMsg) {
+        this.pendingOutgoing.push(this.overloadRetryMsg);
+        this.overloadRetryMsg = null;
+      }
+      clearTimeout(this.overloadRetryTimer);
+      this.overloadRetryTimer = null;
+    }
     this.overloadRetryCount = 0;
-    this.pendingOutgoing.length = 0;
 
     // After a WS reconnect, Codex requires a fresh initialize/initialized
     // handshake before accepting turn/start, even if this adapter was already
     // initialized before the drop.
+    // Bump the epoch so any in-flight initialize() from the previous cycle
+    // detects it has been superseded and bails out instead of racing.
+    this.initEpoch++;
     this.initInProgress = false;
     this.initialized = false;
     this.initFailed = false;
@@ -692,6 +710,7 @@ export class CodexAdapter implements IBackendAdapter {
    */
   private cleanupAndDisconnect(): void {
     this.connected = false;
+    this.overloadRetryMsg = null; // No rescue needed — session is being torn down
     if (this.overloadRetryTimer) { clearTimeout(this.overloadRetryTimer); this.overloadRetryTimer = null; }
     for (const pending of this.pendingDynamicToolCalls.values()) {
       clearTimeout(pending.timeout);
@@ -715,6 +734,8 @@ export class CodexAdapter implements IBackendAdapter {
     this.connected = false;
     this.initialized = false;
     this.initFailed = false;
+    // Bump epoch to invalidate any stale in-flight initialize() from the old transport.
+    this.initEpoch++;
     this.initInProgress = false;
     this.disconnectFired = false;
 
@@ -739,8 +760,13 @@ export class CodexAdapter implements IBackendAdapter {
     this.planUpdateCountByTurnId.clear();
     this.streamingText = "";
     this.streamingItemId = null;
+    this.overloadRetryMsg = null; // Full relaunch — no rescue needed
     if (this.overloadRetryTimer) { clearTimeout(this.overloadRetryTimer); this.overloadRetryTimer = null; }
     this.overloadRetryCount = 0;
+    // Reset reconnect retry budget — this is a full relaunch with a new
+    // transport, not a transient WS proxy reconnect, so the budget should
+    // start fresh.
+    this.reconnectRetryCount = 0;
     this.pendingOutgoing.length = 0;
 
     // Re-wire handlers on the new transport
@@ -804,9 +830,12 @@ export class CodexAdapter implements IBackendAdapter {
       if (!this.connected) return false;
     }
 
-    // Guard against dispatching when transport is down (e.g. after proxy WS drop)
+    // Guard against dispatching when transport is down (e.g. after proxy WS drop).
+    // Also trigger cleanup so the bridge sees the adapter as disconnected and
+    // stops trying to flush messages in a loop (proc.exited may not have fired yet).
     if (!this.transport.isConnected()) {
       console.warn(`[codex-adapter] Transport disconnected — cannot dispatch ${msg.type}`);
+      this.cleanupAndDisconnect();
       return false;
     }
 
@@ -927,10 +956,14 @@ export class CodexAdapter implements IBackendAdapter {
       return;
     }
     this.initInProgress = true;
+    // Snapshot the epoch at call time. If a WS reconnect or resetForReconnect
+    // bumps the epoch while we're awaiting async operations, this initialize()
+    // is stale and should abort to avoid racing with the newer call.
+    const myEpoch = this.initEpoch;
 
     try {
       // Step 1: Send initialize request
-      const result = await this.transport.call("initialize", {
+      await this.transport.call("initialize", {
         clientInfo: {
           name: "thecompanion",
           title: "Aura Companion",
@@ -940,6 +973,13 @@ export class CodexAdapter implements IBackendAdapter {
           experimentalApi: true,
         },
       }) as Record<string, unknown>;
+
+      // Bail if a newer init cycle superseded us while we were awaiting
+      if (myEpoch !== this.initEpoch) {
+        console.warn(`[codex-adapter] Session ${this.sessionId}: init epoch ${myEpoch} superseded by ${this.initEpoch}, aborting stale init`);
+        this.initInProgress = false;
+        return;
+      }
 
       // Step 2: Send initialized notification
       await this.transport.notify("initialized", {});
@@ -955,6 +995,12 @@ export class CodexAdapter implements IBackendAdapter {
       let lastThreadError: unknown;
 
       for (let attempt = 0; attempt < CodexAdapter.INIT_THREAD_MAX_RETRIES; attempt++) {
+        // Bail out early if superseded by a newer init cycle
+        if (myEpoch !== this.initEpoch) {
+          console.warn(`[codex-adapter] Session ${this.sessionId}: init epoch ${myEpoch} superseded during thread start, aborting`);
+          this.initInProgress = false;
+          return;
+        }
         // Bail out early if the transport went away between retries
         if (!this.transport.isConnected()) {
           lastThreadError = new Error("Transport closed before thread start");
@@ -977,8 +1023,9 @@ export class CodexAdapter implements IBackendAdapter {
               // fall back to starting a fresh thread instead of failing entirely.
               const isTransport = resumeErr instanceof Error && resumeErr.message === "Transport closed";
               if (isTransport) throw resumeErr; // Let outer retry handle transient errors
+              const resumeErrMsg = resumeErr instanceof Error ? resumeErr.message : String(resumeErr);
               console.warn(
-                `[codex-adapter] thread/resume failed for ${this.sessionId} (threadId=${this.options.threadId}), falling back to thread/start: ${resumeErr instanceof Error ? resumeErr.message : String(resumeErr)}`,
+                `[codex-adapter] thread/resume failed for ${this.sessionId} (threadId=${this.options.threadId}), falling back to thread/start: ${resumeErrMsg}`,
               );
               const freshResult = await this.transport.call("thread/start", {
                 model: this.options.model,
@@ -991,6 +1038,12 @@ export class CodexAdapter implements IBackendAdapter {
               // Update options.threadId so subsequent resetForReconnect calls
               // attempt to resume this new thread, not the original stale one.
               this.options.threadId = freshResult.thread.id;
+              // Notify the browser that context was lost — the conversation
+              // history is still visible in the UI but Codex has no memory of it.
+              this.emit({
+                type: "error",
+                message: `Session context could not be restored (${resumeErrMsg}). Started a fresh thread — Codex won't remember prior messages.`,
+              });
             }
           } else {
             const threadResult = await this.transport.call("thread/start", {
@@ -1021,6 +1074,11 @@ export class CodexAdapter implements IBackendAdapter {
       }
 
       this.initialized = true;
+      // Reset reconnect retry budget after successful initialization.
+      // This covers the case where WS drops during init but the re-init
+      // succeeds — without this, the counter would accumulate across
+      // reconnect cycles and eventually trigger cleanupAndDisconnect().
+      this.reconnectRetryCount = 0;
       console.log(`[codex-adapter] Session ${this.sessionId} initialized (threadId=${this.threadId})`);
 
       // Notify session metadata
@@ -1152,8 +1210,18 @@ export class CodexAdapter implements IBackendAdapter {
         } else {
           this.emit({ type: "error", message: "Connection briefly interrupted. Retrying your message..." });
           // Prepend (not push) so the original message preserves ordering if
-          // a new browser message arrived in the meantime.
-          this.pendingOutgoing.unshift(msg);
+          // a new browser message arrived in the meantime. Guard against
+          // duplicate re-queuing: if a message with the same client_msg_id is
+          // already in the queue (from a prior reconnect cycle), skip the
+          // unshift to avoid sending the same message to Codex multiple times.
+          // Uses client_msg_id (stable unique ID per send) instead of content
+          // comparison to avoid silently dropping legitimate repeat messages.
+          const clientId = "client_msg_id" in msg ? msg.client_msg_id : undefined;
+          const alreadyQueued = clientId != null
+            && this.pendingOutgoing.some((m) => "client_msg_id" in m && m.client_msg_id === clientId);
+          if (!alreadyQueued) {
+            this.pendingOutgoing.unshift(msg);
+          }
           this.flushPendingOutgoing();
         }
       } else if ((err as Record<string, unknown>)?.code === -32001) {
@@ -1171,8 +1239,12 @@ export class CodexAdapter implements IBackendAdapter {
           // schedule multiple timers and the counter-snapshot guard would
           // silently drop the earlier messages (Cubic review).
           if (this.overloadRetryTimer) clearTimeout(this.overloadRetryTimer);
+          // Track the pending message so handleWsReconnected can rescue it
+          // to pendingOutgoing if the timer is cancelled by a reconnect.
+          this.overloadRetryMsg = msg;
           this.overloadRetryTimer = setTimeout(() => {
             this.overloadRetryTimer = null;
+            this.overloadRetryMsg = null;
             // If a WS reconnect cleared everything, bail out.
             if (!this.initialized) return;
             this.pendingOutgoing.unshift(msg);
@@ -1372,7 +1444,13 @@ export class CodexAdapter implements IBackendAdapter {
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       if (errMsg === "Transport closed") {
-        this.emit({ type: "error", message: "Connection to Codex lost. Cannot fetch MCP status." });
+        // Transient disconnect (e.g. page refresh, WS proxy reconnection).
+        // Trigger cleanup so the bridge sees the adapter as disconnected
+        // immediately and can relaunch — same race fix as sendBrowserMessage.
+        // No re-queue needed: the browser will re-send mcp_get_status when
+        // the new adapter emits cli_connected after relaunch.
+        console.log(`[codex-adapter] Session ${this.sessionId}: mcp_get_status failed (transport closed), triggering cleanup`);
+        this.cleanupAndDisconnect();
       } else {
         this.emit({ type: "error", message: `Failed to get MCP status: ${err}` });
       }
@@ -1486,7 +1564,6 @@ export class CodexAdapter implements IBackendAdapter {
       case "item/mcpToolCall/progress": {
         // MCP tool call progress — map to tool_progress
         const itemId = params.itemId as string | undefined;
-        const threadId = params.threadId as string | undefined;
         if (itemId) {
           this.emit({
             type: "tool_progress",
@@ -2294,7 +2371,7 @@ export class CodexAdapter implements IBackendAdapter {
     });
   }
 
-  private handleItemUpdated(params: Record<string, unknown>): void {
+  private handleItemUpdated(_params: Record<string, unknown>): void {
     // item/updated is a general update — currently we handle streaming via the specific delta events
     // Could handle status updates for command_execution / file_change items here
   }

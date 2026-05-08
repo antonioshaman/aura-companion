@@ -1,5 +1,3 @@
-import type { SdkSessionInfo } from "../types.js";
-
 export interface SessionItem {
   id: string;
   model: string;
@@ -11,6 +9,7 @@ export interface SessionItem {
   linesAdded: number;
   linesRemoved: number;
   isConnected: boolean;
+  isReconnecting: boolean;
   status: "idle" | "running" | "compacting" | null;
   sdkState: "starting" | "connected" | "running" | "exited" | null;
   createdAt: number;

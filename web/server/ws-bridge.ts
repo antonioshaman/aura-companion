@@ -64,6 +64,8 @@ const RETRYABLE_BACKEND_MESSAGE_TYPES = new Set<BrowserOutgoingMessage["type"]>(
 
 export class WsBridge {
   private static readonly PROCESSED_CLIENT_MSG_ID_LIMIT = 1000;
+  /** Maximum number of queued browser→backend messages per session to prevent unbounded memory growth. */
+  private static readonly PENDING_MESSAGES_LIMIT = 200;
   private static readonly DISCONNECT_DEBOUNCE_MS = Number(
     process.env.COMPANION_DISCONNECT_DEBOUNCE_MS || "15000",
   );
@@ -317,6 +319,8 @@ export class WsBridge {
   }
 
   removeSession(sessionId: string) {
+    const session = this.sessions.get(sessionId);
+    session?.unsubscribeStateMachine?.();
     this.cancelDisconnectTimer(sessionId);
     this.stopIdleKillWatchdog(sessionId);
     this.sessions.delete(sessionId);
@@ -326,7 +330,9 @@ export class WsBridge {
 
   /** Wire state machine transition listener to broadcast phase changes. */
   private wireStateMachineListeners(session: Session): void {
-    session.stateMachine.onTransition((event) => {
+    // Unsubscribe any previous listener (e.g. from session restoration) to prevent leaks
+    session.unsubscribeStateMachine?.();
+    session.unsubscribeStateMachine = session.stateMachine.onTransition((event) => {
       companionBus.emit("session:phase-changed", {
         sessionId: event.sessionId,
         from: event.from,
@@ -349,6 +355,9 @@ export class WsBridge {
     this.stopIdleKillWatchdog(sessionId);
     const session = this.sessions.get(sessionId);
     if (!session) return;
+
+    // Unsubscribe state machine listener to prevent leaks
+    session.unsubscribeStateMachine?.();
 
     // Disconnect backend adapter (Claude or Codex)
     if (session.backendAdapter) {
@@ -401,7 +410,11 @@ export class WsBridge {
 
       // -- session_init: merge into session state, broadcast, persist -----
       if (msg.type === "session_init") {
-        const { slash_commands, skills, ...rest } = msg.session;
+        // Exclude session_id from the spread: the CLI reports its own internal
+        // session ID which differs from the Companion's session ID.  Allowing
+        // it to overwrite session.state.session_id causes the browser to key
+        // the session under the wrong ID, producing duplicate sidebar entries.
+        const { slash_commands, skills, session_id: _cliSessionId, ...rest } = msg.session;
         // For containerized sessions, the CLI reports /workspace as its cwd.
         // Keep the host path (set by markContainerized()) for correct project grouping.
         const cwdOverride = session.state.is_containerized ? { cwd: session.state.cwd } : {};
@@ -423,7 +436,8 @@ export class WsBridge {
 
       // -- session_update: merge into session state, persist ---------------
       if (msg.type === "session_update") {
-        const { slash_commands, skills, ...rest } = msg.session;
+        // Exclude session_id — same rationale as session_init above.
+        const { slash_commands, skills, session_id: _cliSessionId, ...rest } = msg.session;
         session.state = {
           ...session.state,
           ...rest,
@@ -433,6 +447,9 @@ export class WsBridge {
         };
         this.refreshGitInfo(session, { notifyPoller: true });
         this.persistSession(session);
+        if (session.pendingMessages.length > 0 && adapter.isConnected()) {
+          this.flushQueuedBrowserMessages(session, adapter, "backend_session_update");
+        }
       }
 
       // -- status_change: update compacting flag ---------------------------
@@ -451,12 +468,26 @@ export class WsBridge {
         this.persistSession(session);
       }
 
+      if (msg.type === "user_message") {
+        const alreadyPersisted = msg.id
+          ? session.messageHistory.some((entry) => entry.type === "user_message" && entry.id === msg.id)
+          : false;
+        if (!alreadyPersisted) {
+          this.appendHistory(session, msg);
+          this.persistSession(session);
+        }
+      }
+
       // -- assistant: append to history, notify listeners ------------------
       if (msg.type === "assistant") {
         const assistantMsg = { ...msg, timestamp: msg.timestamp || Date.now() };
         this.appendHistory(session, assistantMsg);
         this.persistSession(session);
         companionBus.emit("message:assistant", { sessionId: session.id, message: assistantMsg });
+      }
+
+      if (msg.type === "stream_event") {
+        companionBus.emit("message:stream_event", { sessionId: session.id, message: msg });
       }
 
       // -- result: update session cost/turns, refresh git, notify listeners
@@ -515,8 +546,9 @@ export class WsBridge {
           // Run AI validation async
           this.handleAiValidation(session, adapter, perm).catch((err) => {
             console.warn(`[ws-bridge] AI validation error for tool=${perm.tool_name} request_id=${perm.request_id} session=${session.id}, falling through to manual:`, err);
-            // On error, fall through to normal flow
+            // On error, fall through to normal permission flow
             session.pendingPermissions.set(perm.request_id, perm);
+            session.stateMachine.transition("awaiting_permission", "ai_validation_error_fallback");
             this.persistSession(session);
             this.broadcastToBrowsers(session, msg);
           });
@@ -532,6 +564,10 @@ export class WsBridge {
       if (msg.type === "permission_cancelled") {
         const reqId = (msg as { request_id: string }).request_id;
         session.pendingPermissions.delete(reqId);
+        // If no more pending permissions, transition back to streaming
+        if (session.pendingPermissions.size === 0 && session.stateMachine.phase === "awaiting_permission") {
+          session.stateMachine.transition("streaming", "permission_cancelled");
+        }
         this.persistSession(session);
       }
 
@@ -562,6 +598,9 @@ export class WsBridge {
       session.state.backend_type = session.backendType;
       this.refreshGitInfo(session, { broadcastUpdate: true, notifyPoller: true });
       this.persistSession(session);
+      if (session.pendingMessages.length > 0 && adapter.isConnected()) {
+        this.flushQueuedBrowserMessages(session, adapter, "backend_session_meta");
+      }
     });
 
     // ── onDisconnect — handle transport disconnection ────────────────────
@@ -673,6 +712,7 @@ export class WsBridge {
 
     // Uncertain or auto-action disabled: fall through to manual
     session.pendingPermissions.set(perm.request_id, perm);
+    session.stateMachine.transition("awaiting_permission", "ai_validation_manual_fallback");
     this.persistSession(session);
     this.broadcastToBrowsers(session, {
       type: "permission_request",
@@ -681,7 +721,7 @@ export class WsBridge {
   }
 
   /** Cancel a pending disconnect debounce timer for a session, if any. */
-  private cancelDisconnectTimer(sessionId: string): boolean {
+  cancelDisconnectTimer(sessionId: string): boolean {
     const timer = this.disconnectTimers.get(sessionId);
     if (!timer) return false;
     clearTimeout(timer);
@@ -693,6 +733,7 @@ export class WsBridge {
 
   handleCLIOpen(ws: ServerWebSocket<SocketData>, sessionId: string) {
     metricsCollector.recordWsConnection("cli", "open");
+    this.recorder?.recordEvent(sessionId, "ws_open", "cli");
     const session = this.getOrCreateSession(sessionId);
 
     // Create or retrieve ClaudeAdapter for this session
@@ -770,6 +811,7 @@ export class WsBridge {
   handleCLIClose(ws: ServerWebSocket<SocketData>) {
     metricsCollector.recordWsConnection("cli", "close");
     const sessionId = (ws.data as CLISocketData).sessionId;
+    this.recorder?.recordEvent(sessionId, "ws_close", "cli");
     const session = this.sessions.get(sessionId);
     if (!session) return;
 
@@ -797,6 +839,10 @@ export class WsBridge {
         this.broadcastToBrowsers(session, { type: "permission_cancelled", request_id: reqId });
       }
       session.pendingPermissions.clear();
+
+      // Request auto-relaunch regardless of browser state — the proactive
+      // keepalive in the orchestrator ensures headless sessions stay alive.
+      companionBus.emit("session:relaunch-needed", { sessionId });
     }, WsBridge.DISCONNECT_DEBOUNCE_MS));
   }
 
@@ -804,6 +850,7 @@ export class WsBridge {
 
   handleBrowserOpen(ws: ServerWebSocket<SocketData>, sessionId: string) {
     metricsCollector.recordWsConnection("browser", "open");
+    this.recorder?.recordEvent(sessionId, "ws_open", "browser");
     const session = this.getOrCreateSession(sessionId);
     const browserData = ws.data as BrowserSocketData;
     browserData.subscribed = false;
@@ -913,6 +960,7 @@ export class WsBridge {
   handleBrowserClose(ws: ServerWebSocket<SocketData>) {
     metricsCollector.recordWsConnection("browser", "close");
     const sessionId = (ws.data as BrowserSocketData).sessionId;
+    this.recorder?.recordEvent(sessionId, "ws_close", "browser");
     const session = this.sessions.get(sessionId);
     if (!session) return;
 
@@ -980,7 +1028,7 @@ export class WsBridge {
   private static readonly IDLE_KILL_THRESHOLD_MS = Number(
     process.env.COMPANION_IDLE_KILL_MINUTES
       ? Number(process.env.COMPANION_IDLE_KILL_MINUTES) * 60_000
-      : 20 * 60_000, // 20 minutes default
+      : 24 * 60 * 60_000, // 24 hours default
   );
   private static readonly IDLE_CHECK_INTERVAL_MS = 60_000; // check every 60s
 
@@ -1090,12 +1138,13 @@ export class WsBridge {
     if (msg.type === "user_message") {
       metricsCollector.recordTurnStarted(session.id);
       const ts = Date.now();
-      this.appendHistory(session, {
+      const userMessage: BrowserIncomingMessage = {
         type: "user_message",
         content: msg.content,
         timestamp: ts,
-        id: `user-${ts}-${this.userMsgCounter++}`,
-      });
+        id: msg.client_msg_id || `user-${ts}-${this.userMsgCounter++}`,
+      };
+      this.appendHistory(session, userMessage);
       const transitioned = session.stateMachine.transition("streaming", "user_message");
       if (!transitioned) {
         // Session not ready yet (e.g. still initializing). Log a warning so
@@ -1107,6 +1156,7 @@ export class WsBridge {
         });
       }
       this.persistSession(session);
+      this.broadcastToBrowsers(session, userMessage);
     }
 
     // -- permission_response: populate updatedInput fallback from pending, then remove -------
@@ -1133,7 +1183,7 @@ export class WsBridge {
         // messages, queue this incoming message behind them instead of sending
         // it immediately (which could overtake older queued work).
         if (session.pendingMessages.length > 0) {
-          session.pendingMessages.push(JSON.stringify(msg));
+          this.enqueuePendingMessage(session, JSON.stringify(msg));
           this.persistSession(session);
           return;
         }
@@ -1147,7 +1197,7 @@ export class WsBridge {
           sessionId: session.id,
           messageType: msg.type,
         });
-        session.pendingMessages.push(JSON.stringify(msg));
+        this.enqueuePendingMessage(session, JSON.stringify(msg));
       }
       this.persistSession(session);
     } else {
@@ -1156,7 +1206,7 @@ export class WsBridge {
         sessionId: session.id,
         messageType: msg.type,
       });
-      session.pendingMessages.push(JSON.stringify(msg));
+      this.enqueuePendingMessage(session, JSON.stringify(msg));
       this.persistSession(session);
     }
   }
@@ -1186,6 +1236,23 @@ export class WsBridge {
    * Flush queued browser-originated messages to an attached backend adapter.
    * Keeps ordering and re-queues retryable messages if dispatch fails.
    */
+  /** Enqueue a browser→backend message, dropping the oldest if the queue is full. */
+  private enqueuePendingMessage(session: Session, raw: string): void {
+    if (session.pendingMessages.length >= WsBridge.PENDING_MESSAGES_LIMIT) {
+      const dropped = session.pendingMessages.shift();
+      log.warn("ws-bridge", "Pending message queue full, dropping oldest message", {
+        sessionId: session.id,
+        queueSize: session.pendingMessages.length,
+        droppedPreview: dropped?.substring(0, 80),
+      });
+      this.broadcastToBrowsers(session, {
+        type: "error",
+        message: "Message queue full: the oldest queued message was discarded.",
+      });
+    }
+    session.pendingMessages.push(raw);
+  }
+
   private flushQueuedBrowserMessages(session: Session, adapter: IBackendAdapter, reason: string): void {
     if (session.pendingMessages.length === 0) return;
 

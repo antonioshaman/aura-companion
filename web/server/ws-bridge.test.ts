@@ -480,6 +480,73 @@ describe("CLI handlers", () => {
     expect(callback).toHaveBeenCalledWith("s1", "cli-internal-id");
   });
 
+  it("handleCLIMessage: system.init preserves Companion session_id (does not overwrite with CLI internal ID)", async () => {
+    // Regression test for duplicate sidebar entries bug.
+    // The CLI sends its own internal session_id in the system.init message.
+    // The bridge must NOT allow this to overwrite session.state.session_id
+    // (which is the Companion's session ID used by the browser as a Map key).
+    // If overwritten, the browser adds the session under the CLI's ID while
+    // the sdkSessions poll uses the Companion's ID — creating two entries.
+    mockExecSync.mockImplementation(() => {
+      throw new Error("not a git repo");
+    });
+
+    const cli = makeCliSocket("s1");
+    const browser = makeBrowserSocket("s1");
+    bridge.handleCLIOpen(cli, "s1");
+    bridge.handleBrowserOpen(browser, "s1");
+    browser.send.mockClear();
+
+    // CLI reports a different session_id than the Companion's "s1"
+    await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "cli-internal-uuid-abc123" }));
+
+    const session = bridge.getSession("s1")!;
+    // session.state.session_id must remain the Companion's ID
+    expect(session.state.session_id).toBe("s1");
+
+    // The broadcast to the browser must also use the Companion's ID
+    const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
+    const initCall = calls.find((c: any) => c.type === "session_init");
+    expect(initCall).toBeDefined();
+    expect(initCall.session.session_id).toBe("s1");
+  });
+
+  it("handleCLIMessage: session_update preserves Companion session_id (does not overwrite with CLI internal ID)", async () => {
+    // Regression test: after session_init lands, a subsequent session_update
+    // from the adapter must NOT overwrite session.state.session_id with the
+    // CLI's internal ID.  This mirrors the session_init regression test above.
+    mockExecSync.mockImplementation(() => {
+      throw new Error("not a git repo");
+    });
+
+    const cli = makeCliSocket("s1");
+    bridge.handleCLIOpen(cli, "s1");
+
+    // First, send session_init to get the session into ready state
+    await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "cli-internal-uuid-abc123" }));
+
+    const session = bridge.getSession("s1")!;
+    expect(session.state.session_id).toBe("s1"); // sanity check after init
+
+    // Now simulate a session_update with a different session_id coming through
+    // the adapter pipeline.  We invoke the adapter's browserMessageCb directly
+    // because the Claude adapter does not natively emit session_update — this
+    // path is exercised by the Codex adapter in production.
+    const adapter = session.backendAdapter as any;
+    adapter.browserMessageCb({
+      type: "session_update",
+      session: {
+        session_id: "cli-internal-uuid-abc123",
+        model: "claude-opus-4-6",
+      },
+    });
+
+    // session.state.session_id must still be the Companion's ID
+    expect(session.state.session_id).toBe("s1");
+    // The model update should still have been applied
+    expect(session.state.model).toBe("claude-opus-4-6");
+  });
+
   it("handleCLIMessage: updates state from init (model, cwd, tools, permissionMode)", async () => {
     mockExecSync.mockImplementation(() => {
       throw new Error("not a git repo");
@@ -1788,6 +1855,87 @@ describe("Browser message routing", () => {
     expect(send).toHaveBeenCalledTimes(3);
     const messageTypes = send.mock.calls.map(([msg]: [any]) => msg.type);
     expect(messageTypes).toEqual(["user_message", "user_message", "mcp_get_status"]);
+  });
+
+  it("flushes bridge-queued messages when codex session init marks the adapter connected", () => {
+    const browser = makeBrowserSocket("codex-init-flush");
+    bridge.handleBrowserOpen(browser, "codex-init-flush");
+
+    bridge.handleBrowserMessage(browser, JSON.stringify({
+      type: "user_message",
+      content: "flush me after codex init",
+    }));
+
+    const session = bridge.getSession("codex-init-flush")!;
+    expect(session.pendingMessages).toHaveLength(1);
+
+    let onBrowserMessage: ((msg: any) => void) | undefined;
+    let onSessionMeta: ((meta: any) => void) | undefined;
+    const send = vi.fn(() => connected);
+    let connected = false;
+    const adapter = {
+      isConnected: () => connected,
+      send,
+      disconnect: async () => {},
+      onBrowserMessage: (cb: (msg: any) => void) => {
+        onBrowserMessage = cb;
+      },
+      onSessionMeta: (cb: (meta: any) => void) => {
+        onSessionMeta = cb;
+      },
+      onDisconnect: () => {},
+      onInitError: () => {},
+    };
+
+    bridge.attachBackendAdapter("codex-init-flush", adapter as any, "codex");
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(session.pendingMessages).toHaveLength(1);
+
+    connected = true;
+    onSessionMeta?.({
+      cliSessionId: "thr-codex-init-flush",
+      model: "gpt-5.4",
+      cwd: "/test",
+    });
+    onBrowserMessage?.({
+      type: "session_init",
+      session: {
+        session_id: "codex-init-flush",
+        backend_type: "codex",
+        model: "gpt-5.4",
+        cwd: "/test",
+        tools: [],
+        permissionMode: "bypassPermissions",
+        claude_code_version: "",
+        mcp_servers: [],
+        agents: [],
+        slash_commands: [],
+        skills: [],
+        total_cost_usd: 0,
+        num_turns: 0,
+        context_used_percent: 0,
+        is_compacting: false,
+        git_branch: "",
+        is_worktree: false,
+        is_containerized: false,
+        repo_root: "",
+        git_ahead: 0,
+        git_behind: 0,
+        total_lines_added: 0,
+        total_lines_removed: 0,
+      },
+    });
+
+    expect(send).toHaveBeenCalledTimes(2);
+    const flushedCall = (send.mock.calls as any[][])[1];
+    const flushedArg = flushedCall?.[0];
+    expect(flushedCall).toBeDefined();
+    expect(flushedArg).toMatchObject({
+      type: "user_message",
+      content: "flush me after codex init",
+    });
+    expect(session.pendingMessages).toHaveLength(0);
   });
 
   it("preserves FIFO when queued flush is interrupted before sending current message", () => {
@@ -3816,6 +3964,39 @@ describe("per-session listener error handling", () => {
 
     spy.mockRestore();
   });
+
+  it("catches and logs errors thrown by stream event listeners", async () => {
+    const sessionId = "stream-listener-error-session";
+    const cli = makeCliSocket(sessionId);
+    bridge.handleCLIOpen(cli, sessionId);
+    await bridge.handleCLIMessage(cli, makeInitMsg());
+
+    const browser = makeBrowserSocket(sessionId);
+    bridge.handleBrowserOpen(browser, sessionId);
+
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    companionBus.on("message:stream_event", ({ sessionId: sid }) => {
+      if (sid === sessionId) {
+        throw new Error("stream listener boom");
+      }
+    });
+
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "stream_event",
+      event: { type: "content_block_delta", delta: { type: "text_delta", text: "hi" } },
+      parent_tool_use_id: null,
+      uuid: "stream-listener-uuid-1",
+      session_id: sessionId,
+    }));
+
+    expect(spy).toHaveBeenCalledWith(
+      expect.stringContaining("Handler error"),
+      expect.any(Error),
+    );
+
+    spy.mockRestore();
+  });
 });
 
 // ─── sendToCLI error handling ──────────────────────────────────────────────
@@ -4230,11 +4411,11 @@ describe("Idle kill watchdog", () => {
     // Disconnect the browser — should start idle watchdog
     bridge.handleBrowserClose(browser);
 
-    // Advance past the idle kill threshold (default 20 min) + check interval (60s)
+    // Advance past the idle kill threshold (default 24h) + check interval (60s)
     // The watchdog checks every 60s, so we need to advance enough for:
-    // 1) The idle threshold to be exceeded (20 min)
+    // 1) The idle threshold to be exceeded (24h)
     // 2) A check interval to fire
-    vi.advanceTimersByTime(20 * 60_000 + 60_000);
+    vi.advanceTimersByTime(24 * 60 * 60_000 + 60_000);
 
     expect(idleKillHandler).toHaveBeenCalledWith({ sessionId: "s1" });
   });
@@ -4260,8 +4441,8 @@ describe("Idle kill watchdog", () => {
     const browser2 = makeBrowserSocket("s1");
     bridge.handleBrowserOpen(browser2, "s1");
 
-    // Advance well past the threshold
-    vi.advanceTimersByTime(30 * 60_000);
+    // Advance well past the 24h threshold
+    vi.advanceTimersByTime(25 * 60 * 60_000);
 
     // Should NOT have triggered idle kill
     expect(idleKillHandler).not.toHaveBeenCalled();
@@ -4284,8 +4465,8 @@ describe("Idle kill watchdog", () => {
     // Remove session while watchdog is active
     bridge.removeSession("s1");
 
-    // Advance past threshold + check
-    vi.advanceTimersByTime(25 * 60_000);
+    // Advance past 24h threshold + check interval
+    vi.advanceTimersByTime(24 * 60 * 60_000 + 60_000);
 
     // Should NOT fire idle-kill because session was removed
     expect(idleKillHandler).not.toHaveBeenCalled();
@@ -4314,8 +4495,8 @@ describe("Idle kill watchdog", () => {
     const browser2 = makeBrowserSocket("s1");
     session.browserSockets.add(browser2);
 
-    // Advance past threshold
-    vi.advanceTimersByTime(15 * 60_000);
+    // Advance past 24h threshold
+    vi.advanceTimersByTime(24 * 60 * 60_000);
 
     // Watchdog should have noticed the browser and cancelled itself
     expect(idleKillHandler).not.toHaveBeenCalled();

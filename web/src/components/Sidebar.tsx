@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { useStore } from "../store.js";
 import { api, type ArchiveInfo } from "../api.js";
 import { ArchiveLinearModal, type LinearTransitionChoice } from "./ArchiveLinearModal.js";
-import { connectSession, connectAllSessions, disconnectSession } from "../ws.js";
+import { connectAllSessions, disconnectSession } from "../ws.js";
 import { navigateToSession, navigateHome, parseHash } from "../utils/routing.js";
 import { ProjectGroup } from "./ProjectGroup.js";
 import { SessionItem } from "./SessionItem.js";
@@ -59,16 +59,9 @@ const NAV_ITEMS: NavItem[] = [
     id: "integrations",
     label: "Integrations",
     hash: "#/integrations",
-    activePages: ["integrations", "integration-linear", "integration-tailscale"],
+    activePages: ["integrations", "integration-linear", "integration-linear-oauth", "integration-tailscale"],
     viewBox: "0 0 16 16",
     iconPath: "M2.5 3A1.5 1.5 0 001 4.5v2A1.5 1.5 0 002.5 8h2A1.5 1.5 0 006 6.5v-2A1.5 1.5 0 004.5 3h-2zm0 1h2a.5.5 0 01.5.5v2a.5.5 0 01-.5.5h-2a.5.5 0 01-.5-.5v-2a.5.5 0 01.5-.5zm9 0A1.5 1.5 0 0010 5.5v2A1.5 1.5 0 0011.5 9h2A1.5 1.5 0 0015 7.5v-2A1.5 1.5 0 0013.5 4h-2zm0 1h2a.5.5 0 01.5.5v2a.5.5 0 01-.5.5h-2a.5.5 0 01-.5-.5v-2a.5.5 0 01.5-.5zM2.5 10A1.5 1.5 0 001 11.5v2A1.5 1.5 0 002.5 15h2A1.5 1.5 0 006 13.5v-2A1.5 1.5 0 004.5 10h-2zm0 1h2a.5.5 0 01.5.5v2a.5.5 0 01-.5.5h-2a.5.5 0 01-.5-.5v-2a.5.5 0 01.5-.5zM8.5 12a.5.5 0 100 1h5a.5.5 0 100-1h-5zm0-2a.5.5 0 100 1h2a.5.5 0 100-1h-2z",
-  },
-  {
-    id: "terminal",
-    label: "Terminal",
-    hash: "#/terminal",
-    viewBox: "0 0 16 16",
-    iconPath: "M2 3a1 1 0 011-1h10a1 1 0 011 1v10a1 1 0 01-1 1H3a1 1 0 01-1-1V3zm2 1.5l3 2.5-3 2.5V4.5zM8.5 10h3v1h-3v-1z",
   },
   {
     id: "environments",
@@ -113,7 +106,7 @@ const NAV_ITEMS: NavItem[] = [
 ];
 
 const NAV_SECTIONS = [
-  { id: "workbench", label: "Workbench", itemIds: ["prompts", "integrations", "terminal"] },
+  { id: "workbench", label: "Workbench", itemIds: ["prompts", "integrations"] },
   { id: "workspace", label: "Workspace", itemIds: ["environments", "sandboxes", "agents", "settings"] },
 ] as const;
 
@@ -157,8 +150,8 @@ export function Sidebar() {
   const sessions = useStore((s) => s.sessions);
   const sdkSessions = useStore((s) => s.sdkSessions);
   const currentSessionId = useStore((s) => s.currentSessionId);
-  const setCurrentSession = useStore((s) => s.setCurrentSession);
   const cliConnected = useStore((s) => s.cliConnected);
+  const cliReconnecting = useStore((s) => s.cliReconnecting);
   const sessionStatus = useStore((s) => s.sessionStatus);
   const removeSession = useStore((s) => s.removeSession);
   const sessionNames = useStore((s) => s.sessionNames);
@@ -177,11 +170,24 @@ export function Sidebar() {
       try {
         const list = await api.listSessions();
         if (active) {
-          useStore.getState().setSdkSessions(list);
+          const store = useStore.getState();
+          store.setSdkSessions(list);
+          // Remove client-side sessions the server no longer knows about.
+          // Re-read state AFTER setSdkSessions so we get the freshest snapshot —
+          // a session_init WebSocket message may have arrived while listSessions()
+          // was in-flight and added a new session to the store. Guard removal with
+          // a connectionStatus check: a "connected" session arrived legitimately
+          // via session_init and must not be evicted just because it was absent
+          // from the (now-stale) server snapshot.
+          const freshStore = useStore.getState();
+          const serverIds = new Set(list.map((s) => s.sessionId));
+          for (const id of freshStore.sessions.keys()) {
+            if (!serverIds.has(id) && freshStore.connectionStatus.get(id) !== "connected") {
+              freshStore.removeSession(id);
+            }
+          }
           // Connect all active sessions so we receive notifications for all of them
           connectAllSessions(list);
-          // Hydrate session names from server (server is source of truth for auto-generated names)
-          const store = useStore.getState();
           for (const s of list) {
             if (s.name && (!store.sessionNames.has(s.sessionId) || /^[A-Z][a-z]+ [A-Z][a-z]+$/.test(store.sessionNames.get(s.sessionId)!))) {
               const currentStoreName = store.sessionNames.get(s.sessionId);
@@ -214,7 +220,6 @@ export function Sidebar() {
   }, []);
 
   function handleSelectSession(sessionId: string) {
-    useStore.getState().closeTerminal();
     // Navigate to session hash — App.tsx hash effect handles setCurrentSession + connectSession
     navigateToSession(sessionId);
     // Close sidebar on mobile
@@ -224,7 +229,6 @@ export function Sidebar() {
   }
 
   function handleNewSession() {
-    useStore.getState().closeTerminal();
     navigateHome();
     useStore.getState().newSession();
     if (window.innerWidth < 768) {
@@ -460,6 +464,7 @@ export function Sidebar() {
       linesAdded: bridgeState?.total_lines_added || sdkInfo?.totalLinesAdded || 0,
       linesRemoved: bridgeState?.total_lines_removed || sdkInfo?.totalLinesRemoved || 0,
       isConnected: cliConnected.get(id) ?? false,
+      isReconnecting: cliReconnecting.get(id) ?? false,
       status: sessionStatus.get(id) ?? null,
       sdkState: sdkInfo?.state ?? null,
       createdAt: sdkInfo?.createdAt ?? 0,
@@ -736,9 +741,6 @@ export function Sidebar() {
                     <button
                       key={item.id}
                       onClick={() => {
-                        if (item.id !== "terminal") {
-                          useStore.getState().closeTerminal();
-                        }
                         window.location.hash = item.hash;
                         // Close sidebar on mobile so the navigated page is visible
                         if (window.innerWidth < 768) {

@@ -18,12 +18,14 @@ import { api } from "../api.js";
 import type {
   PermissionRequest,
   ChatMessage,
-  ContentBlock,
   SessionState,
   McpServerDetail,
 } from "../types.js";
 import { AiValidationBadge } from "./AiValidationBadge.js";
 import { AiValidationToggle } from "./AiValidationToggle.js";
+import { ToolExecutionBar } from "./ToolExecutionBar.js";
+import { ToolTurnSummary } from "./ToolTurnSummary.js";
+import type { ToolActivityEntry } from "../store/tasks-slice.js";
 import type { TaskItem } from "../types.js";
 import type {
   UpdateInfo,
@@ -215,6 +217,15 @@ const PERM_AI_DANGEROUS = mockPermission({
   },
 });
 
+// Enriched permission fields (display_name, title, decision_reason) — v2.1.81+
+const PERM_ENRICHED = mockPermission({
+  tool_name: "Edit",
+  display_name: "File Editor",
+  title: "Edit a TypeScript file",
+  decision_reason: "File is outside trusted directories",
+  input: { file_path: "/workspace/src/app.ts", new_string: "const x = 1;", old_string: "const x = 0;" },
+});
+
 const PERM_ASK_SINGLE = mockPermission({
   tool_name: "AskUserQuestion",
   input: {
@@ -370,6 +381,15 @@ const MSG_ASSISTANT_STREAMING: ChatMessage = {
   timestamp: Date.now() - 35000,
 };
 
+const MSG_ASSISTANT_STREAMING_THINKING: ChatMessage = {
+  id: "msg-streaming-thinking",
+  role: "assistant",
+  content: "Let me analyze the codebase to understand the authentication architecture. I should look at the middleware, session store, and token validation...",
+  isStreaming: true,
+  streamingPhase: "thinking",
+  timestamp: Date.now() - 34000,
+};
+
 const MSG_SYSTEM: ChatMessage = {
   id: "msg-6",
   role: "system",
@@ -461,6 +481,21 @@ const MOCK_SUBAGENT_TOOL_ITEMS = [
     name: "Grep",
     input: { pattern: "session.userId", path: "src/" },
   },
+];
+
+// Tool Activity mock data
+const MOCK_TOOL_ACTIVITY_OK: ToolActivityEntry[] = [
+  { toolUseId: "ta-1", toolName: "Bash", preview: "bun run test", startedAt: Date.now() - 7200, completedAt: Date.now() - 400, elapsedSeconds: 6.8, isError: false },
+  { toolUseId: "ta-2", toolName: "Read", preview: "src/ws.ts", startedAt: Date.now() - 500, completedAt: Date.now() - 400, elapsedSeconds: 0.1, isError: false },
+  { toolUseId: "ta-3", toolName: "Edit", preview: "src/ws.ts", startedAt: Date.now() - 400, completedAt: Date.now() - 100, elapsedSeconds: 1.4, isError: false },
+];
+const MOCK_TOOL_ACTIVITY_ERROR: ToolActivityEntry[] = [
+  { toolUseId: "ta-4", toolName: "Bash", preview: "npm run build", startedAt: Date.now() - 5000, completedAt: Date.now() - 1000, elapsedSeconds: 4.0, isError: true },
+  { toolUseId: "ta-5", toolName: "Read", preview: "package.json", startedAt: Date.now() - 900, completedAt: Date.now() - 800, elapsedSeconds: 0.1, isError: false },
+];
+const MOCK_TOOL_ACTIVITY_RUNNING: ToolActivityEntry[] = [
+  { toolUseId: "ta-6", toolName: "Bash", preview: "bun run test", startedAt: Date.now() - 3000, elapsedSeconds: 3.0, isError: false },
+  { toolUseId: "ta-7", toolName: "Grep", preview: "TODO", startedAt: Date.now() - 1000, completedAt: Date.now() - 500, elapsedSeconds: 0.5, isError: false },
 ];
 
 // GitHub PR mock data
@@ -783,7 +818,7 @@ export function Playground() {
   }, []);
 
   return (
-    <div className="min-h-screen bg-cc-bg text-cc-fg font-sans-ui">
+    <div className="fixed inset-0 bg-cc-bg text-cc-fg font-sans-ui overflow-y-auto">
       {/* Header */}
       <header className="sticky top-0 z-50 bg-cc-sidebar border-b border-cc-border">
         <div className="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
@@ -856,6 +891,10 @@ export function Playground() {
             />
             <PermissionBanner
               permission={PERM_DYNAMIC}
+              sessionId={MOCK_SESSION_ID}
+            />
+            <PermissionBanner
+              permission={PERM_ENRICHED}
               sessionId={MOCK_SESSION_ID}
             />
           </div>
@@ -1008,6 +1047,9 @@ export function Playground() {
             </Card>
             <Card label="Assistant message (streaming)">
               <MessageBubble message={MSG_ASSISTANT_STREAMING} />
+            </Card>
+            <Card label="Assistant message (streaming thinking phase)">
+              <MessageBubble message={MSG_ASSISTANT_STREAMING_THINKING} />
             </Card>
             <Card label="Assistant message (thinking block)">
               <MessageBubble message={MSG_ASSISTANT_THINKING} />
@@ -1239,6 +1281,54 @@ export function Playground() {
                   role: "system",
                   content:
                     "Read 4 files, searched 12 matches across 3 directories",
+                  timestamp: Date.now(),
+                }}
+              />
+            </Card>
+          </div>
+        </Section>
+
+        <Section
+          title="Interesting Events"
+          description="Event summaries that are worth surfacing in the chat feed"
+        >
+          <div className="space-y-4 max-w-3xl">
+            <Card label="Context compacted">
+              <MessageBubble
+                message={{
+                  id: "event-compact",
+                  role: "system",
+                  content: "Context compacted (auto, pre-tokens: 182344).",
+                  timestamp: Date.now(),
+                }}
+              />
+            </Card>
+            <Card label="Background task completed">
+              <MessageBubble
+                message={{
+                  id: "event-task",
+                  role: "system",
+                  content: "Task completed: a1b2c3d. Build finished successfully.",
+                  timestamp: Date.now(),
+                }}
+              />
+            </Card>
+            <Card label="Files persisted">
+              <MessageBubble
+                message={{
+                  id: "event-files",
+                  role: "system",
+                  content: "Persisted 3 file(s).",
+                  timestamp: Date.now(),
+                }}
+              />
+            </Card>
+            <Card label="Hook outcome">
+              <MessageBubble
+                message={{
+                  id: "event-hook",
+                  role: "system",
+                  content: "Hook success: lint (post_tool_use) (exit 0).",
                   timestamp: Date.now(),
                 }}
               />
@@ -1753,7 +1843,35 @@ export function Playground() {
           description="Connection and session status banners"
         >
           <div className="space-y-3 max-w-3xl">
-            <Card label="Disconnected warning">
+            <Card label="CLI Disconnected">
+              <div className="px-4 py-2 bg-cc-warning/10 border border-cc-warning/20 rounded-lg text-center flex items-center justify-center gap-3">
+                <span className="text-xs text-cc-warning font-medium">
+                  CLI disconnected
+                </span>
+                <span className="text-xs font-medium px-3 py-1.5 rounded-md bg-cc-warning/20 text-cc-warning cursor-pointer">
+                  Reconnect
+                </span>
+              </div>
+            </Card>
+            <Card label="CLI Reconnecting">
+              <div className="px-4 py-2 bg-cc-warning/10 border border-cc-warning/20 rounded-lg text-center flex items-center justify-center gap-3">
+                <span className="w-3 h-3 rounded-full border-2 border-cc-warning/30 border-t-cc-warning animate-spin" />
+                <span className="text-xs text-cc-warning font-medium">
+                  Reconnecting&hellip;
+                </span>
+              </div>
+            </Card>
+            <Card label="Reconnection Error">
+              <div className="px-4 py-2 bg-cc-warning/10 border border-cc-warning/20 rounded-lg text-center flex items-center justify-center gap-3">
+                <span className="text-xs text-cc-error font-medium">
+                  Reconnection failed
+                </span>
+                <span className="text-xs font-medium px-3 py-1.5 rounded-md bg-cc-error/15 text-cc-error cursor-pointer">
+                  Retry
+                </span>
+              </div>
+            </Card>
+            <Card label="WS Disconnected">
               <div className="px-4 py-2 bg-cc-warning/10 border border-cc-warning/20 rounded-lg text-center">
                 <span className="text-xs text-cc-warning font-medium">
                   Reconnecting to session...
@@ -1767,7 +1885,7 @@ export function Playground() {
                   Connected
                 </span>
                 <span className="text-[11px] text-cc-muted ml-auto">
-                  claude-opus-4-6
+                  claude-opus-4-7
                 </span>
               </div>
             </Card>
@@ -2067,6 +2185,43 @@ export function Playground() {
                     </div>
                   </div>
                 </div>
+              </div>
+            </Card>
+          </div>
+        </Section>
+
+        {/* ─── Prompt Suggestions ──────────────────────────────── */}
+        <Section
+          title="Prompt Suggestions"
+          description="Suggestion chips from the CLI for predicted next user prompts"
+        >
+          <div className="max-w-3xl space-y-4">
+            <Card label="Suggestion chips (idle state)">
+              <div className="flex flex-wrap gap-2 p-3">
+                {["Fix the failing test", "Add error handling", "Refactor to use async/await"].map((suggestion) => (
+                  <button
+                    key={suggestion}
+                    type="button"
+                    className="px-3 py-1.5 text-sm rounded-full border border-cc-border bg-cc-card text-cc-fg hover:bg-cc-hover transition-colors"
+                    onClick={() => alert(`Selected: ${suggestion}`)}
+                  >
+                    {suggestion}
+                  </button>
+                ))}
+              </div>
+            </Card>
+            <Card label="Suggestion chips (after completion)">
+              <div className="flex flex-wrap gap-2 p-3">
+                {["Run the test suite", "Deploy to staging", "Update the README"].map((suggestion) => (
+                  <button
+                    key={suggestion}
+                    type="button"
+                    className="px-3 py-1.5 text-sm rounded-full border border-cc-primary/30 bg-cc-primary/5 text-cc-primary hover:bg-cc-primary/10 transition-colors"
+                    onClick={() => alert(`Selected: ${suggestion}`)}
+                  >
+                    {suggestion}
+                  </button>
+                ))}
               </div>
             </Card>
           </div>
@@ -2662,6 +2817,49 @@ export function Playground() {
             </Card>
           </div>
         </Section>
+
+        {/* ─── Tool Activity ──────────────────────────────── */}
+        <Section
+          title="Tool Activity"
+          description="Live execution bar and post-turn summary strip"
+        >
+          <div className="space-y-6">
+            <Card label="ToolExecutionBar — 1 tool running">
+              <div className="bg-cc-bg p-2 rounded">
+                <ToolExecutionBar tools={[{ toolName: "Bash", elapsedSeconds: 3 }]} />
+              </div>
+            </Card>
+            <Card label="ToolExecutionBar — 3 tools running">
+              <div className="bg-cc-bg p-2 rounded">
+                <ToolExecutionBar tools={[
+                  { toolName: "Bash", elapsedSeconds: 7 },
+                  { toolName: "Read", elapsedSeconds: 1 },
+                  { toolName: "Edit", elapsedSeconds: 4 },
+                ]} />
+              </div>
+            </Card>
+            <Card label="ToolExecutionBar — empty (renders nothing)">
+              <div className="bg-cc-bg p-2 rounded min-h-[24px]">
+                <ToolExecutionBar tools={[]} />
+              </div>
+            </Card>
+            <Card label="ToolTurnSummary — collapsed (3 tools, no errors)">
+              <div className="bg-cc-bg p-2 rounded">
+                <ToolTurnSummary entries={MOCK_TOOL_ACTIVITY_OK} />
+              </div>
+            </Card>
+            <Card label="ToolTurnSummary — collapsed (with error)">
+              <div className="bg-cc-bg p-2 rounded">
+                <ToolTurnSummary entries={MOCK_TOOL_ACTIVITY_ERROR} />
+              </div>
+            </Card>
+            <Card label="ToolTurnSummary — collapsed (with running tool)">
+              <div className="bg-cc-bg p-2 rounded">
+                <ToolTurnSummary entries={MOCK_TOOL_ACTIVITY_RUNNING} />
+              </div>
+            </Card>
+          </div>
+        </Section>
       </div>
     </div>
   );
@@ -2681,6 +2879,7 @@ function mockSession(overrides: Partial<SessionItemType>): SessionItemType {
     linesAdded: 0,
     linesRemoved: 0,
     isConnected: false,
+    isReconnecting: false,
     status: null,
     sdkState: null,
     createdAt: Date.now(),
@@ -2778,6 +2977,20 @@ function PlaygroundSessionItems() {
             })}
             isActive={false}
             sessionName="Review PR #42"
+            permCount={0}
+            isRecentlyRenamed={false}
+            {...noopSessionItemProps}
+          />
+        </div>
+      </Card>
+
+      {/* Reconnecting */}
+      <Card label="Reconnecting — CLI restarting">
+        <div className="bg-cc-sidebar rounded-lg p-1">
+          <SessionItem
+            session={mockSession({ isReconnecting: true })}
+            isActive={false}
+            sessionName="Debug auth flow"
             permCount={0}
             isRecentlyRenamed={false}
             {...noopSessionItemProps}
