@@ -20,7 +20,12 @@ export default defineConfig({
       // The coverage-gate CI workflow reads json-summary to enforce
       // that new / changed files have ≥ 80 % line coverage.
     },
-    include: ["server/**/*.test.ts", "src/**/*.test.ts", "src/**/*.test.tsx"],
+    include: [
+      "server/**/*.test.ts",
+      "src/**/*.test.ts",
+      "src/**/*.test.tsx",
+      "scripts/**/*.test.ts",
+    ],
     environmentMatchGlobs: [
       ["src/**/*.test.ts", "jsdom"],
       ["src/**/*.test.tsx", "jsdom"],

@@ -1,5 +1,6 @@
 ---
 name: learn
+origin: aura
 description: Quick-capture a learning during a session without interrupting flow. Appends to the knowledge base immediately.
 user-invokable: true
 args:

@@ -1,5 +1,6 @@
 ---
 name: council-plan
+origin: aura
 description: Architect a feature with the Carmack Council before writing code. Use when explicitly asked to plan a feature, do a "council plan", "carmack plan", or invoke /council-plan. Carmack's philosophy chairs a council of domain experts — Troy Hunt (security), Martin Fowler (refactoring), Telegram UX Expert, Backend/Python Expert, Brandur Leach (PostgreSQL/Alembic), systemd/VPS Deploy Expert, Simon Willison (LLM pipeline), Karri Saarinen (UI quality), Vitaly Friedman (UX quality). Interactive feature discovery followed by parallel subagent dispatch. Produces a sequenced, attributed implementation plan with no code. Stack: Python 3.11+ / aiogram 3.x / SQLAlchemy sync / PostgreSQL + Alembic / OpenAI SDK via ProxyAPI.
 ---
 

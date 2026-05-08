@@ -1,5 +1,6 @@
 ---
 name: self-reflect
+origin: aura
 description: End-of-session reflection that extracts learnings, patterns, gotchas, and decisions into the knowledge base. Run after completing significant work to make future sessions smarter.
 user-invokable: true
 args:

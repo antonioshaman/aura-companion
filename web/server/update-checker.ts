@@ -1,3 +1,15 @@
+// Aura version-stopper note (do NOT "fix" the version mismatch below)
+// ───────────────────────────────────────────────────────────────────
+// Aura is a long-lived fork of the upstream `the-companion` npm package.
+// `web/package.json` deliberately holds a 1.x version that sits ahead of
+// upstream's 0.x line so isUpdateAvailable() returns false against vanilla
+// upstream releases. This is the "stopper" that suppresses the update banner
+// without disabling the checker entirely (we still want the checker around
+// as a drift signal — see scripts/aura-drift-check.* and PLAN-upstream-sync.md).
+//
+// If you bump web/package.json, keep it strictly greater than the latest
+// upstream release. See aura/CONFLICT_WATCHLIST.md.
+
 import { readFileSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,6 +23,7 @@ const currentVersion: string = JSON.parse(
   readFileSync(packageJsonPath, "utf-8"),
 ).version;
 
+// aura-keep-upstream-name — query upstream's npm package by its real name
 const NPM_REGISTRY_BASE = "https://registry.npmjs.org/the-companion";
 const CHECK_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 const INITIAL_DELAY_MS = 10_000; // 10 seconds after boot

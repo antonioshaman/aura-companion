@@ -1,5 +1,6 @@
 ---
 name: animate
+origin: aura
 description: Review a feature and enhance it with purposeful animations, micro-interactions, and motion effects that improve usability and delight.
 user-invokable: true
 args:

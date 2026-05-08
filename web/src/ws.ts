@@ -987,6 +987,12 @@ function handleParsedMessage(
       break;
     }
 
+    case "keep_alive": {
+      // Server-side heartbeat — keeps mobile/proxy connections from idling out.
+      // No state change needed; arrival itself counts as proof the socket is alive.
+      break;
+    }
+
     case "event_replay": {
       let latestProcessed: number | undefined;
       for (const evt of data.events) {

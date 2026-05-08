@@ -1715,6 +1715,43 @@ describe("handleMessage: tool_use_summary", () => {
 });
 
 // ===========================================================================
+// keep_alive heartbeat: silently consumed, no state mutation
+// ===========================================================================
+// The server emits `{ type: "keep_alive" }` every 25s to prevent mobile
+// carriers / proxies from idling the WebSocket out (which would surface as
+// code=1006 and trigger a reconnect storm). The client must accept it as
+// proof-of-life without mutating any session state or appending to history.
+describe("handleMessage: keep_alive", () => {
+  it("does not append a message, alter status, or clear streaming", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+
+    const store = useStore.getState();
+    store.setStreaming("s1", "in-progress text");
+    store.setSessionStatus("s1", "running");
+    const messagesBefore = store.messages.get("s1")?.length ?? 0;
+
+    fireMessage({ type: "keep_alive" });
+
+    const after = useStore.getState();
+    expect(after.messages.get("s1")?.length ?? 0).toBe(messagesBefore);
+    expect(after.streaming.get("s1")).toBe("in-progress text");
+    expect(after.sessionStatus.get("s1")).toBe("running");
+  });
+
+  it("promotes connection status from connecting to connected", () => {
+    // First message arriving on a fresh socket flips the status; this is the
+    // primary user-visible effect of any incoming frame, including keep_alive.
+    wsModule.connectSession("s1");
+    expect(useStore.getState().connectionStatus.get("s1")).toBe("connecting");
+
+    fireMessage({ type: "keep_alive" });
+
+    expect(useStore.getState().connectionStatus.get("s1")).toBe("connected");
+  });
+});
+
+// ===========================================================================
 // assistant message: per-tool progress clearing (not blanket clear)
 // ===========================================================================
 describe("handleMessage: assistant clears only completed tool progress", () => {

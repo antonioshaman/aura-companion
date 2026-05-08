@@ -1,5 +1,6 @@
 ---
 name: spec-writer
+origin: aura
 description: Generate structured software specifications for features, bug fixes, and products. Use when the user wants to create a spec, PRD, feature brief, requirements document, or when starting any new implementation that needs a specification first. Invoke via /spec-writer or when the user says "write a spec", "spec this out", "create a spec", "I need a spec for...", or describes a feature they want to build. Produces adaptive-complexity specs with Job Stories, Gherkin acceptance criteria, and three-tier boundaries. Output is a markdown file ready for agent execution or human review.
 ---
 

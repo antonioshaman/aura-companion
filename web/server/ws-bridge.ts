@@ -925,6 +925,56 @@ export class WsBridge {
     }
   }
 
+  // ── Browser heartbeat (AURA-LOCAL — preserve in upstream merges) ─────────
+  // Mobile carriers and many proxies silently drop idle WebSockets after
+  // 30-120s, surfacing on the client as code=1006 and triggering a reconnect
+  // storm. Bun's `sendPings` is a global option that also kills the CLI
+  // socket, so we use an application-level keep_alive frame instead.
+  //
+  // Composability with upstream PR #634 (proactive CLI relaunch on browser
+  // disconnect): this heartbeat keeps the WS alive while a browser is open;
+  // #634's relaunch path fires only after `browserSockets.size === 0` plus
+  // the existing idle-kill watchdog. They are sequenced, not redundant.
+  // See aura/CONFLICT_WATCHLIST.md.
+
+  private static readonly BROWSER_HEARTBEAT_INTERVAL_MS = 25_000;
+  private browserHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
+  startBrowserHeartbeat(): void {
+    if (this.browserHeartbeatTimer) return;
+    this.browserHeartbeatTimer = setInterval(() => {
+      this.broadcastBrowserHeartbeat();
+    }, WsBridge.BROWSER_HEARTBEAT_INTERVAL_MS);
+  }
+
+  stopBrowserHeartbeat(): void {
+    if (!this.browserHeartbeatTimer) return;
+    clearInterval(this.browserHeartbeatTimer);
+    this.browserHeartbeatTimer = null;
+  }
+
+  /**
+   * Send keep_alive to every browser socket. Intentionally bypasses
+   * `sequenceEvent` / `eventBuffer` / `messageHistory` via direct `ws.send` —
+   * heartbeats are transient liveness probes, not state. If a future merge
+   * unifies all outgoing-to-browser through a helper that auto-sequences,
+   * the heartbeat must remain on the direct path. See PLAN-upstream-sync.md
+   * Watchpoint "TS expert — keep_alive seq invariant".
+   */
+  private broadcastBrowserHeartbeat(): void {
+    const json = JSON.stringify({ type: "keep_alive" });
+    for (const session of this.sessions.values()) {
+      if (session.browserSockets.size === 0) continue;
+      for (const ws of session.browserSockets) {
+        try {
+          ws.send(json);
+        } catch {
+          session.browserSockets.delete(ws);
+        }
+      }
+    }
+  }
+
   // ── Idle kill watchdog ─────────────────────────────────────────────────
 
   private static readonly IDLE_KILL_THRESHOLD_MS = Number(

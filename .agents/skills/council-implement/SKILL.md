@@ -1,5 +1,6 @@
 ---
 name: council-implement
+origin: aura
 description: Execute a Carmack Council plan task by task. Use when explicitly asked to implement a plan, do a "council implement", "carmack implement", "council build", or invoke /council-implement. Reads the output of /council-plan and builds each task sequentially, loading the relevant expert's reference document per task. Verifies after each task. Produces an implementation log for /council-review. Stack: Python 3.11+ / aiogram 3.x / SQLAlchemy sync / PostgreSQL + Alembic / OpenAI SDK via ProxyAPI.
 ---
 

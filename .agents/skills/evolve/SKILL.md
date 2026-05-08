@@ -1,5 +1,6 @@
 ---
 name: evolve
+origin: aura
 description: Meta-skill that analyzes the knowledge base itself — promotes recurring patterns to CLAUDE.md rules, prunes stale entries, identifies knowledge gaps, and suggests new skills.
 user-invokable: true
 args:

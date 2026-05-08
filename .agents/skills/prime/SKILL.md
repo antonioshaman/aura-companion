@@ -1,5 +1,6 @@
 ---
 name: prime
+origin: aura
 description: Load relevant knowledge from the knowledge base before starting work. Filters by affected files, tags, or work type to avoid context bloat.
 user-invokable: true
 args:

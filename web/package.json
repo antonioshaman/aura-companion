@@ -39,7 +39,12 @@
     "test:watch": "vitest",
     "test:a11y": "vitest run --testNamePattern='axe accessibility|accessible names|aria-expanded'",
     "test:codex-contract": "vitest run server/codex-protocol-*.test.ts",
-    "generate-token": "bun bin/generate-token.ts"
+    "generate-token": "bun bin/generate-token.ts",
+    "branding": "bun scripts/apply-aura-branding.ts --root ..",
+    "branding:dry": "bun scripts/apply-aura-branding.ts --root .. --dry-run",
+    "drift:check": "bun scripts/aura-drift-check.ts",
+    "drift:dry": "bun scripts/aura-drift-check.ts --dry-run",
+    "drift:pin": "bun scripts/aura-drift-check.ts --pin"
   },
   "dependencies": {
     "@codemirror/lang-cpp": "^6.0.3",
@@ -67,6 +72,7 @@
   "devDependencies": {
     "@tailwindcss/vite": "^4.0.0",
     "@testing-library/jest-dom": "^6.9.1",
+    "minimatch": "^10.2.4",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",
     "@types/bun": "^1.2.5",

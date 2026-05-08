@@ -81,9 +81,14 @@ describe("SessionStateMachine", () => {
     it("initializing -> terminated", () =>
       expectValidTransition("initializing", "terminated"));
 
-    // ready -> streaming, compacting, reconnecting, terminated
+    // ready -> streaming, awaiting_permission, compacting, reconnecting, terminated
     it("ready -> streaming", () =>
       expectValidTransition("ready", "streaming"));
+    // ready -> awaiting_permission covers the case where the CLI emits a
+    // permission request after a `result` (state already advanced to ready)
+    // but before the user's next turn — observed in production logs.
+    it("ready -> awaiting_permission", () =>
+      expectValidTransition("ready", "awaiting_permission"));
     it("ready -> compacting", () =>
       expectValidTransition("ready", "compacting"));
     it("ready -> reconnecting", () =>

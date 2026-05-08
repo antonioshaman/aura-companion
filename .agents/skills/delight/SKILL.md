@@ -1,5 +1,6 @@
 ---
 name: delight
+origin: aura
 description: Add moments of joy, personality, and unexpected touches that make interfaces memorable and enjoyable to use. Elevates functional to delightful.
 user-invokable: true
 args:

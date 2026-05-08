@@ -1,5 +1,6 @@
 ---
 name: distill
+origin: aura
 description: Strip designs to their essence by removing unnecessary complexity. Great design is simple, powerful, and clean.
 user-invokable: true
 args:

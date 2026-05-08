@@ -1,5 +1,6 @@
 ---
 name: review-with-kb
+origin: aura
 description: Code review that cross-references changes against the knowledge base — catches known gotchas, validates compliance with recorded decisions, and flags anti-pattern violations.
 user-invokable: true
 args:

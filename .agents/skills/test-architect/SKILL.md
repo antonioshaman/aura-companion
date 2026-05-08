@@ -1,5 +1,6 @@
 ---
 name: test-architect
+origin: aura
 description: Map testable surfaces, audit existing tests for quality, and write test specifications that prevent AI shortcuts. Use when asked to "audit tests", "specify tests", "test architect", "map test coverage", or invoke /test-architect. Two modes — audit (evaluate existing tests against Beck's principles) and specify (write test specs for new code). Powered by Carmack × Beck quality-testing.md reference doc. Stack: Python 3.11+ / FastAPI / python-telegram-bot / SQLAlchemy / SQLite / Pydantic v2 / pytest.
 ---
 

@@ -116,6 +116,32 @@ app.get("/health", (c) => {
   });
 });
 
+// ── Readiness endpoint — Aura deploy resilience (Deploy expert D5) ──────────
+// /health returns 200 the moment Bun's HTTP listener binds, well before the
+// orchestrator finishes wiring up. The Aura restart wrapper polls /ready
+// instead, which only flips green when a user can plausibly create a session.
+//
+// Checks (each green = OK):
+//   - bootstrap completed (orchestrator wired, sessions restored)
+//   - at least one Claude/Codex CLI binary resolves on PATH
+let isReady = false;
+import { resolveBinary } from "./path-resolver.js";
+app.get("/ready", (c) => {
+  const claudeOk = resolveBinary("claude") !== null;
+  const codexOk = resolveBinary("codex") !== null;
+  const cliOk = claudeOk || codexOk;
+  const ready = isReady && cliOk;
+  return c.json(
+    {
+      ready,
+      bootstrap: isReady,
+      cli: { claude: claudeOk, codex: codexOk },
+      uptime: Math.floor((Date.now() - startTime) / 1000),
+    },
+    ready ? 200 : 503,
+  );
+});
+
 // ── Managed auth middleware — only active when COMPANION_AUTH_ENABLED=1 ────
 const hasManagedAuthSecret = Boolean(process.env.COMPANION_AUTH_SECRET?.trim());
 const managedAuthEnabled =
@@ -330,6 +356,11 @@ if (process.env.NODE_ENV !== "production") {
   console.log("Dev mode: frontend at http://localhost:5174");
 }
 
+// ── Browser heartbeat ───────────────────────────────────────────────────────
+// Counters mobile / proxy idle drops (code=1006) without enabling Bun's
+// global ping (which kills the CLI socket).
+wsBridge.startBrowserHeartbeat();
+
 // ── Cron scheduler ──────────────────────────────────────────────────────────
 cronScheduler.startAll();
 
@@ -352,6 +383,11 @@ if (isRunningAsService()) {
   setServiceMode(true);
   console.log("[server] Running as background service (auto-update available)");
 }
+
+// ── Bootstrap finished — /ready may now flip green (Deploy expert D5) ──────
+// All synchronous wiring is done above this point. Tailscale restoration is
+// best-effort (fire-and-forget) and not part of the readiness contract.
+isReady = true;
 
 // ── Runtime diagnostics ──────────────────────────────────────────────────────
 import { log } from "./logger.js";

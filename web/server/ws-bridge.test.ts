@@ -4409,3 +4409,87 @@ describe("User message during initializing phase", () => {
     expect(session.stateMachine.phase).toBe("streaming");
   });
 });
+
+// ─── Browser heartbeat ───────────────────────────────────────────────────────
+// Validates the application-level keep_alive frame that prevents mobile
+// carriers and proxies from silently killing idle browser WebSockets
+// (which surfaces as code=1006 and triggers a reconnect storm).
+
+describe("Browser heartbeat", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    bridge.stopBrowserHeartbeat();
+    vi.useRealTimers();
+  });
+
+  it("sends keep_alive to every browser socket on the interval", () => {
+    const browser1 = makeBrowserSocket("s1");
+    const browser2 = makeBrowserSocket("s2");
+    bridge.handleBrowserOpen(browser1, "s1");
+    bridge.handleBrowserOpen(browser2, "s2");
+    browser1.send.mockClear();
+    browser2.send.mockClear();
+
+    bridge.startBrowserHeartbeat();
+
+    // Advance past the 25s interval — both browsers should receive keep_alive.
+    vi.advanceTimersByTime(25_000);
+
+    const isKeepAlive = (calls: any[][]) =>
+      calls.some(([arg]) => JSON.parse(arg as string).type === "keep_alive");
+    expect(isKeepAlive(browser1.send.mock.calls)).toBe(true);
+    expect(isKeepAlive(browser2.send.mock.calls)).toBe(true);
+  });
+
+  it("keep_alive frame has no seq and is not stored in history or event buffer", () => {
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+    const session = bridge.getSession("s1")!;
+    const historyBefore = session.messageHistory.length;
+    const bufferBefore = session.eventBuffer.length;
+    browser.send.mockClear();
+
+    bridge.startBrowserHeartbeat();
+    vi.advanceTimersByTime(25_000);
+
+    const heartbeat = browser.send.mock.calls
+      .map(([arg]: [string]) => JSON.parse(arg))
+      .find((m: any) => m.type === "keep_alive");
+    expect(heartbeat).toBeDefined();
+    // Bypasses sequencing — must not consume a seq number that browsers
+    // would then ack and re-request on reconnect.
+    expect(heartbeat.seq).toBeUndefined();
+    expect(session.messageHistory.length).toBe(historyBefore);
+    expect(session.eventBuffer.length).toBe(bufferBefore);
+  });
+
+  it("skips sessions with no connected browsers", () => {
+    bridge.getOrCreateSession("orphan");
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+    browser.send.mockClear();
+
+    bridge.startBrowserHeartbeat();
+    expect(() => vi.advanceTimersByTime(25_000)).not.toThrow();
+
+    expect(browser.send).toHaveBeenCalled();
+  });
+
+  it("stopBrowserHeartbeat halts further keep_alive frames", () => {
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+    browser.send.mockClear();
+
+    bridge.startBrowserHeartbeat();
+    vi.advanceTimersByTime(25_000);
+    const sentAfterFirstTick = browser.send.mock.calls.length;
+
+    bridge.stopBrowserHeartbeat();
+    vi.advanceTimersByTime(60_000);
+
+    expect(browser.send.mock.calls.length).toBe(sentAfterFirstTick);
+  });
+});

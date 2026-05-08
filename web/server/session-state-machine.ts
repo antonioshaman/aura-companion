@@ -36,6 +36,20 @@ export interface SessionTransitionEvent {
 }
 
 /**
+ * Aura-local addition: phases that Aura allows from `ready` on top of
+ * whatever upstream defines. Kept as a named constant so an upstream merge
+ * that rewrites VALID_TRANSITIONS doesn't silently drop these — the merge
+ * resolution is to re-apply this spread into the `ready` row.
+ *
+ * Why each entry exists:
+ *   awaiting_permission — Claude Code can emit `permission_request` after
+ *   `result` (state has already advanced to `ready`). Without this edge,
+ *   the permission UI silently never appears. See specs/upstream-sync.md
+ *   PR #613 (channels protocol) discussion and ws-bridge tests.
+ */
+const AURA_EXTRA_READY_TRANSITIONS = ["awaiting_permission"] as const;
+
+/**
  * Defines which (from -> to) transitions are valid.
  * Any transition not listed here will be blocked with a warning.
  */
@@ -55,6 +69,7 @@ export const VALID_TRANSITIONS: ReadonlyMap<
     "ready",
     new Set<SessionPhase>([
       "streaming",
+      ...AURA_EXTRA_READY_TRANSITIONS,
       "compacting",
       "reconnecting",
       "terminated",

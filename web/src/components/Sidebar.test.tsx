@@ -1805,3 +1805,65 @@ describe("Sidebar", () => {
     expect(screen.getByText(/3 archived sessions/)).toBeInTheDocument();
   });
 });
+
+// ─── auraIsActiveSession symptom tests (Beck B3) ─────────────────────────────
+//
+// The active-list filter survives whichever implementation wins post-merge:
+// today it's our `93a205c` orphan filter; if PR #621 (sidebar reconcile)
+// replaces it with a server-driven approach, these symptom-level tests
+// must still pass — driven through the public predicate, not internals.
+
+import { auraIsActiveSession } from "./Sidebar.js";
+import type { SessionItem as SessionItemType } from "../utils/project-grouping.js";
+
+function makeItem(overrides: Partial<SessionItemType> = {}): SessionItemType {
+  // Minimal fixture covering the four fields auraIsActiveSession reads.
+  // All other fields filled with neutral values; cast through unknown
+  // because SessionItemType has many fields irrelevant to this predicate.
+  return {
+    id: "test",
+    archived: false,
+    cronJobId: undefined,
+    agentId: undefined,
+    isConnected: true,
+    ...overrides,
+  } as unknown as SessionItemType;
+}
+
+describe("auraIsActiveSession", () => {
+  it("hides archived sessions", () => {
+    const item = makeItem({ archived: true });
+    expect(auraIsActiveSession(item, new Set(["test"]))).toBe(false);
+  });
+
+  it("hides cron-spawned sessions (they live in their own bucket)", () => {
+    const item = makeItem({ cronJobId: "job-1" });
+    expect(auraIsActiveSession(item, new Set(["test"]))).toBe(false);
+  });
+
+  it("hides agent-spawned sessions (they live in their own bucket)", () => {
+    const item = makeItem({ agentId: "agent-1" });
+    expect(auraIsActiveSession(item, new Set(["test"]))).toBe(false);
+  });
+
+  it("hides orphaned bridge-only sessions the server doesn't know about", () => {
+    // The 93a205c symptom: a sub-agent session connected via WS but the
+    // launcher never tracked it, so the server's sdkSessions list omits
+    // it. When it later disconnects, it must drop from the active list.
+    const item = makeItem({ id: "orphan", isConnected: false });
+    expect(auraIsActiveSession(item, new Set(["other-session"]))).toBe(false);
+  });
+
+  it("keeps sessions the server knows about", () => {
+    const item = makeItem({ id: "known" });
+    expect(auraIsActiveSession(item, new Set(["known"]))).toBe(true);
+  });
+
+  it("keeps still-connected bridge-only sessions even if the server doesn't list them", () => {
+    // A live sub-agent that hasn't reached the launcher yet should still
+    // appear so the user sees ongoing work — only orphans that have
+    // disconnected get hidden.
+    const item = makeItem({ id: "live", isConnected: true });
+    expect(auraIsActiveSession(item, new Set())).toBe(true);
+  });
+});

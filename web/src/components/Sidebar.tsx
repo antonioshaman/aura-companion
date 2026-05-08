@@ -119,6 +119,28 @@ const NAV_SECTIONS = [
 
 const NAV_ITEMS_BY_ID = new Map(NAV_ITEMS.map((item) => [item.id, item]));
 
+/**
+ * AURA-LOCAL: predicate that returns true when a session belongs in the
+ * sidebar's active list. Hides:
+ *   - archived sessions
+ *   - cron- or agent-spawned sessions (shown in their own buckets)
+ *   - orphaned bridge-only sessions the server doesn't know about that are
+ *     no longer connected (e.g. finished sub-agents)
+ *
+ * Exported so Sidebar tests can assert the symptom directly without driving
+ * the whole component, and so the next upstream sync can verify behaviour
+ * stays equivalent if PR #621 (sidebar reconcile) replaces our filter.
+ * See aura/CONFLICT_WATCHLIST.md.
+ */
+export function auraIsActiveSession(
+  s: SessionItemType,
+  sdkSessionIds: Set<string>,
+): boolean {
+  if (s.archived || s.cronJobId || s.agentId) return false;
+  if (!sdkSessionIds.has(s.id) && !s.isConnected) return false;
+  return true;
+}
+
 export function Sidebar() {
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState("");
@@ -455,13 +477,14 @@ export function Sidebar() {
   // Build a set of server-known session IDs for orphan detection
   const sdkSessionIds = new Set(sdkSessions.map((s) => s.sessionId));
 
-  const activeSessions = allSessionList.filter((s) => {
-    if (s.archived || s.cronJobId || s.agentId) return false;
-    // Hide orphaned bridge-only sessions (e.g. finished sub-agents) that
-    // the server doesn't track and are no longer connected.
-    if (!sdkSessionIds.has(s.id) && !s.isConnected) return false;
-    return true;
-  });
+  // AURA-LOCAL: filter that hides archived/orphaned sessions from the
+  // active list. If upstream PR #621 (sidebar reconcile) lands and replaces
+  // this with a server-driven approach, prefer upstream BUT verify the
+  // archived/cron/agent/orphan hiding behaviour still holds via the
+  // Sidebar.test.tsx symptom tests. See aura/CONFLICT_WATCHLIST.md.
+  const activeSessions = allSessionList.filter((s) =>
+    auraIsActiveSession(s, sdkSessionIds),
+  );
   const cronSessions = allSessionList.filter((s) => !s.archived && !!s.cronJobId);
   const agentSessions = allSessionList.filter((s) => !s.archived && !!s.agentId);
   const archivedSessions = allSessionList.filter((s) => s.archived);
