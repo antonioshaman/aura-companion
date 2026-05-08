@@ -802,19 +802,14 @@ export class ClaudeAdapter implements IBackendAdapter {
 
   // -- User echo --------------------------------------------------------------
 
-  private handleUserEcho(msg: CLIUserEchoMessage): void {
-    // The CLI echoes user messages back (including subagent tool_result blocks).
-    // Only emit for non-string content (e.g. tool_result arrays from subagents)
-    // that didn't originate from the browser composer. Plain string echoes are
-    // duplicates of messages the browser already has, so silently drop them.
-    if (typeof msg.message.content === "string") return;
-
-    const content = JSON.stringify(msg.message.content);
-    this.browserMessageCb?.({
-      type: "user_message",
-      content,
-      timestamp: Date.now(),
-    });
+  private handleUserEcho(_msg: CLIUserEchoMessage): void {
+    // The CLI echoes every user-role message back, including the protocol-level
+    // tool_result arrays the SDK sends after each assistant tool_use. These
+    // echoes carry no information the browser doesn't already have:
+    //   - String echoes duplicate the user's own composer message.
+    //   - Array echoes (tool_result blocks) duplicate output already surfaced
+    //     via the assistant's tool_use ToolBlock + tool_progress + completedAt.
+    // Forwarding them produced raw JSON dumps in the chat, so drop silently.
   }
 
   // -- Auth status ------------------------------------------------------------

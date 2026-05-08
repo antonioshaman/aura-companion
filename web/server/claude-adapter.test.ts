@@ -342,9 +342,12 @@ describe("Known non-standard CLI message types", () => {
     spy.mockRestore();
   });
 
-  it("user echo with non-string content serializes to JSON", () => {
-    // When the user echo content is an array (e.g. tool_result blocks),
-    // it should be JSON-stringified before sending to the browser.
+  it("user echo with tool_result array content is silently dropped", () => {
+    // After every assistant tool_use, the SDK sends a user-role message
+    // containing tool_result blocks for the model context. These echoes
+    // duplicate output already shown in the UI via the assistant tool_use
+    // ToolBlock + tool_progress events, so forwarding them as user_message
+    // would render raw JSON dumps in the chat. Drop them silently.
     const ws = createMockSocket("sess-1");
     adapter.attachWebSocket(ws);
 
@@ -360,11 +363,8 @@ describe("Known non-standard CLI message types", () => {
       }) + "\n",
     );
 
-    expect(browserMessageCb).toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: "user_message",
-        content: JSON.stringify(complexContent),
-      }),
+    expect(browserMessageCb).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "user_message" }),
     );
   });
 });
