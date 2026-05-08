@@ -1885,7 +1885,7 @@ export function Playground() {
                   Connected
                 </span>
                 <span className="text-[11px] text-cc-muted ml-auto">
-                  claude-opus-4-6
+                  claude-opus-4-7
                 </span>
               </div>
             </Card>
