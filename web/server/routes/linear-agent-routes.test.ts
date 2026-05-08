@@ -349,11 +349,11 @@ describe("GET /linear/oauth/authorize-url", () => {
     const body = await res.json();
     expect(body.url).toContain("linear.app/oauth/authorize");
 
-    // getOAuthAuthorizeUrl now receives clientId as first arg
+    // getOAuthAuthorizeUrl now receives an options object (post-#607 refactor)
     expect(linearAgent.getOAuthAuthorizeUrl).toHaveBeenCalledWith(
       "client-id",
       expect.stringContaining("/api/linear/oauth/callback"),
-      undefined,
+      expect.objectContaining({}),
     );
   });
 
