@@ -3,6 +3,7 @@ import { isSupportedPairing } from "./backend-provider.js";
 import { GROUP_ID_PATTERN } from "./group-authorization.js";
 import { type GroupEvent, type GroupStatus, transition } from "./group-state-machine.js";
 import type { BackendType, SessionGroupRole } from "./session-types.js";
+import { companionBus } from "./event-bus.js";
 
 /**
  * Cryptographically random group ID. ≥128 bits of entropy from
@@ -155,11 +156,26 @@ export class SessionGroupCoordinator {
   }
 
   /** Apply a state-machine event to a group. Returns the resulting status,
-   *  or null if the group is unknown. */
+   *  or null if the group is unknown.
+   *
+   *  Emits `group:degraded` / `group:exited` on the companion bus when the
+   *  transition crosses a meaningful boundary (Realtime council review #3):
+   *  the wire variants `group_degraded` / `group_exited` had been declared
+   *  + listened-for but never fired.
+   */
   applyEvent(sessionGroupId: string, event: GroupEvent): GroupStatus | null {
     const g = this.groups.get(sessionGroupId);
     if (!g) return null;
+    const prevStatus = g.status;
     g.status = transition(g.status, event);
+    if (prevStatus !== "degraded" && g.status === "degraded") {
+      const deadRole = inferDeadRoleFromEvent(event);
+      companionBus.emit("group:degraded", { sessionGroupId, deadRole });
+    }
+    if (prevStatus !== "archived" && g.status === "archived") {
+      const reason = inferExitReasonFromEvent(event);
+      companionBus.emit("group:exited", { sessionGroupId, reason });
+    }
     return g.status;
   }
 
@@ -176,6 +192,12 @@ export class SessionGroupCoordinator {
     if (!g) return false;
     if (g.status === "archived") return true;
     g.status = transition(g.status, { type: "user_archived" });
+    // Realtime council review #3: emit `group:exited` so subscribers
+    // (orchestrator's bus listener → broadcastToGroup → browser store
+    // `removeGroup`) actually see the teardown. Emit BEFORE the kills
+    // so the browser cleans up its store while the kills proceed; the
+    // server-side coordinator record stays until the kills complete.
+    companionBus.emit("group:exited", { sessionGroupId, reason: "user_archived" });
     // Best-effort sequential kill — both must be attempted even if one fails.
     // Failures are reported through onError, never swallowed silently.
     try {
@@ -220,6 +242,30 @@ export class SessionGroupCoordinator {
   clear(): void {
     this.groups.clear();
   }
+}
+
+/**
+ * Pure: infer the dead-role discriminator for `group:degraded` from the
+ * state-machine event that drove the transition. The state machine's
+ * `half_died` event carries the role explicitly; other transitions into
+ * degraded (e.g. `reconnect_failed`) don't name which half — default to
+ * "observer" (the more common death mode in practice).
+ */
+function inferDeadRoleFromEvent(event: GroupEvent): SessionGroupRole {
+  if (event.type === "half_died") return event.role;
+  return "observer";
+}
+
+/**
+ * Pure: infer the `group:exited` reason from the state-machine event.
+ * Today only `user_archived` and `user_killed` reach archived;
+ * shutdown / both_halves_died are upper-layer concepts the orchestrator
+ * may emit directly without going through the state machine.
+ */
+function inferExitReasonFromEvent(event: GroupEvent): "user_archived" | "shutdown" | "both_halves_died" {
+  if (event.type === "user_archived") return "user_archived";
+  if (event.type === "user_killed") return "user_archived";
+  return "user_archived";
 }
 
 // Re-export the canonical pattern for callers that want to validate ids

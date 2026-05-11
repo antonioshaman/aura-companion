@@ -15,6 +15,11 @@ import type { RecorderManager } from "./recorder.js";
 import { CodexAdapter } from "./codex-adapter.js";
 import { resolveBinary, getEnrichedPath } from "./path-resolver.js";
 import { loadObserverSystemPrompt } from "./observer-prompt.js";
+import {
+  OBSERVER_ALLOWED_TOOLS,
+  OBSERVER_DISALLOWED_TOOLS,
+  OBSERVER_PERMISSION_MODE,
+} from "./observer-permissions.js";
 import { containerManager } from "./container-manager.js";
 import { companionBus } from "./event-bus.js";
 import {
@@ -155,6 +160,13 @@ export interface LaunchOptions {
   claudeBinary?: string;
   codexBinary?: string;
   allowedTools?: string[];
+  /** Tools to explicitly forbid (Council Mode observer profile). Maps to
+   *  `--disallowedTools` on Claude argv; Codex tool restrictions are
+   *  driven by the role's system-prompt artifact rather than CLI flags. */
+  disallowedTools?: string[];
+  /** When set, Claude `--resume <id>` is passed to restore conversation
+   *  context on relaunch. Internal to launcher relaunch path. */
+  resumeSessionId?: string;
   env?: Record<string, string>;
   backendType?: BackendType;
   /** Codex sandbox mode. */
@@ -355,17 +367,72 @@ export class CliLauncher {
       info.containerCwd = options.containerCwd || "/workspace";
     }
 
+    // Council Mode observer spawn config (council review #1 P1#1) is
+    // applied uniformly across both backends and reused on relaunch so
+    // the council context isn't lost on every non-initial spawn (#4).
+    const effectiveOptions = this.applyCouncilObserverSpawnConfig(sessionId, info, options);
+
     this.sessions.set(sessionId, info);
-    if (options.env) {
-      this.sessionEnvs.set(sessionId, { ...options.env });
+    if (effectiveOptions.env) {
+      this.sessionEnvs.set(sessionId, { ...effectiveOptions.env });
     }
 
     if (backendType === "codex") {
-      this.spawnCodex(sessionId, info, options);
+      this.spawnCodex(sessionId, info, effectiveOptions);
     } else {
-      this.spawnCLI(sessionId, info, options);
+      this.spawnCLI(sessionId, info, effectiveOptions);
     }
     return info;
+  }
+
+  /**
+   * Hunt + Fowler P1#1 + Subprocess P1#4: Council Mode observer spawns
+   * must apply (a) the observer system-prompt artifact AND (b) the
+   * narrow observer tool profile (EC-1) regardless of backend. Called
+   * from both `launch()` and `relaunch()` so a crashed observer that
+   * auto-relaunches keeps its role + restrictions — the previous wiring
+   * applied them only on the initial `spawnCLI` call.
+   *
+   * Returns `options` unchanged when the session isn't an observer.
+   * Throws on missing/malformed prompt so the council create-pair path
+   * can roll back the orchestrator half (silent "undirected observer"
+   * is impossible).
+   */
+  private applyCouncilObserverSpawnConfig(
+    sessionId: string,
+    info: SdkSessionInfo,
+    options: LaunchOptions,
+  ): LaunchOptions {
+    if (options.sessionGroupRole !== "observer") return options;
+    try {
+      const cwdForPrompt = options.cwd || info.cwd || process.cwd();
+      const promptPath = join(cwdForPrompt, ".council", "prompts", "observer-system.md");
+      const artifact = loadObserverSystemPrompt(promptPath);
+      info.observerPromptSha256 = artifact.sha256;
+      // Compose with any orchestrator-side systemPrompt that flowed in
+      // (no caller does this today; preserved for forward-compat).
+      const composedSystemPrompt = options.systemPrompt
+        ? `${artifact.body}\n\n${options.systemPrompt}`
+        : artifact.body;
+      // Caller-supplied allowedTools intersect with the observer profile —
+      // never widened.
+      const callerAllowed = options.allowedTools ?? [];
+      const intersectedAllowed = callerAllowed.length > 0
+        ? callerAllowed.filter((t) => OBSERVER_ALLOWED_TOOLS.includes(t))
+        : [...OBSERVER_ALLOWED_TOOLS];
+      info.permissionMode = OBSERVER_PERMISSION_MODE;
+      return {
+        ...options,
+        systemPrompt: composedSystemPrompt,
+        allowedTools: intersectedAllowed,
+        disallowedTools: [...OBSERVER_DISALLOWED_TOOLS],
+        permissionMode: OBSERVER_PERMISSION_MODE,
+      };
+    } catch (err) {
+      throw new Error(
+        `observer spawn config load failed for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   }
 
   /**
@@ -458,8 +525,13 @@ export class CliLauncher {
 
     const runtimeEnv = this.sessionEnvs.get(sessionId);
 
-    if (info.backendType === "codex") {
-      this.spawnCodex(sessionId, info, {
+    // Subprocess P1#4: pass council context back into the relaunch
+    // options so the observer prompt + tool restrictions get re-applied
+    // by `applyCouncilObserverSpawnConfig`. Without this, every
+    // auto-relaunched observer spawned as a plain unrole-d session with
+    // full default tools.
+    const baseRelaunchOptions: LaunchOptions = info.backendType === "codex"
+      ? {
         model: info.model,
         permissionMode: info.permissionMode,
         cwd: info.cwd,
@@ -470,9 +542,10 @@ export class CliLauncher {
         containerImage: info.containerImage,
         containerCwd: info.containerCwd,
         env: runtimeEnv,
-      });
-    } else {
-      this.spawnCLI(sessionId, info, {
+        sessionGroupId: info.sessionGroupId,
+        sessionGroupRole: info.sessionGroupRole,
+      }
+      : {
         model: info.model,
         permissionMode: info.permissionMode,
         cwd: info.cwd,
@@ -481,10 +554,32 @@ export class CliLauncher {
         containerName: info.containerName,
         containerImage: info.containerImage,
         env: runtimeEnv,
-      });
+        sessionGroupId: info.sessionGroupId,
+        sessionGroupRole: info.sessionGroupRole,
+      };
+    let effectiveRelaunchOptions: LaunchOptions;
+    try {
+      effectiveRelaunchOptions = this.applyCouncilObserverSpawnConfig(sessionId, info, baseRelaunchOptions);
+    } catch (err) {
+      info.state = "exited";
+      info.exitCode = 1;
+      this.persistState();
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+    if (info.backendType === "codex") {
+      this.spawnCodex(sessionId, info, effectiveRelaunchOptions);
+    } else {
+      this.spawnCLI(sessionId, info, effectiveRelaunchOptions);
     }
     return { ok: true };
   }
+
+  /** Forward declaration for the relaunch options builder. Defined as a
+   *  type alias so the `LaunchOptions` extension stays in one place. */
+  // (none — uses LaunchOptions directly above)
 
   /**
    * Get all sessions in "starting" state (awaiting CLI WebSocket connection).
@@ -493,7 +588,7 @@ export class CliLauncher {
     return Array.from(this.sessions.values()).filter((s) => s.state === "starting");
   }
 
-  private spawnCLI(sessionId: string, info: SdkSessionInfo, options: LaunchOptions & { resumeSessionId?: string }): void {
+  private spawnCLI(sessionId: string, info: SdkSessionInfo, options: LaunchOptions): void {
     const isContainerized = !!options.containerId;
 
     // For containerized sessions, the CLI binary lives inside the container.
@@ -575,28 +670,17 @@ export class CliLauncher {
     if (options.forkSession) {
       args.push("--fork-session");
     }
-
-    // Council Mode — observer spawns receive the CLI-agnostic observer
-    // system-prompt artifact via --append-system-prompt. Loaded once at
-    // spawn time so a malformed artifact fails the spawn loudly rather
-    // than silently producing an unrole-d observer. The observer's tool
-    // allow-list (read-only + single Write) is applied through the
-    // existing --allowedTools mechanism by the caller (orchestrator
-    // injects via getObserverSpawnOverrides in a follow-up commit).
-    if (options.sessionGroupRole === "observer") {
-      try {
-        const cwdForPrompt = options.cwd || process.cwd();
-        const promptPath = join(cwdForPrompt, ".council", "prompts", "observer-system.md");
-        const artifact = loadObserverSystemPrompt(promptPath);
-        args.push("--append-system-prompt", artifact.body);
-        info.observerPromptSha256 = artifact.sha256;
-      } catch (err) {
-        // Loud failure — without the prompt the observer is undirected.
-        // Surface the error to the caller so the council create-pair path
-        // can roll back the orchestrator-half spawn.
-        throw new Error(
-          `observer system prompt load failed for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
-        );
+    // Council Mode observer-role wiring (council review #1): the prompt
+    // body + tool restrictions are populated by `launch()` BEFORE
+    // dispatch so both Claude and Codex receive them; spawnCLI consumes
+    // `options.systemPrompt` and `options.disallowedTools` for its
+    // backend-specific argv shape.
+    if (options.systemPrompt && options.sessionGroupRole === "observer") {
+      args.push("--append-system-prompt", options.systemPrompt);
+    }
+    if (options.disallowedTools && options.disallowedTools.length > 0) {
+      for (const tool of options.disallowedTools) {
+        args.push("--disallowedTools", tool);
       }
     }
 

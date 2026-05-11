@@ -23,11 +23,15 @@ import { generateSessionTitle } from "./auto-namer.js";
 import { companionBus } from "./event-bus.js";
 import { metricsCollector } from "./metrics-collector.js";
 import { log } from "./logger.js";
-import { randomBytes } from "node:crypto";
+import { randomBytes, createHash } from "node:crypto";
+import { join } from "node:path";
+import { mkdirSync } from "node:fs";
 import type { CheckpointPayload, ObserverReviewPayload } from "./council-types.js";
 import { watchCheckpoints } from "./checkpoint-watcher.js";
 import { watchReviews } from "./review-watcher.js";
 import { validateObserverFindings } from "./observer-grounding.js";
+import { buildObserverContextManifest } from "./observer-prompt.js";
+import { formatObserverInvocationLog } from "./observer-attribution.js";
 import type {
   BrowserObserverDowngrade,
   BrowserObserverFinding,
@@ -141,6 +145,63 @@ export interface DeleteSessionResult {
   worktree?: { cleaned?: boolean; dirty?: boolean; path?: string };
 }
 
+// ── Council Mode internal state shapes ─────────────────────────────────────
+
+interface CouncilWatcherEntry {
+  cwd: string;
+  abort: AbortController;
+  /** Most recently observed checkpoint payload — drives grounding for the next review. */
+  lastCheckpoint: CheckpointPayload | null;
+  /** The checkpoint that preceded `lastCheckpoint` — fed to `buildObserverContextManifest` so the manifest is delta-not-cumulative. */
+  previousCheckpoint: CheckpointPayload | null;
+}
+
+interface CouncilGroupMeta {
+  primarySessionId: string;
+  observerSessionId: string;
+  pairing: string;
+  /** Sha256 of the observer prompt artifact at spawn time, captured for invocation-log forensic re-run. */
+  observerPromptSha256?: string;
+  /** Wallclock (ms) when the group was created — used to compute invocation latency. */
+  createdAt: number;
+  /** Wallclock (ms) when the most recent checkpoint reached this orchestrator — used to compute observer wake-to-emit latency. */
+  lastCheckpointReceivedAt: number | null;
+}
+
+/**
+ * Pure: derive a deterministic finding id from the review identity tuple.
+ * Same inputs → same id across server restarts, so the browser's
+ * `appendObserverReview` dedup actually catches restart-replays.
+ *
+ * `evidencePath` + `claim` are mixed into the hash so two findings on
+ * the same `(group, checkpoint, provider, index)` with different content
+ * (e.g. a re-emitted review with different rows) still get distinct ids.
+ *
+ * Exported for unit testing — pure, no side effects.
+ */
+export function deterministicFindingId(input: {
+  sessionGroupId: string;
+  checkpointId: string;
+  observerProvider: string;
+  findingIndex: number;
+  evidencePath: string;
+  claim: string;
+}): string {
+  const hash = createHash("sha256");
+  hash.update(input.sessionGroupId);
+  hash.update("\x00");
+  hash.update(input.checkpointId);
+  hash.update("\x00");
+  hash.update(input.observerProvider);
+  hash.update("\x00");
+  hash.update(String(input.findingIndex));
+  hash.update("\x00");
+  hash.update(input.evidencePath);
+  hash.update("\x00");
+  hash.update(input.claim);
+  return `fnd_${hash.digest("hex").slice(0, 16)}`;
+}
+
 // ── Orchestrator ─────────────────────────────────────────────────────────────
 
 /**
@@ -175,12 +236,19 @@ export class SessionOrchestrator {
   // Council Mode — per-group watcher state. Each entry owns an
   // AbortController for the checkpoint + review watchers and the most
   // recent checkpoint payload (used to ground observer findings against
-  // the artifact manifest the orchestrator emitted).
-  private councilWatchers = new Map<string, {
-    cwd: string;
-    abort: AbortController;
-    lastCheckpoint: CheckpointPayload | null;
-  }>();
+  // the artifact manifest the orchestrator emitted). `previousCheckpoint`
+  // feeds `buildObserverContextManifest` so grounding uses the DELTA
+  // since the previous phase, not the cumulative manifest.
+  private councilWatchers = new Map<string, CouncilWatcherEntry>();
+  /**
+   * Council Mode — per-group spawn metadata captured at pair creation
+   * time so listeners running outside the spawn context (group:review
+   * fanout, group:exited fanout) can correlate to the original orchestrator
+   * + observer session ids and the observer attribution fields. The
+   * coordinator owns the lifecycle source-of-truth; this map is the
+   * orchestrator's read-side cache.
+   */
+  private councilGroupMeta = new Map<string, CouncilGroupMeta>();
 
   // Event listeners
   private exitCallbacks: ((sessionId: string, exitCode: number | null) => void)[] = [];
@@ -255,6 +323,16 @@ export class SessionOrchestrator {
     companionBus.on("session:idle-kill", async ({ sessionId }) => {
       const info = this.launcher.getSession(sessionId);
       if (!info || info.archived) return;
+      // Subprocess council review #4 (P1#4 — S8): observer-role sessions
+      // sleep between checkpoints by design; their `lastCliActivityTs`
+      // doesn't advance during normal operation. Idle-killing them would
+      // brick the council pair without the user's input. The pair's
+      // lifetime is bounded by the orchestrator-half's lifetime, which
+      // has its own idle-kill timer.
+      if (info.sessionGroupRole === "observer") {
+        log.info("orchestrator", "skipping idle-kill for observer session", { sessionId });
+        return;
+      }
       log.info("orchestrator", "Idle-killing session (preserving container)", { sessionId, reason: "no browsers, no activity" });
       this.intentionalKills.add(sessionId);
       // Cancel the CLI disconnect debounce timer so it doesn't fire
@@ -350,6 +428,37 @@ export class SessionOrchestrator {
     // collected.
     companionBus.on("group:exited", ({ sessionGroupId }) => {
       this.stopCouncilWatchers(sessionGroupId);
+      this.councilGroupMeta.delete(sessionGroupId);
+    });
+
+    // Subprocess council review #4 (P1#4): drive `group:degraded` when
+    // either half of a council pair exits unexpectedly. Without this,
+    // the UI never enters degraded mode, watchers leak past the dead
+    // half's auto-relaunch exhaustion, and the user has no signal.
+    companionBus.on("session:exited", ({ sessionId }) => {
+      if (this.intentionalKills.has(sessionId)) return; // archive drives group:exited separately
+      let foundGroupId: string | null = null;
+      let foundRole: "orchestrator" | "observer" | null = null;
+      for (const [groupId, meta] of this.councilGroupMeta) {
+        if (meta.primarySessionId === sessionId) {
+          foundGroupId = groupId;
+          foundRole = "orchestrator";
+          break;
+        }
+        if (meta.observerSessionId === sessionId) {
+          foundGroupId = groupId;
+          foundRole = "observer";
+          break;
+        }
+      }
+      if (!foundGroupId || !foundRole) return;
+      const meta = this.councilGroupMeta.get(foundGroupId)!;
+      // EC-2 invariant: mark BOTH halves intentional BEFORE emitting any
+      // teardown so the proactive-relaunch listener on the surviving half
+      // does not race the degrade signal.
+      this.intentionalKills.add(meta.primarySessionId);
+      this.intentionalKills.add(meta.observerSessionId);
+      companionBus.emit("group:degraded", { sessionGroupId: foundGroupId, deadRole: foundRole });
     });
 
     // Reconnection watchdog for stale sessions after server restart
@@ -371,40 +480,55 @@ export class SessionOrchestrator {
   private startCouncilWatchers(sessionGroupId: string, workspaceCwd: string): void {
     if (this.councilWatchers.has(sessionGroupId)) return;
     const abort = new AbortController();
-    const entry = { cwd: workspaceCwd, abort, lastCheckpoint: null as CheckpointPayload | null };
+    const entry: CouncilWatcherEntry = {
+      cwd: workspaceCwd,
+      abort,
+      lastCheckpoint: null,
+      previousCheckpoint: null,
+    };
     this.councilWatchers.set(sessionGroupId, entry);
 
-    // Lazy import path module — avoid pulling node:path into the hot
-    // initialize() path for non-council sessions.
-    import("node:path").then(({ join }) => {
-      const checkpointsDir = join(workspaceCwd, ".council", "checkpoints");
-      const reviewsDir = join(workspaceCwd, ".council", "reviews");
+    const checkpointsDir = join(workspaceCwd, ".council", "checkpoints");
+    const reviewsDir = join(workspaceCwd, ".council", "reviews");
 
-      // The directory may not exist yet when the pair spawns — that's OK,
-      // watch() throws on missing dir; we catch and log so the rest of
-      // the orchestrator's createCouncilGroup return path stays clean.
-      watchCheckpoints({
-        directory: checkpointsDir,
-        signal: abort.signal,
-        onCheckpoint: (payload) => this.handleCouncilCheckpoint(sessionGroupId, payload),
-      }).catch((err) => {
-        if (abort.signal.aborted) return;
-        log.warn("session-orchestrator", "council checkpoint watcher failed", {
-          sessionGroupId,
-          error: err instanceof Error ? err.message : String(err),
-        });
+    // Ensure the watch targets exist before the watcher attaches —
+    // `fs.watch` throws on missing dirs; Phase G.1 silently absorbed that
+    // failure into a single warn line, leaving the council pipeline dead.
+    // mkdirSync is recursive + idempotent so a pre-existing tree is fine.
+    try {
+      mkdirSync(checkpointsDir, { recursive: true });
+      mkdirSync(reviewsDir, { recursive: true });
+    } catch (err) {
+      log.warn("session-orchestrator", "council watcher dir mkdir failed", {
+        sessionGroupId,
+        error: err instanceof Error ? err.message : String(err),
       });
+      this.councilWatchers.delete(sessionGroupId);
+      abort.abort();
+      return;
+    }
 
-      watchReviews({
-        directory: reviewsDir,
-        signal: abort.signal,
-        onReview: (payload) => this.handleCouncilReview(sessionGroupId, payload),
-      }).catch((err) => {
-        if (abort.signal.aborted) return;
-        log.warn("session-orchestrator", "council review watcher failed", {
-          sessionGroupId,
-          error: err instanceof Error ? err.message : String(err),
-        });
+    watchCheckpoints({
+      directory: checkpointsDir,
+      signal: abort.signal,
+      onCheckpoint: (payload) => this.handleCouncilCheckpoint(sessionGroupId, payload),
+    }).catch((err) => {
+      if (abort.signal.aborted) return;
+      log.warn("session-orchestrator", "council checkpoint watcher failed", {
+        sessionGroupId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+
+    watchReviews({
+      directory: reviewsDir,
+      signal: abort.signal,
+      onReview: (payload) => this.handleCouncilReview(sessionGroupId, payload),
+    }).catch((err) => {
+      if (abort.signal.aborted) return;
+      log.warn("session-orchestrator", "council review watcher failed", {
+        sessionGroupId,
+        error: err instanceof Error ? err.message : String(err),
       });
     });
   }
@@ -418,7 +542,26 @@ export class SessionOrchestrator {
 
   private handleCouncilCheckpoint(sessionGroupId: string, payload: CheckpointPayload): void {
     const entry = this.councilWatchers.get(sessionGroupId);
-    if (entry) entry.lastCheckpoint = payload;
+    if (!entry) return;
+    // Realtime P1-R2 (council review #8): the server is the seq authority;
+    // reject out-of-order or duplicate checkpoint events so a stale manifest
+    // never poisons grounding for the next observer review. Browser-side
+    // monotonicity in council-slice becomes defence-in-depth, not first
+    // line.
+    if (entry.lastCheckpoint !== null && payload.sequence <= entry.lastCheckpoint.sequence) {
+      log.warn("session-orchestrator", "dropping out-of-order checkpoint", {
+        sessionGroupId,
+        incomingSequence: payload.sequence,
+        lastSequence: entry.lastCheckpoint.sequence,
+      });
+      return;
+    }
+    // Capture the prior checkpoint BEFORE overwriting so the next review's
+    // grounding can use the delta manifest, not the cumulative paths set.
+    entry.previousCheckpoint = entry.lastCheckpoint;
+    entry.lastCheckpoint = payload;
+    const meta = this.councilGroupMeta.get(sessionGroupId);
+    if (meta) meta.lastCheckpointReceivedAt = Date.now();
     companionBus.emit("group:checkpoint", {
       sessionGroupId,
       checkpointId: payload.checkpoint_id,
@@ -428,54 +571,114 @@ export class SessionOrchestrator {
   }
 
   private handleCouncilReview(sessionGroupId: string, payload: ObserverReviewPayload): void {
-    const entry = this.councilWatchers.get(sessionGroupId);
-    if (!entry) return;
-    const modifiedFiles = new Set(entry.lastCheckpoint?.artifact_paths ?? []);
-    // Grounding validation against the manifest paths from the last
-    // checkpoint. STOPs whose evidence_path is not in the manifest OR
-    // missing on disk are downgraded to NOTE here, so the browser never
-    // sees an ungrounded destructive banner.
-    let result: ReturnType<typeof validateObserverFindings>;
+    // Backend P1-3 (council review #L): wrap the whole handler body in a
+    // try/catch so a transient throw in the grounding pipeline doesn't
+    // unhook the watcher's read loop. Errors are logged structurally and
+    // the review is dropped; the dedup key in review-watcher will prevent
+    // a re-emission storm on the same file.
     try {
-      result = validateObserverFindings(payload, { workspaceRoot: entry.cwd, modifiedFiles });
-    } catch (err) {
-      log.warn("session-orchestrator", "grounding validation failed", {
+      const entry = this.councilWatchers.get(sessionGroupId);
+      if (!entry) return;
+
+      // Phase E delta manifest (Willison P1-4 item 1; council review #2):
+      // when a previous checkpoint exists, modifiedFiles is the DELTA
+      // since that checkpoint, not the cumulative artifact_paths. This is
+      // the grounding-as-modification-set semantic the prompt artifact
+      // and JSDoc described; Phase G had been using cumulative paths.
+      const manifest = buildObserverContextManifest({
+        current: entry.lastCheckpoint ?? { artifact_paths: [] },
+        previous: entry.previousCheckpoint ?? undefined,
+      });
+      const modifiedFiles = new Set(manifest.delta.length > 0
+        ? manifest.delta
+        : (entry.lastCheckpoint?.artifact_paths ?? []));
+
+      const result = validateObserverFindings(payload, { workspaceRoot: entry.cwd, modifiedFiles });
+
+      // Willison P1-1 (council review #6): deterministic finding ids
+      // derived from review identity + finding position + content hash
+      // so a re-emission of the same review file across server restarts
+      // yields the SAME ids — the browser's appendObserverReview dedup
+      // by id then actually catches restart-replays.
+      const findings: BrowserObserverFinding[] = result.findings.map((f, idx) => {
+        const id = deterministicFindingId({
+          sessionGroupId,
+          checkpointId: payload.checkpoint_id,
+          observerProvider: payload.observer_provider,
+          findingIndex: idx,
+          evidencePath: f.evidence_path,
+          claim: f.claim,
+        });
+        const downgrade = result.downgrades.find((d) => d.index === idx);
+        const out: BrowserObserverFinding = {
+          id,
+          severity: f.severity,
+          claim: f.claim,
+          evidence_path: f.evidence_path,
+          ...(f.evidence_lines !== undefined ? { evidence_lines: f.evidence_lines } : {}),
+          ...(f.confidence !== undefined ? { confidence: f.confidence } : {}),
+          ...(downgrade ? { wasDowngraded: true, downgradeReason: downgrade.reason } : {}),
+        };
+        return out;
+      });
+      const downgrades: BrowserObserverDowngrade[] = result.downgrades.map((d) => {
+        // Findings array is 1:1 with the input — `result.findings[d.index]`
+        // is always defined here. Backend P2-6 (council review #6): drop
+        // the random-id fallback that would orphan the chip on a
+        // hypothetical filter divergence.
+        const target = findings[d.index];
+        if (!target) {
+          throw new Error(`observer-grounding downgrade index ${d.index} out of bounds (findings length ${findings.length})`);
+        }
+        return { id: target.id, reason: d.reason };
+      });
+
+      // Willison P1-4 item 3 (council review #2): emit the structured
+      // invocation log entry so the forensic re-run guarantee
+      // (`observerPromptSha256` captured per invocation) survives review
+      // completion. EC-9 group-lifecycle structured log requirement also
+      // honoured.
+      const meta = this.councilGroupMeta.get(sessionGroupId);
+      if (meta) {
+        const stopCountRaw = payload.findings.filter((f) => f.severity === "STOP").length;
+        const stopCountGrounded = findings.filter((f) => f.severity === "STOP" && f.wasDowngraded !== true).length;
+        log.info("observer-invocation", "observer.invocation.completed", {
+          ...formatObserverInvocationLog({
+            orchestratorSessionId: meta.primarySessionId,
+            observerSessionId: meta.observerSessionId,
+            sessionGroupId,
+            phase: payload.phase,
+            checkpointId: payload.checkpoint_id,
+            artifactsRead: entry.lastCheckpoint?.artifact_paths.length ?? 0,
+            findingsCount: findings.length,
+            stopCountRaw,
+            stopCountGrounded,
+            downgradeCount: result.downgrades.length,
+            latencyMs: meta.lastCheckpointReceivedAt ? Date.now() - meta.lastCheckpointReceivedAt : 0,
+            observerProvider: payload.observer_provider,
+            observerModel: payload.observer_model,
+            observerCliVersion: payload.observer_cli_version,
+            promptSha256: meta.observerPromptSha256 ?? "",
+          }),
+        });
+      }
+
+      companionBus.emit("group:review", {
         sessionGroupId,
+        checkpointId: payload.checkpoint_id,
+        phase: payload.phase,
+        findings,
+        downgrades,
+        observerModel: payload.observer_model,
+        observerProvider: payload.observer_provider,
+      });
+    } catch (err) {
+      log.error("session-orchestrator", "handleCouncilReview failed", {
+        sessionGroupId,
+        checkpointId: payload.checkpoint_id,
         error: err instanceof Error ? err.message : String(err),
       });
-      return;
     }
-    // Assign stable server-generated ids to each finding so React
-    // reconciliation on the browser does not re-mount rows across emissions.
-    const findings: BrowserObserverFinding[] = result.findings.map((f, idx) => {
-      const id = `fnd_${randomBytes(8).toString("hex")}`;
-      const downgrade = result.downgrades.find((d) => d.index === idx);
-      const out: BrowserObserverFinding = {
-        id,
-        severity: f.severity,
-        claim: f.claim,
-        evidence_path: f.evidence_path,
-        ...(f.evidence_lines !== undefined ? { evidence_lines: f.evidence_lines } : {}),
-        ...(f.confidence !== undefined ? { confidence: f.confidence } : {}),
-        ...(downgrade ? { wasDowngraded: true, downgradeReason: downgrade.reason } : {}),
-      };
-      return out;
-    });
-    const downgrades: BrowserObserverDowngrade[] = result.downgrades.map((d) => ({
-      // Map back to the assigned id at the same position so the browser
-      // FindingsLog can correlate the downgrade chip with the finding row.
-      id: findings[d.index]?.id ?? `fnd_${randomBytes(8).toString("hex")}`,
-      reason: d.reason,
-    }));
-    companionBus.emit("group:review", {
-      sessionGroupId,
-      checkpointId: payload.checkpoint_id,
-      phase: payload.phase,
-      findings,
-      downgrades,
-      observerModel: payload.observer_model,
-      observerProvider: payload.observer_provider,
-    });
   }
 
   // ── Session Creation ───────────────────────────────────────────────────────
@@ -581,9 +784,23 @@ export class SessionOrchestrator {
       if (!primaryInfo || !observerInfo) {
         return { ok: false, error: "session metadata lost after spawn", status: 500 };
       }
-      // Start the per-group filesystem watchers BEFORE returning so the
-      // first checkpoint can land before the response races back to the
-      // browser. Watchers tear down on `group:exited` (see initialize).
+      // Capture group metadata for handleCouncilReview's invocation log
+      // and for the bus listeners that broadcast group_* events. The
+      // coordinator owns lifecycle truth; this is the orchestrator's
+      // read-side cache so listeners running outside the spawn context
+      // can correlate without rescanning launcher state.
+      const pairingLabel = `${primaryInfo.backendType ?? "claude"}+${observerInfo.backendType ?? "claude"}`;
+      this.councilGroupMeta.set(group.sessionGroupId, {
+        primarySessionId: group.primary.sessionId,
+        observerSessionId: group.observer.sessionId,
+        pairing: pairingLabel,
+        observerPromptSha256: observerInfo.observerPromptSha256,
+        createdAt: Date.now(),
+        lastCheckpointReceivedAt: null,
+      });
+      // Start the per-group filesystem watchers BEFORE emitting
+      // `group:created` so the watcher's first FS event cannot race past
+      // the listener that calls `upsertGroup` in the browser store.
       this.startCouncilWatchers(group.sessionGroupId, primaryInfo.cwd);
       companionBus.emit("group:created", {
         sessionGroupId: group.sessionGroupId,
