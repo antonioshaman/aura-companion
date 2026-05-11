@@ -5,6 +5,7 @@ import { api } from "./api.js";
 import { capturePageView } from "./analytics.js";
 import { parseHash, navigateToSession } from "./utils/routing.js";
 import { useBrowserTitleAlert } from "./use-browser-title-alert.js";
+import { useCouncilShortcuts } from "./use-council-shortcuts.js";
 import { LoginPage } from "./components/LoginPage.js";
 import { Sidebar } from "./components/Sidebar.js";
 import { ChatView } from "./components/ChatView.js";
@@ -86,6 +87,10 @@ export default function App() {
   // is in the background. Mounted once at the App level (multiple instances
   // would race over document.title).
   useBrowserTitleAlert();
+
+  // Global Council Mode keyboard shortcuts (Cmd/Ctrl+Shift+O / +B). Same
+  // single-mount discipline — multiple instances would double-fire toggle.
+  useCouncilShortcuts();
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", darkMode);

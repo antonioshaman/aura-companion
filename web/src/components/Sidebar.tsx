@@ -106,9 +106,28 @@ const NAV_ITEMS: NavItem[] = [
 ];
 
 const NAV_SECTIONS = [
-  { id: "workbench", label: "Workbench", itemIds: ["prompts", "integrations"] },
-  { id: "workspace", label: "Workspace", itemIds: ["environments", "sandboxes", "agents", "settings"] },
+  { id: "workbench", label: "Workbench", itemIds: ["prompts", "integrations"], defaultCollapsed: true },
+  { id: "workspace", label: "Workspace", itemIds: ["environments", "sandboxes", "agents", "settings"], defaultCollapsed: false },
 ] as const;
+
+const SIDEBAR_NAV_COLLAPSED_KEY = "aura-sidebar-nav-collapsed";
+
+function getInitialNavCollapsed(): Set<string> {
+  if (typeof window === "undefined") {
+    return new Set(NAV_SECTIONS.filter((s) => s.defaultCollapsed).map((s) => s.id));
+  }
+  try {
+    const raw = window.localStorage.getItem(SIDEBAR_NAV_COLLAPSED_KEY);
+    if (!raw) {
+      return new Set(NAV_SECTIONS.filter((s) => s.defaultCollapsed).map((s) => s.id));
+    }
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((v): v is string => typeof v === "string"));
+  } catch {
+    return new Set();
+  }
+}
 
 const NAV_ITEMS_BY_ID = new Map(NAV_ITEMS.map((item) => [item.id, item]));
 
@@ -144,6 +163,21 @@ export function Sidebar() {
   const [archiveModalContainerized, setArchiveModalContainerized] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [confirmDeleteAll, setConfirmDeleteAll] = useState(false);
+  const [collapsedNavSections, setCollapsedNavSections] = useState<Set<string>>(getInitialNavCollapsed);
+
+  const toggleNavSection = useCallback((sectionId: string) => {
+    setCollapsedNavSections((prev) => {
+      const next = new Set(prev);
+      if (next.has(sectionId)) next.delete(sectionId);
+      else next.add(sectionId);
+      try {
+        window.localStorage.setItem(SIDEBAR_NAV_COLLAPSED_KEY, JSON.stringify(Array.from(next)));
+      } catch {
+        /* quota — silent */
+      }
+      return next;
+    });
+  }, []);
   const [hash, setHash] = useState(() => (typeof window !== "undefined" ? window.location.hash : ""));
   const editInputRef = useRef<HTMLInputElement>(null);
   const deleteModalRef = useRef<HTMLDivElement>(null);
@@ -161,6 +195,12 @@ export function Sidebar() {
   const linkedLinearIssues = useStore((s) => s.linkedLinearIssues);
   const collapsedProjects = useStore((s) => s.collapsedProjects);
   const toggleProjectCollapse = useStore((s) => s.toggleProjectCollapse);
+  // Council Mode — reverse-index + findings drive the per-session badge
+  // (pairing chip) and unread STOP counter in SessionItem.
+  const groupBySessionId = useStore((s) => s.groupBySessionId);
+  const groups = useStore((s) => s.groups);
+  const findings = useStore((s) => s.findings);
+  const dismissedStopIds = useStore((s) => s.dismissedStopIds);
   const route = parseHash(hash);
 
   // Poll for SDK sessions on mount
@@ -520,6 +560,27 @@ export function Sidebar() {
     editInputRef,
   };
 
+  /**
+   * Pure helper: extract per-session Council info (pairing + unread STOPs)
+   * from the store maps. Hoisted out of the JSX so the closure cost stays
+   * bounded as the session list grows.
+   */
+  function councilInfoFor(sessionId: string): { pairing?: string; unreadStops?: number } {
+    const groupId = groupBySessionId.get(sessionId);
+    if (!groupId) return {};
+    const group = groups.get(groupId);
+    if (!group) return {};
+    const groupFindings = findings.get(groupId) ?? [];
+    let unread = 0;
+    for (const f of groupFindings) {
+      if (f.severity !== "STOP") continue;
+      if (f.wasDowngraded === true) continue;
+      if (dismissedStopIds.has(f.id)) continue;
+      unread++;
+    }
+    return { pairing: group.pairing, unreadStops: unread };
+  }
+
   return (
     <aside aria-label="Session sidebar" className="w-full md:w-[260px] h-full flex flex-col bg-cc-sidebar">
       {/* Header */}
@@ -550,35 +611,64 @@ export function Sidebar() {
         </div>
       </div>
 
-      {/* Container archive confirmation */}
-      {confirmArchiveId && (
-        <div className="mx-2 mb-1 p-2.5 rounded-[10px] bg-cc-warning/10 border border-cc-warning/20">
-          <div className="flex items-start gap-2">
-            <svg viewBox="0 0 16 16" fill="currentColor" className="w-4 h-4 text-cc-warning shrink-0 mt-0.5">
-              <path d="M8.982 1.566a1.13 1.13 0 00-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 01-1.1 0L7.1 5.995A.905.905 0 018 5zm.002 6a1 1 0 110 2 1 1 0 010-2z" />
-            </svg>
-            <div className="flex-1 min-w-0">
-              <p className="text-[11px] text-cc-fg leading-snug">
-                Archiving will <strong>remove the container</strong> and any uncommitted changes.
-              </p>
-              <div className="flex gap-2 mt-2">
-                <button
-                  onClick={cancelArchive}
-                  className="px-2.5 py-1 text-[11px] font-medium rounded-md bg-cc-hover text-cc-muted hover:text-cc-fg transition-colors cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={confirmArchive}
-                  className="px-2.5 py-1 text-[11px] font-medium rounded-md bg-cc-error/10 text-cc-error hover:bg-cc-error/20 transition-colors cursor-pointer"
-                >
-                  Archive
-                </button>
+      {/* Container archive confirmation. When the session is part of a
+          Council Mode group, we spell out the "both halves" consequence so
+          the group-action preview is visible at the decision point
+          (PLAN watchpoint Friedman). */}
+      {confirmArchiveId && (() => {
+        const council = councilInfoFor(confirmArchiveId);
+        const isCouncilSession = Boolean(council.pairing);
+        return (
+          <div
+            className={`mx-2 mb-1 p-2.5 rounded-[10px] border ${
+              isCouncilSession
+                ? "bg-cc-error/10 border-cc-error/25"
+                : "bg-cc-warning/10 border-cc-warning/20"
+            }`}
+          >
+            <div className="flex items-start gap-2">
+              <svg viewBox="0 0 16 16" fill="currentColor" className={`w-4 h-4 shrink-0 mt-0.5 ${isCouncilSession ? "text-cc-error" : "text-cc-warning"}`}>
+                <path d="M8.982 1.566a1.13 1.13 0 00-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 01-1.1 0L7.1 5.995A.905.905 0 018 5zm.002 6a1 1 0 110 2 1 1 0 010-2z" />
+              </svg>
+              <div className="flex-1 min-w-0">
+                {isCouncilSession ? (
+                  <>
+                    <p className="text-[11px] text-cc-fg leading-snug font-medium">
+                      Archive Council pair?
+                    </p>
+                    <p
+                      className="mt-1 text-[11px] text-cc-fg/85 leading-snug"
+                      data-testid="archive-confirm-council-preview"
+                    >
+                      This ends <strong>both the orchestrator and the observer</strong> in
+                      this {council.pairing} pair. Findings remain accessible from the
+                      archived session.
+                    </p>
+                  </>
+                ) : (
+                  <p className="text-[11px] text-cc-fg leading-snug">
+                    Archiving will <strong>remove the container</strong> and any uncommitted changes.
+                  </p>
+                )}
+                <div className="flex gap-2 mt-2">
+                  <button
+                    onClick={cancelArchive}
+                    className="px-2.5 py-1 text-[11px] font-medium rounded-md bg-cc-hover text-cc-muted hover:text-cc-fg transition-colors cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={confirmArchive}
+                    className="px-2.5 py-1 text-[11px] font-medium rounded-md bg-cc-error/10 text-cc-error hover:bg-cc-error/20 transition-colors cursor-pointer"
+                  >
+                    {isCouncilSession ? "Archive pair" : "Archive"}
+                  </button>
+                </div>
               </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Session list */}
       <div className="flex-1 overflow-y-auto px-2.5 pb-2">
@@ -599,6 +689,7 @@ export function Sidebar() {
                 pendingPermissions={pendingPermissions}
                 recentlyRenamed={recentlyRenamed}
                 isFirst={i === 0}
+                getCouncilInfo={councilInfoFor}
                 {...sessionItemProps}
               />
             ))}
@@ -617,17 +708,22 @@ export function Sidebar() {
                 </button>
                 {showCronSessions && (
                   <div className="mt-0.5">
-                    {cronSessions.map((s) => (
-                      <SessionItem
-                        key={s.id}
-                        session={s}
-                        isActive={currentSessionId === s.id}
-                        sessionName={sessionNames.get(s.id)}
-                        permCount={pendingPermissions.get(s.id)?.size ?? 0}
-                        isRecentlyRenamed={recentlyRenamed.has(s.id)}
-                        {...sessionItemProps}
-                      />
-                    ))}
+                    {cronSessions.map((s) => {
+                      const council = councilInfoFor(s.id);
+                      return (
+                        <SessionItem
+                          key={s.id}
+                          session={s}
+                          isActive={currentSessionId === s.id}
+                          sessionName={sessionNames.get(s.id)}
+                          permCount={pendingPermissions.get(s.id)?.size ?? 0}
+                          isRecentlyRenamed={recentlyRenamed.has(s.id)}
+                          councilPairing={council.pairing}
+                          councilUnreadStops={council.unreadStops}
+                          {...sessionItemProps}
+                        />
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -647,17 +743,22 @@ export function Sidebar() {
                 </button>
                 {showAgentSessions && (
                   <div className="mt-0.5">
-                    {agentSessions.map((s) => (
-                      <SessionItem
-                        key={s.id}
-                        session={s}
-                        isActive={currentSessionId === s.id}
-                        sessionName={sessionNames.get(s.id)}
-                        permCount={pendingPermissions.get(s.id)?.size ?? 0}
-                        isRecentlyRenamed={recentlyRenamed.has(s.id)}
-                        {...sessionItemProps}
-                      />
-                    ))}
+                    {agentSessions.map((s) => {
+                      const council = councilInfoFor(s.id);
+                      return (
+                        <SessionItem
+                          key={s.id}
+                          session={s}
+                          isActive={currentSessionId === s.id}
+                          sessionName={sessionNames.get(s.id)}
+                          permCount={pendingPermissions.get(s.id)?.size ?? 0}
+                          isRecentlyRenamed={recentlyRenamed.has(s.id)}
+                          councilPairing={council.pairing}
+                          councilUnreadStops={council.unreadStops}
+                          {...sessionItemProps}
+                        />
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -688,18 +789,23 @@ export function Sidebar() {
                 </div>
                 {showArchived && (
                   <div className="mt-0.5">
-                    {archivedSessions.map((s) => (
-                      <SessionItem
-                        key={s.id}
-                        session={s}
-                        isActive={currentSessionId === s.id}
-                        isArchived
-                        sessionName={sessionNames.get(s.id)}
-                        permCount={pendingPermissions.get(s.id)?.size ?? 0}
-                        isRecentlyRenamed={recentlyRenamed.has(s.id)}
-                        {...sessionItemProps}
-                      />
-                    ))}
+                    {archivedSessions.map((s) => {
+                      const council = councilInfoFor(s.id);
+                      return (
+                        <SessionItem
+                          key={s.id}
+                          session={s}
+                          isActive={currentSessionId === s.id}
+                          isArchived
+                          sessionName={sessionNames.get(s.id)}
+                          permCount={pendingPermissions.get(s.id)?.size ?? 0}
+                          isRecentlyRenamed={recentlyRenamed.has(s.id)}
+                          councilPairing={council.pairing}
+                          councilUnreadStops={council.unreadStops}
+                          {...sessionItemProps}
+                        />
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -725,12 +831,23 @@ export function Sidebar() {
       {/* Footer */}
       <div className="px-2 py-1.5 pb-safe bg-cc-sidebar-footer border-t border-cc-border/30">
         <nav className="flex flex-col gap-1.5" aria-label="Navigation">
-          {NAV_SECTIONS.map((section) => (
+          {NAV_SECTIONS.map((section) => {
+            const isCollapsed = collapsedNavSections.has(section.id);
+            return (
             <section key={section.id} className="rounded-lg border border-cc-border/30 bg-cc-card/20 p-0.5">
-              <span className="px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-cc-muted/75 block">
-                {section.label}
-              </span>
-              <div className="flex flex-col">
+              <button
+                type="button"
+                onClick={() => toggleNavSection(section.id)}
+                aria-expanded={!isCollapsed}
+                aria-controls={`nav-section-${section.id}`}
+                className="w-full px-2 py-0.5 flex items-center gap-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-cc-muted/75 hover:text-cc-fg transition-colors cursor-pointer rounded"
+              >
+                <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" className={`w-2 h-2 transition-transform duration-150 ${isCollapsed ? "" : "rotate-90"}`}>
+                  <path d="M6 4l4 4-4 4" />
+                </svg>
+                <span>{section.label}</span>
+              </button>
+              <div id={`nav-section-${section.id}`} className="flex flex-col" hidden={isCollapsed}>
                 {section.itemIds.map((itemId) => {
                   const item = NAV_ITEMS_BY_ID.get(itemId);
                   if (!item) return null;
@@ -770,7 +887,8 @@ export function Sidebar() {
                 })}
               </div>
             </section>
-          ))}
+            );
+          })}
         </nav>
         <div className="mt-1.5 rounded-lg border border-cc-border/30 bg-cc-card/20 px-1.5 py-0.5">
           <div className="flex items-center justify-between">

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef, type RefObject } from "react";
 import type { SessionItem as SessionItemType } from "../utils/project-grouping.js";
+import { ProviderBadges } from "./council/index.js";
 
 interface SessionItemProps {
   session: SessionItemType;
@@ -8,6 +9,10 @@ interface SessionItemProps {
   sessionName: string | undefined;
   permCount: number;
   isRecentlyRenamed: boolean;
+  /** Council pairing label when this session is part of a Council group. */
+  councilPairing?: string;
+  /** Number of unresolved STOP findings in the group (drives red unread badge). */
+  councilUnreadStops?: number;
   onSelect: (id: string) => void;
   onStartRename: (id: string, currentName: string) => void;
   onArchive: (e: React.MouseEvent, id: string) => void;
@@ -82,6 +87,8 @@ export function SessionItem({
   sessionName,
   permCount,
   isRecentlyRenamed,
+  councilPairing,
+  councilUnreadStops,
   onSelect,
   onStartRename,
   onArchive,
@@ -243,7 +250,7 @@ export function SessionItem({
           </div>
         )}
 
-        {/* Badges: backend type + Docker + Cron */}
+        {/* Badges: backend type + Docker + Cron + Council pairing + unread STOPs */}
         {!isEditing && (
           <span className="flex items-center gap-1 shrink-0">
             <BackendBadge type={s.backendType} />
@@ -257,6 +264,20 @@ export function SessionItem({
                 <svg viewBox="0 0 16 16" fill="currentColor" className="w-2.5 h-2.5 text-cc-primary">
                   <path d="M8 2a6 6 0 100 12A6 6 0 008 2zM0 8a8 8 0 1116 0A8 8 0 010 8zm9-3a1 1 0 10-2 0v3a1 1 0 00.293.707l2 2a1 1 0 001.414-1.414L9 7.586V5z" />
                 </svg>
+              </span>
+            )}
+            {councilPairing && (
+              <span data-testid="council-session-badge" title={`Council pair: ${councilPairing}`}>
+                <ProviderBadges pairing={councilPairing} size="compact" ariaLabel={`Council pair: ${councilPairing}`} />
+              </span>
+            )}
+            {councilUnreadStops !== undefined && councilUnreadStops > 0 && (
+              <span
+                data-testid="council-unread-count"
+                title={`${councilUnreadStops} unresolved blocker${councilUnreadStops === 1 ? "" : "s"}`}
+                className="text-[10px] font-semibold leading-none px-1.5 py-0.5 rounded bg-cc-error/15 text-cc-error border border-cc-error/25 min-w-[18px] text-center"
+              >
+                {councilUnreadStops}
               </span>
             )}
           </span>

@@ -85,11 +85,14 @@ export function BlockerBanner({
               <span className="font-mono-code">{finding.phase}</span>
             </div>
 
-            {/* Actions */}
+            {/* Actions — `data-council-blocker-primary` marks the primary
+                action so the Cmd/Ctrl+Shift+B shortcut can focus it.
+                Stacking: Open evidence > Mark addressed > Dismiss. */}
             <div className="mt-3 flex flex-wrap items-center gap-2">
               {onOpenEvidence && (
                 <button
                   type="button"
+                  data-council-blocker-primary=""
                   onClick={() => onOpenEvidence(finding)}
                   className="text-xs font-medium px-3 py-1.5 rounded-md bg-cc-error/15 hover:bg-cc-error/25 text-cc-error transition-colors cursor-pointer"
                 >
@@ -99,6 +102,7 @@ export function BlockerBanner({
               {onMarkAddressed && (
                 <button
                   type="button"
+                  {...(!onOpenEvidence ? { "data-council-blocker-primary": "" } : {})}
                   onClick={() => onMarkAddressed(finding)}
                   className="text-xs font-medium px-3 py-1.5 rounded-md bg-cc-card hover:bg-cc-hover text-cc-fg border border-cc-border transition-colors cursor-pointer"
                 >
@@ -107,6 +111,7 @@ export function BlockerBanner({
               )}
               <button
                 type="button"
+                {...(!onOpenEvidence && !onMarkAddressed ? { "data-council-blocker-primary": "" } : {})}
                 onClick={() => onDismiss(finding.id)}
                 className="text-xs text-cc-muted hover:text-cc-fg transition-colors cursor-pointer ml-auto"
               >

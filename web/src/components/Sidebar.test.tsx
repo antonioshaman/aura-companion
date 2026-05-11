@@ -63,6 +63,12 @@ interface MockStoreState {
   markRecentlyRenamed: ReturnType<typeof vi.fn>;
   clearRecentlyRenamed: ReturnType<typeof vi.fn>;
   setSdkSessions: ReturnType<typeof vi.fn>;
+  // Council Mode slice — Sidebar reads these to render per-session
+  // pairing badge + unread STOP counter; empty maps mean no badges.
+  groupBySessionId: Map<string, string>;
+  groups: Map<string, { pairing: string }>;
+  findings: Map<string, unknown[]>;
+  dismissedStopIds: Set<string>;
 }
 
 function makeSession(id: string, overrides: Partial<SessionState> = {}): SessionState {
@@ -130,6 +136,10 @@ function createMockState(overrides: Partial<MockStoreState> = {}): MockStoreStat
     markRecentlyRenamed: vi.fn(),
     clearRecentlyRenamed: vi.fn(),
     setSdkSessions: vi.fn(),
+    groupBySessionId: new Map(),
+    groups: new Map(),
+    findings: new Map(),
+    dismissedStopIds: new Set(),
     ...overrides,
   };
 }
@@ -1998,5 +2008,135 @@ describe("auraIsActiveSession", () => {
     // disconnected get hidden.
     const item = makeItem({ id: "live", isConnected: true });
     expect(auraIsActiveSession(item, new Set())).toBe(true);
+  });
+});
+
+// ─── Council Mode — per-session badge & unread counter ─────────────────────
+
+describe("Sidebar — Council Mode badges", () => {
+  function seedCouncilSession(sessionId: string, pairing: string, stops: { id: string; wasDowngraded?: boolean }[] = []) {
+    const groupId = `grp_for_${sessionId}`;
+    const sdkSession = makeSdkSession(sessionId);
+    mockState.sessions = new Map([[sessionId, makeSession(sessionId)]]);
+    mockState.sdkSessions = [sdkSession];
+    mockState.cliConnected = new Map([[sessionId, true]]);
+    mockState.sessionStatus = new Map([[sessionId, "idle"]]);
+    mockState.groupBySessionId = new Map([[sessionId, groupId]]);
+    mockState.groups = new Map([[groupId, { pairing }]]);
+    mockState.findings = new Map([[groupId, stops.map((s) => ({
+      id: s.id,
+      severity: "STOP",
+      claim: "test",
+      evidence_path: "src/x.ts",
+      wasDowngraded: s.wasDowngraded,
+    }))]]);
+    mockState.dismissedStopIds = new Set();
+  }
+
+  it("renders council pairing badge for a session in a group", () => {
+    seedCouncilSession("s_council", "claude+codex");
+    render(<Sidebar />);
+    expect(screen.getAllByTestId("council-session-badge").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("renders the unread STOP counter when there are live STOPs", () => {
+    seedCouncilSession("s_blocker", "claude+claude", [{ id: "f1" }, { id: "f2" }]);
+    render(<Sidebar />);
+    const counter = screen.getAllByTestId("council-unread-count")[0];
+    expect(counter).toHaveTextContent("2");
+  });
+
+  it("does not render the unread counter when every STOP is downgraded", () => {
+    seedCouncilSession("s_clean", "claude+claude", [
+      { id: "f1", wasDowngraded: true },
+      { id: "f2", wasDowngraded: true },
+    ]);
+    render(<Sidebar />);
+    expect(screen.queryByTestId("council-unread-count")).toBeNull();
+  });
+
+  it("does not render any council badge when the session is not in a group", () => {
+    const sdkSession = makeSdkSession("s_solo");
+    mockState.sessions = new Map([["s_solo", makeSession("s_solo")]]);
+    mockState.sdkSessions = [sdkSession];
+    mockState.cliConnected = new Map([["s_solo", true]]);
+    mockState.sessionStatus = new Map([["s_solo", "idle"]]);
+    render(<Sidebar />);
+    expect(screen.queryByTestId("council-session-badge")).toBeNull();
+    expect(screen.queryByTestId("council-unread-count")).toBeNull();
+  });
+});
+
+// ─── Council Mode — archive confirmation "both halves" preview ─────────────
+
+describe("Sidebar — archive confirmation council preview", () => {
+  // For the inline archive confirmation to render, the session must be
+  // containerized (the existing branch the confirmation handler hits).
+  function seedCouncilContainerSession(sessionId: string, pairing: string) {
+    const groupId = `grp_for_${sessionId}`;
+    const sdkSession = makeSdkSession(sessionId, { containerId: "ctn_abc" });
+    mockState.sessions = new Map([[sessionId, makeSession(sessionId, { is_containerized: true })]]);
+    mockState.sdkSessions = [sdkSession];
+    mockState.cliConnected = new Map([[sessionId, true]]);
+    mockState.sessionStatus = new Map([[sessionId, "idle"]]);
+    mockState.groupBySessionId = new Map([[sessionId, groupId]]);
+    mockState.groups = new Map([[groupId, { pairing }]]);
+    mockState.findings = new Map([[groupId, []]]);
+    mockState.dismissedStopIds = new Set();
+  }
+
+  it("shows 'both halves' preview when archiving a session that is part of a Council group", () => {
+    seedCouncilContainerSession("s_pair_archive", "claude+codex");
+    render(<Sidebar />);
+    // There's only one session rendered in this isolated test setup, so the
+    // single Archive button is unambiguous.
+    const archiveButton = screen.getByLabelText(/Archive session/i);
+    fireEvent.click(archiveButton);
+    expect(screen.getByTestId("archive-confirm-council-preview")).toBeInTheDocument();
+    expect(screen.getByText(/both the orchestrator and the observer/i)).toBeInTheDocument();
+  });
+
+  it("shows the plain container-archive warning for a non-Council session", () => {
+    const sdkSession = makeSdkSession("s_solo_archive", { containerId: "ctn_abc" });
+    mockState.sessions = new Map([["s_solo_archive", makeSession("s_solo_archive", { is_containerized: true })]]);
+    mockState.sdkSessions = [sdkSession];
+    mockState.cliConnected = new Map([["s_solo_archive", true]]);
+    mockState.sessionStatus = new Map([["s_solo_archive", "idle"]]);
+    render(<Sidebar />);
+    const archiveButton = screen.queryByLabelText(/Archive session/i);
+    if (!archiveButton) throw new Error("Archive button not found");
+    fireEvent.click(archiveButton);
+    expect(screen.queryByTestId("archive-confirm-council-preview")).toBeNull();
+    expect(screen.getByText(/remove the container/i)).toBeInTheDocument();
+  });
+});
+
+// ─── Sidebar nav sections — collapsible workbench ──────────────────────────
+
+describe("Sidebar — nav section collapse (workbench off by default)", () => {
+  // PLAN F.3d: Workbench section is unused by this user — default to
+  // collapsed; user can still open it; preference persists to localStorage.
+  it("collapses the Workbench section by default and renders its toggle as aria-expanded=false", () => {
+    render(<Sidebar />);
+    const toggles = screen.getAllByRole("button", { name: /Workbench/i });
+    expect(toggles.length).toBeGreaterThan(0);
+    expect(toggles[0]).toHaveAttribute("aria-expanded", "false");
+  });
+
+  it("expands the Workspace section by default (used regularly)", () => {
+    render(<Sidebar />);
+    const toggles = screen.getAllByRole("button", { name: /Workspace/i });
+    expect(toggles[0]).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("toggles the workbench section open on click and persists to localStorage", () => {
+    render(<Sidebar />);
+    const toggle = screen.getAllByRole("button", { name: /Workbench/i })[0]!;
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    const stored = window.localStorage.getItem("aura-sidebar-nav-collapsed");
+    expect(stored).not.toBeNull();
+    const parsed = JSON.parse(stored!);
+    expect(parsed).not.toContain("workbench");
   });
 });
