@@ -235,6 +235,14 @@ export interface CreateSessionOpts {
     teamName: string;
     url: string;
   };
+  // ── Council Mode ─────────────────────────────────────────────────────────
+  // When set, the server spawns a paired orchestrator+observer group. The
+  // server is the authority on pairing validation; the frontend only
+  // forwards the user's selection. Backend route wiring is deferred to a
+  // later Phase F backend commit — these fields are declared client-side
+  // so the form can compile against the final shape.
+  councilMode?: "single" | "council";
+  councilPairing?: "claude+claude" | "claude+codex";
 }
 
 export interface BackendInfo {

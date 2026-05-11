@@ -96,6 +96,13 @@ function setupStore(overrides: {
     aiResolvedPermissions: aiResolved,
     clearAiResolvedPermissions: vi.fn(),
     setCliReconnecting: mockSetCliReconnecting,
+    // Council Mode slice — ChatView reads `groupBySessionId`, `findings`,
+    // `dismissedStopIds`, and `dismissStop` to render the BlockerBanner
+    // in the permission slot. Empty maps mean no blocker is shown.
+    groupBySessionId: new Map(),
+    findings: new Map(),
+    dismissedStopIds: new Set(),
+    dismissStop: vi.fn(),
   };
 }
 

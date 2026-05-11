@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  countUnresolvedStopsAcrossGroups,
   deriveObserverPanelState,
   findUnresolvedStops,
 } from "./observer-panel-state.js";
@@ -180,5 +181,49 @@ describe("deriveObserverPanelState", () => {
       dismissedStopIds: new Set(),
     });
     expect(out).toEqual({ name: "never-checkpointed-yet" });
+  });
+});
+
+// ── countUnresolvedStopsAcrossGroups ───────────────────────────────────────
+
+describe("countUnresolvedStopsAcrossGroups", () => {
+  // Beck F4 — empty input branch.
+  it("returns 0 for an empty group map", () => {
+    expect(countUnresolvedStopsAcrossGroups(new Map(), new Set())).toBe(0);
+  });
+
+  // Multi-group sum — the whole point of the helper. Each group
+  // contributes its undismissed non-downgraded STOPs to the total.
+  it("sums undismissed STOPs across multiple groups", () => {
+    const map = new Map<string, ObserverFinding[]>([
+      ["grp_a", [
+        finding({ id: "a1", severity: "STOP" }),
+        finding({ id: "a2", severity: "STOP" }),
+        finding({ id: "a3", severity: "NOTE" }),
+      ]],
+      ["grp_b", [
+        finding({ id: "b1", severity: "STOP" }),
+        finding({ id: "b2", severity: "STOP", wasDowngraded: true, downgradeReason: "evidence_missing_on_disk" }),
+      ]],
+      ["grp_c", []],
+    ]);
+    // Total live STOPs across all groups: a1, a2, b1 → 3. b2 was server-downgraded.
+    expect(countUnresolvedStopsAcrossGroups(map, new Set())).toBe(3);
+  });
+
+  it("excludes dismissed STOPs from the global count", () => {
+    const map = new Map<string, ObserverFinding[]>([
+      ["grp_a", [finding({ id: "a1", severity: "STOP" })]],
+      ["grp_b", [finding({ id: "b1", severity: "STOP" })]],
+    ]);
+    expect(countUnresolvedStopsAcrossGroups(map, new Set(["a1"]))).toBe(1);
+  });
+
+  it("returns 0 when every group has only NOTE/WARN/INFO findings", () => {
+    const map = new Map<string, ObserverFinding[]>([
+      ["grp_a", [finding({ severity: "NOTE" }), finding({ severity: "WARN" })]],
+      ["grp_b", [finding({ severity: "INFO" })]],
+    ]);
+    expect(countUnresolvedStopsAcrossGroups(map, new Set())).toBe(0);
   });
 });

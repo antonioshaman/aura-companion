@@ -23,6 +23,16 @@ import type {
 } from "../types.js";
 import { AiValidationBadge } from "./AiValidationBadge.js";
 import { AiValidationToggle } from "./AiValidationToggle.js";
+import {
+  BlockerBanner,
+  CouncilToggle,
+  DegradedBanner,
+  FindingsLog,
+  ObserverPanel,
+  ProviderBadges,
+  type CouncilPairing,
+} from "./council/index.js";
+import type { GroupRecord, ObserverFinding } from "../types.js";
 import { ToolExecutionBar } from "./ToolExecutionBar.js";
 import { ToolTurnSummary } from "./ToolTurnSummary.js";
 import type { ToolActivityEntry } from "../store/tasks-slice.js";
@@ -2860,9 +2870,210 @@ export function Playground() {
             </Card>
           </div>
         </Section>
+
+        <CouncilModeSection />
       </div>
     </div>
   );
+}
+
+// ─── Council Mode Playground ────────────────────────────────────────────────
+
+const COUNCIL_PLAYGROUND_SESSION = "playground-council-orch";
+const COUNCIL_PLAYGROUND_GROUP = "playground-council-grp";
+const COUNCIL_PLAYGROUND_PAIRING = "claude+codex";
+
+function mockFinding(overrides: Partial<ObserverFinding> = {}): ObserverFinding {
+  return {
+    id: `fnd_${Math.random().toString(36).slice(2, 8)}`,
+    severity: "NOTE",
+    claim: "Sample finding for playground render",
+    evidence_path: "src/foo.ts",
+    receivedAt: Date.now(),
+    checkpointId: "chk_demo",
+    phase: "council-plan",
+    observerModel: "gpt-5-codex",
+    observerProvider: "codex",
+    ...overrides,
+  };
+}
+
+function CouncilModeSection() {
+  const [toggleEnabled, setToggleEnabled] = useState(false);
+  const [pairing, setPairing] = useState<CouncilPairing>("claude+claude");
+  const upsertGroup = useStore((s) => s.upsertGroup);
+  const recordCheckpoint = useStore((s) => s.recordCheckpoint);
+  const appendObserverReview = useStore((s) => s.appendObserverReview);
+  const setGroupStatus = useStore((s) => s.setGroupStatus);
+  const removeGroup = useStore((s) => s.removeGroup);
+
+  // Seed a Council group + checkpoint + mixed findings so ObserverPanel
+  // can render its full state coverage in the playground without depending
+  // on a live backend. Cleaned up on unmount.
+  useEffect(() => {
+    const group: GroupRecord = {
+      sessionGroupId: COUNCIL_PLAYGROUND_GROUP,
+      primarySessionId: COUNCIL_PLAYGROUND_SESSION,
+      observerSessionId: "playground-council-obs",
+      status: "active",
+      pairing: COUNCIL_PLAYGROUND_PAIRING,
+    };
+    upsertGroup(group);
+    recordCheckpoint({
+      sessionGroupId: COUNCIL_PLAYGROUND_GROUP,
+      checkpointId: "chk_demo_1",
+      phase: "council-implement",
+      sequence: 1,
+      timestamp: Date.now() - 90_000,
+    });
+    appendObserverReview({
+      sessionGroupId: COUNCIL_PLAYGROUND_GROUP,
+      checkpointId: "chk_demo_1",
+      phase: "council-implement",
+      findings: [
+        { id: "fnd_stop_live", severity: "STOP", claim: "Race condition: session-orchestrator opens before worktree exists.", evidence_path: "web/server/session-orchestrator.ts", evidence_lines: [412, 425] },
+        { id: "fnd_warn", severity: "WARN", claim: "Extracted helper has no negative-path test.", evidence_path: "web/server/group-state-machine.ts", evidence_lines: [54, 80] },
+        { id: "fnd_note", severity: "NOTE", claim: "Consider renaming BackendProvider once a third backend lands.", evidence_path: "web/server/backend-provider.ts" },
+        { id: "fnd_downgraded", severity: "STOP", claim: "Suspicious cast in unrelated file (downgraded by grounding).", evidence_path: "src/unrelated.ts", wasDowngraded: true, downgradeReason: "evidence_not_in_modified_set" },
+        { id: "fnd_info", severity: "INFO", claim: "Spec coverage matches phase A boundaries.", evidence_path: "specs/council-mode-paired-sessions.md" },
+      ],
+      downgrades: [{ id: "fnd_downgraded", reason: "evidence_not_in_modified_set" }],
+      observerModel: "gpt-5-codex",
+      observerProvider: "codex",
+      timestamp: Date.now() - 60_000,
+    });
+    setGroupStatus(COUNCIL_PLAYGROUND_GROUP, "active");
+    return () => {
+      removeGroup(COUNCIL_PLAYGROUND_GROUP);
+    };
+  }, [upsertGroup, recordCheckpoint, appendObserverReview, setGroupStatus, removeGroup]);
+
+  const liveBlockerFinding = mockFinding({
+    id: "fnd_blocker_demo",
+    severity: "STOP",
+    claim: "Race condition in session-orchestrator.ts — `intentionalKills` is added AFTER the first kill call, so scheduleProactiveRelaunch fires on the still-marked-active half.",
+    evidence_path: "web/server/session-orchestrator.ts",
+    evidence_lines: [412, 425],
+    receivedAt: Date.now() - 30_000,
+    phase: "council-implement",
+  });
+
+  return (
+    <Section
+      title="Council Mode"
+      description="Toggle, banner family, provider badges, findings log, and ObserverPanel across its five explicit states. Mock data only; no backend wiring."
+    >
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <Card label="CouncilToggle — off">
+          <CouncilToggle enabled={false} pairing="claude+claude" onEnabledChange={setToggleEnabled} onPairingChange={setPairing} />
+        </Card>
+        <Card label="CouncilToggle — on, claude+claude (default)">
+          <CouncilToggle enabled={true} pairing="claude+claude" onEnabledChange={setToggleEnabled} onPairingChange={setPairing} />
+        </Card>
+        <Card label="CouncilToggle — on, claude+codex (experimental)">
+          <CouncilToggle enabled={true} pairing="claude+codex" onEnabledChange={setToggleEnabled} onPairingChange={setPairing} />
+        </Card>
+        <Card label="CouncilToggle — codex unavailable">
+          <CouncilToggle
+            enabled={true}
+            pairing="claude+claude"
+            onEnabledChange={setToggleEnabled}
+            onPairingChange={setPairing}
+            codexAvailable={false}
+            codexUnavailableReason="Codex CLI not detected — install or sign in."
+          />
+        </Card>
+
+        <Card label="CouncilToggle — interactive (state preserved across re-renders)">
+          <CouncilToggle enabled={toggleEnabled} pairing={pairing} onEnabledChange={setToggleEnabled} onPairingChange={setPairing} />
+        </Card>
+
+        <Card label="ProviderBadges — claude+claude · compact">
+          <ProviderBadges pairing="claude+claude" size="compact" />
+        </Card>
+        <Card label="ProviderBadges — claude+codex · compact">
+          <ProviderBadges pairing="claude+codex" size="compact" />
+        </Card>
+        <Card label="ProviderBadges — claude+codex · default size">
+          <ProviderBadges pairing="claude+codex" size="default" />
+        </Card>
+
+        <Card label="BlockerBanner — STOP with evidence + actions">
+          <BlockerBanner
+            finding={liveBlockerFinding}
+            nowMs={Date.now()}
+            onDismiss={() => { /* noop in playground */ }}
+            onOpenEvidence={() => { /* noop */ }}
+            onMarkAddressed={() => { /* noop */ }}
+          />
+        </Card>
+
+        <Card label="DegradedBanner — observer offline (idle)">
+          <DegradedBanner deadRole="observer" onRespawn={() => {}} onContinueSolo={() => {}} />
+        </Card>
+        <Card label="DegradedBanner — orchestrator offline">
+          <DegradedBanner deadRole="orchestrator" onRespawn={() => {}} />
+        </Card>
+        <Card label="DegradedBanner — controlled respawning state">
+          <DegradedBanner deadRole="observer" onRespawn={() => {}} isRespawning={true} />
+        </Card>
+
+        <Card label="FindingsLog — empty state">
+          <FindingsLog findings={[]} />
+        </Card>
+        <Card label="FindingsLog — full mix (STOP / WARN / NOTE / INFO / downgraded)">
+          <FindingsLog
+            findings={[
+              mockFinding({ id: "a", severity: "STOP", claim: "Race condition in session-orchestrator.ts", receivedAt: Date.now() - 10_000 }),
+              mockFinding({ id: "b", severity: "WARN", claim: "Helper has no negative-path test", receivedAt: Date.now() - 60_000 }),
+              mockFinding({ id: "c", severity: "NOTE", claim: "Consider renaming BackendProvider", receivedAt: Date.now() - 120_000 }),
+              mockFinding({ id: "d", severity: "STOP", claim: "Suspicious cast — downgraded by grounding", receivedAt: Date.now() - 180_000, wasDowngraded: true, downgradeReason: "evidence_not_in_modified_set" }),
+              mockFinding({ id: "e", severity: "INFO", claim: "Spec coverage matches phase A boundaries", receivedAt: Date.now() - 240_000 }),
+            ]}
+            onDismissStop={() => {}}
+            nowMs={Date.now()}
+          />
+        </Card>
+
+        {/* Full panel embeds — sized like the real layout slot. */}
+        <Card label="ObserverPanel — live (seeded group with mixed findings)">
+          <div className="h-[460px] bg-cc-bg rounded-md overflow-hidden">
+            <ObserverPanel sessionId={COUNCIL_PLAYGROUND_SESSION} nowMs={Date.now()} onRespawnHalf={async () => {}} />
+          </div>
+        </Card>
+        <Card label="ObserverPanel — degraded (observer offline)">
+          <div className="h-[460px] bg-cc-bg rounded-md overflow-hidden">
+            <CouncilDegradedPanelDemo />
+          </div>
+        </Card>
+      </div>
+    </Section>
+  );
+}
+
+const COUNCIL_DEGRADED_DEMO_SESSION = "playground-council-degraded-orch";
+const COUNCIL_DEGRADED_DEMO_GROUP = "playground-council-degraded-grp";
+
+function CouncilDegradedPanelDemo() {
+  const upsertGroup = useStore((s) => s.upsertGroup);
+  const setGroupStatus = useStore((s) => s.setGroupStatus);
+  const removeGroup = useStore((s) => s.removeGroup);
+
+  useEffect(() => {
+    upsertGroup({
+      sessionGroupId: COUNCIL_DEGRADED_DEMO_GROUP,
+      primarySessionId: COUNCIL_DEGRADED_DEMO_SESSION,
+      observerSessionId: "playground-council-degraded-obs",
+      status: "active",
+      pairing: "claude+codex",
+    });
+    setGroupStatus(COUNCIL_DEGRADED_DEMO_GROUP, "degraded", { deadRole: "observer" });
+    return () => {
+      removeGroup(COUNCIL_DEGRADED_DEMO_GROUP);
+    };
+  }, [upsertGroup, setGroupStatus, removeGroup]);
+
+  return <ObserverPanel sessionId={COUNCIL_DEGRADED_DEMO_SESSION} onRespawnHalf={async () => {}} />;
 }
 
 // ─── Session Item Playground ─────────────────────────────────────────────────

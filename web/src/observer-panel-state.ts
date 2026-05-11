@@ -86,3 +86,22 @@ export function findUnresolvedStops(
   }
   return out;
 }
+
+/**
+ * Pure helper: total count of unresolved STOPs across EVERY group, used by
+ * the browser-title alert and the Sidebar unread-rail badge.
+ *
+ * `findingsByGroup` is keyed by `sessionGroupId`. Iterating values rather
+ * than entries keeps the helper independent of the key shape — callers may
+ * pass any `Iterable<readonly ObserverFinding[]>`.
+ */
+export function countUnresolvedStopsAcrossGroups(
+  findingsByGroup: ReadonlyMap<string, readonly ObserverFinding[]>,
+  dismissedStopIds: ReadonlySet<string>,
+): number {
+  let total = 0;
+  for (const findings of findingsByGroup.values()) {
+    total += findUnresolvedStops(findings, dismissedStopIds).length;
+  }
+  return total;
+}
