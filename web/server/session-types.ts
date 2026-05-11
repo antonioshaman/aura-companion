@@ -431,7 +431,14 @@ export interface SessionState {
   aiValidationAutoDeny?: boolean | null;
   /** If this session is linked to a Linear agent session */
   linearSessionId?: string;
+  /** Council Mode pairing — group this session belongs to, if any. Server-generated, opaque to clients. */
+  sessionGroupId?: string;
+  /** Council Mode pairing — the role this session plays within {@link sessionGroupId}. */
+  sessionGroupRole?: SessionGroupRole;
 }
+
+/** Roles a session can play inside a Council Mode pair. */
+export type SessionGroupRole = "orchestrator" | "observer";
 
 // ─── MCP Types ───────────────────────────────────────────────────────────────
 
