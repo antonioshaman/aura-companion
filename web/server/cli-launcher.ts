@@ -14,6 +14,7 @@ import type { BackendType } from "./session-types.js";
 import type { RecorderManager } from "./recorder.js";
 import { CodexAdapter } from "./codex-adapter.js";
 import { resolveBinary, getEnrichedPath } from "./path-resolver.js";
+import { loadObserverSystemPrompt } from "./observer-prompt.js";
 import { containerManager } from "./container-manager.js";
 import { companionBus } from "./event-bus.js";
 import {
@@ -141,6 +142,10 @@ export interface SdkSessionInfo {
   sessionGroupId?: string;
   /** Role within the Council pair. */
   sessionGroupRole?: import("./session-types.js").SessionGroupRole;
+  /** SHA-256 of the observer system-prompt artifact at spawn time
+   *  (observer role only). Used by the recorder + invocation log so a
+   *  forensic re-run can identify which prompt revision the model saw. */
+  observerPromptSha256?: string;
 }
 
 export interface LaunchOptions {
@@ -569,6 +574,30 @@ export class CliLauncher {
     }
     if (options.forkSession) {
       args.push("--fork-session");
+    }
+
+    // Council Mode — observer spawns receive the CLI-agnostic observer
+    // system-prompt artifact via --append-system-prompt. Loaded once at
+    // spawn time so a malformed artifact fails the spawn loudly rather
+    // than silently producing an unrole-d observer. The observer's tool
+    // allow-list (read-only + single Write) is applied through the
+    // existing --allowedTools mechanism by the caller (orchestrator
+    // injects via getObserverSpawnOverrides in a follow-up commit).
+    if (options.sessionGroupRole === "observer") {
+      try {
+        const cwdForPrompt = options.cwd || process.cwd();
+        const promptPath = join(cwdForPrompt, ".council", "prompts", "observer-system.md");
+        const artifact = loadObserverSystemPrompt(promptPath);
+        args.push("--append-system-prompt", artifact.body);
+        info.observerPromptSha256 = artifact.sha256;
+      } catch (err) {
+        // Loud failure — without the prompt the observer is undirected.
+        // Surface the error to the caller so the council create-pair path
+        // can roll back the orchestrator-half spawn.
+        throw new Error(
+          `observer system prompt load failed for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
 
     // Always pass -p "" for headless mode. When relaunching, also pass --resume

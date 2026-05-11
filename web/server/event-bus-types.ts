@@ -96,4 +96,20 @@ export interface CompanionEventMap {
     phase: string;
     sequence: number;
   };
+
+  /** Observer review processed end-to-end: parsed from the review file,
+   *  validated for grounding, findings hydrated with server-assigned ids,
+   *  ready for browser fanout. Subscribers transform the payload into
+   *  the `observer_review` BrowserIncomingMessage and broadcast it. */
+  "group:review": {
+    sessionGroupId: string;
+    checkpointId: string;
+    phase: string;
+    /** Findings after grounding validation. Each has a stable server-assigned id. */
+    findings: import("./session-types.js").BrowserObserverFinding[];
+    /** Server-side grounding downgrades (correlate to `findings[].id`). */
+    downgrades: import("./session-types.js").BrowserObserverDowngrade[];
+    observerModel: string;
+    observerProvider: string;
+  };
 }

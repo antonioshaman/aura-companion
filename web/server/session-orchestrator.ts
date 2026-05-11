@@ -23,6 +23,15 @@ import { generateSessionTitle } from "./auto-namer.js";
 import { companionBus } from "./event-bus.js";
 import { metricsCollector } from "./metrics-collector.js";
 import { log } from "./logger.js";
+import { randomBytes } from "node:crypto";
+import type { CheckpointPayload, ObserverReviewPayload } from "./council-types.js";
+import { watchCheckpoints } from "./checkpoint-watcher.js";
+import { watchReviews } from "./review-watcher.js";
+import { validateObserverFindings } from "./observer-grounding.js";
+import type {
+  BrowserObserverDowngrade,
+  BrowserObserverFinding,
+} from "./session-types.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -162,6 +171,16 @@ export class SessionOrchestrator {
 
   // Idempotency guard for initialize()
   private _initialized = false;
+
+  // Council Mode — per-group watcher state. Each entry owns an
+  // AbortController for the checkpoint + review watchers and the most
+  // recent checkpoint payload (used to ground observer findings against
+  // the artifact manifest the orchestrator emitted).
+  private councilWatchers = new Map<string, {
+    cwd: string;
+    abort: AbortController;
+    lastCheckpoint: CheckpointPayload | null;
+  }>();
 
   // Event listeners
   private exitCallbacks: ((sessionId: string, exitCode: number | null) => void)[] = [];
@@ -305,8 +324,158 @@ export class SessionOrchestrator {
       });
     });
 
+    // Observer review pickup → fan out as `observer_review` browser message.
+    // The watcher hand has already validated grounding and assigned stable
+    // ids; this listener only does the WS fanout.
+    companionBus.on("group:review", ({ sessionGroupId, checkpointId, phase, findings, downgrades, observerModel, observerProvider }) => {
+      const ids: string[] = [];
+      for (const s of this.launcher.listSessions()) {
+        if (s.sessionGroupId === sessionGroupId) ids.push(s.sessionId);
+      }
+      this.wsBridge.broadcastToGroup(ids, {
+        type: "observer_review",
+        sessionGroupId,
+        checkpointId,
+        phase,
+        findings,
+        downgrades,
+        observerModel,
+        observerProvider,
+        timestamp: Date.now(),
+      });
+    });
+
+    // Tear down council watchers when a group exits, so the abort signal
+    // cancels any in-flight reads and the AbortController + map entry are
+    // collected.
+    companionBus.on("group:exited", ({ sessionGroupId }) => {
+      this.stopCouncilWatchers(sessionGroupId);
+    });
+
     // Reconnection watchdog for stale sessions after server restart
     this.startReconnectionWatchdog();
+  }
+
+  // ── Council Mode — per-group filesystem watcher lifecycle ────────────────
+
+  /**
+   * Start the checkpoint + review watchers for a newly-created group.
+   * Idempotent: a second call with the same `sessionGroupId` is a no-op
+   * (the existing AbortController remains in charge).
+   *
+   * Both watchers run in the background; errors are logged via the
+   * watcher's `onDropped` hook rather than thrown, so a malformed file or
+   * a missing directory does not propagate up into the group creation
+   * path that already returned to the caller.
+   */
+  private startCouncilWatchers(sessionGroupId: string, workspaceCwd: string): void {
+    if (this.councilWatchers.has(sessionGroupId)) return;
+    const abort = new AbortController();
+    const entry = { cwd: workspaceCwd, abort, lastCheckpoint: null as CheckpointPayload | null };
+    this.councilWatchers.set(sessionGroupId, entry);
+
+    // Lazy import path module — avoid pulling node:path into the hot
+    // initialize() path for non-council sessions.
+    import("node:path").then(({ join }) => {
+      const checkpointsDir = join(workspaceCwd, ".council", "checkpoints");
+      const reviewsDir = join(workspaceCwd, ".council", "reviews");
+
+      // The directory may not exist yet when the pair spawns — that's OK,
+      // watch() throws on missing dir; we catch and log so the rest of
+      // the orchestrator's createCouncilGroup return path stays clean.
+      watchCheckpoints({
+        directory: checkpointsDir,
+        signal: abort.signal,
+        onCheckpoint: (payload) => this.handleCouncilCheckpoint(sessionGroupId, payload),
+      }).catch((err) => {
+        if (abort.signal.aborted) return;
+        log.warn("session-orchestrator", "council checkpoint watcher failed", {
+          sessionGroupId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+
+      watchReviews({
+        directory: reviewsDir,
+        signal: abort.signal,
+        onReview: (payload) => this.handleCouncilReview(sessionGroupId, payload),
+      }).catch((err) => {
+        if (abort.signal.aborted) return;
+        log.warn("session-orchestrator", "council review watcher failed", {
+          sessionGroupId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    });
+  }
+
+  private stopCouncilWatchers(sessionGroupId: string): void {
+    const entry = this.councilWatchers.get(sessionGroupId);
+    if (!entry) return;
+    entry.abort.abort();
+    this.councilWatchers.delete(sessionGroupId);
+  }
+
+  private handleCouncilCheckpoint(sessionGroupId: string, payload: CheckpointPayload): void {
+    const entry = this.councilWatchers.get(sessionGroupId);
+    if (entry) entry.lastCheckpoint = payload;
+    companionBus.emit("group:checkpoint", {
+      sessionGroupId,
+      checkpointId: payload.checkpoint_id,
+      phase: payload.phase,
+      sequence: payload.sequence,
+    });
+  }
+
+  private handleCouncilReview(sessionGroupId: string, payload: ObserverReviewPayload): void {
+    const entry = this.councilWatchers.get(sessionGroupId);
+    if (!entry) return;
+    const modifiedFiles = new Set(entry.lastCheckpoint?.artifact_paths ?? []);
+    // Grounding validation against the manifest paths from the last
+    // checkpoint. STOPs whose evidence_path is not in the manifest OR
+    // missing on disk are downgraded to NOTE here, so the browser never
+    // sees an ungrounded destructive banner.
+    let result: ReturnType<typeof validateObserverFindings>;
+    try {
+      result = validateObserverFindings(payload, { workspaceRoot: entry.cwd, modifiedFiles });
+    } catch (err) {
+      log.warn("session-orchestrator", "grounding validation failed", {
+        sessionGroupId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+    // Assign stable server-generated ids to each finding so React
+    // reconciliation on the browser does not re-mount rows across emissions.
+    const findings: BrowserObserverFinding[] = result.findings.map((f, idx) => {
+      const id = `fnd_${randomBytes(8).toString("hex")}`;
+      const downgrade = result.downgrades.find((d) => d.index === idx);
+      const out: BrowserObserverFinding = {
+        id,
+        severity: f.severity,
+        claim: f.claim,
+        evidence_path: f.evidence_path,
+        ...(f.evidence_lines !== undefined ? { evidence_lines: f.evidence_lines } : {}),
+        ...(f.confidence !== undefined ? { confidence: f.confidence } : {}),
+        ...(downgrade ? { wasDowngraded: true, downgradeReason: downgrade.reason } : {}),
+      };
+      return out;
+    });
+    const downgrades: BrowserObserverDowngrade[] = result.downgrades.map((d) => ({
+      // Map back to the assigned id at the same position so the browser
+      // FindingsLog can correlate the downgrade chip with the finding row.
+      id: findings[d.index]?.id ?? `fnd_${randomBytes(8).toString("hex")}`,
+      reason: d.reason,
+    }));
+    companionBus.emit("group:review", {
+      sessionGroupId,
+      checkpointId: payload.checkpoint_id,
+      phase: payload.phase,
+      findings,
+      downgrades,
+      observerModel: payload.observer_model,
+      observerProvider: payload.observer_provider,
+    });
   }
 
   // ── Session Creation ───────────────────────────────────────────────────────
@@ -412,6 +581,10 @@ export class SessionOrchestrator {
       if (!primaryInfo || !observerInfo) {
         return { ok: false, error: "session metadata lost after spawn", status: 500 };
       }
+      // Start the per-group filesystem watchers BEFORE returning so the
+      // first checkpoint can land before the response races back to the
+      // browser. Watchers tear down on `group:exited` (see initialize).
+      this.startCouncilWatchers(group.sessionGroupId, primaryInfo.cwd);
       companionBus.emit("group:created", {
         sessionGroupId: group.sessionGroupId,
         primarySessionId: group.primary.sessionId,
