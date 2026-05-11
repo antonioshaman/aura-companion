@@ -3,6 +3,7 @@ import type { AppState } from "./index.js";
 import type { SessionState, SdkSessionInfo, McpServerDetail } from "../types.js";
 import type { PRStatusResponse, LinearIssue } from "../api.js";
 import { deleteFromMap, deleteFromSet } from "./utils.js";
+import { COUNCIL_PANEL_OPEN_KEY, COUNCIL_PANEL_WIDTH_KEY } from "./council-slice.js";
 
 function getInitialSessionNames(): Map<string, string> {
   if (typeof window === "undefined") return new Map();
@@ -115,6 +116,35 @@ export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> 
       if (s.currentSessionId === sessionId) {
         localStorage.removeItem("cc-current-session");
       }
+      // Cross-slice: drop the per-session panel preference + group record if any.
+      // Council slice owns its own state; we persist the trimmed panel maps
+      // here via the same localStorage keys the slice uses, keeping the
+      // truth-of-keys exported from council-slice.ts (no duplicate literals).
+      const groupId = s.groupBySessionId.get(sessionId);
+      const observerPanelOpen = new Map(s.observerPanelOpen);
+      observerPanelOpen.delete(sessionId);
+      const observerPanelWidth = new Map(s.observerPanelWidth);
+      observerPanelWidth.delete(sessionId);
+      try {
+        localStorage.setItem(COUNCIL_PANEL_OPEN_KEY, JSON.stringify(Array.from(observerPanelOpen.entries())));
+        localStorage.setItem(COUNCIL_PANEL_WIDTH_KEY, JSON.stringify(Array.from(observerPanelWidth.entries())));
+      } catch {
+        /* quota / serialization failure — silent; not load-bearing */
+      }
+      const groups = new Map(s.groups);
+      const groupBySessionId = new Map(s.groupBySessionId);
+      const findings = new Map(s.findings);
+      const groundingDowngrades = new Map(s.groundingDowngrades);
+      if (groupId) {
+        const existing = s.groups.get(groupId);
+        groups.delete(groupId);
+        if (existing) {
+          groupBySessionId.delete(existing.primarySessionId);
+          groupBySessionId.delete(existing.observerSessionId);
+        }
+        findings.delete(groupId);
+        groundingDowngrades.delete(groupId);
+      }
       return {
         // Sessions slice fields
         sessions: deleteFromMap(s.sessions, sessionId),
@@ -148,6 +178,13 @@ export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> 
         // UI slice fields
         diffPanelSelectedFile: deleteFromMap(s.diffPanelSelectedFile, sessionId),
         chatTabReentryTickBySession: deleteFromMap(s.chatTabReentryTickBySession, sessionId),
+        // Council slice cleanup (computed above)
+        observerPanelOpen,
+        observerPanelWidth,
+        groups,
+        groupBySessionId,
+        findings,
+        groundingDowngrades,
       };
     }),
 

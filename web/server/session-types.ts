@@ -363,7 +363,77 @@ export type BrowserIncomingMessageBase =
   | { type: "keep_alive" }
   | { type: "prompt_suggestion"; suggestions: string[] }
   | { type: "streamlined_text"; text: string }
-  | { type: "streamlined_tool_use_summary"; tool_summary: string };
+  | { type: "streamlined_tool_use_summary"; tool_summary: string }
+  // ── Council Mode group events (T15 frontend wire contract) ─────────────
+  // Emitters live in ws-bridge.ts (wired in a later Phase F commit). The
+  // types are declared here so the frontend store + slice + ws.ts handler
+  // can compile against the final wire shape from day one.
+  | {
+    type: "group_created";
+    sessionGroupId: string;
+    primarySessionId: string;
+    observerSessionId: string;
+    /** Server-validated pairing label, e.g. "claude+claude" or "claude+codex". */
+    pairing: string;
+  }
+  | {
+    type: "group_exited";
+    sessionGroupId: string;
+    reason: "user_archived" | "shutdown" | "both_halves_died";
+  }
+  | {
+    type: "group_degraded";
+    sessionGroupId: string;
+    deadRole: "orchestrator" | "observer";
+  }
+  | {
+    type: "group_checkpoint";
+    sessionGroupId: string;
+    checkpointId: string;
+    phase: string;
+    sequence: number;
+    /** Wallclock (ms) the server processed the checkpoint sentinel. */
+    timestamp: number;
+  }
+  | {
+    type: "observer_review";
+    sessionGroupId: string;
+    checkpointId: string;
+    phase: string;
+    /** Findings after grounding validation. Each carries a stable server-assigned id. */
+    findings: BrowserObserverFinding[];
+    /** Server-side grounding downgrades, surfaced to the panel for transparency. */
+    downgrades: BrowserObserverDowngrade[];
+    observerModel: string;
+    observerProvider: string;
+    /** Wallclock (ms) the review was processed server-side. */
+    timestamp: number;
+  };
+
+/**
+ * Browser-shape observer finding. The server-side `ObserverReviewFinding`
+ * (council-types.ts) is the storage/protocol shape; this is the per-message
+ * envelope the browser consumes — adds `id` (server-assigned, stable for
+ * React reconciliation) and grounding-related fields.
+ */
+export interface BrowserObserverFinding {
+  id: string;
+  severity: "STOP" | "WARN" | "NOTE" | "INFO";
+  claim: string;
+  evidence_path: string;
+  evidence_lines?: [number, number];
+  confidence?: "high" | "medium" | "low";
+  /** True when grounding validation downgraded this from STOP → NOTE. */
+  wasDowngraded?: boolean;
+  /** Why grounding downgraded this finding. Set iff wasDowngraded. */
+  downgradeReason?: "evidence_not_in_modified_set" | "evidence_missing_on_disk";
+}
+
+export interface BrowserObserverDowngrade {
+  /** Finding id (correlates with `findings[].id` when downgraded entry kept in stream). */
+  id: string;
+  reason: "evidence_not_in_modified_set" | "evidence_missing_on_disk";
+}
 
 export type BrowserIncomingMessage = BrowserIncomingMessageBase & { seq?: number };
 

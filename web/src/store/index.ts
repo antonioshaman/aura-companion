@@ -7,6 +7,7 @@ import { createTasksSlice, type TasksSlice } from "./tasks-slice.js";
 import { createUiSlice, type UiSlice, getInitialDiffBase } from "./ui-slice.js";
 import { createTerminalSlice, type TerminalSlice, getInitialQuickTerminalPlacement } from "./terminal-slice.js";
 import { createUpdatesSlice, type UpdatesSlice } from "./updates-slice.js";
+import { createCouncilSlice, type CouncilSlice } from "./council-slice.js";
 
 export type AppState = AuthSlice &
   SessionsSlice &
@@ -15,7 +16,8 @@ export type AppState = AuthSlice &
   TasksSlice &
   UiSlice &
   TerminalSlice &
-  UpdatesSlice & {
+  UpdatesSlice &
+  CouncilSlice & {
     reset: () => void;
   };
 
@@ -28,6 +30,7 @@ export const useStore = create<AppState>((...args) => ({
   ...createUiSlice(...args),
   ...createTerminalSlice(...args),
   ...createUpdatesSlice(...args),
+  ...createCouncilSlice(...args),
 
   reset: () => {
     const [set] = args;
@@ -77,6 +80,14 @@ export const useStore = create<AppState>((...args) => ({
       terminalOpen: false,
       terminalCwd: null,
       terminalId: null,
+      // Council Mode — note: observerPanelOpen / observerPanelWidth /
+      // firstRunHintDismissed are user-preferences that persist across
+      // reset (parallels the collapsedProjects intent).
+      groups: new Map(),
+      groupBySessionId: new Map(),
+      findings: new Map(),
+      groundingDowngrades: new Map(),
+      dismissedStopIds: new Set(),
     });
   },
 }));
