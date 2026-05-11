@@ -65,19 +65,23 @@ export function parseCodexFrame(raw: string): CodexFrame | null {
   const hasError = "error" in parsed;
   const hasId = "id" in parsed;
 
-  // Request: method + id + params, no result, no error.
+  // Request: method + id, optionally params, no result, no error.
+  // Per JSON-RPC 2.0 §4 params is optional; absent params normalises to {}.
   if (hasMethod && hasId && !hasResult && !hasError) {
     if (!isValidMethod(parsed.method)) return null;
     if (!isValidId(parsed.id)) return null;
-    if (!isObject(parsed.params)) return null;
-    return { kind: "request", method: parsed.method, id: parsed.id, params: parsed.params };
+    const params = "params" in parsed ? (isObject(parsed.params) ? parsed.params : null) : {};
+    if (params === null) return null;
+    return { kind: "request", method: parsed.method, id: parsed.id, params };
   }
 
-  // Notification: method + params, no id, no result, no error.
+  // Notification: method, optionally params, no id, no result, no error.
+  // Same optional-params rule as request.
   if (hasMethod && !hasId && !hasResult && !hasError) {
     if (!isValidMethod(parsed.method)) return null;
-    if (!isObject(parsed.params)) return null;
-    return { kind: "notification", method: parsed.method, params: parsed.params };
+    const params = "params" in parsed ? (isObject(parsed.params) ? parsed.params : null) : {};
+    if (params === null) return null;
+    return { kind: "notification", method: parsed.method, params };
   }
 
   // Result: id + result, no method, no error.

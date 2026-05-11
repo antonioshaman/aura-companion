@@ -1,13 +1,14 @@
 import { randomBytes } from "node:crypto";
 import { isSupportedPairing } from "./backend-provider.js";
+import { GROUP_ID_PATTERN } from "./group-authorization.js";
 import { type GroupEvent, type GroupStatus, transition } from "./group-state-machine.js";
 import type { BackendType, SessionGroupRole } from "./session-types.js";
 
 /**
  * Cryptographically random group ID. ≥128 bits of entropy from
- * `randomBytes(16)` so IDs cannot be guessed by enumeration — the
- * authorisation check (Task 7) still verifies host-token ownership,
- * but unguessable IDs raise the cost of any cross-group attack.
+ * `randomBytes(16)` so IDs cannot be guessed by enumeration. Format
+ * matches {@link GROUP_ID_PATTERN} from group-authorization.ts; both
+ * sides use the same constant to avoid drift (Fowler F2).
  */
 function generateGroupId(): string {
   return `grp_${randomBytes(16).toString("hex")}`;
@@ -47,6 +48,14 @@ export type SessionSpawner = (opts: {
 
 export type SessionKiller = (sessionId: string) => Promise<void>;
 
+/** Optional log/telemetry sink for kill failures so they are not silently swallowed. */
+export type CoordinatorErrorSink = (event: {
+  op: "rollback_kill" | "archive_kill";
+  sessionGroupId: string;
+  sessionId: string;
+  error: unknown;
+}) => void;
+
 export interface GroupMember {
   sessionId: string;
   backendType: BackendType;
@@ -63,27 +72,38 @@ export interface GroupRecord {
 export interface SessionGroupCoordinatorDeps {
   spawn: SessionSpawner;
   kill: SessionKiller;
+  /** Optional sink for kill-failure telemetry. Defaults to a console.warn fallback. */
+  onError?: CoordinatorErrorSink;
 }
 
 /**
  * Owns the lifecycle of Council Mode session pairs. Composes the existing
  * SessionOrchestrator via injected `spawn`/`kill` rather than branching
- * inside it (Fowler P6 — boundaries earn their existence).
+ * inside it.
  *
  * Scope deliberately narrow: spawn-with-rollback, group state-machine
- * application, archive. The watcher and event-bus wiring are owned by
- * later tasks; this class is purely the coordination boundary.
+ * application, archive.
  */
 export class SessionGroupCoordinator {
   private groups = new Map<string, GroupRecord>();
+  private readonly onError: CoordinatorErrorSink;
 
-  constructor(private deps: SessionGroupCoordinatorDeps) {}
+  constructor(private deps: SessionGroupCoordinatorDeps) {
+    this.onError =
+      deps.onError ??
+      ((event) =>
+        console.warn(
+          `[session-group-coordinator] ${event.op} failed for ${event.sessionId} (group ${event.sessionGroupId}):`,
+          event.error,
+        ));
+  }
 
   /**
    * Spawn both halves of a Council Mode pair sharing one sessionGroupId
    * and one workspace. **Atomic**: if the second spawn fails after the
    * first is live, the first is killed before the error propagates so
-   * no orphan subprocess survives outside the UI's awareness.
+   * no orphan subprocess survives outside the UI's awareness. Rollback
+   * kill failures are reported through {@link CoordinatorErrorSink}.
    */
   async createGroup(req: CreateGroupRequest): Promise<GroupRecord> {
     if (!isSupportedPairing(req.primary, req.observer)) {
@@ -121,9 +141,13 @@ export class SessionGroupCoordinator {
       if (primarySpawn) {
         try {
           await this.deps.kill(primarySpawn.sessionId);
-        } catch {
-          // Rollback failure is best-effort — the original error is what
-          // the caller cares about; swallowing here preserves it.
+        } catch (killErr) {
+          this.onError({
+            op: "rollback_kill",
+            sessionGroupId,
+            sessionId: primarySpawn.sessionId,
+            error: killErr,
+          });
         }
       }
       throw err;
@@ -140,25 +164,39 @@ export class SessionGroupCoordinator {
   }
 
   /**
-   * Tear down the pair atomically. Both halves are marked intentional-kill
-   * by transitioning to `archived` BEFORE either kill call runs, so an
-   * exit event from the first kill cannot trigger a respawn racing the
-   * second kill.
+   * Tear down the pair. Both halves are marked archived in the state
+   * machine BEFORE either kill call runs, so an exit event from the
+   * first kill cannot trigger a respawn racing the second kill.
+   *
+   * Idempotent at the state level — re-archiving an already-archived
+   * group is a no-op AND does not fire further kill calls (Subprocess P2-1).
    */
   async archiveGroup(sessionGroupId: string): Promise<boolean> {
     const g = this.groups.get(sessionGroupId);
     if (!g) return false;
+    if (g.status === "archived") return true;
     g.status = transition(g.status, { type: "user_archived" });
     // Best-effort sequential kill — both must be attempted even if one fails.
+    // Failures are reported through onError, never swallowed silently.
     try {
       await this.deps.kill(g.primary.sessionId);
-    } catch {
-      /* swallow */
+    } catch (err) {
+      this.onError({
+        op: "archive_kill",
+        sessionGroupId,
+        sessionId: g.primary.sessionId,
+        error: err,
+      });
     }
     try {
       await this.deps.kill(g.observer.sessionId);
-    } catch {
-      /* swallow */
+    } catch (err) {
+      this.onError({
+        op: "archive_kill",
+        sessionGroupId,
+        sessionId: g.observer.sessionId,
+        error: err,
+      });
     }
     return true;
   }
@@ -167,7 +205,8 @@ export class SessionGroupCoordinator {
     return this.groups.get(sessionGroupId);
   }
 
-  /** Locate the group that contains the given session id, if any. */
+  /** Locate the group that contains the given session id, if any. O(n) — fine
+   *  at current scale; a reverse index can be added if measurement demands it. */
   findBySessionId(sessionId: string): GroupRecord | undefined {
     for (const g of this.groups.values()) {
       if (g.primary.sessionId === sessionId || g.observer.sessionId === sessionId) {
@@ -182,3 +221,7 @@ export class SessionGroupCoordinator {
     this.groups.clear();
   }
 }
+
+// Re-export the canonical pattern for callers that want to validate ids
+// without depending on group-authorization.ts. Single source of truth.
+export { GROUP_ID_PATTERN };

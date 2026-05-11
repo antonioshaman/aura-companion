@@ -1,39 +1,41 @@
-import { describe, expect, it } from "vitest";
-import { isObserverWriteAllowed } from "./observer-write-policy.js";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import {
+  assertObserverWriteAllowed,
+  isObserverReviewFilenameAllowed,
+  isObserverWriteAllowed,
+} from "./observer-write-policy.js";
 
 const WS = "/work/repo";
 
 describe("isObserverWriteAllowed", () => {
-  // Happy path: each of the three allowed locations must accept a normal
-  // child path. These three are the entire surface the observer may touch.
+  // Happy path: only `.council/observer/` and `.council/reviews/` are allowed.
+  // The previous `specs/*observer*.md` branch has been removed — specs are
+  // human-owned and writes to it from the observer are an attack vector.
   it.each([
     [".council/observer/notes.md", `${WS}/.council/observer/notes.md`],
     [".council/observer/nested/deep.txt", `${WS}/.council/observer/nested/deep.txt`],
     [".council/reviews/phase-1-observer.md", `${WS}/.council/reviews/phase-1-observer.md`],
-    ["specs/foo-observer.md", `${WS}/specs/foo-observer.md`],
-    ["specs/observer.md", `${WS}/specs/observer.md`],
   ])("allows write to %s", (_rel, abs) => {
     expect(isObserverWriteAllowed(abs, WS)).toBe(true);
   });
 
-  // Hunt P7: code paths are the primary attack target — must always deny.
-  // A drifted observer prompt overwriting `src/...` is the worst-case scenario.
+  // Hunt P7: code paths and human-owned specs must always be denied.
   it.each([
     ["source file", `${WS}/src/foo.ts`],
     ["package.json", `${WS}/package.json`],
     ["husky hook", `${WS}/.husky/pre-commit`],
     ["checkpoint dir (orchestrator owns this)", `${WS}/.council/checkpoints/phase.json`],
     ["nested under .council root", `${WS}/.council/foo.txt`],
-    ["specs file without 'observer' in name", `${WS}/specs/upstream-sync.md`],
-    ["specs subdir with observer-named file (two levels)", `${WS}/specs/nested/foo-observer.md`],
-    ["specs observer-named but non-markdown", `${WS}/specs/observer.txt`],
+    ["specs file even with observer in name (removed loose match)", `${WS}/specs/foo-observer.md`],
+    ["specs file plain", `${WS}/specs/upstream-sync.md`],
   ])("denies write to %s", (_label, target) => {
     expect(isObserverWriteAllowed(target, WS)).toBe(false);
   });
 
-  // Hunt P7: path traversal escape via realpath-resolved `..` must be
-  // caught by the predicate too (defence-in-depth — caller should also
-  // realpath before calling, but predicate must hold even if they forget).
+  // Hunt P7: path traversal escape.
   it.each([
     ["parent escape", `${WS}/../etc/passwd`],
     ["nested escape", `${WS}/.council/observer/../../etc/passwd`],
@@ -42,28 +44,90 @@ describe("isObserverWriteAllowed", () => {
     expect(isObserverWriteAllowed(target, WS)).toBe(false);
   });
 
-  // Hunt P7: NUL byte poisoning — some libraries truncate at NUL but
-  // sandbox checks may compare the full string. Hard reject either way.
   it("rejects NUL byte in target path", () => {
     expect(isObserverWriteAllowed(`${WS}/.council/observer/foo\0.md`, WS)).toBe(false);
   });
 
-  it("rejects NUL byte in workspace root", () => {
-    expect(isObserverWriteAllowed(`${WS}/.council/observer/foo.md`, `${WS}\0`)).toBe(false);
-  });
-
-  // Both inputs must be absolute. A relative `target` could not exist in a
-  // realpath'd world, but explicit rejection makes the contract clear.
   it("rejects relative target path", () => {
     expect(isObserverWriteAllowed(".council/observer/foo.md", WS)).toBe(false);
   });
+});
 
-  it("rejects relative workspace root", () => {
-    expect(isObserverWriteAllowed(`${WS}/.council/observer/foo.md`, "repo")).toBe(false);
+describe("isObserverReviewFilenameAllowed", () => {
+  // Filename must end `-observer.md` with a phase-shaped prefix.
+  it.each(["plan-observer.md", "council-implement-observer.md", "phase_1.2-observer.md"])(
+    "accepts: %s",
+    (name) => {
+      expect(isObserverReviewFilenameAllowed(name)).toBe(true);
+    },
+  );
+
+  // Hunt: substring-match is the bug we removed; tight pattern prevents it.
+  it.each([
+    ["missing -observer.md", "plan.md"],
+    ["wrong order", "observer-plan.md"],
+    ["traversal", "../etc-observer.md"],
+    ["non-md ext", "plan-observer.txt"],
+    ["leading dot", ".plan-observer.md"],
+  ])("rejects: %s", (_label, name) => {
+    expect(isObserverReviewFilenameAllowed(name)).toBe(false);
+  });
+});
+
+describe("assertObserverWriteAllowed", () => {
+  let root: string;
+
+  beforeEach(() => {
+    root = mkdtempSync(join(tmpdir(), "obs-write-"));
+    mkdirSync(join(root, ".council", "observer"), { recursive: true });
+    mkdirSync(join(root, ".council", "reviews"), { recursive: true });
+    mkdirSync(join(root, "src"), { recursive: true });
   });
 
-  // Writing to the workspace root itself is not an allowed location.
-  it("denies writing to workspace root", () => {
-    expect(isObserverWriteAllowed(WS, WS)).toBe(false);
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  // Happy path: integrated entry-point resolves and asserts.
+  it("returns the resolved path on an allowed write", () => {
+    const target = join(root, ".council", "observer", "notes.md");
+    const out = assertObserverWriteAllowed(target, root);
+    expect(out).toBe(target);
+  });
+
+  // Hunt #1 — THE bug the council caught: the previous pure predicate
+  // documented "callers must realpath first" in a comment. The new
+  // integrated assert does it itself, so a symlinked attack is blocked
+  // even when the caller forgets to resolve.
+  it("rejects a symlink that points outside the workspace", () => {
+    const linkSource = join(root, ".council", "observer", "escape.md");
+    const target = "/etc/passwd";
+    symlinkSync(target, linkSource);
+    expect(() => assertObserverWriteAllowed(linkSource, root)).toThrow(/not allowed/);
+  });
+
+  // Symlink target inside the allowed dir is still allowed.
+  it("allows a symlink that points to an allowed location", () => {
+    const realFile = join(root, ".council", "observer", "real.md");
+    writeFileSync(realFile, "x");
+    const linked = join(root, ".council", "observer", "linked.md");
+    symlinkSync(realFile, linked);
+    expect(() => assertObserverWriteAllowed(linked, root)).not.toThrow();
+  });
+
+  it("throws on a target outside the workspace", () => {
+    expect(() => assertObserverWriteAllowed("/etc/passwd", root)).toThrow(/not allowed/);
+  });
+
+  it("throws on a relative target whose resolution lands outside", () => {
+    expect(() => assertObserverWriteAllowed("../../etc/passwd", root)).toThrow(/not allowed/);
+  });
+
+  it("throws on NUL byte in target", () => {
+    expect(() => assertObserverWriteAllowed("\0bad", root)).toThrow(/invalid target/);
+  });
+
+  it("throws on non-absolute workspace root", () => {
+    expect(() => assertObserverWriteAllowed("foo.md", "relative-root")).toThrow(/workspace root/);
   });
 });

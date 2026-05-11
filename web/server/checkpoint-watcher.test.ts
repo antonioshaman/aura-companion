@@ -127,7 +127,8 @@ describe("watchCheckpoints", () => {
   });
 
   // Idempotency: a handler exception must not break subsequent events.
-  // Drop the throwing event via onDropped and keep listening.
+  // Drop the throwing event via onDropped and keep listening. Distinct
+  // checkpoint_ids so the dedup LRU doesn't swallow the second event.
   it("drops events whose handler throws and continues processing", async () => {
     const ac = new AbortController();
     const dropped: string[] = [];
@@ -146,9 +147,40 @@ describe("watchCheckpoints", () => {
     await new Promise((r) => setTimeout(r, 50));
     writeAtomicJson(join(dir, "plan.json"), makePayload({ checkpoint_id: "chk-a" }));
     await waitFor(() => dropped.length > 0);
+    // Second checkpoint with a DIFFERENT id (dedup is by checkpoint_id).
     writeAtomicJson(join(dir, "plan.json"), makePayload({ checkpoint_id: "chk-b" }));
     await waitFor(() => calls >= 2);
     expect(dropped[0]).toMatch(/handler-error/);
+    ac.abort();
+    await watcherDone;
+  });
+
+  // Realtime F4 / Persistence F5: the watcher's documented dedup contract.
+  // Re-emitting the same checkpoint_id (idempotent orchestrator retry)
+  // must drop on the second event, not double-invoke the handler.
+  it("drops duplicate checkpoint_id events without re-invoking the handler", async () => {
+    const ac = new AbortController();
+    const seen: string[] = [];
+    const dropped: string[] = [];
+    const watcherDone = watchCheckpoints({
+      directory: dir,
+      signal: ac.signal,
+      onCheckpoint: (p) => {
+        seen.push(p.checkpoint_id);
+      },
+      onDropped: (reason) => {
+        dropped.push(reason);
+      },
+    });
+    await new Promise((r) => setTimeout(r, 50));
+    writeAtomicJson(join(dir, "plan.json"), makePayload({ checkpoint_id: "chk-same" }));
+    await waitFor(() => seen.length >= 1);
+    // Force a fresh FS event by writing the same payload to a different
+    // filename (debounce is per-filename, so this exercises the dedup
+    // path that lives downstream of the debounce).
+    writeAtomicJson(join(dir, "plan-retry.json"), makePayload({ checkpoint_id: "chk-same" }));
+    await waitFor(() => dropped.some((r) => r === "duplicate-checkpoint-id"));
+    expect(seen).toEqual(["chk-same"]);
     ac.abort();
     await watcherDone;
   });

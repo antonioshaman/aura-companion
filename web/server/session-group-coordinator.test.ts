@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { GROUP_ID_PATTERN } from "./group-authorization.js";
 import {
+  type CoordinatorErrorSink,
   SessionGroupCoordinator,
   type SessionKiller,
   type SessionSpawner,
@@ -44,11 +46,24 @@ describe("SessionGroupCoordinator.createGroup", () => {
     expect(spawn.calls[0]?.sessionGroupRole).toBe("orchestrator");
     expect(spawn.calls[1]?.sessionGroupRole).toBe("observer");
     expect(spawn.calls[0]?.sessionGroupId).toBe(spawn.calls[1]?.sessionGroupId);
-    expect(record.sessionGroupId).toMatch(/^grp_[a-f0-9]{32}$/);
+    // Beck F6: pin the structural invariants — length + prefix — alongside
+    // the regex. These are the security-relevant facts (entropy budget,
+    // canonical prefix); the regex alone could silently drift if both
+    // producer and validator are mutated in lockstep.
+    expect(record.sessionGroupId.length).toBe(36);
+    expect(record.sessionGroupId.startsWith("grp_")).toBe(true);
+    expect(record.sessionGroupId).toMatch(GROUP_ID_PATTERN);
   });
 
-  // Hunt: server-side allow-list check. Browser-supplied unsupported
-  // pairings must be rejected before any spawn runs.
+  // Beck F7: cross-family pairing is the experimental pairing's value-prop.
+  // A bug passing req.primary to both spawn calls (ignoring req.observer)
+  // would pass claude+claude tests but break claude+codex.
+  it("propagates distinct backendType to each spawn for claude+codex pairing", async () => {
+    await coord.createGroup({ cwd: "/work/repo", primary: "claude", observer: "codex" });
+    expect(spawn.calls[0]?.backendType).toBe("claude");
+    expect(spawn.calls[1]?.backendType).toBe("codex");
+  });
+
   it("rejects unsupported pairings without spawning", async () => {
     await expect(
       coord.createGroup({ cwd: "/work/repo", primary: "codex", observer: "codex" }),
@@ -56,9 +71,8 @@ describe("SessionGroupCoordinator.createGroup", () => {
     expect(spawn.calls).toHaveLength(0);
   });
 
-  // Atomic rollback — TS-Async expert's "all-or-nothing" recommendation.
-  // If the observer spawn fails after the primary is live, the primary
-  // must be killed so no orphan survives.
+  // Atomic rollback — if observer spawn fails after primary is live, the
+  // primary must be killed before the error propagates.
   it("rolls back the primary when the observer spawn fails", async () => {
     let n = 0;
     const failingSpawn: SessionSpawner = async () => {
@@ -75,8 +89,33 @@ describe("SessionGroupCoordinator.createGroup", () => {
     expect(failingKill).toHaveBeenCalledWith("sess-1");
   });
 
-  // Defence-in-depth — if the FIRST spawn fails there is nothing to roll
-  // back and we must not pretend to kill a nonexistent session.
+  // Hunt #7 / Backend-TS F1 / Fowler F5: rollback-kill failures must surface
+  // via onError, not silently swallow. Telemetry sink receives the event.
+  it("reports rollback-kill failures via onError without masking the original error", async () => {
+    let n = 0;
+    const failingSpawn: SessionSpawner = async () => {
+      n++;
+      if (n === 2) throw new Error("observer-spawn-failed");
+      return { sessionId: `sess-${n}` };
+    };
+    const failingKill = vi.fn(async () => {
+      throw new Error("kill-also-failed");
+    });
+    const errors: Parameters<CoordinatorErrorSink>[0][] = [];
+    const c = new SessionGroupCoordinator({
+      spawn: failingSpawn,
+      kill: failingKill,
+      onError: (e) => errors.push(e),
+    });
+    await expect(
+      c.createGroup({ cwd: "/work/repo", primary: "claude", observer: "claude" }),
+    ).rejects.toThrow(/observer-spawn-failed/);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.op).toBe("rollback_kill");
+    expect(errors[0]?.sessionId).toBe("sess-1");
+  });
+
+  // Defence-in-depth — if the FIRST spawn fails, no kill is attempted.
   it("does not call kill when the primary spawn itself fails", async () => {
     const alwaysFail: SessionSpawner = async () => {
       throw new Error("primary-spawn-failed");
@@ -89,8 +128,6 @@ describe("SessionGroupCoordinator.createGroup", () => {
     expect(killFn).not.toHaveBeenCalled();
   });
 
-  // Two groups created in sequence must get distinct IDs. Collisions
-  // would be a catastrophic confusion of pairs.
   it("generates a fresh sessionGroupId per group", async () => {
     const a = await coord.createGroup({ cwd: "/a", primary: "claude", observer: "claude" });
     const b = await coord.createGroup({ cwd: "/b", primary: "claude", observer: "claude" });
@@ -128,20 +165,53 @@ describe("SessionGroupCoordinator.archiveGroup", () => {
     expect(kill).toHaveBeenNthCalledWith(2, g.observer.sessionId);
   });
 
-  // TS-Async: status flips BEFORE the kill calls so that a session-exit
-  // event from the first kill cannot trigger a respawn racing the second.
-  // We exercise this by checking that, even if kill throws on the first
-  // call, the status is already terminal AND the second kill is still attempted.
-  it("flips status to archived even if a kill call throws; both kills attempted", async () => {
+  // Beck F3: the ordering invariant — status MUST flip before any kill
+  // call — was previously documented only in a comment. Now actually
+  // asserted: the kill mock observes the status at the moment of each
+  // invocation, and we expect both observations to read "archived".
+  it("flips status to archived BEFORE either kill is invoked (ordering invariant)", async () => {
+    const statusObservations: string[] = [];
+    let observingCoord: SessionGroupCoordinator | null = null;
+    let observingGroupId = "";
+    const killFn = vi.fn(async (_id: string) => {
+      statusObservations.push(observingCoord?.get(observingGroupId)?.status ?? "missing");
+    });
+    observingCoord = new SessionGroupCoordinator({ spawn, kill: killFn });
+    const g = await observingCoord.createGroup({ cwd: "/w", primary: "claude", observer: "claude" });
+    observingGroupId = g.sessionGroupId;
+    await observingCoord.archiveGroup(g.sessionGroupId);
+    expect(statusObservations).toEqual(["archived", "archived"]);
+  });
+
+  // Subprocess P2-1: re-archive of an already-archived group must early-
+  // return WITHOUT firing the kills again. Doubled kill calls cause doubled
+  // event traffic and noise; the state-machine discriminator means we can
+  // (and should) early-return.
+  it("re-archive of an already-archived group is a true no-op (no extra kills)", async () => {
+    const g = await coord.createGroup({ cwd: "/w", primary: "claude", observer: "claude" });
+    await coord.archiveGroup(g.sessionGroupId);
+    expect(kill).toHaveBeenCalledTimes(2);
+    // Second archive — should not fire any more kills.
+    const ok = await coord.archiveGroup(g.sessionGroupId);
+    expect(ok).toBe(true);
+    expect(kill).toHaveBeenCalledTimes(2); // unchanged
+  });
+
+  // Hunt #7 / Backend-TS F1: archive-kill failures must surface, not swallow.
+  it("reports archive-kill failures via onError; status still flips to archived", async () => {
     const killFn = vi.fn(async (id: string) => {
       if (id === "sess-1") throw new Error("kill-1-failed");
     });
-    const c = new SessionGroupCoordinator({ spawn, kill: killFn });
+    const errors: Parameters<CoordinatorErrorSink>[0][] = [];
+    const c = new SessionGroupCoordinator({ spawn, kill: killFn, onError: (e) => errors.push(e) });
     const g = await c.createGroup({ cwd: "/w", primary: "claude", observer: "claude" });
     const ok = await c.archiveGroup(g.sessionGroupId);
     expect(ok).toBe(true);
     expect(c.get(g.sessionGroupId)?.status).toBe("archived");
     expect(killFn).toHaveBeenCalledTimes(2);
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.op).toBe("archive_kill");
+    expect(errors[0]?.sessionId).toBe("sess-1");
   });
 
   it("returns false for an unknown group", async () => {

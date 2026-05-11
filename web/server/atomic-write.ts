@@ -1,45 +1,73 @@
-import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, writeSync } from "node:fs";
+import { closeSync, constants as fsConstants, fsyncSync, mkdirSync, openSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { COUNCIL_ARTIFACT_MAX_BYTES } from "./council-types.js";
 
 /**
- * Write a JSON-serialisable payload to `target` atomically — observers
- * watching this path never see a partial file.
+ * SYNC by design: the caller needs the rename to be visible AND fsynced
+ * before continuing. Async would gain a context switch and a chance to
+ * interleave another writer. Per-call cost ≈ one fsync of file + one
+ * fsync of parent dir — do NOT invoke from inside tight loops in request
+ * handlers; batch writes belong elsewhere.
  *
- * Steps: stringify → write to a sibling `.<rand>.tmp` file → `fsync` the
- * fd → `rename` over the target → `fsync` the parent directory so the
- * rename itself is durable across power loss. Rename within one filesystem
- * is atomic on POSIX; the watcher sees either the previous version or the
- * new one, never a mixture.
+ * Steps: stringify → byte-size-check → write to `.<rand>.tmp` (O_EXCL,
+ * mode 0o600) → `fsync` the fd → `rename` over the target → `fsync` the
+ * parent directory. Rename within one filesystem is atomic on POSIX;
+ * the watcher sees either the previous version or the new one, never a
+ * mixture. On any failure between open and rename, the tmp file is
+ * unlinked so no `.<rand>.tmp` leaks accumulate across retries.
  *
- * Throws on filesystem error or oversize. The caller chooses retry policy.
+ * Throws on filesystem error, oversize, or tmp-name collision (extremely
+ * unlikely with 64-bit random suffix + O_EXCL).
  */
 export function writeAtomicJson(target: string, payload: unknown): void {
   const dir = dirname(target);
   mkdirSync(dir, { recursive: true });
 
   const json = JSON.stringify(payload);
-  if (json.length > COUNCIL_ARTIFACT_MAX_BYTES) {
+  // Byte-count via Buffer — JS string `.length` is UTF-16 code units and
+  // undercounts multibyte content by up to 3×. Hunt #6.
+  const byteLen = Buffer.byteLength(json, "utf8");
+  if (byteLen > COUNCIL_ARTIFACT_MAX_BYTES) {
     throw new Error(
-      `atomic-write: payload (${json.length} bytes) exceeds COUNCIL_ARTIFACT_MAX_BYTES (${COUNCIL_ARTIFACT_MAX_BYTES})`,
+      `atomic-write: payload (${byteLen} bytes) exceeds COUNCIL_ARTIFACT_MAX_BYTES (${COUNCIL_ARTIFACT_MAX_BYTES})`,
     );
   }
 
   const tmp = join(dir, `.${randomBytes(8).toString("hex")}.tmp`);
   let fd = -1;
+  let renamed = false;
   try {
-    fd = openSync(tmp, "w");
+    // O_EXCL fails loudly on collision (rather than silently truncating);
+    // mode 0o600 keeps council artifacts unreadable by other UIDs on shared hosts.
+    fd = openSync(tmp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
     writeSync(fd, json);
     fsyncSync(fd);
+    closeSync(fd);
+    fd = -1;
+    renameSync(tmp, target);
+    renamed = true;
   } finally {
-    if (fd >= 0) closeSync(fd);
+    if (fd >= 0) {
+      try {
+        closeSync(fd);
+      } catch {
+        /* ignore close-after-failure */
+      }
+    }
+    if (!renamed) {
+      // Persistence F4 — unlink the tmp on every failure path so retries
+      // don't accumulate `.deadbeef.tmp` files.
+      try {
+        unlinkSync(tmp);
+      } catch {
+        /* tmp may not exist if open failed first */
+      }
+    }
   }
 
-  renameSync(tmp, target);
-
   // fsync the parent directory so the rename itself survives a power cut.
-  // Not all filesystems support this (e.g. some tmpfs configs); best-effort.
+  // Best-effort: some filesystems don't support fsync on directories.
   let dirFd = -1;
   try {
     dirFd = openSync(dir, "r");
@@ -47,6 +75,12 @@ export function writeAtomicJson(target: string, payload: unknown): void {
   } catch {
     /* best-effort */
   } finally {
-    if (dirFd >= 0) closeSync(dirFd);
+    if (dirFd >= 0) {
+      try {
+        closeSync(dirFd);
+      } catch {
+        /* ignore */
+      }
+    }
   }
 }
