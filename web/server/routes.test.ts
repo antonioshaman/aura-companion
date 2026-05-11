@@ -341,6 +341,12 @@ function createMockOrchestrator() {
       ok: true,
       session: { sessionId: "session-1", state: "starting", cwd: "/test", createdAt: Date.now() },
     })),
+    createCouncilGroup: vi.fn(async () => ({
+      ok: true,
+      sessionGroupId: "grp_test_council",
+      primary: { sessionId: "sess_orch", state: "starting", cwd: "/test", createdAt: Date.now(), backendType: "claude" },
+      observer: { sessionId: "sess_obs", state: "starting", cwd: "/test", createdAt: Date.now(), backendType: "codex" },
+    })),
     killSession: vi.fn(async () => ({ ok: true })),
     relaunchSession: vi.fn(async () => ({ ok: true })),
     deleteSession: vi.fn(async () => ({ ok: true })),
@@ -533,6 +539,98 @@ describe("POST /api/sessions/create", () => {
     // Route catches JSON parse errors and defaults to {}
     expect(res.status).toBe(200);
     expect(orchestrator.createSession).toHaveBeenCalledWith({});
+  });
+});
+
+describe("POST /api/sessions/create — Council Mode branch", () => {
+  it("delegates to createCouncilGroup when councilMode='council' with valid pairing", async () => {
+    const res = await app.request("/api/sessions/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        cwd: "/work/repo",
+        model: "claude-sonnet-4-6",
+        councilMode: "council",
+        councilPairing: "claude+claude",
+      }),
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.sessionGroupId).toBe("grp_test_council");
+    expect(json.primary.sessionId).toBe("sess_orch");
+    expect(json.observer.sessionId).toBe("sess_obs");
+    expect(orchestrator.createCouncilGroup).toHaveBeenCalledWith({
+      pairing: "claude+claude",
+      base: { cwd: "/work/repo", model: "claude-sonnet-4-6" },
+    });
+    // The single-session createSession path MUST NOT be exercised in this branch.
+    expect(orchestrator.createSession).not.toHaveBeenCalled();
+  });
+
+  it("strips councilMode/councilPairing from the base body forwarded to the coordinator", async () => {
+    await app.request("/api/sessions/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        cwd: "/work/repo",
+        envSlug: "production",
+        councilMode: "council",
+        councilPairing: "claude+codex",
+      }),
+    });
+    const callArg = orchestrator.createCouncilGroup.mock.calls[0]![0]!;
+    expect(callArg.base).not.toHaveProperty("councilMode");
+    expect(callArg.base).not.toHaveProperty("councilPairing");
+    expect(callArg.base.envSlug).toBe("production");
+  });
+
+  it("rejects an invalid pairing with 400 BEFORE invoking the coordinator", async () => {
+    const res = await app.request("/api/sessions/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        cwd: "/work/repo",
+        councilMode: "council",
+        councilPairing: "claude+gpt",
+      }),
+    });
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.error).toMatch(/Invalid pairing/);
+    expect(orchestrator.createCouncilGroup).not.toHaveBeenCalled();
+  });
+
+  it("rejects a missing pairing with 400", async () => {
+    const res = await app.request("/api/sessions/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        cwd: "/work/repo",
+        councilMode: "council",
+      }),
+    });
+    expect(res.status).toBe(400);
+    expect(orchestrator.createCouncilGroup).not.toHaveBeenCalled();
+  });
+
+  it("propagates coordinator failure error+status to the client", async () => {
+    orchestrator.createCouncilGroup.mockResolvedValueOnce({
+      ok: false,
+      error: "unsupported pairing: claude+codex",
+      status: 400,
+    });
+    const res = await app.request("/api/sessions/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        cwd: "/work/repo",
+        councilMode: "council",
+        councilPairing: "claude+codex",
+      }),
+    });
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.error).toMatch(/unsupported pairing/);
   });
 });
 

@@ -144,6 +144,21 @@ export class WsBridge {
     this.broadcastToBrowsers(session, msg);
   }
 
+  /**
+   * Council Mode — push the same message to ALL browsers attached to
+   * EITHER half of a session pair. Used to fan `group_created` /
+   * `group_exited` / `group_degraded` / `group_checkpoint` /
+   * `observer_review` out to whichever half the user happens to have open.
+   * Missing-session ids are skipped silently.
+   */
+  broadcastToGroup(sessionIds: readonly string[], msg: BrowserIncomingMessage): void {
+    for (const sid of sessionIds) {
+      const session = this.sessions.get(sid);
+      if (!session) continue;
+      this.broadcastToBrowsers(session, msg);
+    }
+  }
+
   /** Attach a persistent store. Call restoreFromDisk() after. */
   setStore(store: SessionStore): void {
     this.store = store;

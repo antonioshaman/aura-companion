@@ -135,6 +135,12 @@ export interface SdkSessionInfo {
   containerImage?: string;
   /** Runtime cwd inside container for agent RPC calls (e.g. "/workspace"). */
   containerCwd?: string;
+
+  // ── Council Mode pairing ──────────────────────────────────────────────────
+  /** Server-generated group id when this session is part of a Council pair. */
+  sessionGroupId?: string;
+  /** Role within the Council pair. */
+  sessionGroupRole?: import("./session-types.js").SessionGroupRole;
 }
 
 export interface LaunchOptions {
@@ -168,6 +174,13 @@ export interface LaunchOptions {
   systemPrompt?: string;
   /** Sandbox profile slug used for this session */
   sandboxSlug?: string;
+  /** Council Mode — group this session belongs to, if any. */
+  sessionGroupId?: string;
+  /** Council Mode — role within the group. The observer role does NOT alter
+   *  spawn argv in this commit; it tags the SdkSessionInfo so the bridge can
+   *  route observer-specific messages on first WS attach. Spawn-time system
+   *  prompt injection is the follow-up commit. */
+  sessionGroupRole?: import("./session-types.js").SessionGroupRole;
 }
 
 /**
@@ -304,6 +317,19 @@ export class CliLauncher {
     if (options.resumeSessionAt) {
       info.resumeSessionAt = options.resumeSessionAt;
       info.forkSession = options.forkSession === true;
+    }
+
+    // Council Mode — persist group identity into the SdkSessionInfo so
+    // sidebar/store/restart-reconciliation can read the role without
+    // re-deriving from coordinator state. Observer system-prompt injection
+    // at spawn argv is deferred to a follow-up commit; for now the observer
+    // subprocess starts as a plain CLI session and receives its role via
+    // the first WS user-message sent by the bridge on checkpoint arrival.
+    if (options.sessionGroupId) {
+      info.sessionGroupId = options.sessionGroupId;
+    }
+    if (options.sessionGroupRole) {
+      info.sessionGroupRole = options.sessionGroupRole;
     }
 
     if (backendType === "codex") {

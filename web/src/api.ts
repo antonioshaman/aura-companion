@@ -238,9 +238,7 @@ export interface CreateSessionOpts {
   // ── Council Mode ─────────────────────────────────────────────────────────
   // When set, the server spawns a paired orchestrator+observer group. The
   // server is the authority on pairing validation; the frontend only
-  // forwards the user's selection. Backend route wiring is deferred to a
-  // later Phase F backend commit — these fields are declared client-side
-  // so the form can compile against the final shape.
+  // forwards the user's selection.
   councilMode?: "single" | "council";
   councilPairing?: "claude+claude" | "claude+codex";
 }
@@ -748,6 +746,10 @@ export interface CreateSessionStreamResult {
   backendType?: "claude" | "codex";
   resumeSessionAt?: string;
   forkSession?: boolean;
+  /** Council Mode — present when the request had `councilMode: "council"`. */
+  sessionGroupId?: string;
+  /** Council Mode — observer half's session id. Primary sits in `sessionId`. */
+  observerSessionId?: string;
 }
 
 /**

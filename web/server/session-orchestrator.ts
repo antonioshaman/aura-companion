@@ -74,7 +74,31 @@ export interface CreateSessionRequest {
   container?: { image?: string; ports?: number[]; volumes?: string[] };
   resumeSessionAt?: string;
   forkSession?: boolean;
+  // Council Mode — present on a regular createSession request only when the
+  // call is being dispatched FROM `createCouncilGroup` for each half of the
+  // pair. The browser does NOT supply these on the public `councilMode`
+  // route; the coordinator generates them server-side.
+  sessionGroupId?: string;
+  sessionGroupRole?: import("./session-types.js").SessionGroupRole;
 }
+
+/** Public Council Mode pair-create request. The coordinator validates the
+ *  pairing server-side against {@link SUPPORTED_PAIRINGS}; the browser's
+ *  selection is treated as untrusted input. */
+export interface CreateCouncilGroupRequest {
+  pairing: "claude+claude" | "claude+codex";
+  /** Shared base request — model/cwd/env/sandbox/etc. apply to BOTH halves. */
+  base: Omit<CreateSessionRequest, "backend" | "sessionGroupId" | "sessionGroupRole">;
+}
+
+export type CreateCouncilGroupResult =
+  | {
+    ok: true;
+    sessionGroupId: string;
+    primary: SdkSessionInfo;
+    observer: SdkSessionInfo;
+  }
+  | { ok: false; error: string; status: number };
 
 export type CreateSessionResult =
   | { ok: true; session: SdkSessionInfo }
@@ -229,6 +253,58 @@ export class SessionOrchestrator {
       await this.handleAutoNaming(sessionId, firstUserMessage);
     });
 
+    // Council Mode — fan group lifecycle events out to both halves' browsers.
+    // The emitters live in `createCouncilGroup` (group:created) and in the
+    // coordinator's archive path / state machine (group:exited /
+    // group:degraded). The wire shape matches the BrowserIncomingMessage
+    // variants declared in session-types.ts.
+    companionBus.on("group:created", ({ sessionGroupId, primarySessionId, observerSessionId }) => {
+      const primary = this.launcher.getSession(primarySessionId);
+      const observer = this.launcher.getSession(observerSessionId);
+      // Pairing label reconstructed from each half's backendType — the
+      // coordinator's record is its own internal state; the WS message
+      // carries the public label the UI reads.
+      const pairing = `${primary?.backendType ?? "claude"}+${observer?.backendType ?? "claude"}`;
+      this.wsBridge.broadcastToGroup([primarySessionId, observerSessionId], {
+        type: "group_created",
+        sessionGroupId,
+        primarySessionId,
+        observerSessionId,
+        pairing,
+      });
+    });
+    companionBus.on("group:exited", ({ sessionGroupId, reason }) => {
+      // Look up the live group members from the launcher's session map.
+      // Both halves may already be gone by the time `group:exited` fires;
+      // broadcastToGroup is a no-op for missing sessions.
+      const ids: string[] = [];
+      for (const s of this.launcher.listSessions()) {
+        if (s.sessionGroupId === sessionGroupId) ids.push(s.sessionId);
+      }
+      this.wsBridge.broadcastToGroup(ids, { type: "group_exited", sessionGroupId, reason });
+    });
+    companionBus.on("group:degraded", ({ sessionGroupId, deadRole }) => {
+      const ids: string[] = [];
+      for (const s of this.launcher.listSessions()) {
+        if (s.sessionGroupId === sessionGroupId) ids.push(s.sessionId);
+      }
+      this.wsBridge.broadcastToGroup(ids, { type: "group_degraded", sessionGroupId, deadRole });
+    });
+    companionBus.on("group:checkpoint", ({ sessionGroupId, checkpointId, phase, sequence }) => {
+      const ids: string[] = [];
+      for (const s of this.launcher.listSessions()) {
+        if (s.sessionGroupId === sessionGroupId) ids.push(s.sessionId);
+      }
+      this.wsBridge.broadcastToGroup(ids, {
+        type: "group_checkpoint",
+        sessionGroupId,
+        checkpointId,
+        phase,
+        sequence,
+        timestamp: Date.now(),
+      });
+    });
+
     // Reconnection watchdog for stale sessions after server restart
     this.startReconnectionWatchdog();
   }
@@ -244,6 +320,110 @@ export class SessionOrchestrator {
     onProgress: ProgressCallback,
   ): Promise<CreateSessionResult> {
     return this.doCreateSession(body, onProgress);
+  }
+
+  /**
+   * Council Mode entry point. Validates the pairing server-side against
+   * the supported allow-list, then spawns both halves via
+   * {@link SessionGroupCoordinator}. The injected `spawn` is a thin
+   * adapter over {@link doCreateSession} so the council path composes on
+   * top of the existing single-session machinery without branching it.
+   *
+   * Atomic: if the second spawn fails, the coordinator kills the first
+   * before propagating the error — no orphan subprocesses.
+   *
+   * Emits `group:created` on success so {@link WsBridge} can fan the
+   * `group_created` browser message out to both halves' sockets.
+   */
+  async createCouncilGroup(req: CreateCouncilGroupRequest): Promise<CreateCouncilGroupResult> {
+    // Lazy import — coordinator + backend-provider modules are only loaded
+    // when Council Mode is actually invoked. Keeps the single-session
+    // happy path's module-graph unchanged.
+    const [{ SessionGroupCoordinator }, { isSupportedPairing, parsePairingLabel }] = await Promise.all([
+      import("./session-group-coordinator.js"),
+      import("./backend-provider.js").then((m) => ({
+        isSupportedPairing: m.isSupportedPairing,
+        // parsePairingLabel is defined inline below — backend-provider
+        // exports the supported pairings list but not a label parser
+        // since the label format is a routes-layer concern.
+        parsePairingLabel: (label: string): { primary: BackendType; observer: BackendType } | null => {
+          const parts = label.split("+");
+          if (parts.length !== 2) return null;
+          const [p, o] = parts as [string, string];
+          if ((p !== "claude" && p !== "codex") || (o !== "claude" && o !== "codex")) return null;
+          return { primary: p, observer: o };
+        },
+      })),
+    ]);
+
+    const parsed = parsePairingLabel(req.pairing);
+    if (!parsed) return { ok: false, error: `unsupported pairing: ${req.pairing}`, status: 400 };
+    if (!isSupportedPairing(parsed.primary, parsed.observer)) {
+      return { ok: false, error: `unsupported pairing: ${req.pairing}`, status: 400 };
+    }
+
+    const baseBody: CreateSessionRequest = { ...req.base };
+    // Use a ref-object rather than two separate `let`s so TS narrowing
+    // through the closure-mutated lexical state stays sound — TS flow
+    // analysis sees property access on an object, not a re-bound let.
+    type SpawnFailure = { error: string; status: number };
+    const spawnErrors: { primary: SpawnFailure | null; observer: SpawnFailure | null } = { primary: null, observer: null };
+
+    const coordinator = new SessionGroupCoordinator({
+      spawn: async (opts) => {
+        const result = await this.doCreateSession({
+          ...baseBody,
+          backend: opts.backendType,
+          cwd: opts.cwd,
+          model: opts.model ?? baseBody.model,
+          permissionMode: opts.permissionMode ?? baseBody.permissionMode,
+          sessionGroupId: opts.sessionGroupId,
+          sessionGroupRole: opts.sessionGroupRole,
+        });
+        if (!result.ok) {
+          // Capture the error so the council caller surfaces it back to
+          // the browser rather than throwing a bare Error (which loses
+          // status). The coordinator will treat the throw as a spawn
+          // failure and roll back the first half if applicable.
+          if (opts.sessionGroupRole === "orchestrator") {
+            spawnErrors.primary = { error: result.error, status: result.status };
+          } else {
+            spawnErrors.observer = { error: result.error, status: result.status };
+          }
+          throw new Error(result.error);
+        }
+        return { sessionId: result.session.sessionId };
+      },
+      kill: async (sessionId) => {
+        await this.killSession(sessionId);
+      },
+    });
+
+    try {
+      const group = await coordinator.createGroup({
+        cwd: req.base.cwd ?? process.cwd(),
+        primary: parsed.primary,
+        observer: parsed.observer,
+        model: req.base.model,
+        permissionMode: req.base.permissionMode,
+      });
+      const primaryInfo = this.launcher.getSession(group.primary.sessionId);
+      const observerInfo = this.launcher.getSession(group.observer.sessionId);
+      if (!primaryInfo || !observerInfo) {
+        return { ok: false, error: "session metadata lost after spawn", status: 500 };
+      }
+      companionBus.emit("group:created", {
+        sessionGroupId: group.sessionGroupId,
+        primarySessionId: group.primary.sessionId,
+        observerSessionId: group.observer.sessionId,
+      });
+      return { ok: true, sessionGroupId: group.sessionGroupId, primary: primaryInfo, observer: observerInfo };
+    } catch (err) {
+      if (spawnErrors.primary) return { ok: false, ...spawnErrors.primary };
+      if (spawnErrors.observer) return { ok: false, ...spawnErrors.observer };
+      const reason = err instanceof Error ? err.message : String(err);
+      return { ok: false, error: reason, status: 500 };
+    }
   }
 
   private async doCreateSession(
@@ -578,6 +758,11 @@ export class SessionOrchestrator {
           forkSession,
           systemPrompt: backend === "codex" ? linearSystemPrompt : undefined,
           sandboxSlug: sandboxEnabled ? (body.sandboxSlug || undefined) : undefined,
+          // Council Mode pass-through — populated only when this call comes
+          // from `createCouncilGroup`. The browser cannot supply these on a
+          // regular createSession; the coordinator generates them server-side.
+          sessionGroupId: body.sessionGroupId,
+          sessionGroupRole: body.sessionGroupRole,
         });
       } catch (e) {
         // Clean up container if it was created but launch failed
