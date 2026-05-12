@@ -127,7 +127,7 @@ vi.mock("./container-manager.js", () => ({
 
 // ── Imports (after mocks) ───────────────────────────────────────────────────
 
-import { SessionOrchestrator } from "./session-orchestrator.js";
+import { SessionOrchestrator, deterministicFindingId } from "./session-orchestrator.js";
 import type { SessionOrchestratorDeps } from "./session-orchestrator.js";
 import { containerManager } from "./container-manager.js";
 import * as envManager from "./env-manager.js";
@@ -174,6 +174,7 @@ function createMockBridge() {
     prePopulateCommands: vi.fn(),
     broadcastNameUpdate: vi.fn(),
     broadcastToSession: vi.fn(),
+    broadcastToGroup: vi.fn(),
     injectSystemPrompt: vi.fn(),
     attachBackendAdapter: vi.fn(),
     cancelDisconnectTimer: vi.fn(() => false),
@@ -1779,6 +1780,171 @@ describe("SessionOrchestrator", () => {
 
       // kill() is called by deleteSession, but relaunch should NOT be
       expect(deps.launcher.relaunch).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── Council Mode (Beck council review #9 — P2#9 test coverage) ────────────
+
+  describe("deterministicFindingId", () => {
+    // Pure helper: same input → same id; different input → different id.
+    // Restart-replay dedup on the browser side depends on this stability.
+    it("returns the same id for the same input tuple", () => {
+      const input = {
+        sessionGroupId: "grp_abc",
+        checkpointId: "chk_1",
+        observerProvider: "codex",
+        findingIndex: 0,
+        evidencePath: "src/foo.ts",
+        claim: "Race condition in spawn",
+      };
+      const a = deterministicFindingId(input);
+      const b = deterministicFindingId(input);
+      expect(a).toBe(b);
+      expect(a).toMatch(/^fnd_[0-9a-f]{16}$/);
+    });
+
+    it("returns different ids when any field differs", () => {
+      const base = {
+        sessionGroupId: "grp_abc",
+        checkpointId: "chk_1",
+        observerProvider: "codex",
+        findingIndex: 0,
+        evidencePath: "src/foo.ts",
+        claim: "claim",
+      };
+      const id = deterministicFindingId(base);
+      expect(deterministicFindingId({ ...base, sessionGroupId: "grp_xyz" })).not.toBe(id);
+      expect(deterministicFindingId({ ...base, checkpointId: "chk_2" })).not.toBe(id);
+      expect(deterministicFindingId({ ...base, observerProvider: "claude" })).not.toBe(id);
+      expect(deterministicFindingId({ ...base, findingIndex: 1 })).not.toBe(id);
+      expect(deterministicFindingId({ ...base, evidencePath: "src/bar.ts" })).not.toBe(id);
+      expect(deterministicFindingId({ ...base, claim: "different claim" })).not.toBe(id);
+    });
+
+    // Null-byte separator hardening: two distinct-but-concatenation-equal
+    // inputs MUST yield different ids. Without the separators, e.g.
+    // `("ab"+"c")` and `("a"+"bc")` would hash to the same value.
+    it("uses separators so concatenation-collisions are impossible", () => {
+      const a = deterministicFindingId({
+        sessionGroupId: "ab",
+        checkpointId: "c",
+        observerProvider: "p",
+        findingIndex: 0,
+        evidencePath: "e",
+        claim: "k",
+      });
+      const b = deterministicFindingId({
+        sessionGroupId: "a",
+        checkpointId: "bc",
+        observerProvider: "p",
+        findingIndex: 0,
+        evidencePath: "e",
+        claim: "k",
+      });
+      expect(a).not.toBe(b);
+    });
+  });
+
+  describe("Council Mode bus → wsBridge fanout", () => {
+    // The orchestrator's wireGroupListeners subscribes to companionBus
+    // and broadcasts `observer_review` to both halves. These tests drive
+    // the bus directly and assert the wire-message reaches
+    // wsBridge.broadcastToGroup with the correct shape.
+
+    beforeEach(() => {
+      orchestrator.initialize();
+    });
+
+    it("fans `group:created` out to both halves with the correct pairing label", () => {
+      // Seed the launcher's session map so the listener can resolve
+      // backendType for the pairing label.
+      vi.mocked(deps.launcher.getSession).mockImplementation((id: string) => {
+        if (id === "sess_orch") return { sessionId: "sess_orch", state: "starting", cwd: "/w", createdAt: 0, backendType: "claude" } as any;
+        if (id === "sess_obs") return { sessionId: "sess_obs", state: "starting", cwd: "/w", createdAt: 0, backendType: "codex" } as any;
+        return undefined;
+      });
+      companionBus.emit("group:created", {
+        sessionGroupId: "grp_t1",
+        primarySessionId: "sess_orch",
+        observerSessionId: "sess_obs",
+      });
+      expect(deps.wsBridge.broadcastToGroup).toHaveBeenCalledWith(
+        ["sess_orch", "sess_obs"],
+        expect.objectContaining({ type: "group_created", pairing: "claude+codex" }),
+      );
+    });
+
+    it("fans `group:review` out as the observer_review wire message including grounding downgrades", () => {
+      vi.mocked(deps.launcher.listSessions).mockReturnValue([
+        { sessionId: "sess_orch", sessionGroupId: "grp_t2", state: "running", cwd: "/w", createdAt: 0 } as any,
+        { sessionId: "sess_obs", sessionGroupId: "grp_t2", state: "running", cwd: "/w", createdAt: 0 } as any,
+      ]);
+      companionBus.emit("group:review", {
+        sessionGroupId: "grp_t2",
+        checkpointId: "chk_a",
+        phase: "council-plan",
+        findings: [
+          { id: "f1", severity: "STOP", claim: "live STOP", evidence_path: "src/x.ts" },
+          { id: "f2", severity: "STOP", claim: "downgraded STOP", evidence_path: "src/y.ts", wasDowngraded: true, downgradeReason: "evidence_not_in_modified_set" },
+        ],
+        downgrades: [{ id: "f2", reason: "evidence_not_in_modified_set" }],
+        observerModel: "gpt-5-codex",
+        observerProvider: "codex",
+      });
+      const calls = vi.mocked(deps.wsBridge.broadcastToGroup).mock.calls;
+      const last = calls[calls.length - 1]!;
+      expect(last[0]).toEqual(["sess_orch", "sess_obs"]);
+      const msg = last[1] as { type: string; findings: Array<{ id: string; wasDowngraded?: boolean }>; downgrades: Array<{ id: string }>; observerProvider: string };
+      expect(msg.type).toBe("observer_review");
+      expect(msg.observerProvider).toBe("codex");
+      expect(msg.findings).toHaveLength(2);
+      expect(msg.findings[1]?.wasDowngraded).toBe(true);
+      expect(msg.downgrades).toEqual([{ id: "f2", reason: "evidence_not_in_modified_set" }]);
+    });
+
+    // EC-2 invariant (Subprocess council review #4): when an
+    // unintentional `session:exited` hits a council-tracked session,
+    // BOTH halves land in `intentionalKills` BEFORE the degrade signal
+    // emits — preventing the proactive-relaunch race.
+    it("does NOT drive group:degraded for an `intentional` session exit", () => {
+      // Seed council group meta so the orchestrator's session:exited
+      // listener has a group to match against.
+      const obs = orchestrator as unknown as { councilGroupMeta: Map<string, { primarySessionId: string; observerSessionId: string; pairing: string; createdAt: number; lastCheckpointReceivedAt: number | null }> };
+      obs.councilGroupMeta.set("grp_t3", {
+        primarySessionId: "sess_orch_t3",
+        observerSessionId: "sess_obs_t3",
+        pairing: "claude+claude",
+        createdAt: Date.now(),
+        lastCheckpointReceivedAt: null,
+      });
+      const intentional = (orchestrator as unknown as { intentionalKills: Set<string> }).intentionalKills;
+      intentional.add("sess_obs_t3");
+      const broadcastCallsBefore = vi.mocked(deps.wsBridge.broadcastToGroup).mock.calls.length;
+      companionBus.emit("session:exited", { sessionId: "sess_obs_t3", exitCode: 0 });
+      expect(vi.mocked(deps.wsBridge.broadcastToGroup).mock.calls.length).toBe(broadcastCallsBefore);
+    });
+
+    it("drives group:degraded when an unintentional `session:exited` hits a council-tracked half", () => {
+      vi.mocked(deps.launcher.listSessions).mockReturnValue([
+        { sessionId: "sess_orch_t4", sessionGroupId: "grp_t4", state: "running", cwd: "/w", createdAt: 0 } as any,
+      ]);
+      const obs = orchestrator as unknown as { councilGroupMeta: Map<string, { primarySessionId: string; observerSessionId: string; pairing: string; createdAt: number; lastCheckpointReceivedAt: number | null }> };
+      obs.councilGroupMeta.set("grp_t4", {
+        primarySessionId: "sess_orch_t4",
+        observerSessionId: "sess_obs_t4",
+        pairing: "claude+codex",
+        createdAt: Date.now(),
+        lastCheckpointReceivedAt: null,
+      });
+      companionBus.emit("session:exited", { sessionId: "sess_obs_t4", exitCode: 1 });
+      const calls = vi.mocked(deps.wsBridge.broadcastToGroup).mock.calls;
+      const degraded = calls.find((c) => (c[1] as { type?: string }).type === "group_degraded");
+      expect(degraded).toBeDefined();
+      expect(degraded?.[1]).toMatchObject({ type: "group_degraded", sessionGroupId: "grp_t4", deadRole: "observer" });
+      // EC-2: BOTH halves added to intentionalKills BEFORE the degrade signal emits.
+      const intentional = (orchestrator as unknown as { intentionalKills: Set<string> }).intentionalKills;
+      expect(intentional.has("sess_orch_t4")).toBe(true);
+      expect(intentional.has("sess_obs_t4")).toBe(true);
     });
   });
 });

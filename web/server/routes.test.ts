@@ -3987,6 +3987,94 @@ describe("POST /api/sessions/create-stream", () => {
   });
 });
 
+describe("POST /api/sessions/create-stream — Council Mode branch (Beck council review #9)", () => {
+  it("delegates to createCouncilGroup with stripped base body and emits done with pair shape", async () => {
+    const res = await app.request("/api/sessions/create-stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        cwd: "/work/repo",
+        model: "claude-sonnet-4-6",
+        councilMode: "council",
+        councilPairing: "claude+codex",
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+
+    const events = await parseSSE(res);
+    // Two progress events — open + close bracket for the pair spawn.
+    const progress = events.filter((e) => e.event === "progress");
+    expect(progress.length).toBe(2);
+    expect(JSON.parse(progress[0].data).status).toBe("in_progress");
+    expect(JSON.parse(progress[1].data).status).toBe("done");
+
+    // Done event carries the council shape with both halves.
+    const done = events.find((e) => e.event === "done");
+    expect(done).toBeDefined();
+    const doneData = JSON.parse(done!.data);
+    expect(doneData.sessionGroupId).toBe("grp_test_council");
+    expect(doneData.sessionId).toBe("sess_orch");
+    expect(doneData.observerSessionId).toBe("sess_obs");
+    expect(doneData.backendType).toBe("claude");
+
+    // The non-stream path MUST NOT be invoked in the SSE Council branch.
+    expect(orchestrator.createSessionStreaming).not.toHaveBeenCalled();
+    // Coordinator received the base body with councilMode/councilPairing stripped.
+    expect(orchestrator.createCouncilGroup).toHaveBeenCalledWith(expect.objectContaining({
+      pairing: "claude+codex",
+      base: { cwd: "/work/repo", model: "claude-sonnet-4-6" },
+    }));
+  });
+
+  it("emits error event for an invalid pairing BEFORE any progress event fires", async () => {
+    const res = await app.request("/api/sessions/create-stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        cwd: "/work/repo",
+        councilMode: "council",
+        councilPairing: "claude+gpt",
+      }),
+    });
+    expect(res.status).toBe(200);
+    const events = await parseSSE(res);
+    // Error event present; no progress fired (validation runs first).
+    const error = events.find((e) => e.event === "error");
+    expect(error).toBeDefined();
+    expect(JSON.parse(error!.data).error).toMatch(/Invalid pairing/);
+    const progress = events.filter((e) => e.event === "progress");
+    expect(progress.length).toBe(0);
+    // Coordinator was never invoked.
+    expect(orchestrator.createCouncilGroup).not.toHaveBeenCalled();
+  });
+
+  it("propagates coordinator failure as an error SSE event", async () => {
+    orchestrator.createCouncilGroup.mockResolvedValueOnce({
+      ok: false,
+      error: "observer spawn timed out",
+      status: 504,
+    });
+    const res = await app.request("/api/sessions/create-stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        cwd: "/work/repo",
+        councilMode: "council",
+        councilPairing: "claude+codex",
+      }),
+    });
+    expect(res.status).toBe(200);
+    const events = await parseSSE(res);
+    // First progress fired (validation passed); then error.
+    const progress = events.filter((e) => e.event === "progress");
+    expect(progress.length).toBe(1);
+    const error = events.find((e) => e.event === "error");
+    expect(error).toBeDefined();
+    expect(JSON.parse(error!.data).error).toMatch(/observer spawn timed out/);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // Auth endpoints
 // ---------------------------------------------------------------------------
