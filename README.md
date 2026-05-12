@@ -280,7 +280,7 @@ The knowledge base (`.agents/knowledge/`) is project-specific — fork it and le
 
 ## Attribution
 
-Aura Companion is a fork of [Vibe-Companion](https://github.com/nikolaiklein/Vibe-Companion) by The Vibe Company (MIT License) — the original web UI foundation for Claude Code session bridging. The Council Mode pairing system, the adaptive knowledge base, and the Carmack Council skill chain are Aura-specific extensions on top of that foundation.
+Aura Companion is a fork of [`The-Vibe-Company/companion`](https://github.com/The-Vibe-Company/companion) by [The Vibe Company](https://thevibecompany.co) (MIT License) — the original web UI for Claude Code & Codex session bridging, published at [thecompanion.sh](https://thecompanion.sh). The Council Mode pairing system, the adaptive knowledge base, and the Carmack Council skill chain are Aura-specific extensions on top of that foundation. (Note: [nikolaiklein/Vibe-Companion](https://github.com/nikolaiklein/Vibe-Companion) is a separate sibling fork of the same upstream, not an ancestor of Aura.)
 
 Other credits:
 - [impeccable](https://github.com/pbakaus/impeccable) by Paul Bakaus — 18 design skills

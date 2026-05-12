@@ -3,8 +3,12 @@ export function Footer() {
     <footer className="relative z-10 border-t border-cc-border py-10 px-5 sm:px-7 text-center text-sm text-cc-muted">
       <p className="font-mono-code tracking-wide">
         Aura Companion — forked from{" "}
-        <a href="https://github.com/nikolaiklein/Vibe-Companion" target="_blank" rel="noopener" className="hover:text-cc-fg transition-colors">
-          Vibe-Companion
+        <a href="https://github.com/The-Vibe-Company/companion" target="_blank" rel="noopener" className="hover:text-cc-fg transition-colors">
+          The-Vibe-Company/companion
+        </a>{" "}
+        by{" "}
+        <a href="https://thevibecompany.co" target="_blank" rel="noopener" className="hover:text-cc-fg transition-colors">
+          The Vibe Company
         </a>{" "}
         (MIT)
       </p>
