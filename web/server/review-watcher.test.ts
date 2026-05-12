@@ -46,7 +46,7 @@ describe("watchReviews", () => {
       onReview: (p) => { seen.push(p); },
     });
     // Atomic write so the watcher sees rename, not partial.
-    writeAtomicJson(join(dir, "council-plan-observer.md"), validReview());
+    writeAtomicJson(join(dir, "council-plan-codex-observer.md"), validReview());
     // Allow the debounce window + handler to settle.
     await new Promise((r) => setTimeout(r, 300));
     controller.abort();
@@ -83,11 +83,11 @@ describe("watchReviews", () => {
       onReview: vi.fn(),
       onDropped,
     });
-    writeFileSync(join(dir, "council-plan-observer.md"), "not-json{");
+    writeFileSync(join(dir, "council-plan-codex-observer.md"), "not-json{");
     await new Promise((r) => setTimeout(r, 250));
     controller.abort();
     await watchPromise;
-    expect(onDropped).toHaveBeenCalledWith("invalid-schema", "council-plan-observer.md");
+    expect(onDropped).toHaveBeenCalledWith("invalid-schema", "council-plan-codex-observer.md");
   });
 
   // Dedup: the same (checkpoint_id, observer_provider) is emitted once even
@@ -102,18 +102,48 @@ describe("watchReviews", () => {
       onReview: (p) => { seen.push(p); },
       onDropped,
     });
-    writeAtomicJson(join(dir, "phase-a-observer.md"), validReview({ checkpoint_id: "chk-A" }));
+    writeAtomicJson(join(dir, "phase-a-codex-observer.md"), validReview({ checkpoint_id: "chk-A" }));
     await new Promise((r) => setTimeout(r, 250));
     // Re-emit same review (e.g. observer reconnect).
-    writeAtomicJson(join(dir, "phase-a-observer.md"), validReview({ checkpoint_id: "chk-A" }));
+    writeAtomicJson(join(dir, "phase-a-codex-observer.md"), validReview({ checkpoint_id: "chk-A" }));
     await new Promise((r) => setTimeout(r, 250));
     // A different review (different checkpoint) — must land.
-    writeAtomicJson(join(dir, "phase-b-observer.md"), validReview({ checkpoint_id: "chk-B" }));
+    writeAtomicJson(join(dir, "phase-b-codex-observer.md"), validReview({ checkpoint_id: "chk-B" }));
     await new Promise((r) => setTimeout(r, 250));
     controller.abort();
     await watchPromise;
     expect(seen.map((r) => r.checkpoint_id)).toEqual(["chk-A", "chk-B"]);
-    expect(onDropped).toHaveBeenCalledWith("duplicate-review", "phase-a-observer.md", expect.stringContaining("chk-A"));
+    expect(onDropped).toHaveBeenCalledWith("duplicate-review", "phase-a-codex-observer.md", expect.stringContaining("chk-A"));
+  });
+
+  // EC-4 regression (Persistence council review #5): when two DISTINCT
+  // payloads land on the same path within the debounce window, the
+  // first rename's bytes are overwritten on disk by the second
+  // atomic-write — they cannot be recovered. The watcher logs the loss
+  // via `onDropped("superseded", ...)` so the silent-coalesce that
+  // EC-4 forbids becomes visible. The second payload still surfaces.
+  it("logs `superseded` when two distinct writes land on the same path inside the debounce window", async () => {
+    const seen: ObserverReviewPayload[] = [];
+    const onDropped = vi.fn<(r: ReviewDropReason, f: string, d?: string) => void>();
+    const watchPromise = watchReviews({
+      directory: dir,
+      signal: controller.signal,
+      onReview: (p) => { seen.push(p); },
+      onDropped,
+    });
+    const path = join(dir, "phase-z-codex-observer.md");
+    writeAtomicJson(path, validReview({ checkpoint_id: "chk-Z1", phase: "phase-z" }));
+    // Force a distinct mtime by waiting a few ms — atomic writes within
+    // the same millisecond can produce identical mtime on some FSes.
+    await new Promise((r) => setTimeout(r, 30));
+    writeAtomicJson(path, validReview({ checkpoint_id: "chk-Z2", phase: "phase-z" }));
+    await new Promise((r) => setTimeout(r, 400));
+    controller.abort();
+    await watchPromise;
+    // The second payload still surfaces. The first is no longer
+    // silently coalesced — onDropped("superseded") records the loss.
+    expect(seen.map((r) => r.checkpoint_id)).toEqual(["chk-Z2"]);
+    expect(onDropped).toHaveBeenCalledWith("superseded", "phase-z-codex-observer.md", expect.any(String));
   });
 
   // Handler throw: the watcher does NOT propagate; it logs via onDropped.
@@ -125,10 +155,44 @@ describe("watchReviews", () => {
       onReview: () => { throw new Error("handler boom"); },
       onDropped,
     });
-    writeAtomicJson(join(dir, "phase-x-observer.md"), validReview({ checkpoint_id: "chk-X" }));
+    writeAtomicJson(join(dir, "phase-x-codex-observer.md"), validReview({ checkpoint_id: "chk-X" }));
     await new Promise((r) => setTimeout(r, 250));
     controller.abort();
     await watchPromise;
-    expect(onDropped).toHaveBeenCalledWith("handler-error", "phase-x-observer.md", expect.stringContaining("handler boom"));
+    expect(onDropped).toHaveBeenCalledWith("handler-error", "phase-x-codex-observer.md", expect.stringContaining("handler boom"));
+  });
+
+  // Persistence council review #6: a handler that throws on the first
+  // call must NOT commit the dedup key; a subsequent successful retry
+  // surfaces. Without this fix, a transient broadcast failure would
+  // silently consume the review forever.
+  it("retries the same review on a subsequent FS event after a handler throw (dedup key not poisoned)", async () => {
+    const onDropped = vi.fn<(r: ReviewDropReason, f: string, d?: string) => void>();
+    let throwOnce = true;
+    const seen: ObserverReviewPayload[] = [];
+    const watchPromise = watchReviews({
+      directory: dir,
+      signal: controller.signal,
+      onReview: (p) => {
+        if (throwOnce) {
+          throwOnce = false;
+          throw new Error("transient boom");
+        }
+        seen.push(p);
+      },
+      onDropped,
+    });
+    const path = join(dir, "phase-retry-codex-observer.md");
+    writeAtomicJson(path, validReview({ checkpoint_id: "chk-retry" }));
+    await new Promise((r) => setTimeout(r, 250));
+    // Re-emit — same payload, mtime changes (a few ms later), so the
+    // debounce keying treats it as a distinct attempt. Handler now
+    // succeeds, and the dedup key is committed only on success.
+    writeAtomicJson(path, validReview({ checkpoint_id: "chk-retry" }));
+    await new Promise((r) => setTimeout(r, 400));
+    controller.abort();
+    await watchPromise;
+    expect(seen.map((r) => r.checkpoint_id)).toEqual(["chk-retry"]);
+    expect(onDropped).toHaveBeenCalledWith("handler-error", "phase-retry-codex-observer.md", expect.stringContaining("transient boom"));
   });
 });

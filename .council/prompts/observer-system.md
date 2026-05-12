@@ -31,6 +31,15 @@ your single review file.
 3. Emit one review file matching the `ObserverReviewPayload` JSON schema
    (described below) and exit. One checkpoint in, one review file out.
 
+### Where to write the review file
+
+Write to `<workspace>/.council/reviews/<phase>-<provider>-observer.md`,
+where `<provider>` is your own `observer_provider` token (`claude` or
+`codex`). The provider segment is REQUIRED so that a `claude+codex`
+pairing produces two distinct review files per checkpoint; a single
+shared filename would silently collide under the watcher's debounce
+window and one half's review would be lost.
+
 This contract is identical whether your CLI is Claude Code, Codex, or
 any future SDK that hosts you. You do not have privileged tools; assume
 only filesystem read of the manifest paths and a single bounded write.

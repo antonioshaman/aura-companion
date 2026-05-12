@@ -350,17 +350,32 @@ export class SessionOrchestrator {
       await this.handleAutoNaming(sessionId, firstUserMessage);
     });
 
-    // Council Mode — fan group lifecycle events out to both halves' browsers.
-    // The emitters live in `createCouncilGroup` (group:created) and in the
-    // coordinator's archive path / state machine (group:exited /
-    // group:degraded). The wire shape matches the BrowserIncomingMessage
-    // variants declared in session-types.ts.
+    // Council Mode group listener bag — extracted into wireGroupListeners
+    // (Fowler council review #15) so the council surface is visibly
+    // separated from the solo-session lifecycle wiring above.
+    this.wireGroupListeners();
+
+    // Reconnection watchdog for stale sessions after server restart
+    this.startReconnectionWatchdog();
+  }
+
+  // ── Council Mode — wire bus listeners (Fowler council review #15) ────────
+
+  /**
+   * Subscribe the orchestrator to every `group:*` event and to the
+   * council-specific `session:exited` branch. Extracted from
+   * `initialize()` so the council surface lives in one named block
+   * and a future addition (e.g. `group:reconnected`, `group:resumed`)
+   * lands next to its siblings rather than threading another listener
+   * into a 200-line method.
+   */
+  private wireGroupListeners(): void {
+    // Fan group lifecycle events out to both halves' browsers. Wire-shape
+    // matches the BrowserIncomingMessage variants declared in
+    // session-types.ts.
     companionBus.on("group:created", ({ sessionGroupId, primarySessionId, observerSessionId }) => {
       const primary = this.launcher.getSession(primarySessionId);
       const observer = this.launcher.getSession(observerSessionId);
-      // Pairing label reconstructed from each half's backendType — the
-      // coordinator's record is its own internal state; the WS message
-      // carries the public label the UI reads.
       const pairing = `${primary?.backendType ?? "claude"}+${observer?.backendType ?? "claude"}`;
       this.wsBridge.broadcastToGroup([primarySessionId, observerSessionId], {
         type: "group_created",
@@ -371,28 +386,21 @@ export class SessionOrchestrator {
       });
     });
     companionBus.on("group:exited", ({ sessionGroupId, reason }) => {
-      // Look up the live group members from the launcher's session map.
-      // Both halves may already be gone by the time `group:exited` fires;
-      // broadcastToGroup is a no-op for missing sessions.
-      const ids: string[] = [];
-      for (const s of this.launcher.listSessions()) {
-        if (s.sessionGroupId === sessionGroupId) ids.push(s.sessionId);
-      }
-      this.wsBridge.broadcastToGroup(ids, { type: "group_exited", sessionGroupId, reason });
+      this.wsBridge.broadcastToGroup(this.getGroupMemberIds(sessionGroupId), {
+        type: "group_exited",
+        sessionGroupId,
+        reason,
+      });
     });
     companionBus.on("group:degraded", ({ sessionGroupId, deadRole }) => {
-      const ids: string[] = [];
-      for (const s of this.launcher.listSessions()) {
-        if (s.sessionGroupId === sessionGroupId) ids.push(s.sessionId);
-      }
-      this.wsBridge.broadcastToGroup(ids, { type: "group_degraded", sessionGroupId, deadRole });
+      this.wsBridge.broadcastToGroup(this.getGroupMemberIds(sessionGroupId), {
+        type: "group_degraded",
+        sessionGroupId,
+        deadRole,
+      });
     });
     companionBus.on("group:checkpoint", ({ sessionGroupId, checkpointId, phase, sequence }) => {
-      const ids: string[] = [];
-      for (const s of this.launcher.listSessions()) {
-        if (s.sessionGroupId === sessionGroupId) ids.push(s.sessionId);
-      }
-      this.wsBridge.broadcastToGroup(ids, {
+      this.wsBridge.broadcastToGroup(this.getGroupMemberIds(sessionGroupId), {
         type: "group_checkpoint",
         sessionGroupId,
         checkpointId,
@@ -401,16 +409,8 @@ export class SessionOrchestrator {
         timestamp: Date.now(),
       });
     });
-
-    // Observer review pickup → fan out as `observer_review` browser message.
-    // The watcher hand has already validated grounding and assigned stable
-    // ids; this listener only does the WS fanout.
     companionBus.on("group:review", ({ sessionGroupId, checkpointId, phase, findings, downgrades, observerModel, observerProvider }) => {
-      const ids: string[] = [];
-      for (const s of this.launcher.listSessions()) {
-        if (s.sessionGroupId === sessionGroupId) ids.push(s.sessionId);
-      }
-      this.wsBridge.broadcastToGroup(ids, {
+      this.wsBridge.broadcastToGroup(this.getGroupMemberIds(sessionGroupId), {
         type: "observer_review",
         sessionGroupId,
         checkpointId,
@@ -423,46 +423,48 @@ export class SessionOrchestrator {
       });
     });
 
-    // Tear down council watchers when a group exits, so the abort signal
-    // cancels any in-flight reads and the AbortController + map entry are
-    // collected.
+    // Tear down council watchers + drop group metadata on exit. Bus
+    // ordering: this listener runs after the fanout listener above, so
+    // the browser receives `group_exited` before its session map starts
+    // being trimmed server-side — no race.
     companionBus.on("group:exited", ({ sessionGroupId }) => {
       this.stopCouncilWatchers(sessionGroupId);
       this.councilGroupMeta.delete(sessionGroupId);
     });
 
-    // Subprocess council review #4 (P1#4): drive `group:degraded` when
-    // either half of a council pair exits unexpectedly. Without this,
-    // the UI never enters degraded mode, watchers leak past the dead
-    // half's auto-relaunch exhaustion, and the user has no signal.
+    // Drive `group:degraded` when either half of a council pair exits
+    // unexpectedly (Subprocess council review #4). Without this, the UI
+    // never enters degraded mode and watchers leak past the dead half's
+    // auto-relaunch exhaustion. EC-2 invariant honoured — BOTH ids land
+    // in `intentionalKills` before the degrade signal emits.
     companionBus.on("session:exited", ({ sessionId }) => {
-      if (this.intentionalKills.has(sessionId)) return; // archive drives group:exited separately
+      if (this.intentionalKills.has(sessionId)) return;
       let foundGroupId: string | null = null;
       let foundRole: "orchestrator" | "observer" | null = null;
       for (const [groupId, meta] of this.councilGroupMeta) {
-        if (meta.primarySessionId === sessionId) {
-          foundGroupId = groupId;
-          foundRole = "orchestrator";
-          break;
-        }
-        if (meta.observerSessionId === sessionId) {
-          foundGroupId = groupId;
-          foundRole = "observer";
-          break;
-        }
+        if (meta.primarySessionId === sessionId) { foundGroupId = groupId; foundRole = "orchestrator"; break; }
+        if (meta.observerSessionId === sessionId) { foundGroupId = groupId; foundRole = "observer"; break; }
       }
       if (!foundGroupId || !foundRole) return;
       const meta = this.councilGroupMeta.get(foundGroupId)!;
-      // EC-2 invariant: mark BOTH halves intentional BEFORE emitting any
-      // teardown so the proactive-relaunch listener on the surviving half
-      // does not race the degrade signal.
       this.intentionalKills.add(meta.primarySessionId);
       this.intentionalKills.add(meta.observerSessionId);
       companionBus.emit("group:degraded", { sessionGroupId: foundGroupId, deadRole: foundRole });
     });
+  }
 
-    // Reconnection watchdog for stale sessions after server restart
-    this.startReconnectionWatchdog();
+  /**
+   * Pure helper (Fowler council review #15 — F2 echo): live session ids
+   * for a given group, sourced from the launcher's session map. Returns
+   * an empty array when both halves are gone — `broadcastToGroup` is a
+   * no-op on missing ids by design.
+   */
+  private getGroupMemberIds(sessionGroupId: string): string[] {
+    const ids: string[] = [];
+    for (const s of this.launcher.listSessions()) {
+      if (s.sessionGroupId === sessionGroupId) ids.push(s.sessionId);
+    }
+    return ids;
   }
 
   // ── Council Mode — per-group filesystem watcher lifecycle ────────────────
