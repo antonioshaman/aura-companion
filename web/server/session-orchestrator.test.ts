@@ -2421,19 +2421,29 @@ describe("SessionOrchestrator", () => {
       }
     });
 
-    // PLAN Task 6: partial pairs are no longer dropped — the surviving half
-    // re-registers the group in `reconnecting` state and the coordinator
-    // arms the standard reconnect grace window. Session-level auto-relaunch
-    // will fire for the missing half; if it handshakes within the grace,
-    // `reconnect_ok` resolves it back to `active`. Watcher attach is best-
-    // effort (mkdirSync of a missing cwd fails silently); the Task 6
-    // contract is the coordinator state machine, not the filesystem watcher.
-    it("partial pair (orchestrator-only) registers in reconnecting with grace armed", async () => {
+    // FINAL-REVIEW P1#1: partial pairs (one half completely missing from
+    // launcher.listSessions()) are STRUCTURALLY UNRECOVERABLE on restart.
+    // There is no SdkSessionInfo for the missing half to relaunch FROM,
+    // and any real handshake arriving later carries a sessionId that cannot
+    // bind to a `__missing_*` snapshot — the earlier Task 6 design armed
+    // a 45s grace that could never resolve to `reconnect_ok`. The
+    // reality-aligned behaviour is: register the group, then transition
+    // straight to `degraded` via `applyEvent({half_died})` — no grace
+    // timer, no misleading "reconnecting…" UI, no guaranteed 45s wait.
+    it("partial pair (orchestrator-only) lands in degraded with no grace timer", async () => {
       const fs = await import("node:fs");
       const os = await import("node:os");
       const path = await import("node:path");
       const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "council-partial-")));
       try {
+        // Capture the bus emit to verify the degraded transition flows
+        // through the state machine (AP-2: applyEvent is the sole
+        // mutator; the emit must come from there, not from any parallel
+        // direct `bus.emit("group:degraded")` shortcut).
+        const degradedEmits: Array<{ sessionGroupId: string; deadRole: string }> = [];
+        companionBus.on("group:degraded", (payload) => {
+          degradedEmits.push(payload as { sessionGroupId: string; deadRole: string });
+        });
         (deps.launcher.listSessions as any).mockReturnValue([
           { sessionId: "lone-orch", sessionGroupId: "grp_partial", sessionGroupRole: "orchestrator",
             backendType: "claude", cwd: ws, archived: false, createdAt: 1, state: "running" },
@@ -2447,9 +2457,55 @@ describe("SessionOrchestrator", () => {
         };
         obs.reconcileCouncilGroups();
         expect(obs.councilGroupMeta.has("grp_partial")).toBe(true);
-        expect(obs.coordinator.get("grp_partial")?.status).toBe("reconnecting");
-        expect(obs.coordinator.getReconnectContext("grp_partial")).toBeDefined();
+        // P1#1: must be `degraded`, NOT `reconnecting`. The missing
+        // observer half has no relaunch path and no identity-binding
+        // candidate, so the honest state is degraded from frame one.
+        expect(obs.coordinator.get("grp_partial")?.status).toBe("degraded");
+        // No grace timer armed — `getReconnectContext` returns undefined
+        // (the bug was: a context was created with a snapshot id that
+        // no real handshake could ever match → guaranteed expiry).
+        expect(obs.coordinator.getReconnectContext("grp_partial")).toBeUndefined();
+        // The state-machine emit reached the bus with the correct
+        // dead role (observer is the missing half in this fixture).
+        expect(degradedEmits).toEqual([{ sessionGroupId: "grp_partial", deadRole: "observer" }]);
         obs.stopCouncilWatchers("grp_partial");
+      } finally {
+        fs.rmSync(ws, { recursive: true, force: true });
+      }
+    });
+
+    // Symmetry case: observer survives, orchestrator missing. Verifies
+    // the `deadRole` calculation is symmetric (the original Task 6 bug
+    // would have synthesised `__missing_orch_*` here and armed grace on
+    // the wrong half) and that the cross-pairing `pairing` label still
+    // reflects the surviving backend (Codex observer → backend defaults
+    // to "claude" for the unrecoverable orchestrator half because we
+    // have no metadata to recover its true backend — documented in the
+    // P1#1 docstring as the structurally-unrecoverable consequence).
+    it("partial pair (observer-only) lands in degraded with deadRole=orchestrator", async () => {
+      const fs = await import("node:fs");
+      const os = await import("node:os");
+      const path = await import("node:path");
+      const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "council-partial-obs-")));
+      try {
+        const degradedEmits: Array<{ sessionGroupId: string; deadRole: string }> = [];
+        companionBus.on("group:degraded", (payload) => {
+          degradedEmits.push(payload as { sessionGroupId: string; deadRole: string });
+        });
+        (deps.launcher.listSessions as any).mockReturnValue([
+          { sessionId: "lone-obs", sessionGroupId: "grp_partial_obs", sessionGroupRole: "observer",
+            backendType: "codex", cwd: ws, archived: false, createdAt: 2, state: "running" },
+        ]);
+        const obs = orchestrator as unknown as {
+          reconcileCouncilGroups: () => void;
+          stopCouncilWatchers: (id: string) => void;
+          coordinator: { get: (id: string) => { status: string } | undefined; getReconnectContext: (id: string) => unknown };
+        };
+        obs.reconcileCouncilGroups();
+        expect(obs.coordinator.get("grp_partial_obs")?.status).toBe("degraded");
+        expect(obs.coordinator.getReconnectContext("grp_partial_obs")).toBeUndefined();
+        expect(degradedEmits).toEqual([{ sessionGroupId: "grp_partial_obs", deadRole: "orchestrator" }]);
+        obs.stopCouncilWatchers("grp_partial_obs");
       } finally {
         fs.rmSync(ws, { recursive: true, force: true });
       }

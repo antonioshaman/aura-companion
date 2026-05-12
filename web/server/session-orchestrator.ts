@@ -547,14 +547,30 @@ export class SessionOrchestrator {
    * group registry. Called from `initialize()` after the bus is wired and
    * idempotent on re-entry (skips groups already registered).
    *
-   * PLAN Task 6: partial pairs (one half alive, one half missing) are no
-   * longer dropped on the floor. The surviving half registers the group
-   * in `reconnecting` state and the coordinator arms the standard
-   * `COMPANION_GROUP_RECONNECT_GRACE_MS` window — session-level
-   * auto-relaunch fires for the missing half, and if it handshakes within
-   * the grace window, `session:cli-id-received` resolves to `reconnect_ok`
-   * just as for live-disconnect recoveries. After the grace expires, the
-   * normal `reconnect_failed → degraded` resolution lands.
+   * PLAN Task 6 + FINAL-REVIEW P1#1: partial pairs (one half alive, one
+   * half completely missing from `launcher.listSessions()`) are
+   * structurally unrecoverable on restart — the missing half has no
+   * persisted SdkSessionInfo, so `launcher.relaunch` cannot respawn it
+   * (there is no entry to relaunch FROM, and no metadata anywhere about
+   * the missing half's backend / cwd / env / containerId / cliSessionId).
+   * The earlier Task 6 design synthesised `__missing_*` placeholders and
+   * armed the standard reconnect grace window expecting a `--resume`-
+   * style handshake to bind back, but: (1) `scheduleProactiveRelaunch`
+   * keys on `launcher.getSession(sessionId)` which returns undefined for
+   * the placeholder, so no relaunch path ever fires for the missing half;
+   * (2) any real handshake arriving later carries a real sessionId that
+   * cannot equal a `__missing_*` placeholder, so the identity-binding
+   * check at `:365-377` mismatches → grace expires → degraded after a
+   * guaranteed 45s wait with no possible happy path.
+   *
+   * Reality-aligned behaviour: when a partial pair is reconciled, the
+   * group is registered in `active` then immediately transitioned through
+   * `half_died → degraded` via the state machine. No grace timer, no
+   * misleading `reconnecting` UI. The user sees `degraded` straight away,
+   * matching the actual recoverability of the situation.
+   *
+   * Complete-pair restoration continues to use `--resume` + the standard
+   * `session:cli-id-received` listener; that path is unchanged.
    *
    * Deliberate EC-8 gap (FS-JSON recommendation): no `writeReconnectIntent`
    * sentinel. A crash mid-grace means the server is restarting again, and
@@ -603,13 +619,15 @@ export class SessionOrchestrator {
       if (!cwd) continue;
       const isComplete = pair.orchestrator !== undefined && pair.observer !== undefined;
 
-      // For partial pairs, synthesize a placeholder sessionId/backendType
-      // for the missing half. The group record needs both fields to satisfy
-      // GroupMember; the missing half is the snapshotted dead session for
-      // the reconnect window. If/when the missing half handshakes,
-      // `session:cli-id-received` arrives with the real sessionId.
       const orchestrator = pair.orchestrator;
       const observer = pair.observer;
+      // Partial-pair placeholder ids: structurally unrecoverable (see
+      // docstring above). Kept as a non-empty string only because
+      // `GroupRecord` requires both `primary.sessionId` and
+      // `observer.sessionId`. These ids are NEVER passed to `armReconnect`
+      // and NEVER reach `wsBridge.markCouncilSession`, so identity-binding
+      // and broadcast paths cannot mis-bind to them. The group transitions
+      // straight to `degraded` below.
       const primarySessionId = orchestrator?.sessionId ?? `__missing_orch_${groupId}`;
       const observerSessionId = observer?.sessionId ?? `__missing_obs_${groupId}`;
       const primaryBackend = orchestrator?.backendType ?? "claude";
@@ -652,16 +670,18 @@ export class SessionOrchestrator {
           pairing,
         });
       } else {
-        // Partial pair — arm the grace window for the missing half.
+        // FINAL-REVIEW P1#1: partial pair is structurally unrecoverable —
+        // no launcher entry exists for the missing half, no relaunch path
+        // can fire, and any later real handshake carries a sessionId that
+        // cannot bind to a `__missing_*` snapshot. Transition straight to
+        // `degraded` via `applyEvent({half_died})` — single mutator (AP-2),
+        // single EC-9 `group.degraded` log entry. No grace timer, no
+        // misleading "reconnecting…" UI. The surviving half stays
+        // operable; the dead role surfaces honestly.
         const deadRole: SessionGroupRole = orchestrator === undefined ? "orchestrator" : "observer";
-        const deadSessionId = deadRole === "orchestrator" ? primarySessionId : observerSessionId;
-        coord.armReconnect({
-          sessionGroupId: groupId,
-          deadRole,
-          snapshotSessionId: deadSessionId,
-        });
+        coord.applyEvent(groupId, { type: "half_died", role: deadRole });
         restoredPartial++;
-        log.info("session-orchestrator", "council group reconciled with partial-pair grace", {
+        log.info("session-orchestrator", "council group reconciled as degraded partial-pair", {
           event: "group:reconciled_partial",
           sessionGroupId: groupId,
           role: deadRole,
