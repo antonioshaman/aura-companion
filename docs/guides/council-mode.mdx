@@ -7,7 +7,7 @@ description: Paired orchestrator + observer sessions — independent review in o
 
 Council Mode pairs your main agent with an independent reviewer that wakes on every phase checkpoint, reads only the just-changed surface, and pushes grounded findings back into your chat. The multi-agent pattern that worked manually in past pipelines — catching ~2 P1 issues per phase that single-author review missed — is reproducible in one click instead of requiring two terminals and manual coordination.
 
-<img src="/screenshots/council-mode-overview.png" alt="Council Mode running: orchestrator chat on the left, ObserverPanel showing observer findings on the right, multiple paired sessions in the sidebar with provider badges" />
+<img src="../screenshots/council-mode-overview.png" alt="Council Mode running: orchestrator chat on the left, ObserverPanel showing observer findings on the right, multiple paired sessions in the sidebar with provider badges" />
 
 ## When to use it
 
@@ -60,7 +60,7 @@ A collapsible rail with two halves:
 
 - **Findings log** (`role="log"`, `aria-live="polite"`) — chronological list of all observer findings (STOP, NOTE, suggestion). Each entry shows the deterministic `fnd_<hex>` id, the phase, the claim, and the evidence path. Dismissed STOPs collapse but stay visible for audit.
 
-<img src="/screenshots/council-mode-anatomy.png" alt="Council Mode UI anatomy — ProviderBadges (claude+codex compact and default sizes), BlockerBanner with a STOP finding showing evidence path and Open evidence / Mark addressed / Dismiss for now actions, DegradedBanner in observer-offline and orchestrator-offline states, FindingsLog in empty state and with a full STOP/WARN/NOTE/INFO/DOWNGRADED mix" />
+<img src="../screenshots/council-mode-anatomy.png" alt="Council Mode UI anatomy — ProviderBadges (claude+codex compact and default sizes), BlockerBanner with a STOP finding showing evidence path and Open evidence / Mark addressed / Dismiss for now actions, DegradedBanner in observer-offline and orchestrator-offline states, FindingsLog in empty state and with a full STOP/WARN/NOTE/INFO/DOWNGRADED mix" />
 
 ### Provider badges (sidebar)
 
