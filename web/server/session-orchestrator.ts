@@ -31,7 +31,7 @@ import { watchCheckpoints } from "./checkpoint-watcher.js";
 import { watchReviews } from "./review-watcher.js";
 import { validateObserverFindings } from "./observer-grounding.js";
 import { buildObserverContextManifest, formatCheckpointManifestPrompt } from "./observer-prompt.js";
-import { formatObserverInvocationLog } from "./observer-attribution.js";
+import { formatObserverInvocationLog, wrapObserverFindingForInjection } from "./observer-attribution.js";
 import type {
   BrowserObserverDowngrade,
   BrowserObserverFinding,
@@ -683,6 +683,45 @@ export class SessionOrchestrator {
             promptSha256: meta.observerPromptSha256 ?? "",
           }),
         });
+      }
+
+      // Willison P1#2 sub-a (council residual fix): inject every
+      // surviving STOP finding back into the orchestrator chat as a
+      // structured synthetic message. The wrapper produces a delimited
+      // text envelope (`<observer-finding model="…" provider="…" …>…
+      // </observer-finding>`) prefixed by a Willison-P2 preamble that
+      // tells the orchestrator LLM to treat the body as evidence-to-
+      // evaluate, not a command. Without this wire-up the prompt artifact
+      // and the JSDoc claim a defence-in-depth contract that no
+      // production caller honours; the browser sees STOPs via
+      // `group:review`, but the orchestrator LLM never does.
+      //
+      // Iterates over the GROUNDED findings array (post-downgrade). STOPs
+      // that the grounding validator demoted to NOTE never reach
+      // injection, so the gate is the trusted boundary. Each `wrap` call
+      // can throw on unsafe meta tokens — caught per-finding so one bad
+      // attribution doesn't drop the rest.
+      const meta2 = this.councilGroupMeta.get(sessionGroupId);
+      if (meta2) {
+        for (let i = 0; i < result.findings.length; i++) {
+          const f = result.findings[i]!;
+          if (f.severity !== "STOP") continue;
+          try {
+            const wrapped = wrapObserverFindingForInjection(f, {
+              model: payload.observer_model,
+              provider: payload.observer_provider,
+              phase: payload.phase,
+            });
+            this.wsBridge.injectUserMessage(meta2.primarySessionId, wrapped.injectionText);
+          } catch (wrapErr) {
+            log.warn("session-orchestrator", "observer-finding injection skipped (unsafe attribution)", {
+              sessionGroupId,
+              checkpointId: payload.checkpoint_id,
+              findingIndex: i,
+              error: wrapErr instanceof Error ? wrapErr.message : String(wrapErr),
+            });
+          }
+        }
       }
 
       companionBus.emit("group:review", {

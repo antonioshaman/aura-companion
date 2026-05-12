@@ -2263,6 +2263,114 @@ describe("SessionOrchestrator", () => {
       }
     });
 
+    // Willison P1#2 sub-a (council residual fix): every STOP finding that
+    // survives grounding is wrapped via `wrapObserverFindingForInjection`
+    // and pushed into the ORCHESTRATOR half's chat via
+    // `wsBridge.injectUserMessage`. The browser receives the same
+    // findings via `group:review`, but the orchestrator LLM only sees
+    // them via this synthetic injection — the structured envelope with
+    // the Willison-P2 preamble is what tells the orchestrator to treat
+    // the body as evidence to evaluate, not a command.
+    it("injects each surviving STOP into the orchestrator chat with the attribution envelope", () => {
+      const { mkdtempSync, writeFileSync, mkdirSync, rmSync } = require("node:fs") as typeof import("node:fs");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      const workspace = require("node:fs").realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-inj-")));
+      try {
+        mkdirSync(pathJoin(workspace, "src"), { recursive: true });
+        writeFileSync(pathJoin(workspace, "src/a.ts"), "// in-scope\n");
+        seedGroup("grp_inj", {
+          cwd: workspace,
+          artifactPaths: ["src/a.ts"],
+          primary: "sess_orch_inj",
+        });
+        // Reset the injectUserMessage mock so call shape is unambiguous.
+        vi.mocked(deps.wsBridge.injectUserMessage).mockClear();
+
+        const handle = (orchestrator as unknown as {
+          handleCouncilReview: (g: string, p: Record<string, unknown>) => void;
+        }).handleCouncilReview;
+        handle.call(orchestrator, "grp_inj", {
+          schema_version: 1,
+          checkpoint_id: "chk_a",
+          phase: "council-plan",
+          session_group_id: "grp_inj",
+          reviewed_at: "2026-01-01T00:00:00Z",
+          observer_provider: "claude",
+          observer_model: "claude-opus-4-7",
+          observer_cli_version: "1.0.0",
+          findings: [
+            { severity: "STOP", claim: "in-scope STOP survives", evidence_path: "src/a.ts" },
+            { severity: "STOP", claim: "out-of-scope STOP downgraded", evidence_path: "src/b.ts" },
+            { severity: "NOTE", claim: "informational note", evidence_path: "src/a.ts" },
+          ],
+        });
+
+        // Exactly ONE injection — the surviving STOP. The downgraded STOP
+        // became NOTE before reaching the injection loop; the NOTE
+        // finding is non-blocking and not injected.
+        expect(deps.wsBridge.injectUserMessage).toHaveBeenCalledTimes(1);
+        const call = vi.mocked(deps.wsBridge.injectUserMessage).mock.calls[0]!;
+        expect(call[0]).toBe("sess_orch_inj");
+        const injectedText = call[1] as string;
+        // Envelope shape — preamble, opening element with severity="STOP",
+        // claim body, closing element. The orchestrator LLM parses these
+        // as a single distinct synthetic message, not user instruction.
+        expect(injectedText).toContain("automated review from a separate LLM session");
+        expect(injectedText).toContain('<observer-finding model="claude-opus-4-7" provider="claude" phase="council-plan" severity="STOP">');
+        expect(injectedText).toContain("in-scope STOP survives");
+        expect(injectedText).toContain("</observer-finding>");
+        // The downgraded STOP must NOT have been injected.
+        expect(injectedText).not.toContain("out-of-scope STOP downgraded");
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
+    // Defensive: an unsafe attribution token (e.g. provider with a `"`
+    // character) makes the wrapper throw. The handler must skip that one
+    // injection but still process the remaining findings and emit the
+    // `group:review` event.
+    it("skips a single bad attribution without dropping later findings or the group:review emission", () => {
+      const { mkdtempSync, writeFileSync, mkdirSync, rmSync } = require("node:fs") as typeof import("node:fs");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      const workspace = require("node:fs").realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-inj-bad-")));
+      try {
+        mkdirSync(pathJoin(workspace, "src"), { recursive: true });
+        writeFileSync(pathJoin(workspace, "src/a.ts"), "// in-scope\n");
+        seedGroup("grp_inj_bad", { cwd: workspace, artifactPaths: ["src/a.ts"], primary: "sess_orch_bad" });
+        vi.mocked(deps.wsBridge.injectUserMessage).mockClear();
+        const emitted: unknown[] = [];
+        companionBus.on("group:review", (e: unknown) => { emitted.push(e); });
+
+        const handle = (orchestrator as unknown as {
+          handleCouncilReview: (g: string, p: Record<string, unknown>) => void;
+        }).handleCouncilReview;
+        handle.call(orchestrator, "grp_inj_bad", {
+          schema_version: 1,
+          checkpoint_id: "chk_a",
+          phase: 'unsafe"phase',
+          session_group_id: "grp_inj_bad",
+          reviewed_at: "2026-01-01T00:00:00Z",
+          observer_provider: "claude",
+          observer_model: "claude-opus-4-7",
+          observer_cli_version: "1.0.0",
+          findings: [
+            { severity: "STOP", claim: "in-scope claim", evidence_path: "src/a.ts" },
+          ],
+        });
+
+        // Phase token carries `"` which `wrapObserverFindingForInjection`
+        // rejects; the injection is skipped but the group:review fanout
+        // still happens.
+        expect(deps.wsBridge.injectUserMessage).not.toHaveBeenCalled();
+        expect(emitted).toHaveLength(1);
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
     it("is a no-op (no emission) when the group has no watcher entry", () => {
       const emitted: unknown[] = [];
       companionBus.on("group:review", (e: unknown) => { emitted.push(e); });
