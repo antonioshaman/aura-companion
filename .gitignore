@@ -18,3 +18,4 @@ web/dev-dist/
 bun.log
 web/bun.log
 .aura-server.pid
+web/coverage/
