@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "checkpoint_id": "chk_story-2-p3-13-rollback-intentional_1",
+  "phase": "story-2-p3-13-rollback-intentional",
+  "sequence": 1,
+  "session_group_id": "grp_6c3b4a8ed7a78cd845ff2f5d8becc70b",
+  "emitted_at": "2026-05-12T14:18:00Z",
+  "artifact_paths": ["web/server/session-orchestrator.ts", "web/server/session-orchestrator.test.ts"]
+}
