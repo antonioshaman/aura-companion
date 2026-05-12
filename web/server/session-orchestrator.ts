@@ -867,6 +867,16 @@ export class SessionOrchestrator {
         createdAt: Date.now(),
         lastCheckpointReceivedAt: null,
       });
+      // Hunt + Willison P1#2 sub-d (council residual fix): propagate the
+      // council role + group id onto each half's WsBridge SessionState so
+      // the `permission_request` gate at `autoResolveObserverWritePermission`
+      // can resolve observer write attempts synchronously without round-
+      // tripping through the launcher. Called BEFORE `startCouncilWatchers`
+      // so a checkpoint that arrives in the same tick as `group:created`
+      // sees the binding.
+      this.wsBridge.setCouncilContext(group.primary.sessionId, "orchestrator", group.sessionGroupId);
+      this.wsBridge.setCouncilContext(group.observer.sessionId, "observer", group.sessionGroupId);
+
       // Start the per-group filesystem watchers BEFORE emitting
       // `group:created` so the watcher's first FS event cannot race past
       // the listener that calls `upsertGroup` in the browser store.

@@ -2621,6 +2621,210 @@ describe("permission_response with updated_permissions", () => {
   });
 });
 
+// ─── Observer write-policy auto-gate (P1#2 sub-d) ─────────────────────────────
+//
+// Hunt + Willison P1#2 sub-d (council residual fix): when a council
+// observer-role session emits a `permission_request` for Write / Edit /
+// MultiEdit, the bridge resolves the request synchronously server-side
+// via `assertObserverWriteAllowed` rather than broadcasting to a browser
+// that has no human attached. The tests below cover the three branches
+// (Edit/MultiEdit auto-deny, in-bounds Write auto-allow, out-of-bounds
+// Write auto-deny) plus the negative paths (orchestrator role, non-write
+// tools, missing role binding) where the gate must NOT fire.
+describe("Council Mode observer write-policy auto-gate", () => {
+  const fsRealpath = require("node:fs").realpathSync;
+  const { mkdtempSync: mkTmp, writeFileSync: wf, mkdirSync: mk, rmSync: rm } = require("node:fs") as typeof import("node:fs");
+  const { tmpdir: tmp } = require("node:os") as typeof import("node:os");
+  const { join: pj } = require("node:path") as typeof import("node:path");
+  let workspace: string;
+  let cli: ReturnType<typeof makeCliSocket>;
+
+  beforeEach(() => {
+    workspace = fsRealpath(mkTmp(pj(tmp(), "bridge-obs-")));
+    mk(pj(workspace, ".council", "reviews"), { recursive: true });
+    cli = makeCliSocket("obs-1");
+    bridge.handleCLIOpen(cli, "obs-1");
+    cli.send.mockClear();
+  });
+
+  afterEach(() => {
+    rm(workspace, { recursive: true, force: true });
+  });
+
+  function bindObserver(sessionId: string) {
+    bridge.setCouncilContext(sessionId, "observer", "grp_test");
+    const session = bridge.getSession(sessionId)!;
+    session.state.cwd = workspace;
+  }
+
+  it("auto-allows an in-bounds Write and replies with the original input", async () => {
+    bindObserver("obs-1");
+    const targetPath = pj(workspace, ".council", "reviews", "story-1-claude-observer.md");
+    wf(targetPath, "{}", "utf-8");
+
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "control_request",
+      request_id: "req-write-ok",
+      request: {
+        subtype: "can_use_tool",
+        tool_name: "Write",
+        input: { file_path: targetPath, content: "..." },
+        tool_use_id: "tu-write-ok",
+      },
+    }));
+
+    expect(cli.send).toHaveBeenCalledTimes(1);
+    const sentRaw = cli.send.mock.calls[0][0] as string;
+    const sent = JSON.parse(sentRaw.trim());
+    expect(sent.type).toBe("control_response");
+    expect(sent.response.response.behavior).toBe("allow");
+    // Pending permissions MUST stay empty — the request is fully resolved
+    // server-side; the browser UI never sees it.
+    expect(bridge.getSession("obs-1")!.pendingPermissions.size).toBe(0);
+  });
+
+  it("auto-denies an out-of-workspace Write with the assertion's reason", async () => {
+    bindObserver("obs-1");
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "control_request",
+      request_id: "req-write-escape",
+      request: {
+        subtype: "can_use_tool",
+        tool_name: "Write",
+        input: { file_path: "/etc/passwd", content: "..." },
+        tool_use_id: "tu-write-escape",
+      },
+    }));
+
+    const sent = JSON.parse((cli.send.mock.calls[0][0] as string).trim());
+    expect(sent.response.response.behavior).toBe("deny");
+    expect(sent.response.response.message).toMatch(/not allowed/);
+  });
+
+  it("auto-denies a path-traversal Write attempt", async () => {
+    bindObserver("obs-1");
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "control_request",
+      request_id: "req-write-traverse",
+      request: {
+        subtype: "can_use_tool",
+        tool_name: "Write",
+        input: { file_path: "../../etc/passwd", content: "..." },
+        tool_use_id: "tu-write-traverse",
+      },
+    }));
+    const sent = JSON.parse((cli.send.mock.calls[0][0] as string).trim());
+    expect(sent.response.response.behavior).toBe("deny");
+  });
+
+  it("auto-denies a missing file_path with an explanatory message", async () => {
+    bindObserver("obs-1");
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "control_request",
+      request_id: "req-write-noflag",
+      request: {
+        subtype: "can_use_tool",
+        tool_name: "Write",
+        input: { content: "..." },
+        tool_use_id: "tu-write-noflag",
+      },
+    }));
+    const sent = JSON.parse((cli.send.mock.calls[0][0] as string).trim());
+    expect(sent.response.response.behavior).toBe("deny");
+    expect(sent.response.response.message).toMatch(/file_path/);
+  });
+
+  it("auto-denies Edit (regression sentinel — Edit is in OBSERVER_DISALLOWED_TOOLS)", async () => {
+    bindObserver("obs-1");
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "control_request",
+      request_id: "req-edit-banned",
+      request: {
+        subtype: "can_use_tool",
+        tool_name: "Edit",
+        input: { file_path: pj(workspace, "anything.md") },
+        tool_use_id: "tu-edit-banned",
+      },
+    }));
+    const sent = JSON.parse((cli.send.mock.calls[0][0] as string).trim());
+    expect(sent.response.response.behavior).toBe("deny");
+    expect(sent.response.response.message).toMatch(/cannot use Edit/);
+  });
+
+  it("auto-denies MultiEdit (mirror of Edit branch)", async () => {
+    bindObserver("obs-1");
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "control_request",
+      request_id: "req-medit-banned",
+      request: {
+        subtype: "can_use_tool",
+        tool_name: "MultiEdit",
+        input: { file_path: pj(workspace, "anything.md") },
+        tool_use_id: "tu-medit-banned",
+      },
+    }));
+    const sent = JSON.parse((cli.send.mock.calls[0][0] as string).trim());
+    expect(sent.response.response.behavior).toBe("deny");
+    expect(sent.response.response.message).toMatch(/cannot use MultiEdit/);
+  });
+
+  it("does NOT fire the gate for an orchestrator-role session (Write follows the normal pending+broadcast flow)", async () => {
+    bridge.setCouncilContext("obs-1", "orchestrator", "grp_test");
+    const session = bridge.getSession("obs-1")!;
+    session.state.cwd = workspace;
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "control_request",
+      request_id: "req-orch-write",
+      request: {
+        subtype: "can_use_tool",
+        tool_name: "Write",
+        input: { file_path: "/etc/passwd" },
+        tool_use_id: "tu-orch-write",
+      },
+    }));
+    // Should NOT have auto-resolved — pending now holds the request, and
+    // cli.send is still empty (browser flow handles it).
+    expect(cli.send).not.toHaveBeenCalled();
+    expect(bridge.getSession("obs-1")!.pendingPermissions.size).toBe(1);
+  });
+
+  it("does NOT fire the gate for an observer Read (non-write tool)", async () => {
+    bindObserver("obs-1");
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "control_request",
+      request_id: "req-obs-read",
+      request: {
+        subtype: "can_use_tool",
+        tool_name: "Read",
+        input: { file_path: pj(workspace, "anything.md") },
+        tool_use_id: "tu-obs-read",
+      },
+    }));
+    // Read is in OBSERVER_ALLOWED_TOOLS and not in the gate's whitelist;
+    // it should fall through to the normal pending+broadcast flow.
+    expect(cli.send).not.toHaveBeenCalled();
+    expect(bridge.getSession("obs-1")!.pendingPermissions.size).toBe(1);
+  });
+
+  it("does NOT fire the gate when sessionGroupRole is unbound", async () => {
+    // session created but no setCouncilContext call.
+    const session = bridge.getSession("obs-1")!;
+    session.state.cwd = workspace;
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "control_request",
+      request_id: "req-unbound",
+      request: {
+        subtype: "can_use_tool",
+        tool_name: "Write",
+        input: { file_path: "/etc/passwd" },
+        tool_use_id: "tu-unbound",
+      },
+    }));
+    expect(cli.send).not.toHaveBeenCalled();
+    expect(bridge.getSession("obs-1")!.pendingPermissions.size).toBe(1);
+  });
+});
+
 // ─── Multiple browser sockets ─────────────────────────────────────────────────
 
 describe("Multiple browser sockets", () => {

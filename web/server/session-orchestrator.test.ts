@@ -179,6 +179,7 @@ function createMockBridge() {
     injectSystemPrompt: vi.fn(),
     attachBackendAdapter: vi.fn(),
     cancelDisconnectTimer: vi.fn(() => false),
+    setCouncilContext: vi.fn(),
   } as any;
 }
 

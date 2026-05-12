@@ -51,6 +51,8 @@ import { companionBus } from "./event-bus.js";
 import { SessionStateMachine } from "./session-state-machine.js";
 import { metricsCollector } from "./metrics-collector.js";
 import { log } from "./logger.js";
+import { assertObserverWriteAllowed } from "./observer-write-policy.js";
+import type { SessionGroupRole } from "./session-types.js";
 
 // ─── Bridge ───────────────────────────────────────────────────────────────────
 
@@ -90,6 +92,25 @@ export class WsBridge {
     const session = this.sessions.get(sessionId);
     if (!session) return;
     session.state.linearSessionId = linearSessionId;
+    this.persistSession(session);
+  }
+
+  /**
+   * Council Mode — bind a session's role + group id onto its
+   * `SessionState`. Called from `SessionOrchestrator.createCouncilGroup`
+   * after both halves spawn so the `permission_request` gate at
+   * {@link autoResolveObserverPermissionRequest} can read the role
+   * synchronously without round-tripping through the launcher.
+   *
+   * Idempotent: re-binding the same `(role, groupId)` on the same
+   * `sessionId` is a no-op. Creates the session entry if missing so a
+   * call that races the CLI-WS open does not silently drop the
+   * binding.
+   */
+  setCouncilContext(sessionId: string, role: SessionGroupRole, sessionGroupId: string): void {
+    const session = this.getOrCreateSession(sessionId);
+    session.state.sessionGroupRole = role;
+    session.state.sessionGroupId = sessionGroupId;
     this.persistSession(session);
   }
 
@@ -550,6 +571,23 @@ export class WsBridge {
         const perm = msg.request;
         metricsCollector.recordPermissionRequested(perm.request_id, session.id);
 
+        // Hunt + Willison P1#2 sub-d (council residual fix): observer-role
+        // write-policy gate. An observer session must never reach the
+        // browser permission UI for Write/Edit/MultiEdit — the observer
+        // has no human in the loop, so a hung request is a livelock. The
+        // server-side gate resolves the request synchronously via
+        // `assertObserverWriteAllowed` against the workspace cwd:
+        //   - Write to a workspace-bounded path → `allow` with original
+        //     input.
+        //   - Write to anything else → `deny` with the assertion's error
+        //     message.
+        //   - Edit/MultiEdit reaching this path is itself a regression
+        //     (they're in OBSERVER_DISALLOWED_TOOLS); auto-deny so the
+        //     observer surfaces the gap.
+        // Returns early so the request never enters AI validation, never
+        // lands in pendingPermissions, never broadcasts to a browser.
+        if (this.autoResolveObserverWritePermission(session, perm)) return;
+
         // AI Validation Mode: evaluate the tool call before showing to user
         const aiSettings = getEffectiveAiValidation(session.state);
         if (
@@ -669,6 +707,96 @@ export class WsBridge {
       sessionId,
       backendType: session.backendType,
     });
+  }
+
+  /**
+   * Hunt + Willison P1#2 sub-d (council residual fix): synchronously
+   * resolve a `permission_request` from an observer-role session when
+   * the tool is Write/Edit/MultiEdit.
+   *
+   * Returns `true` when the gate handled the request (caller MUST return
+   * early — neither AI validation, nor pending tracking, nor browser
+   * broadcast should fire). Returns `false` when the gate doesn't apply
+   * and the caller should fall through to the regular flow.
+   *
+   * The gate's three branches:
+   *   1. tool ∉ {Write, Edit, MultiEdit} → not applicable, fall through.
+   *   2. tool ∈ {Edit, MultiEdit} → auto-deny (these are in
+   *      OBSERVER_DISALLOWED_TOOLS; reaching this branch means the argv
+   *      restriction was bypassed somehow).
+   *   3. tool === "Write" → run `assertObserverWriteAllowed` against the
+   *      workspace cwd. Allow on pass, deny on throw.
+   */
+  private autoResolveObserverWritePermission(
+    session: Session,
+    perm: PermissionRequest,
+  ): boolean {
+    if (session.state.sessionGroupRole !== "observer") return false;
+    const tool = perm.tool_name;
+    if (tool !== "Write" && tool !== "Edit" && tool !== "MultiEdit") return false;
+    const adapter = session.backendAdapter;
+    if (!adapter) return false;
+
+    if (tool === "Edit" || tool === "MultiEdit") {
+      log.warn("ws-bridge", "observer attempted denied tool — auto-denying", {
+        sessionId: session.id,
+        sessionGroupId: session.state.sessionGroupId,
+        tool,
+        requestId: perm.request_id,
+      });
+      metricsCollector.recordPermissionResolved(perm.request_id, "deny", false);
+      adapter.send({
+        type: "permission_response",
+        request_id: perm.request_id,
+        behavior: "deny",
+        message: `observer-role sessions cannot use ${tool}`,
+      });
+      return true;
+    }
+
+    // tool === "Write" — validate the resolved path bounds.
+    const rawFilePath = perm.input["file_path"];
+    if (typeof rawFilePath !== "string" || rawFilePath.length === 0) {
+      log.warn("ws-bridge", "observer Write missing file_path — auto-denying", {
+        sessionId: session.id,
+        requestId: perm.request_id,
+      });
+      metricsCollector.recordPermissionResolved(perm.request_id, "deny", false);
+      adapter.send({
+        type: "permission_response",
+        request_id: perm.request_id,
+        behavior: "deny",
+        message: "observer Write requires a string file_path",
+      });
+      return true;
+    }
+    try {
+      assertObserverWriteAllowed(rawFilePath, session.state.cwd);
+      metricsCollector.recordPermissionResolved(perm.request_id, "allow", false);
+      adapter.send({
+        type: "permission_response",
+        request_id: perm.request_id,
+        behavior: "allow",
+        updated_input: perm.input,
+      });
+      return true;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      log.warn("ws-bridge", "observer Write rejected by write-policy", {
+        sessionId: session.id,
+        sessionGroupId: session.state.sessionGroupId,
+        filePath: rawFilePath,
+        error: message,
+      });
+      metricsCollector.recordPermissionResolved(perm.request_id, "deny", false);
+      adapter.send({
+        type: "permission_response",
+        request_id: perm.request_id,
+        behavior: "deny",
+        message,
+      });
+      return true;
+    }
   }
 
   /** AI validation for permission requests — shared by Claude and Codex paths. */
