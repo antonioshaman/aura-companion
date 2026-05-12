@@ -153,6 +153,87 @@ export function auraIsActiveSession(
   return true;
 }
 
+type SessionItemSharedProps = Omit<
+  React.ComponentProps<typeof SessionItem>,
+  | "session"
+  | "isActive"
+  | "isArchived"
+  | "sessionName"
+  | "permCount"
+  | "isRecentlyRenamed"
+  | "councilPairing"
+  | "councilUnreadStops"
+>;
+
+interface CollapsibleSessionListProps {
+  title: string;
+  sessions: SessionItemType[];
+  isOpen: boolean;
+  onToggle: () => void;
+  isArchived?: boolean;
+  rightAction?: React.ReactNode;
+  currentSessionId: string | null;
+  sessionNames: Map<string, string>;
+  pendingPermissions: Map<string, Map<string, unknown>>;
+  recentlyRenamed: Set<string>;
+  getCouncilInfo: (id: string) => { pairing?: string; unreadStops?: number };
+  sessionItemProps: SessionItemSharedProps;
+}
+
+function CollapsibleSessionList({
+  title,
+  sessions,
+  isOpen,
+  onToggle,
+  isArchived = false,
+  rightAction,
+  currentSessionId,
+  sessionNames,
+  pendingPermissions,
+  recentlyRenamed,
+  getCouncilInfo,
+  sessionItemProps,
+}: CollapsibleSessionListProps) {
+  return (
+    <div className="mt-3 pt-3 border-t border-cc-separator">
+      <div className="flex items-center">
+        <button
+          onClick={onToggle}
+          aria-expanded={isOpen}
+          className={`${rightAction ? "flex-1" : "w-full"} px-2 py-1 text-[11px] font-semibold text-cc-fg/60 uppercase tracking-wide flex items-center gap-1.5 hover:bg-cc-hover rounded-md transition-colors cursor-pointer`}
+        >
+          <svg viewBox="0 0 16 16" fill="currentColor" className={`w-2 h-2 text-cc-muted/50 transition-transform duration-150 ${isOpen ? "rotate-90" : ""}`}>
+            <path d="M6 4l4 4-4 4" />
+          </svg>
+          {title} ({sessions.length})
+        </button>
+        {rightAction}
+      </div>
+      {isOpen && (
+        <div className="mt-0.5">
+          {sessions.map((s) => {
+            const council = getCouncilInfo(s.id);
+            return (
+              <SessionItem
+                key={s.id}
+                session={s}
+                isActive={currentSessionId === s.id}
+                {...(isArchived ? { isArchived: true as const } : {})}
+                sessionName={sessionNames.get(s.id)}
+                permCount={pendingPermissions.get(s.id)?.size ?? 0}
+                isRecentlyRenamed={recentlyRenamed.has(s.id)}
+                councilPairing={council.pairing}
+                councilUnreadStops={council.unreadStops}
+                {...sessionItemProps}
+              />
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function Sidebar() {
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState("");
@@ -702,89 +783,44 @@ export function Sidebar() {
             ))}
 
             {cronSessions.length > 0 && (
-              <div className="mt-3 pt-3 border-t border-cc-separator">
-                <button
-                  onClick={() => setShowCronSessions(!showCronSessions)}
-                  aria-expanded={showCronSessions}
-                  className="w-full px-2 py-1 text-[11px] font-semibold text-cc-fg/60 uppercase tracking-wide flex items-center gap-1.5 hover:bg-cc-hover rounded-md transition-colors cursor-pointer"
-                >
-                  <svg viewBox="0 0 16 16" fill="currentColor" className={`w-2 h-2 text-cc-muted/50 transition-transform duration-150 ${showCronSessions ? "rotate-90" : ""}`}>
-                    <path d="M6 4l4 4-4 4" />
-                  </svg>
-                  Scheduled Runs ({cronSessions.length})
-                </button>
-                {showCronSessions && (
-                  <div className="mt-0.5">
-                    {cronSessions.map((s) => {
-                      const council = councilInfoFor(s.id);
-                      return (
-                        <SessionItem
-                          key={s.id}
-                          session={s}
-                          isActive={currentSessionId === s.id}
-                          sessionName={sessionNames.get(s.id)}
-                          permCount={pendingPermissions.get(s.id)?.size ?? 0}
-                          isRecentlyRenamed={recentlyRenamed.has(s.id)}
-                          councilPairing={council.pairing}
-                          councilUnreadStops={council.unreadStops}
-                          {...sessionItemProps}
-                        />
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
+              <CollapsibleSessionList
+                title="Scheduled Runs"
+                sessions={cronSessions}
+                isOpen={showCronSessions}
+                onToggle={() => setShowCronSessions(!showCronSessions)}
+                currentSessionId={currentSessionId}
+                sessionNames={sessionNames}
+                pendingPermissions={pendingPermissions}
+                recentlyRenamed={recentlyRenamed}
+                getCouncilInfo={councilInfoFor}
+                sessionItemProps={sessionItemProps}
+              />
             )}
 
             {agentSessions.length > 0 && (
-              <div className="mt-3 pt-3 border-t border-cc-separator">
-                <button
-                  onClick={() => setShowAgentSessions(!showAgentSessions)}
-                  aria-expanded={showAgentSessions}
-                  className="w-full px-2 py-1 text-[11px] font-semibold text-cc-fg/60 uppercase tracking-wide flex items-center gap-1.5 hover:bg-cc-hover rounded-md transition-colors cursor-pointer"
-                >
-                  <svg viewBox="0 0 16 16" fill="currentColor" className={`w-2 h-2 text-cc-muted/50 transition-transform duration-150 ${showAgentSessions ? "rotate-90" : ""}`}>
-                    <path d="M6 4l4 4-4 4" />
-                  </svg>
-                  Agent Runs ({agentSessions.length})
-                </button>
-                {showAgentSessions && (
-                  <div className="mt-0.5">
-                    {agentSessions.map((s) => {
-                      const council = councilInfoFor(s.id);
-                      return (
-                        <SessionItem
-                          key={s.id}
-                          session={s}
-                          isActive={currentSessionId === s.id}
-                          sessionName={sessionNames.get(s.id)}
-                          permCount={pendingPermissions.get(s.id)?.size ?? 0}
-                          isRecentlyRenamed={recentlyRenamed.has(s.id)}
-                          councilPairing={council.pairing}
-                          councilUnreadStops={council.unreadStops}
-                          {...sessionItemProps}
-                        />
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
+              <CollapsibleSessionList
+                title="Agent Runs"
+                sessions={agentSessions}
+                isOpen={showAgentSessions}
+                onToggle={() => setShowAgentSessions(!showAgentSessions)}
+                currentSessionId={currentSessionId}
+                sessionNames={sessionNames}
+                pendingPermissions={pendingPermissions}
+                recentlyRenamed={recentlyRenamed}
+                getCouncilInfo={councilInfoFor}
+                sessionItemProps={sessionItemProps}
+              />
             )}
 
             {archivedSessions.length > 0 && (
-              <div className="mt-3 pt-3 border-t border-cc-separator">
-                <div className="flex items-center">
-                  <button
-                    onClick={() => setShowArchived(!showArchived)}
-                    aria-expanded={showArchived}
-                    className="flex-1 px-2 py-1 text-[11px] font-semibold text-cc-fg/60 uppercase tracking-wide flex items-center gap-1.5 hover:bg-cc-hover rounded-md transition-colors cursor-pointer"
-                  >
-                    <svg viewBox="0 0 16 16" fill="currentColor" className={`w-2 h-2 text-cc-muted/50 transition-transform duration-150 ${showArchived ? "rotate-90" : ""}`}>
-                      <path d="M6 4l4 4-4 4" />
-                    </svg>
-                    Archived ({archivedSessions.length})
-                  </button>
-                  {showArchived && archivedSessions.length > 1 && (
+              <CollapsibleSessionList
+                title="Archived"
+                sessions={archivedSessions}
+                isOpen={showArchived}
+                onToggle={() => setShowArchived(!showArchived)}
+                isArchived
+                rightAction={
+                  showArchived && archivedSessions.length > 1 ? (
                     <button
                       onClick={handleDeleteAllArchived}
                       className="px-2 py-0.5 mr-1 text-[10px] text-cc-error/80 hover:text-cc-error hover:bg-cc-error/5 rounded-md transition-colors cursor-pointer"
@@ -792,30 +828,15 @@ export function Sidebar() {
                     >
                       Delete all
                     </button>
-                  )}
-                </div>
-                {showArchived && (
-                  <div className="mt-0.5">
-                    {archivedSessions.map((s) => {
-                      const council = councilInfoFor(s.id);
-                      return (
-                        <SessionItem
-                          key={s.id}
-                          session={s}
-                          isActive={currentSessionId === s.id}
-                          isArchived
-                          sessionName={sessionNames.get(s.id)}
-                          permCount={pendingPermissions.get(s.id)?.size ?? 0}
-                          isRecentlyRenamed={recentlyRenamed.has(s.id)}
-                          councilPairing={council.pairing}
-                          councilUnreadStops={council.unreadStops}
-                          {...sessionItemProps}
-                        />
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
+                  ) : null
+                }
+                currentSessionId={currentSessionId}
+                sessionNames={sessionNames}
+                pendingPermissions={pendingPermissions}
+                recentlyRenamed={recentlyRenamed}
+                getCouncilInfo={councilInfoFor}
+                sessionItemProps={sessionItemProps}
+              />
             )}
           </>
         )}
