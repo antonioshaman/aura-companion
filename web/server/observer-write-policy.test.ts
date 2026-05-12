@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -78,7 +78,10 @@ describe("assertObserverWriteAllowed", () => {
   let root: string;
 
   beforeEach(() => {
-    root = mkdtempSync(join(tmpdir(), "obs-write-"));
+    // realpathSync resolves /var/folders → /private/var/folders on macOS so
+    // equality checks against the integrated assert (which itself realpaths
+    // the resolved write target) hold on both platforms.
+    root = realpathSync(mkdtempSync(join(tmpdir(), "obs-write-")));
     mkdirSync(join(root, ".council", "observer"), { recursive: true });
     mkdirSync(join(root, ".council", "reviews"), { recursive: true });
     mkdirSync(join(root, "src"), { recursive: true });
