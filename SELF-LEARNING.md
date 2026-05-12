@@ -239,6 +239,6 @@ This system is inspired by:
 
 - **[metaswarm](https://github.com/dsifry/metaswarm)** — self-reflect workflow and JSONL knowledge base format
 - **[ChristopherA's seed prompt](https://gist.github.com/ChristopherA/fd2985551e765a86f4fbb24080263a2f)** — bootstrap approach to self-improving Claude Code
-- **[Vibe-Companion](https://github.com/nikolaiklein/Vibe-Companion)** — the web UI foundation
+- **[The-Vibe-Company/companion](https://github.com/The-Vibe-Company/companion)** by [The Vibe Company](https://thevibecompany.co) — the web UI foundation (MIT)
 
 The core idea: **files outlast sessions**. Claude Code doesn't persist memory between sessions, but files do. Every insight written to `.agents/knowledge/` survives and informs future work. The skills are just the machinery that makes capture and retrieval effortless.

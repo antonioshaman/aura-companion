@@ -1,22 +1,31 @@
-# Aura Companion
+<p align="center">
+  <img src="docs/screenshots/aura-companion-hero.png" alt="Aura Companion — New Session with Council Mode toggle and paired sessions in the sidebar" width="100%" />
+</p>
 
-A self-learning web UI for Claude Code & Codex. Every session makes it smarter.
+<h1 align="center">Aura Companion</h1>
+<p align="center"><strong>Self-learning web UI for Claude Code & Codex with Council Mode.</strong></p>
+<p align="center">Paired orchestrator + observer sessions. Adaptive knowledge base. 29 skills that compound.</p>
 
-Built on [Vibe-Companion](https://github.com/nikolaiklein/Vibe-Companion) with an adaptive knowledge base, Carmack Council review system, and a feedback loop that accumulates project intelligence over time.
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="MIT License" /></a>
+  <a href="https://github.com/antonioshaman/aura-companion/stargazers"><img src="https://img.shields.io/github/stars/antonioshaman/aura-companion?style=social" alt="GitHub stars" /></a>
+  <img src="https://img.shields.io/badge/Bun-%E2%89%A51.0-black" alt="Bun >= 1.0" />
+  <img src="https://img.shields.io/badge/Council%20Mode-orchestrator%20%2B%20observer-orange" alt="Council Mode" />
+</p>
+
+---
+
+**Aura Companion** is a self-learning web UI for Claude Code & Codex with **Council Mode** — paired orchestrator + observer sessions that catch what single-author thinking misses.
+
+Council Mode pairs your main agent with an independent reviewer in one click. The orchestrator runs the work; the observer wakes on each phase checkpoint, reads only the just-changed surface, and pushes grounded findings back into your chat as a BlockerBanner you cannot miss. On top of that, an adaptive knowledge base accumulates patterns, gotchas, and decisions so every session is smarter than the last.
 
 ## What Makes It Different
 
-Regular AI coding companions start from scratch every session. Aura Companion **remembers**:
-
-- **Patterns** — approaches that work well in your codebase
-- **Gotchas** — tricky edge cases and surprising behaviors
-- **Decisions** — architectural choices and their rationale
-- **Anti-patterns** — mistakes to never repeat
-
-Three skill layers work together:
-
 ```
 ┌──────────────────────────────────────────────────────────────┐
+│  Council Mode             Paired orchestrator + observer     │
+│  BlockerBanner + ObserverPanel + provider pairing           │
+├──────────────────────────────────────────────────────────────┤
 │  Carmack Council          Architecture + Review + Testing    │
 │  6 skills: plan, review, implement, spec, test, self-improve│
 ├──────────────────────────────────────────────────────────────┤
@@ -28,7 +37,41 @@ Three skill layers work together:
 └──────────────────────────────────────────────────────────────┘
 ```
 
-**29 skills total.** Design for beautiful UIs. Council for rigorous engineering. Self-learning to get smarter every day.
+**29 skills total + Council Mode.** Design for beautiful UIs. Council for rigorous engineering. Self-learning to get smarter every day. Council Mode to catch what one head misses.
+
+## Council Mode (Orchestrator + Observer)
+
+The multi-agent pattern that worked manually in past pipelines — catching ~2 P1 issues per phase that single-author review missed — is now reproducible in one click instead of two terminals.
+
+![Council Mode running with two paired sessions, ObserverPanel showing findings on the right, dark theme](docs/screenshots/council-mode-overview.png)
+
+```
+You ↔ Orchestrator chat (left)                 Observer panel (right)
+              │                                          ▲
+              │ writes .council/checkpoints/<phase>.json │
+              ▼                                          │
+      .council/ filesystem ─────────────────────────────►│
+                                                         │
+              ◄──────── grounded STOPs as BlockerBanner ─┘
+```
+
+Toggle **Council Mode** on the New Session dialog and pick a pairing:
+
+- **`claude+claude`** (default) — two Claude Code sessions sharing one workspace.
+- **`claude+codex`** (experimental) — orchestrator on Claude, observer on Codex; cross-model independence at the cost of asymmetric tooling.
+
+What you get in the UI:
+
+- **`BlockerBanner`** in the chat slot — the most recent unresolved STOP, JSX-escaped, dismissable.
+- **`ObserverPanel`** sibling of ChatView — status pill (`sleeping / spawning / reviewing / blocker-found / degraded / reconnecting`) plus a collapsible findings log.
+- **`ProviderBadges`** in the sidebar — asymmetric chips when pairings are mixed-provider.
+- **`Cmd/Ctrl+Shift+O`** toggles the Observer panel; **`Cmd/Ctrl+Shift+B`** focuses the BlockerBanner primary action.
+
+![Council Mode UI anatomy: ProviderBadges, BlockerBanner with a STOP finding and evidence path, DegradedBanner in offline states, FindingsLog with a full STOP/WARN/NOTE/INFO/DOWNGRADED mix](docs/screenshots/council-mode-anatomy.png)
+
+Findings are grounded against the modified surface: STOPs that reference files outside the checkpoint's delta or missing from disk are downgraded to NOTE server-side. The browser dedupes by deterministic `fnd_<hex>` ids so restart-replay never doubles.
+
+See [`docs/guides/council-mode.mdx`](docs/guides/council-mode.mdx) for the full guide and [`docs/reference/council-mode-architecture.mdx`](docs/reference/council-mode-architecture.mdx) for the wire protocol and state machine.
 
 ## Quick Start
 
@@ -45,7 +88,7 @@ Open http://localhost:5174 in your browser.
 
 **Requirements**: [Bun](https://bun.sh/) >= 1.0, Claude Code CLI or Codex CLI.
 
-## How the Self-Learning Works
+## Self-Learning
 
 ```
 Session Start          During Work              Session End
@@ -79,6 +122,7 @@ Browser (React 19) ←→ WebSocket ←→ Hono Server (Bun) ←→ WebSocket (N
 - **Backend**: Hono on Bun (port 3456)
 - **Frontend**: React 19 + Zustand + TailwindCSS (port 5174)
 - **Monorepo**: `web/` (main app), `landing/`, `relay/`, `platform/`
+- **Council Mode**: filesystem-protocol under `.council/` (checkpoints + reviews) — see [architecture reference](docs/reference/council-mode-architecture.mdx)
 - **Testing**: Vitest with axe accessibility scans
 - **State**: Session persistence to `$TMPDIR/vibe-sessions/` — survives restarts
 
@@ -134,12 +178,15 @@ Based on John Carmack's engineering philosophy. A council of domain experts revi
 
 ## Recommended Workflow
 
-### Feature Development
+### Feature Development with Council Mode
 
 ```
-/council-plan          # Plan with domain experts
+                          (toggle Council Mode on New Session)
+/council-plan          # Plan with domain experts in orchestrator
 /prime                 # Load relevant knowledge
                        # ... implement ...
+                       # Observer wakes on each phase checkpoint,
+                       # surfaces STOPs as BlockerBanner
 /learn <insight>       # Capture learnings as you go
 /review-with-kb        # Knowledge-informed review
 /council-review        # Deep expert review
@@ -222,8 +269,20 @@ cd web && bun run build && bun run start
     ├── frontend-design/    # Design: UI creation
     └── ...                 # 16 more design skills
 web/
-├── server/                 # Hono + Bun backend
+├── server/                 # Hono + Bun backend (Council Mode pipeline)
+│   ├── session-group-coordinator.ts
+│   ├── group-state-machine.ts
+│   ├── checkpoint-watcher.ts
+│   ├── review-watcher.ts
+│   ├── observer-prompt.ts
+│   └── ...
 └── src/                    # React 19 frontend
+    ├── components/council/ # BlockerBanner, ObserverPanel, ProviderBadges, ...
+    └── ...
+.council/                   # Council Mode runtime artefacts (per workspace)
+├── prompts/observer-system.md
+├── checkpoints/<phase>.json
+└── reviews/<phase>-<provider>-observer.md
 ```
 
 ## Contributing
@@ -238,7 +297,9 @@ The knowledge base (`.agents/knowledge/`) is project-specific — fork it and le
 
 ## Attribution
 
-- [Vibe-Companion](https://github.com/nikolaiklein/Vibe-Companion) by The Vibe Company (MIT License) — web UI foundation
+Aura Companion is a fork of [`The-Vibe-Company/companion`](https://github.com/The-Vibe-Company/companion) by [The Vibe Company](https://thevibecompany.co) (MIT License) — the original web UI for Claude Code & Codex session bridging, published at [thecompanion.sh](https://thecompanion.sh). The Council Mode pairing system, the adaptive knowledge base, and the Carmack Council skill chain are Aura-specific extensions on top of that foundation. (Note: [nikolaiklein/Vibe-Companion](https://github.com/nikolaiklein/Vibe-Companion) is a separate sibling fork of the same upstream, not an ancestor of Aura.)
+
+Other credits:
 - [impeccable](https://github.com/pbakaus/impeccable) by Paul Bakaus — 18 design skills
 - [Carmack Council](https://github.com/antonioshaman/carmack-council) — 6 engineering review skills
 - Self-learning inspired by [metaswarm](https://github.com/dsifry/metaswarm) and [ChristopherA's seed prompt](https://gist.github.com/ChristopherA/fd2985551e765a86f4fbb24080263a2f)
