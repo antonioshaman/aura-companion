@@ -2358,6 +2358,49 @@ describe("SessionOrchestrator", () => {
         expect(result.status).toBe(400);
       }
     });
+
+    // Backend P3#13 / EC-2 (council residual fix): when the observer half of
+    // a council pair fails to spawn, the coordinator rolls back by killing
+    // the orchestrator half. That kill MUST be marked `intentional` before
+    // `killSession` runs so the `session:exited` → `scheduleProactiveRelaunch`
+    // listener at initialize() doesn't race the rollback and try to resurrect
+    // the half being torn down. Verified by snapshotting `intentionalKills`
+    // inside the spy at the exact moment killSession is invoked.
+    it("marks the rollback-bound session id intentional BEFORE invoking killSession during spawn-rollback", async () => {
+      const obs = orchestrator as unknown as {
+        intentionalKills: Set<string>;
+        killSession: (id: string) => Promise<{ ok: boolean }>;
+        doCreateSession: (req: { backend?: string }) => Promise<{ ok: true; session: { sessionId: string } } | { ok: false; error: string; status: number }>;
+      };
+      let intentionalAtKillTime: boolean | null = null;
+      const origKillSession = obs.killSession.bind(orchestrator);
+      obs.killSession = vi.fn(async (id: string) => {
+        intentionalAtKillTime = obs.intentionalKills.has(id);
+        return origKillSession(id);
+      }) as typeof obs.killSession;
+
+      let spawnCount = 0;
+      obs.doCreateSession = vi.fn(async () => {
+        spawnCount++;
+        if (spawnCount === 1) {
+          return { ok: true as const, session: { sessionId: "sess_orch_rollback" } as { sessionId: string } };
+        }
+        return { ok: false as const, error: "observer spawn timed out", status: 504 };
+      }) as typeof obs.doCreateSession;
+
+      const result = await orchestrator.createCouncilGroup({
+        pairing: "claude+codex",
+        base: { cwd: "/w" },
+      });
+
+      expect(result.ok).toBe(false);
+      // The rollback path SHOULD have invoked killSession against the
+      // surviving orchestrator half exactly once.
+      expect(obs.killSession).toHaveBeenCalledWith("sess_orch_rollback");
+      // The EC-2 invariant — the snapshot inside the spy proves the mark
+      // landed BEFORE the kill ran (not after, which would be a race).
+      expect(intentionalAtKillTime).toBe(true);
+    });
   });
 
   // ── startCouncilWatchers — real tmp dir wiring ──────────────────────────

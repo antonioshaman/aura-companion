@@ -789,6 +789,14 @@ export class SessionOrchestrator {
         return { sessionId: result.session.sessionId };
       },
       kill: async (sessionId) => {
+        // Backend P3#13 / EC-2: mark intentional BEFORE the kill fires so
+        // the `session:exited` → `scheduleProactiveRelaunch` listener at
+        // initialize() does not race the spawn-rollback kill and try to
+        // resurrect the half being rolled back. Without this, an observer-
+        // half spawn failure during `createGroup` leaves the orchestrator-
+        // half on the auto-relaunch budget — an orphan CLI attached to a
+        // sessionGroupId that was never registered.
+        this.intentionalKills.add(sessionId);
         await this.killSession(sessionId);
       },
     });
