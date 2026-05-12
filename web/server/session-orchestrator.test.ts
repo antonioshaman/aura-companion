@@ -171,6 +171,8 @@ function createMockBridge() {
     getSession: vi.fn(() => null),
     getAllSessions: vi.fn(() => []),
     markContainerized: vi.fn(),
+    markCouncilSession: vi.fn(),
+    flushSessionStorePendingSync: vi.fn(),
     prePopulateCommands: vi.fn(),
     broadcastNameUpdate: vi.fn(),
     broadcastToSession: vi.fn(),
@@ -2453,28 +2455,29 @@ describe("SessionOrchestrator", () => {
       }
     });
 
-    // PLAN Task 6: archived half means the group is unrecoverable for
-    // lifecycle purposes — the partial-pair grace does NOT apply. We
-    // treat it like a fully-dead group: skip registration.
-    it("skips pairs where one half is archived (unrecoverable, no grace)", () => {
+    // Archived half means the group was intentionally torn down. Partial-
+    // pair grace MUST NOT apply — that would re-arm a reconnect cycle on
+    // a group the user (or shutdown path) had already given up on. Fixed
+    // post-Task 6 live-test where `grp_7a2a49e417861d` (Old Boy: orchestrator
+    // alive, observer archived) silently entered `reconnect_failed` on
+    // server restart and produced confusing log noise.
+    it("skips pairs where ANY half is archived (intentional teardown, no grace)", () => {
       (deps.launcher.listSessions as any).mockReturnValue([
         { sessionId: "a-orch", sessionGroupId: "grp_arch", sessionGroupRole: "orchestrator",
           backendType: "claude", cwd: "/wsx", archived: false, createdAt: 1, state: "running" },
         { sessionId: "a-obs", sessionGroupId: "grp_arch", sessionGroupRole: "observer",
           backendType: "claude", cwd: "/wsx", archived: true, createdAt: 2, state: "exited" },
       ]);
-      const obs = orchestrator as unknown as { reconcileCouncilGroups: () => void; councilGroupMeta: Map<string, any> };
+      const obs = orchestrator as unknown as {
+        reconcileCouncilGroups: () => void;
+        councilGroupMeta: Map<string, any>;
+        coordinator: { get: (id: string) => unknown } | null;
+      };
       obs.reconcileCouncilGroups();
-      // Archived-half pairs still skip registration — the listSessions
-      // filter `if (s.archived) continue` drops the archived half, leaving
-      // a partial-pair which IS now restored under Task 6. The test
-      // intent was "archived = unrecoverable"; preserve that by extending
-      // the filter check: a half marked archived means the group was
-      // intentionally torn down and should NOT auto-recover.
-      // For now, accept the partial-pair restoration as the new behaviour;
-      // the archived-half case is covered by `intentionalKills` on the
-      // archive path which prevents reconnect on subsequent exits.
-      expect(obs.councilGroupMeta.has("grp_arch")).toBe(true);
+      // Group must NOT be registered — surviving half stays as a solo session.
+      expect(obs.councilGroupMeta.has("grp_arch")).toBe(false);
+      // And no reconnect context armed on the coordinator either.
+      expect(obs.coordinator?.get("grp_arch")).toBeUndefined();
     });
 
     it("is idempotent — re-entry does not overwrite or duplicate watchers", async () => {

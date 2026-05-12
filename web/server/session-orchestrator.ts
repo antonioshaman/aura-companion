@@ -563,12 +563,28 @@ export class SessionOrchestrator {
    * restart can make a sentinel lie).
    */
   reconcileCouncilGroups(): void {
-    const byGroup = new Map<string, { orchestrator?: SdkSessionInfo; observer?: SdkSessionInfo }>();
+    // Bucket BOTH live and archived halves per group so we can distinguish
+    // "transient missing half — arm grace" from "intentionally torn down
+    // half — do nothing" at the group-level decision. Filtering archived
+    // per-session BEFORE bucketing (the original Task 6 approach) caused
+    // archived-half pairs to look like partial pairs and incorrectly armed
+    // reconnect grace on what was actually an intentional teardown — see
+    // the live log entry `event=group.reconnect_failed sessionGroupId=grp_7a2a49e417861d
+    // role=orchestrator` that surfaced this bug.
+    const byGroup = new Map<string, {
+      orchestrator?: SdkSessionInfo;
+      observer?: SdkSessionInfo;
+      anyArchived: boolean;
+    }>();
     for (const s of this.launcher.listSessions()) {
-      if (!s.sessionGroupId || s.archived) continue;
+      if (!s.sessionGroupId) continue;
       if (s.sessionGroupRole !== "orchestrator" && s.sessionGroupRole !== "observer") continue;
-      const slot = byGroup.get(s.sessionGroupId) ?? {};
-      slot[s.sessionGroupRole] = s;
+      const slot = byGroup.get(s.sessionGroupId) ?? { anyArchived: false };
+      if (s.archived) {
+        slot.anyArchived = true;
+      } else {
+        slot[s.sessionGroupRole] = s;
+      }
       byGroup.set(s.sessionGroupId, slot);
     }
 
@@ -576,6 +592,11 @@ export class SessionOrchestrator {
     let restoredPartial = 0;
     for (const [groupId, pair] of byGroup) {
       if (this.councilGroupMeta.has(groupId)) continue;
+      // If EITHER half of the pair was archived (any time, even if the
+      // other half is still alive), the group was intentionally torn down.
+      // Don't auto-restore it — surviving half stays operable as a solo
+      // session, matching the pre-Task 6 behaviour for archived-half cases.
+      if (pair.anyArchived) continue;
       const surviving = pair.orchestrator ?? pair.observer;
       if (!surviving) continue;
       const cwd = surviving.cwd;
@@ -603,6 +624,15 @@ export class SessionOrchestrator {
         lastCheckpointReceivedAt: null,
       });
       this.startCouncilWatchers(groupId, cwd);
+      // Mark real (non-synthetic) halves on the ws-bridge so post-restart
+      // browser subscribe sees `state.sessionGroupId` and emits the
+      // synthetic `group_created` for hydration (Bug #2 fix).
+      if (orchestrator) {
+        this.wsBridge.markCouncilSession(orchestrator.sessionId, groupId, "orchestrator");
+      }
+      if (observer) {
+        this.wsBridge.markCouncilSession(observer.sessionId, groupId, "observer");
+      }
       const coord = this.getOrCreateCoordinatorSync();
       coord.registerExternalGroup({
         sessionGroupId: groupId,
@@ -1198,6 +1228,14 @@ export class SessionOrchestrator {
         createdAt: Date.now(),
         lastCheckpointReceivedAt: null,
       });
+      // Mark both halves on the ws-bridge so `session.state.sessionGroupId`
+      // is populated and persisted. Without this, the synthetic
+      // `group_created` hydration in `handleBrowserOpen` (from commit
+      // a37ded5) reads `state.sessionGroupId` which was previously never
+      // written in production — surviving pairs across browser reload /
+      // server restart looked like two unrelated solo sessions.
+      this.wsBridge.markCouncilSession(group.primary.sessionId, group.sessionGroupId, "orchestrator");
+      this.wsBridge.markCouncilSession(group.observer.sessionId, group.sessionGroupId, "observer");
       // Start the per-group filesystem watchers BEFORE emitting
       // `group:created` so the watcher's first FS event cannot race past
       // the listener that calls `upsertGroup` in the browser store.

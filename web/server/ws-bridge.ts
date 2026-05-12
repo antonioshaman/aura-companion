@@ -106,6 +106,30 @@ export class WsBridge {
   }
 
   /**
+   * Mark a session as belonging to a Council Mode pair. Populates
+   * `session.state.sessionGroupId` / `sessionGroupRole` so
+   * `handleBrowserOpen` can hydrate a synthetic `group_created` on
+   * subscribe (post-restart, page-reload, second-tab).
+   *
+   * Prior to this method existing, the synthetic-hydration path from
+   * commit a37ded5 read `state.sessionGroupId` which was never written
+   * in production — only in unit tests. Surviving pairs across browser
+   * reload / server restart looked like two unrelated solo sessions.
+   * Called from `SessionOrchestrator.createCouncilGroup` after spawn
+   * and from `reconcileCouncilGroups` for resumed pairs.
+   */
+  markCouncilSession(
+    sessionId: string,
+    sessionGroupId: string,
+    sessionGroupRole: import("./session-types.js").SessionGroupRole,
+  ): void {
+    const session = this.getOrCreateSession(sessionId);
+    session.state.sessionGroupId = sessionGroupId;
+    session.state.sessionGroupRole = sessionGroupRole;
+    this.persistSession(session);
+  }
+
+  /**
    * Pre-populate a session with container info so that handleSystemMessage
    * preserves the host cwd instead of overwriting it with /workspace.
    * Call this right after launcher.launch() for containerized sessions.
