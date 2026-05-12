@@ -59,6 +59,30 @@ function StatusPill({ state }: { state: ObserverPanelState }) {
           <span className="text-xs font-medium">Awaiting first checkpoint</span>
         </div>
       );
+    case "spawning":
+      return (
+        <div
+          data-testid="status-pill"
+          data-state={state.name}
+          aria-busy="true"
+          className="flex items-center gap-2 text-cc-info"
+        >
+          <span aria-hidden="true" className="w-3 h-3 rounded-full border-2 border-cc-info/30 border-t-cc-info animate-spin" />
+          <span className="text-xs font-medium">Spawning observer…</span>
+        </div>
+      );
+    case "reconnecting":
+      return (
+        <div
+          data-testid="status-pill"
+          data-state={state.name}
+          aria-busy="true"
+          className="flex items-center gap-2 text-cc-warning"
+        >
+          <span aria-hidden="true" className="w-3 h-3 rounded-full border-2 border-cc-warning/30 border-t-cc-warning animate-spin" />
+          <span className="text-xs font-medium">Observer reconnecting</span>
+        </div>
+      );
     case "sleeping":
       return (
         <div data-testid="status-pill" data-state={state.name} className="flex items-center gap-2 text-cc-muted">

@@ -10,22 +10,30 @@ import type {
  * union as a unit rather than re-deriving from individual booleans.
  *
  * Priority ladder (highest wins):
- *   1. `degraded`         — one half of the pair is dead.
- *   2. `blocker-found`    — at least one undismissed STOP finding for this group.
- *   3. `reviewing`        — group received a checkpoint but no review yet.
- *   4. `sleeping`         — at least one checkpoint completed, no live STOPs.
- *   5. `never-checkpointed-yet` — group exists, no checkpoint observed.
+ *   1. `degraded`             — one half of the pair is dead.
+ *   2. `blocker-found`        — at least one undismissed STOP finding for this group.
+ *   3. `reconnecting`         — group is reconnecting after a transient flap.
+ *   4. `reviewing`            — group received a checkpoint but no review yet.
+ *   5. `spawning`             — pair is still being created (no checkpoints yet).
+ *   6. `sleeping`             — at least one checkpoint completed, no live STOPs.
+ *   7. `never-checkpointed-yet` — group is active but no checkpoint observed yet.
  *
  * Returns `null` only when no group is supplied at all — callers render
  * "Council Mode off" UI in that case.
+ *
+ * Friedman council review #11 (P2#11): `spawning` and `reconnecting`
+ * were added so the 10-30s pair-creation window and any WS flap don't
+ * collapse silently into the idle pill.
  */
 export function deriveObserverPanelState(args: {
   group: GroupRecord | undefined;
   findings: readonly ObserverFinding[];
   /** STOP findings the user has dismissed. */
   dismissedStopIds: ReadonlySet<string>;
+  /** Wallclock (ms) — defaults to `Date.now()`. Override for deterministic tests. */
+  nowMs?: number;
 }): ObserverPanelState | null {
-  const { group, findings, dismissedStopIds } = args;
+  const { group, findings, dismissedStopIds, nowMs } = args;
   if (!group) return null;
 
   if (group.status === "degraded") {
@@ -45,11 +53,27 @@ export function deriveObserverPanelState(args: {
     };
   }
 
+  if (group.status === "reconnecting") {
+    return {
+      name: "reconnecting",
+      lastCheckpointAt: group.lastCheckpointAt ?? null,
+      lastPhase: group.lastPhase ?? null,
+    };
+  }
+
   if (group.observerReviewing === true && typeof group.lastCheckpointAt === "number" && typeof group.lastPhase === "string") {
     return {
       name: "reviewing",
       reviewingSince: group.lastCheckpointAt,
       phase: group.lastPhase,
+    };
+  }
+
+  if (group.status === "pairing") {
+    return {
+      name: "spawning",
+      sinceMs: typeof nowMs === "number" ? nowMs : Date.now(),
+      pairing: group.pairing,
     };
   }
 

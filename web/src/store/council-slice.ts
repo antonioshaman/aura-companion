@@ -184,9 +184,10 @@ export interface CouncilSlice {
   setObserverPanelWidth: (sessionId: string, widthPx: number) => void;
   dismissFirstRunHint: () => void;
   dismissStop: (findingId: string) => void;
-
-  /** Cross-slice cleanup — invoked by `removeSession` to drop council state for a session. */
-  cleanupCouncilForSession: (sessionId: string) => void;
+  // Council slice cross-slice cleanup is canonically performed inline
+  // inside `sessions-slice.removeSession` (single write path; React
+  // council review #12 — eliminating the parallel `cleanupCouncilForSession`
+  // export the prior commit shipped unused).
 }
 
 export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = (set) => ({
@@ -332,33 +333,5 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
       const dismissedStopIds = new Set(s.dismissedStopIds);
       dismissedStopIds.add(findingId);
       return { dismissedStopIds };
-    }),
-
-  cleanupCouncilForSession: (sessionId) =>
-    set((s) => {
-      const groupId = s.groupBySessionId.get(sessionId);
-      const observerPanelOpen = new Map(s.observerPanelOpen);
-      observerPanelOpen.delete(sessionId);
-      persistMap(PANEL_OPEN_KEY, observerPanelOpen);
-      const observerPanelWidth = new Map(s.observerPanelWidth);
-      observerPanelWidth.delete(sessionId);
-      persistMap(PANEL_WIDTH_KEY, observerPanelWidth);
-      if (!groupId) return { observerPanelOpen, observerPanelWidth };
-      // Removing the orchestrator session implicitly archives the group
-      // client-side. Server still owns the truth — this is purely so
-      // stale records don't linger across resubscribes.
-      const group = s.groups.get(groupId);
-      const groups = new Map(s.groups);
-      groups.delete(groupId);
-      const groupBySessionId = new Map(s.groupBySessionId);
-      if (group) {
-        groupBySessionId.delete(group.primarySessionId);
-        groupBySessionId.delete(group.observerSessionId);
-      }
-      const findings = new Map(s.findings);
-      findings.delete(groupId);
-      const groundingDowngrades = new Map(s.groundingDowngrades);
-      groundingDowngrades.delete(groupId);
-      return { observerPanelOpen, observerPanelWidth, groups, groupBySessionId, findings, groundingDowngrades };
     }),
 });

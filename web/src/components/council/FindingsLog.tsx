@@ -68,14 +68,14 @@ export function severityClass(severity: ObserverFinding["severity"]): {
 function SeverityDot({ finding }: { finding: ObserverFinding }) {
   const cls = severityClass(finding.severity);
   // Downgraded STOP renders as a "half-tone" muted dot so the user can
-  // see at a glance that this row used to be a STOP. The actual severity
-  // displayed in the label is NOTE (server-side downgrade), but the
-  // half-tone marker preserves the audit trail.
+  // see at a glance that this row used to be a STOP. Saarinen P3-1:
+  // use outline rather than border so layout extent stays at 2×2 — a
+  // border would push the row 2px wider than the regular dot column.
   if (finding.wasDowngraded) {
     return (
       <span
         aria-hidden="true"
-        className="shrink-0 w-2 h-2 rounded-full border border-cc-muted/40 bg-cc-muted/20"
+        className="shrink-0 w-2 h-2 rounded-full outline outline-1 outline-cc-muted/40 outline-offset-0 bg-cc-muted/20"
       />
     );
   }

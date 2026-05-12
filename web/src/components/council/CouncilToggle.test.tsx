@@ -116,7 +116,9 @@ describe("CouncilToggle", () => {
     );
     fireEvent.click(screen.getByTestId("pairing-trigger"));
     const codexOpt = screen.getByTestId("pairing-option-claude+codex");
-    expect(codexOpt).toBeDisabled();
+    // a11y council review #10 — aria-disabled (kept focusable so SR users
+    // hear the inline reason) rather than `disabled` (removes from Tab order).
+    expect(codexOpt).toHaveAttribute("aria-disabled", "true");
     expect(codexOpt.textContent).toMatch(/unavailable/i);
     expect(codexOpt).toHaveAttribute("title", "Codex CLI not detected.");
   });

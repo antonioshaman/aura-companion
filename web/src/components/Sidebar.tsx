@@ -413,13 +413,20 @@ export function Sidebar() {
       }
     }
 
-    // No linked non-done issue — use existing container-only confirmation or direct archive
-    if (isContainerized) {
+    // Friedman council review #11 (P2#11): Council Mode pairs MUST hit
+    // the confirm preview even for uncontainerized sessions, so the
+    // "ends BOTH the orchestrator and the observer" microcopy is reached
+    // before the destructive group-archive fires. The previous routing
+    // gated the confirm on `isContainerized` alone — bypassing the
+    // carefully-written council preview for the most common dev-loop
+    // configuration.
+    const inCouncilGroup = groupBySessionId.has(sessionId);
+    if (isContainerized || inCouncilGroup) {
       setConfirmArchiveId(sessionId);
       return;
     }
     doArchive(sessionId);
-  }, [sdkSessions, sessions, linkedLinearIssues]);
+  }, [sdkSessions, sessions, linkedLinearIssues, groupBySessionId]);
 
   const doArchive = useCallback(async (sessionId: string, force?: boolean, linearTransition?: LinearTransitionChoice) => {
     try {

@@ -161,10 +161,37 @@ describe("deriveObserverPanelState", () => {
     expect(out).toEqual({ name: "sleeping", lastCheckpointAt: 3_000, lastPhase: "council-review" });
   });
 
-  // Fifth-priority / default: pair just created, no activity yet.
-  it("returns 'never-checkpointed-yet' for a fresh group with no checkpoint", () => {
+  // Friedman council review #11 (P2#11): `status === "pairing"` is the
+  // spawning window — the panel should signal "creation in flight",
+  // not silently collapse into the same idle pill as a healthy at-rest pair.
+  it("returns 'spawning' when status is pairing", () => {
     const out = deriveObserverPanelState({
-      group: group({ status: "pairing" }),
+      group: group({ status: "pairing", pairing: "claude+codex" }),
+      findings: [],
+      dismissedStopIds: new Set(),
+      nowMs: 5_000,
+    });
+    expect(out).toEqual({ name: "spawning", sinceMs: 5_000, pairing: "claude+codex" });
+  });
+
+  // `status === "reconnecting"` carries the prior checkpoint context
+  // (so the user sees "reconnecting · phase X · last seen 2m ago" rather
+  // than starting from scratch).
+  it("returns 'reconnecting' when status is reconnecting", () => {
+    const out = deriveObserverPanelState({
+      group: group({ status: "reconnecting", lastCheckpointAt: 3_000, lastPhase: "council-implement" }),
+      findings: [],
+      dismissedStopIds: new Set(),
+    });
+    expect(out).toEqual({ name: "reconnecting", lastCheckpointAt: 3_000, lastPhase: "council-implement" });
+  });
+
+  // never-checkpointed-yet is the fall-through default — an `active`
+  // status with no checkpoint yet (transient window between pair-ready
+  // and first checkpoint).
+  it("returns 'never-checkpointed-yet' for an active group with no checkpoint", () => {
+    const out = deriveObserverPanelState({
+      group: group({ status: "active" }),
       findings: [],
       dismissedStopIds: new Set(),
     });

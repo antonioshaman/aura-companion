@@ -154,6 +154,8 @@ export interface ObserverFinding {
 
 export type ObserverPanelStateName =
   | "never-checkpointed-yet"
+  | "spawning"
+  | "reconnecting"
   | "sleeping"
   | "reviewing"
   | "blocker-found"
@@ -164,9 +166,17 @@ export type ObserverPanelStateName =
  * Components MUST consume the derived value as a unit — they MUST NOT
  * recompute the name from independent booleans (Saarinen P8 component
  * consistency + the "three diverging boolean expressions" anti-pattern).
+ *
+ * `spawning` covers the 10-30s pair-creation window when the backend is
+ * still bringing the second half up; `reconnecting` covers the transient
+ * WebSocket flap when the observer half's CLI socket drops. Both states
+ * sit above `never-checkpointed-yet` in priority — they communicate
+ * "the pair is in flux", not "the pair is healthy + idle".
  */
 export type ObserverPanelState =
   | { name: "never-checkpointed-yet" }
+  | { name: "spawning"; sinceMs: number; pairing: string }
+  | { name: "reconnecting"; lastCheckpointAt: number | null; lastPhase: string | null }
   | { name: "sleeping"; lastCheckpointAt: number; lastPhase: string }
   | { name: "reviewing"; reviewingSince: number; phase: string }
   | { name: "blocker-found"; unresolvedStops: number; lastBlockerAt: number }

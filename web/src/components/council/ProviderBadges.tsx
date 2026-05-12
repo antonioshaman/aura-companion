@@ -52,13 +52,20 @@ interface BadgeProps {
 }
 
 function providerChipClass(provider: string): string {
-  // Brand-tinted muted backgrounds. Distinct hues for the two known
-  // providers; any unknown value falls back to neutral (no surprises).
+  // Brand-tinted backgrounds with WCAG-AA-rated text tokens (a11y
+  // council review #10 / P2#10): `cc-primary` and `cc-codex` over an
+  // alpha-blended brand background fail AA at 10-11px body sizes. The
+  // `-btn` darker variants in `index.css` are documented as
+  // "Darker button-grade variants — meet WCAG AA (4.5:1) with white
+  // text"; we use the same tokens here for legible chip text on the
+  // tinted surface. Background alpha widened (10→25) so the contrast
+  // ratio is built on a more saturated surface for both light and dark
+  // themes.
   if (provider === "claude") {
-    return "bg-cc-primary/10 text-cc-primary border border-cc-primary/15";
+    return "bg-cc-primary/25 text-cc-primary-btn border border-cc-primary/30 dark:text-cc-primary";
   }
   if (provider === "codex") {
-    return "bg-cc-codex/10 text-cc-codex border border-cc-codex/20";
+    return "bg-cc-codex/25 text-cc-codex-btn border border-cc-codex/30 dark:text-cc-codex";
   }
   return "bg-cc-muted/10 text-cc-muted border border-cc-border";
 }

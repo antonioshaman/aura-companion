@@ -67,12 +67,19 @@ export function DegradedBanner({
     ? "The orchestrator continues running solo. Respawn the observer to resume independent review."
     : "The observer is alive but the orchestrator died. This is an unusual state — respawn or end the group.";
 
+  // a11y council review #10 (P2#10 — A11Y-P1-3 + Saarinen P2-1/3): the
+  // label and button text previously rendered as `text-cc-warning` over a
+  // tinted background — fails WCAG AA at 4.5:1 in light mode. Switching
+  // label + button text to `text-cc-fg` keeps the warning identity in
+  // the icon + border + button background, where contrast is fine; the
+  // accessible text now meets AA. Also: bg alpha snapped to /10 (was /8,
+  // off the project's 5/10/15/25 scale per Saarinen P2-3).
   return (
     <div
       role="status"
       aria-live="polite"
       data-testid="degraded-banner"
-      className="px-3 py-3 border-b border-cc-warning/25 bg-cc-warning/8"
+      className="px-3 py-3 border-b border-cc-warning/25 bg-cc-warning/10 animate-[fadeSlideIn_0.2s_ease-out]"
     >
       <div className="flex items-start gap-2">
         <div className="w-6 h-6 rounded-md flex items-center justify-center shrink-0 mt-0.5 bg-cc-warning/15 border border-cc-warning/30">
@@ -81,13 +88,13 @@ export function DegradedBanner({
           </svg>
         </div>
         <div className="flex-1 min-w-0">
-          <div className="text-xs font-semibold text-cc-warning mb-0.5">{label}</div>
-          <p className="text-xs text-cc-fg leading-snug mb-2">{detail}</p>
+          <div className="text-xs font-semibold text-cc-fg mb-0.5">{label}</div>
+          <p className="text-xs text-cc-fg/80 leading-snug mb-2">{detail}</p>
           <div className="flex items-center gap-2">
             {respawning ? (
               <>
-                <span className="inline-flex items-center gap-1.5 text-xs text-cc-warning font-medium px-2.5 py-1 rounded-md bg-cc-warning/15">
-                  <span className="w-3 h-3 rounded-full border-2 border-cc-warning/30 border-t-cc-warning animate-spin" aria-hidden="true" />
+                <span className="inline-flex items-center gap-1.5 text-xs text-cc-fg font-medium px-2.5 py-1 rounded-md bg-cc-warning/15">
+                  <span className="w-3 h-3 rounded-full border-2 border-cc-muted/20 border-t-cc-warning animate-spin" aria-hidden="true" />
                   Respawning…
                 </span>
                 {typeof controlledRespawning !== "boolean" && (
@@ -105,7 +112,7 @@ export function DegradedBanner({
                 <button
                   type="button"
                   onClick={handleRespawn}
-                  className="text-xs font-medium px-3 py-1.5 rounded-md bg-cc-warning/15 hover:bg-cc-warning/25 text-cc-warning transition-colors cursor-pointer"
+                  className="text-xs font-medium px-3 py-1.5 rounded-md bg-cc-warning/20 hover:bg-cc-warning/30 text-cc-fg border border-cc-warning/30 transition-colors cursor-pointer"
                 >
                   Respawn {deadRole}
                 </button>
