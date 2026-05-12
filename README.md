@@ -1,6 +1,21 @@
-# Aura Companion
+<p align="center">
+  <img src="docs/screenshots/aura-companion-hero.png" alt="Aura Companion — New Session with Council Mode toggle and paired sessions in the sidebar" width="100%" />
+</p>
 
-A self-learning web UI for Claude Code & Codex with **Council Mode** — paired orchestrator + observer sessions that catch what single-author thinking misses.
+<h1 align="center">Aura Companion</h1>
+<p align="center"><strong>Self-learning web UI for Claude Code & Codex with Council Mode.</strong></p>
+<p align="center">Paired orchestrator + observer sessions. Adaptive knowledge base. 29 skills that compound.</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="MIT License" /></a>
+  <a href="https://github.com/antonioshaman/aura-companion/stargazers"><img src="https://img.shields.io/github/stars/antonioshaman/aura-companion?style=social" alt="GitHub stars" /></a>
+  <img src="https://img.shields.io/badge/Bun-%E2%89%A51.0-black" alt="Bun >= 1.0" />
+  <img src="https://img.shields.io/badge/Council%20Mode-orchestrator%20%2B%20observer-orange" alt="Council Mode" />
+</p>
+
+---
+
+**Aura Companion** is a self-learning web UI for Claude Code & Codex with **Council Mode** — paired orchestrator + observer sessions that catch what single-author thinking misses.
 
 Council Mode pairs your main agent with an independent reviewer in one click. The orchestrator runs the work; the observer wakes on each phase checkpoint, reads only the just-changed surface, and pushes grounded findings back into your chat as a BlockerBanner you cannot miss. On top of that, an adaptive knowledge base accumulates patterns, gotchas, and decisions so every session is smarter than the last.
 
