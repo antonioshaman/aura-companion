@@ -4527,6 +4527,167 @@ describe("injectMcpSetServers", () => {
   });
 });
 
+// ─── sendInitializeKickoff ────────────────────────────────────────────────────
+
+describe("sendInitializeKickoff", () => {
+  // Validates the bootstrap fix for Council Mode observers (and the latent
+  // orchestrator fragility): Claude Code CLI in `--print -p stream-json` mode
+  // does not emit `system` init until it receives a first input frame. Before
+  // this fix, sessions only handshaked if a browser happened to push some
+  // control_request (e.g. mcp_get_status on subscribe). Observers have no
+  // chat-surface subscription, so they were stuck in "initializing" forever
+  // and the UI banner read "Reconnecting" indefinitely. handleCLIOpen now
+  // fires a bare `initialize` control_request right after attachWebSocket so
+  // the CLI handshake completes deterministically, independent of any client.
+  it("sends bare initialize control_request automatically on handleCLIOpen", () => {
+    // No browser involvement — just a CLI socket opening. The kickoff must
+    // fire so the CLI emits its system init frame.
+    const cli = makeCliSocket("s1");
+    bridge.handleCLIOpen(cli, "s1");
+
+    const calls = cli.send.mock.calls.map(([arg]: [string]) => arg);
+    const initMsg = calls.find((s: string) => {
+      try {
+        const j = JSON.parse(s.trim());
+        return j.type === "control_request" && j.request?.subtype === "initialize";
+      } catch { return false; }
+    });
+    expect(initMsg).toBeDefined();
+    const parsed = JSON.parse(initMsg!.trim());
+    expect(parsed.type).toBe("control_request");
+    expect(parsed.request.subtype).toBe("initialize");
+    // Bare kickoff carries no appendSystemPrompt — that's the orthogonal
+    // injectSystemPrompt path, used for Linear / agent-executor flows.
+    expect(parsed.request.appendSystemPrompt).toBeUndefined();
+    expect(parsed.request_id).toBeDefined();
+    expect(typeof parsed.request_id).toBe("string");
+  });
+
+  it("is a no-op for nonexistent session", () => {
+    expect(() => bridge.sendInitializeKickoff("nonexistent")).not.toThrow();
+  });
+});
+
+// ─── Council Mode — synthetic group_created hydration on browser subscribe ──
+
+describe("handleBrowserOpen — Council group hydration", () => {
+  // Validates Fix B: `group_created` is emitted server-side only at initial
+  // createCouncilGroup time, which means a browser that connects later (page
+  // reload, second tab, post-server-restart) would never know its two
+  // sessions are paired — Sidebar would show two solo entries, ObserverPanel
+  // would never mount. handleBrowserOpen now replays a synthetic group_created
+  // to the subscribing browser based on the in-memory session pair, with the
+  // pairing label derived from each half's backendType.
+  it("sends synthetic group_created when subscribing to an orchestrator-role session with a registered counterpart", () => {
+    const orch = bridge.getOrCreateSession("s-orch", "claude");
+    const obs = bridge.getOrCreateSession("s-obs", "claude");
+    orch.state.sessionGroupId = "grp_h1";
+    orch.state.sessionGroupRole = "orchestrator";
+    obs.state.sessionGroupId = "grp_h1";
+    obs.state.sessionGroupRole = "observer";
+
+    const browser = makeBrowserSocket("s-orch");
+    bridge.handleBrowserOpen(browser, "s-orch");
+
+    const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
+    const groupMsg = calls.find((c: any) => c.type === "group_created");
+    expect(groupMsg).toBeDefined();
+    expect(groupMsg.sessionGroupId).toBe("grp_h1");
+    expect(groupMsg.primarySessionId).toBe("s-orch");
+    expect(groupMsg.observerSessionId).toBe("s-obs");
+    expect(groupMsg.pairing).toBe("claude+claude");
+  });
+
+  it("derives primary/observer correctly when the browser connects to the observer half", () => {
+    // Subscribing TO the observer should still yield a payload where
+    // primarySessionId points at the orchestrator (not the subscriber).
+    const orch = bridge.getOrCreateSession("o-orch", "claude");
+    const obs = bridge.getOrCreateSession("o-obs", "claude");
+    orch.state.sessionGroupId = "grp_h2";
+    orch.state.sessionGroupRole = "orchestrator";
+    obs.state.sessionGroupId = "grp_h2";
+    obs.state.sessionGroupRole = "observer";
+
+    const browser = makeBrowserSocket("o-obs");
+    bridge.handleBrowserOpen(browser, "o-obs");
+
+    const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
+    const groupMsg = calls.find((c: any) => c.type === "group_created");
+    expect(groupMsg).toBeDefined();
+    expect(groupMsg.primarySessionId).toBe("o-orch");
+    expect(groupMsg.observerSessionId).toBe("o-obs");
+  });
+
+  it("emits claude+codex pairing label for cross-family pairs", () => {
+    const orch = bridge.getOrCreateSession("x-orch", "claude");
+    const obs = bridge.getOrCreateSession("x-obs", "codex");
+    orch.state.sessionGroupId = "grp_xp";
+    orch.state.sessionGroupRole = "orchestrator";
+    obs.state.sessionGroupId = "grp_xp";
+    obs.state.sessionGroupRole = "observer";
+
+    const browser = makeBrowserSocket("x-orch");
+    bridge.handleBrowserOpen(browser, "x-orch");
+
+    const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
+    const groupMsg = calls.find((c: any) => c.type === "group_created");
+    expect(groupMsg?.pairing).toBe("claude+codex");
+  });
+
+  it("does NOT send group_created for a session without sessionGroupId", () => {
+    // Plain solo session: hydration path must skip cleanly.
+    bridge.getOrCreateSession("solo-x", "claude");
+    const browser = makeBrowserSocket("solo-x");
+    bridge.handleBrowserOpen(browser, "solo-x");
+
+    const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
+    const groupMsg = calls.find((c: any) => c.type === "group_created");
+    expect(groupMsg).toBeUndefined();
+  });
+
+  it("does NOT send group_created when the counterpart half is not yet registered", () => {
+    // Partial-pair: only orchestrator is registered (e.g. observer's CLI
+    // socket hasn't reconnected yet after restart). The browser will rehydrate
+    // on a future reconnect once the counterpart lands.
+    const orch = bridge.getOrCreateSession("p-orch", "claude");
+    orch.state.sessionGroupId = "grp_partial";
+    orch.state.sessionGroupRole = "orchestrator";
+
+    const browser = makeBrowserSocket("p-orch");
+    bridge.handleBrowserOpen(browser, "p-orch");
+
+    const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
+    const groupMsg = calls.find((c: any) => c.type === "group_created");
+    expect(groupMsg).toBeUndefined();
+  });
+
+  it("sends group_created BEFORE message_history so the council slice is hydrated when conversation replays", () => {
+    // Order matters: ObserverPanel mounts on receipt of group_created, and
+    // some observer-targeted history events (group_checkpoint, observer_review)
+    // require the panel to exist before they dispatch into the slice. Test
+    // the actual ordering on the wire — not just presence.
+    const orch = bridge.getOrCreateSession("ord-orch", "claude");
+    const obs = bridge.getOrCreateSession("ord-obs", "claude");
+    orch.state.sessionGroupId = "grp_ord";
+    orch.state.sessionGroupRole = "orchestrator";
+    obs.state.sessionGroupId = "grp_ord";
+    obs.state.sessionGroupRole = "observer";
+    // Seed minimal message history so handleBrowserOpen sends a message_history
+    // frame after session_init.
+    orch.messageHistory.push({ type: "cli_connected" } as any);
+
+    const browser = makeBrowserSocket("ord-orch");
+    bridge.handleBrowserOpen(browser, "ord-orch");
+
+    const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
+    const groupIdx = calls.findIndex((c: any) => c.type === "group_created");
+    const historyIdx = calls.findIndex((c: any) => c.type === "message_history");
+    expect(groupIdx).toBeGreaterThanOrEqual(0);
+    expect(historyIdx).toBeGreaterThanOrEqual(0);
+    expect(groupIdx).toBeLessThan(historyIdx);
+  });
+});
+
 // ─── injectSystemPrompt ─────────────────────────────────────────────────────
 
 describe("injectSystemPrompt", () => {

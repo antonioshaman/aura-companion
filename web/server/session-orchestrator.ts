@@ -355,8 +355,72 @@ export class SessionOrchestrator {
     // separated from the solo-session lifecycle wiring above.
     this.wireGroupListeners();
 
+    // Council Mode group reconciliation. Pairs created in a previous server
+    // uptime are restored from launcher state (which itself hydrates from
+    // session-store on startup). Without this, --resume brings back the
+    // CLI processes but `councilGroupMeta` is empty and `startCouncilWatchers`
+    // never fires for resumed pairs — the group becomes a zombie with no
+    // checkpoint→review pipeline. Must run AFTER wireGroupListeners so the
+    // bus is ready to fan future events for the reconciled groups.
+    this.reconcileCouncilGroups();
+
     // Reconnection watchdog for stale sessions after server restart
     this.startReconnectionWatchdog();
+  }
+
+  /**
+   * Council Mode — rebuild `councilGroupMeta` + rearm `.council/` watchers
+   * for pairs that exist in launcher state but not yet in our in-memory
+   * group registry. Called from `initialize()` after the bus is wired and
+   * idempotent on re-entry (skips groups already registered).
+   *
+   * Partial pairs (only orchestrator alive, only observer alive, or one
+   * half archived) are skipped — there is no recoverable group lifecycle
+   * for them; the surviving half remains operable as a solo session.
+   */
+  reconcileCouncilGroups(): void {
+    const byGroup = new Map<string, { orchestrator?: SdkSessionInfo; observer?: SdkSessionInfo }>();
+    for (const s of this.launcher.listSessions()) {
+      if (!s.sessionGroupId || s.archived) continue;
+      if (s.sessionGroupRole !== "orchestrator" && s.sessionGroupRole !== "observer") continue;
+      const slot = byGroup.get(s.sessionGroupId) ?? {};
+      slot[s.sessionGroupRole] = s;
+      byGroup.set(s.sessionGroupId, slot);
+    }
+
+    let restored = 0;
+    for (const [groupId, pair] of byGroup) {
+      if (this.councilGroupMeta.has(groupId)) continue;
+      if (!pair.orchestrator || !pair.observer) continue;
+      const cwd = pair.orchestrator.cwd || pair.observer.cwd;
+      if (!cwd) continue;
+      const pairing = `${pair.orchestrator.backendType ?? "claude"}+${pair.observer.backendType ?? "claude"}`;
+      this.councilGroupMeta.set(groupId, {
+        primarySessionId: pair.orchestrator.sessionId,
+        observerSessionId: pair.observer.sessionId,
+        pairing,
+        observerPromptSha256: pair.observer.observerPromptSha256,
+        createdAt: pair.orchestrator.createdAt ?? Date.now(),
+        lastCheckpointReceivedAt: null,
+      });
+      this.startCouncilWatchers(groupId, cwd);
+      restored++;
+      log.info("session-orchestrator", "council group reconciled on startup", {
+        event: "group:reconciled",
+        sessionGroupId: groupId,
+        sessionId: pair.orchestrator.sessionId,
+        role: "orchestrator",
+        observerSessionId: pair.observer.sessionId,
+        pairing,
+      });
+    }
+    if (restored > 0) {
+      log.info("session-orchestrator", "council reconcile completed", {
+        event: "council:reconcile_completed",
+        restored,
+        examined: byGroup.size,
+      });
+    }
   }
 
   // ── Council Mode — wire bus listeners (Fowler council review #15) ────────

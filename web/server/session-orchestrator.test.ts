@@ -2289,6 +2289,135 @@ describe("SessionOrchestrator", () => {
     });
   });
 
+  // ── reconcileCouncilGroups — startup recovery ──────────────────────────
+  //
+  // After a server restart, --resume brings back CLI processes from
+  // session-store, but the orchestrator's in-memory group-lifecycle layer
+  // (councilGroupMeta + councilWatchers) is empty until createCouncilGroup
+  // is called fresh. reconcileCouncilGroups() rebuilds that layer by
+  // scanning launcher.listSessions() for complete (orchestrator + observer
+  // present, non-archived) pairs and arming watchers. Without it, the UI
+  // hydration path (synthetic group_created on browser subscribe) has no
+  // backing data and the checkpoint→review pipeline stays dead post-restart.
+  describe("reconcileCouncilGroups", () => {
+    it("restores councilGroupMeta + arms watchers for a complete pair", async () => {
+      const fs = await import("node:fs");
+      const os = await import("node:os");
+      const path = await import("node:path");
+      const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "council-recon-")));
+      try {
+        (deps.launcher.listSessions as any).mockReturnValue([
+          { sessionId: "s-orch", sessionGroupId: "grp_r1", sessionGroupRole: "orchestrator",
+            backendType: "claude", cwd: ws, archived: false, createdAt: 1000, state: "running" },
+          { sessionId: "s-obs", sessionGroupId: "grp_r1", sessionGroupRole: "observer",
+            backendType: "claude", cwd: ws, archived: false, createdAt: 1001,
+            observerPromptSha256: "deadbeef", state: "running" },
+        ]);
+        const obs = orchestrator as unknown as {
+          reconcileCouncilGroups: () => void;
+          councilGroupMeta: Map<string, { primarySessionId: string; observerSessionId: string; pairing: string; observerPromptSha256?: string }>;
+          councilWatchers: Map<string, unknown>;
+        };
+        obs.reconcileCouncilGroups();
+        const meta = obs.councilGroupMeta.get("grp_r1");
+        expect(meta).toBeDefined();
+        expect(meta?.primarySessionId).toBe("s-orch");
+        expect(meta?.observerSessionId).toBe("s-obs");
+        expect(meta?.pairing).toBe("claude+claude");
+        expect(meta?.observerPromptSha256).toBe("deadbeef");
+        expect(obs.councilWatchers.has("grp_r1")).toBe(true);
+        // stopCouncilWatchers tears down — keeps test tmpdir cleanup safe.
+        (obs as any).stopCouncilWatchers("grp_r1");
+      } finally {
+        fs.rmSync(ws, { recursive: true, force: true });
+      }
+    });
+
+    it("emits the correct pairing label for claude+codex cross-pairing", async () => {
+      const fs = await import("node:fs");
+      const os = await import("node:os");
+      const path = await import("node:path");
+      const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "council-recon-")));
+      try {
+        (deps.launcher.listSessions as any).mockReturnValue([
+          { sessionId: "p-orch", sessionGroupId: "grp_xp", sessionGroupRole: "orchestrator",
+            backendType: "claude", cwd: ws, archived: false, createdAt: 1, state: "running" },
+          { sessionId: "p-obs", sessionGroupId: "grp_xp", sessionGroupRole: "observer",
+            backendType: "codex", cwd: ws, archived: false, createdAt: 2, state: "running" },
+        ]);
+        const obs = orchestrator as unknown as { reconcileCouncilGroups: () => void; councilGroupMeta: Map<string, any> };
+        obs.reconcileCouncilGroups();
+        expect(obs.councilGroupMeta.get("grp_xp")?.pairing).toBe("claude+codex");
+        (orchestrator as any).stopCouncilWatchers("grp_xp");
+      } finally {
+        fs.rmSync(ws, { recursive: true, force: true });
+      }
+    });
+
+    it("skips a partial pair (orchestrator-only) — surviving half stays as solo", () => {
+      // No observer-half session in launcher → group is unrecoverable.
+      // Do NOT register half-baked metadata; that would mislead the UI
+      // hydration path into rendering ProviderBadges for a dead pair.
+      (deps.launcher.listSessions as any).mockReturnValue([
+        { sessionId: "lone-orch", sessionGroupId: "grp_partial", sessionGroupRole: "orchestrator",
+          backendType: "claude", cwd: "/wsx", archived: false, createdAt: 1, state: "running" },
+      ]);
+      const obs = orchestrator as unknown as { reconcileCouncilGroups: () => void; councilGroupMeta: Map<string, any>; councilWatchers: Map<string, any> };
+      obs.reconcileCouncilGroups();
+      expect(obs.councilGroupMeta.has("grp_partial")).toBe(false);
+      expect(obs.councilWatchers.has("grp_partial")).toBe(false);
+    });
+
+    it("skips pairs where one half is archived", () => {
+      // Archived half = group is unrecoverable for lifecycle purposes.
+      (deps.launcher.listSessions as any).mockReturnValue([
+        { sessionId: "a-orch", sessionGroupId: "grp_arch", sessionGroupRole: "orchestrator",
+          backendType: "claude", cwd: "/wsx", archived: false, createdAt: 1, state: "running" },
+        { sessionId: "a-obs", sessionGroupId: "grp_arch", sessionGroupRole: "observer",
+          backendType: "claude", cwd: "/wsx", archived: true, createdAt: 2, state: "exited" },
+      ]);
+      const obs = orchestrator as unknown as { reconcileCouncilGroups: () => void; councilGroupMeta: Map<string, any> };
+      obs.reconcileCouncilGroups();
+      expect(obs.councilGroupMeta.has("grp_arch")).toBe(false);
+    });
+
+    it("is idempotent — re-entry does not overwrite or duplicate watchers", async () => {
+      const fs = await import("node:fs");
+      const os = await import("node:os");
+      const path = await import("node:path");
+      const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "council-recon-")));
+      try {
+        (deps.launcher.listSessions as any).mockReturnValue([
+          { sessionId: "i-orch", sessionGroupId: "grp_idem", sessionGroupRole: "orchestrator",
+            backendType: "claude", cwd: ws, archived: false, createdAt: 1, state: "running" },
+          { sessionId: "i-obs", sessionGroupId: "grp_idem", sessionGroupRole: "observer",
+            backendType: "claude", cwd: ws, archived: false, createdAt: 2, state: "running" },
+        ]);
+        const obs = orchestrator as unknown as { reconcileCouncilGroups: () => void; councilGroupMeta: Map<string, any>; councilWatchers: Map<string, any> };
+        obs.reconcileCouncilGroups();
+        const firstMeta = obs.councilGroupMeta.get("grp_idem");
+        const firstWatcher = obs.councilWatchers.get("grp_idem");
+        // Re-entry must be a no-op for the already-registered group.
+        obs.reconcileCouncilGroups();
+        expect(obs.councilGroupMeta.get("grp_idem")).toBe(firstMeta);
+        expect(obs.councilWatchers.get("grp_idem")).toBe(firstWatcher);
+        (orchestrator as any).stopCouncilWatchers("grp_idem");
+      } finally {
+        fs.rmSync(ws, { recursive: true, force: true });
+      }
+    });
+
+    it("ignores sessions without sessionGroupId — solo sessions are untouched", () => {
+      (deps.launcher.listSessions as any).mockReturnValue([
+        { sessionId: "solo-1", backendType: "claude", cwd: "/x", archived: false, createdAt: 1, state: "running" },
+        { sessionId: "solo-2", backendType: "claude", cwd: "/y", archived: false, createdAt: 2, state: "running" },
+      ]);
+      const obs = orchestrator as unknown as { reconcileCouncilGroups: () => void; councilGroupMeta: Map<string, any> };
+      obs.reconcileCouncilGroups();
+      expect(obs.councilGroupMeta.size).toBe(0);
+    });
+  });
+
   describe("stopCouncilWatchers", () => {
     it("aborts the watcher signal and removes the entry from the map", () => {
       const abort = new AbortController();

@@ -789,6 +789,13 @@ export class WsBridge {
       this.broadcastToBrowsers(session, { type: "cli_connected" });
     }
 
+    // Bootstrap kickoff. Claude Code CLI in `--print -p --input-format stream-json`
+    // mode does not emit `system` init until it receives its first input frame.
+    // Without a kickoff, sessions stay stuck in "initializing" until a browser
+    // happens to send a control_request — fragile for orchestrators, broken for
+    // observers (no chat surface = no browser-side traffic).
+    this.sendInitializeKickoff(sessionId);
+
     // Flush any messages queued while waiting for the CLI WebSocket.
     // Per the SDK protocol, the first user message triggers system.init,
     // so we must send it as soon as the WebSocket is open — NOT wait for
@@ -886,6 +893,16 @@ export class WsBridge {
     };
     this.sendToBrowser(ws, snapshot);
 
+    // Council Mode — hydrate the browser's group state. `group_created` is
+    // emitted by the orchestrator only at initial createCouncilGroup time;
+    // a browser that connects later (page reload, second tab, post-restart)
+    // would otherwise see two unrelated sessions and never mount the
+    // ObserverPanel. Replay a synthetic group_created to THIS browser only.
+    if (session.state.sessionGroupId && session.state.sessionGroupRole) {
+      const groupPayload = this.deriveGroupCreatedForBrowser(session);
+      if (groupPayload) this.sendToBrowser(ws, groupPayload);
+    }
+
     // Replay message history so the browser can reconstruct the conversation
     if (session.messageHistory.length > 0) {
       this.sendToBrowser(ws, {
@@ -950,6 +967,54 @@ export class WsBridge {
       return;
     }
     this.routeBrowserMessage(session, { type: "mcp_set_servers", servers });
+  }
+
+  /** Council Mode — build a synthetic `group_created` payload for a single
+   *  browser subscribing to a session that's part of a pair. Uses the
+   *  bridge's own session map (both halves register here on CLI ws_open
+   *  after spawn or --resume) so no orchestrator dependency is needed.
+   *  Returns null if the counterpart half is not yet registered — the
+   *  browser will hydrate on the next reconnect once both halves are up. */
+  private deriveGroupCreatedForBrowser(session: Session): BrowserIncomingMessage | null {
+    const groupId = session.state.sessionGroupId;
+    const role = session.state.sessionGroupRole;
+    if (!groupId || !role) return null;
+    let counterpart: Session | null = null;
+    for (const other of this.sessions.values()) {
+      if (other === session) continue;
+      if (other.state.sessionGroupId !== groupId) continue;
+      if (other.state.sessionGroupRole === role) continue;
+      counterpart = other;
+      break;
+    }
+    if (!counterpart) return null;
+    const primary = role === "orchestrator" ? session : counterpart;
+    const observer = role === "observer" ? session : counterpart;
+    const pairing = `${primary.backendType ?? "claude"}+${observer.backendType ?? "claude"}`;
+    return {
+      type: "group_created",
+      sessionGroupId: groupId,
+      primarySessionId: primary.id,
+      observerSessionId: observer.id,
+      pairing,
+    };
+  }
+
+  /** Bootstrap kickoff for sessions that never get browser-driven traffic
+   *  (e.g. Council Mode observers). Sends a bare `initialize` control_request
+   *  on CLI ws_open so the CLI emits its `system` init and reaches "ready"
+   *  state without depending on user input or browser activity. Claude-only. */
+  sendInitializeKickoff(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    if (!(session.backendAdapter instanceof ClaudeAdapter)) return;
+    const { randomUUID } = require("node:crypto") as typeof import("node:crypto");
+    const ndjson = JSON.stringify({
+      type: "control_request",
+      request_id: randomUUID(),
+      request: { subtype: "initialize" },
+    });
+    session.backendAdapter.sendRawNDJSON(ndjson);
   }
 
   /** Send an initialize control request with context appended to the system prompt.
