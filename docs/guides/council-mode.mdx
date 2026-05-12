@@ -1,0 +1,131 @@
+---
+title: Council Mode
+description: Paired orchestrator + observer sessions — independent review in one click
+---
+
+# Council Mode
+
+Council Mode pairs your main agent with an independent reviewer that wakes on every phase checkpoint, reads only the just-changed surface, and pushes grounded findings back into your chat. The multi-agent pattern that worked manually in past pipelines — catching ~2 P1 issues per phase that single-author review missed — is reproducible in one click instead of requiring two terminals and manual coordination.
+
+<img src="/screenshots/council-mode-overview.png" alt="Council Mode running: orchestrator chat on the left, ObserverPanel showing observer findings on the right, multiple paired sessions in the sidebar with provider badges" />
+
+## When to use it
+
+Turn Council Mode on when you want a second pair of eyes on a Carmack-Council pipeline (`/spec-writer → /council-plan → /council-implement → /council-review → /test-architect`). The observer is most valuable for:
+
+- Multi-step refactors where one wrong invariant in step 3 corrupts everything downstream.
+- Security-sensitive code paths (auth, permission gates, write boundaries).
+- Test specs — the observer often catches missing negative ACs or vacuously-passing assertions.
+
+Leave it off for trivial one-shot fixes — the overhead of two sessions and the BlockerBanner ceremony is not worth it.
+
+## Enabling Council Mode
+
+On the **New Session** dialog:
+
+1. Toggle **Council Mode** on.
+2. Pick a provider pairing in the dropdown that appears:
+
+| Pairing | Behaviour | When to pick |
+|---|---|---|
+| **`claude+claude`** (default) | Two Claude Code sessions sharing one workspace. Symmetric tooling, same model family. | Default. Lowest friction. |
+| **`claude+codex`** (experimental) | Orchestrator on Claude, observer on Codex. Cross-model independence. | When you want a fundamentally different reasoning pass on the artefacts — caught issues that two Claudes would echo each other on. |
+
+3. Click **Start**. The backend spawns two linked sessions sharing one `sessionGroupId`, one workspace (single git worktree), and identical env/permissions.
+
+<Note>
+If the observer-side provider has no working credentials, the launch is rejected with an inline error naming the missing credential — no half-paired session is created. The orchestrator never starts alone.
+</Note>
+
+## What you see in the UI
+
+### Orchestrator chat (main pane)
+
+This is where you drive the work — exactly like a single session. The only difference is the **BlockerBanner**, which appears in the chat slot when the observer surfaces an unresolved `STOP/BLOCKER` finding. The banner shows the claim (JSX-escaped), the file it references, and a primary action to address it. Dismiss with the close button once you've handled it.
+
+### Observer panel (right sibling of chat)
+
+A collapsible rail with two halves:
+
+- **Status pill** — one of six states (priority ladder, top wins):
+
+  | State | Meaning |
+  |---|---|
+  | `degraded` | Observer process died and has not been respawned. Orchestrator continues; manual respawn available. |
+  | `blocker-found` | At least one unresolved STOP. |
+  | `reconnecting` | Observer's CLI subprocess is reconnecting after a transport blip. |
+  | `reviewing` | Observer is mid-pass on the latest checkpoint. |
+  | `spawning` | Initial boot — system prompt loaded, CLI not yet ready. |
+  | `sleeping` | All clear. No unresolved findings. |
+
+- **Findings log** (`role="log"`, `aria-live="polite"`) — chronological list of all observer findings (STOP, NOTE, suggestion). Each entry shows the deterministic `fnd_<hex>` id, the phase, the claim, and the evidence path. Dismissed STOPs collapse but stay visible for audit.
+
+### Provider badges (sidebar)
+
+Each session row in the sidebar shows provider chips. For a `claude+claude` pair, you see one symmetric chip. For `claude+codex`, you see two asymmetric chips so the active billing source is visible at a glance.
+
+### Keyboard shortcuts
+
+| Shortcut | Action |
+|---|---|
+| `Cmd/Ctrl+Shift+O` | Toggle the Observer panel open/closed (any focused state). |
+| `Cmd/Ctrl+Shift+B` | Focus the BlockerBanner's primary action. |
+
+If unresolved STOPs exist anywhere across your sessions, the browser tab title gets a `(N)` prefix counting them — you don't have to keep the tab focused to notice.
+
+## How findings get grounded
+
+The observer doesn't get to invent issues out of thin air. Every finding is checked against the modified surface of the checkpoint that triggered the review:
+
+- A **STOP** whose `evidence_path` is **not** in the checkpoint's `modifiedFiles` set, or which does not exist on disk, is **downgraded to NOTE** server-side. STOPs only reach the BlockerBanner when they reference real, just-changed files.
+- Findings get deterministic `fnd_<hex>` ids derived from `(sessionGroupId, checkpointId, observerProvider, findingIndex, evidence_path, claim)`. Restart-replay produces stable ids; the browser dedupes so you never see the same finding twice.
+- The observer's write boundary is enforced at the spawn argv (tool allow-list + permission mode intersected with caller config). The observer can read code, but it cannot modify it.
+
+## Degraded mode
+
+If the observer process dies (crashed, manually killed, ran out of credit), the orchestrator continues — your work is never blocked by an observer fault. The Observer panel status pill flips to **`degraded`** and a **DegradedBanner** appears in the panel header.
+
+To recover:
+
+1. Open the Observer panel.
+2. Click **Respawn observer** in the DegradedBanner.
+3. The backend re-spawns the observer half with the same workspace, system prompt, and group id. State resumes from the most recent checkpoint on disk.
+
+If respawn keeps failing, check `~/.companion/recordings/` for the observer's last frames — the JSON-RPC handshake errors are the most common signal (missing credential, model unavailable for the chosen provider).
+
+## Workspace artefacts
+
+While Council Mode runs, the workspace gets a `.council/` subtree:
+
+```
+.council/
+├── prompts/
+│   └── observer-system.md      # Versioned (v1) role definition, loaded at observer spawn
+├── checkpoints/
+│   └── <phase>.json            # Orchestrator writes after each Carmack phase
+├── reviews/
+│   └── <phase>-<provider>-observer.md   # Observer writes (content is JSON despite .md)
+└── review-output/<TIMESTAMP>/  # Per-expert findings + synthesised FINAL-REVIEW.md
+```
+
+You can commit these — they're useful for post-hoc review and reproducible Council debugging. The filename contract carries `<provider>` so a `claude+codex` pairing produces two distinct review files per checkpoint without colliding under the watcher's debounce window.
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| ObserverPanel stuck on `spawning` | Observer CLI failed to boot — credential missing or system prompt artefact unreadable. | Check `.council/prompts/observer-system.md` exists and is readable; verify the observer-provider credential. |
+| BlockerBanner never appears even after phase | Observer's review file path didn't land in `modifiedFiles` (all STOPs downgraded to NOTE). | Check `docs/reference/council-mode-architecture.mdx` for the grounding gate; widen the checkpoint manifest if your phase legitimately touches files outside the modified set. |
+| Status pill flips `reviewing → sleeping` with no findings | Observer ran to completion but had nothing to flag — this is the happy path. | No action. Phase is clean. |
+| Two STOPs on the same finding | Stale browser state from a server restart before the dedup id landed. | Hard-refresh; the deterministic `fnd_<hex>` will collapse them. |
+| `claude+codex` pairing produces one review file, not two | Observer wrote to the wrong filename or the watcher debounced two writes. | The filename **must** include the `<provider>` segment — this is the contract; if your observer is custom, ensure it writes `<phase>-codex-observer.md`, not `<phase>-observer.md`. |
+
+## Limits in v1
+
+- The Carmack chain is not auto-invoked — you still type each skill explicitly. Council Mode just adds the observer; it doesn't drive the orchestrator.
+- Only pairs (N=2) — no triads.
+- No cross-session shared memory during a phase; the only protocol is the filesystem under `.council/`.
+- Observer system prompts cannot be hot-swapped mid-session.
+- Codex observer is optional, not mandatory; Codex stays an experimental adapter.
+
+For the wire protocol, state machine, and the AP-/EC- convention floor, see the [Council Mode architecture reference](/reference/council-mode-architecture).

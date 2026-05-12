@@ -1,0 +1,188 @@
+---
+title: Council Mode Architecture
+description: Filesystem protocol, state machine, and convention floor for paired orchestrator + observer sessions
+---
+
+# Council Mode Architecture
+
+This page is the technical reference for Council Mode. For the user-facing guide, see [Council Mode](/guides/council-mode).
+
+## High-level data flow
+
+```
+You ──── orchestrator chat ────► orchestrator CLI ────► writes .council/checkpoints/<phase>.json
+                                                                      │
+                                                       (atomic write: tmp + rename + fsync)
+                                                                      ▼
+                                              checkpoint-watcher (fs.watch + debounce + LRU dedup)
+                                                                      │
+                                                                      ▼
+                                                       observer CLI reads manifest delta
+                                                                      │
+                                                                      ▼
+                                              writes .council/reviews/<phase>-<provider>-observer.md
+                                                                      │
+                                                                      ▼
+                                              review-watcher → validates STOPs against modifiedFiles
+                                                                      │
+                                                                      ▼
+                                              wsBridge.broadcastToGroup → both halves' browsers
+                                                                      │
+                                                                      ▼
+                                              orchestrator UI: BlockerBanner + ObserverPanel
+```
+
+The entire cross-process protocol lives on the filesystem under `<workspace>/.council/`. There is no shared memory, no IPC socket, no RPC. The watcher debounce + atomic-write contract is what makes this race-free.
+
+## Filesystem protocol
+
+### `.council/prompts/observer-system.md`
+
+CLI-agnostic role definition with a versioned marker (`<!-- observer-system-prompt v1 -->`). Loaded at observer spawn; SHA-256 stamped on `SdkSessionInfo.observerPromptSha256` so you can correlate observer behaviour with the exact prompt revision.
+
+### `.council/checkpoints/<phase>.json`
+
+Written by the orchestrator after each Carmack-Council phase via `writeAtomicJson` (`atomic-write.ts`). Schema lives in `web/server/council-types.ts` as `CheckpointPayload`:
+
+```json
+{
+  "sessionGroupId": "grp_…",
+  "checkpointId": "ckpt_…",
+  "phase": "council-implement",
+  "sequence": 3,
+  "createdAt": "2026-05-12T…Z",
+  "modifiedFiles": ["web/server/ws-bridge.ts", "…"],
+  "manifestPaths": ["web/server/…", "…"]
+}
+```
+
+`sequence` is a monotone counter — stale checkpoints (older sequence than the current) are rejected by `handleCouncilCheckpoint`.
+
+### `.council/reviews/<phase>-<provider>-observer.md`
+
+Written by the observer. Content is JSON despite the `.md` extension — the extension keeps it grep-friendly alongside other markdown artefacts. **The filename MUST carry the `<provider>` segment** (`claude` | `codex`) so the `claude+codex` pairing produces two distinct review files per checkpoint rather than colliding under the watcher's debounce window. This is non-negotiable contract surface.
+
+Schema (`ObserverReviewPayload` in `council-types.ts`):
+
+```json
+{
+  "checkpointId": "ckpt_…",
+  "observerProvider": "claude",
+  "findings": [
+    {
+      "severity": "STOP",
+      "claim": "…",
+      "evidence_path": "web/server/ws-bridge.ts",
+      "evidence_lines": [42, 47]
+    }
+  ]
+}
+```
+
+## Group state machine
+
+The single source of truth for group lifecycle is `web/server/group-state-machine.ts` — a pure `transition(state, event)` function over five states:
+
+| State | Meaning | Out-edges |
+|---|---|---|
+| `pairing` | Both halves spawning; not yet ready. | → `active` on both-ready; → `archived` on spawn-rollback. |
+| `active` | Both halves alive and connected. | → `degraded` on one-half death; → `archived` on intentional kill. |
+| `degraded` | One half (usually observer) is gone; orchestrator continues. | → `active` on respawn; → `archived` on user archive. |
+| `reconnecting` | Transport blip; CLI subprocess is mid-reconnect. | → `active` on reconnect; → `degraded` on timeout. |
+| `archived` | Terminal. Both halves killed, persistence flushed. | (none) |
+
+All transitions go through `applyEvent` on the `SessionGroupCoordinator`, which emits one of these bus events for `wireGroupListeners` to fan out:
+
+- `group:created` — when `createCouncilGroup` succeeds.
+- `group:exited` — emitted directly by `archiveGroup` **before** the kills, so the browser cleans its store before the signal lands.
+- `group:degraded` — on unintentional half-death; observer `respawnObserver` returns this to `active`.
+- `group:checkpoint` — on each new checkpoint write.
+- `group:review` — on each new review file write, with findings + downgrades.
+
+## Convention floor (do not re-flag in council reviews)
+
+These are the AP- (architecture-pattern) and EC- (edge-case) conventions that have already been ratified for Council Mode. Council reviews must not flag violations of these as new findings unless the convention itself is being changed:
+
+| Code | Convention |
+|---|---|
+| **AP-1** | `SessionGroupCoordinator` is decoupled from `session-orchestrator.ts` via dependency injection (`SessionSpawner` / `SessionKiller`). |
+| **AP-2** | `group-state-machine.ts` is the single source of truth for group lifecycle status. |
+| **AP-3** | `council-types.ts` hosts both writer and reader schemas in one file. |
+| **EC-1** | Observer SDK permission profile is applied at spawn argv (`applyCouncilObserverSpawnConfig`). |
+| **EC-2** | Group-aware kills mark BOTH session ids intentional BEFORE either kill executes. |
+| **EC-3** | Coordinator types distinguish Companion `sessionId` from CLI `cliSessionId`. |
+| **EC-4** | Filesystem watcher debounce never silently coalesces distinct payloads. Key by `(file, mtimeNs)` and log `onDropped("superseded")`. |
+| **EC-5** | Protocol parsers reject unknown methods / frame shapes; tolerate polymorphic-by-spec fields. |
+| **EC-6** | Load-bearing protocol parsers require replay-based regression tests. |
+| **EC-7** | Filesystem-access predicates inline path resolution OR are exposed only via a resolving wrapper. |
+| **EC-8** | Reconciliation actions require sentinel-before-sweep helpers. |
+| **EC-9** | Group-lifecycle log lines must be structured JSON with `event` + `sessionGroupId` + (where applicable) `sessionId` + `role`. |
+
+The full list and rationale lives in [`conventions.md`](https://github.com/antonioshaman/aura-companion/blob/main/conventions.md) at the repo root.
+
+## Grounding gate (server-side)
+
+When a review file lands, `handleCouncilReview` runs `validateObserverFindings`:
+
+1. Parse the review payload against `ObserverReviewPayload`.
+2. For each `STOP`, resolve `evidence_path` via `realpath` (EC-7 idiom — inlined in the wrapper, never bare).
+3. If the resolved path is **outside** the checkpoint's `modifiedFiles` set OR not present on disk, **downgrade the STOP to NOTE** and record the downgrade reason.
+4. Wrap surviving STOPs via `wrapObserverFindingForInjection` and broadcast as `group:review` with both the surviving findings and the list of downgrades for audit.
+
+This is the single point of trust between "observer claims X" and "user sees BlockerBanner about X." The observer cannot bypass it.
+
+## Restart recovery
+
+`group-reconciliation.ts` runs at server boot and inspects each persisted group's two halves against currently-alive PIDs:
+
+| Live status | Action |
+|---|---|
+| Both alive | Reattach WebSockets; state stays `active`. |
+| Orchestrator only | Mark group `degraded`; observer respawn available. |
+| Observer only | Treat orchestrator as the source of truth — relaunch orchestrator with `--resume`; observer reconnects to the relaunched group id. |
+| Neither | Group archived during downtime; persistence reflects that. |
+
+Sentinel-before-sweep (EC-8) means the reconciliation marks intentional kills **before** any signal is sent, so the proactive-relaunch listener does not race.
+
+## Browser pipeline
+
+1. `ws.ts` switch dispatches `group_*` / `observer_review` frames to council slice actions.
+2. `observer-panel-state.deriveObserverPanelState({group, findings, dismissedStopIds, nowMs})` derives the discriminated-union status from inputs. Priority ladder: `degraded > blocker-found > reconnecting > reviewing > spawning > sleeping > never-checkpointed-yet`.
+3. `BlockerBanner` renders the most-recent unresolved STOP in the same DOM slot as `PermissionBanner`. Permission requests stack first — the user must clear permissions before addressing the blocker.
+4. `ObserverPanel` (sibling of ChatView) renders the status pill + collapsible rail + FindingsLog.
+5. `Sidebar` shows per-session `ProviderBadges` + an unread-STOP counter.
+6. `useBrowserTitleAlert` aggregates unresolved STOP counts across all groups and prepends `(N)` to `document.title`.
+7. `useCouncilShortcuts` wires `Cmd/Ctrl+Shift+O` (toggle panel) and `Cmd/Ctrl+Shift+B` (focus blocker primary action).
+
+## Authorization
+
+`group-authorization.ts` issues a cryptographic group-id pattern at create time and requires it on all council-scoped REST endpoints. The Companion auth token still gates access globally; the group id is a second factor that prevents one browser tab in a multi-user environment from accidentally targeting another tab's group.
+
+## Recordings
+
+Council Mode emits no special recording stream — both halves use the standard recorder (`web/server/recorder.ts`) writing to `~/.companion/recordings/`. Each half's recording carries its `sessionGroupId` and `sessionGroupRole` in the header so you can correlate the two streams when reconstructing a session post-hoc.
+
+## Source map
+
+| Concern | File |
+|---|---|
+| Coordinator + pairing lifecycle | `web/server/session-group-coordinator.ts` |
+| Group state machine | `web/server/group-state-machine.ts` |
+| Atomic writes | `web/server/atomic-write.ts` |
+| Checkpoint + review watchers | `web/server/checkpoint-watcher.ts`, `review-watcher.ts` |
+| Wire types (both halves) | `web/server/council-types.ts` |
+| Observer spawn config | `web/server/cli-launcher.ts` (`applyCouncilObserverSpawnConfig`) |
+| Observer prompt loader | `web/server/observer-prompt.ts` |
+| Finding wrapping + logging | `web/server/observer-attribution.ts` |
+| Grounding gate | `web/server/observer-grounding.ts` |
+| Permission profile | `web/server/observer-permissions.ts` |
+| Write boundary | `web/server/observer-write-policy.ts` |
+| Group auth | `web/server/group-authorization.ts` |
+| Reconciliation | `web/server/group-reconciliation.ts` |
+| Graceful shutdown | `web/server/group-shutdown.ts` |
+| Preflight capability probe | `web/server/preflight-probe.ts` |
+| Backend provider seam | `web/server/backend-provider.ts` |
+| Codex envelope parser | `web/server/codex-envelope.ts` |
+| Council slice (frontend) | `web/src/store/council-slice.ts` |
+| Panel state derivation | `web/src/observer-panel-state.ts` |
+| Browser components | `web/src/components/council/` |

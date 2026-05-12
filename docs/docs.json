@@ -20,6 +20,7 @@
       {
         "group": "Guides",
         "pages": [
+          "guides/council-mode",
           "guides/sessions-and-permissions",
           "guides/docker-and-environments",
           "guides/git-worktrees",
@@ -39,6 +40,7 @@
         "group": "Reference",
         "pages": [
           "reference/cli-and-api",
+          "reference/council-mode-architecture",
           "reference/troubleshooting"
         ]
       }
@@ -48,13 +50,13 @@
     "links": [
       {
         "label": "GitHub",
-        "href": "https://github.com/thevibecompany/the-companion"
+        "href": "https://github.com/antonioshaman/aura-companion"
       }
     ]
   },
   "footer": {
     "socials": {
-      "github": "https://github.com/thevibecompany/the-companion"
+      "github": "https://github.com/antonioshaman/aura-companion"
     }
   },
   "favicon": "/images/favicon.svg"
