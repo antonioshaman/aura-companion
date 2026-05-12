@@ -1196,6 +1196,21 @@ function handleParsedMessage(
       break;
     }
 
+    // PLAN Task 9: light up the previously-unreachable ObserverPanel
+    // `reconnecting` branch. The pill render code in
+    // `components/council/ObserverPanel.tsx` + the priority ladder in
+    // `observer-panel-state.ts` already support this status; this case
+    // is the missing dispatch that makes it reachable in production.
+    //
+    // `deadlineMs` is intentionally dropped on the floor — per React
+    // expert recommendation, no consumer reads it today; storing it
+    // would become a stale field on the next active flip. When/if a
+    // countdown UI ships, plumb in the same commit as its renderer.
+    case "group_reconnecting": {
+      store.setGroupStatus(data.sessionGroupId, "reconnecting");
+      break;
+    }
+
     case "group_checkpoint": {
       store.recordCheckpoint({
         sessionGroupId: data.sessionGroupId,

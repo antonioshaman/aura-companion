@@ -3,7 +3,7 @@ import type { WsBridge } from "./ws-bridge.js";
 import type { SessionStore } from "./session-store.js";
 import type { WorktreeTracker } from "./worktree-tracker.js";
 import type { AgentExecutor } from "./agent-executor.js";
-import type { BackendType, CreationStepId } from "./session-types.js";
+import type { BackendType, CreationStepId, SessionGroupRole } from "./session-types.js";
 import type { ContainerConfig, ContainerInfo } from "./container-manager.js";
 import { containerManager } from "./container-manager.js";
 import { imagePullManager } from "./image-pull-manager.js";
@@ -23,6 +23,8 @@ import { generateSessionTitle } from "./auto-namer.js";
 import { companionBus } from "./event-bus.js";
 import { metricsCollector } from "./metrics-collector.js";
 import { log } from "./logger.js";
+import { SessionGroupCoordinator } from "./session-group-coordinator.js";
+import { isSupportedPairing as _isSupportedPairing } from "./backend-provider.js";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { mkdirSync } from "node:fs";
@@ -43,6 +45,34 @@ const MAX_AUTO_RELAUNCHES = 3;
 const RELAUNCH_GRACE_MS = 10_000;
 const RELAUNCH_COOLDOWN_MS = 5_000;
 const RECONNECT_GRACE_MS = Number(process.env.COMPANION_RECONNECT_GRACE_MS || "30000");
+
+/**
+ * Group-level reconnect grace window (PLAN Task 2). Layered on top of the
+ * session-level 15s ws debounce in `ws-bridge.ts`; covers the time a single
+ * council half needs to relaunch + handshake before its sibling flips to
+ * `degraded`. Bounded to [1s, 600s] to catch operator typos; one-shot per
+ * active episode (no group-level retry).
+ *
+ * Read once at module load — never in hot paths, so vitest can pin without
+ * env mutation across workers. Resolved value is logged at first call to
+ * `getOrCreateCoordinatorSync()` so `ps`/log inspection diagnoses
+ * running-build vs disk-build mismatches.
+ */
+const GROUP_RECONNECT_GRACE_MS = (() => {
+  const raw = process.env.COMPANION_GROUP_RECONNECT_GRACE_MS;
+  const fallback = 45_000;
+  if (raw === undefined || raw === "") return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 600_000) {
+    log.warn("session-orchestrator", "invalid COMPANION_GROUP_RECONNECT_GRACE_MS, using fallback", {
+      event: "config.grace_ms.invalid",
+      raw,
+      fallbackMs: fallback,
+    });
+    return fallback;
+  }
+  return parsed;
+})();
 
 // Proactive keepalive: base delay before relaunching a crashed CLI (doubles per attempt)
 const KEEPALIVE_BASE_DELAY_MS = 3_000;
@@ -166,6 +196,14 @@ interface CouncilGroupMeta {
   createdAt: number;
   /** Wallclock (ms) when the most recent checkpoint reached this orchestrator — used to compute observer wake-to-emit latency. */
   lastCheckpointReceivedAt: number | null;
+  /**
+   * PLAN Task 12 (Willison): id of the most recent checkpoint for which the
+   * observer produced a validated review. Persists across reconnects so we
+   * can detect "checkpoints emitted while the observer was offline" and
+   * emit a structured catchup log on resume. Null until the first review
+   * lands; updated in `handleCouncilReview`.
+   */
+  lastReviewedCheckpointId?: string | null;
 }
 
 /**
@@ -250,6 +288,27 @@ export class SessionOrchestrator {
    */
   private councilGroupMeta = new Map<string, CouncilGroupMeta>();
 
+  /**
+   * Long-lived coordinator instance — owns the group state machine + the
+   * reconnect grace timer map. Lazily constructed on first council
+   * operation; persists across calls so listeners (session:exited,
+   * session:cli-id-received) hold a stable reference. PLAN Task 1
+   * keystone: `coordinator.applyEvent` is now the sole lifecycle mutator.
+   */
+  private coordinator: SessionGroupCoordinator | null = null;
+
+  /**
+   * Per-call context for `createCouncilGroup`. The coordinator's
+   * spawn/kill callbacks are long-lived (the coordinator is), but each
+   * call brings its own `baseBody` and error-capture struct. Setting this
+   * before invoking `coordinator.createGroup` and clearing in `finally`
+   * keeps the callbacks pure-by-reference without stale-closure risk.
+   */
+  private pendingCouncilCall: {
+    baseBody: CreateSessionRequest;
+    spawnErrors: { primary: { error: string; status: number } | null; observer: { error: string; status: number } | null };
+  } | null = null;
+
   // Event listeners
   private exitCallbacks: ((sessionId: string, exitCode: number | null) => void)[] = [];
 
@@ -271,6 +330,80 @@ export class SessionOrchestrator {
     // When the CLI reports its internal session_id, store it for --resume
     companionBus.on("session:cli-id-received", ({ sessionId, cliSessionId }) => {
       this.launcher.setCLISessionId(sessionId, cliSessionId);
+    });
+
+    // PLAN Task 4: resolve a council reconnect grace window when the
+    // dead half handshakes via `session:cli-id-received`. This fires
+    // AFTER the CLI reported its internal session id (post-`system.init`
+    // for Claude, post-`initialize` ack for Codex) — handshake-not-transport
+    // gate (Q2 lock).
+    //
+    // Identity binding (Hunt): the incoming `sessionId` must equal the
+    // snapshot captured at `reconnect_started`. Companion `sessionId` is
+    // stable across `--resume`; the `cliSessionId` changes but is not
+    // checked here (the launcher uses it). A different process race-
+    // handshaking on the same group is the mismatch case → treat as
+    // `reconnect_failed`, not as a successful recovery.
+    //
+    // Sync handler, try/catch around `applyEvent`; guard violations log
+    // and drop, never crash the bus.
+    companionBus.on("session:cli-id-received", ({ sessionId }) => {
+      try {
+        const coord = this.coordinator;
+        if (!coord) return;
+        // Find the group this sessionId belongs to via meta cache.
+        let foundGroupId: string | null = null;
+        for (const [groupId, meta] of this.councilGroupMeta) {
+          if (meta.primarySessionId === sessionId || meta.observerSessionId === sessionId) {
+            foundGroupId = groupId;
+            break;
+          }
+        }
+        if (!foundGroupId) return;
+        const ctx = coord.getReconnectContext(foundGroupId);
+        if (!ctx) return; // No reconnect armed for this group — normal handshake, nothing to do.
+        if (ctx.snapshotSessionId !== sessionId) {
+          // Identity mismatch: the handshake came from a session we did NOT
+          // snapshot as the dead half. Possible causes: a follow-up
+          // handshake for the SURVIVING half (already alive — should not
+          // re-fire under normal CLI behaviour), or a stale handshake from
+          // a different process. Log + drop. Do NOT cancel the grace.
+          log.warn("session-orchestrator", "cli-id-received identity mismatch during reconnect", {
+            event: "group.reconnect_identity_mismatch",
+            sessionGroupId: foundGroupId,
+            role: ctx.deadRole,
+          });
+          return;
+        }
+        coord.cancelReconnectTimer(foundGroupId, "reconnect_ok");
+        coord.applyEvent(foundGroupId, { type: "reconnect_ok", role: ctx.deadRole });
+        // PLAN Task 12 (Willison): emit a structured catchup log when the
+        // observer comes back. The watcher entry's `lastCheckpoint.id`
+        // is the orchestrator's current sequence; `meta.lastReviewedCheckpointId`
+        // is what the observer last validated. A mismatch means the observer
+        // was offline across one or more checkpoints — surface it so silent
+        // under-review is detectable. (Note: rewriting `buildObserverContextManifest`
+        // to fold skipped paths into `delta` is the deeper Willison ask;
+        // tracked as Watchpoint follow-up to keep this PR scoped.)
+        if (ctx.deadRole === "observer") {
+          const meta = this.councilGroupMeta.get(foundGroupId);
+          const watcher = this.councilWatchers.get(foundGroupId);
+          if (meta && watcher?.lastCheckpoint && watcher.lastCheckpoint.checkpoint_id !== meta.lastReviewedCheckpointId) {
+            log.info("session-orchestrator", "observer caught up after reconnect", {
+              event: "council.observer.catchup",
+              sessionGroupId: foundGroupId,
+              lastReviewedCheckpointId: meta.lastReviewedCheckpointId ?? null,
+              caughtUpCheckpointId: watcher.lastCheckpoint.checkpoint_id,
+            });
+          }
+        }
+      } catch (err) {
+        log.warn("session-orchestrator", "reconnect_ok guard violation", {
+          event: "group.reconnect_ok.guard_violation",
+          sessionId,
+          error: String(err),
+        });
+      }
     });
 
     // When a Codex adapter is created, attach it to the WsBridge
@@ -315,6 +448,46 @@ export class SessionOrchestrator {
     // Auto-relaunch CLI when a browser connects to a session with no CLI
     companionBus.on("session:relaunch-needed", async ({ sessionId }) => {
       await this.handleAutoRelaunch(sessionId);
+    });
+
+    // PLAN Task 5: short-circuit a council reconnect grace window when
+    // the session-level relaunch fails deterministically (synchronous
+    // spawn failure or budget exhausted). Without this, the group sits
+    // in `reconnecting` for the full 45s on a recovery that has no chance.
+    companionBus.on("session:relaunch-failed", ({ sessionId, reason }) => {
+      try {
+        const coord = this.coordinator;
+        if (!coord) return;
+        let foundGroupId: string | null = null;
+        for (const [groupId, meta] of this.councilGroupMeta) {
+          if (meta.primarySessionId === sessionId || meta.observerSessionId === sessionId) {
+            foundGroupId = groupId;
+            break;
+          }
+        }
+        if (!foundGroupId) return;
+        const ctx = coord.getReconnectContext(foundGroupId);
+        if (!ctx || ctx.snapshotSessionId !== sessionId) return;
+        log.info("session-orchestrator", "council reconnect failed early via relaunch-failed", {
+          event: "group.reconnect_failed.short_circuit",
+          sessionGroupId: foundGroupId,
+          role: ctx.deadRole,
+          reason,
+        });
+        coord.cancelReconnectTimer(foundGroupId, "relaunch_failed");
+        // Mark both intentional — relaunch will not succeed, downstream
+        // exits must not re-enter the reconnect path.
+        const meta = this.councilGroupMeta.get(foundGroupId)!;
+        this.intentionalKills.add(meta.primarySessionId);
+        this.intentionalKills.add(meta.observerSessionId);
+        coord.applyEvent(foundGroupId, { type: "reconnect_failed", role: ctx.deadRole });
+      } catch (err) {
+        log.warn("session-orchestrator", "reconnect_failed short-circuit guard violation", {
+          event: "group.reconnect_failed.guard_violation",
+          sessionId,
+          error: String(err),
+        });
+      }
     });
 
     // Kill CLI process when idle with no browsers for 24 hours.
@@ -374,9 +547,20 @@ export class SessionOrchestrator {
    * group registry. Called from `initialize()` after the bus is wired and
    * idempotent on re-entry (skips groups already registered).
    *
-   * Partial pairs (only orchestrator alive, only observer alive, or one
-   * half archived) are skipped — there is no recoverable group lifecycle
-   * for them; the surviving half remains operable as a solo session.
+   * PLAN Task 6: partial pairs (one half alive, one half missing) are no
+   * longer dropped on the floor. The surviving half registers the group
+   * in `reconnecting` state and the coordinator arms the standard
+   * `COMPANION_GROUP_RECONNECT_GRACE_MS` window — session-level
+   * auto-relaunch fires for the missing half, and if it handshakes within
+   * the grace window, `session:cli-id-received` resolves to `reconnect_ok`
+   * just as for live-disconnect recoveries. After the grace expires, the
+   * normal `reconnect_failed → degraded` resolution lands.
+   *
+   * Deliberate EC-8 gap (FS-JSON recommendation): no `writeReconnectIntent`
+   * sentinel. A crash mid-grace means the server is restarting again, and
+   * the next reconcile re-evaluates from the fresh PID-alive snapshot —
+   * strictly more authoritative than any stale marker (PID reuse during
+   * restart can make a sentinel lie).
    */
   reconcileCouncilGroups(): void {
     const byGroup = new Map<string, { orchestrator?: SdkSessionInfo; observer?: SdkSessionInfo }>();
@@ -388,36 +572,78 @@ export class SessionOrchestrator {
       byGroup.set(s.sessionGroupId, slot);
     }
 
-    let restored = 0;
+    let restoredComplete = 0;
+    let restoredPartial = 0;
     for (const [groupId, pair] of byGroup) {
       if (this.councilGroupMeta.has(groupId)) continue;
-      if (!pair.orchestrator || !pair.observer) continue;
-      const cwd = pair.orchestrator.cwd || pair.observer.cwd;
+      const surviving = pair.orchestrator ?? pair.observer;
+      if (!surviving) continue;
+      const cwd = surviving.cwd;
       if (!cwd) continue;
-      const pairing = `${pair.orchestrator.backendType ?? "claude"}+${pair.observer.backendType ?? "claude"}`;
+      const isComplete = pair.orchestrator !== undefined && pair.observer !== undefined;
+
+      // For partial pairs, synthesize a placeholder sessionId/backendType
+      // for the missing half. The group record needs both fields to satisfy
+      // GroupMember; the missing half is the snapshotted dead session for
+      // the reconnect window. If/when the missing half handshakes,
+      // `session:cli-id-received` arrives with the real sessionId.
+      const orchestrator = pair.orchestrator;
+      const observer = pair.observer;
+      const primarySessionId = orchestrator?.sessionId ?? `__missing_orch_${groupId}`;
+      const observerSessionId = observer?.sessionId ?? `__missing_obs_${groupId}`;
+      const primaryBackend = orchestrator?.backendType ?? "claude";
+      const observerBackend = observer?.backendType ?? "claude";
+      const pairing = `${primaryBackend}+${observerBackend}`;
       this.councilGroupMeta.set(groupId, {
-        primarySessionId: pair.orchestrator.sessionId,
-        observerSessionId: pair.observer.sessionId,
+        primarySessionId,
+        observerSessionId,
         pairing,
-        observerPromptSha256: pair.observer.observerPromptSha256,
-        createdAt: pair.orchestrator.createdAt ?? Date.now(),
+        observerPromptSha256: observer?.observerPromptSha256,
+        createdAt: (orchestrator ?? observer)?.createdAt ?? Date.now(),
         lastCheckpointReceivedAt: null,
       });
       this.startCouncilWatchers(groupId, cwd);
-      restored++;
-      log.info("session-orchestrator", "council group reconciled on startup", {
-        event: "group:reconciled",
+      const coord = this.getOrCreateCoordinatorSync();
+      coord.registerExternalGroup({
         sessionGroupId: groupId,
-        sessionId: pair.orchestrator.sessionId,
-        role: "orchestrator",
-        observerSessionId: pair.observer.sessionId,
-        pairing,
+        primary: { sessionId: primarySessionId, backendType: primaryBackend },
+        observer: { sessionId: observerSessionId, backendType: observerBackend },
+        status: "active",
+        createdAt: (orchestrator ?? observer)?.createdAt ?? Date.now(),
       });
+      if (isComplete) {
+        restoredComplete++;
+        log.info("session-orchestrator", "council group reconciled on startup", {
+          event: "group:reconciled",
+          sessionGroupId: groupId,
+          sessionId: primarySessionId,
+          role: "orchestrator",
+          observerSessionId,
+          pairing,
+        });
+      } else {
+        // Partial pair — arm the grace window for the missing half.
+        const deadRole: SessionGroupRole = orchestrator === undefined ? "orchestrator" : "observer";
+        const deadSessionId = deadRole === "orchestrator" ? primarySessionId : observerSessionId;
+        coord.armReconnect({
+          sessionGroupId: groupId,
+          deadRole,
+          snapshotSessionId: deadSessionId,
+        });
+        restoredPartial++;
+        log.info("session-orchestrator", "council group reconciled with partial-pair grace", {
+          event: "group:reconciled_partial",
+          sessionGroupId: groupId,
+          role: deadRole,
+          pairing,
+        });
+      }
     }
-    if (restored > 0) {
+    if (restoredComplete > 0 || restoredPartial > 0) {
       log.info("session-orchestrator", "council reconcile completed", {
         event: "council:reconcile_completed",
-        restored,
+        restoredComplete,
+        restoredPartial,
         examined: byGroup.size,
       });
     }
@@ -463,6 +689,19 @@ export class SessionOrchestrator {
         deadRole,
       });
     });
+    // PLAN Task 7: broadcast `group_reconnecting` at transition time only.
+    // `deadlineMs` is the absolute wallclock the server chose when the
+    // grace timer was armed; survives in-flight latency, replay, and tabs
+    // that backgrounded mid-flight. No periodic heartbeat — one frame per
+    // active episode.
+    companionBus.on("group:reconnecting", ({ sessionGroupId, survivingRole, deadlineMs }) => {
+      this.wsBridge.broadcastToGroup(this.getGroupMemberIds(sessionGroupId), {
+        type: "group_reconnecting",
+        sessionGroupId,
+        survivingRole,
+        deadlineMs,
+      });
+    });
     companionBus.on("group:checkpoint", ({ sessionGroupId, checkpointId, phase, sequence }) => {
       this.wsBridge.broadcastToGroup(this.getGroupMemberIds(sessionGroupId), {
         type: "group_checkpoint",
@@ -496,11 +735,32 @@ export class SessionOrchestrator {
       this.councilGroupMeta.delete(sessionGroupId);
     });
 
-    // Drive `group:degraded` when either half of a council pair exits
-    // unexpectedly (Subprocess council review #4). Without this, the UI
-    // never enters degraded mode and watchers leak past the dead half's
-    // auto-relaunch exhaustion. EC-2 invariant honoured — BOTH ids land
-    // in `intentionalKills` before the degrade signal emits.
+    // PLAN Task 3: route council-half `session:exited` through the
+    // `reconnecting → active|degraded` ladder instead of straight to
+    // `degraded`. Ordering inside the listener is load-bearing (Hunt
+    // absorbing-kill + Subprocess EC-2):
+    //
+    //   1. `intentionalKills.has(sessionId)` — absolute first line.
+    //      A user-driven archive must NOT enter the reconnect path.
+    //      `archiveGroup` adds both ids to `intentionalKills` before
+    //      either kill executes (EC-2).
+    //   2. Find the group + role from `councilGroupMeta`.
+    //   3. If session-level auto-relaunch has already exhausted its
+    //      budget (`relaunchExhaustedNotified`), arming a 45s grace
+    //      window is pointless — drive `reconnect_failed → degraded`
+    //      immediately. EC-8 sentinel-before-sweep idiom: check the
+    //      "decided" flag before kicking off a recovery action.
+    //   4. Otherwise: arm the reconnect grace. `armReconnect` runs
+    //      `applyEvent({type:"reconnect_started"})` internally so the
+    //      `group:degraded` emit is deferred until the timer expires
+    //      or `session:cli-id-received` resolves it (PLAN Task 4).
+    //
+    // We do NOT mark BOTH halves intentional here (the pre-Task 3
+    // behaviour) — that would short-circuit the dead half's session-level
+    // auto-relaunch (scheduleProactiveRelaunch reads `intentionalKills`
+    // when its timer fires). The reconnect cycle's hard one-shot counter
+    // (`armReconnect` refuses re-entry) prevents the duplicate-emit
+    // hazard the old marking was guarding against.
     companionBus.on("session:exited", ({ sessionId }) => {
       if (this.intentionalKills.has(sessionId)) return;
       let foundGroupId: string | null = null;
@@ -510,11 +770,109 @@ export class SessionOrchestrator {
         if (meta.observerSessionId === sessionId) { foundGroupId = groupId; foundRole = "observer"; break; }
       }
       if (!foundGroupId || !foundRole) return;
-      const meta = this.councilGroupMeta.get(foundGroupId)!;
-      this.intentionalKills.add(meta.primarySessionId);
-      this.intentionalKills.add(meta.observerSessionId);
-      companionBus.emit("group:degraded", { sessionGroupId: foundGroupId, deadRole: foundRole });
+      const coordinator = this.coordinator;
+      if (!coordinator) {
+        // Belt-and-braces fallback: the meta entry should not exist without
+        // a coordinator (both populated in createCouncilGroup /
+        // reconcileCouncilGroups), but if somehow it does, preserve the
+        // pre-Task 1 behaviour rather than swallowing the exit.
+        companionBus.emit("group:degraded", { sessionGroupId: foundGroupId, deadRole: foundRole });
+        return;
+      }
+      // EC-8 dual: if session-level relaunch budget is already exhausted,
+      // do not arm a window for an outcome that's already decided. From the
+      // `active` state, the direct route to `degraded` is `half_died`;
+      // `reconnect_failed` is a no-op when we never entered `reconnecting`.
+      if (this.relaunchExhaustedNotified.has(sessionId)) {
+        // Mark both intentional now — relaunch will never succeed for the
+        // dead half, so any later cascading exit must not re-enter.
+        const meta = this.councilGroupMeta.get(foundGroupId)!;
+        this.intentionalKills.add(meta.primarySessionId);
+        this.intentionalKills.add(meta.observerSessionId);
+        coordinator.applyEvent(foundGroupId, { type: "half_died", role: foundRole });
+        return;
+      }
+      // If we are already in a reconnect cycle and a DIFFERENT session in
+      // the same group dies, both halves are now gone — short-circuit to
+      // `reconnect_failed` so the group settles in `degraded` rather than
+      // staying in `reconnecting` until the timer expires.
+      const ctx = coordinator.getReconnectContext(foundGroupId);
+      if (ctx && ctx.snapshotSessionId !== sessionId) {
+        coordinator.cancelReconnectTimer(foundGroupId, "second_half_died");
+        const meta = this.councilGroupMeta.get(foundGroupId)!;
+        this.intentionalKills.add(meta.primarySessionId);
+        this.intentionalKills.add(meta.observerSessionId);
+        coordinator.applyEvent(foundGroupId, { type: "reconnect_failed", role: foundRole });
+        return;
+      }
+      coordinator.armReconnect({
+        sessionGroupId: foundGroupId,
+        deadRole: foundRole,
+        snapshotSessionId: sessionId,
+      });
     });
+  }
+
+  /**
+   * Public accessor for the long-lived coordinator (PLAN Task 11).
+   * Returns null if never initialised (no Council Mode usage this server
+   * uptime). Used by `gracefulShutdown` to cancel reconnect timers + drive
+   * `shutdownAllGroups`. Read-only — mutations should still go through
+   * the appropriate methods on the coordinator itself.
+   */
+  getCouncilCoordinator(): SessionGroupCoordinator | null {
+    return this.coordinator;
+  }
+
+  /**
+   * Lazily construct the long-lived {@link SessionGroupCoordinator}.
+   *
+   * The coordinator is shared between `createCouncilGroup` (the primary
+   * spawn path) and `reconcileCouncilGroups` (the server-restart partial
+   * pair recovery path) so listeners across the orchestrator hold a
+   * stable reference. PLAN Task 1 keystone: `coordinator.applyEvent` is
+   * the sole lifecycle mutator; without a long-lived instance, the
+   * `session:exited` listener would have nothing to drive.
+   *
+   * Spawn/kill callbacks read per-call context via `this.pendingCouncilCall`
+   * (set in `createCouncilGroup`'s try/finally) — no stale-closure risk
+   * across multiple sequential create calls.
+   */
+  private getOrCreateCoordinatorSync(): SessionGroupCoordinator {
+    if (this.coordinator) return this.coordinator;
+    log.info("session-orchestrator", "council coordinator initialised", {
+      event: "config.grace_ms.resolved",
+      resolvedMs: GROUP_RECONNECT_GRACE_MS,
+    });
+    this.coordinator = new SessionGroupCoordinator({
+      graceMs: GROUP_RECONNECT_GRACE_MS,
+      spawn: async (opts) => {
+        const ctx = this.pendingCouncilCall;
+        if (!ctx) throw new Error("internal: coordinator spawn invoked outside createCouncilGroup");
+        const result = await this.doCreateSession({
+          ...ctx.baseBody,
+          backend: opts.backendType,
+          cwd: opts.cwd,
+          model: opts.model ?? ctx.baseBody.model,
+          permissionMode: opts.permissionMode ?? ctx.baseBody.permissionMode,
+          sessionGroupId: opts.sessionGroupId,
+          sessionGroupRole: opts.sessionGroupRole,
+        });
+        if (!result.ok) {
+          if (opts.sessionGroupRole === "orchestrator") {
+            ctx.spawnErrors.primary = { error: result.error, status: result.status };
+          } else {
+            ctx.spawnErrors.observer = { error: result.error, status: result.status };
+          }
+          throw new Error(result.error);
+        }
+        return { sessionId: result.session.sessionId };
+      },
+      kill: async (sessionId) => {
+        await this.killSession(sessionId);
+      },
+    });
+    return this.coordinator;
   }
 
   /**
@@ -729,6 +1087,15 @@ export class SessionOrchestrator {
         });
       }
 
+      // PLAN Task 12 (Willison): track the most recently validated
+      // checkpoint id per group so a post-reconnect handler can detect
+      // skipped checkpoints (orchestrator emitted while observer was
+      // offline) and surface a structured catchup log rather than
+      // silently under-reviewing.
+      if (meta) {
+        meta.lastReviewedCheckpointId = payload.checkpoint_id;
+      }
+
       companionBus.emit("group:review", {
         sessionGroupId,
         checkpointId: payload.checkpoint_id,
@@ -774,25 +1141,19 @@ export class SessionOrchestrator {
    * `group_created` browser message out to both halves' sockets.
    */
   async createCouncilGroup(req: CreateCouncilGroupRequest): Promise<CreateCouncilGroupResult> {
-    // Lazy import — coordinator + backend-provider modules are only loaded
-    // when Council Mode is actually invoked. Keeps the single-session
-    // happy path's module-graph unchanged.
-    const [{ SessionGroupCoordinator }, { isSupportedPairing, parsePairingLabel }] = await Promise.all([
-      import("./session-group-coordinator.js"),
-      import("./backend-provider.js").then((m) => ({
-        isSupportedPairing: m.isSupportedPairing,
-        // parsePairingLabel is defined inline below — backend-provider
-        // exports the supported pairings list but not a label parser
-        // since the label format is a routes-layer concern.
-        parsePairingLabel: (label: string): { primary: BackendType; observer: BackendType } | null => {
-          const parts = label.split("+");
-          if (parts.length !== 2) return null;
-          const [p, o] = parts as [string, string];
-          if ((p !== "claude" && p !== "codex") || (o !== "claude" && o !== "codex")) return null;
-          return { primary: p, observer: o };
-        },
-      })),
-    ]);
+    // PLAN Task 1: coordinator + backend-provider are now statically imported
+    // so reconcileCouncilGroups() (sync, called from initialize()) can wire
+    // groups into the same long-lived coordinator instance this method uses.
+    // Lazy-import overhead was negligible; uniform import keeps both code
+    // paths reading from a single module reference.
+    const isSupportedPairing = _isSupportedPairing;
+    const parsePairingLabel = (label: string): { primary: BackendType; observer: BackendType } | null => {
+      const parts = label.split("+");
+      if (parts.length !== 2) return null;
+      const [p, o] = parts as [string, string];
+      if ((p !== "claude" && p !== "codex") || (o !== "claude" && o !== "codex")) return null;
+      return { primary: p, observer: o };
+    };
 
     const parsed = parsePairingLabel(req.pairing);
     if (!parsed) return { ok: false, error: `unsupported pairing: ${req.pairing}`, status: 400 };
@@ -807,35 +1168,8 @@ export class SessionOrchestrator {
     type SpawnFailure = { error: string; status: number };
     const spawnErrors: { primary: SpawnFailure | null; observer: SpawnFailure | null } = { primary: null, observer: null };
 
-    const coordinator = new SessionGroupCoordinator({
-      spawn: async (opts) => {
-        const result = await this.doCreateSession({
-          ...baseBody,
-          backend: opts.backendType,
-          cwd: opts.cwd,
-          model: opts.model ?? baseBody.model,
-          permissionMode: opts.permissionMode ?? baseBody.permissionMode,
-          sessionGroupId: opts.sessionGroupId,
-          sessionGroupRole: opts.sessionGroupRole,
-        });
-        if (!result.ok) {
-          // Capture the error so the council caller surfaces it back to
-          // the browser rather than throwing a bare Error (which loses
-          // status). The coordinator will treat the throw as a spawn
-          // failure and roll back the first half if applicable.
-          if (opts.sessionGroupRole === "orchestrator") {
-            spawnErrors.primary = { error: result.error, status: result.status };
-          } else {
-            spawnErrors.observer = { error: result.error, status: result.status };
-          }
-          throw new Error(result.error);
-        }
-        return { sessionId: result.session.sessionId };
-      },
-      kill: async (sessionId) => {
-        await this.killSession(sessionId);
-      },
-    });
+    const coordinator = this.getOrCreateCoordinatorSync();
+    this.pendingCouncilCall = { baseBody, spawnErrors };
 
     try {
       const group = await coordinator.createGroup({
@@ -879,6 +1213,11 @@ export class SessionOrchestrator {
       if (spawnErrors.observer) return { ok: false, ...spawnErrors.observer };
       const reason = err instanceof Error ? err.message : String(err);
       return { ok: false, error: reason, status: 500 };
+    } finally {
+      // Clear per-call context so a second council create cannot read stale
+      // baseBody / spawnErrors. The long-lived coordinator's spawn callback
+      // throws explicitly if this is null when invoked.
+      this.pendingCouncilCall = null;
     }
   }
 
@@ -1448,6 +1787,10 @@ export class SessionOrchestrator {
         message: "Session keeps crashing. Please relaunch manually.",
       });
       this.relaunchExhaustedNotified.add(sessionId);
+      // PLAN Task 5: signal council reconnect listeners that this session's
+      // budget is spent — they can short-circuit `reconnecting → degraded`
+      // without waiting for the 45s timer.
+      companionBus.emit("session:relaunch-failed", { sessionId, reason: "budget_exhausted" });
       this.relaunchingSet.delete(sessionId);
       return;
     }
@@ -1464,6 +1807,11 @@ export class SessionOrchestrator {
         const result = await this.launcher.relaunch(sessionId);
         if (!result.ok && result.error) {
           this.wsBridge.broadcastToSession(sessionId, { type: "error", message: result.error });
+          // PLAN Task 5: deterministic spawn failure — let council reconnect
+          // listeners short-circuit immediately. `ok=false` without `error`
+          // is the "spawn happened but maybe needs another attempt" branch;
+          // we keep that silent so the retry budget isn't burned.
+          companionBus.emit("session:relaunch-failed", { sessionId, reason: result.error });
         } else if (result.ok) {
           metricsCollector.recordRelaunchSucceeded();
           this.autoRelaunchCounts.delete(sessionId);

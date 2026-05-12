@@ -72,14 +72,25 @@ function StatusPill({ state }: { state: ObserverPanelState }) {
         </div>
       );
     case "reconnecting":
+      // PLAN Task 14 (Saarinen): use `cc-info` (the in-progress / transient
+      // token, same family as `spawning`) instead of `cc-warning` (which is
+      // also `degraded`). Distinct visual semantics: blue ring spinning =
+      // working on it; amber dot static = bad settled state.
+      // PLAN Task 13 (a11y): `role="status"` makes the pill a polite live
+      // region — a screen reader hears one announcement when the panel
+      // transitions into reconnecting and one more when it resolves to
+      // active or escalates to degraded. `aria-atomic="true"` so the whole
+      // pill text is read, not just the diff. Spinner stays `aria-hidden`.
       return (
         <div
           data-testid="status-pill"
           data-state={state.name}
+          role="status"
           aria-busy="true"
-          className="flex items-center gap-2 text-cc-warning"
+          aria-atomic="true"
+          className="flex items-center gap-2 text-cc-info"
         >
-          <span aria-hidden="true" className="w-3 h-3 rounded-full border-2 border-cc-warning/30 border-t-cc-warning animate-spin" />
+          <span aria-hidden="true" className="w-3 h-3 rounded-full border-2 border-cc-info/30 border-t-cc-info animate-spin" />
           <span className="text-xs font-medium">Observer reconnecting</span>
         </div>
       );

@@ -387,6 +387,24 @@ export type BrowserIncomingMessageBase =
     deadRole: "orchestrator" | "observer";
   }
   | {
+    /**
+     * PLAN Task 7: one half of a Council Mode group dropped its CLI ws
+     * unexpectedly; the coordinator armed a bounded grace window before
+     * flipping to `degraded`. Sent at transition time only — not periodic.
+     *
+     * `survivingRole` describes the alive half (the one whose browser
+     * tab is guaranteed to receive the frame). `deadlineMs` is an
+     * **absolute** wallclock (`Date.now()` at the server when armed +
+     * grace), robust to in-flight latency, sleeping tabs, and replay.
+     * `attempts` is omitted in v1 — current scope is one-shot per active
+     * episode; widening to multi-attempt is an additive field bump.
+     */
+    type: "group_reconnecting";
+    sessionGroupId: string;
+    survivingRole: "orchestrator" | "observer";
+    deadlineMs: number;
+  }
+  | {
     type: "group_checkpoint";
     sessionGroupId: string;
     checkpointId: string;

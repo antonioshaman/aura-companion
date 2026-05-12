@@ -32,6 +32,7 @@ import {
 import {
   appendHistory as appendHistoryFn,
   persistSession as persistSessionFn,
+  serializeForStore,
 } from "./ws-bridge-persist.js";
 import {
   broadcastToBrowsers as broadcastToBrowsersFn,
@@ -301,6 +302,20 @@ export class WsBridge {
 
   getAllSessions(): SessionState[] {
     return Array.from(this.sessions.values()).map((s) => s.state);
+  }
+
+  /**
+   * PLAN Task 11: synchronously flush every pending debounced session-store
+   * write to disk. Used by `gracefulShutdown` so a state mutation that
+   * landed in the 150ms debounce window seconds before SIGTERM is not
+   * lost. No-op if no store is attached.
+   */
+  flushSessionStorePendingSync(): void {
+    if (!this.store) return;
+    this.store.flushAll((sessionId) => {
+      const session = this.sessions.get(sessionId);
+      return session ? serializeForStore(session) : null;
+    });
   }
 
   /** Return per-session memory stats for diagnostics. */

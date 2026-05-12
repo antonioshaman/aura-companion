@@ -138,6 +138,41 @@ describe("ObserverPanel — state pills (5 explicit states)", () => {
     expect(screen.getByText(/2 unresolved/i)).toBeInTheDocument();
   });
 
+  // PLAN Task 13 (a11y): the `reconnecting` branch was previously
+  // unreachable in production; PLAN Task 9 wired the ws.ts dispatch so
+  // a `group_reconnecting` server frame now sets `GroupRecord.status =
+  // "reconnecting"`. Verify the pill renders with the polite live-region
+  // role + aria-atomic, uses the `cc-info` token (Task 14, distinct from
+  // `cc-warning` which is degraded), and keeps the spinner decorative.
+  it("renders reconnecting pill with polite live-region role and cc-info token", async () => {
+    seedGroup();
+    act(() => {
+      useStore.getState().setGroupStatus(GROUP.sessionGroupId, "reconnecting");
+    });
+    const { container } = render(<ObserverPanel sessionId={SESSION} />);
+    const pill = screen.getByTestId("status-pill");
+    expect(pill).toHaveAttribute("data-state", "reconnecting");
+    // Live-region semantics: status role + atomic so a SR reads the full
+    // pill text on transition, not per-render fragments.
+    expect(pill).toHaveAttribute("role", "status");
+    expect(pill).toHaveAttribute("aria-atomic", "true");
+    expect(pill).toHaveAttribute("aria-busy", "true");
+    // Visible name is the accessible name — no aria-label duplication.
+    expect(pill).toHaveTextContent(/Observer reconnecting/i);
+    // Spinner is decorative; otherwise a SR would loop "loading loading…".
+    const spinner = pill.querySelector("span[aria-hidden=\"true\"]");
+    expect(spinner).not.toBeNull();
+    // Color token: cc-info distinguishes transient-in-progress from
+    // settled-error (cc-warning). Asserting the className substring rather
+    // than the computed hex keeps the test resilient to token-value tweaks.
+    expect(pill.className).toContain("text-cc-info");
+    expect(pill.className).not.toContain("text-cc-warning");
+    // axe scan — every component test per CLAUDE.md.
+    const { axe } = await import("vitest-axe");
+    const results = await axe(container);
+    expect(results).toHaveNoViolations();
+  });
+
   // PLAN T15.2: degraded wins over blocker-found regardless of findings.
   it("renders degraded status (highest priority) when the group is degraded", () => {
     seedGroup();

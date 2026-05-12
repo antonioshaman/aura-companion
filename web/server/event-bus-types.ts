@@ -17,6 +17,16 @@ export interface CompanionEventMap {
   /** CLI WebSocket disconnected and a browser needs a relaunch. */
   "session:relaunch-needed": { sessionId: string };
 
+  /**
+   * Auto-relaunch produced a deterministic failure: synchronous spawn
+   * failure (binary missing, observer-config load failure) OR the
+   * `relaunchExhaustedNotified` budget is now spent. Group-level
+   * `reconnecting` listeners short-circuit to `reconnect_failed` rather
+   * than wait out the full grace window for an outcome already decided
+   * (PLAN Task 5, Subprocess council recommendation).
+   */
+  "session:relaunch-failed": { sessionId: string; reason: string };
+
   /** Idle-kill threshold reached with no connected browsers. */
   "session:idle-kill": { sessionId: string };
 
@@ -85,6 +95,17 @@ export interface CompanionEventMap {
   "group:degraded": {
     sessionGroupId: string;
     deadRole: "orchestrator" | "observer";
+  };
+
+  /** One half of a Council Mode group is reconnecting — bounded grace
+   *  window armed (PLAN Task 7). Resolved by `session:cli-id-received`
+   *  → `group:created` re-broadcast (active again) or by timer expiry
+   *  → `group:degraded`. */
+  "group:reconnecting": {
+    sessionGroupId: string;
+    survivingRole: "orchestrator" | "observer";
+    /** Absolute wallclock ms — robust to in-flight latency and tab sleep. */
+    deadlineMs: number;
   };
 
   /** Observer wake-up: a new checkpoint sentinel was emitted by the

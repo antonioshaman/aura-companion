@@ -1099,6 +1099,72 @@ describe("Browser handlers", () => {
     expect(bridge.getSession("s1")!.browserSockets.has(browser)).toBe(false);
   });
 
+  // PLAN Task 8 — replay/seq classification regression: when a council pair
+  // enters reconnecting → active while the browser is disconnected, the
+  // sequence number stream MUST preserve both frames (`group_reconnecting`
+  // followed by the recycled `group_created` for "we're back"). Otherwise
+  // a browser reconnecting with `lastSeqSeen` could see only the resolution
+  // and end stuck in `reconnecting` forever, or only the start and end
+  // stuck after recovery already happened. Both variants must be in the
+  // same replayable class as existing `group_created` / `group_degraded`.
+  it("session_subscribe: replays group_reconnecting and recycled group_created in order", () => {
+    const cli = makeCliSocket("g_orch");
+    bridge.handleCLIOpen(cli, "g_orch");
+    const otherCli = makeCliSocket("g_obs");
+    bridge.handleCLIOpen(otherCli, "g_obs");
+
+    const browser = makeBrowserSocket("g_orch");
+    bridge.handleBrowserOpen(browser, "g_orch");
+    const seqBeforeDisconnect = bridge.getSession("g_orch")!.nextEventSeq;
+
+    // Browser disconnects mid-cycle — frames during this window must be
+    // buffered for replay.
+    bridge.handleBrowserClose(browser);
+
+    // Server emits `group_reconnecting` then the recycled `group_created`
+    // ("we're back") via broadcastToGroup. The orchestrator's bus listener
+    // does this in production; here we exercise the broadcast layer
+    // directly to isolate the seq/replay classification.
+    bridge.broadcastToGroup(["g_orch", "g_obs"], {
+      type: "group_reconnecting",
+      sessionGroupId: "grp_seq",
+      survivingRole: "orchestrator",
+      deadlineMs: Date.now() + 45_000,
+    });
+    bridge.broadcastToGroup(["g_orch", "g_obs"], {
+      type: "group_created",
+      sessionGroupId: "grp_seq",
+      primarySessionId: "g_orch",
+      observerSessionId: "g_obs",
+      pairing: "claude+claude",
+    });
+
+    // Browser reconnects with `last_seq` equal to what it saw before the
+    // disconnect — both frames should arrive in the event_replay payload,
+    // in seq order.
+    const reborn = makeBrowserSocket("g_orch");
+    bridge.handleBrowserOpen(reborn, "g_orch");
+    reborn.send.mockClear();
+    bridge.handleBrowserMessage(reborn, JSON.stringify({
+      type: "session_subscribe",
+      last_seq: seqBeforeDisconnect - 1,
+    }));
+
+    const calls = reborn.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
+    const replay = calls.find((c: any) => c.type === "event_replay");
+    expect(replay).toBeDefined();
+    const replayedTypes = replay.events.map((e: any) => e.message.type);
+    // Both frames present, in order — the panel sees reconnecting first,
+    // then group_created which flips status back to active.
+    expect(replayedTypes).toContain("group_reconnecting");
+    expect(replayedTypes).toContain("group_created");
+    const recIdx = replayedTypes.indexOf("group_reconnecting");
+    const createdIdx = replayedTypes.lastIndexOf("group_created");
+    expect(recIdx).toBeLessThan(createdIdx);
+    // Seq numbers strictly monotonic across the two frames.
+    expect(replay.events[recIdx].seq).toBeLessThan(replay.events[createdIdx].seq);
+  });
+
   it("session_subscribe: replays buffered sequenced events after last_seq", async () => {
     const cli = makeCliSocket("s1");
     bridge.handleCLIOpen(cli, "s1");
