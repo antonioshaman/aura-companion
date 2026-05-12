@@ -247,15 +247,23 @@ export function createRoutes(
           event: "progress",
           data: JSON.stringify({ step: "launching_cli", label: "Council pair ready", status: "done" }),
         });
+        // Frontend needs observerBackendType + pairing to bootstrap the
+        // group store and seed the observer SDK session synchronously, so
+        // the council UI does not depend on racing the `group:created`
+        // broadcast (which fires before any browser WS is open).
+        const primaryBackend = result.primary.backendType ?? "claude";
+        const observerBackend = result.observer.backendType ?? "claude";
         await stream.writeSSE({
           event: "done",
           data: JSON.stringify({
             sessionId: result.primary.sessionId,
             state: result.primary.state,
             cwd: result.primary.cwd,
-            backendType: result.primary.backendType,
+            backendType: primaryBackend,
             sessionGroupId: result.sessionGroupId,
             observerSessionId: result.observer.sessionId,
+            observerBackendType: observerBackend,
+            pairing: `${primaryBackend}+${observerBackend}`,
           }),
         });
         return;

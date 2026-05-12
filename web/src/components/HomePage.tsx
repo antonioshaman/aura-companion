@@ -678,9 +678,17 @@ export function HomePage() {
 
       // Seed sdk session metadata immediately so chat can render resume/fork context
       // before the sidebar poller refreshes /api/sessions.
+      // Council Mode: also seed the observer half AND bootstrap the group
+      // store from the SSE result — `group:created` fires before any browser
+      // WS is open, so relying on the broadcast races the upsert and the
+      // observer panel never renders. Synchronous seeding makes the wiring
+      // deterministic regardless of broadcast timing.
       const sessionStore = useStore.getState();
-      const existingSdkSessions = sessionStore.sdkSessions.filter((sdk) => sdk.sessionId !== sessionId);
-      sessionStore.setSdkSessions([
+      const isCouncil = !!(result.sessionGroupId && result.observerSessionId);
+      const observerSessionId = result.observerSessionId;
+      const filterIds = new Set([sessionId, ...(isCouncil ? [observerSessionId!] : [])]);
+      const existingSdkSessions = sessionStore.sdkSessions.filter((sdk) => !filterIds.has(sdk.sessionId));
+      const seededSessions = [
         ...existingSdkSessions,
         {
           sessionId,
@@ -693,7 +701,28 @@ export function HomePage() {
           resumeSessionAt: effectiveResumeSessionAt,
           forkSession: effectiveResumeSessionAt ? effectiveForkSession === true : undefined,
         },
-      ]);
+      ];
+      if (isCouncil) {
+        seededSessions.push({
+          sessionId: observerSessionId!,
+          state: "starting" as const,
+          cwd: result.cwd,
+          createdAt: Date.now(),
+          backendType: (result.observerBackendType as BackendType | undefined) || backend,
+          model,
+          permissionMode: mode,
+        });
+      }
+      sessionStore.setSdkSessions(seededSessions);
+      if (isCouncil) {
+        sessionStore.upsertGroup({
+          sessionGroupId: result.sessionGroupId!,
+          primarySessionId: sessionId,
+          observerSessionId: observerSessionId!,
+          status: "pairing",
+          pairing: result.pairing ?? `${result.backendType ?? backend}+${result.observerBackendType ?? backend}`,
+        });
+      }
 
       // Assign a random session name
       const existingNames = new Set(useStore.getState().sessionNames.values());
@@ -711,6 +740,13 @@ export function HomePage() {
       // connectSession called eagerly so waitForConnection below can resolve immediately;
       // the App.tsx hash-sync effect also calls it, but that runs after render (too late).
       connectSession(sessionId);
+      // Council Mode: open the observer's browser-WS too. Without this the
+      // observer's CLI is alive on the backend but no browser socket consumes
+      // its session_init / state transitions, so the UI shows it perpetually
+      // "starting" and the Sidebar can't pair-render via group state.
+      if (isCouncil) {
+        connectSession(observerSessionId!);
+      }
 
       // Wait for WebSocket connection
       await waitForConnection(sessionId);

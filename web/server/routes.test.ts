@@ -4017,6 +4017,11 @@ describe("POST /api/sessions/create-stream — Council Mode branch (Beck council
     expect(doneData.sessionId).toBe("sess_orch");
     expect(doneData.observerSessionId).toBe("sess_obs");
     expect(doneData.backendType).toBe("claude");
+    // observerBackendType + pairing must be in done payload so HomePage can
+    // bootstrap the group store + seed the observer SDK session synchronously
+    // (the `group:created` broadcast races the WS open and arrives empty).
+    expect(doneData.observerBackendType).toBe("codex");
+    expect(doneData.pairing).toBe("claude+codex");
 
     // The non-stream path MUST NOT be invoked in the SSE Council branch.
     expect(orchestrator.createSessionStreaming).not.toHaveBeenCalled();

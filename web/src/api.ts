@@ -750,6 +750,10 @@ export interface CreateSessionStreamResult {
   sessionGroupId?: string;
   /** Council Mode — observer half's session id. Primary sits in `sessionId`. */
   observerSessionId?: string;
+  /** Council Mode — observer half's backend type (claude | codex). */
+  observerBackendType?: "claude" | "codex";
+  /** Council Mode — server-validated pairing label ("claude+claude" | "claude+codex"). */
+  pairing?: string;
 }
 
 /**

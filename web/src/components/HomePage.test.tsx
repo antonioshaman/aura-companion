@@ -82,6 +82,7 @@ vi.mock("../utils/routing.js", () => ({
 
 import { HomePage } from "./HomePage.js";
 import { CLAUDE_MODELS } from "../utils/backends.js";
+import { connectSession } from "../ws.js";
 
 // Source of truth for default model labels — keeps tests in sync with the
 // CLAUDE_MODELS list when models are bumped (e.g. Opus 4.6 → 4.7), so we never
@@ -1547,6 +1548,129 @@ describe("HomePage", () => {
       expect(screen.getByText(/sets where your code lives/)).toBeInTheDocument();
       // But the Claude-only sentence should be absent
       expect(screen.queryByText(/branch from session/i)).not.toBeInTheDocument();
+    });
+  });
+
+  // ─── Council Mode bootstrap ───────────────────────────────────────────────
+  describe("Council Mode bootstrap", () => {
+    // Regression guard for the "looks like SOLO in UI" bug: backend correctly
+    // takes the council branch and SSE done event includes sessionGroupId +
+    // observerSessionId + observerBackendType + pairing, but if HomePage only
+    // reads result.sessionId then the observer half is orphaned (no SDK seed,
+    // no group bootstrap, no observer-WS open). Asserts all three side
+    // effects fire from the SSE result synchronously — independent of the
+    // server's `group:created` broadcast which races the WS open.
+    it("seeds observer SDK session, upserts group, and connects observer WS from SSE result", async () => {
+      const setSdkSessionsSpy = vi.fn();
+      const upsertGroupSpy = vi.fn();
+      mockStoreGetState.mockReturnValue(buildStoreMock({
+        setSdkSessions: setSdkSessionsSpy,
+        upsertGroup: upsertGroupSpy,
+      }));
+
+      // Persist the toggle so it's on at first render — same path the user took.
+      localStorage.setItem("cc-council-enabled", "true");
+      localStorage.setItem("cc-council-pairing", "claude+codex");
+
+      createSessionStreamMock.mockResolvedValue({
+        sessionId: "sess_orch",
+        state: "starting",
+        cwd: "/work/repo",
+        backendType: "claude",
+        sessionGroupId: "grp_council_xyz",
+        observerSessionId: "sess_obs",
+        observerBackendType: "codex",
+        pairing: "claude+codex",
+      });
+
+      render(<HomePage />);
+
+      const textarea = await screen.findByLabelText("Task description");
+      await act(async () => {
+        fireEvent.change(textarea, { target: { value: "kick off council" } });
+      });
+
+      const sendButton = screen.getByTitle("Send message");
+      await act(async () => {
+        fireEvent.click(sendButton);
+      });
+
+      await waitFor(() => {
+        expect(createSessionStreamMock).toHaveBeenCalled();
+      });
+
+      // Frontend must forward councilMode + councilPairing to the server.
+      expect(createSessionStreamMock).toHaveBeenCalledWith(
+        expect.objectContaining({
+          councilMode: "council",
+          councilPairing: "claude+codex",
+        }),
+        expect.any(Function),
+      );
+
+      // setSdkSessions seeded BOTH halves — orchestrator + observer.
+      // Without the observer entry the Sidebar never paints the pair.
+      const sdkCall = setSdkSessionsSpy.mock.calls[0]?.[0] as Array<{ sessionId: string; backendType?: string }>;
+      expect(sdkCall).toBeDefined();
+      const seededIds = sdkCall.map((s) => s.sessionId).sort();
+      expect(seededIds).toEqual(["sess_obs", "sess_orch"]);
+      const observerSeed = sdkCall.find((s) => s.sessionId === "sess_obs");
+      expect(observerSeed?.backendType).toBe("codex");
+
+      // upsertGroup bootstrapped the council slice synchronously from the
+      // SSE result — race-proof against `group:created` broadcast (which
+      // fires before any browser WS is open and lands in zero listeners).
+      expect(upsertGroupSpy).toHaveBeenCalledWith({
+        sessionGroupId: "grp_council_xyz",
+        primarySessionId: "sess_orch",
+        observerSessionId: "sess_obs",
+        status: "pairing",
+        pairing: "claude+codex",
+      });
+
+      // Both halves got their browser-WS opened. Observer-WS is what
+      // unblocks the "perpetually starting" UI symptom.
+      const connectMock = vi.mocked(connectSession);
+      const connectedIds = connectMock.mock.calls.map((c) => c[0]).sort();
+      expect(connectedIds).toContain("sess_orch");
+      expect(connectedIds).toContain("sess_obs");
+    });
+
+    // Negative guard: when council toggle is OFF, none of the council-only
+    // store calls fire. Prevents accidentally bootstrapping a non-existent
+    // group when SSE done lacks the council fields (the SOLO happy path).
+    it("does not call upsertGroup or connect observer when SSE result lacks council fields", async () => {
+      const upsertGroupSpy = vi.fn();
+      mockStoreGetState.mockReturnValue(buildStoreMock({
+        upsertGroup: upsertGroupSpy,
+      }));
+
+      localStorage.setItem("cc-council-enabled", "false");
+
+      createSessionStreamMock.mockResolvedValue({
+        sessionId: "sess_solo",
+        state: "starting",
+        cwd: "/work/repo",
+        backendType: "claude",
+      });
+
+      render(<HomePage />);
+      const textarea = await screen.findByLabelText("Task description");
+      await act(async () => {
+        fireEvent.change(textarea, { target: { value: "solo run" } });
+      });
+      const sendButton = screen.getByTitle("Send message");
+      await act(async () => {
+        fireEvent.click(sendButton);
+      });
+
+      await waitFor(() => {
+        expect(createSessionStreamMock).toHaveBeenCalled();
+      });
+
+      expect(upsertGroupSpy).not.toHaveBeenCalled();
+      const connectedIds = vi.mocked(connectSession).mock.calls.map((c) => c[0]);
+      expect(connectedIds).toEqual(["sess_solo"]);
     });
   });
 });
