@@ -27,6 +27,10 @@ interface MockStoreState {
   sessions: Map<string, { cwd?: string; is_containerized?: boolean }>;
   sdkSessions: { sessionId: string; cwd?: string; containerId?: string; model?: string; backendType?: string }[];
   gitChangedFilesCount: Map<string, number>;
+  // Council Mode slice: TopBar reads `groupBySessionId` + `groups` to
+  // render ProviderBadges when the active session is in a group.
+  groupBySessionId: Map<string, string>;
+  groups: Map<string, { pairing: string }>;
 }
 
 let storeState: MockStoreState;
@@ -47,6 +51,8 @@ function resetStore(overrides: Partial<MockStoreState> = {}) {
     sessions: new Map([["s1", { cwd: "/repo" }]]),
     sdkSessions: [],
     gitChangedFilesCount: new Map(),
+    groupBySessionId: new Map(),
+    groups: new Map(),
     ...overrides,
   };
 }

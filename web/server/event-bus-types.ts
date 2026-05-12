@@ -61,4 +61,55 @@ export interface CompanionEventMap {
 
   /** A result (turn completion) was processed and broadcast to browsers. */
   "message:result": { sessionId: string; message: BrowserIncomingMessage };
+
+  // ── Council Mode session groups ────────────────────────────────────
+  // Group-scoped events fire in addition to (not instead of) the
+  // corresponding per-session events. Subscribers that only care about
+  // group membership read these; per-session subscribers are unaffected.
+
+  /** A new Council Mode pair was created and both halves are active. */
+  "group:created": {
+    sessionGroupId: string;
+    primarySessionId: string;
+    observerSessionId: string;
+  };
+
+  /** A Council Mode group was archived (intentional teardown). */
+  "group:exited": {
+    sessionGroupId: string;
+    reason: "user_archived" | "shutdown" | "both_halves_died";
+  };
+
+  /** One half of a Council Mode group died unexpectedly; the surviving
+   *  half is now in degraded mode and may be respawned by the user. */
+  "group:degraded": {
+    sessionGroupId: string;
+    deadRole: "orchestrator" | "observer";
+  };
+
+  /** Observer wake-up: a new checkpoint sentinel was emitted by the
+   *  orchestrator and validated. Subscribers may forward to the observer
+   *  half or surface in the UI. */
+  "group:checkpoint": {
+    sessionGroupId: string;
+    checkpointId: string;
+    phase: string;
+    sequence: number;
+  };
+
+  /** Observer review processed end-to-end: parsed from the review file,
+   *  validated for grounding, findings hydrated with server-assigned ids,
+   *  ready for browser fanout. Subscribers transform the payload into
+   *  the `observer_review` BrowserIncomingMessage and broadcast it. */
+  "group:review": {
+    sessionGroupId: string;
+    checkpointId: string;
+    phase: string;
+    /** Findings after grounding validation. Each has a stable server-assigned id. */
+    findings: import("./session-types.js").BrowserObserverFinding[];
+    /** Server-side grounding downgrades (correlate to `findings[].id`). */
+    downgrades: import("./session-types.js").BrowserObserverDowngrade[];
+    observerModel: string;
+    observerProvider: string;
+  };
 }

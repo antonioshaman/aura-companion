@@ -24,6 +24,7 @@ import { FolderPicker } from "./FolderPicker.js";
 import { readFileAsBase64, type ImageAttachment } from "../utils/image.js";
 import { LinearSection } from "./home/LinearSection.js";
 import { BranchPicker } from "./home/BranchPicker.js";
+import { CouncilToggle } from "./council/index.js";
 import { MentionMenu } from "./MentionMenu.js";
 import { useMentionMenu } from "../utils/use-mention-menu.js";
 import type { SavedPrompt } from "../api.js";
@@ -112,6 +113,23 @@ export function HomePage() {
   const [selectedLinearConnectionId, setSelectedLinearConnectionId] = useState<string | null>(null);
   const [showOnboardingTip, setShowOnboardingTip] = useState(
     () => localStorage.getItem("cc-onboarding-dismissed") !== "true",
+  );
+
+  // Council Mode controls — persisted toggle + pairing so the user's last
+  // choice survives a page refresh without resurrecting the council session
+  // itself (the server is the truth for live groups).
+  const [councilEnabled, setCouncilEnabled] = useState<boolean>(
+    () => localStorage.getItem("cc-council-enabled") === "true",
+  );
+  const [councilPairing, setCouncilPairing] = useState<"claude+claude" | "claude+codex">(
+    () => (localStorage.getItem("cc-council-pairing") as "claude+claude" | "claude+codex") || "claude+claude",
+  );
+  // codexAvailable: backend pre-flight is wired in a later Phase F commit
+  // (PLAN T11). For now, mirror the backends listing — Codex is available
+  // when listed as a working backend by the server.
+  const codexAvailable = useMemo(
+    () => backends.some((b) => b.id === "codex" && b.available),
+    [backends],
   );
 
   const MODELS = dynamicModels || getModelsForBackend(backend);
@@ -646,6 +664,11 @@ export function HomePage() {
             teamName: selectedLinearIssue.teamName,
             url: selectedLinearIssue.url,
           } : undefined,
+          // Council Mode — backend route handler wiring is deferred; the
+          // server will be free to ignore these fields until the matching
+          // backend commit lands.
+          councilMode: councilEnabled ? "council" : undefined,
+          councilPairing: councilEnabled ? councilPairing : undefined,
         },
         (progress) => {
           useStore.getState().addCreationProgress(progress);
@@ -1248,6 +1271,30 @@ export function HomePage() {
                   </button>
                 ))}
               </div>
+            </div>
+          )}
+
+          {/* Council Mode toggle — subordinate to the create button.
+              Off by default; ON reveals a provider-pairing dropdown via
+              height-transition. Backend wiring of the new createSession
+              fields is deferred to a later Phase F backend commit; the
+              client persists the user's choice so it survives a refresh. */}
+          {backend === "claude" && (
+            <div className="max-w-md mx-auto">
+              <CouncilToggle
+                enabled={councilEnabled}
+                pairing={councilPairing}
+                onEnabledChange={(v) => {
+                  setCouncilEnabled(v);
+                  localStorage.setItem("cc-council-enabled", v ? "true" : "false");
+                }}
+                onPairingChange={(p) => {
+                  setCouncilPairing(p);
+                  localStorage.setItem("cc-council-pairing", p);
+                }}
+                codexAvailable={codexAvailable}
+                codexUnavailableReason="Codex CLI not detected — install or sign in."
+              />
             </div>
           )}
 

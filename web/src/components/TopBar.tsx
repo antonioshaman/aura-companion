@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
 import { useStore } from "../store.js";
 import { parseHash } from "../utils/routing.js";
 import { AiValidationToggle } from "./AiValidationToggle.js";
+import { ProviderBadges } from "./council/index.js";
 
 type WorkspaceTab = "chat" | "diff";
 
@@ -32,6 +33,10 @@ export function TopBar() {
   );
   const status = currentSessionId ? (sessionStatus.get(currentSessionId) ?? null) : null;
   const isConnected = currentSessionId ? (cliConnected.get(currentSessionId) ?? false) : false;
+  // Council Mode — if the active session is in a group, surface the
+  // pairing as ProviderBadges in TopBar (PLAN T15.5).
+  const groupId = useStore((s) => (currentSessionId ? s.groupBySessionId.get(currentSessionId) : undefined));
+  const groupPairing = useStore((s) => (groupId ? s.groups.get(groupId)?.pairing : undefined));
   const sessionName = currentSessionId
     ? (sessionNames?.get(currentSessionId) ||
       sdkSessions.find((s) => s.sessionId === currentSessionId)?.name ||
@@ -126,7 +131,10 @@ export function TopBar() {
           </div>
         )}
 
-        <div className="flex items-center gap-0.5 shrink-0">
+        <div className="flex items-center gap-2 shrink-0">
+          {showWorkspaceControls && groupPairing && (
+            <ProviderBadges pairing={groupPairing} size="compact" />
+          )}
           {showWorkspaceControls && currentSessionId && (
             <AiValidationToggle sessionId={currentSessionId} />
           )}

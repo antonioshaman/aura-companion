@@ -74,20 +74,44 @@ Browser (React) ←→ WebSocket ←→ Hono Server (Bun) ←→ WebSocket (NDJS
 
 - **`web/server/`** — Hono + Bun backend (runs on port 3456)
   - `index.ts` — Server bootstrap, Bun.serve with dual WebSocket upgrade (CLI vs browser)
-  - `ws-bridge.ts` — Core message router. Maintains per-session state (CLI socket, browser sockets, message history, pending permissions). Parses NDJSON from CLI, translates to typed JSON for browsers.
-  - `cli-launcher.ts` — Spawns/kills/relaunches Claude Code CLI processes. Handles `--resume` for session recovery. Persists session state across server restarts.
+  - `ws-bridge.ts` — Core message router. Maintains per-session state (CLI socket, browser sockets, message history, pending permissions). Parses NDJSON from CLI, translates to typed JSON for browsers. Also carries `broadcastToGroup` for Council Mode fanout.
+  - `cli-launcher.ts` — Spawns/kills/relaunches Claude Code CLI processes. Handles `--resume` for session recovery. Persists session state across server restarts. Council Mode observer-role spawn pulls the system prompt via `applyCouncilObserverSpawnConfig` (Claude + Codex backends both wired).
+  - `session-orchestrator.ts` — Session create/archive/relaunch lifecycle. Owns `createCouncilGroup`, per-group `councilWatchers` map (checkpoint + review filesystem watchers), and `wireGroupListeners()` for `group:created`/`group:exited`/`group:degraded`/`group:checkpoint`/`group:review` bus fanout.
+  - `session-group-coordinator.ts` — Council Mode pair lifecycle (spawn-with-rollback, archive, state-machine transitions). Decoupled from `session-orchestrator.ts` via injected `SessionSpawner`/`SessionKiller` — AP-1 convention.
+  - `group-state-machine.ts` — Pure `transition(state, event)` for the 5 group statuses (`pairing | active | degraded | archived | reconnecting`). Single source of truth for group lifecycle.
   - `session-store.ts` — JSON file persistence to `$TMPDIR/vibe-sessions/`. Debounced writes.
-  - `session-types.ts` — All TypeScript types for CLI messages (NDJSON), browser messages, session state, permissions.
-  - `routes.ts` — REST API: session CRUD, filesystem browsing, environment management.
+  - `session-types.ts` — All TypeScript types for CLI messages (NDJSON), browser messages, session state, permissions. Includes 5 Council Mode wire variants (`group_*` + `observer_review`).
+  - `routes.ts` — REST API: session CRUD, filesystem browsing, environment management. `POST /sessions/create` + `/sessions/create-stream` branch on `councilMode: "council"` to `orchestrator.createCouncilGroup`.
   - `env-manager.ts` — CRUD for environment profiles stored in `~/.companion/envs/`.
+  - **Council Mode supporting modules:**
+    - `atomic-write.ts` — `writeAtomicJson` (tmp+rename+fsync) for council artifact emission.
+    - `checkpoint-watcher.ts` / `review-watcher.ts` — Filesystem watchers on `.council/checkpoints/` and `.council/reviews/`. Atomic-write contract + debounce + LRU dedup + `onDropped("superseded")` log for EC-4 compliance.
+    - `council-types.ts` — `CheckpointPayload` + `ObserverReviewPayload` schemas. Both writer and reader live in one file (AP-3). `isBoundedToken` / `isBoundedText` / `isIsoTimestamp` validators per semantic category.
+    - `observer-prompt.ts` — Loads `.council/prompts/observer-system.md` at observer spawn; pure `buildObserverContextManifest` partitions `(current, previous)` checkpoints into `{delta, carried, dropped}` so observer reads delta-not-cumulative.
+    - `observer-attribution.ts` — `wrapObserverFindingForInjection` (structured envelope + text-form for chat); `formatObserverInvocationLog` (EC-9 structured log entry with `promptSha256` + STOP counts + latency).
+    - `observer-grounding.ts` — STOP-only grounding gate: STOPs whose `evidence_path` isn't in modifiedFiles OR missing on disk → downgrade to NOTE. EC-7 idiom: integrated wrapper does realpath + bounds-check; pure `checkStopGrounding` takes injected predicate.
+    - `observer-permissions.ts` — Observer tool allow/deny lists. Module-load canary asserts disjoint. Applied at spawn via `applyCouncilObserverSpawnConfig`.
+    - `observer-write-policy.ts` — `assertObserverWriteAllowed(path, root)` for the observer's write boundary (realpath + workspace bounds).
+    - `group-authorization.ts` — Cryptographic group-id pattern + auth checks for council REST endpoints.
+    - `group-reconciliation.ts` — Restart-recovery decisions (both-alive / orchestrator-only / observer-only / neither).
+    - `group-shutdown.ts` — Graceful SIGTERM teardown of active groups during server shutdown.
+    - `preflight-probe.ts` — Cached capability probe (`which codex` + `codex --version`) for the UI's pairing-availability gate.
+    - `backend-provider.ts` — `BackendProvider` seam + `SUPPORTED_PAIRINGS` allow-list (`claude+claude`, `claude+codex`).
+    - `codex-envelope.ts` — Strict typed parser for Codex JSON-RPC frames crossing the bridge.
 
 - **`web/src/`** — React 19 frontend
-  - `store.ts` — Zustand store. All state keyed by session ID (messages, streaming text, permissions, tasks, connection status).
-  - `ws.ts` — Browser WebSocket client. Connects per-session, handles all incoming message types, auto-reconnects. Extracts task items from `TaskCreate`/`TaskUpdate`/`TodoWrite` tool calls.
-  - `types.ts` — Re-exports server types + client-only types (`ChatMessage`, `TaskItem`, `SdkSessionInfo`).
-  - `api.ts` — REST client for session management.
-  - `App.tsx` — Root layout with sidebar, chat view, task panel. Hash routing (`#/playground`).
+  - `store.ts` (barrel) — Re-exports Zustand store from `store/` slices.
+  - `store/council-slice.ts` — Council Mode state (groups, findings, dismissed STOPs, panel-open per session, first-run hint). Persisted preferences via `localStorage`.
+  - `store/sessions-slice.ts` / `chat-slice.ts` / `permissions-slice.ts` / etc. — Per-domain slices.
+  - `ws.ts` — Browser WebSocket client. Connects per-session, handles all incoming message types, auto-reconnects. Includes 5 new `group_*` / `observer_review` cases dispatching to council slice actions.
+  - `types.ts` — Re-exports server types + client-only types (`ChatMessage`, `TaskItem`, `SdkSessionInfo`, `GroupRecord`, `ObserverFinding`, `ObserverPanelState`).
+  - `observer-panel-state.ts` — Pure `deriveObserverPanelState({group, findings, dismissedStopIds, nowMs})` returns the discriminated union for the panel header (priority ladder: degraded > blocker-found > reconnecting > reviewing > spawning > sleeping > never-checkpointed-yet).
+  - `use-browser-title-alert.ts` — Global hook prepending `(N)` to `document.title` when unresolved STOPs exist anywhere.
+  - `use-council-shortcuts.ts` — Global hook: `Cmd/Ctrl+Shift+O` toggles Observer panel; `Cmd/Ctrl+Shift+B` focuses BlockerBanner primary action.
+  - `api.ts` — REST client for session management. `CreateSessionOpts.councilMode + councilPairing` for council-mode spawn.
+  - `App.tsx` — Root layout with sidebar, chat view, task panel, ObserverPanel (sibling of ChatView for Council pairs). Hash routing (`#/playground`).
   - `components/` — UI: `ChatView`, `MessageFeed`, `MessageBubble`, `ToolBlock`, `Composer`, `Sidebar`, `TopBar`, `HomePage`, `TaskPanel`, `PermissionBanner`, `EnvManager`, `Playground`.
+  - `components/council/` — 6 Council Mode components: `CouncilToggle` (New Session toggle + provider dropdown with full APG listbox keyboard model), `ObserverPanel` (5-state status pill + collapsible rail + FindingsLog), `BlockerBanner` (destructive token in PermissionBanner slot, JSX-escaped claim), `DegradedBanner` (warning token in panel header), `ProviderBadges` (asymmetric chips for `claude+codex`), `FindingsLog` (`role="log"` + `aria-live="polite"`, server-assigned stable ids).
 
 - **`web/bin/cli.ts`** — CLI entry point (`bunx the-companion`). Sets `__COMPANION_PACKAGE_ROOT` and imports the server.
 
@@ -125,6 +149,48 @@ Each entry captures:
 - `POST /api/sessions/:id/recording/start` / `stop` — enable/disable per session
 
 **Code**: `web/server/recorder.ts` (recorder + manager), `web/server/replay.ts` (load & filter utilities).
+
+### Council Mode (paired orchestrator + observer sessions)
+
+A user-opt-in flag on the New Session form (`councilMode: "council"` + `councilPairing: "claude+claude" | "claude+codex"`) spawns two linked CLI sessions sharing one workspace — an **orchestrator** that the user drives via the main chat surface, and an **observer** that wakes on filesystem checkpoint sentinels, reads a manifest of paths, emits a structured review file, and the server fans grounded findings back into the orchestrator's UI as `BlockerBanner` + side-panel `ObserverPanel`.
+
+**Cross-process protocol** lives entirely on the filesystem under `<workspace>/.council/`:
+- `.council/prompts/observer-system.md` — versioned (`<!-- observer-system-prompt v1 -->`) CLI-agnostic role definition. Loaded at observer spawn time; hash stamped on `SdkSessionInfo.observerPromptSha256`.
+- `.council/checkpoints/<phase>.json` — written by the orchestrator via `writeAtomicJson` after each Carmack-Council phase. Schema: `CheckpointPayload` in `council-types.ts`.
+- `.council/reviews/<phase>-<provider>-observer.md` — written by the observer (content is JSON despite `.md` extension). Filename MUST carry the `<provider>` segment (`claude` | `codex`) so the `claude+codex` pairing produces two distinct review files per checkpoint rather than colliding under the watcher's debounce window.
+
+**Server pipeline:**
+1. `routes.ts /sessions/create` (or `/sessions/create-stream`) branches on `councilMode === "council"` → `orchestrator.createCouncilGroup`.
+2. `SessionGroupCoordinator` calls injected spawn callback twice (orchestrator + observer) with shared `sessionGroupId` and respective `sessionGroupRole`. Atomic rollback — observer-spawn failure kills the orchestrator half before propagating.
+3. `cli-launcher.applyCouncilObserverSpawnConfig` loads the prompt artefact, applies `getObserverSpawnOverrides()` (allowed/disallowed tools + permission mode intersected with caller-supplied lists), and injects `--append-system-prompt` (Claude) or `systemPrompt` option (Codex).
+4. `session-orchestrator.startCouncilWatchers` arms `watchCheckpoints` + `watchReviews` on the workspace's `.council/` subtree (recursive `mkdirSync` ensures the dirs exist before watch attach).
+5. On each checkpoint: `handleCouncilCheckpoint` rejects stale sequences, captures the prior checkpoint, emits `group:checkpoint`.
+6. On each review file: `handleCouncilReview` runs `validateObserverFindings` against the manifest's delta paths (via `buildObserverContextManifest`); STOPs outside the modified set OR missing on disk are downgraded to NOTE server-side. Findings get deterministic `fnd_<hex>` ids derived from `(sessionGroupId, checkpointId, observerProvider, findingIndex, evidence_path, claim)` — restart-replay produces stable ids, browser dedup catches it. Emits `group:review` with both findings + downgrades.
+7. `wireGroupListeners` in `initialize()` fans `group:created` / `group:exited` / `group:degraded` / `group:checkpoint` / `group:review` out to both halves' browsers via `wsBridge.broadcastToGroup`.
+8. `applyEvent` on the coordinator's state machine emits `group:degraded` / `group:exited` on the relevant transitions; `archiveGroup` emits `group:exited` directly so the browser can clean its store BEFORE the kills proceed.
+9. Unintentional `session:exited` against a council-tracked half drives `group:degraded` AND marks BOTH ids in `intentionalKills` BEFORE the signal (EC-2 invariant) so the proactive-relaunch listener does not race.
+
+**Browser pipeline:**
+1. `ws.ts` switch dispatches `group_*` / `observer_review` to council slice actions.
+2. `observer-panel-state.deriveObserverPanelState` derives the discriminated-union status from `(group, findings, dismissedStopIds)` — priority ladder degraded > blocker-found > reconnecting > reviewing > spawning > sleeping > never-checkpointed-yet.
+3. `BlockerBanner` renders the most-recent unresolved STOP in the same DOM slot as `PermissionBanner` (permission-first stacking); `ObserverPanel` (sibling of ChatView) renders the status pill + collapsible rail + FindingsLog; `Sidebar` shows per-session ProviderBadges + unread STOP counter.
+4. `useBrowserTitleAlert` prepends `(N)` to `document.title` aggregated across all groups; `useCouncilShortcuts` provides `Cmd/Ctrl+Shift+O` (toggle panel) and `Cmd/Ctrl+Shift+B` (focus blocker primary action).
+
+**Convention floor (do not re-flag in council reviews):**
+- `AP-1` Coordinator decoupled from session-orchestrator via DI.
+- `AP-2` `group-state-machine.ts` is single source of truth for group lifecycle status.
+- `AP-3` `council-types.ts` hosts both writer and reader schemas in one file.
+- `EC-1` Observer SDK permission profile applied at spawn argv (`applyCouncilObserverSpawnConfig`).
+- `EC-2` Group-aware kills mark BOTH session ids intentional BEFORE either kill executes.
+- `EC-3` Coordinator types distinguish Companion `sessionId` from CLI `cliSessionId`.
+- `EC-4` Filesystem watcher debounce never silently coalesces distinct payloads (use `(file, mtimeNs)` keying + `onDropped("superseded")`).
+- `EC-5` Protocol parsers reject unknown methods/frame shapes; tolerate polymorphic-by-spec fields.
+- `EC-6` Load-bearing protocol parsers require replay-based regression tests.
+- `EC-7` Filesystem-access predicates inline path resolution OR are exposed only via resolving wrapper.
+- `EC-8` Reconciliation actions require sentinel-before-sweep helpers.
+- `EC-9` Group-lifecycle log lines must be structured JSON with `event` + `sessionGroupId` + (where applicable) `sessionId` + `role`.
+
+Full conventions list in `conventions.md`. Council review artefacts (per-expert findings + synthesised `FINAL-REVIEW.md`) in `.council/review-output/<TIMESTAMP>/`.
 
 ## Browser Exploration
 

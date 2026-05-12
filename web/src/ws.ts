@@ -1175,6 +1175,52 @@ function handleParsedMessage(
       break;
     }
 
+    case "group_created": {
+      store.upsertGroup({
+        sessionGroupId: data.sessionGroupId,
+        primarySessionId: data.primarySessionId,
+        observerSessionId: data.observerSessionId,
+        status: "active",
+        pairing: data.pairing,
+      });
+      break;
+    }
+
+    case "group_exited": {
+      store.removeGroup(data.sessionGroupId);
+      break;
+    }
+
+    case "group_degraded": {
+      store.setGroupStatus(data.sessionGroupId, "degraded", { deadRole: data.deadRole });
+      break;
+    }
+
+    case "group_checkpoint": {
+      store.recordCheckpoint({
+        sessionGroupId: data.sessionGroupId,
+        checkpointId: data.checkpointId,
+        phase: data.phase,
+        sequence: data.sequence,
+        timestamp: data.timestamp,
+      });
+      break;
+    }
+
+    case "observer_review": {
+      store.appendObserverReview({
+        sessionGroupId: data.sessionGroupId,
+        checkpointId: data.checkpointId,
+        phase: data.phase,
+        findings: data.findings,
+        downgrades: data.downgrades,
+        observerModel: data.observerModel,
+        observerProvider: data.observerProvider,
+        timestamp: data.timestamp,
+      });
+      break;
+    }
+
     default: {
       console.debug("[ws] Unhandled message type:", (data as { type: string }).type);
       break;

@@ -47,6 +47,28 @@ const { mockStoreState, mockGetState } = vi.hoisted(() => {
     clearCreation: vi.fn(),
     setUpdateInfo: vi.fn(),
     setDockerUpdateDialogOpen: vi.fn(),
+    // Council Mode slice — ObserverPanel + useBrowserTitleAlert read these.
+    // The maps stay empty in this test, so the panel renders null and the
+    // title hook is a no-op; we only need the shape to exist so selectors
+    // don't crash on `.get()` / `.has()`.
+    groupBySessionId: new Map(),
+    groups: new Map(),
+    findings: new Map(),
+    groundingDowngrades: new Map(),
+    observerPanelOpen: new Map(),
+    observerPanelWidth: new Map(),
+    dismissedStopIds: new Set(),
+    firstRunHintDismissed: true,
+    setObserverPanelOpen: vi.fn(),
+    setObserverPanelWidth: vi.fn(),
+    toggleObserverPanel: vi.fn(),
+    dismissFirstRunHint: vi.fn(),
+    dismissStop: vi.fn(),
+    upsertGroup: vi.fn(),
+    removeGroup: vi.fn(),
+    setGroupStatus: vi.fn(),
+    recordCheckpoint: vi.fn(),
+    appendObserverReview: vi.fn(),
   };
   mockGetState.mockReturnValue(mockStoreState);
   return { mockStoreState, mockGetState };

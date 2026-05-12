@@ -9,9 +9,24 @@ import type {
   McpServerDetail,
   McpServerConfig,
   CreationProgressEvent,
+  BrowserObserverFinding,
+  BrowserObserverDowngrade,
 } from "../server/session-types.js";
 
-export type { SessionState, PermissionRequest, AiValidationInfo, ContentBlock, BrowserIncomingMessage, BrowserOutgoingMessage, BackendType, McpServerDetail, McpServerConfig, CreationProgressEvent };
+export type {
+  SessionState,
+  PermissionRequest,
+  AiValidationInfo,
+  ContentBlock,
+  BrowserIncomingMessage,
+  BrowserOutgoingMessage,
+  BackendType,
+  McpServerDetail,
+  McpServerConfig,
+  CreationProgressEvent,
+  BrowserObserverFinding,
+  BrowserObserverDowngrade,
+};
 export type { SessionPhase } from "../server/session-state-machine.js";
 
 export interface ChatMessage {
@@ -75,6 +90,97 @@ export interface SystemProcess {
   /** Best-effort process start timestamp (ms since epoch) */
   startedAt?: number;
 }
+
+// ── Council Mode client-side types ──────────────────────────────────────────
+
+export type SessionGroupStatus = "pairing" | "active" | "degraded" | "archived" | "reconnecting";
+export type SessionRole = "orchestrator" | "observer";
+
+/**
+ * Mirror of the server-side group record, narrowed to what the browser
+ * needs to render. Updated by the council slice in response to the
+ * `group_*` / `observer_review` WS messages — never mutated directly.
+ */
+export interface GroupRecord {
+  sessionGroupId: string;
+  primarySessionId: string;
+  observerSessionId: string;
+  status: SessionGroupStatus;
+  /** Server-validated pairing label ("claude+claude", "claude+codex"). */
+  pairing: string;
+  /** Which half died — populated only when status === "degraded". */
+  deadRole?: SessionRole;
+  /** Wallclock (ms) of the most recent checkpoint received. */
+  lastCheckpointAt?: number;
+  /** Monotonic sequence of the most recent checkpoint received. */
+  lastCheckpointSeq?: number;
+  /** Phase name of the most recent checkpoint received. */
+  lastPhase?: string;
+  /**
+   * True if the observer is actively reviewing the latest checkpoint
+   * (set on `group_checkpoint`, cleared on `observer_review`). Optimistic
+   * paint is reserved for orchestrator inputs — observer activity is
+   * server-confirmed only (faking it destroys the independent-signal value).
+   */
+  observerReviewing?: boolean;
+}
+
+/**
+ * Browser-side finding record. Adds `receivedAt`, `checkpointId`, `phase`
+ * and observer attribution fields onto the wire envelope so the panel
+ * can group findings by checkpoint without consulting the server again.
+ */
+export interface ObserverFinding {
+  /** Server-assigned stable id — used for React reconciliation. Do not re-key on UI. */
+  id: string;
+  severity: "STOP" | "WARN" | "NOTE" | "INFO";
+  claim: string;
+  evidence_path: string;
+  evidence_lines?: [number, number];
+  confidence?: "high" | "medium" | "low";
+  /** Wallclock (ms) when the finding reached the browser. */
+  receivedAt: number;
+  /** Checkpoint this finding answers. */
+  checkpointId: string;
+  /** Phase name (e.g. "council-plan"). */
+  phase: string;
+  /** True when grounding validation downgraded this from STOP → NOTE server-side. */
+  wasDowngraded?: boolean;
+  /** Why grounding downgraded this finding. Set iff wasDowngraded. */
+  downgradeReason?: "evidence_not_in_modified_set" | "evidence_missing_on_disk";
+  observerModel: string;
+  observerProvider: string;
+}
+
+export type ObserverPanelStateName =
+  | "never-checkpointed-yet"
+  | "spawning"
+  | "reconnecting"
+  | "sleeping"
+  | "reviewing"
+  | "blocker-found"
+  | "degraded";
+
+/**
+ * Discriminated-union for the observer panel header status pill.
+ * Components MUST consume the derived value as a unit — they MUST NOT
+ * recompute the name from independent booleans (Saarinen P8 component
+ * consistency + the "three diverging boolean expressions" anti-pattern).
+ *
+ * `spawning` covers the 10-30s pair-creation window when the backend is
+ * still bringing the second half up; `reconnecting` covers the transient
+ * WebSocket flap when the observer half's CLI socket drops. Both states
+ * sit above `never-checkpointed-yet` in priority — they communicate
+ * "the pair is in flux", not "the pair is healthy + idle".
+ */
+export type ObserverPanelState =
+  | { name: "never-checkpointed-yet" }
+  | { name: "spawning"; sinceMs: number; pairing: string }
+  | { name: "reconnecting"; lastCheckpointAt: number | null; lastPhase: string | null }
+  | { name: "sleeping"; lastCheckpointAt: number; lastPhase: string }
+  | { name: "reviewing"; reviewingSince: number; phase: string }
+  | { name: "blocker-found"; unresolvedStops: number; lastBlockerAt: number }
+  | { name: "degraded"; deadRole: SessionRole };
 
 export interface SdkSessionInfo {
   sessionId: string;

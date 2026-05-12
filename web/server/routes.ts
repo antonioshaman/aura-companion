@@ -30,7 +30,7 @@ import { registerGitRoutes } from "./routes/git-routes.js";
 import { registerSystemRoutes } from "./routes/system-routes.js";
 import { isRecordingHubEnabled } from "./recording-hub/hub-config.js";
 import { registerHubRoutes } from "./recording-hub/hub-routes.js";
-import { registerLinearRoutes, transitionLinearIssue, fetchLinearTeamStates } from "./routes/linear-routes.js";
+import { registerLinearRoutes, fetchLinearTeamStates } from "./routes/linear-routes.js";
 import { registerLinearConnectionRoutes } from "./routes/linear-connection-routes.js";
 import { getConnection, resolveApiKey } from "./linear-connections.js";
 import { registerLinearOAuthConnectionRoutes } from "./routes/linear-oauth-connection-routes.js";
@@ -184,6 +184,26 @@ export function createRoutes(
 
   api.post("/sessions/create", async (c) => {
     const body = await c.req.json().catch(() => ({}));
+    // Council Mode branch — the browser opts in by setting
+    // `councilMode: "council"` + `councilPairing: "<a>+<b>"`. The pairing
+    // string is server-validated against the supported allow-list inside
+    // orchestrator.createCouncilGroup; never forwarded to spawn argv as-is.
+    if (body && body.councilMode === "council") {
+      const pairing = typeof body.councilPairing === "string" ? body.councilPairing : "";
+      if (pairing !== "claude+claude" && pairing !== "claude+codex") {
+        return c.json({ error: `Invalid pairing: ${String(body.councilPairing)}` }, 400 as any);
+      }
+      const { councilMode: _cm, councilPairing: _cp, ...rest } = body;
+      const result = await orchestrator.createCouncilGroup({ pairing, base: rest });
+      if (!result.ok) {
+        return c.json({ error: result.error }, result.status as any);
+      }
+      return c.json({
+        sessionGroupId: result.sessionGroupId,
+        primary: result.primary,
+        observer: result.observer,
+      });
+    }
     const result = await orchestrator.createSession(body);
     if (!result.ok) {
       return c.json({ error: result.error }, result.status as any);
@@ -197,6 +217,50 @@ export function createRoutes(
     const body = await c.req.json().catch(() => ({}));
 
     return streamSSE(c, async (stream) => {
+      // Council Mode branch — same allow-list validation as the non-stream
+      // route; emits two coarse progress events (orchestrator → observer)
+      // rather than per-step granularity since the coordinator spawns
+      // both halves sequentially through doCreateSession internally.
+      if (body && body.councilMode === "council") {
+        const pairing = typeof body.councilPairing === "string" ? body.councilPairing : "";
+        if (pairing !== "claude+claude" && pairing !== "claude+codex") {
+          await stream.writeSSE({
+            event: "error",
+            data: JSON.stringify({ error: `Invalid pairing: ${String(body.councilPairing)}` }),
+          });
+          return;
+        }
+        await stream.writeSSE({
+          event: "progress",
+          data: JSON.stringify({ step: "launching_cli", label: "Spawning Council pair…", status: "in_progress" }),
+        });
+        const { councilMode: _cm, councilPairing: _cp, ...rest } = body;
+        const result = await orchestrator.createCouncilGroup({ pairing, base: rest });
+        if (!result.ok) {
+          await stream.writeSSE({
+            event: "error",
+            data: JSON.stringify({ error: result.error }),
+          });
+          return;
+        }
+        await stream.writeSSE({
+          event: "progress",
+          data: JSON.stringify({ step: "launching_cli", label: "Council pair ready", status: "done" }),
+        });
+        await stream.writeSSE({
+          event: "done",
+          data: JSON.stringify({
+            sessionId: result.primary.sessionId,
+            state: result.primary.state,
+            cwd: result.primary.cwd,
+            backendType: result.primary.backendType,
+            sessionGroupId: result.sessionGroupId,
+            observerSessionId: result.observer.sessionId,
+          }),
+        });
+        return;
+      }
+
       const result = await orchestrator.createSessionStreaming(
         body,
         async (step, label, status, detail) => {

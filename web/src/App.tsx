@@ -4,6 +4,8 @@ import { connectSession } from "./ws.js";
 import { api } from "./api.js";
 import { capturePageView } from "./analytics.js";
 import { parseHash, navigateToSession } from "./utils/routing.js";
+import { useBrowserTitleAlert } from "./use-browser-title-alert.js";
+import { useCouncilShortcuts } from "./use-council-shortcuts.js";
 import { LoginPage } from "./components/LoginPage.js";
 import { Sidebar } from "./components/Sidebar.js";
 import { ChatView } from "./components/ChatView.js";
@@ -16,6 +18,7 @@ import { SessionLaunchOverlay } from "./components/SessionLaunchOverlay.js";
 import { UpdateOverlay } from "./components/UpdateOverlay.js";
 import { DockerUpdateDialog } from "./components/DockerUpdateDialog.js";
 import { OnboardingModal } from "./components/OnboardingModal.js";
+import { ObserverPanel } from "./components/council/index.js";
 
 // Lazy-loaded route-level pages (not needed for initial render)
 const Playground = lazy(() => import("./components/Playground.js").then((m) => ({ default: m.Playground })));
@@ -78,6 +81,16 @@ export default function App() {
   useEffect(() => {
     capturePageView(hash || "#/");
   }, [hash]);
+
+  // Global Council Mode title alert — prepends `(N) ` to document.title when
+  // any group has unresolved STOPs, so blockers surface even when the tab
+  // is in the background. Mounted once at the App level (multiple instances
+  // would race over document.title).
+  useBrowserTitleAlert();
+
+  // Global Council Mode keyboard shortcuts (Cmd/Ctrl+Shift+O / +B). Same
+  // single-mount discipline — multiple instances would double-fire toggle.
+  useCouncilShortcuts();
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", darkMode);
@@ -297,6 +310,16 @@ export default function App() {
           )}
         </div>
       </div>
+
+      {/* Observer panel — sibling of ChatView/TaskPanel for Council Mode pairs.
+          Renders nothing when the current session is not in a Council group.
+          Lives BETWEEN the main area and the TaskPanel so the rail-collapse
+          behaviour mirrors TaskPanel's open/closed pattern. */}
+      {currentSessionId && isSessionView && (
+        <div className="hidden md:flex shrink-0 h-full">
+          <ObserverPanel sessionId={currentSessionId} />
+        </div>
+      )}
 
       {/* Task panel — overlay on mobile, inline on desktop */}
       {currentSessionId && isSessionView && (

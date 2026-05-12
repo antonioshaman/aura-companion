@@ -235,6 +235,12 @@ export interface CreateSessionOpts {
     teamName: string;
     url: string;
   };
+  // ── Council Mode ─────────────────────────────────────────────────────────
+  // When set, the server spawns a paired orchestrator+observer group. The
+  // server is the authority on pairing validation; the frontend only
+  // forwards the user's selection.
+  councilMode?: "single" | "council";
+  councilPairing?: "claude+claude" | "claude+codex";
 }
 
 export interface BackendInfo {
@@ -740,6 +746,10 @@ export interface CreateSessionStreamResult {
   backendType?: "claude" | "codex";
   resumeSessionAt?: string;
   forkSession?: boolean;
+  /** Council Mode — present when the request had `councilMode: "council"`. */
+  sessionGroupId?: string;
+  /** Council Mode — observer half's session id. Primary sits in `sessionId`. */
+  observerSessionId?: string;
 }
 
 /**

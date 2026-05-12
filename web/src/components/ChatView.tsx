@@ -6,6 +6,8 @@ import { MessageFeed } from "./MessageFeed.js";
 import { Composer } from "./Composer.js";
 import { PermissionBanner } from "./PermissionBanner.js";
 import { AiValidationBadge } from "./AiValidationBadge.js";
+import { BlockerBanner } from "./council/index.js";
+import { findUnresolvedStops } from "../observer-panel-state.js";
 
 export function ChatView({ sessionId }: { sessionId: string }) {
   const sessionPerms = useStore((s) => s.pendingPermissions.get(sessionId));
@@ -52,6 +54,22 @@ export function ChatView({ sessionId }: { sessionId: string }) {
     () => (sessionPerms ? Array.from(sessionPerms.values()) : []),
     [sessionPerms]
   );
+
+  // Council Mode: the most recent unresolved STOP for this session's group
+  // surfaces as a BlockerBanner in the same DOM slot as PermissionBanner.
+  // Permission-first stacking (PLAN T15.3): if a permission is pending,
+  // the blocker hides and waits its turn — observer findings are
+  // important but never preempt a tool-call decision.
+  const groupId = useStore((s) => s.groupBySessionId.get(sessionId));
+  const findings = useStore((s) => (groupId ? s.findings.get(groupId) : undefined));
+  const dismissedStopIds = useStore((s) => s.dismissedStopIds);
+  const dismissStop = useStore((s) => s.dismissStop);
+  const topBlocker = useMemo(() => {
+    if (!findings || findings.length === 0) return null;
+    const live = findUnresolvedStops(findings, dismissedStopIds);
+    if (live.length === 0) return null;
+    return live[live.length - 1] ?? null;
+  }, [findings, dismissedStopIds]);
 
   const showCliBanner = connStatus === "connected" && !cliConnected;
 
@@ -118,14 +136,21 @@ export function ChatView({ sessionId }: { sessionId: string }) {
         </div>
       )}
 
-      {/* Permission banners */}
-      {perms.length > 0 && (
+      {/* Permission banners OR BlockerBanner — only one occupies this slot.
+          Permission-first stacking (PLAN T15.3): tool-call decisions trump
+          findings; the blocker waits in the Observer panel until permission
+          is resolved. */}
+      {perms.length > 0 ? (
         <div className="shrink-0 max-h-[60dvh] overflow-y-auto border-t border-cc-border bg-cc-card">
           {perms.map((p) => (
             <PermissionBanner key={p.request_id} permission={p} sessionId={sessionId} />
           ))}
         </div>
-      )}
+      ) : topBlocker ? (
+        <div className="shrink-0 border-t border-cc-border bg-cc-card">
+          <BlockerBanner finding={topBlocker} onDismiss={dismissStop} />
+        </div>
+      ) : null}
 
       {/* Composer */}
       <Composer sessionId={sessionId} />

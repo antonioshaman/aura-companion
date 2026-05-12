@@ -10,6 +10,8 @@ interface ProjectGroupProps {
   sessionNames: Map<string, string>;
   pendingPermissions: Map<string, Map<string, unknown>>;
   recentlyRenamed: Set<string>;
+  /** Optional callback for per-session Council badge/unread data. */
+  getCouncilInfo?: (sessionId: string) => { pairing?: string; unreadStops?: number };
   onSelect: (id: string) => void;
   onStartRename: (id: string, currentName: string) => void;
   onArchive: (e: React.MouseEvent, id: string) => void;
@@ -46,6 +48,7 @@ export function ProjectGroup({
   onCancelRename,
   editInputRef,
   isFirst,
+  getCouncilInfo,
 }: ProjectGroupProps) {
   // Build collapsed preview: first 2 session names
   const collapsedPreview = isCollapsed
@@ -102,6 +105,7 @@ export function ProjectGroup({
         <div className="mt-0.5">
           {group.sessions.map((s) => {
             const permCount = pendingPermissions.get(s.id)?.size ?? 0;
+            const council = getCouncilInfo ? getCouncilInfo(s.id) : {};
             return (
               <SessionItem
                 key={s.id}
@@ -110,6 +114,8 @@ export function ProjectGroup({
                 sessionName={sessionNames.get(s.id)}
                 permCount={permCount}
                 isRecentlyRenamed={recentlyRenamed.has(s.id)}
+                councilPairing={council.pairing}
+                councilUnreadStops={council.unreadStops}
                 onSelect={onSelect}
                 onStartRename={onStartRename}
                 onArchive={onArchive}

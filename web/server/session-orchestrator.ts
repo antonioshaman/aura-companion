@@ -23,6 +23,19 @@ import { generateSessionTitle } from "./auto-namer.js";
 import { companionBus } from "./event-bus.js";
 import { metricsCollector } from "./metrics-collector.js";
 import { log } from "./logger.js";
+import { createHash } from "node:crypto";
+import { join } from "node:path";
+import { mkdirSync } from "node:fs";
+import type { CheckpointPayload, ObserverReviewPayload } from "./council-types.js";
+import { watchCheckpoints } from "./checkpoint-watcher.js";
+import { watchReviews } from "./review-watcher.js";
+import { validateObserverFindings } from "./observer-grounding.js";
+import { buildObserverContextManifest } from "./observer-prompt.js";
+import { formatObserverInvocationLog } from "./observer-attribution.js";
+import type {
+  BrowserObserverDowngrade,
+  BrowserObserverFinding,
+} from "./session-types.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -74,7 +87,31 @@ export interface CreateSessionRequest {
   container?: { image?: string; ports?: number[]; volumes?: string[] };
   resumeSessionAt?: string;
   forkSession?: boolean;
+  // Council Mode — present on a regular createSession request only when the
+  // call is being dispatched FROM `createCouncilGroup` for each half of the
+  // pair. The browser does NOT supply these on the public `councilMode`
+  // route; the coordinator generates them server-side.
+  sessionGroupId?: string;
+  sessionGroupRole?: import("./session-types.js").SessionGroupRole;
 }
+
+/** Public Council Mode pair-create request. The coordinator validates the
+ *  pairing server-side against {@link SUPPORTED_PAIRINGS}; the browser's
+ *  selection is treated as untrusted input. */
+export interface CreateCouncilGroupRequest {
+  pairing: "claude+claude" | "claude+codex";
+  /** Shared base request — model/cwd/env/sandbox/etc. apply to BOTH halves. */
+  base: Omit<CreateSessionRequest, "backend" | "sessionGroupId" | "sessionGroupRole">;
+}
+
+export type CreateCouncilGroupResult =
+  | {
+    ok: true;
+    sessionGroupId: string;
+    primary: SdkSessionInfo;
+    observer: SdkSessionInfo;
+  }
+  | { ok: false; error: string; status: number };
 
 export type CreateSessionResult =
   | { ok: true; session: SdkSessionInfo }
@@ -108,6 +145,63 @@ export interface DeleteSessionResult {
   worktree?: { cleaned?: boolean; dirty?: boolean; path?: string };
 }
 
+// ── Council Mode internal state shapes ─────────────────────────────────────
+
+interface CouncilWatcherEntry {
+  cwd: string;
+  abort: AbortController;
+  /** Most recently observed checkpoint payload — drives grounding for the next review. */
+  lastCheckpoint: CheckpointPayload | null;
+  /** The checkpoint that preceded `lastCheckpoint` — fed to `buildObserverContextManifest` so the manifest is delta-not-cumulative. */
+  previousCheckpoint: CheckpointPayload | null;
+}
+
+interface CouncilGroupMeta {
+  primarySessionId: string;
+  observerSessionId: string;
+  pairing: string;
+  /** Sha256 of the observer prompt artifact at spawn time, captured for invocation-log forensic re-run. */
+  observerPromptSha256?: string;
+  /** Wallclock (ms) when the group was created — used to compute invocation latency. */
+  createdAt: number;
+  /** Wallclock (ms) when the most recent checkpoint reached this orchestrator — used to compute observer wake-to-emit latency. */
+  lastCheckpointReceivedAt: number | null;
+}
+
+/**
+ * Pure: derive a deterministic finding id from the review identity tuple.
+ * Same inputs → same id across server restarts, so the browser's
+ * `appendObserverReview` dedup actually catches restart-replays.
+ *
+ * `evidencePath` + `claim` are mixed into the hash so two findings on
+ * the same `(group, checkpoint, provider, index)` with different content
+ * (e.g. a re-emitted review with different rows) still get distinct ids.
+ *
+ * Exported for unit testing — pure, no side effects.
+ */
+export function deterministicFindingId(input: {
+  sessionGroupId: string;
+  checkpointId: string;
+  observerProvider: string;
+  findingIndex: number;
+  evidencePath: string;
+  claim: string;
+}): string {
+  const hash = createHash("sha256");
+  hash.update(input.sessionGroupId);
+  hash.update("\x00");
+  hash.update(input.checkpointId);
+  hash.update("\x00");
+  hash.update(input.observerProvider);
+  hash.update("\x00");
+  hash.update(String(input.findingIndex));
+  hash.update("\x00");
+  hash.update(input.evidencePath);
+  hash.update("\x00");
+  hash.update(input.claim);
+  return `fnd_${hash.digest("hex").slice(0, 16)}`;
+}
+
 // ── Orchestrator ─────────────────────────────────────────────────────────────
 
 /**
@@ -138,6 +232,23 @@ export class SessionOrchestrator {
 
   // Idempotency guard for initialize()
   private _initialized = false;
+
+  // Council Mode — per-group watcher state. Each entry owns an
+  // AbortController for the checkpoint + review watchers and the most
+  // recent checkpoint payload (used to ground observer findings against
+  // the artifact manifest the orchestrator emitted). `previousCheckpoint`
+  // feeds `buildObserverContextManifest` so grounding uses the DELTA
+  // since the previous phase, not the cumulative manifest.
+  private councilWatchers = new Map<string, CouncilWatcherEntry>();
+  /**
+   * Council Mode — per-group spawn metadata captured at pair creation
+   * time so listeners running outside the spawn context (group:review
+   * fanout, group:exited fanout) can correlate to the original orchestrator
+   * + observer session ids and the observer attribution fields. The
+   * coordinator owns the lifecycle source-of-truth; this map is the
+   * orchestrator's read-side cache.
+   */
+  private councilGroupMeta = new Map<string, CouncilGroupMeta>();
 
   // Event listeners
   private exitCallbacks: ((sessionId: string, exitCode: number | null) => void)[] = [];
@@ -212,6 +323,16 @@ export class SessionOrchestrator {
     companionBus.on("session:idle-kill", async ({ sessionId }) => {
       const info = this.launcher.getSession(sessionId);
       if (!info || info.archived) return;
+      // Subprocess council review #4 (P1#4 — S8): observer-role sessions
+      // sleep between checkpoints by design; their `lastCliActivityTs`
+      // doesn't advance during normal operation. Idle-killing them would
+      // brick the council pair without the user's input. The pair's
+      // lifetime is bounded by the orchestrator-half's lifetime, which
+      // has its own idle-kill timer.
+      if (info.sessionGroupRole === "observer") {
+        log.info("orchestrator", "skipping idle-kill for observer session", { sessionId });
+        return;
+      }
       log.info("orchestrator", "Idle-killing session (preserving container)", { sessionId, reason: "no browsers, no activity" });
       this.intentionalKills.add(sessionId);
       // Cancel the CLI disconnect debounce timer so it doesn't fire
@@ -229,8 +350,337 @@ export class SessionOrchestrator {
       await this.handleAutoNaming(sessionId, firstUserMessage);
     });
 
+    // Council Mode group listener bag — extracted into wireGroupListeners
+    // (Fowler council review #15) so the council surface is visibly
+    // separated from the solo-session lifecycle wiring above.
+    this.wireGroupListeners();
+
     // Reconnection watchdog for stale sessions after server restart
     this.startReconnectionWatchdog();
+  }
+
+  // ── Council Mode — wire bus listeners (Fowler council review #15) ────────
+
+  /**
+   * Subscribe the orchestrator to every `group:*` event and to the
+   * council-specific `session:exited` branch. Extracted from
+   * `initialize()` so the council surface lives in one named block
+   * and a future addition (e.g. `group:reconnected`, `group:resumed`)
+   * lands next to its siblings rather than threading another listener
+   * into a 200-line method.
+   */
+  private wireGroupListeners(): void {
+    // Fan group lifecycle events out to both halves' browsers. Wire-shape
+    // matches the BrowserIncomingMessage variants declared in
+    // session-types.ts.
+    companionBus.on("group:created", ({ sessionGroupId, primarySessionId, observerSessionId }) => {
+      const primary = this.launcher.getSession(primarySessionId);
+      const observer = this.launcher.getSession(observerSessionId);
+      const pairing = `${primary?.backendType ?? "claude"}+${observer?.backendType ?? "claude"}`;
+      this.wsBridge.broadcastToGroup([primarySessionId, observerSessionId], {
+        type: "group_created",
+        sessionGroupId,
+        primarySessionId,
+        observerSessionId,
+        pairing,
+      });
+    });
+    companionBus.on("group:exited", ({ sessionGroupId, reason }) => {
+      this.wsBridge.broadcastToGroup(this.getGroupMemberIds(sessionGroupId), {
+        type: "group_exited",
+        sessionGroupId,
+        reason,
+      });
+    });
+    companionBus.on("group:degraded", ({ sessionGroupId, deadRole }) => {
+      this.wsBridge.broadcastToGroup(this.getGroupMemberIds(sessionGroupId), {
+        type: "group_degraded",
+        sessionGroupId,
+        deadRole,
+      });
+    });
+    companionBus.on("group:checkpoint", ({ sessionGroupId, checkpointId, phase, sequence }) => {
+      this.wsBridge.broadcastToGroup(this.getGroupMemberIds(sessionGroupId), {
+        type: "group_checkpoint",
+        sessionGroupId,
+        checkpointId,
+        phase,
+        sequence,
+        timestamp: Date.now(),
+      });
+    });
+    companionBus.on("group:review", ({ sessionGroupId, checkpointId, phase, findings, downgrades, observerModel, observerProvider }) => {
+      this.wsBridge.broadcastToGroup(this.getGroupMemberIds(sessionGroupId), {
+        type: "observer_review",
+        sessionGroupId,
+        checkpointId,
+        phase,
+        findings,
+        downgrades,
+        observerModel,
+        observerProvider,
+        timestamp: Date.now(),
+      });
+    });
+
+    // Tear down council watchers + drop group metadata on exit. Bus
+    // ordering: this listener runs after the fanout listener above, so
+    // the browser receives `group_exited` before its session map starts
+    // being trimmed server-side — no race.
+    companionBus.on("group:exited", ({ sessionGroupId }) => {
+      this.stopCouncilWatchers(sessionGroupId);
+      this.councilGroupMeta.delete(sessionGroupId);
+    });
+
+    // Drive `group:degraded` when either half of a council pair exits
+    // unexpectedly (Subprocess council review #4). Without this, the UI
+    // never enters degraded mode and watchers leak past the dead half's
+    // auto-relaunch exhaustion. EC-2 invariant honoured — BOTH ids land
+    // in `intentionalKills` before the degrade signal emits.
+    companionBus.on("session:exited", ({ sessionId }) => {
+      if (this.intentionalKills.has(sessionId)) return;
+      let foundGroupId: string | null = null;
+      let foundRole: "orchestrator" | "observer" | null = null;
+      for (const [groupId, meta] of this.councilGroupMeta) {
+        if (meta.primarySessionId === sessionId) { foundGroupId = groupId; foundRole = "orchestrator"; break; }
+        if (meta.observerSessionId === sessionId) { foundGroupId = groupId; foundRole = "observer"; break; }
+      }
+      if (!foundGroupId || !foundRole) return;
+      const meta = this.councilGroupMeta.get(foundGroupId)!;
+      this.intentionalKills.add(meta.primarySessionId);
+      this.intentionalKills.add(meta.observerSessionId);
+      companionBus.emit("group:degraded", { sessionGroupId: foundGroupId, deadRole: foundRole });
+    });
+  }
+
+  /**
+   * Pure helper (Fowler council review #15 — F2 echo): live session ids
+   * for a given group, sourced from the launcher's session map. Returns
+   * an empty array when both halves are gone — `broadcastToGroup` is a
+   * no-op on missing ids by design.
+   */
+  private getGroupMemberIds(sessionGroupId: string): string[] {
+    const ids: string[] = [];
+    for (const s of this.launcher.listSessions()) {
+      if (s.sessionGroupId === sessionGroupId) ids.push(s.sessionId);
+    }
+    return ids;
+  }
+
+  // ── Council Mode — per-group filesystem watcher lifecycle ────────────────
+
+  /**
+   * Start the checkpoint + review watchers for a newly-created group.
+   * Idempotent: a second call with the same `sessionGroupId` is a no-op
+   * (the existing AbortController remains in charge).
+   *
+   * Both watchers run in the background; errors are logged via the
+   * watcher's `onDropped` hook rather than thrown, so a malformed file or
+   * a missing directory does not propagate up into the group creation
+   * path that already returned to the caller.
+   */
+  private startCouncilWatchers(sessionGroupId: string, workspaceCwd: string): void {
+    if (this.councilWatchers.has(sessionGroupId)) return;
+    const abort = new AbortController();
+    const entry: CouncilWatcherEntry = {
+      cwd: workspaceCwd,
+      abort,
+      lastCheckpoint: null,
+      previousCheckpoint: null,
+    };
+    this.councilWatchers.set(sessionGroupId, entry);
+
+    const checkpointsDir = join(workspaceCwd, ".council", "checkpoints");
+    const reviewsDir = join(workspaceCwd, ".council", "reviews");
+
+    // Ensure the watch targets exist before the watcher attaches —
+    // `fs.watch` throws on missing dirs; Phase G.1 silently absorbed that
+    // failure into a single warn line, leaving the council pipeline dead.
+    // mkdirSync is recursive + idempotent so a pre-existing tree is fine.
+    try {
+      mkdirSync(checkpointsDir, { recursive: true });
+      mkdirSync(reviewsDir, { recursive: true });
+    } catch (err) {
+      log.warn("session-orchestrator", "council watcher dir mkdir failed", {
+        sessionGroupId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      this.councilWatchers.delete(sessionGroupId);
+      abort.abort();
+      return;
+    }
+
+    watchCheckpoints({
+      directory: checkpointsDir,
+      signal: abort.signal,
+      onCheckpoint: (payload) => this.handleCouncilCheckpoint(sessionGroupId, payload),
+    }).catch((err) => {
+      if (abort.signal.aborted) return;
+      log.warn("session-orchestrator", "council checkpoint watcher failed", {
+        sessionGroupId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+
+    watchReviews({
+      directory: reviewsDir,
+      signal: abort.signal,
+      onReview: (payload) => this.handleCouncilReview(sessionGroupId, payload),
+    }).catch((err) => {
+      if (abort.signal.aborted) return;
+      log.warn("session-orchestrator", "council review watcher failed", {
+        sessionGroupId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }
+
+  private stopCouncilWatchers(sessionGroupId: string): void {
+    const entry = this.councilWatchers.get(sessionGroupId);
+    if (!entry) return;
+    entry.abort.abort();
+    this.councilWatchers.delete(sessionGroupId);
+  }
+
+  private handleCouncilCheckpoint(sessionGroupId: string, payload: CheckpointPayload): void {
+    const entry = this.councilWatchers.get(sessionGroupId);
+    if (!entry) return;
+    // Realtime P1-R2 (council review #8): the server is the seq authority;
+    // reject out-of-order or duplicate checkpoint events so a stale manifest
+    // never poisons grounding for the next observer review. Browser-side
+    // monotonicity in council-slice becomes defence-in-depth, not first
+    // line.
+    if (entry.lastCheckpoint !== null && payload.sequence <= entry.lastCheckpoint.sequence) {
+      log.warn("session-orchestrator", "dropping out-of-order checkpoint", {
+        sessionGroupId,
+        incomingSequence: payload.sequence,
+        lastSequence: entry.lastCheckpoint.sequence,
+      });
+      return;
+    }
+    // Capture the prior checkpoint BEFORE overwriting so the next review's
+    // grounding can use the delta manifest, not the cumulative paths set.
+    entry.previousCheckpoint = entry.lastCheckpoint;
+    entry.lastCheckpoint = payload;
+    const meta = this.councilGroupMeta.get(sessionGroupId);
+    if (meta) meta.lastCheckpointReceivedAt = Date.now();
+    companionBus.emit("group:checkpoint", {
+      sessionGroupId,
+      checkpointId: payload.checkpoint_id,
+      phase: payload.phase,
+      sequence: payload.sequence,
+    });
+  }
+
+  private handleCouncilReview(sessionGroupId: string, payload: ObserverReviewPayload): void {
+    // Backend P1-3 (council review #L): wrap the whole handler body in a
+    // try/catch so a transient throw in the grounding pipeline doesn't
+    // unhook the watcher's read loop. Errors are logged structurally and
+    // the review is dropped; the dedup key in review-watcher will prevent
+    // a re-emission storm on the same file.
+    try {
+      const entry = this.councilWatchers.get(sessionGroupId);
+      if (!entry) return;
+
+      // Phase E delta manifest (Willison P1-4 item 1; council review #2):
+      // when a previous checkpoint exists, modifiedFiles is the DELTA
+      // since that checkpoint, not the cumulative artifact_paths. This is
+      // the grounding-as-modification-set semantic the prompt artifact
+      // and JSDoc described; Phase G had been using cumulative paths.
+      const manifest = buildObserverContextManifest({
+        current: entry.lastCheckpoint ?? { artifact_paths: [] },
+        previous: entry.previousCheckpoint ?? undefined,
+      });
+      const modifiedFiles = new Set(manifest.delta.length > 0
+        ? manifest.delta
+        : (entry.lastCheckpoint?.artifact_paths ?? []));
+
+      const result = validateObserverFindings(payload, { workspaceRoot: entry.cwd, modifiedFiles });
+
+      // Willison P1-1 (council review #6): deterministic finding ids
+      // derived from review identity + finding position + content hash
+      // so a re-emission of the same review file across server restarts
+      // yields the SAME ids — the browser's appendObserverReview dedup
+      // by id then actually catches restart-replays.
+      const findings: BrowserObserverFinding[] = result.findings.map((f, idx) => {
+        const id = deterministicFindingId({
+          sessionGroupId,
+          checkpointId: payload.checkpoint_id,
+          observerProvider: payload.observer_provider,
+          findingIndex: idx,
+          evidencePath: f.evidence_path,
+          claim: f.claim,
+        });
+        const downgrade = result.downgrades.find((d) => d.index === idx);
+        const out: BrowserObserverFinding = {
+          id,
+          severity: f.severity,
+          claim: f.claim,
+          evidence_path: f.evidence_path,
+          ...(f.evidence_lines !== undefined ? { evidence_lines: f.evidence_lines } : {}),
+          ...(f.confidence !== undefined ? { confidence: f.confidence } : {}),
+          ...(downgrade ? { wasDowngraded: true, downgradeReason: downgrade.reason } : {}),
+        };
+        return out;
+      });
+      const downgrades: BrowserObserverDowngrade[] = result.downgrades.map((d) => {
+        // Findings array is 1:1 with the input — `result.findings[d.index]`
+        // is always defined here. Backend P2-6 (council review #6): drop
+        // the random-id fallback that would orphan the chip on a
+        // hypothetical filter divergence.
+        const target = findings[d.index];
+        if (!target) {
+          throw new Error(`observer-grounding downgrade index ${d.index} out of bounds (findings length ${findings.length})`);
+        }
+        return { id: target.id, reason: d.reason };
+      });
+
+      // Willison P1-4 item 3 (council review #2): emit the structured
+      // invocation log entry so the forensic re-run guarantee
+      // (`observerPromptSha256` captured per invocation) survives review
+      // completion. EC-9 group-lifecycle structured log requirement also
+      // honoured.
+      const meta = this.councilGroupMeta.get(sessionGroupId);
+      if (meta) {
+        const stopCountRaw = payload.findings.filter((f) => f.severity === "STOP").length;
+        const stopCountGrounded = findings.filter((f) => f.severity === "STOP" && f.wasDowngraded !== true).length;
+        log.info("observer-invocation", "observer.invocation.completed", {
+          ...formatObserverInvocationLog({
+            orchestratorSessionId: meta.primarySessionId,
+            observerSessionId: meta.observerSessionId,
+            sessionGroupId,
+            phase: payload.phase,
+            checkpointId: payload.checkpoint_id,
+            artifactsRead: entry.lastCheckpoint?.artifact_paths.length ?? 0,
+            findingsCount: findings.length,
+            stopCountRaw,
+            stopCountGrounded,
+            downgradeCount: result.downgrades.length,
+            latencyMs: meta.lastCheckpointReceivedAt ? Date.now() - meta.lastCheckpointReceivedAt : 0,
+            observerProvider: payload.observer_provider,
+            observerModel: payload.observer_model,
+            observerCliVersion: payload.observer_cli_version,
+            promptSha256: meta.observerPromptSha256 ?? "",
+          }),
+        });
+      }
+
+      companionBus.emit("group:review", {
+        sessionGroupId,
+        checkpointId: payload.checkpoint_id,
+        phase: payload.phase,
+        findings,
+        downgrades,
+        observerModel: payload.observer_model,
+        observerProvider: payload.observer_provider,
+      });
+    } catch (err) {
+      log.error("session-orchestrator", "handleCouncilReview failed", {
+        sessionGroupId,
+        checkpointId: payload.checkpoint_id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   // ── Session Creation ───────────────────────────────────────────────────────
@@ -244,6 +694,128 @@ export class SessionOrchestrator {
     onProgress: ProgressCallback,
   ): Promise<CreateSessionResult> {
     return this.doCreateSession(body, onProgress);
+  }
+
+  /**
+   * Council Mode entry point. Validates the pairing server-side against
+   * the supported allow-list, then spawns both halves via
+   * {@link SessionGroupCoordinator}. The injected `spawn` is a thin
+   * adapter over {@link doCreateSession} so the council path composes on
+   * top of the existing single-session machinery without branching it.
+   *
+   * Atomic: if the second spawn fails, the coordinator kills the first
+   * before propagating the error — no orphan subprocesses.
+   *
+   * Emits `group:created` on success so {@link WsBridge} can fan the
+   * `group_created` browser message out to both halves' sockets.
+   */
+  async createCouncilGroup(req: CreateCouncilGroupRequest): Promise<CreateCouncilGroupResult> {
+    // Lazy import — coordinator + backend-provider modules are only loaded
+    // when Council Mode is actually invoked. Keeps the single-session
+    // happy path's module-graph unchanged.
+    const [{ SessionGroupCoordinator }, { isSupportedPairing, parsePairingLabel }] = await Promise.all([
+      import("./session-group-coordinator.js"),
+      import("./backend-provider.js").then((m) => ({
+        isSupportedPairing: m.isSupportedPairing,
+        // parsePairingLabel is defined inline below — backend-provider
+        // exports the supported pairings list but not a label parser
+        // since the label format is a routes-layer concern.
+        parsePairingLabel: (label: string): { primary: BackendType; observer: BackendType } | null => {
+          const parts = label.split("+");
+          if (parts.length !== 2) return null;
+          const [p, o] = parts as [string, string];
+          if ((p !== "claude" && p !== "codex") || (o !== "claude" && o !== "codex")) return null;
+          return { primary: p, observer: o };
+        },
+      })),
+    ]);
+
+    const parsed = parsePairingLabel(req.pairing);
+    if (!parsed) return { ok: false, error: `unsupported pairing: ${req.pairing}`, status: 400 };
+    if (!isSupportedPairing(parsed.primary, parsed.observer)) {
+      return { ok: false, error: `unsupported pairing: ${req.pairing}`, status: 400 };
+    }
+
+    const baseBody: CreateSessionRequest = { ...req.base };
+    // Use a ref-object rather than two separate `let`s so TS narrowing
+    // through the closure-mutated lexical state stays sound — TS flow
+    // analysis sees property access on an object, not a re-bound let.
+    type SpawnFailure = { error: string; status: number };
+    const spawnErrors: { primary: SpawnFailure | null; observer: SpawnFailure | null } = { primary: null, observer: null };
+
+    const coordinator = new SessionGroupCoordinator({
+      spawn: async (opts) => {
+        const result = await this.doCreateSession({
+          ...baseBody,
+          backend: opts.backendType,
+          cwd: opts.cwd,
+          model: opts.model ?? baseBody.model,
+          permissionMode: opts.permissionMode ?? baseBody.permissionMode,
+          sessionGroupId: opts.sessionGroupId,
+          sessionGroupRole: opts.sessionGroupRole,
+        });
+        if (!result.ok) {
+          // Capture the error so the council caller surfaces it back to
+          // the browser rather than throwing a bare Error (which loses
+          // status). The coordinator will treat the throw as a spawn
+          // failure and roll back the first half if applicable.
+          if (opts.sessionGroupRole === "orchestrator") {
+            spawnErrors.primary = { error: result.error, status: result.status };
+          } else {
+            spawnErrors.observer = { error: result.error, status: result.status };
+          }
+          throw new Error(result.error);
+        }
+        return { sessionId: result.session.sessionId };
+      },
+      kill: async (sessionId) => {
+        await this.killSession(sessionId);
+      },
+    });
+
+    try {
+      const group = await coordinator.createGroup({
+        cwd: req.base.cwd ?? process.cwd(),
+        primary: parsed.primary,
+        observer: parsed.observer,
+        model: req.base.model,
+        permissionMode: req.base.permissionMode,
+      });
+      const primaryInfo = this.launcher.getSession(group.primary.sessionId);
+      const observerInfo = this.launcher.getSession(group.observer.sessionId);
+      if (!primaryInfo || !observerInfo) {
+        return { ok: false, error: "session metadata lost after spawn", status: 500 };
+      }
+      // Capture group metadata for handleCouncilReview's invocation log
+      // and for the bus listeners that broadcast group_* events. The
+      // coordinator owns lifecycle truth; this is the orchestrator's
+      // read-side cache so listeners running outside the spawn context
+      // can correlate without rescanning launcher state.
+      const pairingLabel = `${primaryInfo.backendType ?? "claude"}+${observerInfo.backendType ?? "claude"}`;
+      this.councilGroupMeta.set(group.sessionGroupId, {
+        primarySessionId: group.primary.sessionId,
+        observerSessionId: group.observer.sessionId,
+        pairing: pairingLabel,
+        observerPromptSha256: observerInfo.observerPromptSha256,
+        createdAt: Date.now(),
+        lastCheckpointReceivedAt: null,
+      });
+      // Start the per-group filesystem watchers BEFORE emitting
+      // `group:created` so the watcher's first FS event cannot race past
+      // the listener that calls `upsertGroup` in the browser store.
+      this.startCouncilWatchers(group.sessionGroupId, primaryInfo.cwd);
+      companionBus.emit("group:created", {
+        sessionGroupId: group.sessionGroupId,
+        primarySessionId: group.primary.sessionId,
+        observerSessionId: group.observer.sessionId,
+      });
+      return { ok: true, sessionGroupId: group.sessionGroupId, primary: primaryInfo, observer: observerInfo };
+    } catch (err) {
+      if (spawnErrors.primary) return { ok: false, ...spawnErrors.primary };
+      if (spawnErrors.observer) return { ok: false, ...spawnErrors.observer };
+      const reason = err instanceof Error ? err.message : String(err);
+      return { ok: false, error: reason, status: 500 };
+    }
   }
 
   private async doCreateSession(
@@ -578,6 +1150,11 @@ export class SessionOrchestrator {
           forkSession,
           systemPrompt: backend === "codex" ? linearSystemPrompt : undefined,
           sandboxSlug: sandboxEnabled ? (body.sandboxSlug || undefined) : undefined,
+          // Council Mode pass-through — populated only when this call comes
+          // from `createCouncilGroup`. The browser cannot supply these on a
+          // regular createSession; the coordinator generates them server-side.
+          sessionGroupId: body.sessionGroupId,
+          sessionGroupRole: body.sessionGroupRole,
         });
       } catch (e) {
         // Clean up container if it was created but launch failed
