@@ -8,6 +8,7 @@ import {
   OBSERVER_PROMPT_MAX_BYTES,
   OBSERVER_PROMPT_SCHEMA_VERSION,
   buildObserverContextManifest,
+  formatCheckpointManifestPrompt,
   loadObserverSystemPrompt,
   parseObserverPromptHeader,
 } from "./observer-prompt.js";
@@ -210,5 +211,96 @@ describe("buildObserverContextManifest", () => {
       previous: { artifact_paths: [] },
     });
     expect(m).toEqual({ delta: [], carried: [], dropped: [] });
+  });
+});
+
+// ── formatCheckpointManifestPrompt ──────────────────────────────────────────
+//
+// The wake-message string the bridge injects into the observer CLI's stream
+// to unblock its pre-init stdin wait. The observer's system prompt is
+// human-readable, so the wake message follows the same shape — plain text
+// with the identity triple, a delta section, and an optional carried
+// section. These tests pin the surface the prompt author depends on.
+
+describe("formatCheckpointManifestPrompt", () => {
+  // The identity triple (session_group_id, checkpoint_id, phase) must round-trip
+  // through the message verbatim so the observer can echo them into the review
+  // file — review-watcher uses (checkpoint_id, observer_provider) to dedup.
+  it("renders the identity triple and delta-only paths on a first checkpoint", () => {
+    const body = formatCheckpointManifestPrompt({
+      sessionGroupId: "grp_abc",
+      checkpointId: "chk_1",
+      phase: "council-plan",
+      manifest: { delta: ["src/a.ts", "src/b.ts"], carried: [], dropped: [] },
+    });
+    expect(body).toContain("session_group_id: grp_abc");
+    expect(body).toContain("checkpoint_id: chk_1");
+    expect(body).toContain("phase: council-plan");
+    expect(body).toContain("- src/a.ts");
+    expect(body).toContain("- src/b.ts");
+    // No carried section on a first checkpoint.
+    expect(body).not.toContain("Carried from previous checkpoint");
+  });
+
+  // Carried paths must appear under a SEPARATE header so the observer can
+  // distinguish "must read this cycle" from "optional cross-cut reference".
+  // Conflating them defeats the delta-grounding semantic.
+  it("emits a separate carried section when carried paths exist", () => {
+    const body = formatCheckpointManifestPrompt({
+      sessionGroupId: "grp",
+      checkpointId: "c",
+      phase: "p",
+      manifest: { delta: ["new.ts"], carried: ["old.ts"], dropped: [] },
+    });
+    const modifiedAt = body.indexOf("Modified files this cycle");
+    const carriedAt = body.indexOf("Carried from previous checkpoint");
+    expect(modifiedAt).toBeGreaterThanOrEqual(0);
+    expect(carriedAt).toBeGreaterThan(modifiedAt);
+    expect(body.slice(modifiedAt, carriedAt)).toContain("- new.ts");
+    expect(body.slice(carriedAt)).toContain("- old.ts");
+  });
+
+  // Dropped paths must NOT appear in the message. The system prompt's
+  // contract is "do not re-read dropped"; even mentioning the names risks
+  // the model fetching them.
+  it("omits dropped paths entirely", () => {
+    const body = formatCheckpointManifestPrompt({
+      sessionGroupId: "grp",
+      checkpointId: "c",
+      phase: "p",
+      manifest: { delta: ["keep.ts"], carried: [], dropped: ["gone.ts"] },
+    });
+    expect(body).toContain("keep.ts");
+    expect(body).not.toContain("gone.ts");
+  });
+
+  // Empty delta is a legal edge case (a checkpoint that signals phase
+  // completion with no new artifacts). The observer must still wake to
+  // emit a zero-findings review, so the message must still ship — with
+  // an explicit "none" sentinel rather than a bare empty list which
+  // would look like a parser bug.
+  it("renders an explicit 'none' note when delta is empty", () => {
+    const body = formatCheckpointManifestPrompt({
+      sessionGroupId: "grp",
+      checkpointId: "c",
+      phase: "p",
+      manifest: { delta: [], carried: [], dropped: [] },
+    });
+    expect(body).toMatch(/Modified files this cycle:\s*\(none/);
+  });
+
+  // The reminder of the review output path must include the phase token —
+  // observer-system.md says the filename pattern is `<phase>-<provider>-observer.md`
+  // and a typo in this reminder (e.g. dropping the phase) would silently
+  // produce collisions across phases.
+  it("includes the phase-bearing review filename pattern in the closing reminder", () => {
+    const body = formatCheckpointManifestPrompt({
+      sessionGroupId: "grp",
+      checkpointId: "c",
+      phase: "phaseX",
+      manifest: { delta: ["a.ts"], carried: [], dropped: [] },
+    });
+    expect(body).toContain(".council/reviews/phaseX-");
+    expect(body).toContain("-observer.md");
   });
 });

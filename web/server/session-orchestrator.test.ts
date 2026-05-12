@@ -175,6 +175,7 @@ function createMockBridge() {
     broadcastNameUpdate: vi.fn(),
     broadcastToSession: vi.fn(),
     broadcastToGroup: vi.fn(),
+    injectUserMessage: vi.fn(),
     injectSystemPrompt: vi.fn(),
     attachBackendAdapter: vi.fn(),
     cancelDisconnectTimer: vi.fn(() => false),
@@ -2057,6 +2058,131 @@ describe("SessionOrchestrator", () => {
         artifact_paths: [],
       });
       expect(emitted).toHaveLength(0);
+    });
+
+    // The observer half runs `claude --input-format stream-json` and stays
+    // blocked at pre-init until the bridge injects a user_message — its
+    // only input channel is the WS, and no human types into it. Before this
+    // wiring the checkpoint→browser fanout existed but nothing wrote back
+    // to the observer's CLI, so the watcher waited forever for a review
+    // file the observer was never asked to produce. This test pins the
+    // dispatch call so a future refactor can't silently regress to the
+    // dangling-symbol state described in
+    // `specs/council-mode-residual-fixes-2026-05-11-2251.md`.
+    it("injects the manifest as a user_message into the observer CLI", () => {
+      seedWatcherEntry("grp_disp_1");
+      const meta = (orchestrator as unknown as {
+        councilGroupMeta: Map<string, { primarySessionId: string; observerSessionId: string; pairing: string; createdAt: number; lastCheckpointReceivedAt: number | null }>;
+      }).councilGroupMeta;
+      meta.set("grp_disp_1", {
+        primarySessionId: "sess_orch_disp",
+        observerSessionId: "sess_obs_disp",
+        pairing: "claude+claude",
+        createdAt: Date.now(),
+        lastCheckpointReceivedAt: null,
+      });
+      const inject = deps.wsBridge.injectUserMessage as ReturnType<typeof vi.fn>;
+      inject.mockClear();
+
+      const handle = (orchestrator as unknown as {
+        handleCouncilCheckpoint: (g: string, p: { schema_version: 1; checkpoint_id: string; phase: string; sequence: number; session_group_id: string; emitted_at: string; artifact_paths: string[] }) => void;
+      }).handleCouncilCheckpoint;
+      handle.call(orchestrator, "grp_disp_1", {
+        schema_version: 1,
+        checkpoint_id: "chk_disp",
+        phase: "council-plan",
+        sequence: 0,
+        session_group_id: "grp_disp_1",
+        emitted_at: "2026-01-01T00:00:00Z",
+        artifact_paths: ["src/a.ts", "src/b.ts"],
+      });
+
+      expect(inject).toHaveBeenCalledTimes(1);
+      const [sid, body] = inject.mock.calls[0]!;
+      expect(sid).toBe("sess_obs_disp");
+      expect(typeof body).toBe("string");
+      // Manifest must carry the identity triple — observer echoes them
+      // back into the review file so review-watcher can pair it to the
+      // checkpoint that produced it.
+      expect(body).toContain("checkpoint_id: chk_disp");
+      expect(body).toContain("phase: council-plan");
+      expect(body).toContain("session_group_id: grp_disp_1");
+      // First checkpoint → all paths are delta. Each artifact must appear
+      // verbatim so the observer doesn't read from a stale cached set.
+      expect(body).toContain("src/a.ts");
+      expect(body).toContain("src/b.ts");
+    });
+
+    // Group meta absence is a real production state: a checkpoint can
+    // race a `group:exited` event during shutdown. Dispatch must skip
+    // silently rather than crash the watcher loop.
+    it("skips dispatch when group meta is missing (race with archive)", () => {
+      seedWatcherEntry("grp_disp_2");
+      const inject = deps.wsBridge.injectUserMessage as ReturnType<typeof vi.fn>;
+      inject.mockClear();
+      const handle = (orchestrator as unknown as {
+        handleCouncilCheckpoint: (g: string, p: Record<string, unknown>) => void;
+      }).handleCouncilCheckpoint;
+      handle.call(orchestrator, "grp_disp_2", {
+        schema_version: 1,
+        checkpoint_id: "chk_x",
+        phase: "p",
+        sequence: 0,
+        session_group_id: "grp_disp_2",
+        emitted_at: "2026-01-01T00:00:00Z",
+        artifact_paths: ["src/a.ts"],
+      });
+      expect(inject).not.toHaveBeenCalled();
+    });
+
+    // Subsequent checkpoints must inject only the delta paths, not the
+    // cumulative artifact set. The `buildObserverContextManifest` partition
+    // already enforces this for grounding; this test pins that the same
+    // partition is used for dispatch so the observer reads the changed
+    // surface, not the growing tree.
+    it("dispatches only delta paths on a follow-up checkpoint, with carried paths labelled separately", () => {
+      seedWatcherEntry("grp_disp_3", {
+        lastCheckpoint: { sequence: 0, checkpoint_id: "chk_prev", phase: "p", artifact_paths: ["src/a.ts", "src/b.ts"] },
+      });
+      const meta = (orchestrator as unknown as {
+        councilGroupMeta: Map<string, { primarySessionId: string; observerSessionId: string; pairing: string; createdAt: number; lastCheckpointReceivedAt: number | null }>;
+      }).councilGroupMeta;
+      meta.set("grp_disp_3", {
+        primarySessionId: "sess_orch_3",
+        observerSessionId: "sess_obs_3",
+        pairing: "claude+claude",
+        createdAt: Date.now(),
+        lastCheckpointReceivedAt: null,
+      });
+      const inject = deps.wsBridge.injectUserMessage as ReturnType<typeof vi.fn>;
+      inject.mockClear();
+      const handle = (orchestrator as unknown as {
+        handleCouncilCheckpoint: (g: string, p: Record<string, unknown>) => void;
+      }).handleCouncilCheckpoint;
+      handle.call(orchestrator, "grp_disp_3", {
+        schema_version: 1,
+        checkpoint_id: "chk_next",
+        phase: "p",
+        sequence: 1,
+        session_group_id: "grp_disp_3",
+        emitted_at: "2026-01-01T00:00:00Z",
+        artifact_paths: ["src/a.ts", "src/c.ts"], // a carried, c delta, b dropped
+      });
+      expect(inject).toHaveBeenCalledTimes(1);
+      const body = inject.mock.calls[0]![1] as string;
+      // c.ts must appear under the "Modified files this cycle" header.
+      const modifiedHeader = body.indexOf("Modified files this cycle");
+      const carriedHeader = body.indexOf("Carried from previous checkpoint");
+      expect(modifiedHeader).toBeGreaterThanOrEqual(0);
+      expect(carriedHeader).toBeGreaterThan(modifiedHeader);
+      const modifiedSection = body.slice(modifiedHeader, carriedHeader);
+      const carriedSection = body.slice(carriedHeader);
+      expect(modifiedSection).toContain("src/c.ts");
+      expect(carriedSection).toContain("src/a.ts");
+      // b.ts was dropped — must NOT be re-fed; the system prompt enforces
+      // "do not re-read dropped" so even mentioning it risks confusing
+      // the observer back into reading it.
+      expect(body).not.toContain("src/b.ts");
     });
   });
 

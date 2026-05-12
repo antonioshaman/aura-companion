@@ -30,7 +30,7 @@ import type { CheckpointPayload, ObserverReviewPayload } from "./council-types.j
 import { watchCheckpoints } from "./checkpoint-watcher.js";
 import { watchReviews } from "./review-watcher.js";
 import { validateObserverFindings } from "./observer-grounding.js";
-import { buildObserverContextManifest } from "./observer-prompt.js";
+import { buildObserverContextManifest, formatCheckpointManifestPrompt } from "./observer-prompt.js";
 import { formatObserverInvocationLog } from "./observer-attribution.js";
 import type {
   BrowserObserverDowngrade,
@@ -563,7 +563,27 @@ export class SessionOrchestrator {
     entry.previousCheckpoint = entry.lastCheckpoint;
     entry.lastCheckpoint = payload;
     const meta = this.councilGroupMeta.get(sessionGroupId);
-    if (meta) meta.lastCheckpointReceivedAt = Date.now();
+    if (meta) {
+      meta.lastCheckpointReceivedAt = Date.now();
+      // Wake the observer half. The CLI runs `--input-format stream-json`
+      // and emits its `system:init` only after the first user_message; with
+      // no human in the observer loop, dispatch is the sole wake channel.
+      // Without this call the observer sits at pre-init forever and never
+      // produces the review file the watcher is waiting for. Manifest
+      // partitioning is delta-aware so re-checkpoint cycles don't re-feed
+      // the cumulative artifact tree.
+      const manifest = buildObserverContextManifest({
+        current: payload,
+        previous: entry.previousCheckpoint ?? undefined,
+      });
+      const wakeMessage = formatCheckpointManifestPrompt({
+        sessionGroupId,
+        checkpointId: payload.checkpoint_id,
+        phase: payload.phase,
+        manifest,
+      });
+      this.wsBridge.injectUserMessage(meta.observerSessionId, wakeMessage);
+    }
     companionBus.emit("group:checkpoint", {
       sessionGroupId,
       checkpointId: payload.checkpoint_id,

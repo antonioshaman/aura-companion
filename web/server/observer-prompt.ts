@@ -191,3 +191,56 @@ export function buildObserverContextManifest(args: {
 
   return { delta, carried, dropped };
 }
+
+// ── Per-checkpoint observer wake message ────────────────────────────────────
+
+/**
+ * Pure: render the observer's per-checkpoint wake-input as a user_message
+ * payload. The observer CLI runs `--input-format stream-json` and stays
+ * blocked on stdin until the bridge injects a user_message; this is the
+ * content of that injection. Without it the observer half sits at pre-init
+ * forever — its only input channel is the WS bridge, and the bus listener
+ * that fans `group:checkpoint` to browsers does not write back to the CLI.
+ *
+ * The format is deliberately plain-text-with-bullets, not JSON: the
+ * observer system prompt was written assuming a human-readable manifest,
+ * and a free-form prompt lets the same wake message work for both Claude
+ * and Codex with no provider-specific framing.
+ *
+ * Path partitioning is delta-first: `manifest.delta` is what the observer
+ * MUST read this cycle; `manifest.carried` is exposed for cross-cut
+ * consistency checks but flagged as optional. `dropped` is omitted from
+ * the message — the prompt's contract is "do not re-read dropped paths",
+ * and listing them risks confusing the model into doing exactly that.
+ */
+export function formatCheckpointManifestPrompt(args: {
+  sessionGroupId: string;
+  checkpointId: string;
+  phase: string;
+  manifest: ObserverContextManifest;
+}): string {
+  const lines: string[] = [];
+  lines.push("New checkpoint manifest for review.");
+  lines.push("");
+  lines.push(`session_group_id: ${args.sessionGroupId}`);
+  lines.push(`checkpoint_id: ${args.checkpointId}`);
+  lines.push(`phase: ${args.phase}`);
+  lines.push("");
+  if (args.manifest.delta.length === 0) {
+    lines.push("Modified files this cycle: (none — no new artifacts since the previous checkpoint).");
+  } else {
+    lines.push("Modified files this cycle (read these):");
+    for (const p of args.manifest.delta) lines.push(`- ${p}`);
+  }
+  if (args.manifest.carried.length > 0) {
+    lines.push("");
+    lines.push("Carried from previous checkpoint (read only for cross-cut checks):");
+    for (const p of args.manifest.carried) lines.push(`- ${p}`);
+  }
+  lines.push("");
+  lines.push(
+    `Per your system prompt: emit exactly one ObserverReviewPayload JSON to ` +
+    `.council/reviews/${args.phase}-<your provider>-observer.md, then exit.`,
+  );
+  return lines.join("\n");
+}
