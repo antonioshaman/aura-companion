@@ -688,9 +688,11 @@ Register hooks, MCP servers, agents, system prompt. **Must be sent before the fi
   promptSuggestions?: boolean,        // Enable prompt_suggestion messages
   agentProgressSummaries?: boolean,   // Enable agent progress summaries
 }
+```
 
 In v2.1.81, the wire format was broadened for some fields (`hooks`, `sdkMcpServers`, `agents`), but the exact extended shapes are not yet fully documented here.
 
+```typescript
 // Response
 {
   commands: { name: string; description: string; argumentHint?: string }[],

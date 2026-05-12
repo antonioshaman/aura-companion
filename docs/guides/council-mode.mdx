@@ -47,7 +47,7 @@ This is where you drive the work — exactly like a single session. The only dif
 
 A collapsible rail with two halves:
 
-- **Status pill** — one of six states (priority ladder, top wins):
+- **Status pill** — one of seven states (priority ladder, top wins):
 
   | State | Meaning |
   |---|---|
@@ -57,6 +57,7 @@ A collapsible rail with two halves:
   | `reviewing` | Observer is mid-pass on the latest checkpoint. |
   | `spawning` | Initial boot — system prompt loaded, CLI not yet ready. |
   | `sleeping` | All clear. No unresolved findings. |
+  | `never-checkpointed-yet` | Observer is up but the orchestrator has not written a first checkpoint, so there is nothing to review yet. |
 
 - **Findings log** (`role="log"`, `aria-live="polite"`) — chronological list of all observer findings (STOP, NOTE, suggestion). Each entry shows the deterministic `fnd_<hex>` id, the phase, the claim, and the evidence path. Dismissed STOPs collapse but stay visible for audit.
 
