@@ -1938,7 +1938,7 @@ describe("SessionOrchestrator", () => {
       });
       companionBus.emit("session:exited", { sessionId: "sess_obs_t4", exitCode: 1 });
       const calls = vi.mocked(deps.wsBridge.broadcastToGroup).mock.calls;
-      const degraded = calls.find((c) => (c[1] as { type?: string }).type === "group_degraded");
+      const degraded = calls.find((c: unknown[]) => (c[1] as { type?: string }).type === "group_degraded");
       expect(degraded).toBeDefined();
       expect(degraded?.[1]).toMatchObject({ type: "group_degraded", sessionGroupId: "grp_t4", deadRole: "observer" });
       // EC-2: BOTH halves added to intentionalKills BEFORE the degrade signal emits.

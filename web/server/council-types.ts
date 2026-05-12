@@ -13,7 +13,9 @@ export const COUNCIL_SCHEMA_VERSION = 1 as const;
 /** Hard size cap for any single council artifact (defence against runaway writers OOM'ing the watcher). */
 export const COUNCIL_ARTIFACT_MAX_BYTES = 256 * 1024;
 
-const MAX_PHASE_LEN = 64;
+// `MAX_PHASE_LEN` is documented via the PHASE_PATTERN regex below
+// (length-bounded to 64 by the trailing `{0,63}` quantifier); keeping
+// the literal here for readers' reference would trip the deadcode guard.
 const MAX_CLAIM_LEN = 4_000;
 const MAX_PATH_LEN = 1_024;
 
