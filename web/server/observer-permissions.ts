@@ -99,3 +99,50 @@ export function assertObserverToolPolicyConsistent(
 // Module-load canary — runs once per process. A regression that breaks
 // the invariant fails server boot, not "production after the first call".
 assertObserverToolPolicyConsistent();
+
+/**
+ * Per-spawn boot canary for the Claude observer half. Inspects the argv
+ * array that is about to be passed to `Bun.spawn` and throws if it does
+ * not carry `--disallowedTools` immediately followed by `"Bash"`.
+ *
+ * Defense-in-depth: a future regression that silently disables
+ * {@link getObserverSpawnOverrides} OR that re-routes spawn through a
+ * code path that bypasses {@link applyCouncilObserverSpawnConfig} would
+ * leave the OBSERVER_DISALLOWED_TOOLS list (which includes Bash) absent
+ * from the constructed argv. The module-load canary at
+ * {@link assertObserverToolPolicyConsistent} catches list-shape drift but
+ * cannot catch a regression in the spawn pipeline that never invokes the
+ * config helper.
+ *
+ * Why pick `Bash` specifically: the highest-impact tool in the deny set —
+ * a regression that loses Bash loses arbitrary shell execution under the
+ * orchestrator's uid + cwd. Any production code path that succeeds in
+ * passing this canary AND fails to add the other tools is then a
+ * narrower (still fixable) bug, not RCE-class.
+ */
+export function assertObserverClaudeArgvSafe(argv: readonly string[]): void {
+  for (let i = 0; i < argv.length - 1; i++) {
+    if (argv[i] === "--disallowedTools" && argv[i + 1] === "Bash") return;
+  }
+  throw new Error(
+    "observer-permissions: refusing to spawn observer-role Claude session without `--disallowedTools Bash` in argv (EC-1 boot canary)",
+  );
+}
+
+/**
+ * Per-spawn boot canary for the Codex observer half. The Codex CLI has
+ * no `--disallowedTools` argv equivalent — observer tool restrictions
+ * land via the system prompt body that
+ * {@link applyCouncilObserverSpawnConfig} composes from the workspace
+ * `.council/prompts/observer-system.md` artifact. Verifies that the
+ * `options.systemPrompt` field is a non-empty string before the Bun.spawn
+ * call site so a regression that drops the prompt body cannot produce a
+ * default-tooled Codex observer.
+ */
+export function assertObserverCodexSystemPromptSet(systemPrompt: unknown): void {
+  if (typeof systemPrompt !== "string" || systemPrompt.trim().length === 0) {
+    throw new Error(
+      "observer-permissions: refusing to spawn observer-role Codex session without a non-empty system prompt (EC-1 boot canary)",
+    );
+  }
+}

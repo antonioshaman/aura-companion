@@ -19,6 +19,8 @@ import {
   OBSERVER_ALLOWED_TOOLS,
   OBSERVER_DISALLOWED_TOOLS,
   OBSERVER_PERMISSION_MODE,
+  assertObserverClaudeArgvSafe,
+  assertObserverCodexSystemPromptSet,
 } from "./observer-permissions.js";
 import { containerManager } from "./container-manager.js";
 import { companionBus } from "./event-bus.js";
@@ -692,6 +694,25 @@ export class CliLauncher {
 
     args.push("-p", "");
 
+    // Hunt + Fowler P1#1 sub-d (council residual fix): boot-time canary —
+    // an observer-role launch that reaches Bun.spawn without
+    // `--disallowedTools Bash` in argv is fail-shut. Catches regressions
+    // that bypass `applyCouncilObserverSpawnConfig` (e.g. a future
+    // refactor that re-routes through a sibling spawn path). The canary
+    // inspects the CLI argv array directly, so it works regardless of
+    // docker-wrap layering.
+    if (options.sessionGroupRole === "observer") {
+      try {
+        assertObserverClaudeArgvSafe(args);
+      } catch (err) {
+        console.error(`[cli-launcher] ${err instanceof Error ? err.message : String(err)}`);
+        info.state = "exited";
+        info.exitCode = 1;
+        this.persistState();
+        return;
+      }
+    }
+
     let spawnCmd: string[];
     let spawnEnv: Record<string, string | undefined>;
     let spawnCwd: string | undefined;
@@ -959,6 +980,23 @@ export class CliLauncher {
       spawnCwd = info.cwd;
     }
 
+    // Hunt + Fowler P1#1 sub-d (council residual fix): Codex boot canary —
+    // Codex has no `--disallowedTools` argv equivalent, so observer tool
+    // restrictions land via the system prompt body composed by
+    // `applyCouncilObserverSpawnConfig`. Fail-shut if observer-role spawn
+    // reaches Bun.spawn without that prompt.
+    if (options.sessionGroupRole === "observer") {
+      try {
+        assertObserverCodexSystemPromptSet(options.systemPrompt);
+      } catch (err) {
+        console.error(`[cli-launcher] ${err instanceof Error ? err.message : String(err)}`);
+        info.state = "exited";
+        info.exitCode = 1;
+        this.persistState();
+        return;
+      }
+    }
+
     console.log(
       `[cli-launcher] Spawning Codex WS session ${sessionId}${isContainerized ? " (container)" : ""}: ` +
       sanitizeSpawnArgsForLog(spawnCmd),
@@ -1197,6 +1235,20 @@ export class CliLauncher {
         PATH: spawnPath,
       };
       spawnCwd = info.cwd;
+    }
+
+    // Hunt + Fowler P1#1 sub-d (council residual fix): Codex stdio boot
+    // canary — mirror of the WS path. See spawnCodexWs for rationale.
+    if (options.sessionGroupRole === "observer") {
+      try {
+        assertObserverCodexSystemPromptSet(options.systemPrompt);
+      } catch (err) {
+        console.error(`[cli-launcher] ${err instanceof Error ? err.message : String(err)}`);
+        info.state = "exited";
+        info.exitCode = 1;
+        this.persistState();
+        return;
+      }
     }
 
     console.log(
