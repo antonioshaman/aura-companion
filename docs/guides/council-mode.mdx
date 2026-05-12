@@ -60,6 +60,8 @@ A collapsible rail with two halves:
 
 - **Findings log** (`role="log"`, `aria-live="polite"`) — chronological list of all observer findings (STOP, NOTE, suggestion). Each entry shows the deterministic `fnd_<hex>` id, the phase, the claim, and the evidence path. Dismissed STOPs collapse but stay visible for audit.
 
+<img src="/screenshots/council-mode-anatomy.png" alt="Council Mode UI anatomy — ProviderBadges (claude+codex compact and default sizes), BlockerBanner with a STOP finding showing evidence path and Open evidence / Mark addressed / Dismiss for now actions, DegradedBanner in observer-offline and orchestrator-offline states, FindingsLog in empty state and with a full STOP/WARN/NOTE/INFO/DOWNGRADED mix" />
+
 ### Provider badges (sidebar)
 
 Each session row in the sidebar shows provider chips. For a `claude+claude` pair, you see one symmetric chip. For `claude+codex`, you see two asymmetric chips so the active billing source is visible at a glance.

@@ -67,6 +67,8 @@ What you get in the UI:
 - **`ProviderBadges`** in the sidebar — asymmetric chips when pairings are mixed-provider.
 - **`Cmd/Ctrl+Shift+O`** toggles the Observer panel; **`Cmd/Ctrl+Shift+B`** focuses the BlockerBanner primary action.
 
+![Council Mode UI anatomy: ProviderBadges, BlockerBanner with a STOP finding and evidence path, DegradedBanner in offline states, FindingsLog with a full STOP/WARN/NOTE/INFO/DOWNGRADED mix](docs/screenshots/council-mode-anatomy.png)
+
 Findings are grounded against the modified surface: STOPs that reference files outside the checkpoint's delta or missing from disk are downgraded to NOTE server-side. The browser dedupes by deterministic `fnd_<hex>` ids so restart-replay never doubles.
 
 See [`docs/guides/council-mode.mdx`](docs/guides/council-mode.mdx) for the full guide and [`docs/reference/council-mode-architecture.mdx`](docs/reference/council-mode-architecture.mdx) for the wire protocol and state machine.
