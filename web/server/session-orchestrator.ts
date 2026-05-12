@@ -24,6 +24,7 @@ import { companionBus } from "./event-bus.js";
 import { metricsCollector } from "./metrics-collector.js";
 import { log } from "./logger.js";
 import { createHash } from "node:crypto";
+import { execSync } from "node:child_process";
 import { join } from "node:path";
 import { mkdirSync } from "node:fs";
 import type { CheckpointPayload, ObserverReviewPayload } from "./council-types.js";
@@ -32,6 +33,7 @@ import { watchReviews } from "./review-watcher.js";
 import { validateObserverFindings } from "./observer-grounding.js";
 import { buildObserverContextManifest, formatCheckpointManifestPrompt } from "./observer-prompt.js";
 import { formatObserverInvocationLog, wrapObserverFindingForInjection } from "./observer-attribution.js";
+import { writeAtomicJson } from "./atomic-write.js";
 import type {
   BrowserObserverDowngrade,
   BrowserObserverFinding,
@@ -43,6 +45,21 @@ const MAX_AUTO_RELAUNCHES = 3;
 const RELAUNCH_GRACE_MS = 10_000;
 const RELAUNCH_COOLDOWN_MS = 5_000;
 const RECONNECT_GRACE_MS = Number(process.env.COMPANION_RECONNECT_GRACE_MS || "30000");
+
+/**
+ * Council Mode auto-checkpoint throttle. After the orchestrator-half of a
+ * council pair completes a turn, an auto-checkpoint emits IF the working
+ * tree has changed since the last checkpoint AND at least this many ms
+ * elapsed since the prior auto emit. 30s is small enough that observer
+ * stays in the loop on normal cadence, large enough that a chatty
+ * orchestrator (e.g. plan→implement loop with rapid turns) does not pile
+ * up reviews on each intermediate turn.
+ *
+ * Overridable for tests via COMPANION_COUNCIL_AUTOCHECKPOINT_THROTTLE_MS.
+ */
+const COUNCIL_AUTOCHECKPOINT_THROTTLE_MS = Number(
+  process.env.COMPANION_COUNCIL_AUTOCHECKPOINT_THROTTLE_MS || "30000",
+);
 
 // Proactive keepalive: base delay before relaunching a crashed CLI (doubles per attempt)
 const KEEPALIVE_BASE_DELAY_MS = 3_000;
@@ -250,6 +267,14 @@ export class SessionOrchestrator {
    */
   private councilGroupMeta = new Map<string, CouncilGroupMeta>();
 
+  /**
+   * Council Mode — last auto-checkpoint emit timestamp per group. Used to
+   * throttle the per-turn auto wake so a chatty orchestrator that completes
+   * 4 turns inside 10 seconds does not flood the observer with 4 reviews.
+   * Cleared on `group:exited`.
+   */
+  private councilAutoCheckpointLast = new Map<string, number>();
+
   // Event listeners
   private exitCallbacks: ((sessionId: string, exitCode: number | null) => void)[] = [];
 
@@ -430,6 +455,21 @@ export class SessionOrchestrator {
     companionBus.on("group:exited", ({ sessionGroupId }) => {
       this.stopCouncilWatchers(sessionGroupId);
       this.councilGroupMeta.delete(sessionGroupId);
+      this.councilAutoCheckpointLast.delete(sessionGroupId);
+    });
+
+    // Auto-checkpoint on orchestrator turn completion. Without this, a
+    // council pair where the user (not a /council-plan flow) drives the
+    // orchestrator never wakes the observer at all — observer wake is
+    // gated on checkpoint emission, and a casual chat workflow has no
+    // natural place to emit one. Listening on `message:result` (fired by
+    // the bridge when the CLI sends a `result` frame, i.e. end of an
+    // assistant turn) gives the observer a natural cadence: one review
+    // per completed turn, throttled to avoid flood.
+    companionBus.on("message:result", ({ sessionId, message }) => {
+      const msg = message as { is_error?: boolean };
+      if (msg.is_error) return; // failed turns don't represent reviewable work
+      this.maybeEmitAutoCheckpoint(sessionId);
     });
 
     // Drive `group:degraded` when either half of a council pair exits
@@ -451,6 +491,117 @@ export class SessionOrchestrator {
       this.intentionalKills.add(meta.observerSessionId);
       companionBus.emit("group:degraded", { sessionGroupId: foundGroupId, deadRole: foundRole });
     });
+  }
+
+  /**
+   * Council Mode — on orchestrator-half turn completion, emit a synthetic
+   * auto-checkpoint IF the working tree has changed since the prior
+   * checkpoint AND the throttle window has elapsed.
+   *
+   * Without this hook, a council pair driven by ordinary chat (not a
+   * /council-plan flow that emits explicit checkpoints) never wakes the
+   * observer at all — the observer's wake gate is checkpoint-emission,
+   * and casual orchestrator activity has no natural place to emit one.
+   * This method gives the observer a natural cadence: one auto-checkpoint
+   * per completed orchestrator turn, throttled by
+   * `COUNCIL_AUTOCHECKPOINT_THROTTLE_MS`.
+   *
+   * Filtering rules:
+   * - Only orchestrator-half (not observer) results trigger emit.
+   * - `git status --porcelain` is the change source (respects .gitignore).
+   * - `.council/` paths are stripped — observer's own review writes and
+   *   orchestrator's own checkpoint writes would otherwise drive a
+   *   feedback loop where every observer review wakes the observer again
+   *   on the orchestrator's next turn.
+   * - Empty change set → skip (no point waking the observer with nothing
+   *   to review).
+   *
+   * Sequence policy: continues the same monotonic stream as manual
+   * checkpoints so the sequence-monotonicity guard in
+   * `handleCouncilCheckpoint` still applies — auto-checkpoint sequence
+   * is `(lastCheckpoint?.sequence ?? -1) + 1`. Manual checkpoints from a
+   * /council-plan flow inserted later will simply continue from there.
+   */
+  private maybeEmitAutoCheckpoint(orchestratorSessionId: string): void {
+    let groupId: string | undefined;
+    let meta: CouncilGroupMeta | undefined;
+    for (const [gid, m] of this.councilGroupMeta) {
+      if (m.primarySessionId === orchestratorSessionId) {
+        groupId = gid;
+        meta = m;
+        break;
+      }
+    }
+    if (!groupId || !meta) return;
+
+    const now = Date.now();
+    const last = this.councilAutoCheckpointLast.get(groupId) ?? 0;
+    if (now - last < COUNCIL_AUTOCHECKPOINT_THROTTLE_MS) return;
+
+    const watcher = this.councilWatchers.get(groupId);
+    if (!watcher) return;
+
+    let changedPaths: string[];
+    try {
+      const output = execSync("git status --porcelain", {
+        cwd: watcher.cwd,
+        encoding: "utf-8",
+        timeout: 5_000,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      changedPaths = output
+        .split("\n")
+        .filter(Boolean)
+        // Porcelain format: XY <path>. Slice off the 3-char status prefix.
+        // Renames carry "R  old -> new" — take the destination by splitting
+        // on " -> " if present.
+        .map((line) => {
+          const path = line.slice(3);
+          const arrow = path.indexOf(" -> ");
+          return arrow >= 0 ? path.slice(arrow + 4) : path;
+        })
+        .filter((p) => !p.startsWith(".council/"));
+    } catch (err) {
+      log.warn("session-orchestrator", "auto-checkpoint: git status failed", {
+        sessionGroupId: groupId,
+        cwd: watcher.cwd,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+
+    if (changedPaths.length === 0) return;
+
+    const nextSeq = (watcher.lastCheckpoint?.sequence ?? -1) + 1;
+    const payload: CheckpointPayload = {
+      schema_version: 1,
+      checkpoint_id: `chk_auto_turn_${nextSeq}`,
+      phase: `auto-turn-${nextSeq}`,
+      sequence: nextSeq,
+      session_group_id: groupId,
+      emitted_at: new Date(now).toISOString(),
+      artifact_paths: changedPaths,
+    };
+
+    const target = join(watcher.cwd, ".council", "checkpoints", `auto-turn-${nextSeq}.json`);
+    try {
+      writeAtomicJson(target, payload);
+      this.councilAutoCheckpointLast.set(groupId, now);
+      log.info("session-orchestrator", "council auto-checkpoint emitted", {
+        event: "council.auto_checkpoint.emitted",
+        sessionGroupId: groupId,
+        orchestratorSessionId,
+        phase: payload.phase,
+        sequence: payload.sequence,
+        artifactPathsCount: changedPaths.length,
+      });
+    } catch (err) {
+      log.warn("session-orchestrator", "auto-checkpoint write failed", {
+        sessionGroupId: groupId,
+        target,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   /**

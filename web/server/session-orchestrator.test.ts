@@ -2187,6 +2187,217 @@ describe("SessionOrchestrator", () => {
     });
   });
 
+  // maybeEmitAutoCheckpoint is the natural-cadence wake gate added to close
+  // the "observer stays silent during ordinary chat workflows" gap. It listens
+  // on `message:result` (turn completion) for any orchestrator-half of a
+  // council pair, computes `git status --porcelain` against the workspace,
+  // and emits an `auto-turn-<N>.json` checkpoint into `.council/checkpoints/`
+  // when changes exist. The existing checkpoint-watcher + handleCouncilCheckpoint
+  // path then dispatches the manifest to the observer CLI as normal.
+  //
+  // These tests pin: (1) the orchestrator-only filter, (2) the empty-change
+  // skip, (3) the throttle window, (4) the `.council/` path filter that
+  // prevents the observer's own review writes from re-waking it.
+  describe("maybeEmitAutoCheckpoint", () => {
+    type AutoTestCtx = {
+      workspace: string;
+      cleanup: () => void;
+    };
+    function setupTmpRepo(): AutoTestCtx {
+      const { execSync } = require("node:child_process") as typeof import("node:child_process");
+      const { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } = require("node:fs") as typeof import("node:fs");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      const workspace = realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-auto-")));
+      mkdirSync(pathJoin(workspace, ".council", "checkpoints"), { recursive: true });
+      execSync("git init -q && git config user.email a@b && git config user.name t && git commit -q --allow-empty -m base", {
+        cwd: workspace,
+        stdio: ["ignore", "ignore", "ignore"],
+      });
+      writeFileSync(pathJoin(workspace, "README.md"), "# new\n");
+      return {
+        workspace,
+        cleanup: () => rmSync(workspace, { recursive: true, force: true }),
+      };
+    }
+
+    function seedAutoGroup(groupId: string, workspace: string, primary: string = "sess_orch_auto"): void {
+      const ws = orchestrator as unknown as {
+        councilWatchers: Map<string, { cwd: string; abort: AbortController; lastCheckpoint: unknown; previousCheckpoint: unknown }>;
+        councilGroupMeta: Map<string, { primarySessionId: string; observerSessionId: string; pairing: string; createdAt: number; lastCheckpointReceivedAt: number | null }>;
+        councilAutoCheckpointLast: Map<string, number>;
+      };
+      ws.councilWatchers.set(groupId, {
+        cwd: workspace,
+        abort: new AbortController(),
+        lastCheckpoint: null,
+        previousCheckpoint: null,
+      });
+      ws.councilGroupMeta.set(groupId, {
+        primarySessionId: primary,
+        observerSessionId: "sess_obs_auto",
+        pairing: "claude+claude",
+        createdAt: Date.now(),
+        lastCheckpointReceivedAt: null,
+      });
+      ws.councilAutoCheckpointLast.delete(groupId);
+    }
+
+    // Happy path: orchestrator turn completed, working tree dirty → checkpoint
+    // file lands at `<cwd>/.council/checkpoints/auto-turn-0.json` with the
+    // dirty path in artifact_paths. Verifies the full chain from
+    // `message:result` event through `git status --porcelain` through
+    // `writeAtomicJson` to the disk artifact the watcher will consume.
+    it("emits an auto-checkpoint when orchestrator turn completes with workspace changes", () => {
+      const ctx = setupTmpRepo();
+      try {
+        seedAutoGroup("grp_auto_1", ctx.workspace);
+        const handle = (orchestrator as unknown as {
+          maybeEmitAutoCheckpoint: (sid: string) => void;
+        }).maybeEmitAutoCheckpoint;
+        handle.call(orchestrator, "sess_orch_auto");
+        const path = require("node:path").join(ctx.workspace, ".council/checkpoints/auto-turn-0.json");
+        const exists = require("node:fs").existsSync(path);
+        expect(exists).toBe(true);
+        const payload = JSON.parse(require("node:fs").readFileSync(path, "utf-8")) as {
+          phase: string;
+          sequence: number;
+          artifact_paths: string[];
+          session_group_id: string;
+        };
+        expect(payload.phase).toBe("auto-turn-0");
+        expect(payload.sequence).toBe(0);
+        expect(payload.session_group_id).toBe("grp_auto_1");
+        expect(payload.artifact_paths).toContain("README.md");
+      } finally {
+        ctx.cleanup();
+      }
+    });
+
+    // Clean working tree → skip. No artifact_paths to ground a review
+    // against, so emitting would only burn observer LLM tokens on a no-op.
+    it("skips emit when working tree is clean (no changes)", () => {
+      const ctx = setupTmpRepo();
+      try {
+        // overwrite README back to committed state via git checkout
+        require("node:child_process").execSync("git checkout -- README.md 2>/dev/null || true && git add -A && git commit -q --allow-empty -m clean", {
+          cwd: ctx.workspace,
+          stdio: ["ignore", "ignore", "ignore"],
+        });
+        // verify no porcelain output
+        const out = require("node:child_process").execSync("git status --porcelain", { cwd: ctx.workspace, encoding: "utf-8" });
+        expect(out).toBe("");
+        seedAutoGroup("grp_auto_clean", ctx.workspace);
+        const handle = (orchestrator as unknown as {
+          maybeEmitAutoCheckpoint: (sid: string) => void;
+        }).maybeEmitAutoCheckpoint;
+        handle.call(orchestrator, "sess_orch_auto");
+        const path = require("node:path").join(ctx.workspace, ".council/checkpoints/auto-turn-0.json");
+        expect(require("node:fs").existsSync(path)).toBe(false);
+      } finally {
+        ctx.cleanup();
+      }
+    });
+
+    // Throttle: a second message:result inside the throttle window must NOT
+    // produce a second checkpoint. The artifact on disk after both calls
+    // must still be the first one (sequence 0) — a rapid orchestrator that
+    // completes 4 turns in 10 seconds should not flood the observer.
+    it("throttles repeat emit inside COUNCIL_AUTOCHECKPOINT_THROTTLE_MS", () => {
+      const ctx = setupTmpRepo();
+      const origEnv = process.env.COMPANION_COUNCIL_AUTOCHECKPOINT_THROTTLE_MS;
+      try {
+        seedAutoGroup("grp_auto_th", ctx.workspace);
+        const handle = (orchestrator as unknown as {
+          maybeEmitAutoCheckpoint: (sid: string) => void;
+        }).maybeEmitAutoCheckpoint;
+        // First emit
+        handle.call(orchestrator, "sess_orch_auto");
+        const p0 = require("node:path").join(ctx.workspace, ".council/checkpoints/auto-turn-0.json");
+        expect(require("node:fs").existsSync(p0)).toBe(true);
+        // Second emit immediately — throttle window blocks. No auto-turn-1.
+        // Add a second pending change so git status would have new content.
+        require("node:fs").writeFileSync(require("node:path").join(ctx.workspace, "B.md"), "b\n");
+        handle.call(orchestrator, "sess_orch_auto");
+        const p1 = require("node:path").join(ctx.workspace, ".council/checkpoints/auto-turn-1.json");
+        expect(require("node:fs").existsSync(p1)).toBe(false);
+      } finally {
+        if (origEnv === undefined) delete process.env.COMPANION_COUNCIL_AUTOCHECKPOINT_THROTTLE_MS;
+        else process.env.COMPANION_COUNCIL_AUTOCHECKPOINT_THROTTLE_MS = origEnv;
+        ctx.cleanup();
+      }
+    });
+
+    // Observer-half message:result must NOT trigger auto-checkpoint. Observer
+    // reviews are the OUTPUT of the wake gate; if they themselves triggered
+    // another wake, the pair would loop forever on a single dirty path.
+    it("is a no-op when called with the observer-half session id (not orchestrator)", () => {
+      const ctx = setupTmpRepo();
+      try {
+        seedAutoGroup("grp_auto_obs", ctx.workspace);
+        const handle = (orchestrator as unknown as {
+          maybeEmitAutoCheckpoint: (sid: string) => void;
+        }).maybeEmitAutoCheckpoint;
+        // Call with OBSERVER session id, not orchestrator
+        handle.call(orchestrator, "sess_obs_auto");
+        const path = require("node:path").join(ctx.workspace, ".council/checkpoints/auto-turn-0.json");
+        expect(require("node:fs").existsSync(path)).toBe(false);
+      } finally {
+        ctx.cleanup();
+      }
+    });
+
+    // Non-council session must NOT trigger anything. If a regular (non-paired)
+    // session's turn completion event reaches the listener, the lookup in
+    // councilGroupMeta returns nothing and we exit silently.
+    it("is a no-op for non-council session ids", () => {
+      const ctx = setupTmpRepo();
+      try {
+        // No seedAutoGroup — councilGroupMeta empty.
+        const handle = (orchestrator as unknown as {
+          maybeEmitAutoCheckpoint: (sid: string) => void;
+        }).maybeEmitAutoCheckpoint;
+        handle.call(orchestrator, "sess_random");
+        const path = require("node:path").join(ctx.workspace, ".council/checkpoints/auto-turn-0.json");
+        expect(require("node:fs").existsSync(path)).toBe(false);
+      } finally {
+        ctx.cleanup();
+      }
+    });
+
+    // `.council/` paths must be filtered from artifact_paths. If the observer
+    // writes `story-N-claude-observer.md` and the orchestrator's next turn
+    // completes, `git status --porcelain` reports that review file as new
+    // workspace change — feeding it back as an artifact would have the
+    // observer review its own previous review (feedback loop). The filter
+    // strips them before the manifest reaches the watcher.
+    it("strips .council/ paths from artifact_paths so observer reviews do not re-wake the observer", () => {
+      const ctx = setupTmpRepo();
+      try {
+        const { writeFileSync, mkdirSync } = require("node:fs") as typeof import("node:fs");
+        const { join: pj } = require("node:path") as typeof import("node:path");
+        // Simulate an observer review file landing in .council/reviews
+        mkdirSync(pj(ctx.workspace, ".council", "reviews"), { recursive: true });
+        writeFileSync(pj(ctx.workspace, ".council", "reviews", "x-claude-observer.md"), "{}\n");
+        // README.md is still dirty from setupTmpRepo, so we expect at least it
+        // in artifact_paths AND the .council/ entry stripped.
+        seedAutoGroup("grp_auto_council_filter", ctx.workspace);
+        const handle = (orchestrator as unknown as {
+          maybeEmitAutoCheckpoint: (sid: string) => void;
+        }).maybeEmitAutoCheckpoint;
+        handle.call(orchestrator, "sess_orch_auto");
+        const path = require("node:path").join(ctx.workspace, ".council/checkpoints/auto-turn-0.json");
+        const payload = JSON.parse(require("node:fs").readFileSync(path, "utf-8")) as { artifact_paths: string[] };
+        expect(payload.artifact_paths).toContain("README.md");
+        for (const p of payload.artifact_paths) {
+          expect(p.startsWith(".council/")).toBe(false);
+        }
+      } finally {
+        ctx.cleanup();
+      }
+    });
+  });
+
   describe("handleCouncilReview", () => {
     function seedGroup(groupId: string, opts: { cwd?: string; artifactPaths?: string[]; primary?: string; observer?: string } = {}) {
       const cwd = opts.cwd ?? "/w";
