@@ -1971,3 +1971,136 @@ describe("listExecutions", () => {
     expect(url).toBe("/api/executions?status=running");
   });
 });
+
+// ===========================================================================
+// Linear OAuth helpers (lines 1259-1294) — these are the thin REST wrappers
+// the LinearOAuthSettingsPage drives. They were previously untested because
+// the page itself owns the integration tests; the Council Mode PR touches
+// src/api.ts elsewhere, which puts the whole file under the 80%
+// coverage-gate, so we cover the small surfaces here directly.
+// ===========================================================================
+describe("Linear OAuth thin wrappers", () => {
+  it("getLinearOAuthStatus issues GET without query when no stagingId", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ configured: true }));
+    await api.getLinearOAuthStatus();
+    const [url] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/linear/oauth/status");
+  });
+
+  it("getLinearOAuthStatus appends ?stagingId=… when provided", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ configured: false }));
+    await api.getLinearOAuthStatus("stg-1");
+    const [url] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/linear/oauth/status?stagingId=stg-1");
+  });
+
+  it("getLinearOAuthAuthorizeUrl includes returnTo + stagingId when both supplied", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ url: "https://linear.app/oauth/authorize" }));
+    await api.getLinearOAuthAuthorizeUrl("/settings", "stg-2");
+    const [url] = mockFetch.mock.calls[0];
+    expect(url).toContain("returnTo=%2Fsettings");
+    expect(url).toContain("stagingId=stg-2");
+  });
+
+  it("disconnectLinearOAuth POSTs to /linear/oauth/disconnect", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ ok: true }));
+    await api.disconnectLinearOAuth();
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/linear/oauth/disconnect");
+    expect(opts.method).toBe("POST");
+  });
+
+  it("createLinearStaging POSTs credentials and returns stagingId", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ stagingId: "stg-3" }));
+    const out = await api.createLinearStaging({
+      clientId: "id",
+      clientSecret: "secret",
+      webhookSecret: "wh",
+    });
+    expect(out.stagingId).toBe("stg-3");
+  });
+
+  it("getLinearStagingStatus URL-encodes the id segment", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ exists: true }));
+    await api.getLinearStagingStatus("stg/a b");
+    const [url] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/linear/oauth/staging/stg%2Fa%20b/status");
+  });
+
+  it("deleteLinearStaging sends DELETE", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ ok: true }));
+    await api.deleteLinearStaging("stg-4");
+    const [, opts] = mockFetch.mock.calls[0];
+    expect(opts.method).toBe("DELETE");
+  });
+
+  it("listLinearOAuthConnections issues GET", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ connections: [] }));
+    await api.listLinearOAuthConnections();
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/linear/oauth-connections");
+    expect(opts.method || "GET").toBe("GET");
+  });
+
+  it("createLinearOAuthConnection POSTs the full credential payload", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ connection: { id: "c-1" } }));
+    await api.createLinearOAuthConnection({
+      name: "my-app",
+      oauthClientId: "id",
+      oauthClientSecret: "secret",
+      webhookSecret: "wh",
+    });
+    const [, opts] = mockFetch.mock.calls[0];
+    expect(JSON.parse(opts.body).name).toBe("my-app");
+  });
+
+  it("updateLinearOAuthConnection PUTs partial fields", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ connection: { id: "c-1" } }));
+    await api.updateLinearOAuthConnection("c-1", { name: "renamed" });
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/linear/oauth-connections/c-1");
+    expect(opts.method).toBe("PUT");
+  });
+
+  it("deleteLinearOAuthConnection sends DELETE and returns ok", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ ok: true }));
+    const out = await api.deleteLinearOAuthConnection("c-1");
+    expect(out.ok).toBe(true);
+  });
+
+  it("getLinearOAuthConnectionAuthorizeUrl optionally appends returnTo", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ url: "https://linear.app/auth" }));
+    await api.getLinearOAuthConnectionAuthorizeUrl("c-1", "/settings");
+    const [url] = mockFetch.mock.calls[0];
+    expect(url).toContain("returnTo=%2Fsettings");
+  });
+});
+
+// ===========================================================================
+// Browser preview helpers (lines 1120-1129) — also pre-existing untested
+// surfaces dragged under the coverage gate by the Council Mode PR.
+// ===========================================================================
+describe("Browser preview thin wrappers", () => {
+  it("startBrowser POSTs without url when none supplied", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ ok: true }));
+    await api.startBrowser("sess-1");
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/sessions/sess-1/browser/start");
+    expect(opts.method).toBe("POST");
+  });
+
+  it("startBrowser POSTs { url } when supplied", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ ok: true }));
+    await api.startBrowser("sess-1", "https://example.com");
+    const [, opts] = mockFetch.mock.calls[0];
+    expect(JSON.parse(opts.body)).toEqual({ url: "https://example.com" });
+  });
+
+  it("navigateBrowser POSTs the url body", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ ok: true }));
+    await api.navigateBrowser("sess-1", "https://acme.test");
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/sessions/sess-1/browser/navigate");
+    expect(JSON.parse(opts.body)).toEqual({ url: "https://acme.test" });
+  });
+});

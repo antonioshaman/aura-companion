@@ -1947,4 +1947,369 @@ describe("SessionOrchestrator", () => {
       expect(intentional.has("sess_obs_t4")).toBe(true);
     });
   });
+
+  // ── handleCouncilCheckpoint / handleCouncilReview producers ────────────────
+  //
+  // These tests exercise the producer side of the Council Mode pipeline that
+  // the bus-listener tests above only consume. handleCouncilCheckpoint is the
+  // server-side sequence-monotonicity authority (Realtime P1-R2); handleCouncilReview
+  // composes the delta manifest, grounding-validates the findings, and emits
+  // the structured invocation log entry (Willison P1-1 / P1-4 / EC-9).
+  describe("handleCouncilCheckpoint", () => {
+    type WatcherEntry = {
+      cwd: string;
+      abort: AbortController;
+      lastCheckpoint: { sequence: number; checkpoint_id: string; phase: string; artifact_paths: string[] } | null;
+      previousCheckpoint: { sequence: number; checkpoint_id: string; phase: string; artifact_paths: string[] } | null;
+    };
+    function seedWatcherEntry(groupId: string, overrides: Partial<WatcherEntry> = {}): WatcherEntry {
+      const entry: WatcherEntry = {
+        cwd: "/w",
+        abort: new AbortController(),
+        lastCheckpoint: null,
+        previousCheckpoint: null,
+        ...overrides,
+      };
+      const obs = orchestrator as unknown as { councilWatchers: Map<string, WatcherEntry> };
+      obs.councilWatchers.set(groupId, entry);
+      return entry;
+    }
+
+    it("captures the first checkpoint and emits group:checkpoint", () => {
+      const entry = seedWatcherEntry("grp_c1");
+      const emitted: Array<{ sessionGroupId: string; sequence: number }> = [];
+      companionBus.on("group:checkpoint", (e: unknown) => { emitted.push(e as { sessionGroupId: string; sequence: number }); });
+
+      const handle = (orchestrator as unknown as {
+        handleCouncilCheckpoint: (g: string, p: { schema_version: 1; checkpoint_id: string; phase: string; sequence: number; session_group_id: string; emitted_at: string; artifact_paths: string[] }) => void;
+      }).handleCouncilCheckpoint;
+      handle.call(orchestrator, "grp_c1", {
+        schema_version: 1,
+        checkpoint_id: "chk_a",
+        phase: "council-plan",
+        sequence: 0,
+        session_group_id: "grp_c1",
+        emitted_at: "2026-01-01T00:00:00Z",
+        artifact_paths: ["src/a.ts"],
+      });
+      expect(entry.lastCheckpoint?.checkpoint_id).toBe("chk_a");
+      expect(entry.previousCheckpoint).toBeNull();
+      expect(emitted).toHaveLength(1);
+      expect(emitted[0]?.sessionGroupId).toBe("grp_c1");
+    });
+
+    it("drops a checkpoint whose sequence is <= the last seen sequence", () => {
+      const entry = seedWatcherEntry("grp_c2", {
+        lastCheckpoint: { sequence: 5, checkpoint_id: "chk_old", phase: "p", artifact_paths: [] },
+      });
+      const emitted: unknown[] = [];
+      companionBus.on("group:checkpoint", (e: unknown) => { emitted.push(e); });
+
+      const handle = (orchestrator as unknown as {
+        handleCouncilCheckpoint: (g: string, p: Record<string, unknown>) => void;
+      }).handleCouncilCheckpoint;
+      handle.call(orchestrator, "grp_c2", {
+        schema_version: 1,
+        checkpoint_id: "chk_stale",
+        phase: "p",
+        sequence: 3,
+        session_group_id: "grp_c2",
+        emitted_at: "2026-01-01T00:00:00Z",
+        artifact_paths: [],
+      });
+      expect(entry.lastCheckpoint?.checkpoint_id).toBe("chk_old");
+      expect(emitted).toHaveLength(0);
+    });
+
+    it("captures the prior checkpoint into previousCheckpoint when a new one supersedes", () => {
+      const entry = seedWatcherEntry("grp_c3", {
+        lastCheckpoint: { sequence: 1, checkpoint_id: "chk_prev", phase: "p", artifact_paths: ["src/a.ts"] },
+      });
+      const handle = (orchestrator as unknown as {
+        handleCouncilCheckpoint: (g: string, p: Record<string, unknown>) => void;
+      }).handleCouncilCheckpoint;
+      handle.call(orchestrator, "grp_c3", {
+        schema_version: 1,
+        checkpoint_id: "chk_new",
+        phase: "p",
+        sequence: 2,
+        session_group_id: "grp_c3",
+        emitted_at: "2026-01-01T00:00:00Z",
+        artifact_paths: ["src/a.ts", "src/b.ts"],
+      });
+      expect(entry.previousCheckpoint?.checkpoint_id).toBe("chk_prev");
+      expect(entry.lastCheckpoint?.checkpoint_id).toBe("chk_new");
+    });
+
+    it("is a no-op when no watcher entry exists for the group", () => {
+      const emitted: unknown[] = [];
+      companionBus.on("group:checkpoint", (e: unknown) => { emitted.push(e); });
+      const handle = (orchestrator as unknown as {
+        handleCouncilCheckpoint: (g: string, p: Record<string, unknown>) => void;
+      }).handleCouncilCheckpoint;
+      handle.call(orchestrator, "grp_missing", {
+        schema_version: 1,
+        checkpoint_id: "chk_x",
+        phase: "p",
+        sequence: 0,
+        session_group_id: "grp_missing",
+        emitted_at: "2026-01-01T00:00:00Z",
+        artifact_paths: [],
+      });
+      expect(emitted).toHaveLength(0);
+    });
+  });
+
+  describe("handleCouncilReview", () => {
+    function seedGroup(groupId: string, opts: { cwd?: string; artifactPaths?: string[]; primary?: string; observer?: string } = {}) {
+      const cwd = opts.cwd ?? "/w";
+      const ws = orchestrator as unknown as {
+        councilWatchers: Map<string, {
+          cwd: string;
+          abort: AbortController;
+          lastCheckpoint: { sequence: number; checkpoint_id: string; phase: string; artifact_paths: string[] } | null;
+          previousCheckpoint: { sequence: number; artifact_paths: string[] } | null;
+        }>;
+        councilGroupMeta: Map<string, { primarySessionId: string; observerSessionId: string; pairing: string; observerPromptSha256?: string; createdAt: number; lastCheckpointReceivedAt: number | null }>;
+      };
+      ws.councilWatchers.set(groupId, {
+        cwd,
+        abort: new AbortController(),
+        lastCheckpoint: {
+          sequence: 0,
+          checkpoint_id: "chk_a",
+          phase: "council-plan",
+          artifact_paths: opts.artifactPaths ?? [],
+        },
+        previousCheckpoint: null,
+      });
+      ws.councilGroupMeta.set(groupId, {
+        primarySessionId: opts.primary ?? "sess_orch",
+        observerSessionId: opts.observer ?? "sess_obs",
+        pairing: "claude+claude",
+        observerPromptSha256: "abc123",
+        createdAt: Date.now(),
+        lastCheckpointReceivedAt: Date.now() - 100,
+      });
+    }
+
+    it("emits group:review with deterministic ids and downgrades STOPs whose evidence path is outside the modified set", () => {
+      // Use a real tmp workspace so the grounding check's existsRelative
+      // gate (Hunt P1-2) returns true for the in-scope file. Without this
+      // the realpathSync-backed default predicate downgrades ALL STOPs as
+      // `evidence_missing_on_disk`, hiding the modified-set branch.
+      const { mkdtempSync, writeFileSync, mkdirSync, rmSync } = require("node:fs") as typeof import("node:fs");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      const workspace = require("node:fs").realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-orch-")));
+      try {
+        mkdirSync(pathJoin(workspace, "src"), { recursive: true });
+        writeFileSync(pathJoin(workspace, "src/a.ts"), "// in-scope\n");
+        seedGroup("grp_r1", { cwd: workspace, artifactPaths: ["src/a.ts"] });
+        const emitted: Array<{ findings: Array<{ id: string; severity: string; wasDowngraded?: boolean }> }> = [];
+        companionBus.on("group:review", (e: unknown) => { emitted.push(e as { findings: Array<{ id: string; severity: string; wasDowngraded?: boolean }> }); });
+
+        const handle = (orchestrator as unknown as {
+          handleCouncilReview: (g: string, p: Record<string, unknown>) => void;
+        }).handleCouncilReview;
+        handle.call(orchestrator, "grp_r1", {
+          schema_version: 1,
+          checkpoint_id: "chk_a",
+          phase: "council-plan",
+          session_group_id: "grp_r1",
+          reviewed_at: "2026-01-01T00:00:00Z",
+          observer_provider: "claude",
+          observer_model: "claude-opus-4-7",
+          observer_cli_version: "1.0.0",
+          findings: [
+            { severity: "STOP", claim: "in scope", evidence_path: "src/a.ts" },
+            { severity: "STOP", claim: "out of scope", evidence_path: "src/b.ts" },
+          ],
+        });
+        expect(emitted).toHaveLength(1);
+        const f0 = emitted[0]!.findings[0]!;
+        const f1 = emitted[0]!.findings[1]!;
+        expect(f0.id).toMatch(/^fnd_/);
+        expect(f0.wasDowngraded).not.toBe(true);
+        expect(f1.wasDowngraded).toBe(true);
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
+    it("is a no-op (no emission) when the group has no watcher entry", () => {
+      const emitted: unknown[] = [];
+      companionBus.on("group:review", (e: unknown) => { emitted.push(e); });
+      const handle = (orchestrator as unknown as {
+        handleCouncilReview: (g: string, p: Record<string, unknown>) => void;
+      }).handleCouncilReview;
+      handle.call(orchestrator, "grp_missing", {
+        schema_version: 1,
+        checkpoint_id: "chk",
+        phase: "p",
+        session_group_id: "grp_missing",
+        reviewed_at: "2026-01-01T00:00:00Z",
+        observer_provider: "claude",
+        observer_model: "m",
+        observer_cli_version: "1",
+        findings: [],
+      });
+      expect(emitted).toHaveLength(0);
+    });
+
+    it("swallows transient errors thrown during the grounding pipeline so the watcher's read loop stays alive", () => {
+      // Seed group then trip the meta lookup to throw via a Proxy on the Map.
+      seedGroup("grp_r2", { artifactPaths: ["src/a.ts"] });
+      const ws = orchestrator as unknown as {
+        councilGroupMeta: Map<string, { primarySessionId: string }>;
+      };
+      const original = ws.councilGroupMeta.get;
+      ws.councilGroupMeta.get = () => { throw new Error("forced"); };
+      try {
+        const handle = (orchestrator as unknown as {
+          handleCouncilReview: (g: string, p: Record<string, unknown>) => void;
+        }).handleCouncilReview;
+        expect(() => handle.call(orchestrator, "grp_r2", {
+          schema_version: 1,
+          checkpoint_id: "chk_a",
+          phase: "p",
+          session_group_id: "grp_r2",
+          reviewed_at: "2026-01-01T00:00:00Z",
+          observer_provider: "claude",
+          observer_model: "m",
+          observer_cli_version: "1",
+          findings: [{ severity: "INFO", claim: "x", evidence_path: "src/a.ts" }],
+        })).not.toThrow();
+      } finally {
+        ws.councilGroupMeta.get = original;
+      }
+    });
+  });
+
+  // ── stopCouncilWatchers cleanup ────────────────────────────────────────────
+  // ── createCouncilGroup early-error branches ─────────────────────────────
+  //
+  // The full happy path requires a real coordinator + spawn pipeline (covered
+  // indirectly by the routes.test.ts SSE branch tests). Here we focus on the
+  // synchronous early-error paths that gate against malformed pairing labels
+  // — cheap to cover, and the user-facing error shape is the contract.
+  describe("createCouncilGroup early-error branches", () => {
+    // The pairing label is typed at the API boundary, but the runtime
+    // parser is the actual gate — callers can hand-craft a malformed
+    // request from a stale browser. Cast through `as` so the test exercises
+    // that gate directly.
+    it("returns ok:false with status 400 on an unparseable pairing label (wrong arity)", async () => {
+      const result = await orchestrator.createCouncilGroup({
+        pairing: "claude-only-no-plus" as "claude+claude",
+        base: { cwd: "/w" },
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.status).toBe(400);
+        expect(result.error).toMatch(/unsupported pairing/);
+      }
+    });
+
+    it("returns ok:false with status 400 on an unsupported provider in the pairing label", async () => {
+      const result = await orchestrator.createCouncilGroup({
+        pairing: "claude+gemini" as "claude+claude",
+        base: { cwd: "/w" },
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.status).toBe(400);
+      }
+    });
+
+    it("returns ok:false with status 400 when the parsed pairing is not in SUPPORTED_PAIRINGS", async () => {
+      // codex+claude is parseable but not in the allow-list.
+      const result = await orchestrator.createCouncilGroup({
+        pairing: "codex+claude" as "claude+claude",
+        base: { cwd: "/w" },
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.status).toBe(400);
+      }
+    });
+  });
+
+  // ── startCouncilWatchers — real tmp dir wiring ──────────────────────────
+  //
+  // Verifies that startCouncilWatchers (a) creates .council/checkpoints +
+  // .council/reviews directories under the workspace, (b) inserts the
+  // watcher entry into the councilWatchers map, (c) stopCouncilWatchers
+  // tears it down cleanly. The fs.watch handles themselves are exercised
+  // by checkpoint-watcher.test.ts / review-watcher.test.ts; we just verify
+  // the orchestrator's bookkeeping side here.
+  describe("startCouncilWatchers", () => {
+    it("creates .council/checkpoints + .council/reviews and inserts the watcher entry", async () => {
+      const fs = await import("node:fs");
+      const os = await import("node:os");
+      const path = await import("node:path");
+      const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "council-watch-")));
+      try {
+        const obs = orchestrator as unknown as {
+          startCouncilWatchers: (g: string, cwd: string) => void;
+          stopCouncilWatchers: (g: string) => void;
+          councilWatchers: Map<string, { cwd: string; abort: AbortController }>;
+        };
+        obs.startCouncilWatchers("grp_sw1", ws);
+        expect(obs.councilWatchers.has("grp_sw1")).toBe(true);
+        expect(fs.existsSync(path.join(ws, ".council", "checkpoints"))).toBe(true);
+        expect(fs.existsSync(path.join(ws, ".council", "reviews"))).toBe(true);
+        obs.stopCouncilWatchers("grp_sw1");
+        expect(obs.councilWatchers.has("grp_sw1")).toBe(false);
+      } finally {
+        fs.rmSync(ws, { recursive: true, force: true });
+      }
+    });
+
+    it("is a no-op when called twice for the same group (idempotency)", async () => {
+      const fs = await import("node:fs");
+      const os = await import("node:os");
+      const path = await import("node:path");
+      const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "council-watch-")));
+      try {
+        const obs = orchestrator as unknown as {
+          startCouncilWatchers: (g: string, cwd: string) => void;
+          stopCouncilWatchers: (g: string) => void;
+          councilWatchers: Map<string, { cwd: string; abort: AbortController }>;
+        };
+        obs.startCouncilWatchers("grp_sw2", ws);
+        const first = obs.councilWatchers.get("grp_sw2");
+        obs.startCouncilWatchers("grp_sw2", ws);
+        const second = obs.councilWatchers.get("grp_sw2");
+        // Same entry (no re-attach).
+        expect(second).toBe(first);
+        obs.stopCouncilWatchers("grp_sw2");
+      } finally {
+        fs.rmSync(ws, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("stopCouncilWatchers", () => {
+    it("aborts the watcher signal and removes the entry from the map", () => {
+      const abort = new AbortController();
+      const obs = orchestrator as unknown as {
+        councilWatchers: Map<string, { cwd: string; abort: AbortController; lastCheckpoint: null; previousCheckpoint: null }>;
+        stopCouncilWatchers: (g: string) => void;
+      };
+      obs.councilWatchers.set("grp_stop", {
+        cwd: "/w",
+        abort,
+        lastCheckpoint: null,
+        previousCheckpoint: null,
+      });
+      obs.stopCouncilWatchers("grp_stop");
+      expect(abort.signal.aborted).toBe(true);
+      expect(obs.councilWatchers.has("grp_stop")).toBe(false);
+    });
+
+    it("is a no-op when the group has no watcher entry", () => {
+      const obs = orchestrator as unknown as { stopCouncilWatchers: (g: string) => void };
+      expect(() => obs.stopCouncilWatchers("grp_unknown")).not.toThrow();
+    });
+  });
 });
