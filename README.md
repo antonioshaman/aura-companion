@@ -62,7 +62,7 @@ Toggle **Council Mode** on the New Session dialog and pick a pairing:
 
 What you get in the UI:
 
-- **`BlockerBanner`** in the chat slot — the most recent unresolved STOP, JSX-escaped, dismissable.
+- **`BlockerBanner`** in the chat slot — the most recent unresolved STOP, JSX-escaped, dismissible.
 - **`ObserverPanel`** sibling of ChatView — status pill (`sleeping / spawning / reviewing / blocker-found / degraded / reconnecting`) plus a collapsible findings log.
 - **`ProviderBadges`** in the sidebar — asymmetric chips when pairings are mixed-provider.
 - **`Cmd/Ctrl+Shift+O`** toggles the Observer panel; **`Cmd/Ctrl+Shift+B`** focuses the BlockerBanner primary action.

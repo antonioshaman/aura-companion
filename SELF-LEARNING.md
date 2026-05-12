@@ -11,9 +11,9 @@ The system has three layers:
 │  CLAUDE.md          Promoted rules          │  ← Permanent project wisdom
 ├─────────────────────────────────────────────┤
 │  .agents/knowledge/ JSONL knowledge base    │  ← Growing session-by-session
-├���────────────────────────────────────────────┤
+├─────────────────────────────────────────────┤
 │  5 skills           Learning loop           │  ← Capture → Store → Load → Apply
-└───────��─────────────────────────────────────┘
+└─────────────────────────────────────────────┘
 ```
 
 Knowledge flows upward: insights captured during work accumulate in the knowledge base, and the best patterns eventually get promoted to CLAUDE.md rules.
