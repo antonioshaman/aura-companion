@@ -202,6 +202,137 @@ describe("broadcastToBrowsers", () => {
   });
 });
 
+// ─── Council wire variants — seq coverage ────────────────────────────────────
+//
+// PLAN-aura-consolidated-refactor.md Task 1 acceptance criterion (promoted
+// from Risks v2 → Task 1 v2 patch): every `group_*` and `observer_review`
+// emit MUST pass through the same `sequenceEvent` + `eventBuffer` path as
+// `assistant`/`stream_event`, so reconnect-replay (`session_subscribe
+// { last_seq }`) covers them. Monotonic seq is necessary but NOT sufficient
+// per v3 NOTE — must also verify the seq originates from the shared
+// `nextEventSeq` counter (not from an independent counter that happens to
+// be monotonic too).
+//
+// The shared-counter assertion is structural: `sequenceEvent` reads + bumps
+// `session.nextEventSeq`; we verify each broadcast bumps it by exactly 1
+// and the emitted msg's `seq` equals the pre-bump value.
+describe("broadcastToBrowsers — council wire variants seq coverage", () => {
+  const councilWireFixtures: BrowserIncomingMessage[] = [
+    {
+      type: "group_created",
+      sessionGroupId: "grp_t1",
+      primarySessionId: "sess_orch",
+      observerSessionId: "sess_obs",
+      pairing: "claude+claude",
+    },
+    {
+      type: "group_exited",
+      sessionGroupId: "grp_t1",
+      reason: "user_archived",
+    },
+    {
+      type: "group_degraded",
+      sessionGroupId: "grp_t1",
+      deadRole: "observer",
+    },
+    {
+      type: "group_reconnecting",
+      sessionGroupId: "grp_t1",
+      survivingRole: "orchestrator",
+      deadlineMs: Date.now() + 45_000,
+    },
+    {
+      type: "group_checkpoint",
+      sessionGroupId: "grp_t1",
+      checkpointId: "chk_1",
+      phase: "council-plan",
+      sequence: 0,
+      timestamp: Date.now(),
+    },
+    {
+      type: "observer_review",
+      sessionGroupId: "grp_t1",
+      checkpointId: "chk_1",
+      phase: "council-plan",
+      findings: [],
+      downgrades: [],
+      observerModel: "claude-opus-4-7",
+      observerProvider: "claude",
+      timestamp: Date.now(),
+    },
+  ];
+
+  it.each(councilWireFixtures.map((m) => [m.type, m] as const))(
+    "%s carries a `seq` field originating from session.nextEventSeq AND lands in eventBuffer for reconnect-replay",
+    (_type, msg) => {
+      const ws = makeMockSocket();
+      const session = makeSession();
+      session.browserSockets.add(ws);
+
+      const startingSeq = session.nextEventSeq;
+      const startingBufferLen = session.eventBuffer.length;
+      broadcastToBrowsers(session, msg, {
+        eventBufferLimit: EVENT_BUFFER_LIMIT,
+        recorder: null,
+        persistFn: vi.fn(),
+      });
+
+      expect(ws.send).toHaveBeenCalledTimes(1);
+      const sent = JSON.parse((ws.send as any).mock.calls[0][0]);
+      // The emitted seq must equal the pre-broadcast value of nextEventSeq
+      // (sequenceEvent reads then post-increments). Any other source would
+      // produce a different value — this is the shared-counter assertion.
+      expect(sent.seq).toBe(startingSeq);
+      // And the counter must have advanced by exactly 1.
+      expect(session.nextEventSeq).toBe(startingSeq + 1);
+      // eventBuffer half of the v2 acceptance criterion: every council frame
+      // MUST also land in the replay buffer, otherwise reconnect via
+      // `session_subscribe { last_seq }` silently drops council frames even
+      // though `nextEventSeq` advanced. A regression that bumps the counter
+      // but skips the buffer write (e.g. a type-gated `if (msg.type === "assistant")`
+      // around eventBuffer.push) would pass every seq assertion above.
+      expect(session.eventBuffer).toHaveLength(startingBufferLen + 1);
+      expect(session.eventBuffer[session.eventBuffer.length - 1]?.seq).toBe(startingSeq);
+      expect(session.eventBuffer[session.eventBuffer.length - 1]?.message).toEqual(msg);
+    },
+  );
+
+  it("all six council variants share the same monotonic seq counter AND populate eventBuffer contiguously", () => {
+    const ws = makeMockSocket();
+    const session = makeSession();
+    session.browserSockets.add(ws);
+
+    const startingSeq = session.nextEventSeq;
+    for (const msg of councilWireFixtures) {
+      broadcastToBrowsers(session, msg, {
+        eventBufferLimit: EVENT_BUFFER_LIMIT,
+        recorder: null,
+        persistFn: vi.fn(),
+      });
+    }
+
+    // Every call.send received exactly one frame; collect their seqs.
+    const seqs = (ws.send as any).mock.calls.map((call: any) => JSON.parse(call[0]).seq);
+    expect(seqs).toHaveLength(councilWireFixtures.length);
+    // Seqs are strictly monotonic AND contiguous starting from startingSeq —
+    // contiguous-from-counter is the "shared sequenceEvent path" proof:
+    // a parallel counter or fresh start would break contiguity.
+    for (let i = 0; i < seqs.length; i++) {
+      expect(seqs[i]).toBe(startingSeq + i);
+    }
+    expect(session.nextEventSeq).toBe(startingSeq + councilWireFixtures.length);
+    // The eventBuffer must mirror the wire-frame sequence one-for-one.
+    // This is the load-bearing reconnect-replay invariant: a browser
+    // reconnecting with `last_seq < startingSeq` MUST receive every
+    // council frame in order.
+    expect(session.eventBuffer).toHaveLength(councilWireFixtures.length);
+    const bufferedSeqs = session.eventBuffer.map((entry) => entry.seq);
+    expect(bufferedSeqs).toEqual(seqs);
+    const bufferedTypes = session.eventBuffer.map((entry) => entry.message.type);
+    expect(bufferedTypes).toEqual(councilWireFixtures.map((m) => m.type));
+  });
+});
+
 // ─── sendToBrowser ────────────────────────────────────────────────────────────
 
 describe("sendToBrowser", () => {

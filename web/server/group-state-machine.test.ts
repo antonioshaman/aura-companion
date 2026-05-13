@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  deriveSideEffects,
+  type GroupBusSideEffect,
   type GroupEvent,
+  type GroupLogEntry,
   type GroupStatus,
+  type GroupTransitionSideEffects,
   isObserverHealthy,
   isOperable,
   transition,
@@ -162,5 +166,247 @@ describe("ALL_STATES inventory", () => {
     expect(ALL_STATES).toContain("degraded");
     expect(ALL_STATES).toContain("archived");
     expect(ALL_STATES).toContain("reconnecting");
+  });
+});
+
+// PLAN-aura-consolidated-refactor.md Task 1: direct unit coverage for the
+// AP-2 keystone. The Council Review 2026-05-12-2211 flagged that
+// `deriveSideEffects` had zero direct tests — every applyEvent correctness
+// claim rested on integration happenstance. This block enumerates the full
+// 5 × 8 cartesian `(prev_status × event_type)` matrix, computing the actual
+// `next` via `transition()` and asserting exact `{busEvents, logEntries}`.
+// Any cell that drifts fails the test by structural mismatch — not just
+// "must be in the union shape."
+//
+// Realtime × Carmack — Principle 4 (Broadcast fan-out): the bus emit
+// descriptors the coordinator enacts are the wire-frame plan. Direct
+// coverage of the plan-producing function is the cheapest leverage in the
+// council lifecycle: every subsequent reconnect/degrade behaviour change
+// has a regression net.
+//
+// Backend × Carmack — Principle 8 (Type safety at the boundary): the
+// TypeScript types `GroupTransitionSideEffects` and the runtime descriptors
+// are validated together — drift between them is what this table catches.
+describe("deriveSideEffects", () => {
+  // Stable filler payloads for events that carry data. The descriptor
+  // matrix only cares about (prev, next, event-discriminator) → side
+  // effects, so role / deadline values are repeated through cells.
+  const survObs: GroupEvent = {
+    type: "reconnect_started",
+    survivingRole: "observer",
+    deadlineMs: 1_000,
+  };
+  const survOrch: GroupEvent = {
+    type: "reconnect_started",
+    survivingRole: "orchestrator",
+    deadlineMs: 1_000,
+  };
+  const recOkObs: GroupEvent = { type: "reconnect_ok", role: "observer" };
+  const recOkOrch: GroupEvent = { type: "reconnect_ok", role: "orchestrator" };
+  const recFailedObs: GroupEvent = { type: "reconnect_failed", role: "observer" };
+  const recFailedOrch: GroupEvent = { type: "reconnect_failed", role: "orchestrator" };
+  const noop: GroupTransitionSideEffects = { busEvents: [], logEntries: [] };
+  const exited: GroupTransitionSideEffects = {
+    busEvents: [{ kind: "exited", reason: "user_archived" }],
+    logEntries: [{ event: "group.exited" }],
+  };
+
+  // Helper — what `deriveSideEffects` should produce when an unintentional
+  // exit (or a `reconnect_failed`) drives the group to degraded. The shape
+  // diverges by event type: half_died logs `group.degraded` with the dead
+  // role, while reconnect_failed logs `group.reconnect_failed` with the
+  // role + attempts=1.
+  function degradedFromHalfDied(role: "observer" | "orchestrator"): GroupTransitionSideEffects {
+    return {
+      busEvents: [{ kind: "degraded", deadRole: role }],
+      logEntries: [{ event: "group.degraded", role }],
+    };
+  }
+  function degradedFromReconnectFailed(role: "observer" | "orchestrator"): GroupTransitionSideEffects {
+    return {
+      busEvents: [{ kind: "degraded", deadRole: role }],
+      logEntries: [{ event: "group.reconnect_failed", role, attempts: 1 }],
+    };
+  }
+  function reconnectingFromStarted(survivingRole: "observer" | "orchestrator", deadlineMs: number): GroupTransitionSideEffects {
+    return {
+      busEvents: [{ kind: "reconnecting", survivingRole, deadlineMs }],
+      logEntries: [{ event: "group.reconnect_started", role: survivingRole, attempts: 1 }],
+    };
+  }
+  function reconnectedOk(role: "observer" | "orchestrator"): GroupTransitionSideEffects {
+    return {
+      busEvents: [{ kind: "reconnected" }],
+      logEntries: [{ event: "group.reconnect_ok", role, attempts: 1 }],
+    };
+  }
+
+  // The full table — every (prev × event) cell with the expected side
+  // effects. The `next` column is intentionally computed via `transition()`
+  // at test time, NOT pre-baked, so a drift in `transition()` flips the
+  // descriptor expectation through the same chain the production
+  // coordinator uses (`applyEvent` reads `next = transition(prev, event)`,
+  // then calls `deriveSideEffects(prev, next, event)`).
+  const table: Array<{ prev: GroupStatus; event: GroupEvent; expected: GroupTransitionSideEffects; label: string }> = [
+    // ── from pairing ──
+    { prev: "pairing", event: { type: "both_ready" }, expected: noop, label: "pairing × both_ready → active (no side effect; createCouncilGroup directly emits group:created)" },
+    { prev: "pairing", event: { type: "half_died", role: "observer" }, expected: noop, label: "pairing × half_died/observer (no transition)" },
+    { prev: "pairing", event: { type: "half_respawned", role: "observer" }, expected: noop, label: "pairing × half_respawned/observer (no transition)" },
+    { prev: "pairing", event: survObs, expected: noop, label: "pairing × reconnect_started (no transition)" },
+    { prev: "pairing", event: recOkObs, expected: noop, label: "pairing × reconnect_ok (no transition)" },
+    { prev: "pairing", event: recFailedObs, expected: noop, label: "pairing × reconnect_failed (no transition)" },
+    { prev: "pairing", event: { type: "user_archived" }, expected: exited, label: "pairing × user_archived → archived" },
+    { prev: "pairing", event: { type: "user_killed" }, expected: exited, label: "pairing × user_killed → archived" },
+
+    // ── from active ──
+    { prev: "active", event: { type: "both_ready" }, expected: noop, label: "active × both_ready (no transition)" },
+    { prev: "active", event: { type: "half_died", role: "observer" }, expected: degradedFromHalfDied("observer"), label: "active × half_died/observer → degraded" },
+    { prev: "active", event: { type: "half_died", role: "orchestrator" }, expected: degradedFromHalfDied("orchestrator"), label: "active × half_died/orchestrator → degraded" },
+    { prev: "active", event: { type: "half_respawned", role: "observer" }, expected: noop, label: "active × half_respawned (no transition)" },
+    { prev: "active", event: survObs, expected: reconnectingFromStarted("observer", 1_000), label: "active × reconnect_started/observer → reconnecting" },
+    { prev: "active", event: survOrch, expected: reconnectingFromStarted("orchestrator", 1_000), label: "active × reconnect_started/orchestrator → reconnecting" },
+    { prev: "active", event: recOkObs, expected: noop, label: "active × reconnect_ok (no transition — not in a reconnect cycle)" },
+    { prev: "active", event: recFailedObs, expected: noop, label: "active × reconnect_failed (no transition)" },
+    { prev: "active", event: { type: "user_archived" }, expected: exited, label: "active × user_archived → archived" },
+    { prev: "active", event: { type: "user_killed" }, expected: exited, label: "active × user_killed → archived" },
+
+    // ── from degraded ──
+    { prev: "degraded", event: { type: "both_ready" }, expected: noop, label: "degraded × both_ready (no transition)" },
+    { prev: "degraded", event: { type: "half_died", role: "observer" }, expected: noop, label: "degraded × half_died (no transition — already degraded)" },
+    // degraded → active via half_respawned has no descriptor emission;
+    // session-orchestrator's recovery path re-emits group:created via the
+    // synthetic replay channel, not through deriveSideEffects.
+    { prev: "degraded", event: { type: "half_respawned", role: "observer" }, expected: noop, label: "degraded × half_respawned → active (no side effect; group:created replayed elsewhere)" },
+    { prev: "degraded", event: survObs, expected: noop, label: "degraded × reconnect_started (no transition)" },
+    { prev: "degraded", event: recOkObs, expected: noop, label: "degraded × reconnect_ok (no transition)" },
+    { prev: "degraded", event: recFailedObs, expected: noop, label: "degraded × reconnect_failed (no transition)" },
+    { prev: "degraded", event: { type: "user_archived" }, expected: exited, label: "degraded × user_archived → archived" },
+    { prev: "degraded", event: { type: "user_killed" }, expected: exited, label: "degraded × user_killed → archived" },
+
+    // ── from reconnecting ──
+    { prev: "reconnecting", event: { type: "both_ready" }, expected: noop, label: "reconnecting × both_ready (no transition)" },
+    { prev: "reconnecting", event: { type: "half_died", role: "observer" }, expected: noop, label: "reconnecting × half_died (no transition)" },
+    { prev: "reconnecting", event: { type: "half_respawned", role: "observer" }, expected: noop, label: "reconnecting × half_respawned (no transition)" },
+    { prev: "reconnecting", event: survObs, expected: noop, label: "reconnecting × reconnect_started (no transition — already reconnecting)" },
+    { prev: "reconnecting", event: recOkObs, expected: reconnectedOk("observer"), label: "reconnecting × reconnect_ok/observer → active" },
+    { prev: "reconnecting", event: recOkOrch, expected: reconnectedOk("orchestrator"), label: "reconnecting × reconnect_ok/orchestrator → active" },
+    { prev: "reconnecting", event: recFailedObs, expected: degradedFromReconnectFailed("observer"), label: "reconnecting × reconnect_failed/observer → degraded" },
+    { prev: "reconnecting", event: recFailedOrch, expected: degradedFromReconnectFailed("orchestrator"), label: "reconnecting × reconnect_failed/orchestrator → degraded" },
+    { prev: "reconnecting", event: { type: "user_archived" }, expected: exited, label: "reconnecting × user_archived → archived" },
+    { prev: "reconnecting", event: { type: "user_killed" }, expected: exited, label: "reconnecting × user_killed → archived" },
+
+    // ── from archived (terminal) ── prev === next on every cell, so noop.
+    { prev: "archived", event: { type: "both_ready" }, expected: noop, label: "archived × both_ready (terminal — noop)" },
+    { prev: "archived", event: { type: "half_died", role: "observer" }, expected: noop, label: "archived × half_died (terminal — noop)" },
+    { prev: "archived", event: { type: "half_respawned", role: "observer" }, expected: noop, label: "archived × half_respawned (terminal — noop)" },
+    { prev: "archived", event: survObs, expected: noop, label: "archived × reconnect_started (terminal — noop)" },
+    { prev: "archived", event: recOkObs, expected: noop, label: "archived × reconnect_ok (terminal — noop)" },
+    { prev: "archived", event: recFailedObs, expected: noop, label: "archived × reconnect_failed (terminal — noop)" },
+    { prev: "archived", event: { type: "user_archived" }, expected: noop, label: "archived × user_archived (terminal — noop, no double-emit)" },
+    { prev: "archived", event: { type: "user_killed" }, expected: noop, label: "archived × user_killed (terminal — noop, no double-emit)" },
+  ];
+
+  it.each(table)("$label", ({ prev, event, expected }) => {
+    const next = transition(prev, event);
+    const result = deriveSideEffects(prev, next, event);
+    expect(result.busEvents).toEqual(expected.busEvents);
+    expect(result.logEntries).toEqual(expected.logEntries);
+  });
+
+  // Inventory tests — the matrix above is the canonical truth, but these
+  // assertions pin specific high-leverage invariants in a form a careless
+  // refactor cannot accidentally satisfy:
+
+  it("never emits side effects when prev === next (no-op transitions stay silent)", () => {
+    for (const state of ["pairing", "active", "degraded", "reconnecting", "archived"] as const) {
+      // Pick an event whose discriminator does not transition out of this state.
+      const noopEvent: GroupEvent = state === "archived"
+        ? { type: "both_ready" } // terminal — no-op
+        : { type: "half_respawned", role: "observer" }; // half_respawned only transitions degraded → active
+      const next = transition(state, noopEvent);
+      if (next !== state) continue; // skip cells that actually transition
+      const result = deriveSideEffects(state, next, noopEvent);
+      expect(result.busEvents).toEqual([]);
+      expect(result.logEntries).toEqual([]);
+    }
+  });
+
+  it("bus events and log entries are paired one-to-one (no asymmetric emit — either both populated or both empty)", () => {
+    // Split into TWO invariants so an asymmetric defect (bus emit without
+    // log entry or vice versa) cannot slip past the `if (length > 0)` guard
+    // the original single check used. v1 implement review NOTE 1 (2026-05-13):
+    // wrapping the count assertion inside `if (busEvents.length > 0)` skipped
+    // the assertion when bus is empty but logEntries is populated (or mirror).
+    for (const cell of table) {
+      const next = transition(cell.prev, cell.event);
+      const result = deriveSideEffects(cell.prev, next, cell.event);
+      // Invariant 1: bus + log are paired (same length, always).
+      expect(
+        result.busEvents.length,
+        `paired-emit invariant violated at (${cell.prev} × ${cell.event.type}): bus=${result.busEvents.length}, log=${result.logEntries.length}`,
+      ).toBe(result.logEntries.length);
+      // Invariant 2: when non-empty, exactly one of each (no fanout amplification).
+      if (result.busEvents.length > 0) {
+        expect(result.busEvents).toHaveLength(1);
+        expect(result.logEntries).toHaveLength(1);
+      }
+    }
+  });
+
+  it("EC-9 log shape — every emitted log entry carries `event` and never leaks cliSessionId/path/observerPromptSha256", () => {
+    const allowedKeys = new Set(["event", "role", "attempts"]);
+    for (const cell of table) {
+      const next = transition(cell.prev, cell.event);
+      const result = deriveSideEffects(cell.prev, next, cell.event);
+      for (const entry of result.logEntries) {
+        expect(entry.event).toMatch(/^group\./);
+        // EC-9 bounded-context contract — the descriptor must not carry
+        // any field outside the canonical allowlist. If the type ever
+        // grows a field, the convention check in `conventions.md` EC-9
+        // forces an explicit decision here, not a silent leak.
+        for (const key of Object.keys(entry)) {
+          expect(allowedKeys.has(key), `log entry leaked key "${key}" — EC-9 violation`).toBe(true);
+        }
+      }
+    }
+  });
+
+  // Cross-cutting test: assert the matrix is exhaustive — every combination
+  // of GroupStatus × GroupEvent discriminator is covered by exactly one row.
+  // Drift detection: if a new event variant lands without a table entry,
+  // this fails; the implementer is forced to extend the matrix consciously
+  // rather than discover the gap during a production incident.
+  it("table is exhaustive — every (state × event-discriminator) is covered", () => {
+    const states: GroupStatus[] = ["pairing", "active", "degraded", "reconnecting", "archived"];
+    const eventDiscriminators: GroupEvent["type"][] = [
+      "both_ready",
+      "half_died",
+      "half_respawned",
+      "reconnect_started",
+      "reconnect_ok",
+      "reconnect_failed",
+      "user_archived",
+      "user_killed",
+    ];
+    const covered = new Set<string>();
+    for (const cell of table) {
+      covered.add(`${cell.prev}::${cell.event.type}`);
+    }
+    for (const state of states) {
+      for (const disc of eventDiscriminators) {
+        expect(covered.has(`${state}::${disc}`), `(${state} × ${disc}) missing from deriveSideEffects table`).toBe(true);
+      }
+    }
+  });
+
+  // Surface the imported types so unused-import lint rules don't trip on
+  // them — they're conceptually load-bearing for the test (any drift in
+  // GroupBusSideEffect / GroupLogEntry shape would change `toEqual`
+  // matching above), even if the matchers don't reference them directly.
+  it("descriptor types remain assignable from the matrix shape", () => {
+    const sample: GroupBusSideEffect = { kind: "exited", reason: "user_archived" };
+    const log: GroupLogEntry = { event: "group.exited" };
+    expect(sample.kind).toBe("exited");
+    expect(log.event).toBe("group.exited");
   });
 });
