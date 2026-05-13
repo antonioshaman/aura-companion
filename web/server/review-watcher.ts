@@ -84,6 +84,15 @@ export async function watchReviews(opts: ReviewWatcherOptions): Promise<void> {
       if (!file) continue;
       if (file.startsWith(".")) continue;
       if (file.includes("\0")) continue;
+      // Two-tier filter: silently drop events that don't look like a
+      // review attempt at all (e.g. macOS fs.watch fires events with the
+      // PARENT DIRECTORY name as `filename` when the dir's mtime
+      // changes — observed as `rev-watcher-MeKrVU`-style identifiers on
+      // macOS-latest CI). The strict pattern check stays — but only for
+      // filenames that already look like a `.md` attempt, so a wrong
+      // pattern under `.md` is a legitimate operator misconfig the
+      // observer should learn about.
+      if (!file.endsWith(".md")) continue;
       if (!REVIEW_FILE_PATTERN.test(file)) {
         onDropped("invalid-filename", file);
         continue;
