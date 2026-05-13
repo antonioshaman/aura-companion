@@ -24,15 +24,17 @@ describe("transition", () => {
   });
 
   it("active enters reconnecting on reconnect_started", () => {
-    expect(transition("active", { type: "reconnect_started" })).toBe("reconnecting");
+    expect(
+      transition("active", { type: "reconnect_started", survivingRole: "orchestrator", deadlineMs: 1_000 }),
+    ).toBe("reconnecting");
   });
 
   it("reconnecting transitions to active on reconnect_ok", () => {
-    expect(transition("reconnecting", { type: "reconnect_ok" })).toBe("active");
+    expect(transition("reconnecting", { type: "reconnect_ok", role: "observer" })).toBe("active");
   });
 
   it("reconnecting transitions to degraded on reconnect_failed", () => {
-    expect(transition("reconnecting", { type: "reconnect_failed" })).toBe("degraded");
+    expect(transition("reconnecting", { type: "reconnect_failed", role: "observer" })).toBe("degraded");
   });
 
   it.each(["pairing", "active", "degraded", "reconnecting"] as const)(
@@ -53,9 +55,9 @@ describe("transition", () => {
     { type: "both_ready" },
     { type: "half_died", role: "observer" },
     { type: "half_respawned", role: "orchestrator" },
-    { type: "reconnect_started" },
-    { type: "reconnect_ok" },
-    { type: "reconnect_failed" },
+    { type: "reconnect_started", survivingRole: "orchestrator", deadlineMs: 1_000 },
+    { type: "reconnect_ok", role: "observer" },
+    { type: "reconnect_failed", role: "observer" },
     { type: "user_archived" },
     { type: "user_killed" },
   ])("archived is terminal under event %#", (event) => {
@@ -68,50 +70,56 @@ describe("transition", () => {
   // snapshot — any cell that drifts fails the test, not just "must be in
   // the state enum".
   it("matches the full transition table", () => {
+    // Representative payloads for events that now carry data — the
+    // transition table only cares about (from, event-discriminator) →
+    // next, so the role / deadline values are stable filler.
+    const reconnectStartedEv: GroupEvent = { type: "reconnect_started", survivingRole: "orchestrator", deadlineMs: 1_000 };
+    const reconnectOkEv: GroupEvent = { type: "reconnect_ok", role: "observer" };
+    const reconnectFailedEv: GroupEvent = { type: "reconnect_failed", role: "observer" };
     const table: Array<[GroupStatus, GroupEvent, GroupStatus]> = [
       // From pairing
       ["pairing", { type: "both_ready" }, "active"],
       ["pairing", { type: "half_died", role: "observer" }, "pairing"],
       ["pairing", { type: "half_respawned", role: "observer" }, "pairing"],
-      ["pairing", { type: "reconnect_started" }, "pairing"],
-      ["pairing", { type: "reconnect_ok" }, "pairing"],
-      ["pairing", { type: "reconnect_failed" }, "pairing"],
+      ["pairing", reconnectStartedEv, "pairing"],
+      ["pairing", reconnectOkEv, "pairing"],
+      ["pairing", reconnectFailedEv, "pairing"],
       ["pairing", { type: "user_archived" }, "archived"],
       ["pairing", { type: "user_killed" }, "archived"],
       // From active
       ["active", { type: "both_ready" }, "active"],
       ["active", { type: "half_died", role: "observer" }, "degraded"],
       ["active", { type: "half_respawned", role: "observer" }, "active"],
-      ["active", { type: "reconnect_started" }, "reconnecting"],
-      ["active", { type: "reconnect_ok" }, "active"],
-      ["active", { type: "reconnect_failed" }, "active"],
+      ["active", reconnectStartedEv, "reconnecting"],
+      ["active", reconnectOkEv, "active"],
+      ["active", reconnectFailedEv, "active"],
       ["active", { type: "user_archived" }, "archived"],
       ["active", { type: "user_killed" }, "archived"],
       // From degraded
       ["degraded", { type: "both_ready" }, "degraded"],
       ["degraded", { type: "half_died", role: "observer" }, "degraded"],
       ["degraded", { type: "half_respawned", role: "observer" }, "active"],
-      ["degraded", { type: "reconnect_started" }, "degraded"],
-      ["degraded", { type: "reconnect_ok" }, "degraded"],
-      ["degraded", { type: "reconnect_failed" }, "degraded"],
+      ["degraded", reconnectStartedEv, "degraded"],
+      ["degraded", reconnectOkEv, "degraded"],
+      ["degraded", reconnectFailedEv, "degraded"],
       ["degraded", { type: "user_archived" }, "archived"],
       ["degraded", { type: "user_killed" }, "archived"],
       // From reconnecting
       ["reconnecting", { type: "both_ready" }, "reconnecting"],
       ["reconnecting", { type: "half_died", role: "observer" }, "reconnecting"],
       ["reconnecting", { type: "half_respawned", role: "observer" }, "reconnecting"],
-      ["reconnecting", { type: "reconnect_started" }, "reconnecting"],
-      ["reconnecting", { type: "reconnect_ok" }, "active"],
-      ["reconnecting", { type: "reconnect_failed" }, "degraded"],
+      ["reconnecting", reconnectStartedEv, "reconnecting"],
+      ["reconnecting", reconnectOkEv, "active"],
+      ["reconnecting", reconnectFailedEv, "degraded"],
       ["reconnecting", { type: "user_archived" }, "archived"],
       ["reconnecting", { type: "user_killed" }, "archived"],
       // From archived — terminal under every event
       ["archived", { type: "both_ready" }, "archived"],
       ["archived", { type: "half_died", role: "observer" }, "archived"],
       ["archived", { type: "half_respawned", role: "observer" }, "archived"],
-      ["archived", { type: "reconnect_started" }, "archived"],
-      ["archived", { type: "reconnect_ok" }, "archived"],
-      ["archived", { type: "reconnect_failed" }, "archived"],
+      ["archived", reconnectStartedEv, "archived"],
+      ["archived", reconnectOkEv, "archived"],
+      ["archived", reconnectFailedEv, "archived"],
       ["archived", { type: "user_archived" }, "archived"],
       ["archived", { type: "user_killed" }, "archived"],
     ];

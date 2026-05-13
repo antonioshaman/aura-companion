@@ -18,7 +18,7 @@
  * Renders nothing when the given session is not part of a Council group.
  */
 
-import { useCallback } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useStore } from "../../store.js";
 import {
   DEFAULT_OBSERVER_PANEL_WIDTH_PX,
@@ -72,14 +72,25 @@ function StatusPill({ state }: { state: ObserverPanelState }) {
         </div>
       );
     case "reconnecting":
+      // PLAN Task 14 (Saarinen): use `cc-info` (the in-progress / transient
+      // token, same family as `spawning`) instead of `cc-warning` (which is
+      // also `degraded`). Distinct visual semantics: blue ring spinning =
+      // working on it; amber dot static = bad settled state.
+      // PLAN Task 13 (a11y): `role="status"` makes the pill a polite live
+      // region — a screen reader hears one announcement when the panel
+      // transitions into reconnecting and one more when it resolves to
+      // active or escalates to degraded. `aria-atomic="true"` so the whole
+      // pill text is read, not just the diff. Spinner stays `aria-hidden`.
       return (
         <div
           data-testid="status-pill"
           data-state={state.name}
+          role="status"
           aria-busy="true"
-          className="flex items-center gap-2 text-cc-warning"
+          aria-atomic="true"
+          className="flex items-center gap-2 text-cc-info"
         >
-          <span aria-hidden="true" className="w-3 h-3 rounded-full border-2 border-cc-warning/30 border-t-cc-warning animate-spin" />
+          <span aria-hidden="true" className="w-3 h-3 rounded-full border-2 border-cc-info/30 border-t-cc-info animate-spin" />
           <span className="text-xs font-medium">Observer reconnecting</span>
         </div>
       );
@@ -124,6 +135,66 @@ function StatusPill({ state }: { state: ObserverPanelState }) {
           <span className="text-xs font-medium">{state.deadRole === "observer" ? "Observer offline" : "Orchestrator offline"}</span>
         </div>
       );
+    // Council Review 2026-05-13 Friedman #5 (closes recovery-branch-
+    // reachability cluster, convention EC-10): exhaustive case for the
+    // two new state variants added in Task 11. The TS `never` check
+    // below refuses to compile when a future variant lands without a
+    // matching renderer.
+    case "reviewing-stalled":
+      // Council Review 2026-05-13-0150 Friedman #10: stalled state must
+      // offer a next-step action. The pill itself stays declarative;
+      // the surrounding `DegradedBanner`-style banner pattern in
+      // ObserverPanel exposes a "Relaunch observer" button. The pill
+      // copy now hints that user action may be needed.
+      return (
+        <div
+          data-testid="status-pill"
+          data-state={state.name}
+          role="status"
+          aria-atomic="true"
+          className="flex items-center gap-2 text-cc-warning"
+          title={`Observer wake exceeded its timeout for phase ${state.phase}. The pair may be stuck — consider relaunching the observer.`}
+          aria-label={`Observer wake exceeded its timeout for phase ${state.phase}. The pair may be stuck — consider relaunching the observer.`}
+        >
+          <span aria-hidden="true" className="w-2 h-2 rounded-full bg-cc-warning" />
+          <span className="text-xs font-medium">Review stalled — relaunch?</span>
+          <span className="text-[10px] font-mono-code text-cc-muted">·</span>
+          <span className="text-[10px] font-mono-code text-cc-muted">{state.phase}</span>
+        </div>
+      );
+    case "queued-dropped": {
+      // Council Review 2026-05-13-0150 Friedman #9: explicit copy +
+      // tooltip drill-down. The user needs to know WHAT was skipped
+      // (earlier checkpoints) and that those are deliberate supersedes
+      // (newest-wins queue), not a missed review.
+      const droppedCount = state.droppedCheckpointIds.length;
+      const dropList = state.droppedCheckpointIds.join(", ");
+      const tooltip = `Server's mid-turn queue replaced ${droppedCount} earlier checkpoint${droppedCount === 1 ? "" : "s"} with the latest one before review. Superseded: ${dropList}.`;
+      return (
+        <div
+          data-testid="status-pill"
+          data-state={state.name}
+          role="status"
+          aria-atomic="true"
+          className="flex items-center gap-2 text-cc-info"
+          title={tooltip}
+          aria-label={tooltip}
+        >
+          <span aria-hidden="true" className="w-2 h-2 rounded-full bg-cc-info" />
+          <span className="text-xs font-medium">
+            Reviewed {state.lastPhase} ({droppedCount} earlier superseded)
+          </span>
+        </div>
+      );
+    }
+    default: {
+      // EC-10: TypeScript exhaustiveness check. Adding a new
+      // ObserverPanelState variant without extending this switch is a
+      // compile-time error rather than a silent empty-pill render.
+      const _exhaustive: never = state;
+      void _exhaustive;
+      return null;
+    }
   }
 }
 
@@ -186,10 +257,38 @@ export function ObserverPanel({
     if (group && onRespawnHalf) await onRespawnHalf(group.sessionGroupId);
   }, [group, onRespawnHalf]);
 
+  // Council Review 2026-05-13 React/Web UI #4 (closes recovery-branch-
+  // reachability cluster, convention EC-11): the deriver's
+  // `reviewing → reviewing-stalled` transition is wallclock-anchored on
+  // `lastCheckpointAt + wakeTimeoutMs`. Pure derivation re-runs only on
+  // state changes; without an explicit clock-tick subscription, the
+  // transition would only fire coincidentally after an unrelated event.
+  //
+  // While the panel sits in `reviewing` (server says observer is mid-
+  // turn), tick once per second so the deriver gets a chance to flip
+  // to `reviewing-stalled` past the deadline. Cleared when the panel
+  // leaves `reviewing`. Test paths supply `nowMs` explicitly so the
+  // interval is harmless there.
+  const [clockTick, setClockTick] = useState(0);
+  const isReviewingNow = group?.observerReviewing === true && typeof group?.lastCheckpointAt === "number";
+  useEffect(() => {
+    if (!isReviewingNow) return;
+    const handle = setInterval(() => setClockTick((t) => t + 1), 1000);
+    return () => clearInterval(handle);
+  }, [isReviewingNow]);
+  // Reference clockTick so the linter/runtime acknowledge the dep; the
+  // re-render itself is the point — value unused otherwise.
+  void clockTick;
+
   // Nothing to render when this session isn't in a Council group.
   if (!group) return null;
 
-  const state = deriveObserverPanelState({ group, findings, dismissedStopIds });
+  // Task 11: forward `nowMs` to the deriver so the `reviewing` →
+  // `reviewing-stalled` transition is deterministic — the wakeTimeoutMs
+  // bound is wallclock-anchored on `lastCheckpointAt`, and callers that
+  // need deterministic snapshots (tests, replay tooling) must control
+  // the same clock reference the deriver consumes.
+  const state = deriveObserverPanelState({ group, findings, dismissedStopIds, nowMs });
   if (!state) return null;
 
   const unresolvedCount = findUnresolvedStops(findings, dismissedStopIds).length;
@@ -242,6 +341,32 @@ export function ObserverPanel({
         <DegradedBanner deadRole={state.deadRole} onRespawn={handleRespawn} />
       )}
 
+      {/* Council Review 2026-05-13-0150 Friedman #10: stalled state next-
+          step affordance. Mirrors DegradedBanner shape — same Relaunch
+          action target. The user landed here after waiting >wakeTimeoutMs
+          (default 5 min); offer the recovery path explicitly. */}
+      {state.name === "reviewing-stalled" && onRespawnHalf && (
+        <div
+          data-testid="reviewing-stalled-banner"
+          className="shrink-0 px-3 py-2.5 border-b border-cc-warning/25 bg-cc-warning/5 flex items-center gap-3"
+        >
+          <div className="flex-1 text-xs text-cc-fg leading-snug">
+            <div className="font-medium">Review stalled</div>
+            <div className="text-cc-muted">
+              No review for phase {state.phase} in the expected window. Observer may be stuck.
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleRespawn}
+            data-council-stalled-primary=""
+            className="text-xs font-medium px-3 py-1.5 rounded-md bg-cc-warning/15 hover:bg-cc-warning/25 text-cc-warning transition-colors cursor-pointer"
+          >
+            Relaunch observer
+          </button>
+        </div>
+      )}
+
       {/* First-run microcopy (dismissable, per-user) */}
       {!firstRunDismissed && (
         <div className="shrink-0 px-3 py-2.5 border-b border-cc-border bg-cc-info/5">
@@ -266,6 +391,7 @@ export function ObserverPanel({
           onSelect={onOpenEvidence}
           onDismissStop={dismissStop}
           dismissedStopIds={dismissedStopIds}
+          announcerScope={group.sessionGroupId}
         />
       </div>
     </aside>

@@ -15,9 +15,16 @@
  * — forensic re-run depends on knowing which prompt the model saw.
  */
 
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, statSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { isAbsolute } from "node:path";
+import { dirname, isAbsolute, resolve as resolvePath, sep } from "node:path";
+import {
+  OBSERVER_WAKE_MAX_BYTES,
+  OBSERVER_WAKE_MAX_PATHS_PER_SECTION,
+  OBSERVER_WAKE_PAYLOAD_VERSION,
+  type CheckpointPayload,
+  type ObserverWakePayload,
+} from "./council-types.js";
 
 export const OBSERVER_PROMPT_SCHEMA_VERSION = 1 as const;
 
@@ -190,4 +197,319 @@ export function buildObserverContextManifest(args: {
   }
 
   return { delta, carried, dropped };
+}
+
+// ── Wake-message body builder ────────────────────────────────────────────────
+
+/**
+ * Reason a manifest path was dropped from the assembled wake body. The
+ * builder reports these to the caller (the orchestrator's dispatcher)
+ * which emits one EC-9 structured log entry per drop.
+ */
+export type ObserverWakePathDropReason =
+  | "realpath_resolve_failed"
+  | "resolves_outside_workspace";
+
+/** A single dropped manifest entry — section + workspace-relative path
+ *  + reason. Order-preserved from the input manifest. */
+export interface ObserverWakeDroppedPath {
+  section: "delta" | "carried" | "dropped";
+  path: string;
+  reason: ObserverWakePathDropReason;
+}
+
+/**
+ * Result of {@link buildObserverWakePayload}.
+ *
+ * `textBody` is the assembled hybrid body (H1 preamble + fenced JSON +
+ * directive terminator) intended as the `content` of a `user`-shaped
+ * NDJSON frame to the observer's CLI subprocess. `sha256` is the SHA-256
+ * of `textBody` for audit/recording attribution; it is NOT a transport
+ * checksum. `droppedPaths` enumerates manifest entries that were
+ * filtered out by the realpath boundary check (Hunt P1 — EC-7 idiom);
+ * callers MUST log each drop at EC-9 severity.
+ */
+export interface ObserverWakeBuildResult {
+  textBody: string;
+  sha256: string;
+  droppedPaths: ObserverWakeDroppedPath[];
+}
+
+/**
+ * EC-7 wrapper: realpath-resolve a workspace-relative manifest path and
+ * assert containment in the workspace root. The predicate (containment)
+ * is NEVER exported separately — only this wrapper that combines
+ * resolve-then-check as one atomic unit. This is the convention from
+ * EC-7 / `observer-write-policy.ts`'s `assertObserverWriteAllowed`,
+ * applied symmetrically to outbound manifest-path emission.
+ *
+ * Behaviour for non-existent paths: climb to the nearest existing parent
+ * and realpath that, then re-append the missing tail (mirrors the EC-7
+ * idiom on the write side). Symbolic links along the chain are followed
+ * — a symlink that escapes the workspace is caught here, not after the
+ * observer reads it.
+ *
+ * Returns `{ok: true, resolved}` when the realpath lies inside the
+ * workspace root (inclusive of the root itself). Returns `{ok: false,
+ * reason}` otherwise. Never throws — callers that need exception flow
+ * should wrap this themselves.
+ *
+ * `workspaceRoot` MUST be absolute and (ideally) already realpath-resolved
+ * by the caller — the function realpaths it defensively but a caller
+ * passing a non-canonical root short-circuits its own correctness
+ * argument. The check is `resolved === root` OR `resolved.startsWith(root + sep)`
+ * to avoid the classic prefix-confusion bug (`/work` accepting `/workspace-evil`).
+ */
+export function assertWakeManifestPathAllowed(
+  workspaceRelativePath: string,
+  workspaceRoot: string,
+): { ok: true; resolved: string } | { ok: false; reason: ObserverWakePathDropReason } {
+  if (!isAbsolute(workspaceRoot)) {
+    return { ok: false, reason: "realpath_resolve_failed" };
+  }
+  let rootCanonical: string;
+  try {
+    rootCanonical = realpathSync(workspaceRoot);
+  } catch {
+    // Workspace root itself does not exist or is unresolvable — refuse
+    // to make a containment claim against it.
+    return { ok: false, reason: "realpath_resolve_failed" };
+  }
+
+  // Join workspace-relative path to the canonical root. Use posix-style
+  // `resolve` so `..` segments collapse safely BEFORE realpath; the
+  // upstream validator (`isRelativeWorkspacePath`) already rejects `..`
+  // segments, but defence-in-depth means we don't trust the caller.
+  const joined = resolvePath(rootCanonical, workspaceRelativePath);
+
+  // Climb to the nearest existing ancestor and realpath that, then
+  // re-attach the missing tail. This handles the legitimate case where
+  // a checkpoint references a path the observer will create — and the
+  // hostile case where the missing tail is intended to mask the parent's
+  // symlink-escape.
+  let canonical: string;
+  try {
+    canonical = realpathSync(joined);
+  } catch {
+    // Climb. Loop bounded by path-depth (paths are ≤ MAX_PATH_LEN chars).
+    let cursor = joined;
+    let suffix = "";
+    while (true) {
+      const parent = dirname(cursor);
+      if (parent === cursor) {
+        // Reached filesystem root without finding an existing ancestor.
+        return { ok: false, reason: "realpath_resolve_failed" };
+      }
+      const tail = cursor.slice(parent.length);
+      suffix = tail + suffix;
+      cursor = parent;
+      try {
+        const parentCanonical = realpathSync(cursor);
+        canonical = parentCanonical + suffix;
+        break;
+      } catch {
+        // Continue climbing.
+      }
+    }
+  }
+
+  // Containment: canonical === rootCanonical (the workspace root itself)
+  // OR canonical begins with rootCanonical + sep. The +sep is what
+  // prevents the prefix-confusion vulnerability ("/work" accepting
+  // "/workspace-other").
+  if (canonical === rootCanonical) return { ok: true, resolved: canonical };
+  if (canonical.startsWith(rootCanonical + sep)) return { ok: true, resolved: canonical };
+  return { ok: false, reason: "resolves_outside_workspace" };
+}
+
+/** The exact triplet that would prematurely close our fenced JSON block. */
+const FENCE_TRIPLET = "```";
+
+/**
+ * Reject path strings carrying NDJSON-unframing or fence-unframing bytes.
+ *
+ * `council-types.isRelativeWorkspacePath` rejects NUL but accepts CR/LF
+ * (POSIX allows newlines inside filenames). At the wake-builder boundary
+ * we tighten this: CR or LF inside a manifest path is almost always
+ * either an adversarial-looking write by a buggy producer or a planted
+ * injection attempt — neither belongs in a wake frame the observer
+ * autoregresses over. The check pairs with the size and section caps
+ * for input-side defence (Hunt P1 — NDJSON line-discipline injection).
+ */
+function hasUnsafeWireCharacters(s: string): boolean {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c === 0x00 || c === 0x0a || c === 0x0d) return true;
+  }
+  return false;
+}
+
+/**
+ * Pure: format a deterministic wake message body the observer can parse.
+ *
+ * Body shape (in order, newline-joined):
+ * 1. `# Council Checkpoint — <phase>` — H1 preamble naming the action.
+ * 2. Single prose sentence pointing at the manifest below.
+ * 3. ```json``` fence carrying an {@link ObserverWakePayload}. Version is
+ *    the first key; echo fields (`session_group_id`, `checkpoint_id`,
+ *    `phase`, `checkpoint_seq`) precede the content arrays so the
+ *    observer's review can copy-paste them rather than synthesise.
+ * 4. Single imperative directive sentence pointing at the system
+ *    prompt's ObserverReviewPayload contract.
+ *
+ * Defensive input-side validation (Hunt P1; Willison P8):
+ * - Each manifest section is capped at
+ *   {@link OBSERVER_WAKE_MAX_PATHS_PER_SECTION} independently — a runaway
+ *   `delta` cannot displace `carried`/`dropped` from the observer's view.
+ * - Every manifest path is scanned for CR/LF/NUL via
+ *   {@link hasUnsafeWireCharacters} — paths that survived the watcher
+ *   boundary but would be ambiguous inside our fenced block are rejected
+ *   here, not escaped silently.
+ * - Every manifest path AND echo field is scanned for the literal
+ *   ``` triplet — would prematurely close our fence. Reject on the writer
+ *   side (EC-5 idiom: refuse unknown frame discriminators rather than
+ *   escape away ambiguity).
+ * - Total assembled body capped at {@link OBSERVER_WAKE_MAX_BYTES}.
+ *
+ * Throws a typed `Error` on validation failure. The dispatcher (Task 3)
+ * catches and emits a structured EC-9 log line; the throw is the contract
+ * because silent truncation would hide an orchestrator emitting
+ * adversarial-looking content.
+ */
+export function buildObserverWakePayload(args: {
+  checkpoint: Pick<CheckpointPayload, "session_group_id" | "checkpoint_id" | "phase" | "sequence">;
+  manifest: { delta: readonly string[]; carried: readonly string[]; dropped: readonly string[] };
+  /** Absolute path to the workspace root. Manifest paths that resolve
+   *  (via realpath) outside this root are dropped from the assembled
+   *  body and reported in {@link ObserverWakeBuildResult.droppedPaths}.
+   *  EC-7 idiom — the filesystem-access predicate is callable only via
+   *  the resolving wrapper {@link assertWakeManifestPathAllowed}. */
+  workspaceRoot: string;
+}): ObserverWakeBuildResult {
+  const { checkpoint, manifest, workspaceRoot } = args;
+
+  // Per-section length caps — bounded independently. Char-level
+  // validation (CR/LF/NUL/fence-triplet) happens first; realpath
+  // containment runs after so a malformed path is rejected before we
+  // attempt a filesystem stat.
+  const sections: Array<readonly [name: "delta" | "carried" | "dropped", paths: readonly string[]]> = [
+    ["delta", manifest.delta],
+    ["carried", manifest.carried],
+    ["dropped", manifest.dropped],
+  ];
+  for (const [name, paths] of sections) {
+    if (paths.length > OBSERVER_WAKE_MAX_PATHS_PER_SECTION) {
+      throw new Error(
+        `observer-wake: section "${name}" has ${paths.length} paths, exceeds OBSERVER_WAKE_MAX_PATHS_PER_SECTION (${OBSERVER_WAKE_MAX_PATHS_PER_SECTION})`,
+      );
+    }
+    for (const p of paths) {
+      if (typeof p !== "string") {
+        throw new Error(`observer-wake: non-string entry in manifest section "${name}"`);
+      }
+      if (hasUnsafeWireCharacters(p)) {
+        throw new Error(
+          `observer-wake: manifest path in "${name}" contains CR/LF/NUL (refusing to serialise): ${p.slice(0, 64)}`,
+        );
+      }
+      if (p.includes(FENCE_TRIPLET)) {
+        throw new Error(
+          `observer-wake: manifest path in "${name}" contains \`\`\` triplet (refusing to serialise): ${p.slice(0, 64)}`,
+        );
+      }
+    }
+  }
+
+  // Realpath-bound containment check. Drop (not throw) — a single
+  // mis-listed path should not invalidate the whole wake. The caller
+  // (dispatcher in Task 3) logs each drop at EC-9. Dropped paths are
+  // EXCLUDED from the serialised body the observer sees, so the
+  // observer cannot be tricked into reading them via the prompt
+  // injection vector even if its tool profile would have permitted
+  // the read.
+  const droppedPaths: ObserverWakeDroppedPath[] = [];
+  const filteredManifest: Record<"delta" | "carried" | "dropped", string[]> = {
+    delta: [],
+    carried: [],
+    dropped: [],
+  };
+  for (const [name, paths] of sections) {
+    for (const p of paths) {
+      const check = assertWakeManifestPathAllowed(p, workspaceRoot);
+      if (!check.ok) {
+        droppedPaths.push({ section: name, path: p, reason: check.reason });
+        continue;
+      }
+      filteredManifest[name].push(p);
+    }
+  }
+
+  // Echo fields appear verbatim in BOTH the prose preamble (phase) AND
+  // the JSON block (all four). They were already validated by
+  // parseCheckpointPayload's isBoundedToken/isValidPhase — those reject
+  // ≤0x20 controls including CR/LF/NUL — but the symmetric check here
+  // makes the wake builder's contract self-contained and grep-able.
+  const echoFields: Array<[name: string, value: string]> = [
+    ["session_group_id", checkpoint.session_group_id],
+    ["checkpoint_id", checkpoint.checkpoint_id],
+    ["phase", checkpoint.phase],
+  ];
+  for (const [name, value] of echoFields) {
+    if (typeof value !== "string" || value.length === 0) {
+      throw new Error(`observer-wake: echo field "${name}" is missing or non-string`);
+    }
+    if (hasUnsafeWireCharacters(value)) {
+      throw new Error(`observer-wake: echo field "${name}" contains CR/LF/NUL`);
+    }
+    if (value.includes(FENCE_TRIPLET)) {
+      throw new Error(`observer-wake: echo field "${name}" contains \`\`\` triplet`);
+    }
+  }
+  if (!Number.isInteger(checkpoint.sequence) || checkpoint.sequence < 0) {
+    throw new Error(`observer-wake: checkpoint.sequence must be a non-negative integer`);
+  }
+
+  // Build the typed payload from the FILTERED manifest. Key order is
+  // intentional and load-bearing: version first, then echo fields, then
+  // content arrays. Paths that failed the realpath boundary check are
+  // EXCLUDED from the body — the observer never sees them.
+  const payload: ObserverWakePayload = {
+    observer_wake_payload_version: OBSERVER_WAKE_PAYLOAD_VERSION,
+    session_group_id: checkpoint.session_group_id,
+    checkpoint_id: checkpoint.checkpoint_id,
+    phase: checkpoint.phase,
+    checkpoint_seq: checkpoint.sequence,
+    delta: filteredManifest.delta,
+    carried: filteredManifest.carried,
+    dropped: filteredManifest.dropped,
+  };
+
+  const jsonBlock = JSON.stringify(payload, null, 2);
+
+  // Hybrid body: H1 preamble → prose pointer → fenced JSON → directive
+  // terminator. Plain English on either side of the fence is the
+  // portability hedge across model families (Willison Principle 7).
+  const textBody = [
+    `# Council Checkpoint — ${checkpoint.phase}`,
+    "",
+    "A new checkpoint has arrived. Read only the workspace-relative paths listed under `delta` and `carried` in the manifest below. Files listed under `dropped` are explicitly out of scope this cycle.",
+    "",
+    "```json",
+    jsonBlock,
+    "```",
+    "",
+    "Emit one review file matching the `ObserverReviewPayload` JSON schema described in your system prompt. Set `observer_wake_payload_version_echo` to the integer value of `observer_wake_payload_version` from the manifest. Echo `session_group_id`, `checkpoint_id`, and `phase` from the manifest verbatim. Begin.",
+    "",
+  ].join("\n");
+
+  const byteLen = Buffer.byteLength(textBody, "utf8");
+  if (byteLen > OBSERVER_WAKE_MAX_BYTES) {
+    throw new Error(
+      `observer-wake: body is ${byteLen} bytes, exceeds OBSERVER_WAKE_MAX_BYTES (${OBSERVER_WAKE_MAX_BYTES})`,
+    );
+  }
+
+  const sha256 = createHash("sha256").update(textBody, "utf8").digest("hex");
+
+  return { textBody, sha256, droppedPaths };
 }

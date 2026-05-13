@@ -10,9 +10,33 @@ const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
+/**
+ * Recording-file header schema version. Bumped when the entry shape
+ * gains a discriminant field that replay tooling must branch on.
+ *
+ * - v1: ts + dir + raw + ch (+ optional event + meta for lifecycle).
+ * - v2: adds optional `origin` field on entries to distinguish
+ *   server-internal-origin sends (council auto-wake) from
+ *   browser-relayed user input. Omitted field defaults to "browser"
+ *   for back-compat with historical recordings.
+ */
+export const RECORDING_HEADER_VERSION = 2 as const;
+
+/**
+ * Versions readers must accept. Writers always emit
+ * {@link RECORDING_HEADER_VERSION}; readers tolerate any version in this
+ * set to preserve forensic access to historical recordings across
+ * schema bumps. Bump and migrate readers in lockstep when a new schema
+ * field becomes load-bearing.
+ */
+export type RecordingHeaderVersion = 1 | 2;
+export const RECORDING_HEADER_VERSIONS_ACCEPTED: ReadonlySet<RecordingHeaderVersion> = new Set([1, 2]);
+
 export interface RecordingHeader {
   _header: true;
-  version: 1;
+  /** Writer emits {@link RECORDING_HEADER_VERSION}; reader tolerates any
+   *  value in {@link RECORDING_HEADER_VERSIONS_ACCEPTED}. */
+  version: RecordingHeaderVersion;
   session_id: string;
   backend_type: BackendType;
   started_at: number;
@@ -29,6 +53,19 @@ export type RecordingLifecycleEvent =
   | "reconnect_attempt"
   | "reconnect_success";
 
+/**
+ * Provenance of a recorded `out` frame.
+ *
+ * - `"browser"` (default; field omitted for back-compat) — frame
+ *   relayed from a browser-originated message via the adapter's
+ *   `send()` method.
+ * - `"server:council-wake"` — frame synthesised by the server's
+ *   Council Mode auto-wake dispatcher (Story 2 AC#1). Inbound frames
+ *   (`dir: "in"`) never carry an origin — provenance is implicit from
+ *   the CLI subprocess.
+ */
+export type RecordingOrigin = "browser" | "server:council-wake";
+
 export interface RecordingEntry {
   ts: number;
   dir: RecordingDirection;
@@ -38,6 +75,9 @@ export interface RecordingEntry {
   event?: RecordingLifecycleEvent;
   /** Optional metadata for lifecycle events (e.g. close code, error message). */
   meta?: Record<string, unknown>;
+  /** Provenance of `out` frames — omitted for `in` frames and for
+   *  legacy "browser" sends to keep on-disk byte size minimal. */
+  origin?: RecordingOrigin;
 }
 
 export interface RecordingFileMeta {
@@ -76,7 +116,7 @@ export class SessionRecorder {
 
     const header: RecordingHeader = {
       _header: true,
-      version: 1,
+      version: RECORDING_HEADER_VERSION,
       session_id: sessionId,
       backend_type: backendType,
       started_at: Date.now(),
@@ -85,13 +125,19 @@ export class SessionRecorder {
     appendFileSync(this.filePath, JSON.stringify(header) + "\n");
   }
 
-  record(dir: RecordingDirection, raw: string, channel: RecordingChannel): void {
+  record(
+    dir: RecordingDirection,
+    raw: string,
+    channel: RecordingChannel,
+    origin?: RecordingOrigin,
+  ): void {
     if (this.closed) return;
     const entry: RecordingEntry = {
       ts: Date.now(),
       dir,
       raw,
       ch: channel,
+      ...(origin ? { origin } : {}),
     };
     try {
       appendFileSync(this.filePath, JSON.stringify(entry) + "\n");
@@ -220,6 +266,12 @@ export class RecorderManager {
   /**
    * Record a raw message. No-op if recording is disabled for this session.
    * Lazily creates the SessionRecorder on first call.
+   *
+   * `origin` annotates `dir: "out"` frames with their provenance —
+   * "browser" for relayed user input (default; field omitted on disk),
+   * "server:council-wake" for server-synthesised wake frames from the
+   * Council Mode dispatcher. Inbound frames never carry origin; the
+   * caller passes `undefined` and the field is dropped.
    */
   record(
     sessionId: string,
@@ -228,6 +280,7 @@ export class RecorderManager {
     channel: RecordingChannel,
     backendType: BackendType,
     cwd: string,
+    origin?: RecordingOrigin,
   ): void {
     if (!this.isRecording(sessionId)) return;
 
@@ -237,7 +290,7 @@ export class RecorderManager {
       recorder = new SessionRecorder(sessionId, backendType, cwd, this.recordingsDir);
       this.recorders.set(sessionId, recorder);
     }
-    recorder.record(dir, raw, channel);
+    recorder.record(dir, raw, channel, origin);
   }
 
   /** Record a connection lifecycle event for diagnostics. */

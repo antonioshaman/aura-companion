@@ -1182,6 +1182,11 @@ function handleParsedMessage(
         observerSessionId: data.observerSessionId,
         status: "active",
         pairing: data.pairing,
+        // Task 9: server-published wake-to-review timeout. The panel-
+        // state deriver (Task 11) bounds the `reviewing` interval by
+        // `lastCheckpointAt + wakeTimeoutMs`; past that, fall through
+        // to `reviewing-stalled`.
+        wakeTimeoutMs: data.wakeTimeoutMs,
       });
       break;
     }
@@ -1193,6 +1198,21 @@ function handleParsedMessage(
 
     case "group_degraded": {
       store.setGroupStatus(data.sessionGroupId, "degraded", { deadRole: data.deadRole });
+      break;
+    }
+
+    // PLAN Task 9: light up the previously-unreachable ObserverPanel
+    // `reconnecting` branch. The pill render code in
+    // `components/council/ObserverPanel.tsx` + the priority ladder in
+    // `observer-panel-state.ts` already support this status; this case
+    // is the missing dispatch that makes it reachable in production.
+    //
+    // `deadlineMs` is intentionally dropped on the floor — per React
+    // expert recommendation, no consumer reads it today; storing it
+    // would become a stale field on the next active flip. When/if a
+    // countdown UI ships, plumb in the same commit as its renderer.
+    case "group_reconnecting": {
+      store.setGroupStatus(data.sessionGroupId, "reconnecting");
       break;
     }
 
@@ -1217,6 +1237,12 @@ function handleParsedMessage(
         observerModel: data.observerModel,
         observerProvider: data.observerProvider,
         timestamp: data.timestamp,
+        // Task 9: server-reported checkpoint ids dropped by the mid-
+        // turn queue between previous review and this one. Slice uses
+        // this to flip the panel into `queued-dropped` state.
+        ...(data.supersededCheckpointIds !== undefined
+          ? { supersededCheckpointIds: data.supersededCheckpointIds }
+          : {}),
       });
       break;
     }

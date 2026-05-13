@@ -140,6 +140,29 @@ export class SessionStore {
     this.debounceTimers.clear();
   }
 
+  /**
+   * PLAN Task 10: flush every pending debounced `save()` to disk
+   * synchronously. Required at shutdown — without this, a status flip
+   * (or any other state change) that landed in the 150ms debounce
+   * window seconds before SIGTERM is lost on next boot. The current
+   * dispose() cancels timers without writing; flushAll() writes the
+   * pending payload.
+   *
+   * `pending` accepts a getter for the latest session snapshot so the
+   * caller (WsBridge) can map the queued session-id back to its
+   * current in-memory `Session` and pass through `toPersisted`. If the
+   * snapshot is missing, the timer is cancelled (the session was
+   * removed during shutdown — nothing to flush).
+   */
+  flushAll(pending: (sessionId: string) => PersistedSession | null): void {
+    for (const [sessionId, timer] of this.debounceTimers) {
+      clearTimeout(timer);
+      const snapshot = pending(sessionId);
+      if (snapshot) this.saveSync(snapshot);
+    }
+    this.debounceTimers.clear();
+  }
+
   get directory(): string {
     return this.dir;
   }

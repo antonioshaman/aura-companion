@@ -167,8 +167,8 @@ A user-opt-in flag on the New Session form (`councilMode: "council"` + `councilP
 5. On each checkpoint: `handleCouncilCheckpoint` rejects stale sequences, captures the prior checkpoint, emits `group:checkpoint`.
 6. On each review file: `handleCouncilReview` runs `validateObserverFindings` against the manifest's delta paths (via `buildObserverContextManifest`); STOPs outside the modified set OR missing on disk are downgraded to NOTE server-side. Findings get deterministic `fnd_<hex>` ids derived from `(sessionGroupId, checkpointId, observerProvider, findingIndex, evidence_path, claim)` — restart-replay produces stable ids, browser dedup catches it. Emits `group:review` with both findings + downgrades.
 7. `wireGroupListeners` in `initialize()` fans `group:created` / `group:exited` / `group:degraded` / `group:checkpoint` / `group:review` out to both halves' browsers via `wsBridge.broadcastToGroup`.
-8. `applyEvent` on the coordinator's state machine emits `group:degraded` / `group:exited` on the relevant transitions; `archiveGroup` emits `group:exited` directly so the browser can clean its store BEFORE the kills proceed.
-9. Unintentional `session:exited` against a council-tracked half drives `group:degraded` AND marks BOTH ids in `intentionalKills` BEFORE the signal (EC-2 invariant) so the proactive-relaunch listener does not race.
+8. `applyEvent` on the coordinator's state machine is the **sole** lifecycle mutator: a pure `deriveSideEffects(prev, next, event)` table decides which `group:*` bus events fire and which EC-9 log entries land; `applyEvent` drains both. `archiveGroup` routes through `applyEvent({type:"user_archived"})` so the `group:exited` emit comes from the same channel, still firing BEFORE the kills proceed so the browser cleans its store first.
+9. Unintentional `session:exited` against a council-tracked half drives `coordinator.armReconnect` (45s grace, env-overridable via `COMPANION_GROUP_RECONNECT_GRACE_MS`) instead of immediate `group:degraded`. If the half re-handshakes via `session:cli-id-received` within the window → `reconnect_ok` → `group:created` re-broadcast (active). Otherwise → `reconnect_failed` → `group:degraded`. `relaunchExhaustedNotified` or `intentionalKills` short-circuit the grace; cascading second-half death also short-circuits. EC-2 invariant is preserved on the kill paths (archive/delete still mark both intentional first).
 
 **Browser pipeline:**
 1. `ws.ts` switch dispatches `group_*` / `observer_review` to council slice actions.
@@ -199,15 +199,15 @@ Always use `agent-browser` CLI command to explore the browser. Never use playwri
 ## Pull Requests
 
 When submitting a pull request:
-- use commitzen to format the commit message and the PR title
-- Add a screenshot of the changes in the PR description if its a visual change
+- use commitizen to format the commit message and the PR title
+- Add a screenshot of the changes in the PR description if it's a visual change
 - Explain simply what the PR does and why it's needed
 - Tell me if the code was reviewed by a human or simply generated directly by an AI. 
 
 ## Linear Issues
 
 When creating or updating Linear issues:
-- do not use commitzen-style titles in Linear
+- do not use commitizen-style titles in Linear
 - use clear product-style titles that describe user value/outcome
 
 ### How To Open A PR With GitHub CLI
@@ -216,16 +216,16 @@ Use this flow from the repository root:
 
 ```bash
 # 1) Create a branch
-git checkout -b fix/short-description (commitzen)
+git checkout -b fix/short-description (commitizen)
 
-# 2) Commit using commitzen format
+# 2) Commit using commitizen format
 git add <files>
-git commit -m "fix(scope): short summary" (commitzen)
+git commit -m "fix(scope): short summary" (commitizen)
 
 # 3) Push and set upstream
 git push -u origin fix/short-description
 
-# 4) Create PR (title should follow commitzen style)
+# 4) Create PR (title should follow commitizen style)
 gh pr create --base main --head fix/short-description --title "fix(scope): short summary"
 ```
 

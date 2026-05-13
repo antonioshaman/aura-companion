@@ -11,6 +11,7 @@
  *    transparent to the user.
  */
 
+import { useEffect, useState } from "react";
 import type { ObserverFinding } from "../../types.js";
 
 export interface FindingsLogProps {
@@ -23,6 +24,39 @@ export interface FindingsLogProps {
   onDismissStop?: (findingId: string) => void;
   /** Set of STOP ids already dismissed. Drives the per-row dismiss-button visibility. */
   dismissedStopIds?: ReadonlySet<string>;
+  /**
+   * Council Review 2026-05-13 a11y #10: scope key for the SR
+   * announcement-coalescer cross-mount memory. Pass a stable id
+   * (typically `sessionGroupId`) and the FindingsLog will only
+   * announce findings that haven't been announced under this key
+   * before — even across panel collapse/expand cycles that re-mount
+   * the component. When omitted, defaults to a module-level shared
+   * key (legacy single-group behaviour kept for back-compat).
+   */
+  announcerScope?: string;
+}
+
+/**
+ * Module-level coalescer for the SR summary announcer. Survives all
+ * FindingsLog mount/unmount cycles so panel collapse/expand does not
+ * re-announce existing findings. Keyed by `announcerScope` (typically
+ * the sessionGroupId) so multiple Council groups in the same browser
+ * tab maintain independent announcement state. Never freed —
+ * accumulating ids are bounded by the lifetime of the page; future
+ * cleanup belongs in the council slice's `removeGroup` if accumulation
+ * becomes a concern.
+ */
+const ANNOUNCED_FINDING_IDS_BY_SCOPE = new Map<string, Set<string>>();
+const DEFAULT_ANNOUNCER_SCOPE = "__default__";
+
+/**
+ * Council Review 2026-05-13-0150 React × Fowler #15: exposed for the
+ * slice's `removeGroup` action to call so an exited group's announcer
+ * state doesn't leak. Closes the JSDoc-only-contract concern from the
+ * regression review.
+ */
+export function clearAnnouncerScope(scope: string): void {
+  ANNOUNCED_FINDING_IDS_BY_SCOPE.delete(scope);
 }
 
 /**
@@ -82,16 +116,41 @@ function SeverityDot({ finding }: { finding: ObserverFinding }) {
   return <span aria-hidden="true" className={`shrink-0 w-2 h-2 rounded-full ${cls.dot}`} />;
 }
 
+/**
+ * Council Review 2026-05-13 Friedman #19: exhaustive switch — adding a
+ * new downgrade reason without extending this map is a compile-time
+ * error rather than a fall-through to "not in modified files".
+ */
+function downgradeReasonHuman(reason: NonNullable<ObserverFinding["downgradeReason"]>): string {
+  switch (reason) {
+    case "evidence_missing_on_disk":
+      return "evidence not on disk";
+    case "evidence_not_in_modified_set":
+      return "not in modified files";
+    case "wake_version_mismatch":
+      return "schema mismatch — review may be stale";
+    default: {
+      const _exhaustive: never = reason;
+      void _exhaustive;
+      return "downgraded";
+    }
+  }
+}
+
 function DowngradedChip({ reason }: { reason: NonNullable<ObserverFinding["downgradeReason"]> }) {
-  const human = reason === "evidence_missing_on_disk"
-    ? "evidence not on disk"
-    : "not in modified files";
+  const human = downgradeReasonHuman(reason);
+  // Council Review 2026-05-13-0150 a11y #8: render the reason inline as
+  // visible text AND expose it via aria-label so the chip is not silent
+  // to keyboard / screen-reader users. `title` stays for sighted-mouse
+  // discoverability but is no longer the sole channel for the reason.
   return (
     <span
-      className="ml-1 inline-flex items-center text-[9px] uppercase tracking-wide font-mono-code px-1.5 py-0.5 rounded bg-cc-muted/10 text-cc-muted border border-cc-border"
+      className="ml-1 inline-flex items-center gap-1 text-[9px] uppercase tracking-wide font-mono-code px-1.5 py-0.5 rounded bg-cc-muted/10 text-cc-muted border border-cc-border"
       title={`Server downgraded this STOP — ${human}`}
+      aria-label={`Server downgraded this STOP — ${human}`}
     >
       downgraded
+      <span className="opacity-70 normal-case font-normal tracking-normal">· {human}</span>
     </span>
   );
 }
@@ -150,48 +209,128 @@ function FindingRow({
   );
 }
 
+/**
+ * Pure: derive the one-line screen-reader summary for a review event.
+ * Exported so the test pack (Task 13) can pin both the math and the
+ * grammar without rendering a component. Singular/plural distinctions
+ * matter — SR users hear this verbatim every checkpoint with findings.
+ */
+export function buildFindingsReviewSummary(args: {
+  newBlockers: number;
+  newWarnings: number;
+  newNotes: number;
+  newInfos: number;
+}): string {
+  const parts: string[] = [];
+  if (args.newBlockers > 0) parts.push(`${args.newBlockers} blocker${args.newBlockers === 1 ? "" : "s"}`);
+  if (args.newWarnings > 0) parts.push(`${args.newWarnings} warning${args.newWarnings === 1 ? "" : "s"}`);
+  if (args.newNotes > 0) parts.push(`${args.newNotes} note${args.newNotes === 1 ? "" : "s"}`);
+  if (args.newInfos > 0) parts.push(`${args.newInfos} info`);
+  if (parts.length === 0) return "Observer review complete: no findings";
+  return `Observer review complete: ${parts.join(", ")}`;
+}
+
 export function FindingsLog({
   findings,
   nowMs,
   onSelect,
   onDismissStop,
   dismissedStopIds,
+  announcerScope,
 }: FindingsLogProps) {
   // Capture `Date.now()` at render time so tests can pass a fixed reference.
   const now = typeof nowMs === "number" ? nowMs : Date.now();
+
+  // Task 12: cadence-aware live-region pattern.
+  //
+  // The row container is `role="log" aria-live="off"` — `log` is kept
+  // for screen-reader landmark navigation (JAWS/NVDA expose log
+  // landmarks for jump-to), but `aria-live="off"` prevents the polite
+  // queue from filling with per-row append events. With auto-wake firing
+  // on every checkpoint, the previous `aria-live="polite"` on this
+  // container produced 3–8 rapid-fire announcements per phase — an
+  // unusable cadence for SR users running a Carmack-Council pipeline.
+  //
+  // The summary announcer below collapses each REVIEW event (one
+  // checkpoint round-trip) into a single polite line.
+  //
+  // Council Review 2026-05-13 a11y #10: the announcement-coalescer
+  // state lives in the module-level ANNOUNCED_FINDING_IDS_BY_SCOPE Map,
+  // not in a per-mount useRef. Collapsing and re-expanding the panel
+  // (which unmounts FindingsLog) no longer re-announces existing
+  // findings. `aria-atomic="true"` ensures the announcer reads the
+  // whole summary each time rather than diffing into a stream.
+  const scope = announcerScope ?? DEFAULT_ANNOUNCER_SCOPE;
+  const [announcement, setAnnouncement] = useState<string>("");
+  useEffect(() => {
+    const seen = ANNOUNCED_FINDING_IDS_BY_SCOPE.get(scope) ?? new Set<string>();
+    const newOnes = findings.filter((f) => !seen.has(f.id));
+    if (newOnes.length === 0) return;
+    for (const f of newOnes) seen.add(f.id);
+    ANNOUNCED_FINDING_IDS_BY_SCOPE.set(scope, seen);
+    const summary = buildFindingsReviewSummary({
+      newBlockers: newOnes.filter((f) => f.severity === "STOP" && f.wasDowngraded !== true).length,
+      newWarnings: newOnes.filter((f) => f.severity === "WARN").length,
+      newNotes: newOnes.filter((f) => f.severity === "NOTE" || (f.severity === "STOP" && f.wasDowngraded === true)).length,
+      newInfos: newOnes.filter((f) => f.severity === "INFO").length,
+    });
+    setAnnouncement(summary);
+  }, [findings, scope]);
+
+  // Council Review 2026-05-13 a11y #20: only render the announcer once
+  // it has content — empty `role="status"` mounts cause some SR
+  // engines (VoiceOver historically) to announce "blank".
+  const summaryAnnouncer = announcement.length > 0 ? (
+    <div
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      data-testid="findings-review-announcer"
+      className="sr-only"
+    >
+      {announcement}
+    </div>
+  ) : null;
+
   if (findings.length === 0) {
     return (
-      <div
-        role="log"
-        aria-live="polite"
-        aria-label="Observer findings"
-        className="px-3 py-4 text-xs text-cc-muted"
-      >
-        No findings yet.
-      </div>
+      <>
+        <div
+          role="log"
+          aria-live="off"
+          aria-label="Observer findings"
+          className="px-3 py-4 text-xs text-cc-muted"
+        >
+          No findings yet.
+        </div>
+        {summaryAnnouncer}
+      </>
     );
   }
   // role="log" must live on a generic container (axe aria-allowed-role —
   // role=log on <ul> is rejected). Wrap the list in a div that owns the
   // log semantics; the inner <ul> retains its native list semantics.
   return (
-    <div
-      role="log"
-      aria-live="polite"
-      aria-label={`Observer findings (${findings.length})`}
-    >
-      <ul className="border-t border-cc-border bg-cc-card list-none">
-        {findings.map((f) => (
-          <FindingRow
-            key={f.id}
-            finding={f}
-            nowMs={now}
-            onSelect={onSelect}
-            onDismissStop={onDismissStop}
-            isDismissed={dismissedStopIds?.has(f.id) ?? false}
-          />
-        ))}
-      </ul>
-    </div>
+    <>
+      <div
+        role="log"
+        aria-live="off"
+        aria-label="Observer findings"
+      >
+        <ul className="border-t border-cc-border bg-cc-card list-none">
+          {findings.map((f) => (
+            <FindingRow
+              key={f.id}
+              finding={f}
+              nowMs={now}
+              onSelect={onSelect}
+              onDismissStop={onDismissStop}
+              isDismissed={dismissedStopIds?.has(f.id) ?? false}
+            />
+          ))}
+        </ul>
+      </div>
+      {summaryAnnouncer}
+    </>
   );
 }

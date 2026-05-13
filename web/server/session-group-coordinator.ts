@@ -1,9 +1,17 @@
 import { randomBytes } from "node:crypto";
 import { isSupportedPairing } from "./backend-provider.js";
 import { GROUP_ID_PATTERN } from "./group-authorization.js";
-import { type GroupEvent, type GroupStatus, transition } from "./group-state-machine.js";
+import {
+  deriveSideEffects,
+  type GroupBusSideEffect,
+  type GroupEvent,
+  type GroupLogEntry,
+  type GroupStatus,
+  transition,
+} from "./group-state-machine.js";
 import type { BackendType, SessionGroupRole } from "./session-types.js";
 import { companionBus } from "./event-bus.js";
+import { log } from "./logger.js";
 
 /**
  * Cryptographically random group ID. ≥128 bits of entropy from
@@ -75,6 +83,38 @@ export interface SessionGroupCoordinatorDeps {
   kill: SessionKiller;
   /** Optional sink for kill-failure telemetry. Defaults to a console.warn fallback. */
   onError?: CoordinatorErrorSink;
+  /** Injectable clock for deterministic latency measurements in tests.
+   *  Defaults to `Date.now`. Bun/Hono Backend P5: never read `Date.now` in
+   *  hot paths that tests need to pin without `vi.useFakeTimers()`. */
+  now?: () => number;
+  /** Group-level reconnect grace window in ms (PLAN Task 2). Optional with
+   *  a 45s default; the orchestrator resolves `COMPANION_GROUP_RECONNECT_GRACE_MS`
+   *  at module load and passes it here so the coordinator never reads env in
+   *  hot paths. */
+  graceMs?: number;
+}
+
+/**
+ * Per-group reconnect bookkeeping. Coordinator-private — never exposed on
+ * `GroupRecord`, which would tempt parallel-status fields and violate AP-2.
+ * The `status` on the record is the only lifecycle truth; this context is
+ * just the metadata the coordinator needs to time the grace window and bind
+ * `reconnect_ok` to the half that actually disconnected.
+ *
+ * `survivingRole` is the alive half (the one whose ws frames will reach
+ * the browser); `deadRole` is the half we're waiting on. `snapshotSessionId`
+ * binds `reconnect_ok` to the exact `sessionId` that disconnected — see
+ * Hunt recommendation in PLAN: a different process race-handshaking on the
+ * same group cannot claim the slot.
+ */
+export interface ReconnectContext {
+  sessionGroupId: string;
+  survivingRole: SessionGroupRole;
+  deadRole: SessionGroupRole;
+  snapshotSessionId: string;
+  startedAtMs: number;
+  deadlineMs: number;
+  timer: ReturnType<typeof setTimeout> | null;
 }
 
 /**
@@ -87,7 +127,10 @@ export interface SessionGroupCoordinatorDeps {
  */
 export class SessionGroupCoordinator {
   private groups = new Map<string, GroupRecord>();
+  private reconnectContexts = new Map<string, ReconnectContext>();
   private readonly onError: CoordinatorErrorSink;
+  private readonly now: () => number;
+  private readonly graceMs: number;
 
   constructor(private deps: SessionGroupCoordinatorDeps) {
     this.onError =
@@ -97,6 +140,8 @@ export class SessionGroupCoordinator {
           `[session-group-coordinator] ${event.op} failed for ${event.sessionId} (group ${event.sessionGroupId}):`,
           event.error,
         ));
+    this.now = deps.now ?? (() => Date.now());
+    this.graceMs = deps.graceMs ?? 45_000;
   }
 
   /**
@@ -155,28 +200,201 @@ export class SessionGroupCoordinator {
     }
   }
 
-  /** Apply a state-machine event to a group. Returns the resulting status,
-   *  or null if the group is unknown.
+  /**
+   * Apply a state-machine event to a group. Returns the resulting status,
+   * or null if the group is unknown.
    *
-   *  Emits `group:degraded` / `group:exited` on the companion bus when the
-   *  transition crosses a meaningful boundary (Realtime council review #3):
-   *  the wire variants `group_degraded` / `group_exited` had been declared
-   *  + listened-for but never fired.
+   * **Sole lifecycle mutator** (PLAN Task 1 keystone, AP-2 enforced): every
+   * bus emit on `group:*` and every EC-9 log entry for a transition flows
+   * through this method. Callers do not need to remember a paired
+   * `bus.emit` or `log.info` — the pure `deriveSideEffects` function
+   * decides what fires, this method drains it. Adding a new event arm is
+   * one change to the state machine + side-effect table; the rest is
+   * automatic.
    */
   applyEvent(sessionGroupId: string, event: GroupEvent): GroupStatus | null {
     const g = this.groups.get(sessionGroupId);
     if (!g) return null;
     const prevStatus = g.status;
-    g.status = transition(g.status, event);
-    if (prevStatus !== "degraded" && g.status === "degraded") {
-      const deadRole = inferDeadRoleFromEvent(event);
-      companionBus.emit("group:degraded", { sessionGroupId, deadRole });
+    const nextStatus = transition(prevStatus, event);
+    g.status = nextStatus;
+    const { busEvents, logEntries } = deriveSideEffects(prevStatus, nextStatus, event);
+    for (const e of busEvents) this.enactBusEvent(sessionGroupId, e);
+    for (const entry of logEntries) this.enactLogEntry(sessionGroupId, entry);
+    return nextStatus;
+  }
+
+  /**
+   * Translate a side-effect descriptor into a bus emit. The shapes of the
+   * existing `group:*` events are fixed by `event-bus-types.ts`; the
+   * descriptor types in `group-state-machine.ts` are a parallel narrower
+   * view that this method bridges. `reconnecting` and `reconnected` do not
+   * yet have their own bus events — they are emitted as orchestrator-side
+   * `group:degraded` / restored-status fanout (PLAN Task 7 introduces
+   * the `group_reconnecting` wire variant; PLAN Task 7 also recycles
+   * `group_created` hydration for the reconnected case).
+   */
+  private enactBusEvent(sessionGroupId: string, e: GroupBusSideEffect): void {
+    if (e.kind === "degraded") {
+      companionBus.emit("group:degraded", { sessionGroupId, deadRole: e.deadRole });
+      return;
     }
-    if (prevStatus !== "archived" && g.status === "archived") {
-      const reason = inferExitReasonFromEvent(event);
-      companionBus.emit("group:exited", { sessionGroupId, reason });
+    if (e.kind === "exited") {
+      companionBus.emit("group:exited", { sessionGroupId, reason: e.reason });
+      return;
     }
-    return g.status;
+    if (e.kind === "reconnecting") {
+      // PLAN Task 7: surfaces the bounded grace window to browsers. The
+      // orchestrator's `group:reconnecting` listener fans the wire variant
+      // out via `broadcastToGroup`. `deadlineMs` is absolute wallclock —
+      // robust to in-flight latency, sleeping tabs, and replay.
+      companionBus.emit("group:reconnecting", {
+        sessionGroupId,
+        survivingRole: e.survivingRole,
+        deadlineMs: e.deadlineMs,
+      });
+      return;
+    }
+    if (e.kind === "reconnected") {
+      // PLAN Task 7 (Realtime expert recommendation): recycle the existing
+      // `group:created` channel as the idempotent "you may now treat the
+      // pair as healthy" surface. The orchestrator's existing
+      // `group:created` listener replays `group_created` on the wire; the
+      // browser slice's idempotent `upsertGroup` flips status back to
+      // `active`. No new variant minted; one less wire shape to drift.
+      const g = this.groups.get(sessionGroupId);
+      if (!g) return;
+      companionBus.emit("group:created", {
+        sessionGroupId,
+        primarySessionId: g.primary.sessionId,
+        observerSessionId: g.observer.sessionId,
+      });
+      return;
+    }
+  }
+
+  /**
+   * EC-9 structured log entry. Content is bounded to `event` +
+   * `sessionGroupId` + optional `role` + `attempts` (PLAN Task 7 Hunt
+   * recommendation: never include cliSessionId / observerPromptSha256 /
+   * workspace absolute path in operational logs — recordings carry that).
+   */
+  private enactLogEntry(sessionGroupId: string, entry: GroupLogEntry): void {
+    log.info("session-group-coordinator", "group lifecycle event", {
+      event: entry.event,
+      sessionGroupId,
+      ...(entry.role ? { role: entry.role } : {}),
+      ...(entry.attempts !== undefined ? { attempts: entry.attempts } : {}),
+    });
+  }
+
+  /**
+   * Arm a reconnect grace timer. Called by the orchestrator's
+   * `session:exited` listener when a council-tracked half drops without
+   * `intentionalKills`. The timer fires `reconnect_failed → degraded`
+   * if not cancelled by `cancelReconnectTimer` (resolution path:
+   * `session:cli-id-received` for the recovered half, or explicit
+   * `session:relaunch-failed`).
+   *
+   * Returns the deadline wallclock so the caller can broadcast it to
+   * browsers verbatim (absolute deadlines survive in-flight latency,
+   * sleeping tabs, replay — PLAN Task 7).
+   */
+  armReconnect(opts: {
+    sessionGroupId: string;
+    deadRole: SessionGroupRole;
+    snapshotSessionId: string;
+    /** Override the coordinator's default `graceMs` (configured at
+     *  construction from `COMPANION_GROUP_RECONNECT_GRACE_MS`). Tests pin
+     *  short windows; production callers leave undefined. */
+    graceMs?: number;
+  }): { deadlineMs: number; survivingRole: SessionGroupRole } | null {
+    const g = this.groups.get(opts.sessionGroupId);
+    if (!g) return null;
+    if (this.reconnectContexts.has(opts.sessionGroupId)) {
+      // Already in a reconnect cycle — Hunt P7 hard counter: one cycle per
+      // active episode. Re-entry is a no-op-with-log, never a re-arm.
+      log.warn("session-group-coordinator", "reconnect already armed; ignoring re-entry", {
+        event: "group.reconnect_started",
+        sessionGroupId: opts.sessionGroupId,
+        role: opts.deadRole,
+      });
+      return null;
+    }
+    const graceMs = opts.graceMs ?? this.graceMs;
+    const survivingRole: SessionGroupRole = opts.deadRole === "orchestrator" ? "observer" : "orchestrator";
+    const startedAtMs = this.now();
+    const deadlineMs = startedAtMs + graceMs;
+    const timer = setTimeout(() => {
+      // Coordinator-internal expiry: drive the state machine through
+      // `reconnect_failed`, which derives `group:degraded` via the same
+      // side-effect channel as a direct half_died.
+      const ctx = this.reconnectContexts.get(opts.sessionGroupId);
+      if (!ctx) return;
+      this.reconnectContexts.delete(opts.sessionGroupId);
+      this.applyEvent(opts.sessionGroupId, { type: "reconnect_failed", role: ctx.deadRole });
+    }, graceMs);
+    this.reconnectContexts.set(opts.sessionGroupId, {
+      sessionGroupId: opts.sessionGroupId,
+      survivingRole,
+      deadRole: opts.deadRole,
+      snapshotSessionId: opts.snapshotSessionId,
+      startedAtMs,
+      deadlineMs,
+      timer,
+    });
+    // Drive the state machine through `reconnect_started`. Side effects
+    // (the `reconnecting` bus event + EC-9 log) drain through applyEvent.
+    this.applyEvent(opts.sessionGroupId, {
+      type: "reconnect_started",
+      survivingRole,
+      deadlineMs,
+    });
+    return { deadlineMs, survivingRole };
+  }
+
+  /**
+   * Cancel an armed reconnect timer. Idempotent. The caller is responsible
+   * for driving the state machine through `reconnect_ok` / `reconnect_failed`
+   * separately (this method only clears the timer + map entry).
+   */
+  cancelReconnectTimer(sessionGroupId: string, _reason: string): void {
+    const ctx = this.reconnectContexts.get(sessionGroupId);
+    if (!ctx) return;
+    if (ctx.timer) clearTimeout(ctx.timer);
+    this.reconnectContexts.delete(sessionGroupId);
+  }
+
+  /** Read access for handlers that need to validate an incoming
+   *  `session:cli-id-received` against the disconnect snapshot. */
+  getReconnectContext(sessionGroupId: string): ReconnectContext | undefined {
+    return this.reconnectContexts.get(sessionGroupId);
+  }
+
+  /**
+   * Register a group whose halves are already alive — used by the
+   * orchestrator's `reconcileCouncilGroups()` on server restart to
+   * re-populate the coordinator's `groups` map for pairs that came back
+   * via `--resume` rather than via `createGroup`. Idempotent: a second
+   * call with the same id is a no-op so reconcile re-entry is safe.
+   */
+  registerExternalGroup(record: GroupRecord): void {
+    if (this.groups.has(record.sessionGroupId)) return;
+    this.groups.set(record.sessionGroupId, record);
+  }
+
+  /** Cancel all reconnect timers — called from gracefulShutdown so no
+   *  timer fires mid-archive (PLAN Task 11). */
+  cancelAllReconnectTimers(): void {
+    for (const [groupId] of this.reconnectContexts) {
+      this.cancelReconnectTimer(groupId, "shutdown");
+    }
+  }
+
+  /** Enumerate live group ids — used by gracefulShutdown to call
+   *  `shutdownAllGroups` (PLAN Task 11). Snapshot at call time. */
+  listGroupIds(): string[] {
+    return Array.from(this.groups.keys());
   }
 
   /**
@@ -186,18 +404,22 @@ export class SessionGroupCoordinator {
    *
    * Idempotent at the state level — re-archiving an already-archived
    * group is a no-op AND does not fire further kill calls (Subprocess P2-1).
+   *
+   * PLAN Task 1: routes through `applyEvent` so the `group:exited` bus
+   * event + EC-9 log come from the same side-effect channel as every
+   * other lifecycle transition (AP-2). Cancel any in-flight reconnect
+   * timer first — a user-driven archive bypasses the reconnect path
+   * entirely (Hunt: `intentionalKills` as absorbing state).
    */
   async archiveGroup(sessionGroupId: string): Promise<boolean> {
     const g = this.groups.get(sessionGroupId);
     if (!g) return false;
     if (g.status === "archived") return true;
-    g.status = transition(g.status, { type: "user_archived" });
-    // Realtime council review #3: emit `group:exited` so subscribers
-    // (orchestrator's bus listener → broadcastToGroup → browser store
-    // `removeGroup`) actually see the teardown. Emit BEFORE the kills
-    // so the browser cleans up its store while the kills proceed; the
-    // server-side coordinator record stays until the kills complete.
-    companionBus.emit("group:exited", { sessionGroupId, reason: "user_archived" });
+    this.cancelReconnectTimer(sessionGroupId, "user_archived");
+    // Drive the state machine through applyEvent; `deriveSideEffects`
+    // produces the `group:exited` bus event + log entry. Emit BEFORE
+    // kills so the browser cleans its store while the kills proceed.
+    this.applyEvent(sessionGroupId, { type: "user_archived" });
     // Best-effort sequential kill — both must be attempted even if one fails.
     // Failures are reported through onError, never swallowed silently.
     try {
@@ -242,30 +464,6 @@ export class SessionGroupCoordinator {
   clear(): void {
     this.groups.clear();
   }
-}
-
-/**
- * Pure: infer the dead-role discriminator for `group:degraded` from the
- * state-machine event that drove the transition. The state machine's
- * `half_died` event carries the role explicitly; other transitions into
- * degraded (e.g. `reconnect_failed`) don't name which half — default to
- * "observer" (the more common death mode in practice).
- */
-function inferDeadRoleFromEvent(event: GroupEvent): SessionGroupRole {
-  if (event.type === "half_died") return event.role;
-  return "observer";
-}
-
-/**
- * Pure: infer the `group:exited` reason from the state-machine event.
- * Today only `user_archived` and `user_killed` reach archived;
- * shutdown / both_halves_died are upper-layer concepts the orchestrator
- * may emit directly without going through the state machine.
- */
-function inferExitReasonFromEvent(event: GroupEvent): "user_archived" | "shutdown" | "both_halves_died" {
-  if (event.type === "user_archived") return "user_archived";
-  if (event.type === "user_killed") return "user_archived";
-  return "user_archived";
 }
 
 // Re-export the canonical pattern for callers that want to validate ids

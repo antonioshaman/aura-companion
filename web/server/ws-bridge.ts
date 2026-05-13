@@ -9,7 +9,8 @@ import type {
 } from "./session-types.js";
 import type { SessionStore } from "./session-store.js";
 import type { IBackendAdapter } from "./backend-adapter.js";
-import { ClaudeAdapter } from "./claude-adapter.js";
+import { ClaudeAdapter, type ObserverWakeSendOutcome } from "./claude-adapter.js";
+import { OBSERVER_WAKE_TIMEOUT_MS } from "./council-types.js";
 import type { RecorderManager } from "./recorder.js";
 import { resolveSessionGitInfo } from "./session-git-info.js";
 import type {
@@ -32,6 +33,7 @@ import {
 import {
   appendHistory as appendHistoryFn,
   persistSession as persistSessionFn,
+  serializeForStore,
 } from "./ws-bridge-persist.js";
 import {
   broadcastToBrowsers as broadcastToBrowsersFn,
@@ -53,6 +55,18 @@ import { metricsCollector } from "./metrics-collector.js";
 import { log } from "./logger.js";
 
 // ─── Bridge ───────────────────────────────────────────────────────────────────
+
+/**
+ * Outcome returned by {@link WsBridge.sendObserverWakeFrame}. Wraps the
+ * adapter-level {@link ObserverWakeSendOutcome} with bridge-level reasons
+ * (session/adapter lookup miss) so the orchestrator's dispatcher can map
+ * every branch to a single EC-9 structured log entry without ambiguity.
+ */
+export type BridgeObserverWakeOutcome =
+  | ObserverWakeSendOutcome
+  | { kind: "session_unknown" }
+  | { kind: "adapter_missing" }
+  | { kind: "unsupported_backend" };
 
 const RETRYABLE_BACKEND_MESSAGE_TYPES = new Set<BrowserOutgoingMessage["type"]>([
   "user_message",
@@ -105,6 +119,30 @@ export class WsBridge {
   }
 
   /**
+   * Mark a session as belonging to a Council Mode pair. Populates
+   * `session.state.sessionGroupId` / `sessionGroupRole` so
+   * `handleBrowserOpen` can hydrate a synthetic `group_created` on
+   * subscribe (post-restart, page-reload, second-tab).
+   *
+   * Prior to this method existing, the synthetic-hydration path from
+   * commit a37ded5 read `state.sessionGroupId` which was never written
+   * in production — only in unit tests. Surviving pairs across browser
+   * reload / server restart looked like two unrelated solo sessions.
+   * Called from `SessionOrchestrator.createCouncilGroup` after spawn
+   * and from `reconcileCouncilGroups` for resumed pairs.
+   */
+  markCouncilSession(
+    sessionId: string,
+    sessionGroupId: string,
+    sessionGroupRole: import("./session-types.js").SessionGroupRole,
+  ): void {
+    const session = this.getOrCreateSession(sessionId);
+    session.state.sessionGroupId = sessionGroupId;
+    session.state.sessionGroupRole = sessionGroupRole;
+    this.persistSession(session);
+  }
+
+  /**
    * Pre-populate a session with container info so that handleSystemMessage
    * preserves the host cwd instead of overwriting it with /workspace.
    * Call this right after launcher.launch() for containerized sessions.
@@ -142,6 +180,27 @@ export class WsBridge {
     const session = this.sessions.get(sessionId);
     if (!session) return;
     this.broadcastToBrowsers(session, msg);
+  }
+
+  /**
+   * Council Mode auto-wake — dispatch a server-synthesised `user` NDJSON
+   * frame to a specific observer session's CLI socket via its adapter.
+   *
+   * The bridge is the only place that knows the sessionId → adapter map,
+   * so it owns the lookup. The Claude-instance narrowing is intentional
+   * for the current claude+claude scope; Codex pairings return
+   * `unsupported_backend` (the dispatcher in `session-orchestrator.ts`
+   * skips with that reason). When Codex pairing ships, replace the
+   * narrowing with an `IBackendAdapter`-shaped optional method.
+   */
+  sendObserverWakeFrame(sessionId: string, content: string): BridgeObserverWakeOutcome {
+    const session = this.sessions.get(sessionId);
+    if (!session) return { kind: "session_unknown" };
+    if (!session.backendAdapter) return { kind: "adapter_missing" };
+    if (!(session.backendAdapter instanceof ClaudeAdapter)) {
+      return { kind: "unsupported_backend" };
+    }
+    return session.backendAdapter.sendUserFrameFromServer(content);
   }
 
   /**
@@ -301,6 +360,20 @@ export class WsBridge {
 
   getAllSessions(): SessionState[] {
     return Array.from(this.sessions.values()).map((s) => s.state);
+  }
+
+  /**
+   * PLAN Task 11: synchronously flush every pending debounced session-store
+   * write to disk. Used by `gracefulShutdown` so a state mutation that
+   * landed in the 150ms debounce window seconds before SIGTERM is not
+   * lost. No-op if no store is attached.
+   */
+  flushSessionStorePendingSync(): void {
+    if (!this.store) return;
+    this.store.flushAll((sessionId) => {
+      const session = this.sessions.get(sessionId);
+      return session ? serializeForStore(session) : null;
+    });
   }
 
   /** Return per-session memory stats for diagnostics. */
@@ -789,6 +862,13 @@ export class WsBridge {
       this.broadcastToBrowsers(session, { type: "cli_connected" });
     }
 
+    // Bootstrap kickoff. Claude Code CLI in `--print -p --input-format stream-json`
+    // mode does not emit `system` init until it receives its first input frame.
+    // Without a kickoff, sessions stay stuck in "initializing" until a browser
+    // happens to send a control_request — fragile for orchestrators, broken for
+    // observers (no chat surface = no browser-side traffic).
+    this.sendInitializeKickoff(sessionId);
+
     // Flush any messages queued while waiting for the CLI WebSocket.
     // Per the SDK protocol, the first user message triggers system.init,
     // so we must send it as soon as the WebSocket is open — NOT wait for
@@ -886,6 +966,16 @@ export class WsBridge {
     };
     this.sendToBrowser(ws, snapshot);
 
+    // Council Mode — hydrate the browser's group state. `group_created` is
+    // emitted by the orchestrator only at initial createCouncilGroup time;
+    // a browser that connects later (page reload, second tab, post-restart)
+    // would otherwise see two unrelated sessions and never mount the
+    // ObserverPanel. Replay a synthetic group_created to THIS browser only.
+    if (session.state.sessionGroupId && session.state.sessionGroupRole) {
+      const groupPayload = this.deriveGroupCreatedForBrowser(session);
+      if (groupPayload) this.sendToBrowser(ws, groupPayload);
+    }
+
     // Replay message history so the browser can reconstruct the conversation
     if (session.messageHistory.length > 0) {
       this.sendToBrowser(ws, {
@@ -950,6 +1040,55 @@ export class WsBridge {
       return;
     }
     this.routeBrowserMessage(session, { type: "mcp_set_servers", servers });
+  }
+
+  /** Council Mode — build a synthetic `group_created` payload for a single
+   *  browser subscribing to a session that's part of a pair. Uses the
+   *  bridge's own session map (both halves register here on CLI ws_open
+   *  after spawn or --resume) so no orchestrator dependency is needed.
+   *  Returns null if the counterpart half is not yet registered — the
+   *  browser will hydrate on the next reconnect once both halves are up. */
+  private deriveGroupCreatedForBrowser(session: Session): BrowserIncomingMessage | null {
+    const groupId = session.state.sessionGroupId;
+    const role = session.state.sessionGroupRole;
+    if (!groupId || !role) return null;
+    let counterpart: Session | null = null;
+    for (const other of this.sessions.values()) {
+      if (other === session) continue;
+      if (other.state.sessionGroupId !== groupId) continue;
+      if (other.state.sessionGroupRole === role) continue;
+      counterpart = other;
+      break;
+    }
+    if (!counterpart) return null;
+    const primary = role === "orchestrator" ? session : counterpart;
+    const observer = role === "observer" ? session : counterpart;
+    const pairing = `${primary.backendType ?? "claude"}+${observer.backendType ?? "claude"}`;
+    return {
+      type: "group_created",
+      sessionGroupId: groupId,
+      primarySessionId: primary.id,
+      observerSessionId: observer.id,
+      pairing,
+      wakeTimeoutMs: OBSERVER_WAKE_TIMEOUT_MS,
+    };
+  }
+
+  /** Bootstrap kickoff for sessions that never get browser-driven traffic
+   *  (e.g. Council Mode observers). Sends a bare `initialize` control_request
+   *  on CLI ws_open so the CLI emits its `system` init and reaches "ready"
+   *  state without depending on user input or browser activity. Claude-only. */
+  sendInitializeKickoff(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    if (!(session.backendAdapter instanceof ClaudeAdapter)) return;
+    const { randomUUID } = require("node:crypto") as typeof import("node:crypto");
+    const ndjson = JSON.stringify({
+      type: "control_request",
+      request_id: randomUUID(),
+      request: { subtype: "initialize" },
+    });
+    session.backendAdapter.sendRawNDJSON(ndjson);
   }
 
   /** Send an initialize control request with context appended to the system prompt.

@@ -50,6 +50,7 @@ the-companion logs
 | `COMPANION_RECORDINGS_DIR` | Override recordings directory | `~/.companion/recordings/` |
 | `COMPANION_RECORDINGS_MAX_LINES` | Max total lines before recording rotation | `1,000,000` |
 | `COMPANION_INIT_SCRIPT_TIMEOUT` | Init script timeout in seconds | `120` |
+| `COMPANION_GROUP_RECONNECT_GRACE_MS` | Council pair grace window (ms) before a single-half drop becomes `degraded`. Bounded `[1, 600_000]`; invalid input falls back to default with a structured warn log. | `45000` |
 
 ## REST API
 

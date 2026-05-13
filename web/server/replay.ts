@@ -7,7 +7,7 @@
  */
 
 import { readFileSync } from "node:fs";
-import type { RecordingHeader, RecordingEntry } from "./recorder.js";
+import { RECORDING_HEADER_VERSIONS_ACCEPTED, type RecordingHeader, type RecordingEntry } from "./recorder.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -31,8 +31,10 @@ export function loadRecording(path: string): Recording {
   }
 
   const header = JSON.parse(lines[0]) as RecordingHeader;
-  if (!header._header || header.version !== 1) {
-    throw new Error("Invalid recording header: missing _header or version !== 1");
+  if (!header._header || !RECORDING_HEADER_VERSIONS_ACCEPTED.has(header.version)) {
+    throw new Error(
+      `Invalid recording header: missing _header or version not in {${[...RECORDING_HEADER_VERSIONS_ACCEPTED].join(",")}}`,
+    );
   }
 
   const entries: RecordingEntry[] = [];

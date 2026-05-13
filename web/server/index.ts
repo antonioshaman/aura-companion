@@ -419,8 +419,41 @@ setInterval(() => {
   });
 }, DIAGNOSTICS_INTERVAL_MS);
 
-// ── Graceful shutdown — persist container state ──────────────────────────────
-function gracefulShutdown() {
+// ── Graceful shutdown — Council teardown + persist container state ───────────
+//
+// PLAN Task 11: prior to this, `gracefulShutdown` persisted container state
+// and exited but never invoked `shutdownAllGroups` (pre-existing P1 caught
+// during the Deploy review). Ordering matters:
+//
+//   1. Cancel coordinator reconnect timers — otherwise a fired timer races
+//      mid-archive trying to "recover" a group being torn down.
+//   2. Flush session-store debounced writes synchronously — otherwise a
+//      state mutation in the 150ms debounce window before SIGTERM is lost.
+//   3. Archive all council groups in parallel under a bounded budget —
+//      kills both halves of every live pair; observers + orchestrators
+//      reaped rather than orphaned to PID 1.
+//   4. Persist container state + cleanup hooks (existing behaviour).
+//
+// Step 3 is async; the wrapper awaits it (Node's process.exit triggers
+// after the promise resolves). Total shutdown budget is bounded.
+async function gracefulShutdown() {
+  try {
+    const coordinator = orchestrator.getCouncilCoordinator();
+    if (coordinator) {
+      coordinator.cancelAllReconnectTimers();
+    }
+    wsBridge.flushSessionStorePendingSync();
+    if (coordinator) {
+      const { shutdownAllGroups } = await import("./group-shutdown.js");
+      const groupIds = coordinator.listGroupIds();
+      if (groupIds.length > 0) {
+        const summary = await shutdownAllGroups(coordinator, groupIds, { timeoutMs: 8_000 });
+        console.log(`[server] Council shutdown summary:`, summary);
+      }
+    }
+  } catch (err) {
+    console.error("[server] Council shutdown error (continuing to container persist):", err);
+  }
   console.log("[server] Persisting container state before shutdown...");
   containerManager.persistState(CONTAINER_STATE_PATH);
   cleanupTailscaleFunnel(port);

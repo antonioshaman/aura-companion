@@ -125,7 +125,12 @@ describe("deriveObserverPanelState", () => {
     expect(out).toEqual({ name: "sleeping", lastCheckpointAt: 1_000, lastPhase: "council-plan" });
   });
 
-  // Third-priority branch: observerReviewing flag → reviewing.
+  // Third-priority branch: observerReviewing flag → reviewing. Task 11
+  // bounded this interval by `lastCheckpointAt + wakeTimeoutMs`, so the
+  // assertion pins both the new `expiresAt` field and provides an
+  // explicit `nowMs` to keep us inside the window (otherwise the wall-
+  // clock default lands far past the deadline and we'd see
+  // `reviewing-stalled` instead).
   it("returns 'reviewing' when observerReviewing is true and a checkpoint is recorded", () => {
     const g = group({
       status: "active",
@@ -133,9 +138,49 @@ describe("deriveObserverPanelState", () => {
       lastCheckpointSeq: 1,
       lastPhase: "council-implement",
       observerReviewing: true,
+      wakeTimeoutMs: 90_000,
     });
-    const out = deriveObserverPanelState({ group: g, findings: [], dismissedStopIds: new Set() });
-    expect(out).toEqual({ name: "reviewing", reviewingSince: 2_000, phase: "council-implement" });
+    const out = deriveObserverPanelState({ group: g, findings: [], dismissedStopIds: new Set(), nowMs: 50_000 });
+    expect(out).toEqual({ name: "reviewing", reviewingSince: 2_000, phase: "council-implement", expiresAt: 92_000 });
+  });
+
+  // Task 11 (reviewing-stalled): past the wakeTimeoutMs deadline without
+  // an observer_review, the deriver yields `reviewing-stalled` rather
+  // than silently reverting to `sleeping`. Closes the recovery-branch-
+  // reachability failure mode where a stuck wake looked the same as a
+  // healthy idle pair.
+  it("returns 'reviewing-stalled' past wakeTimeoutMs without a review", () => {
+    const g = group({
+      status: "active",
+      lastCheckpointAt: 2_000,
+      lastCheckpointSeq: 1,
+      lastPhase: "council-implement",
+      observerReviewing: true,
+      wakeTimeoutMs: 90_000,
+    });
+    const out = deriveObserverPanelState({ group: g, findings: [], dismissedStopIds: new Set(), nowMs: 200_000 });
+    expect(out).toEqual({ name: "reviewing-stalled", reviewingSince: 2_000, phase: "council-implement", expiredAt: 92_000 });
+  });
+
+  // Task 11 (queued-dropped): when the previous review came with
+  // superseded checkpoint ids (server's mid-turn newest-wins queue
+  // dropped one+), the panel surfaces `queued-dropped` instead of
+  // sleeping so the user knows skipped coverage is deliberate.
+  it("returns 'queued-dropped' when recentlySupersededCheckpointIds is non-empty", () => {
+    const g = group({
+      status: "active",
+      lastCheckpointAt: 2_000,
+      lastCheckpointSeq: 5,
+      lastPhase: "council-review",
+      recentlySupersededCheckpointIds: ["chk_dropped_3", "chk_dropped_4"],
+    });
+    const out = deriveObserverPanelState({ group: g, findings: [], dismissedStopIds: new Set(), nowMs: 5_000 });
+    expect(out).toEqual({
+      name: "queued-dropped",
+      lastCheckpointAt: 2_000,
+      lastPhase: "council-review",
+      droppedCheckpointIds: ["chk_dropped_3", "chk_dropped_4"],
+    });
   });
 
   // observerReviewing without a checkpoint shouldn't paint 'reviewing'

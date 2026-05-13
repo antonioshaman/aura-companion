@@ -45,6 +45,7 @@ function createMockSocket(sessionId: string) {
     send: vi.fn(),
     close: vi.fn(),
     readyState: 1,
+    getBufferedAmount: vi.fn(() => 0),
   } as any;
 }
 
@@ -1360,5 +1361,119 @@ describe("prompt_suggestion", () => {
     const emitted = browserMessageCb.mock.calls[0][0];
     expect(emitted.type).toBe("prompt_suggestion");
     expect(emitted.suggestions).toEqual(["Fix the bug", "Add tests"]);
+  });
+});
+
+// ─── sendUserFrameFromServer — Council Review 2026-05-13 Beck regression #3 ──
+//
+// Direct behavioural coverage of the new server-direction wake-frame send
+// (Story 2 AC#1 keystone). The prior council fix-pass added the method but
+// left it test-free — only the static-grep canary at observer-prompt.test.ts
+// pinned the call site. This test pack covers all 5 ObserverWakeSendOutcome
+// variants + the turn-state reset invariants from Subprocess #2.
+
+describe("sendUserFrameFromServer (Council Mode auto-wake)", () => {
+  let adapter: ClaudeAdapter;
+  let activityCb: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    activityCb = vi.fn();
+    adapter = new ClaudeAdapter("sess-wake-1", { onActivityUpdate: activityCb as unknown as () => void });
+  });
+
+  it("returns socket_disconnected when no CLI socket has attached", () => {
+    const out = adapter.sendUserFrameFromServer("test content");
+    expect(out.kind).toBe("socket_disconnected");
+    // Activity still registered — wake attempt is real activity even when gated.
+    expect(activityCb).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns socket_disconnected when the cliSocket readyState is not OPEN", () => {
+    const ws = createMockSocket("sess-wake-1");
+    ws.readyState = 0; // CONNECTING
+    adapter.attachWebSocket(ws);
+    const out = adapter.sendUserFrameFromServer("test content");
+    expect(out.kind).toBe("socket_disconnected");
+  });
+
+  it("returns sent + flips observerTurnState to in-flight on successful send", () => {
+    const ws = createMockSocket("sess-wake-1");
+    adapter.attachWebSocket(ws);
+    const out = adapter.sendUserFrameFromServer("# Council Checkpoint test");
+    expect(out.kind).toBe("sent");
+    expect(adapter.getObserverTurnState()).toBe("in-flight");
+    expect(ws.send).toHaveBeenCalledTimes(1);
+    const frame = ws.send.mock.calls[0][0];
+    // NDJSON line-discipline: frame is single-line, terminated by \n.
+    expect(frame.endsWith("\n")).toBe(true);
+    expect(frame.split("\n").filter((l: string) => l.length > 0)).toHaveLength(1);
+  });
+
+  it("returns busy when observerTurnState is already in-flight", () => {
+    const ws = createMockSocket("sess-wake-1");
+    adapter.attachWebSocket(ws);
+    expect(adapter.sendUserFrameFromServer("first").kind).toBe("sent");
+    const second = adapter.sendUserFrameFromServer("second");
+    expect(second.kind).toBe("busy");
+    // The second send should NOT have hit the socket.
+    expect(ws.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns backpressure when getBufferedAmount exceeds the 1 MiB threshold", () => {
+    const ws = createMockSocket("sess-wake-1");
+    ws.getBufferedAmount = vi.fn(() => 2 * 1024 * 1024); // 2 MiB
+    adapter.attachWebSocket(ws);
+    const out = adapter.sendUserFrameFromServer("test");
+    expect(out.kind).toBe("backpressure");
+    if (out.kind === "backpressure") {
+      expect(out.bufferedAmount).toBe(2 * 1024 * 1024);
+    }
+    expect(ws.send).not.toHaveBeenCalled();
+  });
+
+  it("returns failed with the error message when cliSocket.send throws", () => {
+    const ws = createMockSocket("sess-wake-1");
+    ws.send = vi.fn(() => { throw new Error("EPIPE"); });
+    adapter.attachWebSocket(ws);
+    const out = adapter.sendUserFrameFromServer("test");
+    expect(out.kind).toBe("failed");
+    if (out.kind === "failed") {
+      expect(out.error).toBe("EPIPE");
+    }
+  });
+
+  // Council Review 2026-05-13 Subprocess #2 fix verification — both detach
+  // paths reset turn-state so a transient socket flap doesn't deadlock the
+  // dispatcher in `in-flight` forever.
+  it("resets observerTurnState to idle on detachWebSocket", () => {
+    const ws = createMockSocket("sess-wake-1");
+    adapter.attachWebSocket(ws);
+    expect(adapter.sendUserFrameFromServer("first").kind).toBe("sent");
+    expect(adapter.getObserverTurnState()).toBe("in-flight");
+    adapter.detachWebSocket(ws);
+    expect(adapter.getObserverTurnState()).toBe("idle");
+  });
+
+  it("resets observerTurnState to idle on handleTransportClose", () => {
+    const ws = createMockSocket("sess-wake-1");
+    adapter.attachWebSocket(ws);
+    expect(adapter.sendUserFrameFromServer("first").kind).toBe("sent");
+    expect(adapter.getObserverTurnState()).toBe("in-flight");
+    adapter.handleTransportClose();
+    expect(adapter.getObserverTurnState()).toBe("idle");
+  });
+
+  // Council Review 2026-05-13 Subprocess #5 fix verification — attaching a
+  // new socket resets turn-state, defending against the late-detach race.
+  it("resets observerTurnState to idle on attachWebSocket (fresh socket = fresh turn)", () => {
+    const ws1 = createMockSocket("sess-wake-1");
+    adapter.attachWebSocket(ws1);
+    expect(adapter.sendUserFrameFromServer("first").kind).toBe("sent");
+    // Simulate late-detach race: NEW socket attaches before the old detach
+    // event fires. Stale-socket guard would skip the reset on detach, but
+    // the new attach reset closes the gap.
+    const ws2 = createMockSocket("sess-wake-1");
+    adapter.attachWebSocket(ws2);
+    expect(adapter.getObserverTurnState()).toBe("idle");
   });
 });

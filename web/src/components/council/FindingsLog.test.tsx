@@ -89,12 +89,35 @@ describe("FindingsLog", () => {
     expect(screen.getByTestId("finding-row-b")).toHaveAttribute("data-severity", "NOTE");
   });
 
-  // PLAN T15.2: `role="log"` + `aria-live="polite"` so screen readers
-  // announce new findings without yanking focus from the composer.
-  it("exposes role=log with aria-live=polite for screen-reader announcements", () => {
+  // Task 12 (a11y cadence response): the row container keeps `role="log"`
+  // for landmark navigation but `aria-live` is OFF — per-row polite
+  // announcements at auto-wake cadence (3-8 findings per phase, every
+  // phase) would flood the SR speech buffer. The separate summary
+  // announcer (see "summarizes new findings…" test below) collapses
+  // each review event into a single polite line instead.
+  it("exposes role=log with aria-live=off (cadence-aware live region)", () => {
     render(<FindingsLog findings={[finding()]} />);
     const log = screen.getByRole("log");
-    expect(log).toHaveAttribute("aria-live", "polite");
+    expect(log).toHaveAttribute("aria-live", "off");
+  });
+
+  // Task 12: a separate visually-hidden polite announcer summarises
+  // each review event as one line ("Observer review complete: 1
+  // blocker, 2 notes") so SR users hear a single actionable summary
+  // per checkpoint rather than a stream of per-row appends.
+  it("summarizes new findings into a single polite announcer per review event", async () => {
+    const stop = finding({ id: "x1", severity: "STOP", wasDowngraded: false });
+    const note = finding({ id: "x2", severity: "NOTE" });
+    const { rerender } = render(<FindingsLog findings={[]} />);
+    rerender(<FindingsLog findings={[stop, note]} />);
+    const announcer = await screen.findByTestId("findings-review-announcer");
+    expect(announcer).toHaveAttribute("aria-live", "polite");
+    expect(announcer).toHaveAttribute("aria-atomic", "true");
+    // The summary string is the single source of truth — same findings
+    // re-rendered MUST NOT re-announce (lastIdsRef captures previously
+    // seen ids).
+    expect(announcer.textContent).toContain("1 blocker");
+    expect(announcer.textContent).toContain("1 note");
   });
 
   it("renders a downgraded STOP with the 'downgraded' chip and half-tone dot", () => {
