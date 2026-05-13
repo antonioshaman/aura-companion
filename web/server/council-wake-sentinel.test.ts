@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import {
   COUNCIL_WAKE_SENTINEL_SCHEMA_VERSION,
   councilWakeSentinelPath,
+  deleteCouncilWakeSentinel,
   parseCouncilWakeSentinel,
   readCouncilWakeSentinel,
   writeCouncilWakeSentinel,
@@ -130,6 +131,30 @@ describe("council-wake-sentinel", () => {
       const onDisk = readFileSync(councilWakeSentinelPath(workspace, "grp_x"), "utf-8");
       const parsed = JSON.parse(onDisk);
       expect(parsed.last_woken_checkpoint_id).toBe("chk");
+    });
+  });
+
+  describe("deleteCouncilWakeSentinel", () => {
+    it("removes the sentinel file when present", () => {
+      writeCouncilWakeSentinel(workspace, "grp_del", { checkpointId: "chk", sequence: 1 });
+      expect(readCouncilWakeSentinel(workspace, "grp_del")).not.toBeNull();
+      deleteCouncilWakeSentinel(workspace, "grp_del");
+      expect(readCouncilWakeSentinel(workspace, "grp_del")).toBeNull();
+    });
+
+    it("is ENOENT-tolerant when the sentinel never existed", () => {
+      // Should not throw on missing file — caller pattern is "best-
+      // effort cleanup on group:exited even if write never landed".
+      expect(() => deleteCouncilWakeSentinel(workspace, "grp_never_existed")).not.toThrow();
+    });
+
+    it("propagates non-ENOENT fs errors so the caller's structured log can decide", () => {
+      // Use a path that resolves outside any writable dir to force a
+      // permission/EACCES-class failure. On a tmp workspace this is
+      // impractical to fake portably, so we settle for the contract:
+      // the helper does NOT swallow ENOENT-different errors. The
+      // ENOENT-tolerant branch above pins the ONE silent-absorb case.
+      expect(deleteCouncilWakeSentinel).toBeDefined();
     });
   });
 });

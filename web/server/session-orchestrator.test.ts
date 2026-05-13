@@ -2442,6 +2442,185 @@ describe("SessionOrchestrator", () => {
       expect(second.kind).toBe("skipped");
       expect(second.reason).toBe("already_woken");
     });
+
+    // drainPendingObserverWake: drains queue when one exists.
+    it("drainPendingObserverWake dispatches the queued checkpoint and clears the slot", () => {
+      seedActiveGroup("grp_d_drain");
+      const ws = orchestrator as unknown as {
+        councilWatchers: Map<string, { pendingCheckpoint: any }>;
+        drainPendingObserverWake: (g: string) => void;
+      };
+      const queued = validPayload("grp_d_drain", { checkpointId: "chk_queued" });
+      ws.councilWatchers.get("grp_d_drain")!.pendingCheckpoint = queued;
+      vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "sent" });
+      ws.drainPendingObserverWake.call(orchestrator, "grp_d_drain");
+      // Slot cleared, send invoked.
+      expect(ws.councilWatchers.get("grp_d_drain")!.pendingCheckpoint).toBeNull();
+      expect(deps.wsBridge.sendObserverWakeFrame).toHaveBeenCalledTimes(1);
+    });
+
+    it("drainPendingObserverWake is a no-op when no checkpoint is queued", () => {
+      seedActiveGroup("grp_d_drain_empty");
+      const ws = orchestrator as unknown as {
+        drainPendingObserverWake: (g: string) => void;
+      };
+      vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReset();
+      ws.drainPendingObserverWake.call(orchestrator, "grp_d_drain_empty");
+      expect(deps.wsBridge.sendObserverWakeFrame).not.toHaveBeenCalled();
+    });
+
+    it("drainPendingObserverWake is a no-op when the watcher entry is missing", () => {
+      const ws = orchestrator as unknown as {
+        drainPendingObserverWake: (g: string) => void;
+      };
+      vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReset();
+      ws.drainPendingObserverWake.call(orchestrator, "grp_nonexistent");
+      expect(deps.wsBridge.sendObserverWakeFrame).not.toHaveBeenCalled();
+    });
+
+    // Foreign-group checkpoint defence (Hunt #1 from prior pass).
+    it("handleCouncilCheckpoint drops a checkpoint whose session_group_id mismatches the watcher", () => {
+      seedActiveGroup("grp_fg_a");
+      vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReset();
+      const handle = (orchestrator as unknown as {
+        handleCouncilCheckpoint: (g: string, p: any) => void;
+      }).handleCouncilCheckpoint;
+      // Payload claims group B but watcher is for group A.
+      handle.call(orchestrator, "grp_fg_a", validPayload("grp_fg_OTHER"));
+      // Cross-group filter at handler head: no dispatch, no state mutation.
+      expect(deps.wsBridge.sendObserverWakeFrame).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── scanForMissedObserverWakes (EC-12 pre-scan reconciler) ───────────────
+  describe("scanForMissedObserverWakes", () => {
+    const fs = require("node:fs") as typeof import("node:fs");
+    const pathLib = require("node:path") as typeof import("node:path");
+    const osLib = require("node:os") as typeof import("node:os");
+
+    function seedActiveGroupAt(groupId: string, workspaceCwd: string) {
+      const ws = orchestrator as unknown as {
+        councilWatchers: Map<string, { cwd: string; abort: AbortController; lastCheckpoint: unknown; previousCheckpoint: unknown; pendingCheckpoint: unknown; supersededCheckpointIds: string[] }>;
+        councilGroupMeta: Map<string, { primarySessionId: string; observerSessionId: string; pairing: string; createdAt: number; lastCheckpointReceivedAt: number | null }>;
+        coordinator: unknown;
+      };
+      ws.councilWatchers.set(groupId, {
+        cwd: workspaceCwd,
+        abort: new AbortController(),
+        lastCheckpoint: null,
+        previousCheckpoint: null,
+        pendingCheckpoint: null,
+        supersededCheckpointIds: [],
+      });
+      ws.councilGroupMeta.set(groupId, {
+        primarySessionId: "orch",
+        observerSessionId: "obs",
+        pairing: "claude+claude",
+        createdAt: Date.now(),
+        lastCheckpointReceivedAt: null,
+      });
+      ws.coordinator = { get: vi.fn(() => ({ sessionGroupId: groupId, status: "active" })) };
+    }
+
+    afterEach(() => {
+      vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReset();
+      vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "sent" });
+    });
+
+    it("dispatches a wake for the highest-sequence on-disk checkpoint when no sentinel exists", () => {
+      const workspace = fs.realpathSync(fs.mkdtempSync(pathLib.join(osLib.tmpdir(), "scan-test-")));
+      try {
+        fs.mkdirSync(pathLib.join(workspace, ".council", "checkpoints"), { recursive: true });
+        fs.writeFileSync(pathLib.join(workspace, ".council", "checkpoints", "phase-a.json"), JSON.stringify({
+          schema_version: 1, checkpoint_id: "chk_a", phase: "phase-a", sequence: 1,
+          session_group_id: "grp_scan1", emitted_at: "2026-01-01T00:00:00Z", artifact_paths: [],
+        }));
+        fs.writeFileSync(pathLib.join(workspace, ".council", "checkpoints", "phase-b.json"), JSON.stringify({
+          schema_version: 1, checkpoint_id: "chk_b", phase: "phase-b", sequence: 2,
+          session_group_id: "grp_scan1", emitted_at: "2026-01-01T00:00:00Z", artifact_paths: [],
+        }));
+        seedActiveGroupAt("grp_scan1", workspace);
+        (orchestrator as unknown as { scanForMissedObserverWakes: () => void }).scanForMissedObserverWakes.call(orchestrator);
+        // Highest-sequence (chk_b, seq=2) should be dispatched.
+        expect(deps.wsBridge.sendObserverWakeFrame).toHaveBeenCalledTimes(1);
+      } finally {
+        fs.rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
+    it("skips dispatch when the highest on-disk checkpoint matches the sentinel", () => {
+      const workspace = fs.realpathSync(fs.mkdtempSync(pathLib.join(osLib.tmpdir(), "scan-test-")));
+      try {
+        fs.mkdirSync(pathLib.join(workspace, ".council", "checkpoints"), { recursive: true });
+        fs.writeFileSync(pathLib.join(workspace, ".council", "checkpoints", "phase-a.json"), JSON.stringify({
+          schema_version: 1, checkpoint_id: "chk_a", phase: "phase-a", sequence: 5,
+          session_group_id: "grp_scan2", emitted_at: "2026-01-01T00:00:00Z", artifact_paths: [],
+        }));
+        // Pre-write sentinel claiming we already woke for seq 5.
+        // Inline the sentinel file write — avoids vitest's ESM/CJS
+        // require quirk on .js extensions for sibling source files.
+        const stateDir = pathLib.join(workspace, ".council", "state");
+        fs.mkdirSync(stateDir, { recursive: true });
+        fs.writeFileSync(pathLib.join(stateDir, "grp_scan2-wake.json"), JSON.stringify({
+          schema_version: 1,
+          last_woken_checkpoint_id: "chk_a",
+          last_woken_sequence: 5,
+          last_woken_at: "2026-01-01T00:00:00Z",
+        }));
+        seedActiveGroupAt("grp_scan2", workspace);
+        (orchestrator as unknown as { scanForMissedObserverWakes: () => void }).scanForMissedObserverWakes.call(orchestrator);
+        expect(deps.wsBridge.sendObserverWakeFrame).not.toHaveBeenCalled();
+      } finally {
+        fs.rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
+    it("absorbs missing .council/checkpoints/ directory without throwing", () => {
+      const workspace = fs.mkdtempSync(pathLib.join(osLib.tmpdir(), "scan-test-"));
+      try {
+        // Workspace exists but no .council subdir.
+        seedActiveGroupAt("grp_scan3", workspace);
+        expect(() => (orchestrator as unknown as { scanForMissedObserverWakes: () => void }).scanForMissedObserverWakes.call(orchestrator)).not.toThrow();
+        expect(deps.wsBridge.sendObserverWakeFrame).not.toHaveBeenCalled();
+      } finally {
+        fs.rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
+    it("skips foreign-group checkpoints in the scan (cross-group filter)", () => {
+      const workspace = fs.realpathSync(fs.mkdtempSync(pathLib.join(osLib.tmpdir(), "scan-test-")));
+      try {
+        fs.mkdirSync(pathLib.join(workspace, ".council", "checkpoints"), { recursive: true });
+        // Checkpoint claims a DIFFERENT group than the watcher.
+        fs.writeFileSync(pathLib.join(workspace, ".council", "checkpoints", "phase-x.json"), JSON.stringify({
+          schema_version: 1, checkpoint_id: "chk_x", phase: "phase-x", sequence: 1,
+          session_group_id: "grp_OTHER", emitted_at: "2026-01-01T00:00:00Z", artifact_paths: [],
+        }));
+        seedActiveGroupAt("grp_scan4", workspace);
+        (orchestrator as unknown as { scanForMissedObserverWakes: () => void }).scanForMissedObserverWakes.call(orchestrator);
+        expect(deps.wsBridge.sendObserverWakeFrame).not.toHaveBeenCalled();
+      } finally {
+        fs.rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
+    it("skips corrupt checkpoint files without crashing", () => {
+      const workspace = fs.realpathSync(fs.mkdtempSync(pathLib.join(osLib.tmpdir(), "scan-test-")));
+      try {
+        fs.mkdirSync(pathLib.join(workspace, ".council", "checkpoints"), { recursive: true });
+        fs.writeFileSync(pathLib.join(workspace, ".council", "checkpoints", "garbage.json"), "{not valid JSON");
+        fs.writeFileSync(pathLib.join(workspace, ".council", "checkpoints", "good.json"), JSON.stringify({
+          schema_version: 1, checkpoint_id: "chk_ok", phase: "phase-ok", sequence: 1,
+          session_group_id: "grp_scan5", emitted_at: "2026-01-01T00:00:00Z", artifact_paths: [],
+        }));
+        seedActiveGroupAt("grp_scan5", workspace);
+        (orchestrator as unknown as { scanForMissedObserverWakes: () => void }).scanForMissedObserverWakes.call(orchestrator);
+        // The good file should still be dispatched; the garbage file is skipped.
+        expect(deps.wsBridge.sendObserverWakeFrame).toHaveBeenCalledTimes(1);
+      } finally {
+        fs.rmSync(workspace, { recursive: true, force: true });
+      }
+    });
   });
 
   // ── stopCouncilWatchers cleanup ────────────────────────────────────────────
