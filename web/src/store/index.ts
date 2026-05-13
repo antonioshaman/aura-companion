@@ -8,6 +8,7 @@ import { createUiSlice, type UiSlice, getInitialDiffBase } from "./ui-slice.js";
 import { createTerminalSlice, type TerminalSlice, getInitialQuickTerminalPlacement } from "./terminal-slice.js";
 import { createUpdatesSlice, type UpdatesSlice } from "./updates-slice.js";
 import { createCouncilSlice, type CouncilSlice } from "./council-slice.js";
+import { createSettingsSlice, type SettingsSlice } from "./settings-slice.js";
 
 export type AppState = AuthSlice &
   SessionsSlice &
@@ -17,7 +18,8 @@ export type AppState = AuthSlice &
   UiSlice &
   TerminalSlice &
   UpdatesSlice &
-  CouncilSlice & {
+  CouncilSlice &
+  SettingsSlice & {
     reset: () => void;
   };
 
@@ -31,6 +33,7 @@ export const useStore = create<AppState>((...args) => ({
   ...createTerminalSlice(...args),
   ...createUpdatesSlice(...args),
   ...createCouncilSlice(...args),
+  ...createSettingsSlice(...args),
 
   reset: () => {
     const [set] = args;
