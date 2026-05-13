@@ -826,11 +826,20 @@ export class SessionOrchestrator {
       if (!cwd) continue;
       const isComplete = pair.orchestrator !== undefined && pair.observer !== undefined;
 
-      // For partial pairs, synthesize a placeholder sessionId/backendType
-      // for the missing half. The group record needs both fields to satisfy
-      // GroupMember; the missing half is the snapshotted dead session for
-      // the reconnect window. If/when the missing half handshakes,
-      // `session:cli-id-received` arrives with the real sessionId.
+      // For partial pairs, synthesize a placeholder sessionId for the
+      // missing half ONLY because `GroupMember.sessionId` is a required
+      // `string` field on the coordinator's GroupRecord shape. Plan Task 3
+      // text says "NO synthetic placeholders that can never bind to a
+      // real handshake" — the spirit of that injunction is that placeholders
+      // must NEVER enter any code path expecting a real sessionId:
+      //   - armReconnect: skipped entirely (Task 3 lands in degraded directly).
+      //   - councilGroupBySessionId reverse index: placeholder MUST NOT be
+      //     inserted below (dead weight + the canary test asserts absence).
+      //   - wsBridge.markCouncilSession: only called for real halves below.
+      //   - kill / archive: coordinator best-effort kill no-ops on missing
+      //     launcher.getSession (placeholder by construction not in map).
+      // A future GroupMember type widening that allows `sessionId: string | null`
+      // would let us drop placeholders altogether — out of scope here.
       const orchestrator = pair.orchestrator;
       const observer = pair.observer;
       const primarySessionId = orchestrator?.sessionId ?? `__missing_orch_${groupId}`;
@@ -846,8 +855,12 @@ export class SessionOrchestrator {
         createdAt: (orchestrator ?? observer)?.createdAt ?? Date.now(),
         lastCheckpointReceivedAt: null,
       });
-      this.councilGroupBySessionId.set(primarySessionId, groupId);
-      this.councilGroupBySessionId.set(observerSessionId, groupId);
+      // Reverse index — placeholder ids MUST NOT enter this map: a future
+      // session:cli-id-received for an unrelated session that happens to
+      // collide with the placeholder string would resolve to the wrong
+      // group. Skip the synthesised half; insert only real halves.
+      if (orchestrator) this.councilGroupBySessionId.set(orchestrator.sessionId, groupId);
+      if (observer) this.councilGroupBySessionId.set(observer.sessionId, groupId);
       this.startCouncilWatchers(groupId, cwd);
       // Mark real (non-synthetic) halves on the ws-bridge so post-restart
       // browser subscribe sees `state.sessionGroupId` and emits the
