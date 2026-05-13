@@ -219,3 +219,51 @@ describe("SessionGroupCoordinator.archiveGroup", () => {
     expect(kill).not.toHaveBeenCalled();
   });
 });
+
+// Coverage backfill: small surface methods + edge guards. Not part of any
+// council review finding, just keeps the file above the 80% line gate when
+// the `feat/council-mode-paired-sessions` diff grew the file enough that
+// the original happy-path tests no longer cover ≥ 80% on their own.
+describe("SessionGroupCoordinator.listGroupIds / clear / armReconnect edges", () => {
+  it("listGroupIds returns an empty array when no groups have been created", () => {
+    expect(coord.listGroupIds()).toEqual([]);
+  });
+
+  it("listGroupIds enumerates every active group id (snapshot at call time)", async () => {
+    const g1 = await coord.createGroup({ cwd: "/w1", primary: "claude", observer: "claude" });
+    const g2 = await coord.createGroup({ cwd: "/w2", primary: "claude", observer: "claude" });
+    expect(coord.listGroupIds().sort()).toEqual([g1.sessionGroupId, g2.sessionGroupId].sort());
+  });
+
+  it("clear() empties the internal groups map (test-only teardown)", async () => {
+    await coord.createGroup({ cwd: "/w", primary: "claude", observer: "claude" });
+    expect(coord.listGroupIds()).toHaveLength(1);
+    coord.clear();
+    expect(coord.listGroupIds()).toEqual([]);
+  });
+
+  it("armReconnect returns null for an unknown sessionGroupId without scheduling a timer", () => {
+    const result = coord.armReconnect({
+      sessionGroupId: "grp_does_not_exist",
+      deadRole: "observer",
+      snapshotSessionId: "sess_x",
+    });
+    expect(result).toBeNull();
+  });
+
+  // The constructor falls back to a console.warn-based onError sink when
+  // the caller does not pass one — exercising that path keeps the default
+  // closure covered and asserts the fallback is observable to the operator.
+  it("default onError sink prints a warning when archive_kill fails and no sink was supplied", async () => {
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const killFn: SessionKiller = vi.fn(async (id: string) => {
+      if (id === "sess-1") throw new Error("boom");
+    });
+    // No `onError` in deps — must exercise the default arrow at line ~138.
+    const c = new SessionGroupCoordinator({ spawn, kill: killFn });
+    const g = await c.createGroup({ cwd: "/w", primary: "claude", observer: "claude" });
+    await c.archiveGroup(g.sessionGroupId);
+    expect(consoleWarn).toHaveBeenCalled();
+    consoleWarn.mockRestore();
+  });
+});

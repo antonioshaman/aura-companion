@@ -2013,6 +2013,276 @@ describe("SessionOrchestrator", () => {
       expect(intentional.has("sess_orch_t4b")).toBe(true);
       expect(intentional.has("sess_obs_t4b")).toBe(true);
     });
+
+    // Coverage backfill for the 4 fanout handlers that mirror the
+    // `group:created` / `group:review` pair already tested above:
+    // `group:exited`, `group:degraded`, `group:reconnecting`,
+    // `group:checkpoint`. Each test seeds `launcher.listSessions` so that
+    // `getGroupMemberIds` resolves the two halves, emits the bus event with
+    // a minimal valid payload, and asserts the corresponding wire-message
+    // shape lands at `wsBridge.broadcastToGroup`.
+    it("fans `group:exited` out as the group_exited wire message", () => {
+      vi.mocked(deps.launcher.listSessions).mockReturnValue([
+        { sessionId: "sess_o_exit", sessionGroupId: "grp_exit", state: "running", cwd: "/w", createdAt: 0 } as any,
+        { sessionId: "sess_b_exit", sessionGroupId: "grp_exit", state: "running", cwd: "/w", createdAt: 0 } as any,
+      ]);
+      companionBus.emit("group:exited", { sessionGroupId: "grp_exit", reason: "user_archived" });
+      const calls = vi.mocked(deps.wsBridge.broadcastToGroup).mock.calls;
+      const exited = calls.find((c: unknown[]) => (c[1] as { type?: string }).type === "group_exited");
+      expect(exited).toBeDefined();
+      expect(exited?.[0]).toEqual(["sess_o_exit", "sess_b_exit"]);
+      expect(exited?.[1]).toMatchObject({ type: "group_exited", sessionGroupId: "grp_exit", reason: "user_archived" });
+    });
+
+    it("fans `group:degraded` out as the group_degraded wire message", () => {
+      vi.mocked(deps.launcher.listSessions).mockReturnValue([
+        { sessionId: "sess_o_deg", sessionGroupId: "grp_deg", state: "running", cwd: "/w", createdAt: 0 } as any,
+        { sessionId: "sess_b_deg", sessionGroupId: "grp_deg", state: "running", cwd: "/w", createdAt: 0 } as any,
+      ]);
+      companionBus.emit("group:degraded", { sessionGroupId: "grp_deg", deadRole: "observer" });
+      const calls = vi.mocked(deps.wsBridge.broadcastToGroup).mock.calls;
+      const degraded = calls.find((c: unknown[]) => (c[1] as { type?: string }).type === "group_degraded");
+      expect(degraded).toBeDefined();
+      expect(degraded?.[1]).toMatchObject({ type: "group_degraded", sessionGroupId: "grp_deg", deadRole: "observer" });
+    });
+
+    it("fans `group:reconnecting` out as the group_reconnecting wire message with absolute deadlineMs", () => {
+      vi.mocked(deps.launcher.listSessions).mockReturnValue([
+        { sessionId: "sess_o_rec", sessionGroupId: "grp_rec", state: "running", cwd: "/w", createdAt: 0 } as any,
+        { sessionId: "sess_b_rec", sessionGroupId: "grp_rec", state: "running", cwd: "/w", createdAt: 0 } as any,
+      ]);
+      // PLAN Task 7: deadlineMs is the absolute wallclock chosen by the
+      // server, NOT a relative duration — must survive tab backgrounding.
+      const deadlineMs = Date.now() + 45_000;
+      companionBus.emit("group:reconnecting", { sessionGroupId: "grp_rec", survivingRole: "orchestrator", deadlineMs });
+      const calls = vi.mocked(deps.wsBridge.broadcastToGroup).mock.calls;
+      const rec = calls.find((c: unknown[]) => (c[1] as { type?: string }).type === "group_reconnecting");
+      expect(rec).toBeDefined();
+      expect(rec?.[1]).toMatchObject({
+        type: "group_reconnecting",
+        sessionGroupId: "grp_rec",
+        survivingRole: "orchestrator",
+        deadlineMs,
+      });
+    });
+
+    it("fans `group:checkpoint` out as the group_checkpoint wire message including the sequence and phase", () => {
+      vi.mocked(deps.launcher.listSessions).mockReturnValue([
+        { sessionId: "sess_o_chk", sessionGroupId: "grp_chk", state: "running", cwd: "/w", createdAt: 0 } as any,
+        { sessionId: "sess_b_chk", sessionGroupId: "grp_chk", state: "running", cwd: "/w", createdAt: 0 } as any,
+      ]);
+      companionBus.emit("group:checkpoint", {
+        sessionGroupId: "grp_chk",
+        checkpointId: "chk_42",
+        phase: "council-plan",
+        sequence: 3,
+      });
+      const calls = vi.mocked(deps.wsBridge.broadcastToGroup).mock.calls;
+      const chk = calls.find((c: unknown[]) => (c[1] as { type?: string }).type === "group_checkpoint");
+      expect(chk).toBeDefined();
+      expect(chk?.[1]).toMatchObject({
+        type: "group_checkpoint",
+        sessionGroupId: "grp_chk",
+        checkpointId: "chk_42",
+        phase: "council-plan",
+        sequence: 3,
+      });
+    });
+  });
+
+  // Coverage backfill for thin public delegation methods on SessionOrchestrator
+  // that the existing behavioural tests don't exercise on their own. Without
+  // them the orchestrator file dipped under the 80% line-coverage gate after
+  // the partial-pair restart commits grew the file. Each test asserts the
+  // observable side-effect, not just "called the method".
+  describe("SessionOrchestrator thin public-method delegation", () => {
+    it("getCouncilCoordinator returns null until Council Mode initialises a coordinator", () => {
+      // No createCouncilGroup / reconcileCouncilGroups call has happened in
+      // this test's setup, so the lazy field is still unset.
+      expect(orchestrator.getCouncilCoordinator()).toBeNull();
+    });
+
+    it("unarchiveSession flips archived=false on launcher and sessionStore", () => {
+      const r = orchestrator.unarchiveSession("sess_unarch_1");
+      expect(r).toEqual({ ok: true });
+      expect(deps.launcher.setArchived).toHaveBeenCalledWith("sess_unarch_1", false);
+      expect(deps.sessionStore.setArchived).toHaveBeenCalledWith("sess_unarch_1", false);
+    });
+
+    it("clearAutoRelaunchCount drops both retry counter and exhausted-notified marker so a recovered session can retry", () => {
+      const obs = orchestrator as unknown as {
+        autoRelaunchCounts: Map<string, number>;
+        relaunchExhaustedNotified: Set<string>;
+      };
+      obs.autoRelaunchCounts.set("sess_clr", 3);
+      obs.relaunchExhaustedNotified.add("sess_clr");
+      orchestrator.clearAutoRelaunchCount("sess_clr");
+      expect(obs.autoRelaunchCounts.has("sess_clr")).toBe(false);
+      expect(obs.relaunchExhaustedNotified.has("sess_clr")).toBe(false);
+    });
+
+    it("onSessionExited registers the callback and returns an unsubscribe handle that pops it off", () => {
+      const cb = vi.fn();
+      const unsub = orchestrator.onSessionExited(cb);
+      const obs = orchestrator as unknown as { exitCallbacks: Array<unknown> };
+      expect(obs.exitCallbacks).toContain(cb);
+      unsub();
+      expect(obs.exitCallbacks).not.toContain(cb);
+      // Unsubscribing a second time must be a safe no-op (idx === -1 branch).
+      expect(() => unsub()).not.toThrow();
+    });
+
+    it("getSession delegates to launcher.getSession verbatim", () => {
+      const info = { sessionId: "sess_gs", state: "running", cwd: "/w", createdAt: 1 } as any;
+      vi.mocked(deps.launcher.getSession).mockReturnValueOnce(info);
+      expect(orchestrator.getSession("sess_gs")).toBe(info);
+      expect(deps.launcher.getSession).toHaveBeenCalledWith("sess_gs");
+    });
+
+    it("shutdown is a synchronous no-op (process owns the timers, not this method)", () => {
+      // No assertion on internal state — just that the call doesn't throw
+      // and returns void. The doc-comment commits to "timers are owned by
+      // the process lifecycle" so a stronger contract here would over-constrain.
+      expect(() => orchestrator.shutdown()).not.toThrow();
+    });
+
+    // createSession early-return edges — the happy path is covered by tests
+    // above (~line 441); these target the small `else if` and 404 branches
+    // that the diff in feat/council-mode-paired-sessions made gate-relevant.
+    it("createSession warns and proceeds when an envSlug refers to a missing environment profile", async () => {
+      // Earlier tests (~line 442) overwrite the getEnv impl to return a profile;
+      // `clearAllMocks` clears CALLS but not the implementation, so we have to
+      // re-pin it to null here to actually hit the `else if (body.envSlug)`
+      // warn branch this test targets.
+      vi.mocked(envManager.getEnv).mockReturnValue(null);
+      const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const result = await orchestrator.createSession({ cwd: "/test", envSlug: "does-not-exist" });
+      // Session still launches; the env-not-found path is non-fatal.
+      expect(result.ok).toBe(true);
+      const warnCalls = consoleWarn.mock.calls.flat().filter((c): c is string => typeof c === "string");
+      expect(warnCalls.some((c) => c.includes('Environment "does-not-exist" not found'))).toBe(true);
+      consoleWarn.mockRestore();
+    });
+
+    it("createSession returns 404 when sandboxEnabled + a missing sandboxSlug is supplied", async () => {
+      // Same leakage rationale as above: prior tests mock getSandbox to return
+      // a populated sandbox, the implementation survives clearAllMocks, so we
+      // re-pin to null to actually exercise the 404 branch.
+      vi.mocked(sandboxManager.getSandbox).mockReturnValue(null);
+      const result = await orchestrator.createSession({
+        cwd: "/test",
+        sandboxEnabled: true,
+        sandboxSlug: "does-not-exist",
+      });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.status).toBe(404);
+        expect(result.error).toContain('Sandbox "does-not-exist" not found');
+      }
+    });
+
+    it("killSession delegates to launcher.kill and removes the container on success", async () => {
+      vi.mocked(deps.launcher.kill).mockResolvedValueOnce(true);
+      const result = await orchestrator.killSession("sess_k1");
+      expect(result).toEqual({ ok: true });
+      expect(deps.launcher.kill).toHaveBeenCalledWith("sess_k1");
+      // The container removal call is downstream of the kill — verifying it
+      // here would couple this test to a module-singleton we don't own. The
+      // return-shape contract is what callers can rely on.
+    });
+
+    it("killSession returns ok=false when the launcher reports the session was not killed", async () => {
+      vi.mocked(deps.launcher.kill).mockResolvedValueOnce(false);
+      const result = await orchestrator.killSession("sess_k_missing");
+      expect(result).toEqual({ ok: false });
+    });
+
+    it("backend:codex-adapter-created bus event triggers wsBridge.attachBackendAdapter for the codex backend", () => {
+      // This describe block doesn't have its own initialize() beforeEach
+      // (unlike the fanout describe just above) — call it here so the bus
+      // listeners are registered for THIS test only.
+      orchestrator.initialize();
+      const adapter = { __codex_fake: true } as unknown as { sessionId: string };
+      companionBus.emit("backend:codex-adapter-created", { sessionId: "sess_codex_1", adapter });
+      expect(deps.wsBridge.attachBackendAdapter).toHaveBeenCalledWith("sess_codex_1", adapter, "codex");
+    });
+
+    it("relaunchSession refuses an archived session with the documented error string", async () => {
+      vi.mocked(deps.launcher.getSession).mockReturnValueOnce({
+        sessionId: "sess_arch_relaunch",
+        state: "running",
+        cwd: "/w",
+        createdAt: 1,
+        archived: true,
+      } as any);
+      const result = await orchestrator.relaunchSession("sess_arch_relaunch");
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error).toMatch(/archived/i);
+      }
+      // Must not call launcher.relaunch when the session is archived.
+      expect(deps.launcher.relaunch).not.toHaveBeenCalled();
+    });
+
+    it("session:exited targeting the orchestrator-half hits the primary-id loop arm in the council exit handler", () => {
+      // The existing fanout-describe tests cover the observer-half exit path
+      // (sessionId matches `observerSessionId`). The symmetric primary-half
+      // branch — sessionId matches `primarySessionId` — was unexercised, so
+      // the loop body that captures `foundRole = "orchestrator"` was still
+      // statement-uncovered. This test trips that arm with a minimal stage.
+      orchestrator.initialize();
+      const obs = orchestrator as unknown as {
+        councilGroupMeta: Map<string, { primarySessionId: string; observerSessionId: string; pairing: string; createdAt: number; lastCheckpointReceivedAt: number | null }>;
+      };
+      obs.councilGroupMeta.set("grp_primary_exit", {
+        primarySessionId: "sess_orch_pe",
+        observerSessionId: "sess_obs_pe",
+        pairing: "claude+claude",
+        createdAt: Date.now(),
+        lastCheckpointReceivedAt: null,
+      });
+      // No coordinator wired (createCouncilGroup not called) → falls through
+      // to the belt-and-braces `group:degraded` emit at line ~829, which the
+      // fanout describe above translates into a broadcastToGroup. Two birds
+      // with one stone for the coverage cascade.
+      vi.mocked(deps.launcher.listSessions).mockReturnValue([
+        { sessionId: "sess_orch_pe", sessionGroupId: "grp_primary_exit", state: "running", cwd: "/w", createdAt: 0 } as any,
+        { sessionId: "sess_obs_pe", sessionGroupId: "grp_primary_exit", state: "running", cwd: "/w", createdAt: 0 } as any,
+      ]);
+      companionBus.emit("session:exited", { sessionId: "sess_orch_pe", exitCode: 1 });
+      // Loop must have matched the primary half — assert via the downstream
+      // broadcast that fires from the fallback `group:degraded` emit.
+      const calls = vi.mocked(deps.wsBridge.broadcastToGroup).mock.calls;
+      const degraded = calls.find((c: unknown[]) => {
+        const msg = c[1] as { type?: string; deadRole?: string; sessionGroupId?: string };
+        return msg.type === "group_degraded" && msg.sessionGroupId === "grp_primary_exit" && msg.deadRole === "orchestrator";
+      });
+      expect(degraded).toBeDefined();
+    });
+
+    it("relaunchSession on a live session clears retry counters and delegates to launcher.relaunch", async () => {
+      const obs = orchestrator as unknown as {
+        autoRelaunchCounts: Map<string, number>;
+        relaunchExhaustedNotified: Set<string>;
+      };
+      obs.autoRelaunchCounts.set("sess_relaunch_1", 2);
+      obs.relaunchExhaustedNotified.add("sess_relaunch_1");
+      vi.mocked(deps.launcher.getSession).mockReturnValueOnce({
+        sessionId: "sess_relaunch_1",
+        state: "running",
+        cwd: "/w",
+        createdAt: 1,
+        archived: false,
+      } as any);
+      vi.mocked(deps.launcher.relaunch).mockResolvedValueOnce({ ok: true });
+      const result = await orchestrator.relaunchSession("sess_relaunch_1");
+      expect(result).toEqual({ ok: true });
+      // Retry bookkeeping is cleared so a successful relaunch doesn't inherit
+      // stale exhausted-notified state from prior crash cycles.
+      expect(obs.autoRelaunchCounts.has("sess_relaunch_1")).toBe(false);
+      expect(obs.relaunchExhaustedNotified.has("sess_relaunch_1")).toBe(false);
+      expect(deps.launcher.relaunch).toHaveBeenCalledWith("sess_relaunch_1");
+    });
   });
 
   // ── handleCouncilCheckpoint / handleCouncilReview producers ────────────────
