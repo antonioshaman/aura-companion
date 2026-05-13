@@ -71,7 +71,10 @@ describe("SessionRecorder", () => {
 
     const header = JSON.parse(lines[0]);
     expect(header._header).toBe(true);
-    expect(header.version).toBe(1);
+    // Schema bumped to v2 in Task 8 (origin field on entries); writer
+    // always emits the current version, readers tolerate both 1 and 2
+    // for forensic access to historical recordings.
+    expect(header.version).toBe(2);
     expect(header.session_id).toBe("sess-1");
     expect(header.backend_type).toBe("claude");
     expect(header.cwd).toBe("/project");

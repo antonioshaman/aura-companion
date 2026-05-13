@@ -23,11 +23,18 @@ your single review file.
 
 ## Your contract — exactly one cycle
 
-1. Receive a **checkpoint manifest**: a list of workspace-relative
-   artifact paths plus the phase name and a checkpoint id.
-2. Read **only** the manifest paths. Do not browse the rest of the tree.
-   Do not run shell commands. Do not write to anything other than your
-   single review file.
+1. Receive a **checkpoint manifest**: a JSON block carrying `delta`
+   (new files this cycle), `carried` (files unchanged since last cycle
+   that may be re-read for cross-cut consistency), and `dropped` (files
+   that left the manifest this cycle).
+2. Read **only** the paths under `delta` and `carried`. Files listed
+   under `dropped` are explicitly OUT OF SCOPE this cycle — even if you
+   reviewed them before, do NOT re-read them now; their contents may
+   have moved, been deleted, or been replaced with unrelated work, and
+   citing them produces grounded-looking findings about state the
+   orchestrator no longer considers part of the current phase. Do not
+   browse the rest of the tree. Do not run shell commands. Do not write
+   to anything other than your single review file.
 3. Emit one review file matching the `ObserverReviewPayload` JSON schema
    (described below) and exit. One checkpoint in, one review file out.
 
@@ -111,6 +118,7 @@ Emit valid JSON exactly matching `ObserverReviewPayload`:
 ```
 {
   "schema_version": 1,
+  "observer_wake_payload_version_echo": <integer from manifest>,
   "checkpoint_id": "<echo from input>",
   "phase": "<echo from input>",
   "session_group_id": "<echo from input>",
@@ -129,6 +137,14 @@ Emit valid JSON exactly matching `ObserverReviewPayload`:
   ]
 }
 ```
+
+`observer_wake_payload_version_echo` must be the integer value of
+`observer_wake_payload_version` taken verbatim from the manifest JSON
+block in the wake message. The server validates this echo against the
+version it sent; a mismatch downgrades ALL findings in this review to
+NOTE severity to defend against silent schema drift between a server
+that ships a new wake shape and a stale prompt that still parses against
+the old one.
 
 No prose around the JSON. No code fences. The CLI's stdout is parsed
 verbatim. A response that is not valid JSON matching the schema is

@@ -107,3 +107,27 @@ These must be followed — flag violations as findings.
 **Principle:** `references/quality-backend.md` → Principle 6
 
 ---
+
+### EC-10: Discriminated-union state renderers must compile-fail on missing variants
+
+**Convention:** Any UI component that switches on a discriminated-union state (e.g. `ObserverPanelState`, `SessionPhase`, group lifecycle pills) must include a `const _: never = state;` (or equivalent exhaustiveness check) in the `default` branch. Adding a new variant to the union without extending the switch must fail typecheck rather than silently render an empty header. The pattern is mandatory on any state-pill, status-banner, or stage-indicator component whose union has ≥3 variants.
+**Origin:** Friedman (UX Quality) — Council Review 2026-05-13-0100 (finding #5)
+**Principle:** `references/quality-ux.md` → Principle 2 (Design all five screen states)
+
+---
+
+### EC-11: Wallclock-anchored derived state requires an explicit clock-tick subscription
+
+**Convention:** Any derived state whose transition is gated on `nowMs > someDeadline` (e.g. `reviewing → reviewing-stalled` at `lastCheckpointAt + wakeTimeoutMs`, idle-kill timers, grace-window expiries) must be paired with either (a) a `setInterval` / `useTimer` subscription that re-renders periodically, or (b) a server-emitted deadline-fired event the client consumes via `ws.ts`. Pure derivation alone is structurally unreachable in production because the component re-renders only on state changes — not on the wallclock passing through a deadline. Option (b) is preferred because it preserves the "single mutation channel via ws.ts" discipline; option (a) is acceptable when the deadline is short (< 30s).
+**Origin:** React/Web UI — Council Review 2026-05-13-0100 (finding #4)
+**Principle:** `references/quality-frontend.md` → Principle 1 (single source of truth for derived state)
+
+---
+
+### EC-12: `fs.watch`-driven pipelines require an explicit pre-scan reconcile on initialize
+
+**Convention:** Any pipeline that depends on `fs.watch` events to drive durable state mutation (council checkpoint→wake, review-watcher→grounding, future filesystem-driven flows) must implement a scan-on-initialize reconciler that enumerates pre-existing files in the watched directory, compares them against the persisted sentinel state, and fires the corresponding action for any gap. `fs.watch` is event-only post-attach — it does NOT replay existing files on watcher start. A pipeline that promises "restart-idempotent" behaviour without the scan ships green but loses state across crashes. The reconciler must be idempotent (the sentinel-before-sweep wrapper from EC-8 is the canonical pattern).
+**Origin:** FS-JSON Persistence — Council Review 2026-05-13-0100 (finding #6)
+**Principle:** `references/quality-persistence.md` → Principle 7 (Replay determinism)
+
+---

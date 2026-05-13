@@ -7,10 +7,18 @@ import { createHash } from "node:crypto";
 import {
   OBSERVER_PROMPT_MAX_BYTES,
   OBSERVER_PROMPT_SCHEMA_VERSION,
+  assertWakeManifestPathAllowed,
   buildObserverContextManifest,
+  buildObserverWakePayload,
   loadObserverSystemPrompt,
   parseObserverPromptHeader,
 } from "./observer-prompt.js";
+import {
+  OBSERVER_WAKE_MAX_PATHS_PER_SECTION,
+  OBSERVER_WAKE_PAYLOAD_VERSION,
+} from "./council-types.js";
+import { mkdirSync, symlinkSync } from "node:fs";
+import { readFileSync as _readFileSync } from "node:fs";
 
 // The minimum bytes guard is in the source; padding lets us write tiny
 // fixtures and still pass the floor without copy-pasting the constant.
@@ -210,5 +218,234 @@ describe("buildObserverContextManifest", () => {
       previous: { artifact_paths: [] },
     });
     expect(m).toEqual({ delta: [], carried: [], dropped: [] });
+  });
+});
+
+// ── Task 13 test pack ──────────────────────────────────────────────────────
+//
+// Pure unit tables for the wake payload builder and the EC-7 wrapper.
+// The dispatcher integration (Task 3) is exercised through the existing
+// `session-orchestrator.test.ts` patterns; here we pin the producer-side
+// invariants in isolation so payload-format edits ripple only through
+// the builder tests (structure-insensitive per Beck Principle 2).
+
+describe("buildObserverWakePayload", () => {
+  let workspaceRoot: string;
+  beforeEach(() => {
+    workspaceRoot = mkdtempSync(join(tmpdir(), "observer-wake-test-"));
+    // Seed two files inside the workspace so realpath containment has
+    // existing paths to resolve. Non-existent paths exercise the
+    // climb-to-parent branch.
+    writeFileSync(join(workspaceRoot, "a.ts"), "// existing");
+    writeFileSync(join(workspaceRoot, "b.ts"), "// existing");
+  });
+  afterEach(() => {
+    rmSync(workspaceRoot, { recursive: true, force: true });
+  });
+
+  it("emits the canonical hybrid body with H1 preamble + fenced JSON + directive terminator", () => {
+    const result = buildObserverWakePayload({
+      checkpoint: {
+        session_group_id: "grp_test",
+        checkpoint_id: "chk_1",
+        phase: "council-implement",
+        sequence: 1,
+      },
+      manifest: { delta: ["a.ts"], carried: ["b.ts"], dropped: [] },
+      workspaceRoot,
+    });
+    expect(result.textBody.startsWith("# Council Checkpoint — council-implement")).toBe(true);
+    expect(result.textBody).toContain("```json");
+    expect(result.textBody).toContain("```\n\nEmit one review file");
+    expect(result.droppedPaths).toEqual([]);
+    expect(result.sha256).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("orders JSON keys with version first, then echo fields, then content arrays", () => {
+    const result = buildObserverWakePayload({
+      checkpoint: {
+        session_group_id: "grp_x",
+        checkpoint_id: "chk_2",
+        phase: "council-plan",
+        sequence: 5,
+      },
+      manifest: { delta: ["a.ts"], carried: [], dropped: [] },
+      workspaceRoot,
+    });
+    // Extract the fenced JSON block and assert key order via stringified
+    // representation — first occurrence of each key in textual order
+    // mirrors Object.keys() insertion order.
+    const match = /```json\n([\s\S]*?)\n```/.exec(result.textBody);
+    expect(match).not.toBeNull();
+    const json = match![1];
+    const keysInOrder = [...json.matchAll(/"([a-z_]+)":/g)].map((m) => m[1]);
+    // Filter out nested keys — the top-level scan picks up "type": "text"
+    // only if we accidentally serialised the content blocks here; we
+    // didn't, but the regex doesn't distinguish, so we slice the leading
+    // five keys that we KNOW are the payload's top-level discriminator.
+    expect(keysInOrder.slice(0, 5)).toEqual([
+      "observer_wake_payload_version",
+      "session_group_id",
+      "checkpoint_id",
+      "phase",
+      "checkpoint_seq",
+    ]);
+  });
+
+  it("throws on CR/LF/NUL in manifest paths (NDJSON line-discipline defence)", () => {
+    expect(() =>
+      buildObserverWakePayload({
+        checkpoint: {
+          session_group_id: "grp_x",
+          checkpoint_id: "chk_3",
+          phase: "p",
+          sequence: 1,
+        },
+        manifest: { delta: ["a\nb.ts"], carried: [], dropped: [] },
+        workspaceRoot,
+      })
+    ).toThrow(/CR\/LF\/NUL/);
+  });
+
+  it("throws on backtick triplet in manifest paths (fence-unframing defence)", () => {
+    expect(() =>
+      buildObserverWakePayload({
+        checkpoint: {
+          session_group_id: "grp_x",
+          checkpoint_id: "chk_4",
+          phase: "p",
+          sequence: 1,
+        },
+        manifest: { delta: ["foo```.ts"], carried: [], dropped: [] },
+        workspaceRoot,
+      })
+    ).toThrow(/triplet/);
+  });
+
+  it("throws when a section exceeds OBSERVER_WAKE_MAX_PATHS_PER_SECTION", () => {
+    const overflow = Array.from(
+      { length: OBSERVER_WAKE_MAX_PATHS_PER_SECTION + 1 },
+      (_, i) => `f${i}.ts`,
+    );
+    expect(() =>
+      buildObserverWakePayload({
+        checkpoint: {
+          session_group_id: "grp_x",
+          checkpoint_id: "chk_5",
+          phase: "p",
+          sequence: 1,
+        },
+        manifest: { delta: overflow, carried: [], dropped: [] },
+        workspaceRoot,
+      })
+    ).toThrow(/OBSERVER_WAKE_MAX_PATHS_PER_SECTION/);
+  });
+
+  it("drops (does not throw) paths that escape the workspace root", () => {
+    // Use an absolute path pointing outside the workspace — realpath
+    // containment must reject it without crashing the whole wake.
+    const result = buildObserverWakePayload({
+      checkpoint: {
+        session_group_id: "grp_x",
+        checkpoint_id: "chk_6",
+        phase: "p",
+        sequence: 1,
+      },
+      manifest: {
+        delta: ["a.ts", "/etc/passwd"],
+        carried: [],
+        dropped: [],
+      },
+      workspaceRoot,
+    });
+    expect(result.droppedPaths.length).toBeGreaterThan(0);
+    // The traversal path is excluded from the serialised body — observer
+    // never sees it even though the orchestrator wrote it into the
+    // checkpoint.
+    expect(result.textBody).not.toContain("/etc/passwd");
+    expect(result.textBody).toContain("a.ts");
+  });
+
+  it("emits stable sha256 for identical inputs (deterministic for audit)", () => {
+    const inputs = {
+      checkpoint: {
+        session_group_id: "grp_x",
+        checkpoint_id: "chk_7",
+        phase: "p",
+        sequence: 1,
+      },
+      manifest: { delta: ["a.ts"], carried: ["b.ts"], dropped: [] },
+      workspaceRoot,
+    };
+    const r1 = buildObserverWakePayload(inputs);
+    const r2 = buildObserverWakePayload(inputs);
+    expect(r1.sha256).toBe(r2.sha256);
+    expect(r1.textBody).toBe(r2.textBody);
+  });
+});
+
+describe("assertWakeManifestPathAllowed (EC-7 wrapper)", () => {
+  let workspaceRoot: string;
+  beforeEach(() => {
+    workspaceRoot = mkdtempSync(join(tmpdir(), "wake-path-test-"));
+    writeFileSync(join(workspaceRoot, "inside.ts"), "");
+  });
+  afterEach(() => {
+    rmSync(workspaceRoot, { recursive: true, force: true });
+  });
+
+  it("allows an existing file inside the workspace", () => {
+    const r = assertWakeManifestPathAllowed("inside.ts", workspaceRoot);
+    expect(r.ok).toBe(true);
+  });
+
+  it("allows a non-existent file inside the workspace (climbs to parent)", () => {
+    const r = assertWakeManifestPathAllowed("not-yet.ts", workspaceRoot);
+    expect(r.ok).toBe(true);
+  });
+
+  it("rejects absolute paths outside the workspace", () => {
+    const r = assertWakeManifestPathAllowed("/etc/passwd", workspaceRoot);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("resolves_outside_workspace");
+  });
+
+  it("rejects a symlink that escapes the workspace", () => {
+    const outside = mkdtempSync(join(tmpdir(), "wake-path-outside-"));
+    writeFileSync(join(outside, "secret.ts"), "");
+    symlinkSync(join(outside, "secret.ts"), join(workspaceRoot, "evil-link.ts"));
+    try {
+      const r = assertWakeManifestPathAllowed("evil-link.ts", workspaceRoot);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.reason).toBe("resolves_outside_workspace");
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── Static-grep canary ─────────────────────────────────────────────────────
+//
+// Beck Council Rec 4: the wake dispatcher call site lives INSIDE
+// `handleCouncilCheckpoint`'s body. A future refactor that extracts the
+// wake into a wrapper and forgets to invoke it would ship green on
+// behavioural tests if those tests only exercise the wrapper. This
+// canary asserts the call site is mechanically reachable from the
+// handler body, regardless of the wrapper's name.
+
+describe("dispatchObserverWake call-site canary (Beck Council Rec 4)", () => {
+  it("session-orchestrator.handleCouncilCheckpoint invokes dispatchObserverWake in its body", () => {
+    const filePath = fileURLToPath(new URL("./session-orchestrator.ts", import.meta.url));
+    const source = _readFileSync(filePath, "utf-8");
+    // Find the body of handleCouncilCheckpoint — anchored on the private
+    // method declaration, terminated by the next method declaration's
+    // signature OR the class brace. Using regex with `\w+` placeholders
+    // per `feedback_static_grep_canary_regex_over_substring`.
+    const handlerStart = source.indexOf("private handleCouncilCheckpoint(");
+    expect(handlerStart).toBeGreaterThan(0);
+    // Search the next 4000 characters of source — generous bound for the
+    // handler body; if it grows beyond that, the canary is the canary.
+    const handlerBody = source.slice(handlerStart, handlerStart + 4000);
+    expect(handlerBody).toMatch(/this\.dispatchObserverWake\s*\(/);
   });
 });

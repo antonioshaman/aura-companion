@@ -180,6 +180,7 @@ function createMockBridge() {
     injectSystemPrompt: vi.fn(),
     attachBackendAdapter: vi.fn(),
     cancelDisconnectTimer: vi.fn(() => false),
+    sendObserverWakeFrame: vi.fn(() => ({ kind: "sent" })),
   } as any;
 }
 
@@ -2181,6 +2182,11 @@ describe("SessionOrchestrator", () => {
         }).handleCouncilReview;
         handle.call(orchestrator, "grp_r1", {
           schema_version: 1,
+          // Council Review 2026-05-13 Willison #12: wake-version echo
+          // is mandatory; tests that exercise grounding (not echo
+          // validation) must supply it so findings are not blanket-
+          // downgraded with `wake_version_mismatch`.
+          observer_wake_payload_version_echo: 1,
           checkpoint_id: "chk_a",
           phase: "council-plan",
           session_group_id: "grp_r1",
@@ -2250,6 +2256,191 @@ describe("SessionOrchestrator", () => {
       } finally {
         ws.councilGroupMeta.get = original;
       }
+    });
+  });
+
+  // ── dispatchObserverWake — direct outcome-table coverage (Beck regression #2) ──
+  //
+  // The keystone observer-wake dispatcher has 10 distinct outcome branches
+  // (dispatched + 8 skip reasons + failed) and 5 ordered gates (sentinel,
+  // group_status, build, busy/disconnected/backpressure/etc., send). The
+  // static-grep canary at observer-prompt.test.ts pins the call site but
+  // does not exercise behaviour — this describe block covers each outcome
+  // via the injected `deps.wsBridge.sendObserverWakeFrame` mock.
+  describe("dispatchObserverWake", () => {
+    function seedActiveGroup(groupId: string, opts: { cwd?: string; primary?: string; observer?: string } = {}) {
+      const cwd = opts.cwd ?? require("node:fs").realpathSync(require("node:fs").mkdtempSync(require("node:path").join(require("node:os").tmpdir(), "council-disp-")));
+      const ws = orchestrator as unknown as {
+        councilWatchers: Map<string, { cwd: string; abort: AbortController; lastCheckpoint: unknown; previousCheckpoint: unknown; pendingCheckpoint: unknown; supersededCheckpointIds: string[] }>;
+        councilGroupMeta: Map<string, { primarySessionId: string; observerSessionId: string; pairing: string; createdAt: number; lastCheckpointReceivedAt: number | null }>;
+        coordinator: unknown;
+      };
+      ws.councilWatchers.set(groupId, {
+        cwd,
+        abort: new AbortController(),
+        lastCheckpoint: null,
+        previousCheckpoint: null,
+        pendingCheckpoint: null,
+        supersededCheckpointIds: [],
+      });
+      ws.councilGroupMeta.set(groupId, {
+        primarySessionId: opts.primary ?? "sess_orch",
+        observerSessionId: opts.observer ?? "sess_obs",
+        pairing: "claude+claude",
+        createdAt: Date.now(),
+        lastCheckpointReceivedAt: null,
+      });
+      // Stub a minimal coordinator with an active group record so Gate 1
+      // doesn't short-circuit on absent-coordinator.
+      ws.coordinator = {
+        get: vi.fn(() => ({ sessionGroupId: groupId, status: "active" })),
+      };
+      return cwd;
+    }
+    function validPayload(groupId: string, opts: { sequence?: number; checkpointId?: string } = {}) {
+      return {
+        schema_version: 1,
+        checkpoint_id: opts.checkpointId ?? "chk_dispatch_1",
+        phase: "council-plan",
+        sequence: opts.sequence ?? 1,
+        session_group_id: groupId,
+        emitted_at: "2026-01-01T00:00:00Z",
+        artifact_paths: [],
+      } as any;
+    }
+    function callDispatch(groupId: string, payload: any) {
+      return (orchestrator as unknown as {
+        dispatchObserverWake: (g: string, p: any) => any;
+      }).dispatchObserverWake.call(orchestrator, groupId, payload);
+    }
+
+    afterEach(() => {
+      vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReset();
+      vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "sent" });
+    });
+
+    // Happy path: bridge returns sent → outcome dispatched + sentinel written.
+    it("returns dispatched + writes sentinel when the bridge accepts the wake", () => {
+      seedActiveGroup("grp_d1");
+      vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "sent" });
+      const out = callDispatch("grp_d1", validPayload("grp_d1"));
+      expect(out.kind).toBe("dispatched");
+      expect(out.checkpointId).toBe("chk_dispatch_1");
+      expect(out.observerSessionId).toBe("sess_obs");
+      expect(deps.wsBridge.sendObserverWakeFrame).toHaveBeenCalledTimes(1);
+    });
+
+    // Observer unknown — watcher exists but councilGroupMeta drops mid-flight.
+    it("returns skipped:observer_unknown when councilGroupMeta is missing for the group", () => {
+      seedActiveGroup("grp_d_unknown");
+      const ws = orchestrator as unknown as { councilGroupMeta: Map<string, unknown> };
+      ws.councilGroupMeta.delete("grp_d_unknown");
+      const out = callDispatch("grp_d_unknown", validPayload("grp_d_unknown"));
+      expect(out.kind).toBe("skipped");
+      expect(out.reason).toBe("observer_unknown");
+    });
+
+    // Group status not-active (degraded) → skipped:group_not_active.
+    it("returns skipped:group_not_active when coordinator status is degraded", () => {
+      seedActiveGroup("grp_d_deg");
+      const ws = orchestrator as unknown as { coordinator: { get: ReturnType<typeof vi.fn> } };
+      ws.coordinator.get = vi.fn(() => ({ status: "degraded" }));
+      const out = callDispatch("grp_d_deg", validPayload("grp_d_deg"));
+      expect(out.kind).toBe("skipped");
+      expect(out.reason).toBe("group_not_active");
+    });
+
+    // Group status reconnecting → queues into pendingCheckpoint (#3 fix).
+    it("queues into pendingCheckpoint when coordinator status is reconnecting", () => {
+      seedActiveGroup("grp_d_rec");
+      const ws = orchestrator as unknown as { coordinator: { get: ReturnType<typeof vi.fn> }; councilWatchers: Map<string, { pendingCheckpoint: unknown }> };
+      ws.coordinator.get = vi.fn(() => ({ status: "reconnecting" }));
+      const payload = validPayload("grp_d_rec");
+      const out = callDispatch("grp_d_rec", payload);
+      expect(out.kind).toBe("skipped");
+      expect(out.reason).toBe("observer_busy");
+      expect(ws.councilWatchers.get("grp_d_rec")?.pendingCheckpoint).toBe(payload);
+    });
+
+    // Bridge returns busy → queues into pendingCheckpoint.
+    it("queues into pendingCheckpoint when the adapter is mid-turn (busy)", () => {
+      seedActiveGroup("grp_d_busy");
+      vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "busy" });
+      const payload = validPayload("grp_d_busy");
+      const out = callDispatch("grp_d_busy", payload);
+      expect(out.kind).toBe("skipped");
+      expect(out.reason).toBe("observer_busy");
+      const ws = orchestrator as unknown as { councilWatchers: Map<string, { pendingCheckpoint: unknown }> };
+      expect(ws.councilWatchers.get("grp_d_busy")?.pendingCheckpoint).toBe(payload);
+    });
+
+    // Bridge returns socket_disconnected → skip without queue.
+    it("returns skipped:socket_disconnected when the bridge can't reach the observer", () => {
+      seedActiveGroup("grp_d_disc");
+      vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "socket_disconnected" });
+      const out = callDispatch("grp_d_disc", validPayload("grp_d_disc"));
+      expect(out.kind).toBe("skipped");
+      expect(out.reason).toBe("socket_disconnected");
+    });
+
+    // Bridge returns backpressure → queues (Realtime #17 fix).
+    it("queues into pendingCheckpoint on backpressure (Realtime #17)", () => {
+      seedActiveGroup("grp_d_bp");
+      vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "backpressure", bufferedAmount: 2_000_000 });
+      const payload = validPayload("grp_d_bp");
+      const out = callDispatch("grp_d_bp", payload);
+      expect(out.kind).toBe("skipped");
+      expect(out.reason).toBe("backpressure");
+      const ws = orchestrator as unknown as { councilWatchers: Map<string, { pendingCheckpoint: unknown }> };
+      expect(ws.councilWatchers.get("grp_d_bp")?.pendingCheckpoint).toBe(payload);
+    });
+
+    // Bridge returns session_unknown → observer_unknown (mapped).
+    it("maps bridge session_unknown to skipped:observer_unknown", () => {
+      seedActiveGroup("grp_d_su");
+      vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "session_unknown" });
+      const out = callDispatch("grp_d_su", validPayload("grp_d_su"));
+      expect(out.kind).toBe("skipped");
+      expect(out.reason).toBe("observer_unknown");
+    });
+
+    // Bridge returns adapter_missing → adapter_missing.
+    it("returns skipped:adapter_missing when the bridge has no adapter for the session", () => {
+      seedActiveGroup("grp_d_am");
+      vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "adapter_missing" });
+      const out = callDispatch("grp_d_am", validPayload("grp_d_am"));
+      expect(out.kind).toBe("skipped");
+      expect(out.reason).toBe("adapter_missing");
+    });
+
+    // Bridge returns unsupported_backend (Codex pairing not wired).
+    it("returns skipped:unsupported_backend on Codex pairing", () => {
+      seedActiveGroup("grp_d_un");
+      vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "unsupported_backend" });
+      const out = callDispatch("grp_d_un", validPayload("grp_d_un"));
+      expect(out.kind).toBe("skipped");
+      expect(out.reason).toBe("unsupported_backend");
+    });
+
+    // Bridge throws → failed outcome with error string.
+    it("returns failed with error message on bridge send-throw", () => {
+      seedActiveGroup("grp_d_fail");
+      vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "failed", error: "socket-write-EPIPE" });
+      const out = callDispatch("grp_d_fail", validPayload("grp_d_fail"));
+      expect(out.kind).toBe("failed");
+      expect(out.error).toBe("socket-write-EPIPE");
+    });
+
+    // Sentinel idempotency: a second dispatch for the same checkpoint id skips.
+    it("returns skipped:already_woken on second dispatch for the same checkpoint_id (sentinel idempotency)", () => {
+      seedActiveGroup("grp_d_sent");
+      vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "sent" });
+      const p = validPayload("grp_d_sent", { checkpointId: "chk_repeat" });
+      const first = callDispatch("grp_d_sent", p);
+      expect(first.kind).toBe("dispatched");
+      const second = callDispatch("grp_d_sent", p);
+      expect(second.kind).toBe("skipped");
+      expect(second.reason).toBe("already_woken");
     });
   });
 

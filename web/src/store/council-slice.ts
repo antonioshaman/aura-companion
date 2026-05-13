@@ -8,6 +8,7 @@ import type {
   SessionGroupStatus,
   SessionRole,
 } from "../types.js";
+import { clearAnnouncerScope } from "../components/council/FindingsLog.js";
 
 // ── Persistence keys & bounds ───────────────────────────────────────────────
 
@@ -176,6 +177,9 @@ export interface CouncilSlice {
     observerModel: string;
     observerProvider: string;
     timestamp: number;
+    /** Task 9/11: server-reported checkpoint ids dropped by the mid-turn
+     *  newest-wins queue between the previous review and this one. */
+    supersededCheckpointIds?: string[];
   }) => void;
 
   // Actions — panel state
@@ -230,6 +234,11 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
       findings.delete(sessionGroupId);
       const groundingDowngrades = new Map(s.groundingDowngrades);
       groundingDowngrades.delete(sessionGroupId);
+      // Council Review 2026-05-13-0150 React × Fowler #15: clear the
+      // FindingsLog announcer-coalescer state for this group so an
+      // exited-then-recreated group doesn't inherit stale "already
+      // announced" ids.
+      clearAnnouncerScope(sessionGroupId);
       return { groups, groupBySessionId, findings, groundingDowngrades };
     }),
 
@@ -268,12 +277,22 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
       return { groups };
     }),
 
-  appendObserverReview: ({ sessionGroupId, checkpointId, phase, findings: wireFindings, downgrades, observerModel, observerProvider, timestamp }) =>
+  appendObserverReview: ({ sessionGroupId, checkpointId, phase, findings: wireFindings, downgrades, observerModel, observerProvider, timestamp, supersededCheckpointIds }) =>
     set((s) => {
       const existing = s.groups.get(sessionGroupId);
       if (!existing) return {};
       const groups = new Map(s.groups);
-      groups.set(sessionGroupId, { ...existing, observerReviewing: false });
+      // Task 11: update recentlySupersededCheckpointIds from this review.
+      // Non-empty = the panel shows `queued-dropped` until the next review.
+      // Omitted/empty = clear; the deriver falls through to sleeping.
+      const next: GroupRecord = {
+        ...existing,
+        observerReviewing: false,
+        ...(Array.isArray(supersededCheckpointIds) && supersededCheckpointIds.length > 0
+          ? { recentlySupersededCheckpointIds: supersededCheckpointIds }
+          : { recentlySupersededCheckpointIds: [] }),
+      };
+      groups.set(sessionGroupId, next);
       const findings = new Map(s.findings);
       const prior = findings.get(sessionGroupId) ?? [];
       const seenIds = new Set(prior.map((f) => f.id));
@@ -282,7 +301,15 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
         if (seenIds.has(wire.id)) continue; // server may re-emit on reconnect; dedup
         newOnes.push(hydrateObserverFinding(wire, { receivedAt: timestamp, checkpointId, phase, observerModel, observerProvider }));
       }
-      findings.set(sessionGroupId, [...prior, ...newOnes]);
+      // Council Review 2026-05-13 React #24: only write a fresh array
+      // reference when there's actually new content. Server may re-emit
+      // a review on reconnect (dedupe filters everything out); writing
+      // a same-content fresh array forces every selector subscribed to
+      // findings to re-render, including the FindingsLog summary
+      // announcer's effect.
+      if (newOnes.length > 0) {
+        findings.set(sessionGroupId, [...prior, ...newOnes]);
+      }
       const groundingDowngrades = new Map(s.groundingDowngrades);
       const priorDowngrades = groundingDowngrades.get(sessionGroupId) ?? [];
       const seenDowngradeIds = new Set(priorDowngrades.map((d) => d.id));

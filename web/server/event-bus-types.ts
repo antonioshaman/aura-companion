@@ -118,6 +118,22 @@ export interface CompanionEventMap {
     sequence: number;
   };
 
+  /**
+   * Council Mode auto-wake — observer's per-turn state machine transitioned
+   * from `in-flight` to `idle`. Fired by the Claude adapter when a `result`
+   * NDJSON frame arrives AFTER a server-synthesised wake frame had been
+   * sent (i.e., the previous state was `in-flight`). Non-council sessions
+   * and browser-initiated turns never fire this event.
+   *
+   * The orchestrator's listener inspects its `councilWatchers` map for a
+   * pending-checkpoint queue (Task 4 newest-wins slot) and drains it via
+   * a fresh `dispatchObserverWake` call.
+   */
+  "observer:turn-done": {
+    /** Companion sessionId of the observer half (NOT cliSessionId). */
+    sessionId: string;
+  };
+
   /** Observer review processed end-to-end: parsed from the review file,
    *  validated for grounding, findings hydrated with server-assigned ids,
    *  ready for browser fanout. Subscribers transform the payload into

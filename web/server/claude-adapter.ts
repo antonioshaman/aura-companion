@@ -47,11 +47,47 @@ import type { RecorderManager } from "./recorder.js";
 import { parseNDJSON, isDuplicateCLIMessage } from "./ws-bridge-cli-ingest.js";
 import type { CLIDedupState } from "./ws-bridge-cli-ingest.js";
 import { reportProtocolDrift } from "./protocol-monitor.js";
+import { companionBus } from "./event-bus.js";
 
 // --- Constants ----------------------------------------------------------------
 
 /** Number of recent CLI message hashes to track for deduplication on WS reconnect. */
 const CLI_DEDUP_WINDOW = 2000;
+
+/**
+ * Backpressure threshold for the server-direction wake send. Bun's
+ * `ServerWebSocket.bufferedAmount` accumulates when the peer can't drain
+ * fast enough. Wake frames are bounded at OBSERVER_WAKE_MAX_BYTES (32 KiB)
+ * so 1 MiB of buffered tells us the observer transport is stuck, not that
+ * the message is large — refuse the send rather than silently queue.
+ */
+const OBSERVER_WAKE_BACKPRESSURE_THRESHOLD_BYTES = 1024 * 1024;
+
+/**
+ * Adapter-level outcome of a wake send attempt. The orchestrator's
+ * dispatcher (Task 3) wraps this in a richer WakeDispatchOutcome that
+ * adds coordinator-side reasons (observer_unknown, group_not_active).
+ *
+ * - `sent` — NDJSON frame was passed to `cliSocket.send` without throwing.
+ *   The observer turn-state is now `in-flight` and idle-kill activity
+ *   has been registered.
+ * - `socket_disconnected` — cliSocket is null or closing. Transient
+ *   observer disconnect window; the dispatcher should keep the pending
+ *   checkpoint for the reconnect-aware drain (Task 5).
+ * - `busy` — observer is mid-turn from a previous wake. Dispatcher should
+ *   enqueue (Task 4).
+ * - `backpressure` — bufferedAmount exceeds threshold. Refuse rather
+ *   than queue; the next checkpoint will try again.
+ * - `failed` — `cliSocket.send` threw synchronously. Logged at EC-9 by
+ *   the dispatcher; do NOT mark the half degraded directly (Subprocess
+ *   Council Rec 6).
+ */
+export type ObserverWakeSendOutcome =
+  | { kind: "sent" }
+  | { kind: "socket_disconnected" }
+  | { kind: "busy" }
+  | { kind: "backpressure"; bufferedAmount: number }
+  | { kind: "failed"; error: string };
 
 // --- Claude Code Adapter ------------------------------------------------------
 
@@ -87,6 +123,26 @@ export class ClaudeAdapter implements IBackendAdapter {
   private protocolDriftSeen = new Set<string>();
   private parseErrorSeen = new Set<string>();
 
+  /**
+   * Observer turn-state for the Council Mode auto-wake gate.
+   *
+   * `idle` means the observer is ready for a new `user` frame — either
+   * never received one yet (cliSessionId still null), or the previous
+   * turn terminated with a `result` NDJSON frame.
+   *
+   * `in-flight` means a wake `user` frame was sent and we have not yet
+   * seen the matching `result` frame back. Subsequent wake attempts
+   * return {kind:"busy"} so the dispatcher can enqueue (Task 4 newest-
+   * wins slot).
+   *
+   * Browser-initiated `user_message` traffic does NOT touch this field —
+   * it tracks ONLY the auto-wake pump. The observer-tab composer is
+   * disabled in council mode, so cross-contamination isn't a concern,
+   * but the field name and the toggle sites are scoped narrowly on
+   * purpose.
+   */
+  private observerTurnState: "idle" | "in-flight" = "idle";
+
   constructor(
     sessionId: string,
     opts?: {
@@ -107,6 +163,12 @@ export class ClaudeAdapter implements IBackendAdapter {
    */
   attachWebSocket(ws: ServerWebSocket<SocketData>): void {
     this.cliSocket = ws;
+    // Council Review 2026-05-13 Subprocess #5: reset turn-state on every
+    // attach. A fresh socket is by definition a fresh turn — closes the
+    // late-detach race where the stale-socket guard in detachWebSocket
+    // skips the reset, leaving `in-flight` from the prior socket and
+    // permanently blocking the dispatcher.
+    this.observerTurnState = "idle";
 
     // Flush pending messages
     if (this.pendingMessages.length > 0) {
@@ -123,11 +185,18 @@ export class ClaudeAdapter implements IBackendAdapter {
   /**
    * Called when the CLI WebSocket closes. Guards against stale socket references
    * (a new WS may have opened before the old one closed).
+   *
+   * Council Review 2026-05-13 Subprocess #2: reset `observerTurnState` to
+   * `idle` on detach. Turn-state is socket-bound; a fresh socket starts
+   * idle. Without this reset, a transient WS flap mid-turn left the
+   * adapter permanently in-flight and every subsequent wake returned
+   * `busy` regardless of actual observer state.
    */
   detachWebSocket(ws: ServerWebSocket<SocketData>): void {
     // Only detach if this is the current socket -- ignore stale close events
     if (this.cliSocket !== ws) return;
     this.cliSocket = null;
+    this.observerTurnState = "idle";
     this.disconnectCb?.();
   }
 
@@ -169,9 +238,14 @@ export class ClaudeAdapter implements IBackendAdapter {
    * Handle transport-level close (used when WS proxy drops).
    * Clears the socket reference without triggering the disconnect callback,
    * allowing the CLI to reconnect.
+   *
+   * Council Review 2026-05-13 Subprocess #2: also reset `observerTurnState`
+   * — transport closing means any in-flight wake's `result` frame will
+   * never arrive. Stale `in-flight` here would deadlock the dispatcher.
    */
   handleTransportClose(): void {
     this.cliSocket = null;
+    this.observerTurnState = "idle";
   }
 
   // -- IBackendAdapter: Raw message ingestion from CLI ------------------------
@@ -688,6 +762,18 @@ export class ClaudeAdapter implements IBackendAdapter {
   }
 
   private handleResultMessage(msg: CLIResultMessage): void {
+    // Council Mode auto-wake: `result` is the documented per-turn
+    // terminator in the Claude Code NDJSON protocol. When we see one
+    // and the observer was mid-flight from an auto-wake, flip back to
+    // idle and emit `observer:turn-done` so the orchestrator's drain
+    // hook can dispatch any queued checkpoint (Task 4 newest-wins slot).
+    // Browser-initiated user_message paths never set in-flight, so
+    // emitting only on the in-flight → idle transition keeps non-council
+    // sessions off the bus channel.
+    if (this.observerTurnState === "in-flight") {
+      this.observerTurnState = "idle";
+      companionBus.emit("observer:turn-done", { sessionId: this.sessionId });
+    }
     this.browserMessageCb?.({
       type: "result",
       data: msg,
@@ -864,6 +950,133 @@ export class ClaudeAdapter implements IBackendAdapter {
    */
   sendRawNDJSON(ndjson: string): void {
     this.sendToBackend(ndjson);
+  }
+
+  /**
+   * Council Mode auto-wake seam: synthesise a `user` NDJSON frame on the
+   * server's own initiative and push it to the observer's CLI socket.
+   *
+   * This is the ONLY server-internal-origin path that emits a `user`
+   * frame to the CLI. Every other `user` frame is browser-relayed via
+   * {@link handleOutgoingUserMessage}. The `FromServer` suffix is
+   * load-bearing — it makes the unusual provenance grep-able at every
+   * current and future call site.
+   *
+   * Gating order — three strict checks per Subprocess Council Rec 3:
+   * 1. `observerTurnState === "in-flight"` → return `busy`
+   * 2. `cliSocket` is null or not OPEN → return `socket_disconnected`
+   * 3. `bufferedAmount > OBSERVER_WAKE_BACKPRESSURE_THRESHOLD_BYTES`
+   *    → return `backpressure`
+   *
+   * On a successful send: flip turn-state to `in-flight`, register
+   * idle-kill activity (wake counts as activity — observer working
+   * continuously via auto-wake must not be killed at 4h), record the
+   * outgoing frame.
+   *
+   * `content` is the assembled wake message body from
+   * {@link buildObserverWakePayload}. It is passed straight into the
+   * NDJSON envelope's `content[0].text` field. JSON.stringify escapes
+   * any `\n` inside it to `\\n` so the serialised line is single-line by
+   * construction; the post-stringify assertion catches builder bugs that
+   * would otherwise unframe the observer's stream-json reader (Hunt P1
+   * NDJSON line-discipline injection).
+   *
+   * `session_id` is `""` — the Claude Code NDJSON protocol documents this
+   * for the first `user` frame to a freshly spawned CLI, and the
+   * browser-side path also passes `""` by default. The observer's CLI
+   * binds session via socket identity, not via the field.
+   */
+  sendUserFrameFromServer(content: string): ObserverWakeSendOutcome {
+    // Council Review 2026-05-13 Subprocess #15: register idle-kill
+    // activity unconditionally, BEFORE the gates. A wake-dispatch
+    // attempt is real activity even when gated out (observer is mid-
+    // turn, transient socket flap, backpressure) — the orchestrator
+    // clearly producing checkpoints means the group is alive and
+    // should not idle-kill the observer at 4h. Previously this was
+    // inside the success branch, so a long-running review with
+    // intervening busy-gated checkpoints would still tick toward
+    // idle-kill.
+    this.onActivityUpdate?.();
+
+    // Gate 1: turn-state.
+    if (this.observerTurnState === "in-flight") {
+      return { kind: "busy" };
+    }
+
+    // Gate 2: transport. readyState 1 === OPEN per WebSocket spec.
+    if (!this.cliSocket) {
+      return { kind: "socket_disconnected" };
+    }
+    if (this.cliSocket.readyState !== 1) {
+      return { kind: "socket_disconnected" };
+    }
+
+    // Gate 3: backpressure. Bun's ServerWebSocket exposes
+    // getBufferedAmount(); refuse rather than silently queue in JS.
+    const buffered = this.cliSocket.getBufferedAmount();
+    if (buffered > OBSERVER_WAKE_BACKPRESSURE_THRESHOLD_BYTES) {
+      return { kind: "backpressure", bufferedAmount: buffered };
+    }
+
+    // Build the NDJSON envelope. Array-of-one-text-block content shape
+    // (canonical Claude SDK; survives a future image/attachment append
+    // as a pure array push rather than a shape migration).
+    const frame = JSON.stringify({
+      type: "user",
+      message: { role: "user", content: [{ type: "text", text: content }] },
+      parent_tool_use_id: null,
+      session_id: "",
+    });
+
+    // Post-stringify NDJSON line-discipline assertion. JSON.stringify
+    // contractually escapes interior `\n` to `\\n`, so this can only
+    // fire on builder bugs that inject literal newlines outside the
+    // string-escape path. Cheap tripwire — Carmack P1.
+    if (frame.includes("\n")) {
+      return {
+        kind: "failed",
+        error: "NDJSON line-discipline violated: frame contains embedded newline",
+      };
+    }
+
+    // Send. Bun's `ServerWebSocket.send` is sync and may throw on a
+    // closed-but-not-yet-detached socket. Per Subprocess Council Rec 6:
+    // log and propagate, do NOT mark the half degraded here — the
+    // natural socket-close handler will fire `session:exited` within
+    // milliseconds and the existing reconnect path takes over.
+    try {
+      // Record BEFORE send so a crash-during-send leaves a forensic
+      // trail. `origin: "server:council-wake"` distinguishes this from
+      // browser-relayed user frames in replay (recorder v2 schema —
+      // see {@link RECORDING_HEADER_VERSION}).
+      this.recorder?.record(
+        this.sessionId, "out", frame, "cli", "claude", "", "server:council-wake",
+      );
+      this.cliSocket.send(frame + "\n");
+    } catch (err) {
+      return {
+        kind: "failed",
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+
+    // Success: flip turn-state to in-flight. Activity was already
+    // registered before the gates (Council Review #15).
+    this.observerTurnState = "in-flight";
+    return { kind: "sent" };
+  }
+
+  /**
+   * Council Mode test hook + restart-reconcile helper. Returns the current
+   * observer turn-state. Callers must NOT use this for gating — the
+   * gating decision lives inside {@link sendUserFrameFromServer} so the
+   * check and the send are atomic. This accessor exists for assertion
+   * sites and for the orchestrator's reconcile-on-initialize path that
+   * needs to know whether to pre-flip state when restoring a pair whose
+   * observer was mid-turn at server-shutdown time.
+   */
+  getObserverTurnState(): "idle" | "in-flight" {
+    return this.observerTurnState;
   }
 
   /**

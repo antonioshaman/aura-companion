@@ -9,7 +9,8 @@ import type {
 } from "./session-types.js";
 import type { SessionStore } from "./session-store.js";
 import type { IBackendAdapter } from "./backend-adapter.js";
-import { ClaudeAdapter } from "./claude-adapter.js";
+import { ClaudeAdapter, type ObserverWakeSendOutcome } from "./claude-adapter.js";
+import { OBSERVER_WAKE_TIMEOUT_MS } from "./council-types.js";
 import type { RecorderManager } from "./recorder.js";
 import { resolveSessionGitInfo } from "./session-git-info.js";
 import type {
@@ -54,6 +55,18 @@ import { metricsCollector } from "./metrics-collector.js";
 import { log } from "./logger.js";
 
 // ─── Bridge ───────────────────────────────────────────────────────────────────
+
+/**
+ * Outcome returned by {@link WsBridge.sendObserverWakeFrame}. Wraps the
+ * adapter-level {@link ObserverWakeSendOutcome} with bridge-level reasons
+ * (session/adapter lookup miss) so the orchestrator's dispatcher can map
+ * every branch to a single EC-9 structured log entry without ambiguity.
+ */
+export type BridgeObserverWakeOutcome =
+  | ObserverWakeSendOutcome
+  | { kind: "session_unknown" }
+  | { kind: "adapter_missing" }
+  | { kind: "unsupported_backend" };
 
 const RETRYABLE_BACKEND_MESSAGE_TYPES = new Set<BrowserOutgoingMessage["type"]>([
   "user_message",
@@ -167,6 +180,27 @@ export class WsBridge {
     const session = this.sessions.get(sessionId);
     if (!session) return;
     this.broadcastToBrowsers(session, msg);
+  }
+
+  /**
+   * Council Mode auto-wake — dispatch a server-synthesised `user` NDJSON
+   * frame to a specific observer session's CLI socket via its adapter.
+   *
+   * The bridge is the only place that knows the sessionId → adapter map,
+   * so it owns the lookup. The Claude-instance narrowing is intentional
+   * for the current claude+claude scope; Codex pairings return
+   * `unsupported_backend` (the dispatcher in `session-orchestrator.ts`
+   * skips with that reason). When Codex pairing ships, replace the
+   * narrowing with an `IBackendAdapter`-shaped optional method.
+   */
+  sendObserverWakeFrame(sessionId: string, content: string): BridgeObserverWakeOutcome {
+    const session = this.sessions.get(sessionId);
+    if (!session) return { kind: "session_unknown" };
+    if (!session.backendAdapter) return { kind: "adapter_missing" };
+    if (!(session.backendAdapter instanceof ClaudeAdapter)) {
+      return { kind: "unsupported_backend" };
+    }
+    return session.backendAdapter.sendUserFrameFromServer(content);
   }
 
   /**
@@ -1036,6 +1070,7 @@ export class WsBridge {
       primarySessionId: primary.id,
       observerSessionId: observer.id,
       pairing,
+      wakeTimeoutMs: OBSERVER_WAKE_TIMEOUT_MS,
     };
   }
 

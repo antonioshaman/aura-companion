@@ -13,6 +13,50 @@ export const COUNCIL_SCHEMA_VERSION = 1 as const;
 /** Hard size cap for any single council artifact (defence against runaway writers OOM'ing the watcher). */
 export const COUNCIL_ARTIFACT_MAX_BYTES = 256 * 1024;
 
+/**
+ * Wake-payload schema version. Independent of {@link COUNCIL_SCHEMA_VERSION}
+ * — the writer is the server (not the orchestrator process), the reader is
+ * the observer's autoregressive parse, and the lifecycle of "what bytes we
+ * push into the observer's stdin" can evolve separately from "what JSON
+ * the orchestrator writes to disk". A bump here MUST be paired with a
+ * matching prompt-artifact header bump in `.council/prompts/observer-system.md`
+ * (see Task 10) so a v2 server cannot silently misalign with a v1 prompt.
+ */
+export const OBSERVER_WAKE_PAYLOAD_VERSION = 1 as const;
+
+/** Hard size cap for the assembled wake message body (hybrid preamble +
+ *  fenced JSON + terminator). Generous — the manifest carries paths only,
+ *  not file contents — but capped so a pathological checkpoint cannot
+ *  produce a multi-megabyte NDJSON line that wedges the recorder or the
+ *  observer's stream-json reader. */
+export const OBSERVER_WAKE_MAX_BYTES = 32 * 1024;
+
+/** Per-section cap for delta/carried/dropped arrays inside the wake
+ *  payload. Each section is bounded independently so a runaway `delta`
+ *  cannot displace `carried`/`dropped` from the observer's view. */
+export const OBSERVER_WAKE_MAX_PATHS_PER_SECTION = 50;
+
+/**
+ * Council Mode auto-wake — frontend-side timeout bound for the
+ * `reviewing` panel state. Published on the `group_created` wire frame
+ * so the frontend deriver bounds the interval; past this deadline
+ * without an `observer_review` arrival, the deriver yields
+ * `reviewing-stalled` rather than silently reverting to `sleeping`.
+ *
+ * Lives in council-types.ts so both the orchestrator (emit site) and
+ * the bridge's hydration path (deriveGroupCreatedForBrowser) read from
+ * the same constant.
+ *
+ * Council Review 2026-05-13 Friedman #18: bumped 90s → 300s (5 min).
+ * Opus reviewing a rich manifest (30+ files) routinely takes 2-3
+ * minutes; the 90s bound false-tripped on every legitimate long
+ * review. The bound is a UX cue (panel pill flips to "stalled"), not
+ * a correctness gate — a real stuck observer surfaces a bit later,
+ * which is acceptable vs the false-alarm cost. Tune via incident-
+ * driven measurement.
+ */
+export const OBSERVER_WAKE_TIMEOUT_MS = 300_000;
+
 // `MAX_PHASE_LEN` is documented via the PHASE_PATTERN regex below
 // (length-bounded to 64 by the trailing `{0,63}` quantifier); keeping
 // the literal here for readers' reference would trip the deadcode guard.
@@ -63,6 +107,40 @@ export interface ObserverReviewFinding {
   confidence?: CouncilFindingConfidence;
 }
 
+/**
+ * Outbound wake payload — the JSON object server-side code stuffs inside
+ * the fenced block of the `user`-message body sent to the observer's CLI
+ * subprocess on each checkpoint arrival.
+ *
+ * Key ordering is load-bearing: `observer_wake_payload_version` first so
+ * the observer's autoregressive parse sees the schema discriminator
+ * before any content; then the four echo fields (`session_group_id`,
+ * `checkpoint_id`, `phase`, `checkpoint_seq`) so the observer's review
+ * can copy-paste them rather than synthesise (Willison Principle 8 —
+ * context propagation; AP-3 — writer and reader colocate). Content
+ * arrays (`delta`/`carried`/`dropped`) follow last.
+ *
+ * Type lives here even though no reader-side parser consumes it — the
+ * observer's "reader" is its model context, not a structured parser.
+ * Co-locating the type with the on-disk schemas keeps wake-frame edits
+ * inside the same AP-3 single-source-of-truth file.
+ */
+export interface ObserverWakePayload {
+  observer_wake_payload_version: typeof OBSERVER_WAKE_PAYLOAD_VERSION;
+  session_group_id: string;
+  checkpoint_id: string;
+  phase: string;
+  checkpoint_seq: number;
+  /** Paths newly added in this checkpoint vs the previous one — the
+   *  primary review surface. */
+  delta: string[];
+  /** Paths carried over from the previous checkpoint. Observer MAY
+   *  re-read for cross-cut consistency checks. */
+  carried: string[];
+  /** Paths dropped from scope this cycle. Observer MUST NOT re-read these. */
+  dropped: string[];
+}
+
 export interface ObserverReviewPayload {
   schema_version: typeof COUNCIL_SCHEMA_VERSION;
   /** Mirrors the checkpoint this review answers — observer must echo it. */
@@ -78,6 +156,16 @@ export interface ObserverReviewPayload {
   /** CLI binary version that produced the review. Free-form, used as audit field only. */
   observer_cli_version: string;
   findings: ObserverReviewFinding[];
+  /**
+   * Task 10: observer-echoed copy of `observer_wake_payload_version`
+   * from the wake message. Optional — back-compat with v1 reviews that
+   * predate the echo contract. The reader (handleCouncilReview) checks
+   * this against the version it dispatched; a present-but-mismatched
+   * value downgrades all findings to NOTE severity, defending against
+   * silent schema drift between a server that ships a new wake shape
+   * and a stale prompt that still parses against the old one.
+   */
+  observer_wake_payload_version_echo?: number;
 }
 
 // ── Validators ───────────────────────────────────────────────────────────────
@@ -228,18 +316,38 @@ export function parseObserverReviewPayload(raw: string): ObserverReviewPayload |
   for (const f of parsed.findings) {
     if (!isObject(f)) return null;
     if (typeof f.severity !== "string" || !VALID_SEVERITIES.has(f.severity as CouncilFindingSeverity)) return null;
-    if (!isBoundedText(f.claim, MAX_CLAIM_LEN)) return null;
+    // Council Review 2026-05-13 Hunt #22: strip backtick triplets at
+    // the validation boundary. `isBoundedText` allows them (claims can
+    // include code excerpts conceptually), but the claim is echoed
+    // verbatim into the orchestrator's chat surface — fence-triplet
+    // content would render as a fake code block in markdown.
+    //
+    // Council Review 2026-05-13-0150 Hunt #12: reorder — strip BEFORE
+    // the length check, because the replacement is +33% per occurrence
+    // and could push a borderline claim over MAX_CLAIM_LEN otherwise.
+    if (typeof f.claim !== "string") return null;
+    const claim = f.claim.replace(/```/g, "ʼ`ʼ`ʼ`");
+    if (!isBoundedText(claim, MAX_CLAIM_LEN)) return null;
     if (!isRelativeWorkspacePath(f.evidence_path)) return null;
     const lines = parseLineRange(f.evidence_lines);
     if (!lines.ok) return null;
     if (f.confidence !== undefined && (typeof f.confidence !== "string" || !VALID_CONFIDENCES.has(f.confidence as CouncilFindingConfidence))) return null;
     findings.push({
       severity: f.severity as CouncilFindingSeverity,
-      claim: f.claim,
+      claim,
       evidence_path: f.evidence_path,
       ...(lines.value !== undefined ? { evidence_lines: lines.value } : {}),
       ...(f.confidence !== undefined ? { confidence: f.confidence as CouncilFindingConfidence } : {}),
     });
+  }
+  // Task 10: parse optional observer_wake_payload_version_echo. Reject
+  // on present-but-malformed (non-integer or negative); absent is fine
+  // for back-compat with v1 reviews.
+  let wakeEcho: number | undefined;
+  if (parsed.observer_wake_payload_version_echo !== undefined) {
+    const v = parsed.observer_wake_payload_version_echo;
+    if (typeof v !== "number" || !Number.isInteger(v) || v < 0) return null;
+    wakeEcho = v;
   }
   return {
     schema_version: COUNCIL_SCHEMA_VERSION,
@@ -251,5 +359,6 @@ export function parseObserverReviewPayload(raw: string): ObserverReviewPayload |
     observer_model: parsed.observer_model,
     observer_cli_version: parsed.observer_cli_version,
     findings,
+    ...(wakeEcho !== undefined ? { observer_wake_payload_version_echo: wakeEcho } : {}),
   };
 }

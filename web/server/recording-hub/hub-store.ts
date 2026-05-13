@@ -19,7 +19,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { COMPANION_HOME } from "../paths.js";
 import { loadRecording } from "../replay.js";
-import type { RecordingHeader, RecordingEntry } from "../recorder.js";
+import { RECORDING_HEADER_VERSIONS_ACCEPTED, type RecordingHeader, type RecordingEntry } from "../recorder.js";
 import type { BackendType } from "../session-types.js";
 import { getMaxUploadBytes } from "./hub-config.js";
 
@@ -87,8 +87,10 @@ export class HubStore {
     if (lines.length === 0) throw new Error("Recording file is empty");
 
     const header = JSON.parse(lines[0]) as RecordingHeader;
-    if (!header._header || header.version !== 1) {
-      throw new Error("Invalid recording header: missing _header or version !== 1");
+    if (!header._header || !RECORDING_HEADER_VERSIONS_ACCEPTED.has(header.version)) {
+      throw new Error(
+        `Invalid recording header: missing _header or version not in {${[...RECORDING_HEADER_VERSIONS_ACCEPTED].join(",")}}`,
+      );
     }
     if (header.backend_type !== "claude" && header.backend_type !== "codex") {
       throw new Error(`Invalid backend_type: ${header.backend_type}`);

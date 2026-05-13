@@ -375,6 +375,22 @@ export type BrowserIncomingMessageBase =
     observerSessionId: string;
     /** Server-validated pairing label, e.g. "claude+claude" or "claude+codex". */
     pairing: string;
+    /**
+     * Task 9: server-published auto-wake-to-review timeout in
+     * milliseconds. Frontend uses this to bound the `reviewing` panel
+     * state — past this deadline without an `observer_review` arrival,
+     * the panel-state deriver yields `reviewing-stalled` (Task 11)
+     * instead of silently reverting to `sleeping`. Server constant
+     * mirrored here so the deriver has a real bound rather than a
+     * frontend guess.
+     *
+     * Council Review 2026-05-13 Realtime #9: optional on the wire with
+     * a frontend-side fallback constant (90s). Required would break
+     * event-buffer replay for clients holding a pre-Task-9 `group_created`
+     * frame. New clients always receive a populated value from the
+     * server's current emit; replay-only-old-clients fall back gracefully.
+     */
+    wakeTimeoutMs?: number;
   }
   | {
     type: "group_exited";
@@ -385,6 +401,14 @@ export type BrowserIncomingMessageBase =
     type: "group_degraded";
     sessionGroupId: string;
     deadRole: "orchestrator" | "observer";
+    /**
+     * Task 9: optional discriminant on the reason this group went
+     * degraded. Frontend may render a sub-state of the `degraded`
+     * status pill (e.g. "observer wake send failed" vs the default
+     * "observer exited"). Omitted field defaults to "observer_exited"
+     * for back-compat with v1 clients.
+     */
+    reason?: "observer_exited" | "wake_send_failed" | "reconnect_failed";
   }
   | {
     /**
@@ -426,6 +450,15 @@ export type BrowserIncomingMessageBase =
     observerProvider: string;
     /** Wallclock (ms) the review was processed server-side. */
     timestamp: number;
+    /**
+     * Task 9: checkpoint ids that were superseded by the mid-turn
+     * newest-wins queue (Task 4) between the previous review and this
+     * one. Frontend renders a "checkpoint X was skipped (superseded)"
+     * note in the panel so the user knows the cycle dropped coverage
+     * deliberately, not silently. Omitted/empty when no checkpoints
+     * were dropped — keeps the on-wire payload minimal in the happy path.
+     */
+    supersededCheckpointIds?: string[];
   };
 
 /**
@@ -444,13 +477,13 @@ export interface BrowserObserverFinding {
   /** True when grounding validation downgraded this from STOP → NOTE. */
   wasDowngraded?: boolean;
   /** Why grounding downgraded this finding. Set iff wasDowngraded. */
-  downgradeReason?: "evidence_not_in_modified_set" | "evidence_missing_on_disk";
+  downgradeReason?: "evidence_not_in_modified_set" | "evidence_missing_on_disk" | "wake_version_mismatch";
 }
 
 export interface BrowserObserverDowngrade {
   /** Finding id (correlates with `findings[].id` when downgraded entry kept in stream). */
   id: string;
-  reason: "evidence_not_in_modified_set" | "evidence_missing_on_disk";
+  reason: "evidence_not_in_modified_set" | "evidence_missing_on_disk" | "wake_version_mismatch";
 }
 
 export type BrowserIncomingMessage = BrowserIncomingMessageBase & { seq?: number };

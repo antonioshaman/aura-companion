@@ -1137,6 +1137,7 @@ describe("Browser handlers", () => {
       primarySessionId: "g_orch",
       observerSessionId: "g_obs",
       pairing: "claude+claude",
+      wakeTimeoutMs: 90_000,
     });
 
     // Browser reconnects with `last_seq` equal to what it saw before the

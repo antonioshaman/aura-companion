@@ -122,8 +122,12 @@ describe("ObserverPanel — state pills (5 explicit states)", () => {
 
   it("renders reviewing status when observer is reviewing the latest checkpoint", () => {
     seedGroup();
-    seedCheckpoint(); // observerReviewing flips on
-    render(<ObserverPanel sessionId={SESSION} />);
+    seedCheckpoint(); // observerReviewing flips on (timestamp: 1_000)
+    // Task 11 bounded `reviewing` by lastCheckpointAt + wakeTimeoutMs.
+    // Pass nowMs within that window so we don't lapse into `reviewing-
+    // stalled` (the seed timestamp is epoch-1s, the default wallclock
+    // wallops past the 90s deadline).
+    render(<ObserverPanel sessionId={SESSION} nowMs={3_000} />);
     expect(screen.getByTestId("status-pill")).toHaveAttribute("data-state", "reviewing");
     // aria-busy="true" so SR users know an async task is in flight.
     expect(screen.getByTestId("status-pill")).toHaveAttribute("aria-busy", "true");

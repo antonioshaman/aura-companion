@@ -123,6 +123,23 @@ export interface GroupRecord {
    * server-confirmed only (faking it destroys the independent-signal value).
    */
   observerReviewing?: boolean;
+  /**
+   * Task 9/11: server-published wake-to-review timeout in milliseconds.
+   * Populated from `group_created`; the panel-state deriver uses this to
+   * bound the `reviewing` interval. Past `lastCheckpointAt + wakeTimeoutMs`
+   * without an `observer_review` arrival, the deriver yields
+   * `reviewing-stalled` rather than silently reverting to `sleeping`.
+   */
+  wakeTimeoutMs?: number;
+  /**
+   * Task 9/11: checkpoint ids the server's mid-turn newest-wins queue
+   * dropped between the previous review and the most recent one.
+   * Populated from `observer_review.supersededCheckpointIds`. Surfaced
+   * in the panel as `queued-dropped` state so the user knows the cycle
+   * deliberately skipped coverage. Cleared when the next review lands
+   * with an empty/omitted superseded list.
+   */
+  recentlySupersededCheckpointIds?: string[];
 }
 
 /**
@@ -146,8 +163,11 @@ export interface ObserverFinding {
   phase: string;
   /** True when grounding validation downgraded this from STOP → NOTE server-side. */
   wasDowngraded?: boolean;
-  /** Why grounding downgraded this finding. Set iff wasDowngraded. */
-  downgradeReason?: "evidence_not_in_modified_set" | "evidence_missing_on_disk";
+  /** Why grounding downgraded this finding. Set iff wasDowngraded.
+   *  `wake_version_mismatch` (Task 10) is a global downgrade applied to
+   *  every finding when the observer's echo of the wake-payload version
+   *  disagrees with what the server dispatched. */
+  downgradeReason?: "evidence_not_in_modified_set" | "evidence_missing_on_disk" | "wake_version_mismatch";
   observerModel: string;
   observerProvider: string;
 }
@@ -158,6 +178,8 @@ export type ObserverPanelStateName =
   | "reconnecting"
   | "sleeping"
   | "reviewing"
+  | "reviewing-stalled"
+  | "queued-dropped"
   | "blocker-found"
   | "degraded";
 
@@ -178,7 +200,9 @@ export type ObserverPanelState =
   | { name: "spawning"; sinceMs: number; pairing: string }
   | { name: "reconnecting"; lastCheckpointAt: number | null; lastPhase: string | null }
   | { name: "sleeping"; lastCheckpointAt: number; lastPhase: string }
-  | { name: "reviewing"; reviewingSince: number; phase: string }
+  | { name: "reviewing"; reviewingSince: number; phase: string; expiresAt: number }
+  | { name: "reviewing-stalled"; reviewingSince: number; phase: string; expiredAt: number }
+  | { name: "queued-dropped"; lastCheckpointAt: number; lastPhase: string; droppedCheckpointIds: readonly string[] }
   | { name: "blocker-found"; unresolvedStops: number; lastBlockerAt: number }
   | { name: "degraded"; deadRole: SessionRole };
 

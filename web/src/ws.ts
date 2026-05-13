@@ -1182,6 +1182,11 @@ function handleParsedMessage(
         observerSessionId: data.observerSessionId,
         status: "active",
         pairing: data.pairing,
+        // Task 9: server-published wake-to-review timeout. The panel-
+        // state deriver (Task 11) bounds the `reviewing` interval by
+        // `lastCheckpointAt + wakeTimeoutMs`; past that, fall through
+        // to `reviewing-stalled`.
+        wakeTimeoutMs: data.wakeTimeoutMs,
       });
       break;
     }
@@ -1232,6 +1237,12 @@ function handleParsedMessage(
         observerModel: data.observerModel,
         observerProvider: data.observerProvider,
         timestamp: data.timestamp,
+        // Task 9: server-reported checkpoint ids dropped by the mid-
+        // turn queue between previous review and this one. Slice uses
+        // this to flip the panel into `queued-dropped` state.
+        ...(data.supersededCheckpointIds !== undefined
+          ? { supersededCheckpointIds: data.supersededCheckpointIds }
+          : {}),
       });
       break;
     }
