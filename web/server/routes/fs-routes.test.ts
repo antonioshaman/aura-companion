@@ -317,6 +317,80 @@ describe("GET /fs/list — env-var allowlist + default path", () => {
     expect(denied.status).toBe(403);
   });
 
+  // Observer-flagged NIT (b) per PR #16 v3 review: silent misconfiguration
+  // of relative paths in COMPANION_FS_ALLOWED_BASES makes operators chase
+  // 403 errors with no signal. The fix: filter non-absolute entries at
+  // parse time AND emit a single structured WARN naming the rejected
+  // entries — sibling of feedback_alert_text_symptom_not_cause.
+  it("filters non-absolute entries from COMPANION_FS_ALLOWED_BASES with a single structured WARN", async () => {
+    // Mix absolute + relative + ../ traversal — only the absolute survives.
+    // The WARN is the operator-facing signal; 403 is the runtime safety
+    // net (already covered by other tests). This test pins the WARN.
+    process.env.COMPANION_FS_ALLOWED_BASES = `./projects:${extraDir}:../escape`;
+    mkdirSync(join(extraDir, "ok-dir"));
+
+    // Capture log output for the WARN assertion. The logger.ts module
+    // writes both to console.log AND to a file; spying on console is the
+    // cheap path for asserting the structured emit landed.
+    const writeSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      registerFsRoutes(envApp);
+
+      // Absolute extra dir IS in the allowlist (positive control).
+      const ok = await envApp.request(`/fs/list?path=${encodeURIComponent(extraDir)}`);
+      expect(ok.status).toBe(200);
+
+      // Single WARN emitted at registerFsRoutes time with the rejected
+      // entries listed verbatim, so an operator grep'ing logs sees
+      // exactly which strings were dropped (sibling of
+      // feedback_alert_text_symptom_not_cause — name the cause, not just
+      // the downstream 403 symptom).
+      const warnEmits = writeSpy.mock.calls
+        .map((c) => (typeof c[0] === "string" ? c[0] : JSON.stringify(c[0])))
+        .filter((s) => s.includes("rejected_non_absolute") || s.includes("rejected non-absolute"));
+      expect(warnEmits.length).toBeGreaterThanOrEqual(1);
+      const warnText = warnEmits.join("\n");
+      expect(warnText).toContain("./projects");
+      expect(warnText).toContain("../escape");
+      // The accepted extra is NOT in the rejected list (regression net —
+      // if a future refactor mistakenly rejects absolute paths too, this
+      // assertion flags it).
+      expect(warnText).not.toContain(`"${extraDir}"`);
+    } finally {
+      writeSpy.mockRestore();
+    }
+  });
+
+  it("does NOT emit a WARN when COMPANION_FS_ALLOWED_BASES is unset or fully-absolute", async () => {
+    // Absence-of-noise test — operators who set the var correctly OR
+    // leave it unset must not see a confusing WARN.
+    delete process.env.COMPANION_FS_ALLOWED_BASES;
+    const writeSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      registerFsRoutes(envApp);
+      const noiseEmits = writeSpy.mock.calls
+        .map((c) => (typeof c[0] === "string" ? c[0] : JSON.stringify(c[0])))
+        .filter((s) => s.includes("rejected_non_absolute"));
+      expect(noiseEmits).toHaveLength(0);
+    } finally {
+      writeSpy.mockRestore();
+    }
+
+    // Fully-absolute env is also silent.
+    process.env.COMPANION_FS_ALLOWED_BASES = `${extraDir}:/another/absolute/path`;
+    const writeSpy2 = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const freshApp = new Hono();
+      registerFsRoutes(freshApp);
+      const noiseEmits = writeSpy2.mock.calls
+        .map((c) => (typeof c[0] === "string" ? c[0] : JSON.stringify(c[0])))
+        .filter((s) => s.includes("rejected_non_absolute"));
+      expect(noiseEmits).toHaveLength(0);
+    } finally {
+      writeSpy2.mockRestore();
+    }
+  });
+
   it("uses COMPANION_FS_DEFAULT_PATH when no ?path= query is provided", async () => {
     // Without the default-path env, the picker would open homedir() —
     // which on the production aura host is the empty `/home/auracomp`.

@@ -1,8 +1,9 @@
 import { execSync } from "node:child_process";
 import { readdir, readFile, stat, writeFile, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { Hono } from "hono";
+import { log } from "../logger.js";
 
 /** Ensure a resolved path is within one of the allowed base directories.
  *  Returns the resolved absolute path, or null if it escapes all bases. */
@@ -67,11 +68,31 @@ export function registerFsRoutes(api: Hono, opts?: { allowedBases?: string[] }):
   // server as a non-root user whose `$HOME` is empty while real
   // projects live elsewhere on the filesystem. `opts.allowedBases`
   // takes precedence over the env var to keep tests deterministic.
+  //
+  // Non-absolute entries are FILTERED OUT at parse time and surfaced as
+  // a single structured WARN log line — silent misconfiguration is the
+  // hard-to-debug failure mode (operator sets `./projects`, sees 403 on
+  // every list call, has no way to know `./projects` was dropped because
+  // it never resolved against absolute paths). Sibling of
+  // `feedback_alert_text_symptom_not_cause`: this WARN names the
+  // observable cause ("non-absolute path rejected: ./projects"), not
+  // just the downstream symptom (403). One-shot at registerFsRoutes
+  // time; env changes mid-process don't re-validate (Carmack — no
+  // speculative generality for an unobserved edge case).
+  const rawEnv = process.env.COMPANION_FS_ALLOWED_BASES;
+  const parsedEntries = rawEnv ? rawEnv.split(":").map((s) => s.trim()).filter(Boolean) : [];
+  const validExtras = parsedEntries.filter((p) => isAbsolute(p));
+  const rejectedEntries = parsedEntries.filter((p) => !isAbsolute(p));
+  if (rejectedEntries.length > 0) {
+    log.warn("fs-routes", "COMPANION_FS_ALLOWED_BASES rejected non-absolute entries", {
+      event: "fs.allowed_bases.rejected_non_absolute",
+      rejected: rejectedEntries,
+      accepted_count: validExtras.length,
+    });
+  }
   const allowedBases = () => {
     if (opts?.allowedBases) return opts.allowedBases;
-    const env = process.env.COMPANION_FS_ALLOWED_BASES;
-    const extras = env ? env.split(":").map((s) => s.trim()).filter(Boolean) : [];
-    return [homedir(), process.cwd(), ...extras];
+    return [homedir(), process.cwd(), ...validExtras];
   };
 
   // Default path the folder picker opens when no `?path=` query arrives.
