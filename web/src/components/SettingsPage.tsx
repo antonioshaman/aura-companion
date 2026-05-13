@@ -64,6 +64,15 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
   const [claudeCodeTokenConfigured, setClaudeCodeTokenConfigured] = useState(false);
   const [openaiApiKey, setOpenaiApiKey] = useState("");
   const [openaiApiKeyConfigured, setOpenaiApiKeyConfigured] = useState(false);
+  // Task 6: also hydrate the settings-slice so other consumers (the
+  // New Session pairing-availability gate, future MAX 20x verifier)
+  // read a single source of truth. The local useState above stays so
+  // existing SettingsPage tests continue to work against the
+  // `vi.mock("../store.js")` selector mock; the wire-up of
+  // SettingsPage itself onto the slice is a follow-up PR that needs
+  // the test mock upgraded to support Zustand-style subscriptions.
+  const hydrateSettingsSlice = useStore((s) => s.hydrateSettings);
+  const setProviderConfiguredSlice = useStore((s) => s.setProviderConfigured);
   const [providerSaving, setProviderSaving] = useState(false);
   const [providerSaved, setProviderSaved] = useState(false);
   const [providerError, setProviderError] = useState("");
@@ -130,6 +139,23 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
         setConfigured(s.anthropicApiKeyConfigured);
         setClaudeCodeTokenConfigured(s.claudeCodeOAuthTokenConfigured);
         setOpenaiApiKeyConfigured(s.openaiApiKeyConfigured);
+        // Task 6: dual-write the server-authoritative facts to the
+        // settings-slice. The local state above remains the source for
+        // THIS component (test-mock compatibility); the slice is what
+        // other consumers (New Session pairing-availability gate)
+        // read. When the SettingsPage test infrastructure is upgraded
+        // to support Zustand subscriptions, the locals collapse into
+        // slice selectors and this dual-write becomes single-write.
+        if (typeof hydrateSettingsSlice === "function") {
+          hydrateSettingsSlice({
+            anthropicApiKeyConfigured: s.anthropicApiKeyConfigured,
+            claudeCodeOAuthTokenConfigured: s.claudeCodeOAuthTokenConfigured,
+            openaiApiKeyConfigured: s.openaiApiKeyConfigured,
+            aiValidationEnabled: s.aiValidationEnabled,
+            aiValidationAutoApprove: s.aiValidationAutoApprove,
+            aiValidationAutoDeny: s.aiValidationAutoDeny,
+          });
+        }
         setAnthropicModel(s.anthropicModel || "claude-sonnet-4-6");
         if (typeof s.aiValidationEnabled === "boolean") setAiValidationEnabled(s.aiValidationEnabled);
         if (typeof s.aiValidationAutoApprove === "boolean") setAiValidationAutoApprove(s.aiValidationAutoApprove);
@@ -664,6 +690,14 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                       const res = await api.updateSettings(payload);
                       setClaudeCodeTokenConfigured(res.claudeCodeOAuthTokenConfigured);
                       setOpenaiApiKeyConfigured(res.openaiApiKeyConfigured);
+                      // Task 6: dual-write to slice so other consumers
+                      // see the post-save state without a re-fetch.
+                      if (typeof setProviderConfiguredSlice === "function") {
+                        setProviderConfiguredSlice({
+                          claudeCodeOAuthTokenConfigured: res.claudeCodeOAuthTokenConfigured,
+                          openaiApiKeyConfigured: res.openaiApiKeyConfigured,
+                        });
+                      }
                       setClaudeCodeToken("");
                       setOpenaiApiKey("");
                       setProviderSaved(true);
