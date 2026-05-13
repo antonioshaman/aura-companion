@@ -198,6 +198,13 @@ export interface LaunchOptions {
    *  route observer-specific messages on first WS attach. Spawn-time system
    *  prompt injection is the follow-up commit. */
   sessionGroupRole?: import("./session-types.js").SessionGroupRole;
+  /** Task 11 — recordings exclusion. Defaults to `true` (recorded). Set
+   *  to `false` for short-lived auth-probe spawns (Codex smoke check,
+   *  MAX 20x tier verification) so their init frames — which carry the
+   *  raw token before any redactor sees it — never reach disk. The
+   *  launcher disables the recorder for this sessionId before the
+   *  adapter wires its first `record()` call. */
+  record?: boolean;
 }
 
 /**
@@ -375,6 +382,13 @@ export class CliLauncher {
     this.sessions.set(sessionId, info);
     if (effectiveOptions.env) {
       this.sessionEnvs.set(sessionId, { ...effectiveOptions.env });
+    }
+
+    // Task 11 — auth-probe spawns (record: false) opt out of recording.
+    // Must fire BEFORE the adapter wires its first record() call so the
+    // RecorderManager's lazy-create path never opens a file for this id.
+    if (effectiveOptions.record === false) {
+      this.recorder?.disableForSession(sessionId);
     }
 
     if (backendType === "codex") {
