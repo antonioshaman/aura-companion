@@ -280,16 +280,31 @@ export function CouncilToggle({
         </div>
       </div>
 
-      {/* Provider-pairing dropdown — height-animated so the toggle row doesn't jump. */}
-      <div
-        data-testid="pairing-dropdown-container"
-        className={`grid transition-[grid-template-rows] duration-200 ease-out ${
-          enabled ? "grid-rows-[1fr] mt-3" : "grid-rows-[0fr]"
-        }`}
-        // role="presentation" on the animation container; the actual listbox lives below.
-      >
-        <div className="overflow-hidden">
-          <div className="relative" ref={dropdownRef}>
+      {/* Provider-pairing dropdown — height-animated so the toggle row doesn't jump.
+       *
+       * Structural note: the listbox lives OUTSIDE the `overflow-hidden`
+       * animation wrapper as a sibling of the grid container. The wrapper
+       * uses `overflow-hidden` to clip the trigger during the
+       * grid-template-rows 1fr↔0fr collapse animation; an `absolute`
+       * descendant rendered INSIDE that wrapper would be clipped to zero
+       * pixels alongside the row collapse, making the dropdown invisible
+       * even though `open === true`. By lifting `.relative` (the
+       * positioning context that anchors the absolute listbox) to wrap
+       * BOTH the animation container AND the open-state listbox, the
+       * dropdown escapes the clip while still positioning correctly
+       * via `top-full` (= bottom edge of the relative parent =
+       * bottom edge of the animated container = directly below the
+       * trigger when expanded). Re-introducing `overflow-hidden`
+       * above the dropdownRef would silently regress the open behaviour
+       * (the dropdown would render but be invisible). */}
+      <div className="relative" ref={dropdownRef}>
+        <div
+          data-testid="pairing-dropdown-container"
+          className={`grid transition-[grid-template-rows] duration-200 ease-out ${
+            enabled ? "grid-rows-[1fr] mt-3" : "grid-rows-[0fr]"
+          }`}
+        >
+          <div className="overflow-hidden">
             <button
               ref={triggerRef}
               type="button"
@@ -317,37 +332,41 @@ export function CouncilToggle({
             {selectedOption.subcopy && pairing === "claude+codex" && (
               <p className="mt-1.5 text-[11px] text-cc-muted">{selectedOption.subcopy}</p>
             )}
-
-            {open && (
-              <div
-                id="council-pairing-listbox"
-                role="listbox"
-                aria-label="Select pairing"
-                aria-activedescendant={`pairing-option-${PAIRING_OPTIONS[activeIndex]?.value ?? ""}`}
-                onKeyDown={handleListboxKeyDown}
-                tabIndex={-1}
-                // Saarinen council review #14: dropdown radius snapped
-                // to project's `rounded-[10px]` shadow-lg convention.
-                className="absolute z-10 left-0 right-0 mt-1 p-1 bg-cc-card border border-cc-border rounded-[10px] shadow-lg"
-              >
-                {PAIRING_OPTIONS.map((opt, idx) => {
-                  const available = opt.value === "claude+codex" ? codexAvailable : true;
-                  return (
-                    <PairingDropdownItem
-                      key={opt.value}
-                      option={opt}
-                      selected={opt.value === pairing}
-                      isActive={idx === activeIndex}
-                      available={available}
-                      unavailableReason={opt.value === "claude+codex" && !available ? codexUnavailableReason : undefined}
-                      onSelect={() => handleSelect(opt.value)}
-                    />
-                  );
-                })}
-              </div>
-            )}
           </div>
         </div>
+
+        {open && (
+          <div
+            id="council-pairing-listbox"
+            role="listbox"
+            aria-label="Select pairing"
+            aria-activedescendant={`pairing-option-${PAIRING_OPTIONS[activeIndex]?.value ?? ""}`}
+            onKeyDown={handleListboxKeyDown}
+            tabIndex={-1}
+            // Saarinen council review #14: dropdown radius snapped
+            // to project's `rounded-[10px]` shadow-lg convention.
+            // `top-full` positions the listbox at the bottom of the
+            // outer .relative (which contains the animated container);
+            // when enabled = true, that bottom edge sits directly below
+            // the trigger button. `mt-1` preserves the original 4px gap.
+            className="absolute z-10 top-full left-0 right-0 mt-1 p-1 bg-cc-card border border-cc-border rounded-[10px] shadow-lg"
+          >
+            {PAIRING_OPTIONS.map((opt, idx) => {
+              const available = opt.value === "claude+codex" ? codexAvailable : true;
+              return (
+                <PairingDropdownItem
+                  key={opt.value}
+                  option={opt}
+                  selected={opt.value === pairing}
+                  isActive={idx === activeIndex}
+                  available={available}
+                  unavailableReason={opt.value === "claude+codex" && !available ? codexUnavailableReason : undefined}
+                  onSelect={() => handleSelect(opt.value)}
+                />
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );
