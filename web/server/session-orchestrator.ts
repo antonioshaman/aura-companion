@@ -312,6 +312,25 @@ export function deterministicFindingId(input: {
 // ── Orchestrator ─────────────────────────────────────────────────────────────
 
 /**
+ * Per-call context plumbed through the SessionGroupCoordinator's
+ * `spawnContext` field (PLAN-aura-consolidated-refactor.md Task 2). The
+ * `baseBody` is the parent `CreateSessionRequest` carrying the user's
+ * model/permission/env choices the council spawn callback needs to forward
+ * to `doCreateSession`. The `spawnErrors` capture struct is mutated by the
+ * spawn callback on per-half failure so the parent `createCouncilGroup`
+ * can return the actual upstream error code rather than the coordinator's
+ * generic 500. Race-free because the entire struct lives in the call's
+ * lexical scope, never on the orchestrator instance.
+ */
+interface CouncilSpawnContext {
+  baseBody: CreateSessionRequest;
+  spawnErrors: {
+    primary: { error: string; status: number } | null;
+    observer: { error: string; status: number } | null;
+  };
+}
+
+/**
  * Single entry point for session lifecycle operations: create, resume,
  * reconnect, and terminate. Coordinates between CliLauncher (process
  * management), WsBridge (message routing), and SessionStore (persistence).
@@ -373,18 +392,6 @@ export class SessionOrchestrator {
    * keystone: `coordinator.applyEvent` is now the sole lifecycle mutator.
    */
   private coordinator: SessionGroupCoordinator | null = null;
-
-  /**
-   * Per-call context for `createCouncilGroup`. The coordinator's
-   * spawn/kill callbacks are long-lived (the coordinator is), but each
-   * call brings its own `baseBody` and error-capture struct. Setting this
-   * before invoking `coordinator.createGroup` and clearing in `finally`
-   * keeps the callbacks pure-by-reference without stale-closure risk.
-   */
-  private pendingCouncilCall: {
-    baseBody: CreateSessionRequest;
-    spawnErrors: { primary: { error: string; status: number } | null; observer: { error: string; status: number } | null };
-  } | null = null;
 
   // Event listeners
   private exitCallbacks: ((sessionId: string, exitCode: number | null) => void)[] = [];
@@ -1150,9 +1157,12 @@ export class SessionOrchestrator {
    * the sole lifecycle mutator; without a long-lived instance, the
    * `session:exited` listener would have nothing to drive.
    *
-   * Spawn/kill callbacks read per-call context via `this.pendingCouncilCall`
-   * (set in `createCouncilGroup`'s try/finally) — no stale-closure risk
-   * across multiple sequential create calls.
+   * Spawn/kill callbacks read per-call context from `opts.spawnContext`
+   * (forwarded verbatim by the coordinator from `createGroup`'s request).
+   * Two concurrent `createCouncilGroup` invocations cannot cross-contaminate
+   * by construction — each call brings its own closure-captured context
+   * object (PLAN-aura-consolidated-refactor.md Task 2; replaces the prior
+   * `this.pendingCouncilCall` instance scalar that was racy across tabs).
    */
   private getOrCreateCoordinatorSync(): SessionGroupCoordinator {
     if (this.coordinator) return this.coordinator;
@@ -1163,8 +1173,11 @@ export class SessionOrchestrator {
     this.coordinator = new SessionGroupCoordinator({
       graceMs: GROUP_RECONNECT_GRACE_MS,
       spawn: async (opts) => {
-        const ctx = this.pendingCouncilCall;
-        if (!ctx) throw new Error("internal: coordinator spawn invoked outside createCouncilGroup");
+        // Per-call context typed at the consumer end — the orchestrator
+        // owns both the producer (createCouncilGroup) and this consumer,
+        // so the cast is structurally safe.
+        const ctx = opts.spawnContext as CouncilSpawnContext | undefined;
+        if (!ctx) throw new Error("internal: coordinator spawn invoked without spawnContext");
         const result = await this.doCreateSession({
           ...ctx.baseBody,
           backend: opts.backendType,
@@ -1935,14 +1948,17 @@ export class SessionOrchestrator {
     }
 
     const baseBody: CreateSessionRequest = { ...req.base };
-    // Use a ref-object rather than two separate `let`s so TS narrowing
-    // through the closure-mutated lexical state stays sound — TS flow
-    // analysis sees property access on an object, not a re-bound let.
-    type SpawnFailure = { error: string; status: number };
-    const spawnErrors: { primary: SpawnFailure | null; observer: SpawnFailure | null } = { primary: null, observer: null };
+    // Per-call context — entirely lexical, never on `this`. Two concurrent
+    // createCouncilGroup invocations get distinct closure-captured objects
+    // and the coordinator's spawn callback (set in
+    // getOrCreateCoordinatorSync) reads from `opts.spawnContext`, not from
+    // shared mutable state. PLAN Task 2 race fix.
+    const spawnContext: CouncilSpawnContext = {
+      baseBody,
+      spawnErrors: { primary: null, observer: null },
+    };
 
     const coordinator = this.getOrCreateCoordinatorSync();
-    this.pendingCouncilCall = { baseBody, spawnErrors };
 
     try {
       const group = await coordinator.createGroup({
@@ -1951,6 +1967,7 @@ export class SessionOrchestrator {
         observer: parsed.observer,
         model: req.base.model,
         permissionMode: req.base.permissionMode,
+        spawnContext,
       });
       const primaryInfo = this.launcher.getSession(group.primary.sessionId);
       const observerInfo = this.launcher.getSession(group.observer.sessionId);
@@ -1992,16 +2009,13 @@ export class SessionOrchestrator {
       });
       return { ok: true, sessionGroupId: group.sessionGroupId, primary: primaryInfo, observer: observerInfo };
     } catch (err) {
-      if (spawnErrors.primary) return { ok: false, ...spawnErrors.primary };
-      if (spawnErrors.observer) return { ok: false, ...spawnErrors.observer };
+      if (spawnContext.spawnErrors.primary) return { ok: false, ...spawnContext.spawnErrors.primary };
+      if (spawnContext.spawnErrors.observer) return { ok: false, ...spawnContext.spawnErrors.observer };
       const reason = err instanceof Error ? err.message : String(err);
       return { ok: false, error: reason, status: 500 };
-    } finally {
-      // Clear per-call context so a second council create cannot read stale
-      // baseBody / spawnErrors. The long-lived coordinator's spawn callback
-      // throws explicitly if this is null when invoked.
-      this.pendingCouncilCall = null;
     }
+    // No finally block — spawnContext lives in lexical scope and GC'd when
+    // this function returns; nothing to clean up on the orchestrator instance.
   }
 
   private async doCreateSession(

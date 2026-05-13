@@ -34,6 +34,19 @@ export interface CreateGroupRequest {
   model?: string;
   /** Optional — forwarded to the underlying session spawner. */
   permissionMode?: string;
+  /**
+   * Opaque per-call context plumbed through to the `SessionSpawner`'s opts
+   * argument as-is. Caller defines the shape (typed at the call site via a
+   * cast inside the spawner closure). Replaces the prior `pendingCouncilCall`
+   * instance-field side channel on `SessionOrchestrator` that two concurrent
+   * `createCouncilGroup` invocations could race and cross-contaminate.
+   *
+   * Closure-captured local context in the spawner is the structurally safe
+   * pattern (each `createGroup` call brings its own context object; spawn
+   * callbacks read from `opts.spawnContext`, not from shared mutable state).
+   * PLAN-aura-consolidated-refactor.md Task 2.
+   */
+  spawnContext?: unknown;
 }
 
 /** What the injected spawner must return for the coordinator to record the pair. */
@@ -53,6 +66,12 @@ export type SessionSpawner = (opts: {
   permissionMode?: string;
   sessionGroupId: string;
   sessionGroupRole: SessionGroupRole;
+  /**
+   * Per-call context forwarded verbatim from `CreateGroupRequest.spawnContext`.
+   * The spawner casts to its expected shape — type safety is the caller's
+   * responsibility since the coordinator never inspects this field.
+   */
+  spawnContext?: unknown;
 }) => Promise<SpawnedSession>;
 
 export type SessionKiller = (sessionId: string) => Promise<void>;
@@ -165,6 +184,7 @@ export class SessionGroupCoordinator {
         permissionMode: req.permissionMode,
         sessionGroupId,
         sessionGroupRole: "orchestrator",
+        spawnContext: req.spawnContext,
       });
       const observerSpawn = await this.deps.spawn({
         cwd: req.cwd,
@@ -173,6 +193,7 @@ export class SessionGroupCoordinator {
         permissionMode: req.permissionMode,
         sessionGroupId,
         sessionGroupRole: "observer",
+        spawnContext: req.spawnContext,
       });
       const record: GroupRecord = {
         sessionGroupId,

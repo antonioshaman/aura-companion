@@ -219,3 +219,84 @@ describe("SessionGroupCoordinator.archiveGroup", () => {
     expect(kill).not.toHaveBeenCalled();
   });
 });
+
+// PLAN-aura-consolidated-refactor.md Task 2 acceptance:
+// `createGroup` now plumbs an opaque `spawnContext` to each spawn callback
+// (replacing the prior `pendingCouncilCall` instance scalar on the
+// orchestrator that two concurrent invocations could race and
+// cross-contaminate). The regression tripwire: two concurrent createGroup
+// calls with distinct contexts must each see their OWN context in their
+// spawn callbacks — never the other's.
+describe("SessionGroupCoordinator.createGroup — concurrent spawnContext isolation", () => {
+  it("two concurrent createGroup calls receive their own spawnContext (no cross-contamination)", async () => {
+    // Distinguishable context shape per call; the spawner reads opts.spawnContext
+    // and records what it observed so the test can compare against what was sent.
+    type TestContext = { tag: string; observed: string[] };
+    const ctxA: TestContext = { tag: "call-A", observed: [] };
+    const ctxB: TestContext = { tag: "call-B", observed: [] };
+
+    let serial = 0;
+    const interleavedSpawn: SessionSpawner = async (opts) => {
+      // The spawner deliberately yields to the event loop between
+      // observing the context and returning, so the two createGroup
+      // calls' four total spawns interleave rather than execute
+      // serially per call. This is exactly the race surface the
+      // refactor closes.
+      const observedCtx = opts.spawnContext as TestContext;
+      observedCtx.observed.push(`${opts.sessionGroupRole}:${opts.backendType}`);
+      await new Promise((r) => setTimeout(r, 5));
+      serial += 1;
+      return { sessionId: `sess-${observedCtx.tag}-${serial}` };
+    };
+    const sharedKill = vi.fn(async () => {});
+    const c = new SessionGroupCoordinator({ spawn: interleavedSpawn, kill: sharedKill });
+
+    const [groupA, groupB] = await Promise.all([
+      c.createGroup({ cwd: "/w/a", primary: "claude", observer: "claude", spawnContext: ctxA }),
+      c.createGroup({ cwd: "/w/b", primary: "claude", observer: "claude", spawnContext: ctxB }),
+    ]);
+
+    // Each context recorded EXACTLY its own pair of spawns — never the other's.
+    expect(ctxA.observed).toEqual(["orchestrator:claude", "observer:claude"]);
+    expect(ctxB.observed).toEqual(["orchestrator:claude", "observer:claude"]);
+    // Sanity: the four sessionIds embed the correct context tag, proving
+    // the spawner's view of `opts.spawnContext` matched the call's intent.
+    expect(groupA.primary.sessionId).toContain("call-A");
+    expect(groupA.observer.sessionId).toContain("call-A");
+    expect(groupB.primary.sessionId).toContain("call-B");
+    expect(groupB.observer.sessionId).toContain("call-B");
+    // Distinct group ids — coordinator generates a fresh one per call.
+    expect(groupA.sessionGroupId).not.toBe(groupB.sessionGroupId);
+  });
+
+  it("spawnContext is forwarded as-is — coordinator never inspects or mutates it", async () => {
+    // Reference equality: the exact object the caller passed is the exact
+    // object the spawner receives, in both orchestrator + observer halves.
+    const sentinel = { tag: "sentinel", deep: { nested: true } } as const;
+    const seen: unknown[] = [];
+    const echoSpawn: SessionSpawner = async (opts) => {
+      seen.push(opts.spawnContext);
+      return { sessionId: `sess-${seen.length}` };
+    };
+    const c = new SessionGroupCoordinator({ spawn: echoSpawn, kill: vi.fn(async () => {}) });
+    await c.createGroup({ cwd: "/w", primary: "claude", observer: "claude", spawnContext: sentinel });
+    expect(seen).toHaveLength(2);
+    // Reference identity, not deep equality — the coordinator must not
+    // clone, freeze, or rewrap the context.
+    expect(seen[0]).toBe(sentinel);
+    expect(seen[1]).toBe(sentinel);
+  });
+
+  it("spawnContext is optional — createGroup without one leaves opts.spawnContext undefined for legacy callers", async () => {
+    const seen: unknown[] = [];
+    const echoSpawn: SessionSpawner = async (opts) => {
+      seen.push(opts.spawnContext);
+      return { sessionId: `sess-${seen.length}` };
+    };
+    const c = new SessionGroupCoordinator({ spawn: echoSpawn, kill: vi.fn(async () => {}) });
+    // No spawnContext field at all — confirms back-compat with any caller
+    // that hasn't migrated to the explicit-context API.
+    await c.createGroup({ cwd: "/w", primary: "claude", observer: "claude" });
+    expect(seen).toEqual([undefined, undefined]);
+  });
+});
