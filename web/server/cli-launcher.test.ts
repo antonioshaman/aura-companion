@@ -510,6 +510,61 @@ describe("launch", () => {
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
+  // ── Task 11 — record: false plumbing ──────────────────────────────────────
+  // Auth-probe spawns (Codex smoke check, MAX 20x tier verification) MUST
+  // disable recording BEFORE the adapter wires its first `record()` call.
+  // The check sits in `launch()` between session-creation and the spawn
+  // dispatch, so the RecorderManager.disableForSession() call lands before
+  // any frame can reach the recorder.
+
+  it("calls recorder.disableForSession when launched with record: false", () => {
+    const fakeRecorder = {
+      disableForSession: vi.fn(),
+      enableForSession: vi.fn(),
+      record: vi.fn(),
+      recordEvent: vi.fn(),
+      stopRecording: vi.fn(),
+      isRecording: vi.fn(() => false),
+    } as any;
+    launcher.setRecorder(fakeRecorder);
+
+    launcher.launch({ cwd: "/tmp/probe", record: false });
+
+    expect(fakeRecorder.disableForSession).toHaveBeenCalledWith("test-session-id");
+  });
+
+  it("does NOT call recorder.disableForSession when record option is omitted (default = true)", () => {
+    const fakeRecorder = {
+      disableForSession: vi.fn(),
+      enableForSession: vi.fn(),
+      record: vi.fn(),
+      recordEvent: vi.fn(),
+      stopRecording: vi.fn(),
+      isRecording: vi.fn(() => true),
+    } as any;
+    launcher.setRecorder(fakeRecorder);
+
+    launcher.launch({ cwd: "/tmp/normal" });
+
+    expect(fakeRecorder.disableForSession).not.toHaveBeenCalled();
+  });
+
+  it("does NOT call recorder.disableForSession when record: true (explicit default)", () => {
+    const fakeRecorder = {
+      disableForSession: vi.fn(),
+      enableForSession: vi.fn(),
+      record: vi.fn(),
+      recordEvent: vi.fn(),
+      stopRecording: vi.fn(),
+      isRecording: vi.fn(() => true),
+    } as any;
+    launcher.setRecorder(fakeRecorder);
+
+    launcher.launch({ cwd: "/tmp/explicit-on", record: true });
+
+    expect(fakeRecorder.disableForSession).not.toHaveBeenCalled();
+  });
+
 });
 
 // ─── state management ────────────────────────────────────────────────────────

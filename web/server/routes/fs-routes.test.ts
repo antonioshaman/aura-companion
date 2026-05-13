@@ -411,6 +411,13 @@ describe("GET /fs/list — env-var allowlist + default path", () => {
   it("falls back to homedir() when COMPANION_FS_DEFAULT_PATH is unset", async () => {
     // Backwards-compatibility check: omitting both env vars must produce
     // exactly the legacy behaviour — default path = homedir().
+    // Per feedback_test_env_pollution_explicit_unset: a beforeEach prevX/
+    // afterEach-restore pair preserves whatever the SHELL started with;
+    // if a dev/CI machine exports COMPANION_FS_DEFAULT_PATH (e.g.
+    // /root via systemd unit), the test silently runs against a polluted
+    // env. Explicitly delete the var inside the test so the "unset"
+    // precondition is established regardless of shell baseline.
+    delete process.env.COMPANION_FS_DEFAULT_PATH;
     registerFsRoutes(envApp);
 
     const res = await envApp.request("/fs/list");

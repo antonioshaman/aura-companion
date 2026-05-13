@@ -6,10 +6,18 @@ import {
   readdirSync,
   existsSync,
   utimesSync,
+  statSync,
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { SessionRecorder, RecorderManager } from "./recorder.js";
+import {
+  SessionRecorder,
+  RecorderManager,
+  redactRaw,
+  REDACTED_PLACEHOLDER,
+  RECORDING_HEADER_VERSION,
+  RECORDING_HEADER_VERSIONS_ACCEPTED,
+} from "./recorder.js";
 
 let tempDir: string;
 
@@ -71,10 +79,13 @@ describe("SessionRecorder", () => {
 
     const header = JSON.parse(lines[0]);
     expect(header._header).toBe(true);
-    // Schema bumped to v2 in Task 8 (origin field on entries); writer
-    // always emits the current version, readers tolerate both 1 and 2
+    // Schema bumped to v3 in Task 11 (redactionApplied flag); writer
+    // always emits the current version, readers tolerate 1, 2 and 3
     // for forensic access to historical recordings.
-    expect(header.version).toBe(2);
+    expect(header.version).toBe(3);
+    expect(header.version).toBe(RECORDING_HEADER_VERSION);
+    expect(RECORDING_HEADER_VERSIONS_ACCEPTED.has(header.version)).toBe(true);
+    expect(header.redactionApplied).toBe(true);
     expect(header.session_id).toBe("sess-1");
     expect(header.backend_type).toBe("claude");
     expect(header.cwd).toBe("/project");
@@ -451,6 +462,222 @@ describe("cleanup / rotation", () => {
     const remaining = readDirSafe(tempDir);
     expect(remaining.length).toBe(1);
     expect(remaining[0]).toContain("new_claude");
+
+    mgr.closeAll();
+  });
+});
+
+// ─── Redaction (Task 11) ─────────────────────────────────────────────────────
+
+describe("redactRaw — pure function", () => {
+  // The pre-screen short-circuits frames that carry no secret marker so the
+  // overwhelming majority of recorded NDJSON (assistant deltas, tool
+  // results, keep-alives) round-trips byte-identical. This keeps replay-
+  // fixture corpora stable across the schema bump.
+  it("returns inert input unchanged (byte-identical)", () => {
+    const inputs = [
+      '{"type":"system","subtype":"init","model":"claude-opus-4-7"}',
+      '{"type":"assistant","content":[{"type":"text","text":"Hello world"}]}',
+      '{"type":"keep_alive"}',
+      "",
+      "plain non-JSON text",
+    ];
+    for (const raw of inputs) {
+      expect(redactRaw(raw)).toBe(raw);
+    }
+  });
+
+  it("redacts OpenAI sk- keys in structured JSON values", () => {
+    const raw = JSON.stringify({
+      type: "system",
+      env: { OPENAI_API_KEY: "sk-proj-abcdef1234567890ABCDEF" },
+    });
+    const out = redactRaw(raw);
+    const parsed = JSON.parse(out);
+    expect(parsed.env.OPENAI_API_KEY).toBe(REDACTED_PLACEHOLDER);
+    expect(out).not.toContain("sk-proj-abcdef");
+  });
+
+  it("redacts Anthropic sk-ant- keys", () => {
+    const raw = JSON.stringify({
+      params: { authToken: "sk-ant-api03-abcXYZ_123-deadbeef987654321abcdef" },
+    });
+    const out = redactRaw(raw);
+    expect(out).not.toContain("sk-ant-api03");
+    // Output must remain parseable JSON — guaranteed by parse-then-mutate.
+    expect(() => JSON.parse(out)).not.toThrow();
+  });
+
+  it("redacts Bearer tokens in string values regardless of key name", () => {
+    const raw = JSON.stringify({
+      type: "control_request",
+      headers: { Authorization: "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.abcdef" },
+    });
+    const out = redactRaw(raw);
+    expect(out).not.toContain("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.abcdef");
+    expect(out).toContain(REDACTED_PLACEHOLDER);
+  });
+
+  it("redacts GitHub PAT (ghp_, gho_, github_pat_) patterns", () => {
+    const cases = [
+      "ghp_1234567890abcdefghijklmnopqrstuvwxyz",
+      "gho_abcdefghijklmnopqrstuvwxyz1234567890",
+      "github_pat_11ABCDEFG0abcdefghijkl_LongRestPartHere1234",
+    ];
+    for (const token of cases) {
+      const out = redactRaw(JSON.stringify({ token }));
+      expect(out).not.toContain(token);
+    }
+  });
+
+  it("redacts by sensitive key name even when value isn't pattern-shaped", () => {
+    // A bare opaque string under `companion_auth_token` must be redacted
+    // even though it doesn't match any value-shape pattern — the key name
+    // is the authoritative signal here.
+    const raw = JSON.stringify({ companion_auth_token: "some-opaque-token-abc123" });
+    const out = redactRaw(raw);
+    const parsed = JSON.parse(out);
+    expect(parsed.companion_auth_token).toBe(REDACTED_PLACEHOLDER);
+  });
+
+  it("redacts in arrays + nested objects", () => {
+    const raw = JSON.stringify({
+      env_list: [
+        { name: "OPENAI_API_KEY", value: "sk-user-deadbeef123456789012345" },
+        { name: "PATH", value: "/usr/bin" },
+      ],
+    });
+    const out = redactRaw(raw);
+    expect(out).not.toContain("sk-user-deadbeef");
+    expect(out).toContain("/usr/bin");
+  });
+
+  it("falls back to pattern replacement for non-JSON raw with a marker", () => {
+    // control_response can carry a raw string. If parse fails, the function
+    // applies value patterns directly.
+    const raw = "Authorization: Bearer abcdefghijklmnopqrstuv";
+    const out = redactRaw(raw);
+    expect(out).not.toContain("Bearer abcdefghijklmnopqrstuv");
+    expect(out).toContain(REDACTED_PLACEHOLDER);
+  });
+
+  it("output of structured redaction is always valid JSON", () => {
+    // Per task spec: every emitted line must JSON.parse — the parse-then-
+    // mutate-then-restringify path has no streaming-regex-spanning-escape
+    // hazard. We verify with input containing tricky escapes.
+    const raw = JSON.stringify({
+      apiKey: "Bearer xx\nyy\\zz\"qq",
+      note: "value with \\t \\n and \"quotes\"",
+    });
+    const out = redactRaw(raw);
+    expect(() => JSON.parse(out)).not.toThrow();
+  });
+});
+
+describe("SessionRecorder — redaction at write time", () => {
+  it("redacts sk- keys when raw is recorded", () => {
+    const rec = new SessionRecorder("sess-redact-1", "claude", "/cwd", tempDir);
+    rec.record(
+      "in",
+      JSON.stringify({ env: { OPENAI_API_KEY: "sk-proj-realbeefdeadbeef123456" } }),
+      "cli",
+    );
+    rec.close();
+
+    const lines = readFileSync(rec.filePath, "utf-8").trim().split("\n");
+    expect(lines.length).toBe(2);
+    expect(lines[1]).not.toContain("sk-proj-realbeefdeadbeef");
+
+    // Per spec acceptance: every line must remain JSON-parseable post-redaction.
+    for (const line of lines) {
+      expect(() => JSON.parse(line)).not.toThrow();
+    }
+
+    const entry = JSON.parse(lines[1]);
+    const innerRaw = JSON.parse(entry.raw);
+    expect(innerRaw.env.OPENAI_API_KEY).toBe(REDACTED_PLACEHOLDER);
+  });
+
+  it("redacts sensitive fields inside lifecycle event meta", () => {
+    const rec = new SessionRecorder("sess-event-redact", "codex", "/cwd", tempDir);
+    rec.recordEvent("ws_error", "cli", {
+      error: "connection failed",
+      headers: { Authorization: "Bearer secret_jwt_blob_abcdef1234567890" },
+    });
+    rec.close();
+
+    const lines = readFileSync(rec.filePath, "utf-8").trim().split("\n");
+    expect(lines.length).toBe(2);
+    expect(lines[1]).not.toContain("secret_jwt_blob_abcdef");
+
+    const entry = JSON.parse(lines[1]);
+    expect(entry.meta.headers.Authorization).toBe(REDACTED_PLACEHOLDER);
+    expect(entry.meta.error).toBe("connection failed");
+  });
+});
+
+// ─── File / directory mode (Task 11 — Hunt Principle 3) ──────────────────────
+
+describe("recording file + directory permissions", () => {
+  // On systems that don't surface POSIX modes (e.g. some CI Windows runners
+  // through node), statSync still returns a `mode` — but the bottom octal
+  // bits are coerced. Skip the bit-level assertions on non-POSIX platforms
+  // and just assert the file/dir exists.
+  const isPosix = process.platform !== "win32";
+
+  it("creates the recordings directory with mode 0o700", () => {
+    const nestedDir = join(tempDir, "fresh-recordings");
+    const mgr = new RecorderManager({ globalEnabled: true, recordingsDir: nestedDir });
+    // Triggers ensureDir on first record() call.
+    mgr.record("sess-perm-1", "in", "msg", "cli", "claude", "/cwd");
+
+    expect(existsSync(nestedDir)).toBe(true);
+    if (isPosix) {
+      const mode = statSync(nestedDir).mode & 0o777;
+      expect(mode).toBe(0o700);
+    }
+    mgr.closeAll();
+  });
+
+  it("creates the recording file with mode 0o600", () => {
+    const rec = new SessionRecorder("sess-perm-2", "claude", "/cwd", tempDir);
+    rec.close();
+
+    expect(existsSync(rec.filePath)).toBe(true);
+    if (isPosix) {
+      const mode = statSync(rec.filePath).mode & 0o777;
+      expect(mode).toBe(0o600);
+    }
+  });
+});
+
+// ─── Auth-probe exclusion (Task 11 — record: false plumbing) ─────────────────
+
+describe("RecorderManager — auth-probe exclusion via disableForSession", () => {
+  // The cli-launcher disables recording for a session BEFORE any adapter
+  // wires its first record() call — short-lived auth-probe spawns (Codex
+  // smoke check, MAX 20x tier verification) must never write init frames
+  // (which carry the raw token before redaction reaches the per-frame
+  // writer) to disk.
+  it("a session disabled before any record() call writes no file", () => {
+    const mgr = new RecorderManager({ globalEnabled: true, recordingsDir: tempDir });
+
+    // Simulate the cli-launcher path: disable, then attempt to record.
+    mgr.disableForSession("probe-sess");
+    expect(mgr.isRecording("probe-sess")).toBe(false);
+
+    mgr.record(
+      "probe-sess",
+      "in",
+      JSON.stringify({ env: { OPENAI_API_KEY: "sk-real-probe-secret-1234567890" } }),
+      "cli",
+      "claude",
+      "/cwd",
+    );
+
+    // No file should have been opened for the probe session.
+    const files = readdirSync(tempDir).filter((f) => f.includes("probe-sess"));
+    expect(files.length).toBe(0);
 
     mgr.closeAll();
   });
