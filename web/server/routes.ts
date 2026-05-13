@@ -5,6 +5,7 @@ import { execSync } from "node:child_process";
 import { resolveBinary } from "./path-resolver.js";
 import { writeAtomicJson } from "./atomic-write.js";
 import { parseCheckpointPayload } from "./council-types.js";
+import { log } from "./logger.js";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
@@ -332,8 +333,23 @@ export function createRoutes(
     } catch {
       return c.json({ error: "Failed to read request body" }, 400);
     }
-    const payload = parseCheckpointPayload(raw);
+    let parserReason: string | undefined;
+    let parserField: string | undefined;
+    const payload = parseCheckpointPayload(raw, (reason, field) => {
+      parserReason = reason;
+      parserField = field;
+    });
     if (!payload) {
+      // Task 13: structured drop telemetry — surfaces upstream orchestrator
+      // writer drift from the first malformed POST instead of silently 400ing.
+      log.warn("routes", "protocol.frame_dropped", {
+        event: "protocol.frame_dropped",
+        backend: "council",
+        parser: "checkpoint",
+        reason: parserReason ?? "unknown",
+        field: parserField,
+        sessionId,
+      });
       return c.json({ error: "Invalid CheckpointPayload — failed schema validation" }, 400);
     }
     // Cross-check the payload's session_group_id matches the caller's

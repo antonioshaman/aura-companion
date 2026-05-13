@@ -111,8 +111,25 @@ async function readAndEmit(
     return;
   }
   if (signal.aborted) return;
-  const payload = parseCheckpointPayload(raw);
+  // Task 13: capture parser-level reason and emit a structured
+  // protocol.frame_dropped signal alongside the watcher's higher-level
+  // "invalid-schema" drop. Upstream writer drift becomes visible from
+  // the first malformed frame rather than after silent divergence.
+  let parserReason: string | undefined;
+  let parserField: string | undefined;
+  const payload = parseCheckpointPayload(raw, (reason, field) => {
+    parserReason = reason;
+    parserField = field;
+  });
   if (!payload) {
+    log.warn("checkpoint-watcher", "protocol.frame_dropped", {
+      event: "protocol.frame_dropped",
+      backend: "council",
+      parser: "checkpoint",
+      reason: parserReason ?? "unknown",
+      field: parserField,
+      file,
+    });
     onDropped("invalid-schema", file);
     return;
   }

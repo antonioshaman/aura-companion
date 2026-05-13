@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "checkpoint_id": "council-implement-1-aaaaaaaa",
+  "phase": "council-implement",
+  "session_group_id": "grp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "reviewed_at": "2026-05-13T20:00:00Z",
+  "observer_provider": "claude",
+  "observer_model": "claude-opus-4-7",
+  "observer_cli_version": "1.0.0",
+  "findings": [
+    {
+      "severity": "STOP",
+      "claim": "Function eats unbounded memory because input length is not capped.",
+      "evidence_path": "web/server/recorder.ts",
+      "evidence_lines": [142, 152],
+      "confidence": "high"
+    }
+  ]
+}
