@@ -3059,4 +3059,68 @@ describe("SessionOrchestrator", () => {
       expect(() => obs.stopCouncilWatchers("grp_unknown")).not.toThrow();
     });
   });
+
+  // ─── getCouncilGroupBySessionId ───────────────────────────────────────────
+  //
+  // Public O(1) accessor used by REST endpoints (notably the checkpoint
+  // emit route in PR #10) to authorize callers without leaking the full
+  // council group meta map. Returns {sessionGroupId, role} or null. The
+  // role is decided by comparing the session id to the meta's
+  // `primarySessionId` — anything else under that group is observer.
+  // Read-only; no state mutation.
+  describe("getCouncilGroupBySessionId", () => {
+    function seedGroup(gid: string, orchId: string, obsId: string) {
+      const obs = orchestrator as unknown as {
+        councilGroupMeta: Map<string, {
+          primarySessionId: string;
+          observerSessionId: string;
+          pairing: string;
+          createdAt: number;
+          lastCheckpointReceivedAt: number | null;
+        }>;
+        councilGroupBySessionId: Map<string, string>;
+      };
+      obs.councilGroupMeta.set(gid, {
+        primarySessionId: orchId,
+        observerSessionId: obsId,
+        pairing: "claude+claude",
+        createdAt: Date.now(),
+        lastCheckpointReceivedAt: null,
+      });
+      obs.councilGroupBySessionId.set(orchId, gid);
+      obs.councilGroupBySessionId.set(obsId, gid);
+    }
+
+    it("returns null when the session id is not part of any council group", () => {
+      expect(orchestrator.getCouncilGroupBySessionId("never_seen")).toBeNull();
+    });
+
+    it("returns {sessionGroupId, role: orchestrator} when sessionId matches primarySessionId", () => {
+      seedGroup("grp_role_orch", "orch_a", "obs_a");
+      expect(orchestrator.getCouncilGroupBySessionId("orch_a")).toEqual({
+        sessionGroupId: "grp_role_orch",
+        role: "orchestrator",
+      });
+    });
+
+    it("returns {sessionGroupId, role: observer} when sessionId matches observerSessionId", () => {
+      seedGroup("grp_role_obs", "orch_b", "obs_b");
+      expect(orchestrator.getCouncilGroupBySessionId("obs_b")).toEqual({
+        sessionGroupId: "grp_role_obs",
+        role: "observer",
+      });
+    });
+
+    // Defends against the rare reconciliation race where the
+    // bySessionId reverse-index still points at a group whose meta
+    // entry has been torn down. Without the null check on `meta` the
+    // accessor would throw on `meta.primarySessionId`.
+    it("returns null when the reverse-index points at a group whose meta is gone", () => {
+      const obs = orchestrator as unknown as {
+        councilGroupBySessionId: Map<string, string>;
+      };
+      obs.councilGroupBySessionId.set("orphan_sid", "grp_meta_missing");
+      expect(orchestrator.getCouncilGroupBySessionId("orphan_sid")).toBeNull();
+    });
+  });
 });
