@@ -156,7 +156,7 @@ A user-opt-in flag on the New Session form (`councilMode: "council"` + `councilP
 
 **Cross-process protocol** lives entirely on the filesystem under `<workspace>/.council/`:
 - `.council/prompts/observer-system.md` — versioned (`<!-- observer-system-prompt v1 -->`) CLI-agnostic role definition. Loaded at observer spawn time; hash stamped on `SdkSessionInfo.observerPromptSha256`.
-- `.council/checkpoints/<phase>.json` — written by the orchestrator via `writeAtomicJson` after each Carmack-Council phase. Schema: `CheckpointPayload` in `council-types.ts`.
+- `.council/checkpoints/<phase>.json` — written by the orchestrator via `writeAtomicJson` after each Carmack-Council phase. Schema: `CheckpointPayload` in `council-types.ts`. Producer-side REST: `POST /api/sessions/:id/council/checkpoint` with the JSON payload as the body — server validates via `parseCheckpointPayload`, cross-checks `session_group_id` against the caller's actual group (orchestrator-half only), then atomically writes into the workspace's `.council/checkpoints/` directory.
 - `.council/reviews/<phase>-<provider>-observer.md` — written by the observer (content is JSON despite `.md` extension). Filename MUST carry the `<provider>` segment (`claude` | `codex`) so the `claude+codex` pairing produces two distinct review files per checkpoint rather than colliding under the watcher's debounce window.
 
 **Server pipeline:**
