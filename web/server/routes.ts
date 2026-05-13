@@ -3,6 +3,8 @@ import { getCookie, setCookie } from "hono/cookie";
 import { streamSSE } from "hono/streaming";
 import { execSync } from "node:child_process";
 import { resolveBinary } from "./path-resolver.js";
+import { writeAtomicJson } from "./atomic-write.js";
+import { parseCheckpointPayload } from "./council-types.js";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
@@ -290,6 +292,76 @@ export function createRoutes(
           forkSession: result.session.forkSession,
         }),
       });
+    });
+  });
+
+  // ─── Council Mode — Orchestrator-side checkpoint emit ──────────────────────
+  //
+  // The orchestrator half of a Council pair calls this to publish a
+  // CheckpointPayload to its workspace's `.council/checkpoints/<phase>.json`.
+  // The filesystem watcher (`checkpoint-watcher.ts`) then picks it up, the
+  // orchestrator's wake pipeline (PR #8) dispatches the manifest to the
+  // observer's CLI, and the observer emits a review.
+  //
+  // The endpoint exists because — prior to this route — no production code
+  // path wrote checkpoints. Schema + parser + watcher + wake pipeline all
+  // existed; the producer was the missing link. Co-locating writes with the
+  // bridge process means schema validation runs inside the same versioned
+  // module as the watcher's reader (AP-3), and the workspace's `.council/`
+  // tree is the only thing that touches disk — no IPC, no shared state.
+  //
+  // Authorization: only the orchestrator half of an *active* council group
+  // may write. Observer-half writes (or non-council sessions) are rejected
+  // — they would corrupt the per-group sequence invariant.
+  api.post("/sessions/:id/council/checkpoint", async (c) => {
+    const sessionId = c.req.param("id");
+    const session = launcher.getSession(sessionId);
+    if (!session) {
+      return c.json({ error: "Session not found" }, 404);
+    }
+    const group = orchestrator.getCouncilGroupBySessionId(sessionId);
+    if (!group) {
+      return c.json({ error: "Session is not part of an active council group" }, 409);
+    }
+    if (group.role !== "orchestrator") {
+      return c.json({ error: "Only the orchestrator half may emit checkpoints" }, 403);
+    }
+    let raw: string;
+    try {
+      raw = await c.req.text();
+    } catch {
+      return c.json({ error: "Failed to read request body" }, 400);
+    }
+    const payload = parseCheckpointPayload(raw);
+    if (!payload) {
+      return c.json({ error: "Invalid CheckpointPayload — failed schema validation" }, 400);
+    }
+    // Cross-check the payload's session_group_id matches the caller's
+    // session group. Without this, an orchestrator could emit into another
+    // group's checkpoint directory (file path is built from session.cwd
+    // though, so cross-group write would still land in caller's own
+    // workspace — but the watcher keys on payload.session_group_id and
+    // would mis-attribute). Reject early.
+    if (payload.session_group_id !== group.sessionGroupId) {
+      return c.json(
+        { error: "session_group_id in payload does not match caller's session group" },
+        400,
+      );
+    }
+    const target = join(session.cwd, ".council", "checkpoints", `${payload.phase}.json`);
+    try {
+      writeAtomicJson(target, payload);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return c.json({ error: `Failed to write checkpoint: ${message}` }, 500);
+    }
+    return c.json({
+      ok: true,
+      written: target,
+      sessionGroupId: group.sessionGroupId,
+      checkpointId: payload.checkpoint_id,
+      phase: payload.phase,
+      sequence: payload.sequence,
     });
   });
 

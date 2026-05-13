@@ -2516,6 +2516,24 @@ export class SessionOrchestrator {
     return this.launcher.getSession(sessionId);
   }
 
+  /**
+   * O(1) lookup of the Council group a session belongs to, returning both
+   * the group id and the session's role within it. Returns null when the
+   * session is not part of any active council group. Exposed publicly so
+   * REST endpoints (notably the orchestrator-side checkpoint emit route)
+   * can authorize callers without leaking the full `councilGroupMeta`
+   * map. Read-only — does not mutate orchestrator state.
+   */
+  getCouncilGroupBySessionId(sessionId: string): { sessionGroupId: string; role: "orchestrator" | "observer" } | null {
+    const sessionGroupId = this.councilGroupBySessionId.get(sessionId);
+    if (!sessionGroupId) return null;
+    const meta = this.councilGroupMeta.get(sessionGroupId);
+    if (!meta) return null;
+    const role: "orchestrator" | "observer" =
+      meta.primarySessionId === sessionId ? "orchestrator" : "observer";
+    return { sessionGroupId, role };
+  }
+
   // ── Cleanup ────────────────────────────────────────────────────────────────
 
   shutdown(): void {

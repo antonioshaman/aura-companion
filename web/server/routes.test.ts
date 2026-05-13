@@ -354,6 +354,7 @@ function createMockOrchestrator() {
     unarchiveSession: vi.fn(() => ({ ok: true })),
     clearAutoRelaunchCount: vi.fn(),
     getSession: vi.fn(),
+    getCouncilGroupBySessionId: vi.fn(() => null),
   } as any;
 }
 
@@ -4837,5 +4838,150 @@ describe("GET /api/sessions/:id/browser/host-proxy/:port/*", () => {
     // Should NOT leak the raw error message (e.g. "Connection refused 127.0.0.1:9999")
     expect(json.error).toBe("Proxy failed: upstream unreachable");
     fetchSpy.mockRestore();
+  });
+});
+
+// ─── POST /api/sessions/:id/council/checkpoint ─────────────────────────────
+//
+// The producer side of the Council Mode pipeline. Orchestrator-half Claude
+// sessions call this to publish a CheckpointPayload to their workspace's
+// `.council/checkpoints/<phase>.json`, which the filesystem watcher then
+// converts into an observer wake. Without this endpoint the pipeline is
+// half-built — every other piece (watcher, dispatch, wake-frame send,
+// review handling) exists but has no producer.
+describe("POST /api/sessions/:id/council/checkpoint", () => {
+  // Use a per-suite tmpdir so the success-path test can write a real file
+  // without colliding with other tests or polluting the repo. Each test
+  // re-mocks `launcher.getSession` with the tmpdir as `cwd`.
+  let tmpCwd: string;
+
+  beforeEach(async () => {
+    const os = await import("node:os");
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    tmpCwd = path.join(os.tmpdir(), `aura-checkpoint-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    fs.mkdirSync(tmpCwd, { recursive: true });
+  });
+
+  // Schema-valid payload. Tests mutate copies of this base to exercise
+  // individual validation branches; using a single literal everywhere
+  // would make the "what part of the payload is wrong" question vague.
+  function validPayload(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      schema_version: 1,
+      checkpoint_id: "ckpt_001",
+      phase: "council-plan",
+      sequence: 0,
+      session_group_id: "grp_test",
+      emitted_at: "2026-05-13T04:00:00Z",
+      artifact_paths: ["docs/plan.md"],
+      ...overrides,
+    };
+  }
+
+  it("returns 404 when the session does not exist", async () => {
+    launcher.getSession.mockReturnValue(undefined);
+    const res = await app.request("/api/sessions/missing/council/checkpoint", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(validPayload()),
+    });
+    expect(res.status).toBe(404);
+    expect((await res.json()).error).toMatch(/not found/i);
+  });
+
+  it("returns 409 when the session exists but is not part of a council group", async () => {
+    launcher.getSession.mockReturnValue({ sessionId: "s1", state: "running", cwd: tmpCwd });
+    orchestrator.getCouncilGroupBySessionId.mockReturnValue(null);
+    const res = await app.request("/api/sessions/s1/council/checkpoint", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(validPayload()),
+    });
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toMatch(/council group/i);
+  });
+
+  it("returns 403 when the caller is the observer half (only the orchestrator may emit)", async () => {
+    launcher.getSession.mockReturnValue({ sessionId: "s_obs", state: "running", cwd: tmpCwd });
+    orchestrator.getCouncilGroupBySessionId.mockReturnValue({
+      sessionGroupId: "grp_test",
+      role: "observer",
+    });
+    const res = await app.request("/api/sessions/s_obs/council/checkpoint", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(validPayload()),
+    });
+    expect(res.status).toBe(403);
+    expect((await res.json()).error).toMatch(/orchestrator/i);
+  });
+
+  it("returns 400 when the body fails CheckpointPayload schema validation", async () => {
+    launcher.getSession.mockReturnValue({ sessionId: "s_orch", state: "running", cwd: tmpCwd });
+    orchestrator.getCouncilGroupBySessionId.mockReturnValue({
+      sessionGroupId: "grp_test",
+      role: "orchestrator",
+    });
+    // schema_version=99 — parser rejects.
+    const res = await app.request("/api/sessions/s_orch/council/checkpoint", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(validPayload({ schema_version: 99 })),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/schema validation/i);
+  });
+
+  it("returns 400 when payload.session_group_id does not match the caller's actual group", async () => {
+    launcher.getSession.mockReturnValue({ sessionId: "s_orch", state: "running", cwd: tmpCwd });
+    orchestrator.getCouncilGroupBySessionId.mockReturnValue({
+      sessionGroupId: "grp_real",
+      role: "orchestrator",
+    });
+    // Schema-valid but session_group_id mismatches caller's group.
+    const res = await app.request("/api/sessions/s_orch/council/checkpoint", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(validPayload({ session_group_id: "grp_someone_else" })),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/session_group_id.*does not match/i);
+  });
+
+  it("writes the checkpoint and returns 200 on the happy path", async () => {
+    const path = await import("node:path");
+    launcher.getSession.mockReturnValue({ sessionId: "s_orch", state: "running", cwd: tmpCwd });
+    orchestrator.getCouncilGroupBySessionId.mockReturnValue({
+      sessionGroupId: "grp_test",
+      role: "orchestrator",
+    });
+    const payload = validPayload();
+    const res = await app.request("/api/sessions/s_orch/council/checkpoint", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.ok).toBe(true);
+    expect(json.sessionGroupId).toBe("grp_test");
+    expect(json.checkpointId).toBe("ckpt_001");
+    expect(json.phase).toBe("council-plan");
+    expect(json.sequence).toBe(0);
+
+    // The file actually lands on disk at the documented path. Round-trip
+    // through `node:fs/promises` (a different module spec than the
+    // suite-wide `vi.mock("node:fs")`) — `readFileSync` on the mocked
+    // module is polluted with stale stub returns from neighbouring suites
+    // and `vi.clearAllMocks` does not reset mock-return-values, only call
+    // history. Reading through promises sidesteps the mock and catches
+    // silent JSON re-serialisation drift between writeAtomicJson and
+    // parseCheckpointPayload.
+    const expectedPath = path.join(tmpCwd, ".council", "checkpoints", "council-plan.json");
+    expect(json.written).toBe(expectedPath);
+    const fsp = await import("node:fs/promises");
+    const writtenRaw = await fsp.readFile(expectedPath, "utf8");
+    expect(JSON.parse(writtenRaw)).toEqual(payload);
   });
 });
