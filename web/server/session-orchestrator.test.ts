@@ -2947,7 +2947,14 @@ describe("SessionOrchestrator", () => {
     // `reconnect_ok` resolves it back to `active`. Watcher attach is best-
     // effort (mkdirSync of a missing cwd fails silently); the Task 6
     // contract is the coordinator state machine, not the filesystem watcher.
-    it("partial pair (orchestrator-only) registers in reconnecting with grace armed", async () => {
+    // PLAN-aura-consolidated-refactor.md Task 3 (FINAL-REVIEW 2026-05-12-2211
+    // P1 #1): partial-pair restart now lands directly in `degraded` rather
+    // than arming a useless reconnect grace window. The `__missing_*`
+    // placeholder sessionId cannot bind to any real handshake by
+    // construction, so the grace window would always expire 45s later into
+    // `degraded` anyway — better to surface the honest state immediately
+    // than show a lying "reconnecting…" UI for 45s.
+    it("partial pair (orchestrator-only) registers in degraded directly — no reconnect grace, no UI lie", async () => {
       const fs = await import("node:fs");
       const os = await import("node:os");
       const path = await import("node:path");
@@ -2966,9 +2973,106 @@ describe("SessionOrchestrator", () => {
         };
         obs.reconcileCouncilGroups();
         expect(obs.councilGroupMeta.has("grp_partial")).toBe(true);
-        expect(obs.coordinator.get("grp_partial")?.status).toBe("reconnecting");
-        expect(obs.coordinator.getReconnectContext("grp_partial")).toBeDefined();
+        // Direct to degraded — no transient `reconnecting` state.
+        expect(obs.coordinator.get("grp_partial")?.status).toBe("degraded");
+        // No reconnect context armed — the grace window would be useless.
+        expect(obs.coordinator.getReconnectContext("grp_partial")).toBeUndefined();
         obs.stopCouncilWatchers("grp_partial");
+      } finally {
+        fs.rmSync(ws, { recursive: true, force: true });
+      }
+    });
+
+    // PLAN Task 3 — explicit injunction enforcement (observer review WARN
+    // on commit efe8d9f): placeholder __missing_* sessionIds may be
+    // synthesised to satisfy `GroupMember.sessionId` typing, but they MUST
+    // NOT enter `councilGroupBySessionId` reverse index. A future
+    // session:cli-id-received for an unrelated session that happens to
+    // collide with the placeholder string (or a `getCouncilGroupBySessionId`
+    // lookup keyed on a leaked placeholder) would resolve to the wrong
+    // group. Canary asserts the placeholder is structurally absent from
+    // every lookup surface the orchestrator exposes.
+    it("partial pair placeholder sessionIds are NEVER inserted into councilGroupBySessionId reverse index", async () => {
+      const fs = await import("node:fs");
+      const os = await import("node:os");
+      const path = await import("node:path");
+      const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "council-placeholder-")));
+      try {
+        (deps.launcher.listSessions as any).mockReturnValue([
+          { sessionId: "lone-orch-real", sessionGroupId: "grp_canary", sessionGroupRole: "orchestrator",
+            backendType: "claude", cwd: ws, archived: false, createdAt: 1, state: "running" },
+        ]);
+        const obs = orchestrator as unknown as {
+          reconcileCouncilGroups: () => void;
+          stopCouncilWatchers: (id: string) => void;
+          councilGroupBySessionId: Map<string, string>;
+          getCouncilGroupBySessionId: (id: string) => { sessionGroupId: string; role: string } | null;
+          coordinator: { findBySessionId: (id: string) => { sessionGroupId: string } | undefined };
+        };
+        obs.reconcileCouncilGroups();
+        // Real surviving half IS in the reverse index.
+        expect(obs.councilGroupBySessionId.get("lone-orch-real")).toBe("grp_canary");
+        // Placeholder for the missing observer half IS NOT in the index.
+        // Anything matching the `__missing_*` prefix is dead weight at best
+        // and a collision risk at worst.
+        const placeholderKey = `__missing_obs_grp_canary`;
+        expect(obs.councilGroupBySessionId.has(placeholderKey)).toBe(false);
+        // Symmetric verification — observer-review v2 NOTE 1: the prefix
+        // check must catch ANY synthesized placeholder, not just the
+        // literal `__missing_` prefix. A future refactor renaming to
+        // `__placeholder_*` / `__synthetic_*` / `__pending_*` would
+        // bypass a literal-substring check. Regex catches any
+        // `__<lowercase>_` shape.
+        const placeholderShape = /^__[a-z]+_/;
+        for (const key of obs.councilGroupBySessionId.keys()) {
+          expect(placeholderShape.test(key), `placeholder-shaped key leaked to reverse index: ${key}`).toBe(false);
+        }
+        // Observer-review v2 NOTE 2: document the KNOWN LEAK at
+        // `coord.findBySessionId`. The coordinator's groups map stores
+        // GroupRecord with placeholder sessionIds (required by the
+        // string-typed GroupMember.sessionId slot). A direct lookup via
+        // `coord.findBySessionId(placeholder)` still returns the
+        // partial-pair group — this is the gap a `string | null`
+        // widening would close. Pinning both halves so future refactor
+        // shifting either invariant fails the test:
+        //   - Orchestrator-level lookup IS safe (placeholder-free index).
+        //   - Coordinator-level direct lookup IS the documented leak.
+        expect(obs.getCouncilGroupBySessionId(placeholderKey)).toBeNull();
+        // Document the leak — if a future change closes this leak (e.g.
+        // GroupMember widening + drop placeholders from groups map), the
+        // test will fail and force a conscious update of the comment +
+        // the orchestrator's forbidden-paths block.
+        const coordHit = obs.coordinator.findBySessionId(placeholderKey);
+        expect(coordHit?.sessionGroupId, "coord.findBySessionId leak documentation — flip if/when GroupMember widens to string|null").toBe("grp_canary");
+        obs.stopCouncilWatchers("grp_canary");
+      } finally {
+        fs.rmSync(ws, { recursive: true, force: true });
+      }
+    });
+
+    // Symmetric test: when only the observer half survives across restart,
+    // the dead-role is "orchestrator" and the group still lands in degraded.
+    it("partial pair (observer-only) registers in degraded with deadRole=orchestrator", async () => {
+      const fs = await import("node:fs");
+      const os = await import("node:os");
+      const path = await import("node:path");
+      const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "council-partial-obs-")));
+      try {
+        (deps.launcher.listSessions as any).mockReturnValue([
+          { sessionId: "lone-obs", sessionGroupId: "grp_partial_obs", sessionGroupRole: "observer",
+            backendType: "claude", cwd: ws, archived: false, createdAt: 1, state: "running" },
+        ]);
+        const obs = orchestrator as unknown as {
+          reconcileCouncilGroups: () => void;
+          councilGroupMeta: Map<string, any>;
+          stopCouncilWatchers: (id: string) => void;
+          coordinator: { get: (id: string) => { status: string } | undefined; getReconnectContext: (id: string) => unknown };
+        };
+        obs.reconcileCouncilGroups();
+        expect(obs.councilGroupMeta.has("grp_partial_obs")).toBe(true);
+        expect(obs.coordinator.get("grp_partial_obs")?.status).toBe("degraded");
+        expect(obs.coordinator.getReconnectContext("grp_partial_obs")).toBeUndefined();
+        obs.stopCouncilWatchers("grp_partial_obs");
       } finally {
         fs.rmSync(ws, { recursive: true, force: true });
       }

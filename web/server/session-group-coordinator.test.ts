@@ -219,3 +219,198 @@ describe("SessionGroupCoordinator.archiveGroup", () => {
     expect(kill).not.toHaveBeenCalled();
   });
 });
+
+// PLAN-aura-consolidated-refactor.md Task 2 acceptance:
+// `createGroup` now plumbs an opaque `spawnContext` to each spawn callback
+// (replacing the prior `pendingCouncilCall` instance scalar on the
+// orchestrator that two concurrent invocations could race and
+// cross-contaminate). The regression tripwire: two concurrent createGroup
+// calls with distinct contexts must each see their OWN context in their
+// spawn callbacks — never the other's.
+describe("SessionGroupCoordinator.createGroup — concurrent spawnContext isolation", () => {
+  it("two concurrent createGroup calls receive their own spawnContext (no cross-contamination)", async () => {
+    // Distinguishable context shape per call; the spawner reads opts.spawnContext
+    // and records what it observed so the test can compare against what was sent.
+    type TestContext = { tag: string; observed: string[] };
+    const ctxA: TestContext = { tag: "call-A", observed: [] };
+    const ctxB: TestContext = { tag: "call-B", observed: [] };
+
+    let serial = 0;
+    const interleavedSpawn: SessionSpawner = async (opts) => {
+      // The spawner deliberately yields to the event loop between
+      // observing the context and returning, so the two createGroup
+      // calls' four total spawns interleave rather than execute
+      // serially per call. This is exactly the race surface the
+      // refactor closes.
+      const observedCtx = opts.spawnContext as TestContext;
+      observedCtx.observed.push(`${opts.sessionGroupRole}:${opts.backendType}`);
+      await new Promise((r) => setTimeout(r, 5));
+      serial += 1;
+      return { sessionId: `sess-${observedCtx.tag}-${serial}` };
+    };
+    const sharedKill = vi.fn(async () => {});
+    const c = new SessionGroupCoordinator({ spawn: interleavedSpawn, kill: sharedKill });
+
+    const [groupA, groupB] = await Promise.all([
+      c.createGroup({ cwd: "/w/a", primary: "claude", observer: "claude", spawnContext: ctxA }),
+      c.createGroup({ cwd: "/w/b", primary: "claude", observer: "claude", spawnContext: ctxB }),
+    ]);
+
+    // Each context recorded EXACTLY its own pair of spawns — never the other's.
+    expect(ctxA.observed).toEqual(["orchestrator:claude", "observer:claude"]);
+    expect(ctxB.observed).toEqual(["orchestrator:claude", "observer:claude"]);
+    // Sanity: the four sessionIds embed the correct context tag, proving
+    // the spawner's view of `opts.spawnContext` matched the call's intent.
+    expect(groupA.primary.sessionId).toContain("call-A");
+    expect(groupA.observer.sessionId).toContain("call-A");
+    expect(groupB.primary.sessionId).toContain("call-B");
+    expect(groupB.observer.sessionId).toContain("call-B");
+    // Distinct group ids — coordinator generates a fresh one per call.
+    expect(groupA.sessionGroupId).not.toBe(groupB.sessionGroupId);
+  });
+
+  it("spawnContext is forwarded as-is — coordinator never inspects or mutates it", async () => {
+    // Reference equality: the exact object the caller passed is the exact
+    // object the spawner receives, in both orchestrator + observer halves.
+    const sentinel = { tag: "sentinel", deep: { nested: true } } as const;
+    const seen: unknown[] = [];
+    const echoSpawn: SessionSpawner = async (opts) => {
+      seen.push(opts.spawnContext);
+      return { sessionId: `sess-${seen.length}` };
+    };
+    const c = new SessionGroupCoordinator({ spawn: echoSpawn, kill: vi.fn(async () => {}) });
+    await c.createGroup({ cwd: "/w", primary: "claude", observer: "claude", spawnContext: sentinel });
+    expect(seen).toHaveLength(2);
+    // Reference identity, not deep equality — the coordinator must not
+    // clone, freeze, or rewrap the context.
+    expect(seen[0]).toBe(sentinel);
+    expect(seen[1]).toBe(sentinel);
+  });
+
+  it("spawnContext is optional — createGroup without one leaves opts.spawnContext undefined for legacy callers", async () => {
+    const seen: unknown[] = [];
+    const echoSpawn: SessionSpawner = async (opts) => {
+      seen.push(opts.spawnContext);
+      return { sessionId: `sess-${seen.length}` };
+    };
+    const c = new SessionGroupCoordinator({ spawn: echoSpawn, kill: vi.fn(async () => {}) });
+    // No spawnContext field at all — confirms back-compat with any caller
+    // that hasn't migrated to the explicit-context API.
+    await c.createGroup({ cwd: "/w", primary: "claude", observer: "claude" });
+    expect(seen).toEqual([undefined, undefined]);
+  });
+});
+
+// PLAN-aura-consolidated-refactor.md Task 4 acceptance criterion (v2
+// promotion from Risks → Task 4): "every reconcile-driven state mutation
+// function MUST be safe to call twice — `markGroupDegraded(id)` called by
+// both the reconnect-grace expiry path AND the cascading-second-half-death
+// path MUST produce identical disk state. No counter increments inside a
+// state setter; no list-append where set-membership is meant."
+//
+// Concrete invariant per v3 NOTE 2 refinement: exactly 1 emission across
+// both calls — the second call must be a no-op at the log level too, not
+// a duplicate emission.
+describe("SessionGroupCoordinator.applyEvent — idempotency under repeated signals", () => {
+  it("applyEvent(half_died) is idempotent: a second call from `degraded` is a true no-op (no double bus emit, no double log)", async () => {
+    const events: Array<{ kind: string; deadRole?: string }> = [];
+    const c = new SessionGroupCoordinator({
+      spawn,
+      kill,
+      onError: vi.fn(),
+    });
+    const g = await c.createGroup({ cwd: "/w", primary: "claude", observer: "claude" });
+
+    // Subscribe to the side-effects channel by patching applyEvent's
+    // bus emitter is too invasive; instead, attach a listener to the
+    // shared bus and capture group:degraded emissions. This mirrors how
+    // production listeners observe the same channel.
+    const { companionBus } = await import("./event-bus.js");
+    const handler = (e: { sessionGroupId: string; deadRole: string }) => {
+      if (e.sessionGroupId === g.sessionGroupId) {
+        events.push({ kind: "degraded", deadRole: e.deadRole });
+      }
+    };
+    companionBus.on("group:degraded", handler);
+
+    try {
+      // First call: active → degraded, emits exactly once.
+      c.applyEvent(g.sessionGroupId, { type: "half_died", role: "observer" });
+      // Second call: degraded → degraded (transition no-op), MUST emit
+      // zero additional events. This is the load-bearing invariant.
+      c.applyEvent(g.sessionGroupId, { type: "half_died", role: "observer" });
+
+      // Exactly one emission total, NOT two. Second call no-ops at bus
+      // level because deriveSideEffects(prev === next) returns empty.
+      expect(events).toHaveLength(1);
+      expect(events[0]).toEqual({ kind: "degraded", deadRole: "observer" });
+      // Group status pinned at degraded — no parallel-status drift.
+      expect(c.get(g.sessionGroupId)?.status).toBe("degraded");
+    } finally {
+      companionBus.off("group:degraded", handler);
+    }
+  });
+
+  it("applyEvent(reconnect_failed) following half_died is a true no-op — concurrent grace-expiry vs cascading-death signals converge to one log entry", async () => {
+    // Real-world: a partial-pair's reconnect-grace timer expires
+    // (reconnect_failed) at the same wallclock instant the surviving
+    // half also dies (half_died → degraded). Both paths flow into
+    // applyEvent. The state machine MUST converge — no doubled log entry,
+    // no parallel-status field, no race in side-effect emission count.
+    const events: Array<{ kind: string }> = [];
+    const c = new SessionGroupCoordinator({ spawn, kill, onError: vi.fn() });
+    const g = await c.createGroup({ cwd: "/w", primary: "claude", observer: "claude" });
+    const { companionBus } = await import("./event-bus.js");
+    const handler = (e: { sessionGroupId: string }) => {
+      if (e.sessionGroupId === g.sessionGroupId) events.push({ kind: "degraded" });
+    };
+    companionBus.on("group:degraded", handler);
+
+    try {
+      // Drive to reconnecting first so the second event can be
+      // reconnect_failed (only valid transition from reconnecting).
+      c.applyEvent(g.sessionGroupId, {
+        type: "reconnect_started",
+        survivingRole: "orchestrator",
+        deadlineMs: Date.now() + 1_000,
+      });
+      // First terminal signal: reconnect_failed → degraded, emits once.
+      c.applyEvent(g.sessionGroupId, { type: "reconnect_failed", role: "observer" });
+      // Concurrent cascading-death signal arriving microseconds later:
+      // applyEvent(half_died) from degraded state is a transition no-op,
+      // emits zero. Total emissions = 1.
+      c.applyEvent(g.sessionGroupId, { type: "half_died", role: "observer" });
+      expect(events).toHaveLength(1);
+      expect(c.get(g.sessionGroupId)?.status).toBe("degraded");
+    } finally {
+      companionBus.off("group:degraded", handler);
+    }
+  });
+
+  it("user_archived on an already-archived group is a true no-op (no double `group:exited` emit, no double kill)", async () => {
+    const exitEvents: number[] = [];
+    const c = new SessionGroupCoordinator({
+      spawn,
+      kill,
+      onError: vi.fn(),
+    });
+    const g = await c.createGroup({ cwd: "/w", primary: "claude", observer: "claude" });
+    const { companionBus } = await import("./event-bus.js");
+    const handler = (e: { sessionGroupId: string }) => {
+      if (e.sessionGroupId === g.sessionGroupId) exitEvents.push(1);
+    };
+    companionBus.on("group:exited", handler);
+
+    try {
+      await c.archiveGroup(g.sessionGroupId);
+      // Re-archive: idempotent at every level — no bus emit, no kill,
+      // no log entry. `archiveGroup` returns true on the no-op path.
+      const repeated = await c.archiveGroup(g.sessionGroupId);
+      expect(repeated).toBe(true);
+      expect(exitEvents).toHaveLength(1);
+      expect(c.get(g.sessionGroupId)?.status).toBe("archived");
+    } finally {
+      companionBus.off("group:exited", handler);
+    }
+  });
+});

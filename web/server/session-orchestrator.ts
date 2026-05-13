@@ -312,6 +312,25 @@ export function deterministicFindingId(input: {
 // ── Orchestrator ─────────────────────────────────────────────────────────────
 
 /**
+ * Per-call context plumbed through the SessionGroupCoordinator's
+ * `spawnContext` field (PLAN-aura-consolidated-refactor.md Task 2). The
+ * `baseBody` is the parent `CreateSessionRequest` carrying the user's
+ * model/permission/env choices the council spawn callback needs to forward
+ * to `doCreateSession`. The `spawnErrors` capture struct is mutated by the
+ * spawn callback on per-half failure so the parent `createCouncilGroup`
+ * can return the actual upstream error code rather than the coordinator's
+ * generic 500. Race-free because the entire struct lives in the call's
+ * lexical scope, never on the orchestrator instance.
+ */
+interface CouncilSpawnContext {
+  baseBody: CreateSessionRequest;
+  spawnErrors: {
+    primary: { error: string; status: number } | null;
+    observer: { error: string; status: number } | null;
+  };
+}
+
+/**
  * Single entry point for session lifecycle operations: create, resume,
  * reconnect, and terminate. Coordinates between CliLauncher (process
  * management), WsBridge (message routing), and SessionStore (persistence).
@@ -373,18 +392,6 @@ export class SessionOrchestrator {
    * keystone: `coordinator.applyEvent` is now the sole lifecycle mutator.
    */
   private coordinator: SessionGroupCoordinator | null = null;
-
-  /**
-   * Per-call context for `createCouncilGroup`. The coordinator's
-   * spawn/kill callbacks are long-lived (the coordinator is), but each
-   * call brings its own `baseBody` and error-capture struct. Setting this
-   * before invoking `coordinator.createGroup` and clearing in `finally`
-   * keeps the callbacks pure-by-reference without stale-closure risk.
-   */
-  private pendingCouncilCall: {
-    baseBody: CreateSessionRequest;
-    spawnErrors: { primary: { error: string; status: number } | null; observer: { error: string; status: number } | null };
-  } | null = null;
 
   // Event listeners
   private exitCallbacks: ((sessionId: string, exitCode: number | null) => void)[] = [];
@@ -819,11 +826,30 @@ export class SessionOrchestrator {
       if (!cwd) continue;
       const isComplete = pair.orchestrator !== undefined && pair.observer !== undefined;
 
-      // For partial pairs, synthesize a placeholder sessionId/backendType
-      // for the missing half. The group record needs both fields to satisfy
-      // GroupMember; the missing half is the snapshotted dead session for
-      // the reconnect window. If/when the missing half handshakes,
-      // `session:cli-id-received` arrives with the real sessionId.
+      // For partial pairs, synthesize a placeholder sessionId for the
+      // missing half ONLY because `GroupMember.sessionId` is a required
+      // `string` field on the coordinator's GroupRecord shape. Plan Task 3
+      // text says "NO synthetic placeholders that can never bind to a
+      // real handshake" — the spirit of that injunction is that placeholders
+      // must NEVER enter any code path expecting a real sessionId:
+      //   - armReconnect: skipped entirely (Task 3 lands in degraded directly).
+      //   - councilGroupBySessionId reverse index: placeholder MUST NOT be
+      //     inserted below (dead weight + the canary test asserts absence).
+      //   - wsBridge.markCouncilSession: only called for real halves below.
+      //   - kill / archive: coordinator best-effort kill no-ops on missing
+      //     launcher.getSession (placeholder by construction not in map).
+      //   - SessionGroupCoordinator.findBySessionId: KNOWN LEAK — iterates
+      //     `groups.values()` and matches on `primary.sessionId` /
+      //     `observer.sessionId` directly. Because `registerExternalGroup`
+      //     below passes the placeholder into the coordinator's groups
+      //     map's sessionId slot, `coord.findBySessionId("__missing_...")`
+      //     returns the partial-pair group. Orchestrator-level callers
+      //     route through `getCouncilGroupBySessionId` (safe — reads the
+      //     placeholder-free reverse index); any future caller reaching
+      //     into `coord.findBySessionId` directly MUST guard placeholder
+      //     inputs at the call site. A `GroupMember.sessionId: string | null`
+      //     type widening would close this surface for free — explicitly
+      //     out of Task 3 scope.
       const orchestrator = pair.orchestrator;
       const observer = pair.observer;
       const primarySessionId = orchestrator?.sessionId ?? `__missing_orch_${groupId}`;
@@ -839,8 +865,12 @@ export class SessionOrchestrator {
         createdAt: (orchestrator ?? observer)?.createdAt ?? Date.now(),
         lastCheckpointReceivedAt: null,
       });
-      this.councilGroupBySessionId.set(primarySessionId, groupId);
-      this.councilGroupBySessionId.set(observerSessionId, groupId);
+      // Reverse index — placeholder ids MUST NOT enter this map: a future
+      // session:cli-id-received for an unrelated session that happens to
+      // collide with the placeholder string would resolve to the wrong
+      // group. Skip the synthesised half; insert only real halves.
+      if (orchestrator) this.councilGroupBySessionId.set(orchestrator.sessionId, groupId);
+      if (observer) this.councilGroupBySessionId.set(observer.sessionId, groupId);
       this.startCouncilWatchers(groupId, cwd);
       // Mark real (non-synthetic) halves on the ws-bridge so post-restart
       // browser subscribe sees `state.sessionGroupId` and emits the
@@ -859,6 +889,8 @@ export class SessionOrchestrator {
         status: "active",
         createdAt: (orchestrator ?? observer)?.createdAt ?? Date.now(),
       });
+      // Make sure the coordinator's state is consistent BEFORE the
+      // partial-pair branch potentially fires `applyEvent`.
       if (isComplete) {
         restoredComplete++;
         log.info("session-orchestrator", "council group reconciled on startup", {
@@ -870,17 +902,32 @@ export class SessionOrchestrator {
           pairing,
         });
       } else {
-        // Partial pair — arm the grace window for the missing half.
+        // Partial pair — approach (b) from FINAL-REVIEW 2026-05-12-2211
+        // P1 #1 (PLAN-aura-consolidated-refactor.md Task 3): apply
+        // `half_died → degraded` DIRECTLY, do NOT arm a reconnect grace
+        // window. Rationale:
+        //
+        //  - `scheduleProactiveRelaunch` and the reconnect watchdog key
+        //    on `launcher.getSession(sessionId)` which returns undefined
+        //    for the synthesised `__missing_*` placeholder — no
+        //    session-level relaunch path exists for the missing half by
+        //    construction.
+        //
+        //  - Any real handshake arriving later carries a real Companion
+        //    sessionId that cannot equal the `__missing_*` placeholder,
+        //    so the identity-binding check would mismatch and drop. The
+        //    grace timer would expire and the group would land in
+        //    `degraded` anyway after a guaranteed 45s wait with no
+        //    possible happy path.
+        //
+        // Lying via "reconnecting…" UI is worse than honest "degraded".
+        // The state machine emits `group:degraded` + EC-9 log via the
+        // standard side-effect channel; no new code paths in this branch.
         const deadRole: SessionGroupRole = orchestrator === undefined ? "orchestrator" : "observer";
-        const deadSessionId = deadRole === "orchestrator" ? primarySessionId : observerSessionId;
-        coord.armReconnect({
-          sessionGroupId: groupId,
-          deadRole,
-          snapshotSessionId: deadSessionId,
-        });
+        coord.applyEvent(groupId, { type: "half_died", role: deadRole });
         restoredPartial++;
-        log.info("session-orchestrator", "council group reconciled with partial-pair grace", {
-          event: "group:reconciled_partial",
+        log.info("session-orchestrator", "council group reconciled to degraded (partial pair on restart)", {
+          event: "group:reconciled_degraded",
           sessionGroupId: groupId,
           role: deadRole,
           pairing,
@@ -1150,9 +1197,12 @@ export class SessionOrchestrator {
    * the sole lifecycle mutator; without a long-lived instance, the
    * `session:exited` listener would have nothing to drive.
    *
-   * Spawn/kill callbacks read per-call context via `this.pendingCouncilCall`
-   * (set in `createCouncilGroup`'s try/finally) — no stale-closure risk
-   * across multiple sequential create calls.
+   * Spawn/kill callbacks read per-call context from `opts.spawnContext`
+   * (forwarded verbatim by the coordinator from `createGroup`'s request).
+   * Two concurrent `createCouncilGroup` invocations cannot cross-contaminate
+   * by construction — each call brings its own closure-captured context
+   * object (PLAN-aura-consolidated-refactor.md Task 2; replaces the prior
+   * `this.pendingCouncilCall` instance scalar that was racy across tabs).
    */
   private getOrCreateCoordinatorSync(): SessionGroupCoordinator {
     if (this.coordinator) return this.coordinator;
@@ -1163,8 +1213,11 @@ export class SessionOrchestrator {
     this.coordinator = new SessionGroupCoordinator({
       graceMs: GROUP_RECONNECT_GRACE_MS,
       spawn: async (opts) => {
-        const ctx = this.pendingCouncilCall;
-        if (!ctx) throw new Error("internal: coordinator spawn invoked outside createCouncilGroup");
+        // Per-call context typed at the consumer end — the orchestrator
+        // owns both the producer (createCouncilGroup) and this consumer,
+        // so the cast is structurally safe.
+        const ctx = opts.spawnContext as CouncilSpawnContext | undefined;
+        if (!ctx) throw new Error("internal: coordinator spawn invoked without spawnContext");
         const result = await this.doCreateSession({
           ...ctx.baseBody,
           backend: opts.backendType,
@@ -1935,14 +1988,17 @@ export class SessionOrchestrator {
     }
 
     const baseBody: CreateSessionRequest = { ...req.base };
-    // Use a ref-object rather than two separate `let`s so TS narrowing
-    // through the closure-mutated lexical state stays sound — TS flow
-    // analysis sees property access on an object, not a re-bound let.
-    type SpawnFailure = { error: string; status: number };
-    const spawnErrors: { primary: SpawnFailure | null; observer: SpawnFailure | null } = { primary: null, observer: null };
+    // Per-call context — entirely lexical, never on `this`. Two concurrent
+    // createCouncilGroup invocations get distinct closure-captured objects
+    // and the coordinator's spawn callback (set in
+    // getOrCreateCoordinatorSync) reads from `opts.spawnContext`, not from
+    // shared mutable state. PLAN Task 2 race fix.
+    const spawnContext: CouncilSpawnContext = {
+      baseBody,
+      spawnErrors: { primary: null, observer: null },
+    };
 
     const coordinator = this.getOrCreateCoordinatorSync();
-    this.pendingCouncilCall = { baseBody, spawnErrors };
 
     try {
       const group = await coordinator.createGroup({
@@ -1951,6 +2007,7 @@ export class SessionOrchestrator {
         observer: parsed.observer,
         model: req.base.model,
         permissionMode: req.base.permissionMode,
+        spawnContext,
       });
       const primaryInfo = this.launcher.getSession(group.primary.sessionId);
       const observerInfo = this.launcher.getSession(group.observer.sessionId);
@@ -1992,16 +2049,13 @@ export class SessionOrchestrator {
       });
       return { ok: true, sessionGroupId: group.sessionGroupId, primary: primaryInfo, observer: observerInfo };
     } catch (err) {
-      if (spawnErrors.primary) return { ok: false, ...spawnErrors.primary };
-      if (spawnErrors.observer) return { ok: false, ...spawnErrors.observer };
+      if (spawnContext.spawnErrors.primary) return { ok: false, ...spawnContext.spawnErrors.primary };
+      if (spawnContext.spawnErrors.observer) return { ok: false, ...spawnContext.spawnErrors.observer };
       const reason = err instanceof Error ? err.message : String(err);
       return { ok: false, error: reason, status: 500 };
-    } finally {
-      // Clear per-call context so a second council create cannot read stale
-      // baseBody / spawnErrors. The long-lived coordinator's spawn callback
-      // throws explicitly if this is null when invoked.
-      this.pendingCouncilCall = null;
     }
+    // No finally block — spawnContext lives in lexical scope and GC'd when
+    // this function returns; nothing to clean up on the orchestrator instance.
   }
 
   private async doCreateSession(
