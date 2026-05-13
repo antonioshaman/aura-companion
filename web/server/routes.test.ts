@@ -4887,7 +4887,10 @@ describe("POST /api/sessions/:id/council/checkpoint", () => {
       body: JSON.stringify(validPayload()),
     });
     expect(res.status).toBe(404);
-    expect((await res.json()).error).toMatch(/not found/i);
+    // Task 15a (Hunt P9): response body is now a stable error code, not a
+    // human-readable string. Status code remains the primary discriminator;
+    // body code is the secondary signal for client branching.
+    expect((await res.json()).error).toBe("not_found");
   });
 
   it("returns 409 when the session exists but is not part of a council group", async () => {
@@ -4899,7 +4902,7 @@ describe("POST /api/sessions/:id/council/checkpoint", () => {
       body: JSON.stringify(validPayload()),
     });
     expect(res.status).toBe(409);
-    expect((await res.json()).error).toMatch(/council group/i);
+    expect((await res.json()).error).toBe("conflict");
   });
 
   it("returns 403 when the caller is the observer half (only the orchestrator may emit)", async () => {
@@ -4914,7 +4917,7 @@ describe("POST /api/sessions/:id/council/checkpoint", () => {
       body: JSON.stringify(validPayload()),
     });
     expect(res.status).toBe(403);
-    expect((await res.json()).error).toMatch(/orchestrator/i);
+    expect((await res.json()).error).toBe("forbidden");
   });
 
   it("returns 400 when the body fails CheckpointPayload schema validation", async () => {
@@ -4930,7 +4933,7 @@ describe("POST /api/sessions/:id/council/checkpoint", () => {
       body: JSON.stringify(validPayload({ schema_version: 99 })),
     });
     expect(res.status).toBe(400);
-    expect((await res.json()).error).toMatch(/schema validation/i);
+    expect((await res.json()).error).toBe("validation_failed");
   });
 
   it("returns 400 when payload.session_group_id does not match the caller's actual group", async () => {
@@ -4946,7 +4949,7 @@ describe("POST /api/sessions/:id/council/checkpoint", () => {
       body: JSON.stringify(validPayload({ session_group_id: "grp_someone_else" })),
     });
     expect(res.status).toBe(400);
-    expect((await res.json()).error).toMatch(/session_group_id.*does not match/i);
+    expect((await res.json()).error).toBe("validation_failed");
   });
 
   it("writes the checkpoint and returns 200 on the happy path", async () => {

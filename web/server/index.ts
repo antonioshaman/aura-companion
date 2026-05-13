@@ -32,6 +32,8 @@ import { migrateLinearCredentialsToAgents } from "./linear-credential-migration.
 import { authenticateManagedWebSocket } from "./ws-auth.js";
 import { LinearAgentBridge } from "./linear-agent-bridge.js";
 import { NoVncProxy } from "./novnc-proxy.js";
+import { isOriginAllowed } from "./middleware/origin-allowlist.js";
+import { securityHeaders } from "./middleware/security-headers.js";
 
 import { startPeriodicCheck, setServiceMode } from "./update-checker.js";
 import { imagePullManager } from "./image-pull-manager.js";
@@ -156,6 +158,11 @@ if (managedAuthEnabled) {
   console.log("[server] Managed auth disabled");
 }
 
+// ── Task 15a: baseline security headers (CSP + X-Content-Type-Options +
+// Referrer-Policy + Permissions-Policy). Mounted before routes so every
+// response — including HTML, JSON, and 404s — carries the headers.
+app.use("/*", securityHeaders());
+
 app.use("/api/*", cors());
 app.route("/api", createRoutes(orchestrator, launcher, wsBridge, terminalManager, prPoller, recorder, cronScheduler, agentExecutor, linearAgentBridge, port));
 
@@ -228,9 +235,21 @@ const server = Bun.serve<SocketData>({
     const reqAddr = reqIp?.address ?? "";
     const isLocalhost = reqAddr === "127.0.0.1" || reqAddr === "::1" || reqAddr === "::ffff:127.0.0.1";
 
+    // Task 15a: shared Origin allowlist check applied to every
+    // browser-facing WS upgrade. WebSocket bypasses same-origin policy
+    // by design (Hunt P4) — a malicious page on another origin can open
+    // `ws://localhost:3456/ws/browser/...` and read session contents
+    // without an Origin check at upgrade time. CLI socket (subprocess,
+    // not browser) is excluded — it carries no Origin header by design.
+    const reqOrigin = req.headers.get("origin");
+    const originOk = isOriginAllowed({ origin: reqOrigin, localhost: isLocalhost });
+
     // ── Browser WebSocket — connects to a specific session ─────────────
     const browserMatch = url.pathname.match(/^\/ws\/browser\/([a-f0-9-]+)$/);
     if (browserMatch) {
+      if (!originOk) {
+        return new Response("Forbidden — Origin not allowed", { status: 403 });
+      }
       if (managedAuthEnabled) {
         const auth = await authenticateManagedWebSocket(req);
         if (!auth.ok) {
@@ -253,6 +272,9 @@ const server = Bun.serve<SocketData>({
     // ── Terminal WebSocket — embedded terminal PTY connection ─────────
     const termMatch = url.pathname.match(/^\/ws\/terminal\/([a-f0-9-]+)$/);
     if (termMatch) {
+      if (!originOk) {
+        return new Response("Forbidden — Origin not allowed", { status: 403 });
+      }
       if (managedAuthEnabled) {
         const auth = await authenticateManagedWebSocket(req);
         if (!auth.ok) {
@@ -275,6 +297,9 @@ const server = Bun.serve<SocketData>({
     // ── noVNC WebSocket — proxies VNC data to container's websockify ────
     const novncMatch = url.pathname.match(/^\/ws\/novnc\/([a-f0-9-]+)$/);
     if (novncMatch) {
+      if (!originOk) {
+        return new Response("Forbidden — Origin not allowed", { status: 403 });
+      }
       if (managedAuthEnabled) {
         const auth = await authenticateManagedWebSocket(req);
         if (!auth.ok) {
