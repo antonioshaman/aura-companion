@@ -2947,7 +2947,14 @@ describe("SessionOrchestrator", () => {
     // `reconnect_ok` resolves it back to `active`. Watcher attach is best-
     // effort (mkdirSync of a missing cwd fails silently); the Task 6
     // contract is the coordinator state machine, not the filesystem watcher.
-    it("partial pair (orchestrator-only) registers in reconnecting with grace armed", async () => {
+    // PLAN-aura-consolidated-refactor.md Task 3 (FINAL-REVIEW 2026-05-12-2211
+    // P1 #1): partial-pair restart now lands directly in `degraded` rather
+    // than arming a useless reconnect grace window. The `__missing_*`
+    // placeholder sessionId cannot bind to any real handshake by
+    // construction, so the grace window would always expire 45s later into
+    // `degraded` anyway — better to surface the honest state immediately
+    // than show a lying "reconnecting…" UI for 45s.
+    it("partial pair (orchestrator-only) registers in degraded directly — no reconnect grace, no UI lie", async () => {
       const fs = await import("node:fs");
       const os = await import("node:os");
       const path = await import("node:path");
@@ -2966,9 +2973,39 @@ describe("SessionOrchestrator", () => {
         };
         obs.reconcileCouncilGroups();
         expect(obs.councilGroupMeta.has("grp_partial")).toBe(true);
-        expect(obs.coordinator.get("grp_partial")?.status).toBe("reconnecting");
-        expect(obs.coordinator.getReconnectContext("grp_partial")).toBeDefined();
+        // Direct to degraded — no transient `reconnecting` state.
+        expect(obs.coordinator.get("grp_partial")?.status).toBe("degraded");
+        // No reconnect context armed — the grace window would be useless.
+        expect(obs.coordinator.getReconnectContext("grp_partial")).toBeUndefined();
         obs.stopCouncilWatchers("grp_partial");
+      } finally {
+        fs.rmSync(ws, { recursive: true, force: true });
+      }
+    });
+
+    // Symmetric test: when only the observer half survives across restart,
+    // the dead-role is "orchestrator" and the group still lands in degraded.
+    it("partial pair (observer-only) registers in degraded with deadRole=orchestrator", async () => {
+      const fs = await import("node:fs");
+      const os = await import("node:os");
+      const path = await import("node:path");
+      const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "council-partial-obs-")));
+      try {
+        (deps.launcher.listSessions as any).mockReturnValue([
+          { sessionId: "lone-obs", sessionGroupId: "grp_partial_obs", sessionGroupRole: "observer",
+            backendType: "claude", cwd: ws, archived: false, createdAt: 1, state: "running" },
+        ]);
+        const obs = orchestrator as unknown as {
+          reconcileCouncilGroups: () => void;
+          councilGroupMeta: Map<string, any>;
+          stopCouncilWatchers: (id: string) => void;
+          coordinator: { get: (id: string) => { status: string } | undefined; getReconnectContext: (id: string) => unknown };
+        };
+        obs.reconcileCouncilGroups();
+        expect(obs.councilGroupMeta.has("grp_partial_obs")).toBe(true);
+        expect(obs.coordinator.get("grp_partial_obs")?.status).toBe("degraded");
+        expect(obs.coordinator.getReconnectContext("grp_partial_obs")).toBeUndefined();
+        obs.stopCouncilWatchers("grp_partial_obs");
       } finally {
         fs.rmSync(ws, { recursive: true, force: true });
       }

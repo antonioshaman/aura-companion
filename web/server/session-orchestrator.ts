@@ -866,6 +866,8 @@ export class SessionOrchestrator {
         status: "active",
         createdAt: (orchestrator ?? observer)?.createdAt ?? Date.now(),
       });
+      // Make sure the coordinator's state is consistent BEFORE the
+      // partial-pair branch potentially fires `applyEvent`.
       if (isComplete) {
         restoredComplete++;
         log.info("session-orchestrator", "council group reconciled on startup", {
@@ -877,17 +879,32 @@ export class SessionOrchestrator {
           pairing,
         });
       } else {
-        // Partial pair — arm the grace window for the missing half.
+        // Partial pair — approach (b) from FINAL-REVIEW 2026-05-12-2211
+        // P1 #1 (PLAN-aura-consolidated-refactor.md Task 3): apply
+        // `half_died → degraded` DIRECTLY, do NOT arm a reconnect grace
+        // window. Rationale:
+        //
+        //  - `scheduleProactiveRelaunch` and the reconnect watchdog key
+        //    on `launcher.getSession(sessionId)` which returns undefined
+        //    for the synthesised `__missing_*` placeholder — no
+        //    session-level relaunch path exists for the missing half by
+        //    construction.
+        //
+        //  - Any real handshake arriving later carries a real Companion
+        //    sessionId that cannot equal the `__missing_*` placeholder,
+        //    so the identity-binding check would mismatch and drop. The
+        //    grace timer would expire and the group would land in
+        //    `degraded` anyway after a guaranteed 45s wait with no
+        //    possible happy path.
+        //
+        // Lying via "reconnecting…" UI is worse than honest "degraded".
+        // The state machine emits `group:degraded` + EC-9 log via the
+        // standard side-effect channel; no new code paths in this branch.
         const deadRole: SessionGroupRole = orchestrator === undefined ? "orchestrator" : "observer";
-        const deadSessionId = deadRole === "orchestrator" ? primarySessionId : observerSessionId;
-        coord.armReconnect({
-          sessionGroupId: groupId,
-          deadRole,
-          snapshotSessionId: deadSessionId,
-        });
+        coord.applyEvent(groupId, { type: "half_died", role: deadRole });
         restoredPartial++;
-        log.info("session-orchestrator", "council group reconciled with partial-pair grace", {
-          event: "group:reconciled_partial",
+        log.info("session-orchestrator", "council group reconciled to degraded (partial pair on restart)", {
+          event: "group:reconciled_degraded",
           sessionGroupId: groupId,
           role: deadRole,
           pairing,
