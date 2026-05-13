@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.3.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.2.1...aura-companion-v1.3.0) (2026-05-13)
+
+
+### Features
+
+* **council:** land plan Tasks 1-4 + observer-driven follow-ups ([0a14bce](https://github.com/antonioshaman/aura-companion/commit/0a14bce524936dc42a8a82e0d2836fe13332b619))
+* **fs-routes:** env-var allowlist + default path with loud misconfig WARN ([fc25af8](https://github.com/antonioshaman/aura-companion/commit/fc25af85b98b1c08a79bda2b43d6d68e017c6862))
+
+
+### Bug Fixes
+
+* **council:** filter macOS fs.watch parent-dir-name events in review-watcher ([a4bfc80](https://github.com/antonioshaman/aura-companion/commit/a4bfc80b3dbcf4c7f14582b54420bb1873fbc942))
+
 ## [1.2.1](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.1.0...aura-companion-v1.2.1) (2026-05-13)
 
 
