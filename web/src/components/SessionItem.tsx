@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, type RefObject } from "react";
 import type { SessionItem as SessionItemType } from "../utils/project-grouping.js";
-import { ProviderBadges } from "./council/index.js";
+import { ProviderBadges, isHomogeneousPairing } from "./council/index.js";
 
 interface SessionItemProps {
   session: SessionItemType;
@@ -211,7 +211,12 @@ export function SessionItem({
           <StatusDot status={derivedStatus} />
         )}
 
-        {/* Session name / edit input */}
+        {/* Session name / edit input. Two-row layout (UX feedback, May 2026):
+            row 1 = name takes the full inner width so the user can actually
+            read it; row 2 = metadata (cwd + chips). Previously the chip
+            cluster sat as a sibling of the name container, eating horizontal
+            space and truncating long session names to 1–2 characters when
+            Council Mode added provider chips. */}
         {isEditing ? (
           <input
             ref={editInputRef}
@@ -234,6 +239,7 @@ export function SessionItem({
           />
         ) : (
           <div className="flex-1 min-w-0">
+            {/* Row 1 — name, full inner width */}
             <span
               className={`text-[12.5px] font-medium truncate block leading-snug ${
                 isActive ? "text-cc-fg" : "text-cc-fg/90"
@@ -242,45 +248,49 @@ export function SessionItem({
             >
               {label}
             </span>
-            {cwdTail && (
-              <span className="text-[10px] text-cc-muted/70 truncate block leading-tight mt-px">
-                {cwdTail}
+            {/* Row 2 — meta: cwd (truncates first) + chip cluster (shrink-0). */}
+            <div className="flex items-center gap-1.5 mt-px min-w-0">
+              {cwdTail && (
+                <span className="text-[10px] text-cc-muted/70 truncate min-w-0 leading-tight flex-1">
+                  {cwdTail}
+                </span>
+              )}
+              <span className="flex items-center gap-1 shrink-0">
+                <BackendBadge type={s.backendType} />
+                {s.isContainerized && (
+                  <span className="flex items-center px-1 py-0.5 rounded bg-blue-400/10" title="Docker">
+                    <img src="/logo-docker.svg" alt="Docker logo" className="w-3 h-3" />
+                  </span>
+                )}
+                {s.cronJobId && (
+                  <span className="flex items-center px-1 py-0.5 rounded bg-cc-primary/10" title="Scheduled">
+                    <svg viewBox="0 0 16 16" fill="currentColor" className="w-2.5 h-2.5 text-cc-primary">
+                      <path d="M8 2a6 6 0 100 12A6 6 0 008 2zM0 8a8 8 0 1116 0A8 8 0 010 8zm9-3a1 1 0 10-2 0v3a1 1 0 00.293.707l2 2a1 1 0 001.414-1.414L9 7.586V5z" />
+                    </svg>
+                  </span>
+                )}
+                {/* Council pairing chips: only render when asymmetric.
+                    `claude+claude` would repeat the same label twice and add
+                    no signal — the BackendBadge already shows the orchestrator
+                    backend, and (when blockers exist) the unread STOP counter
+                    discriminates Council pairs from solo sessions. */}
+                {councilPairing && !isHomogeneousPairing(councilPairing) && (
+                  <span data-testid="council-session-badge" title={`Council pair: ${councilPairing}`}>
+                    <ProviderBadges pairing={councilPairing} size="compact" ariaLabel={`Council pair: ${councilPairing}`} />
+                  </span>
+                )}
+                {councilUnreadStops !== undefined && councilUnreadStops > 0 && (
+                  <span
+                    data-testid="council-unread-count"
+                    title={`${councilUnreadStops} unresolved blocker${councilUnreadStops === 1 ? "" : "s"}`}
+                    className="text-[10px] font-semibold leading-none px-1.5 py-0.5 rounded bg-cc-error/15 text-cc-error border border-cc-error/25 min-w-[18px] text-center"
+                  >
+                    {councilUnreadStops}
+                  </span>
+                )}
               </span>
-            )}
+            </div>
           </div>
-        )}
-
-        {/* Badges: backend type + Docker + Cron + Council pairing + unread STOPs */}
-        {!isEditing && (
-          <span className="flex items-center gap-1 shrink-0">
-            <BackendBadge type={s.backendType} />
-            {s.isContainerized && (
-              <span className="flex items-center px-1 py-0.5 rounded bg-blue-400/10" title="Docker">
-                <img src="/logo-docker.svg" alt="Docker logo" className="w-3 h-3" />
-              </span>
-            )}
-            {s.cronJobId && (
-              <span className="flex items-center px-1 py-0.5 rounded bg-cc-primary/10" title="Scheduled">
-                <svg viewBox="0 0 16 16" fill="currentColor" className="w-2.5 h-2.5 text-cc-primary">
-                  <path d="M8 2a6 6 0 100 12A6 6 0 008 2zM0 8a8 8 0 1116 0A8 8 0 010 8zm9-3a1 1 0 10-2 0v3a1 1 0 00.293.707l2 2a1 1 0 001.414-1.414L9 7.586V5z" />
-                </svg>
-              </span>
-            )}
-            {councilPairing && (
-              <span data-testid="council-session-badge" title={`Council pair: ${councilPairing}`}>
-                <ProviderBadges pairing={councilPairing} size="compact" ariaLabel={`Council pair: ${councilPairing}`} />
-              </span>
-            )}
-            {councilUnreadStops !== undefined && councilUnreadStops > 0 && (
-              <span
-                data-testid="council-unread-count"
-                title={`${councilUnreadStops} unresolved blocker${councilUnreadStops === 1 ? "" : "s"}`}
-                className="text-[10px] font-semibold leading-none px-1.5 py-0.5 rounded bg-cc-error/15 text-cc-error border border-cc-error/25 min-w-[18px] text-center"
-              >
-                {councilUnreadStops}
-              </span>
-            )}
-          </span>
         )}
       </button>
 

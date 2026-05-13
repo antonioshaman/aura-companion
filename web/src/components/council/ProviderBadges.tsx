@@ -45,6 +45,20 @@ export function parsePairing(pairing: string): { orchestrator: string; observer:
   return { orchestrator: o.toLowerCase(), observer: b.toLowerCase() };
 }
 
+/**
+ * `true` when both halves of the pairing reference the same provider — the
+ * chips would render identical labels and only crowd the surrounding row
+ * (e.g. Sidebar's SessionItem). Callers in dense contexts can suppress
+ * ProviderBadges in that case; asymmetric pairings still carry information
+ * the user reads from the chip colours. Malformed input returns `false` so
+ * the caller falls back to ProviderBadges' own neutral-chip rendering.
+ */
+export function isHomogeneousPairing(pairing: string): boolean {
+  const parsed = parsePairing(pairing);
+  if (!parsed) return false;
+  return parsed.orchestrator === parsed.observer;
+}
+
 interface BadgeProps {
   provider: string;
   role: "orchestrator" | "observer";
