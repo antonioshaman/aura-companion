@@ -509,4 +509,74 @@ describe("SessionItem", () => {
     );
     expect(container.querySelector(".bg-cc-success")).toBeTruthy();
   });
+
+  // --- Council pairing chips (May 2026 UX feedback) ---
+
+  it("hides ProviderBadges for homogeneous council pair (claude+claude)", () => {
+    // The sidebar row is dense; rendering `CLAUDE + CLAUDE` for a homogeneous
+    // pair adds no signal and crowds out the session name. The BackendBadge
+    // already shows the orchestrator backend (CC) and the unread STOP counter
+    // (when present) discriminates Council pairs from solo sessions. Trusting
+    // both signals means the homogeneous-pair chip is pure noise → hide it.
+    render(<SessionItem {...buildProps({ councilPairing: "claude+claude" })} />);
+    expect(screen.queryByTestId("council-session-badge")).not.toBeInTheDocument();
+  });
+
+  it("shows ProviderBadges for asymmetric council pair (claude+codex)", () => {
+    // Asymmetric pairings carry information the user reads from chip colours
+    // (claude tint vs codex tint). The chip cluster is the ONLY in-sidebar
+    // affordance that distinguishes a `claude+codex` pair from `claude+claude`,
+    // so it must render — even at the cost of horizontal space.
+    render(<SessionItem {...buildProps({ councilPairing: "claude+codex" })} />);
+    expect(screen.getByTestId("council-session-badge")).toBeInTheDocument();
+  });
+
+  it("renders name on row 1 above the metadata row (chip cluster + cwd)", () => {
+    // Structural guard for the two-row layout (UX feedback May 2026). Pre-fix
+    // the chip cluster was a direct child of the outer button's flex row,
+    // competing horizontally with the name container and truncating names to
+    // 1–2 characters. Post-fix the chip cluster lives inside a sibling row of
+    // the name (within the inner column), so the name row gets the full inner
+    // width. We assert the new placement by checking the chip is NOT a direct
+    // child of the outer button — that's the canary against accidentally
+    // collapsing the structure back to the old single-row layout.
+    const { container } = render(
+      <SessionItem
+        {...buildProps({
+          sessionName: "Very long session name that would otherwise truncate",
+          councilPairing: "claude+codex",
+        })}
+      />,
+    );
+    const nameSpan = screen.getByText("Very long session name that would otherwise truncate");
+    const chipBadge = screen.getByTestId("council-session-badge");
+    const outerButton = container.querySelector("button");
+    expect(outerButton).toBeTruthy();
+    // Both descend from the same outer button — sanity.
+    expect(outerButton?.contains(nameSpan)).toBe(true);
+    expect(outerButton?.contains(chipBadge)).toBe(true);
+    // Chip cluster is NOT a direct child of the button (old layout had it as
+    // a sibling of the name column). Direct children should be: accent edge,
+    // status dot, column-container — three elements, none of which is the
+    // chip cluster.
+    const directChildren = Array.from(outerButton!.children);
+    expect(directChildren).not.toContain(chipBadge.parentElement);
+    expect(directChildren.includes(chipBadge)).toBe(false);
+  });
+
+  it("shows the unread STOP counter alongside the chip cluster regardless of pairing symmetry", () => {
+    // The red blocker counter is the highest-priority signal — it must stay
+    // visible whether or not the homogeneous-chip suppression applies.
+    render(
+      <SessionItem
+        {...buildProps({
+          councilPairing: "claude+claude",
+          councilUnreadStops: 3,
+        })}
+      />,
+    );
+    expect(screen.getByTestId("council-unread-count")).toHaveTextContent("3");
+    // And the chip suppression still applies.
+    expect(screen.queryByTestId("council-session-badge")).not.toBeInTheDocument();
+  });
 });

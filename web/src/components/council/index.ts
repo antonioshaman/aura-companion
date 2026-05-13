@@ -10,5 +10,5 @@ export { FindingsLog, formatRelativeTime, severityClass } from "./FindingsLog.js
 export type { FindingsLogProps } from "./FindingsLog.js";
 export { ObserverPanel } from "./ObserverPanel.js";
 export type { ObserverPanelProps } from "./ObserverPanel.js";
-export { ProviderBadges, parsePairing } from "./ProviderBadges.js";
+export { ProviderBadges, parsePairing, isHomogeneousPairing } from "./ProviderBadges.js";
 export type { ProviderBadgesProps } from "./ProviderBadges.js";

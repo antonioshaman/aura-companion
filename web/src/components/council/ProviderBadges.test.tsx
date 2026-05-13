@@ -2,7 +2,7 @@
 import { describe, it, expect } from "vitest";
 import { render, screen } from "@testing-library/react";
 import "@testing-library/jest-dom";
-import { ProviderBadges, parsePairing } from "./ProviderBadges.js";
+import { ProviderBadges, parsePairing, isHomogeneousPairing } from "./ProviderBadges.js";
 
 // ── parsePairing (Beck F4: both branches) ──────────────────────────────────
 
@@ -27,6 +27,34 @@ describe("parsePairing", () => {
 
   it("returns null for non-string input", () => {
     expect(parsePairing(undefined as unknown as string)).toBeNull();
+  });
+});
+
+// ── isHomogeneousPairing (callers in dense rows suppress chips when both halves match) ──
+
+describe("isHomogeneousPairing", () => {
+  it("returns true when both halves of the pairing are the same provider", () => {
+    expect(isHomogeneousPairing("claude+claude")).toBe(true);
+  });
+
+  it("is case-insensitive — `Claude+CLAUDE` is still homogeneous", () => {
+    // parsePairing lower-cases both halves; this test exists so future refactors
+    // that change normalisation can't silently regress the dense-row suppression.
+    expect(isHomogeneousPairing("Claude+CLAUDE")).toBe(true);
+  });
+
+  it("returns false for asymmetric pairings (claude+codex)", () => {
+    expect(isHomogeneousPairing("claude+codex")).toBe(false);
+  });
+
+  it.each([
+    ["empty", ""],
+    ["single half", "claude"],
+    ["three parts", "claude+codex+extra"],
+    ["empty left", "+claude"],
+    ["empty right", "claude+"],
+  ])("returns false for malformed input (%s) — callers fall back to ProviderBadges' own neutral chips", (_label, raw) => {
+    expect(isHomogeneousPairing(raw)).toBe(false);
   });
 });
 
