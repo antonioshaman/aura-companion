@@ -48,7 +48,7 @@ describe("watchReviews", () => {
     // Atomic write so the watcher sees rename, not partial.
     writeAtomicJson(join(dir, "council-plan-codex-observer.md"), validReview());
     // Allow the debounce window + handler to settle.
-    await new Promise((r) => setTimeout(r, 300));
+    await new Promise((r) => setTimeout(r, 500));
     controller.abort();
     await watchPromise;
     expect(seen).toHaveLength(1);
@@ -67,7 +67,7 @@ describe("watchReviews", () => {
       onDropped,
     });
     writeFileSync(join(dir, "wrong-name.md"), JSON.stringify(validReview()));
-    await new Promise((r) => setTimeout(r, 250));
+    await new Promise((r) => setTimeout(r, 500));
     controller.abort();
     await watchPromise;
     expect(seen).toHaveLength(0);
@@ -84,7 +84,7 @@ describe("watchReviews", () => {
       onDropped,
     });
     writeFileSync(join(dir, "council-plan-codex-observer.md"), "not-json{");
-    await new Promise((r) => setTimeout(r, 250));
+    await new Promise((r) => setTimeout(r, 500));
     controller.abort();
     await watchPromise;
     expect(onDropped).toHaveBeenCalledWith("invalid-schema", "council-plan-codex-observer.md");
@@ -103,13 +103,13 @@ describe("watchReviews", () => {
       onDropped,
     });
     writeAtomicJson(join(dir, "phase-a-codex-observer.md"), validReview({ checkpoint_id: "chk-A" }));
-    await new Promise((r) => setTimeout(r, 250));
+    await new Promise((r) => setTimeout(r, 500));
     // Re-emit same review (e.g. observer reconnect).
     writeAtomicJson(join(dir, "phase-a-codex-observer.md"), validReview({ checkpoint_id: "chk-A" }));
-    await new Promise((r) => setTimeout(r, 250));
+    await new Promise((r) => setTimeout(r, 500));
     // A different review (different checkpoint) — must land.
     writeAtomicJson(join(dir, "phase-b-codex-observer.md"), validReview({ checkpoint_id: "chk-B" }));
-    await new Promise((r) => setTimeout(r, 250));
+    await new Promise((r) => setTimeout(r, 500));
     controller.abort();
     await watchPromise;
     expect(seen.map((r) => r.checkpoint_id)).toEqual(["chk-A", "chk-B"]);
@@ -135,9 +135,9 @@ describe("watchReviews", () => {
     writeAtomicJson(path, validReview({ checkpoint_id: "chk-Z1", phase: "phase-z" }));
     // Force a distinct mtime by waiting a few ms — atomic writes within
     // the same millisecond can produce identical mtime on some FSes.
-    await new Promise((r) => setTimeout(r, 30));
+    await new Promise((r) => setTimeout(r, 80));
     writeAtomicJson(path, validReview({ checkpoint_id: "chk-Z2", phase: "phase-z" }));
-    await new Promise((r) => setTimeout(r, 400));
+    await new Promise((r) => setTimeout(r, 500));
     controller.abort();
     await watchPromise;
     // The second payload still surfaces. The first is no longer
@@ -156,7 +156,7 @@ describe("watchReviews", () => {
       onDropped,
     });
     writeAtomicJson(join(dir, "phase-x-codex-observer.md"), validReview({ checkpoint_id: "chk-X" }));
-    await new Promise((r) => setTimeout(r, 250));
+    await new Promise((r) => setTimeout(r, 500));
     controller.abort();
     await watchPromise;
     expect(onDropped).toHaveBeenCalledWith("handler-error", "phase-x-codex-observer.md", expect.stringContaining("handler boom"));
@@ -184,12 +184,12 @@ describe("watchReviews", () => {
     });
     const path = join(dir, "phase-retry-codex-observer.md");
     writeAtomicJson(path, validReview({ checkpoint_id: "chk-retry" }));
-    await new Promise((r) => setTimeout(r, 250));
+    await new Promise((r) => setTimeout(r, 500));
     // Re-emit — same payload, mtime changes (a few ms later), so the
     // debounce keying treats it as a distinct attempt. Handler now
     // succeeds, and the dedup key is committed only on success.
     writeAtomicJson(path, validReview({ checkpoint_id: "chk-retry" }));
-    await new Promise((r) => setTimeout(r, 400));
+    await new Promise((r) => setTimeout(r, 500));
     controller.abort();
     await watchPromise;
     expect(seen.map((r) => r.checkpoint_id)).toEqual(["chk-retry"]);
