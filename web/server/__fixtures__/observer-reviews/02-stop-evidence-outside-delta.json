@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "checkpoint_id": "council-implement-2-bbbbbbbb",
+  "phase": "council-implement",
+  "session_group_id": "grp_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "reviewed_at": "2026-05-13T20:01:00Z",
+  "observer_provider": "claude",
+  "observer_model": "claude-opus-4-7",
+  "observer_cli_version": "1.0.0",
+  "findings": [
+    {
+      "severity": "STOP",
+      "claim": "Server crashes on startup because of misconfigured environment.",
+      "evidence_path": "etc/passwd",
+      "confidence": "high"
+    }
+  ]
+}

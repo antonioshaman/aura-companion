@@ -168,8 +168,24 @@ async function readAndEmit(
     return;
   }
   if (signal.aborted) return;
-  const payload = parseObserverReviewPayload(raw);
+  // Task 13: parser-level reason surfaces upstream observer drift via
+  // structured protocol.frame_dropped log; watcher's higher-level
+  // "invalid-schema" drop fires alongside for the watcher-state log.
+  let parserReason: string | undefined;
+  let parserField: string | undefined;
+  const payload = parseObserverReviewPayload(raw, (reason, field) => {
+    parserReason = reason;
+    parserField = field;
+  });
   if (!payload) {
+    log.warn("review-watcher", "protocol.frame_dropped", {
+      event: "protocol.frame_dropped",
+      backend: "council",
+      parser: "observer-review",
+      reason: parserReason ?? "unknown",
+      field: parserField,
+      file,
+    });
     onDropped("invalid-schema", file);
     return;
   }

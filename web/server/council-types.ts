@@ -170,6 +170,31 @@ export interface ObserverReviewPayload {
 
 // ── Validators ───────────────────────────────────────────────────────────────
 
+/**
+ * Reason tags emitted by the council-payload parsers when they reject a
+ * raw string. The drop reporter is the protocol-frame_dropped observability
+ * signal (Task 13) — upstream drift in the orchestrator's writer OR the
+ * observer's writer becomes visible from the first frame rather than
+ * after a silent state divergence.
+ *
+ * Coarse enough that a new validator can be added without enlarging the
+ * union; the optional `field` argument carries the specific identifier
+ * for `invalid-field` drops.
+ */
+export type CouncilParserDropReason =
+  | "oversize"
+  | "json-parse-error"
+  | "schema-mismatch"
+  | "invalid-field";
+
+/**
+ * Drop reporter callback. Parsers call this just before returning `null`.
+ * Production callers wire it to a structured `log.warn("protocol.frame_dropped", ...)`
+ * emit; tests inject a spy to assert the rejection took the expected branch.
+ * Optional everywhere — back-compat with existing callers.
+ */
+export type CouncilParserDropReporter = (reason: CouncilParserDropReason, field?: string) => void;
+
 function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
@@ -254,26 +279,39 @@ function utf8ByteLength(s: string): number {
  * Returns `null` if the input is oversized, not JSON, or any field fails
  * validation. Never throws — callers (the FS watcher) treat null as "drop
  * this event silently and log".
+ *
+ * The optional `onDrop` reporter (Task 13) fires once per rejection with
+ * the categorical reason and (where applicable) the offending field name.
+ * Production callers wire it to a structured `log.warn` emit so upstream
+ * writer drift is observable from the first malformed frame instead of
+ * silently after state divergence.
  */
-export function parseCheckpointPayload(raw: string): CheckpointPayload | null {
-  if (utf8ByteLength(raw) > COUNCIL_ARTIFACT_MAX_BYTES) return null;
+export function parseCheckpointPayload(
+  raw: string,
+  onDrop?: CouncilParserDropReporter,
+): CheckpointPayload | null {
+  if (utf8ByteLength(raw) > COUNCIL_ARTIFACT_MAX_BYTES) { onDrop?.("oversize"); return null; }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
+    onDrop?.("json-parse-error");
     return null;
   }
-  if (!isObject(parsed)) return null;
-  if (parsed.schema_version !== COUNCIL_SCHEMA_VERSION) return null;
-  if (!isBoundedToken(parsed.checkpoint_id, 128)) return null;
-  if (!isValidPhase(parsed.phase)) return null;
-  if (typeof parsed.sequence !== "number" || !Number.isInteger(parsed.sequence) || parsed.sequence < 0) return null;
-  if (!isBoundedToken(parsed.session_group_id, 128)) return null;
-  if (!isIsoTimestamp(parsed.emitted_at)) return null;
-  if (!Array.isArray(parsed.artifact_paths)) return null;
-  if (parsed.artifact_paths.length > MAX_ARTIFACT_PATHS) return null;
+  if (!isObject(parsed)) { onDrop?.("schema-mismatch", "not-object"); return null; }
+  if (parsed.schema_version !== COUNCIL_SCHEMA_VERSION) { onDrop?.("schema-mismatch", "schema_version"); return null; }
+  if (!isBoundedToken(parsed.checkpoint_id, 128)) { onDrop?.("invalid-field", "checkpoint_id"); return null; }
+  if (!isValidPhase(parsed.phase)) { onDrop?.("invalid-field", "phase"); return null; }
+  if (typeof parsed.sequence !== "number" || !Number.isInteger(parsed.sequence) || parsed.sequence < 0) {
+    onDrop?.("invalid-field", "sequence");
+    return null;
+  }
+  if (!isBoundedToken(parsed.session_group_id, 128)) { onDrop?.("invalid-field", "session_group_id"); return null; }
+  if (!isIsoTimestamp(parsed.emitted_at)) { onDrop?.("invalid-field", "emitted_at"); return null; }
+  if (!Array.isArray(parsed.artifact_paths)) { onDrop?.("invalid-field", "artifact_paths"); return null; }
+  if (parsed.artifact_paths.length > MAX_ARTIFACT_PATHS) { onDrop?.("invalid-field", "artifact_paths"); return null; }
   for (const p of parsed.artifact_paths) {
-    if (!isRelativeWorkspacePath(p)) return null;
+    if (!isRelativeWorkspacePath(p)) { onDrop?.("invalid-field", "artifact_paths"); return null; }
   }
   return {
     schema_version: COUNCIL_SCHEMA_VERSION,
@@ -292,30 +330,38 @@ const VALID_CONFIDENCES: ReadonlySet<CouncilFindingConfidence> = new Set(["high"
 /**
  * Parse and validate an {@link ObserverReviewPayload}. Same contract as
  * {@link parseCheckpointPayload} — returns `null` on any validation failure.
+ * Optional `onDrop` reporter fires once with the rejection reason (Task 13).
  */
-export function parseObserverReviewPayload(raw: string): ObserverReviewPayload | null {
-  if (utf8ByteLength(raw) > COUNCIL_ARTIFACT_MAX_BYTES) return null;
+export function parseObserverReviewPayload(
+  raw: string,
+  onDrop?: CouncilParserDropReporter,
+): ObserverReviewPayload | null {
+  if (utf8ByteLength(raw) > COUNCIL_ARTIFACT_MAX_BYTES) { onDrop?.("oversize"); return null; }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
+    onDrop?.("json-parse-error");
     return null;
   }
-  if (!isObject(parsed)) return null;
-  if (parsed.schema_version !== COUNCIL_SCHEMA_VERSION) return null;
-  if (!isBoundedToken(parsed.checkpoint_id, 128)) return null;
-  if (!isValidPhase(parsed.phase)) return null;
-  if (!isBoundedToken(parsed.session_group_id, 128)) return null;
-  if (!isIsoTimestamp(parsed.reviewed_at)) return null;
-  if (!isBoundedToken(parsed.observer_provider, 32)) return null;
-  if (!isBoundedToken(parsed.observer_model, 128)) return null;
-  if (!isBoundedToken(parsed.observer_cli_version, 64)) return null;
-  if (!Array.isArray(parsed.findings)) return null;
-  if (parsed.findings.length > MAX_FINDINGS_PER_REVIEW) return null;
+  if (!isObject(parsed)) { onDrop?.("schema-mismatch", "not-object"); return null; }
+  if (parsed.schema_version !== COUNCIL_SCHEMA_VERSION) { onDrop?.("schema-mismatch", "schema_version"); return null; }
+  if (!isBoundedToken(parsed.checkpoint_id, 128)) { onDrop?.("invalid-field", "checkpoint_id"); return null; }
+  if (!isValidPhase(parsed.phase)) { onDrop?.("invalid-field", "phase"); return null; }
+  if (!isBoundedToken(parsed.session_group_id, 128)) { onDrop?.("invalid-field", "session_group_id"); return null; }
+  if (!isIsoTimestamp(parsed.reviewed_at)) { onDrop?.("invalid-field", "reviewed_at"); return null; }
+  if (!isBoundedToken(parsed.observer_provider, 32)) { onDrop?.("invalid-field", "observer_provider"); return null; }
+  if (!isBoundedToken(parsed.observer_model, 128)) { onDrop?.("invalid-field", "observer_model"); return null; }
+  if (!isBoundedToken(parsed.observer_cli_version, 64)) { onDrop?.("invalid-field", "observer_cli_version"); return null; }
+  if (!Array.isArray(parsed.findings)) { onDrop?.("invalid-field", "findings"); return null; }
+  if (parsed.findings.length > MAX_FINDINGS_PER_REVIEW) { onDrop?.("invalid-field", "findings"); return null; }
   const findings: ObserverReviewFinding[] = [];
   for (const f of parsed.findings) {
-    if (!isObject(f)) return null;
-    if (typeof f.severity !== "string" || !VALID_SEVERITIES.has(f.severity as CouncilFindingSeverity)) return null;
+    if (!isObject(f)) { onDrop?.("invalid-field", "findings"); return null; }
+    if (typeof f.severity !== "string" || !VALID_SEVERITIES.has(f.severity as CouncilFindingSeverity)) {
+      onDrop?.("invalid-field", "findings.severity");
+      return null;
+    }
     // Council Review 2026-05-13 Hunt #22: strip backtick triplets at
     // the validation boundary. `isBoundedText` allows them (claims can
     // include code excerpts conceptually), but the claim is echoed
@@ -325,13 +371,16 @@ export function parseObserverReviewPayload(raw: string): ObserverReviewPayload |
     // Council Review 2026-05-13-0150 Hunt #12: reorder — strip BEFORE
     // the length check, because the replacement is +33% per occurrence
     // and could push a borderline claim over MAX_CLAIM_LEN otherwise.
-    if (typeof f.claim !== "string") return null;
+    if (typeof f.claim !== "string") { onDrop?.("invalid-field", "findings.claim"); return null; }
     const claim = f.claim.replace(/```/g, "ʼ`ʼ`ʼ`");
-    if (!isBoundedText(claim, MAX_CLAIM_LEN)) return null;
-    if (!isRelativeWorkspacePath(f.evidence_path)) return null;
+    if (!isBoundedText(claim, MAX_CLAIM_LEN)) { onDrop?.("invalid-field", "findings.claim"); return null; }
+    if (!isRelativeWorkspacePath(f.evidence_path)) { onDrop?.("invalid-field", "findings.evidence_path"); return null; }
     const lines = parseLineRange(f.evidence_lines);
-    if (!lines.ok) return null;
-    if (f.confidence !== undefined && (typeof f.confidence !== "string" || !VALID_CONFIDENCES.has(f.confidence as CouncilFindingConfidence))) return null;
+    if (!lines.ok) { onDrop?.("invalid-field", "findings.evidence_lines"); return null; }
+    if (f.confidence !== undefined && (typeof f.confidence !== "string" || !VALID_CONFIDENCES.has(f.confidence as CouncilFindingConfidence))) {
+      onDrop?.("invalid-field", "findings.confidence");
+      return null;
+    }
     findings.push({
       severity: f.severity as CouncilFindingSeverity,
       claim,
@@ -346,7 +395,10 @@ export function parseObserverReviewPayload(raw: string): ObserverReviewPayload |
   let wakeEcho: number | undefined;
   if (parsed.observer_wake_payload_version_echo !== undefined) {
     const v = parsed.observer_wake_payload_version_echo;
-    if (typeof v !== "number" || !Number.isInteger(v) || v < 0) return null;
+    if (typeof v !== "number" || !Number.isInteger(v) || v < 0) {
+      onDrop?.("invalid-field", "observer_wake_payload_version_echo");
+      return null;
+    }
     wakeEcho = v;
   }
   return {

@@ -260,6 +260,75 @@ describe("parseObserverReviewPayload", () => {
   });
 });
 
+// ── Drop-reporter (Task 13 — protocol.frame_dropped telemetry) ──────────────
+
+describe("parseCheckpointPayload — onDrop reporter", () => {
+  // The reporter is the load-bearing observability signal that surfaces
+  // upstream writer drift from the first malformed frame. These tests
+  // pin the categorical reason for each rejection branch so a future
+  // refactor that loses a drop emission goes red.
+
+  it("emits json-parse-error on invalid JSON", () => {
+    const drops: Array<{ reason: string; field?: string }> = [];
+    parseCheckpointPayload("not-json{", (reason, field) => drops.push({ reason, field }));
+    expect(drops).toEqual([{ reason: "json-parse-error", field: undefined }]);
+  });
+
+  it("emits oversize on payloads > 256KB", () => {
+    const drops: Array<{ reason: string; field?: string }> = [];
+    const huge = JSON.stringify({ _filler: "x".repeat(300_000) });
+    parseCheckpointPayload(huge, (reason, field) => drops.push({ reason, field }));
+    expect(drops[0]!.reason).toBe("oversize");
+  });
+
+  it("emits schema-mismatch with field=schema_version on wrong version", () => {
+    const drops: Array<{ reason: string; field?: string }> = [];
+    const p = { ...validCheckpoint(), schema_version: 99 };
+    parseCheckpointPayload(JSON.stringify(p), (reason, field) => drops.push({ reason, field }));
+    expect(drops[0]).toEqual({ reason: "schema-mismatch", field: "schema_version" });
+  });
+
+  it("emits invalid-field with the offending field name", () => {
+    const drops: Array<{ reason: string; field?: string }> = [];
+    const p = { ...validCheckpoint(), checkpoint_id: "has spaces" };
+    parseCheckpointPayload(JSON.stringify(p), (reason, field) => drops.push({ reason, field }));
+    expect(drops[0]).toEqual({ reason: "invalid-field", field: "checkpoint_id" });
+  });
+
+  it("does not emit on a successful parse", () => {
+    const drops: unknown[] = [];
+    const result = parseCheckpointPayload(JSON.stringify(validCheckpoint()), () => drops.push("called"));
+    expect(result).not.toBeNull();
+    expect(drops).toHaveLength(0);
+  });
+
+  it("is backward compatible — onDrop is optional", () => {
+    // Existing callers must continue to work without the new parameter.
+    expect(parseCheckpointPayload("not-json{")).toBeNull();
+    expect(parseCheckpointPayload(JSON.stringify(validCheckpoint()))).not.toBeNull();
+  });
+});
+
+describe("parseObserverReviewPayload — onDrop reporter", () => {
+  it("emits json-parse-error on invalid JSON", () => {
+    const drops: Array<{ reason: string; field?: string }> = [];
+    parseObserverReviewPayload("{not valid json", (r, f) => drops.push({ reason: r, field: f }));
+    expect(drops).toEqual([{ reason: "json-parse-error", field: undefined }]);
+  });
+
+  it("emits invalid-field with field=findings.severity on bad severity", () => {
+    const p = validReview();
+    p.findings[0]!.severity = "PANIC" as unknown as ObserverReviewPayload["findings"][number]["severity"];
+    const drops: Array<{ reason: string; field?: string }> = [];
+    parseObserverReviewPayload(JSON.stringify(p), (r, f) => drops.push({ reason: r, field: f }));
+    expect(drops[0]).toEqual({ reason: "invalid-field", field: "findings.severity" });
+  });
+
+  it("is backward compatible — existing single-arg callers unchanged", () => {
+    expect(parseObserverReviewPayload(JSON.stringify(validReview()))).not.toBeNull();
+  });
+});
+
 // ── Validator helpers (exported for reuse by other modules) ─────────────────
 
 describe("isBoundedToken", () => {

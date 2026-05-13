@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "checkpoint_id": "council-implement-4-dddddddd",
+  "phase": "council-implement",
+  "session_group_id": "grp_dddddddddddddddddddddddddddddddd",
+  "reviewed_at": "2026-05-13T20:03:00Z",
+  "observer_provider": "claude",
+  "observer_model": "claude-opus-4-7",
+  "observer_cli_version": "1.0.0",
+  "findings": [
+    {
+      "severity": "NOTE",
+      "claim": "Multi-word claim with spaces, punctuation, and non-ASCII codepoints — “smart quotes” плюс кириллица 漢字 work end-to-end.",
+      "evidence_path": "web/server/recorder.ts",
+      "confidence": "low"
+    },
+    {
+      "severity": "INFO",
+      "claim": "Claim including tabs\tand newlines\nis accepted by isBoundedText (tabs/LF/CR allowed).",
+      "evidence_path": "web/server/recorder.ts"
+    }
+  ]
+}

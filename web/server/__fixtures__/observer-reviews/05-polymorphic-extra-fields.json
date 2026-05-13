@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "checkpoint_id": "council-implement-5-eeeeeeee",
+  "phase": "council-implement",
+  "session_group_id": "grp_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "reviewed_at": "2026-05-13T20:04:00Z",
+  "observer_provider": "claude",
+  "observer_model": "claude-opus-4-7",
+  "observer_cli_version": "1.0.0",
+  "unknown_top_level_field": "future schema migration — reader tolerates",
+  "future_review_metadata": { "model_temperature": 0.0, "cli_minor_revision": 7 },
+  "findings": [
+    {
+      "severity": "WARN",
+      "claim": "Polymorphic-but-unknown extra fields at both top level and inside a finding must pass through per EC-5.",
+      "evidence_path": "web/server/recorder.ts",
+      "confidence": "medium",
+      "observer_internal_score": 0.83,
+      "tags": ["future-field", "schema-tolerance"]
+    }
+  ]
+}

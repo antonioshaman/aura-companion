@@ -724,8 +724,28 @@ export class SessionOrchestrator {
           } catch {
             continue;
           }
-          const payload = parseCheckpointPayload(raw);
-          if (!payload) continue;
+          // Task 13: surface parser rejections during the catchup scan
+          // as structured protocol.frame_dropped so a stale/corrupted
+          // checkpoint left from a prior run is observable rather than
+          // silently skipped.
+          let parserReason: string | undefined;
+          let parserField: string | undefined;
+          const payload = parseCheckpointPayload(raw, (reason, field) => {
+            parserReason = reason;
+            parserField = field;
+          });
+          if (!payload) {
+            log.warn("session-orchestrator", "protocol.frame_dropped", {
+              event: "protocol.frame_dropped",
+              backend: "council",
+              parser: "checkpoint",
+              reason: parserReason ?? "unknown",
+              field: parserField,
+              file,
+              context: "restart-catchup-scan",
+            });
+            continue;
+          }
           if (payload.session_group_id !== groupId) continue;
           if (!highest || payload.sequence > highest.sequence) {
             highest = payload;
