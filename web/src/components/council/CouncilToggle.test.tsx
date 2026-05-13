@@ -68,6 +68,32 @@ describe("CouncilToggle", () => {
     expect(screen.getByRole("listbox")).toBeInTheDocument();
   });
 
+  // Regression: the listbox MUST NOT live inside any element carrying
+  // `overflow-hidden`. The grid-rows-[0fr↔1fr] animation wrapper uses
+  // `overflow-hidden` to clip the trigger during the collapse animation;
+  // an absolutely-positioned listbox rendered as a descendant of that
+  // wrapper is clipped to zero pixels alongside the row collapse, so
+  // the user sees the trigger toggle `aria-expanded` true but the
+  // dropdown stays visually invisible. JSDOM cannot reproduce the CSS
+  // clip — assert the DOM structure instead. Observed in production
+  // 2026-05-13: dropdown open but invisible; reported by user.
+  it("renders the listbox OUTSIDE every overflow-hidden ancestor (regression: dropdown clipped)", () => {
+    render(
+      <CouncilToggle enabled={true} pairing="claude+claude" onEnabledChange={() => {}} onPairingChange={() => {}} />,
+    );
+    fireEvent.click(screen.getByTestId("pairing-trigger"));
+    const listbox = screen.getByRole("listbox");
+    // Walk every ancestor up to <html> and assert none has the
+    // overflow-hidden class (Tailwind utility). If any ancestor does,
+    // CSS clipping will hide the absolutely-positioned listbox even
+    // when `open === true`.
+    let node: HTMLElement | null = listbox.parentElement;
+    while (node && node !== document.documentElement) {
+      expect(node.className).not.toMatch(/(^|\s)overflow-hidden(\s|$)/);
+      node = node.parentElement;
+    }
+  });
+
   it("calls onPairingChange and closes the listbox when an option is selected", () => {
     const onPairingChange = vi.fn();
     render(
