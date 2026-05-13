@@ -838,8 +838,18 @@ export class SessionOrchestrator {
       //   - wsBridge.markCouncilSession: only called for real halves below.
       //   - kill / archive: coordinator best-effort kill no-ops on missing
       //     launcher.getSession (placeholder by construction not in map).
-      // A future GroupMember type widening that allows `sessionId: string | null`
-      // would let us drop placeholders altogether — out of scope here.
+      //   - SessionGroupCoordinator.findBySessionId: KNOWN LEAK — iterates
+      //     `groups.values()` and matches on `primary.sessionId` /
+      //     `observer.sessionId` directly. Because `registerExternalGroup`
+      //     below passes the placeholder into the coordinator's groups
+      //     map's sessionId slot, `coord.findBySessionId("__missing_...")`
+      //     returns the partial-pair group. Orchestrator-level callers
+      //     route through `getCouncilGroupBySessionId` (safe — reads the
+      //     placeholder-free reverse index); any future caller reaching
+      //     into `coord.findBySessionId` directly MUST guard placeholder
+      //     inputs at the call site. A `GroupMember.sessionId: string | null`
+      //     type widening would close this surface for free — explicitly
+      //     out of Task 3 scope.
       const orchestrator = pair.orchestrator;
       const observer = pair.observer;
       const primarySessionId = orchestrator?.sessionId ?? `__missing_orch_${groupId}`;

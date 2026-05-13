@@ -3006,6 +3006,8 @@ describe("SessionOrchestrator", () => {
           reconcileCouncilGroups: () => void;
           stopCouncilWatchers: (id: string) => void;
           councilGroupBySessionId: Map<string, string>;
+          getCouncilGroupBySessionId: (id: string) => { sessionGroupId: string; role: string } | null;
+          coordinator: { findBySessionId: (id: string) => { sessionGroupId: string } | undefined };
         };
         obs.reconcileCouncilGroups();
         // Real surviving half IS in the reverse index.
@@ -3015,12 +3017,33 @@ describe("SessionOrchestrator", () => {
         // and a collision risk at worst.
         const placeholderKey = `__missing_obs_grp_canary`;
         expect(obs.councilGroupBySessionId.has(placeholderKey)).toBe(false);
-        // Symmetric verification — iterate all keys to catch any future
-        // refactor that might re-introduce the placeholder under a different
-        // naming scheme.
+        // Symmetric verification — observer-review v2 NOTE 1: the prefix
+        // check must catch ANY synthesized placeholder, not just the
+        // literal `__missing_` prefix. A future refactor renaming to
+        // `__placeholder_*` / `__synthetic_*` / `__pending_*` would
+        // bypass a literal-substring check. Regex catches any
+        // `__<lowercase>_` shape.
+        const placeholderShape = /^__[a-z]+_/;
         for (const key of obs.councilGroupBySessionId.keys()) {
-          expect(key.startsWith("__missing_"), `placeholder leaked to reverse index: ${key}`).toBe(false);
+          expect(placeholderShape.test(key), `placeholder-shaped key leaked to reverse index: ${key}`).toBe(false);
         }
+        // Observer-review v2 NOTE 2: document the KNOWN LEAK at
+        // `coord.findBySessionId`. The coordinator's groups map stores
+        // GroupRecord with placeholder sessionIds (required by the
+        // string-typed GroupMember.sessionId slot). A direct lookup via
+        // `coord.findBySessionId(placeholder)` still returns the
+        // partial-pair group — this is the gap a `string | null`
+        // widening would close. Pinning both halves so future refactor
+        // shifting either invariant fails the test:
+        //   - Orchestrator-level lookup IS safe (placeholder-free index).
+        //   - Coordinator-level direct lookup IS the documented leak.
+        expect(obs.getCouncilGroupBySessionId(placeholderKey)).toBeNull();
+        // Document the leak — if a future change closes this leak (e.g.
+        // GroupMember widening + drop placeholders from groups map), the
+        // test will fail and force a conscious update of the comment +
+        // the orchestrator's forbidden-paths block.
+        const coordHit = obs.coordinator.findBySessionId(placeholderKey);
+        expect(coordHit?.sessionGroupId, "coord.findBySessionId leak documentation — flip if/when GroupMember widens to string|null").toBe("grp_canary");
         obs.stopCouncilWatchers("grp_canary");
       } finally {
         fs.rmSync(ws, { recursive: true, force: true });
