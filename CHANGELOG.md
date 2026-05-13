@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.1](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.3.0...aura-companion-v1.3.1) (2026-05-13)
+
+
+### Bug Fixes
+
+* **council:** bump review-watcher test waits for macOS FSEvents headroom ([315b4df](https://github.com/antonioshaman/aura-companion/commit/315b4df7fa4b8259e5347a3b137a43fc6356a4ca))
+
 ## [1.3.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.2.1...aura-companion-v1.3.0) (2026-05-13)
 
 
