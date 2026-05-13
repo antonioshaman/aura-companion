@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.2](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.3.1...aura-companion-v1.3.2) (2026-05-13)
+
+
+### Bug Fixes
+
+* **settings:** replace masked-value pattern with placeholder hint (Task 5) ([c85c26e](https://github.com/antonioshaman/aura-companion/commit/c85c26ec653b423841d02457ae17c1dfd764c190))
+
 ## [1.3.1](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.3.0...aura-companion-v1.3.1) (2026-05-13)
 
 
