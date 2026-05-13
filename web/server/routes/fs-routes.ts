@@ -60,11 +60,31 @@ function resolveBranchDiffBases(repoRoot: string): string[] {
 
 export function registerFsRoutes(api: Hono, opts?: { allowedBases?: string[] }): void {
   // Allowed base directories for filesystem access.
-  // Requests must target paths under the user's home directory or process cwd.
-  const allowedBases = () => opts?.allowedBases ?? [homedir(), process.cwd()];
+  // Defaults to the service user's home directory and the process cwd.
+  // Operators can extend the allowlist via `COMPANION_FS_ALLOWED_BASES`
+  // (colon-separated absolute paths) when the service user cannot list
+  // the directories holding user projects — e.g. systemd runs the
+  // server as a non-root user whose `$HOME` is empty while real
+  // projects live elsewhere on the filesystem. `opts.allowedBases`
+  // takes precedence over the env var to keep tests deterministic.
+  const allowedBases = () => {
+    if (opts?.allowedBases) return opts.allowedBases;
+    const env = process.env.COMPANION_FS_ALLOWED_BASES;
+    const extras = env ? env.split(":").map((s) => s.trim()).filter(Boolean) : [];
+    return [homedir(), process.cwd(), ...extras];
+  };
+
+  // Default path the folder picker opens when no `?path=` query arrives.
+  // `COMPANION_FS_DEFAULT_PATH` lets operators land users on a useful
+  // directory (e.g. `/root` when projects live there) instead of an
+  // empty service-user home. The default must itself pass the
+  // allowlist guard — `guardPath` is still authoritative; misconfig
+  // surfaces as a 403 on the first list call rather than silently
+  // leaking access.
+  const defaultPath = () => process.env.COMPANION_FS_DEFAULT_PATH || homedir();
 
   api.get("/fs/list", async (c) => {
-    const rawPath = c.req.query("path") || homedir();
+    const rawPath = c.req.query("path") || defaultPath();
     const basePath = guardPath(rawPath, allowedBases());
     if (!basePath) return c.json({ error: "Path outside allowed directories" }, 403);
     try {

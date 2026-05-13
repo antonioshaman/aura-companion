@@ -231,6 +231,160 @@ describe("GET /fs/list", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// GET /fs/list — env-var allowlist + default-path extensions
+// ─────────────────────────────────────────────────────────────────────────────
+// Production motivation: when the systemd service runs as a non-root user
+// (e.g. `auracomp`) whose `$HOME` is empty while real projects live under
+// `/root/*` (which the service user can traverse via the execute bit but
+// cannot list), the folder picker dies with 403 on every recent-list click.
+// `COMPANION_FS_ALLOWED_BASES` lets operators extend the allowlist without
+// running the server as root; `COMPANION_FS_DEFAULT_PATH` lets them land
+// the picker on a useful default instead of an empty home directory.
+describe("GET /fs/list — env-var allowlist + default path", () => {
+  // These tests bypass the suite-wide `registerFsRoutes(app, { allowedBases:
+  // [tempDir] })` setup because `opts.allowedBases` MUST take precedence
+  // over the env var (deterministic test behaviour). Each test mounts a
+  // fresh Hono app with NO opts, letting the env-var code path execute.
+  let envApp: Hono;
+  let extraDir: string;
+  const prevAllowed = process.env.COMPANION_FS_ALLOWED_BASES;
+  const prevDefault = process.env.COMPANION_FS_DEFAULT_PATH;
+
+  beforeEach(() => {
+    extraDir = mkRealTempDir("fs-env-extra-");
+    envApp = new Hono();
+  });
+
+  afterEach(() => {
+    if (prevAllowed === undefined) delete process.env.COMPANION_FS_ALLOWED_BASES;
+    else process.env.COMPANION_FS_ALLOWED_BASES = prevAllowed;
+    if (prevDefault === undefined) delete process.env.COMPANION_FS_DEFAULT_PATH;
+    else process.env.COMPANION_FS_DEFAULT_PATH = prevDefault;
+    try {
+      rmSync(extraDir, { recursive: true, force: true });
+    } catch {
+      // ignore
+    }
+  });
+
+  it("appends colon-separated paths from COMPANION_FS_ALLOWED_BASES to the default allowlist", async () => {
+    // The extra dir would be outside the default [homedir, cwd] allowlist;
+    // setting the env var should make it reachable without code changes.
+    mkdirSync(join(extraDir, "child"));
+    process.env.COMPANION_FS_ALLOWED_BASES = extraDir;
+    registerFsRoutes(envApp);
+
+    const res = await envApp.request(`/fs/list?path=${encodeURIComponent(extraDir)}`);
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.path).toBe(extraDir);
+    expect(body.dirs.map((d: { name: string }) => d.name)).toEqual(["child"]);
+  });
+
+  it("parses multiple colon-separated bases and accepts paths under any of them", async () => {
+    // Multi-base case mirrors the realistic deployment where operators
+    // want both `/root` and `/srv` reachable from a non-root service user.
+    const extraDir2 = mkRealTempDir("fs-env-extra2-");
+    try {
+      mkdirSync(join(extraDir2, "second"));
+      process.env.COMPANION_FS_ALLOWED_BASES = `${extraDir}:${extraDir2}`;
+      registerFsRoutes(envApp);
+
+      const res = await envApp.request(`/fs/list?path=${encodeURIComponent(extraDir2)}`);
+
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.dirs.map((d: { name: string }) => d.name)).toEqual(["second"]);
+    } finally {
+      rmSync(extraDir2, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores empty segments and whitespace in COMPANION_FS_ALLOWED_BASES", async () => {
+    // Operators paste env vars by hand — trailing colons, accidental
+    // double colons, and leading/trailing whitespace must not produce
+    // a "" entry that `guardPath` would treat as the filesystem root.
+    process.env.COMPANION_FS_ALLOWED_BASES = `  ${extraDir}  ::`;
+    registerFsRoutes(envApp);
+
+    // Path under the trimmed extra dir is accessible…
+    const ok = await envApp.request(`/fs/list?path=${encodeURIComponent(extraDir)}`);
+    expect(ok.status).toBe(200);
+
+    // …while a path that would only match an empty-string base is rejected.
+    const denied = await envApp.request(`/fs/list?path=${encodeURIComponent("/etc")}`);
+    expect(denied.status).toBe(403);
+  });
+
+  it("uses COMPANION_FS_DEFAULT_PATH when no ?path= query is provided", async () => {
+    // Without the default-path env, the picker would open homedir() —
+    // which on the production aura host is the empty `/home/auracomp`.
+    // The default-path env makes the picker open a useful directory.
+    mkdirSync(join(extraDir, "landing-spot"));
+    process.env.COMPANION_FS_ALLOWED_BASES = extraDir;
+    process.env.COMPANION_FS_DEFAULT_PATH = extraDir;
+    registerFsRoutes(envApp);
+
+    const res = await envApp.request("/fs/list");
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.path).toBe(extraDir);
+    expect(body.dirs.map((d: { name: string }) => d.name)).toEqual(["landing-spot"]);
+  });
+
+  it("falls back to homedir() when COMPANION_FS_DEFAULT_PATH is unset", async () => {
+    // Backwards-compatibility check: omitting both env vars must produce
+    // exactly the legacy behaviour — default path = homedir().
+    registerFsRoutes(envApp);
+
+    const res = await envApp.request("/fs/list");
+    // Status depends on whether homedir() is itself listable in the test
+    // env; what matters is that the response's `home` matches and `path`
+    // equals homedir(). 200 (listable) or 400 (not listable) both fine —
+    // 403 (allowlist rejection) would indicate the fallback regressed.
+    expect([200, 400]).toContain(res.status);
+    const body = await res.json();
+    expect(body.home).toBe(homedir());
+    expect(body.path).toBe(homedir());
+  });
+
+  it("rejects COMPANION_FS_DEFAULT_PATH that is not in the allowlist (guardPath stays authoritative)", async () => {
+    // Misconfiguration safety: setting DEFAULT_PATH without adding it
+    // to ALLOWED_BASES should produce a clean 403 on the first list
+    // call rather than silently widening access.
+    process.env.COMPANION_FS_DEFAULT_PATH = "/etc";
+    registerFsRoutes(envApp);
+
+    const res = await envApp.request("/fs/list");
+    expect(res.status).toBe(403);
+  });
+
+  it("opts.allowedBases overrides COMPANION_FS_ALLOWED_BASES (test seam stays deterministic)", async () => {
+    // If the test passes `allowedBases` explicitly, the env var must be
+    // ignored — otherwise a stray env var on the developer's shell would
+    // leak into every test in the suite.
+    process.env.COMPANION_FS_ALLOWED_BASES = extraDir;
+    const optsOnlyApp = new Hono();
+    const otherDir = mkRealTempDir("fs-env-other-");
+    try {
+      registerFsRoutes(optsOnlyApp, { allowedBases: [otherDir] });
+
+      // extraDir from the env var should NOT be reachable.
+      const denied = await optsOnlyApp.request(`/fs/list?path=${encodeURIComponent(extraDir)}`);
+      expect(denied.status).toBe(403);
+
+      // The opts-supplied base IS reachable.
+      const ok = await optsOnlyApp.request(`/fs/list?path=${encodeURIComponent(otherDir)}`);
+      expect(ok.status).toBe(200);
+    } finally {
+      rmSync(otherDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GET /fs/home — home directory and cwd logic
 // ─────────────────────────────────────────────────────────────────────────────
 describe("GET /fs/home", () => {
