@@ -6,6 +6,7 @@ import { resolveBinary } from "./path-resolver.js";
 import { writeAtomicJson } from "./atomic-write.js";
 import { parseCheckpointPayload } from "./council-types.js";
 import { log } from "./logger.js";
+import { respondError } from "./respond-error.js";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
@@ -318,20 +319,29 @@ export function createRoutes(
     const sessionId = c.req.param("id");
     const session = launcher.getSession(sessionId);
     if (!session) {
-      return c.json({ error: "Session not found" }, 404);
+      return respondError(c, 404, "not_found", { module: "council.checkpoint", detail: { sessionId } });
     }
     const group = orchestrator.getCouncilGroupBySessionId(sessionId);
     if (!group) {
-      return c.json({ error: "Session is not part of an active council group" }, 409);
+      return respondError(c, 409, "conflict", {
+        module: "council.checkpoint",
+        detail: { sessionId, reason: "session not part of an active council group" },
+      });
     }
     if (group.role !== "orchestrator") {
-      return c.json({ error: "Only the orchestrator half may emit checkpoints" }, 403);
+      return respondError(c, 403, "forbidden", {
+        module: "council.checkpoint",
+        detail: { sessionId, role: group.role, reason: "only the orchestrator half may emit checkpoints" },
+      });
     }
     let raw: string;
     try {
       raw = await c.req.text();
     } catch {
-      return c.json({ error: "Failed to read request body" }, 400);
+      return respondError(c, 400, "bad_request", {
+        module: "council.checkpoint",
+        detail: { sessionId, reason: "failed to read request body" },
+      });
     }
     let parserReason: string | undefined;
     let parserField: string | undefined;
@@ -350,7 +360,10 @@ export function createRoutes(
         field: parserField,
         sessionId,
       });
-      return c.json({ error: "Invalid CheckpointPayload — failed schema validation" }, 400);
+      return respondError(c, 400, "validation_failed", {
+        module: "council.checkpoint",
+        detail: { sessionId, parserReason, parserField },
+      });
     }
     // Cross-check the payload's session_group_id matches the caller's
     // session group. Without this, an orchestrator could emit into another
@@ -359,17 +372,27 @@ export function createRoutes(
     // workspace — but the watcher keys on payload.session_group_id and
     // would mis-attribute). Reject early.
     if (payload.session_group_id !== group.sessionGroupId) {
-      return c.json(
-        { error: "session_group_id in payload does not match caller's session group" },
-        400,
-      );
+      return respondError(c, 400, "validation_failed", {
+        module: "council.checkpoint",
+        detail: {
+          sessionId,
+          reason: "session_group_id mismatch",
+          callerGroupId: group.sessionGroupId,
+          payloadGroupId: payload.session_group_id,
+        },
+      });
     }
     const target = join(session.cwd, ".council", "checkpoints", `${payload.phase}.json`);
     try {
       writeAtomicJson(target, payload);
     } catch (err) {
+      // Per Hunt P9: stack/path/file detail goes to log only — wire body
+      // never carries internal information.
       const message = err instanceof Error ? err.message : String(err);
-      return c.json({ error: `Failed to write checkpoint: ${message}` }, 500);
+      return respondError(c, 500, "internal_error", {
+        module: "council.checkpoint",
+        detail: { sessionId, target, message },
+      });
     }
     return c.json({
       ok: true,
