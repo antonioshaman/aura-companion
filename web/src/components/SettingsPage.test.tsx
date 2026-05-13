@@ -1162,9 +1162,11 @@ describe("SettingsPage", () => {
     expect(screen.getByText("OpenAI key not configured")).toBeInTheDocument();
   });
 
-  // Verifies that the Claude Code token input shows masked dots when configured,
-  // and clears on focus to allow entering a replacement token.
-  it("shows masked dots in Claude Code token field when configured", async () => {
+  // When the Claude Code token is configured, the input value stays empty (draft state)
+  // and the configured-hint is shown as a placeholder. Typing replaces immediately —
+  // no focus-flip race possible because the value is never tied to focus state.
+  // (PLAN Task 5: replaces fragile masked-value-in-value pattern with placeholder hint.)
+  it("Claude Code token field shows configured-hint as placeholder, not as value, when configured", async () => {
     mockApi.getSettings.mockResolvedValueOnce({
       anthropicApiKeyConfigured: true,
       anthropicModel: "claude-sonnet-4-6",
@@ -1178,10 +1180,15 @@ describe("SettingsPage", () => {
     await screen.findByText("Claude Code token configured");
 
     const input = screen.getByLabelText("Claude Code OAuth Token") as HTMLInputElement;
-    expect(input.value).toBe("••••••••••••••••");
-
-    fireEvent.focus(input);
+    // Value stays empty — draft state, no focus-flip race.
     expect(input.value).toBe("");
+    // Placeholder carries the configured-hint with dot pattern.
+    expect(input.placeholder).toContain("••••••••••••••••");
+    expect(input.placeholder).toContain("enter a new token to replace");
+
+    // Typing into the input is clean — no dot characters leak into the value.
+    fireEvent.change(input, { target: { value: "new-token" } });
+    expect(input.value).toBe("new-token");
   });
 
   // Verifies that provider settings are saved correctly via updateSettings API
@@ -1224,13 +1231,16 @@ describe("SettingsPage", () => {
       });
     });
 
-    // Inputs should be cleared after save – button is disabled again,
-    // and masked-dot placeholders are restored since both tokens are now configured.
+    // Inputs should be cleared after save — button is disabled again,
+    // values return to empty draft state, and the now-configured hint shows
+    // in the placeholder (PLAN Task 5 masked-value-to-placeholder migration).
     await waitFor(() => {
       expect(screen.getByText("Provider settings saved.")).toBeInTheDocument();
       expect(saveBtn).toBeDisabled();
-      expect(claudeInput.value).toBe("••••••••••••••••");
-      expect(openaiInput.value).toBe("••••••••••••••••");
+      expect(claudeInput.value).toBe("");
+      expect(openaiInput.value).toBe("");
+      expect(claudeInput.placeholder).toContain("••••••••••••••••");
+      expect(openaiInput.placeholder).toContain("••••••••••••••••");
     });
   });
 
