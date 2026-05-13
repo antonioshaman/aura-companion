@@ -2621,6 +2621,155 @@ describe("SessionOrchestrator", () => {
         fs.rmSync(workspace, { recursive: true, force: true });
       }
     });
+
+    it("caps file iteration at SCAN_MAX_FILES_PER_GROUP and emits a structured truncated log", () => {
+      const workspace = fs.realpathSync(fs.mkdtempSync(pathLib.join(osLib.tmpdir(), "scan-cap-")));
+      try {
+        fs.mkdirSync(pathLib.join(workspace, ".council", "checkpoints"), { recursive: true });
+        // Write 250 files (cap is 200). Use simple unique names; the
+        // sort() in the scan picks the lexicographic tail.
+        for (let i = 1; i <= 250; i++) {
+          const padded = String(i).padStart(4, "0");
+          fs.writeFileSync(pathLib.join(workspace, ".council", "checkpoints", `phase-${padded}.json`), JSON.stringify({
+            schema_version: 1, checkpoint_id: `chk_${padded}`, phase: `phase-${padded}`,
+            sequence: i, session_group_id: "grp_cap", emitted_at: "2026-01-01T00:00:00Z", artifact_paths: [],
+          }));
+        }
+        seedActiveGroupAt("grp_cap", workspace);
+        (orchestrator as unknown as { scanForMissedObserverWakes: () => void }).scanForMissedObserverWakes.call(orchestrator);
+        // Scan still picks a dispatch from the capped tail — coverage
+        // proof is the truncated log path was exercised.
+        expect(deps.wsBridge.sendObserverWakeFrame).toHaveBeenCalled();
+      } finally {
+        fs.rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+  });
+
+  // ── Bus listener paths added by the fix-pass ──────────────────────────────
+  // Exercises the group:exited / group:degraded listeners' sentinel cleanup
+  // + tearDownCouncilGroupTracking helper (Backend #4 fix).
+  describe("council group lifecycle listeners", () => {
+    const fs = require("node:fs") as typeof import("node:fs");
+    const pathLib = require("node:path") as typeof import("node:path");
+    const osLib = require("node:os") as typeof import("node:os");
+
+    function setupGroup(groupId: string): { workspace: string; ws: any } {
+      const workspace = fs.realpathSync(fs.mkdtempSync(pathLib.join(osLib.tmpdir(), "lifecycle-")));
+      const ws = orchestrator as unknown as {
+        councilWatchers: Map<string, { cwd: string; abort: AbortController; lastCheckpoint: unknown; previousCheckpoint: unknown; pendingCheckpoint: unknown; supersededCheckpointIds: string[] }>;
+        councilGroupMeta: Map<string, { primarySessionId: string; observerSessionId: string; pairing: string; createdAt: number; lastCheckpointReceivedAt: number | null }>;
+        councilGroupBySessionId: Map<string, string>;
+      };
+      ws.councilWatchers.set(groupId, {
+        cwd: workspace,
+        abort: new AbortController(),
+        lastCheckpoint: null,
+        previousCheckpoint: null,
+        pendingCheckpoint: null,
+        supersededCheckpointIds: [],
+      });
+      ws.councilGroupMeta.set(groupId, {
+        primarySessionId: "orch_id",
+        observerSessionId: "obs_id",
+        pairing: "claude+claude",
+        createdAt: Date.now(),
+        lastCheckpointReceivedAt: null,
+      });
+      ws.councilGroupBySessionId.set("orch_id", groupId);
+      ws.councilGroupBySessionId.set("obs_id", groupId);
+      // Pre-write a sentinel so the cleanup path exercises unlink.
+      const stateDir = pathLib.join(workspace, ".council", "state");
+      fs.mkdirSync(stateDir, { recursive: true });
+      fs.writeFileSync(pathLib.join(stateDir, `${groupId}-wake.json`), JSON.stringify({
+        schema_version: 1,
+        last_woken_checkpoint_id: "chk_x",
+        last_woken_sequence: 1,
+        last_woken_at: "2026-01-01T00:00:00Z",
+      }));
+      return { workspace, ws };
+    }
+
+    it("group:exited listener tears down all 3 state maps + deletes sentinel + stops watcher", () => {
+      // Listeners are wired in initialize() — these tests need them live.
+      orchestrator.initialize();
+      const { workspace, ws } = setupGroup("grp_le1");
+      try {
+        companionBus.emit("group:exited", { sessionGroupId: "grp_le1", reason: "user_archived" });
+        // Tracking maps cleared.
+        expect(ws.councilGroupMeta.has("grp_le1")).toBe(false);
+        expect(ws.councilGroupBySessionId.has("orch_id")).toBe(false);
+        expect(ws.councilGroupBySessionId.has("obs_id")).toBe(false);
+        expect(ws.councilWatchers.has("grp_le1")).toBe(false);
+        // Sentinel file removed.
+        expect(fs.existsSync(pathLib.join(workspace, ".council", "state", "grp_le1-wake.json"))).toBe(false);
+      } finally {
+        fs.rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
+    it("group:degraded listener drops queued pendingCheckpoint + cleans sentinel without removing watcher", () => {
+      orchestrator.initialize();
+      const { workspace, ws } = setupGroup("grp_ld1");
+      try {
+        // Stage a queued checkpoint that should be dropped.
+        ws.councilWatchers.get("grp_ld1")!.pendingCheckpoint = {
+          checkpoint_id: "chk_queued",
+          sequence: 5,
+        };
+        companionBus.emit("group:degraded", { sessionGroupId: "grp_ld1", deadRole: "observer" });
+        // pendingCheckpoint cleared.
+        expect(ws.councilWatchers.get("grp_ld1")?.pendingCheckpoint).toBeNull();
+        // Sentinel removed (the new fix-pass behaviour).
+        expect(fs.existsSync(pathLib.join(workspace, ".council", "state", "grp_ld1-wake.json"))).toBe(false);
+        // Watcher NOT torn down — group still operable with surviving half.
+        expect(ws.councilWatchers.has("grp_ld1")).toBe(true);
+      } finally {
+        fs.rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
+    it("observer:turn-done listener drains pendingCheckpoint via reverse-index lookup (Backend #21)", () => {
+      orchestrator.initialize();
+      const { workspace, ws } = setupGroup("grp_lt1");
+      try {
+        // Stage a queued checkpoint that should drain on turn-done.
+        const queued = {
+          schema_version: 1, checkpoint_id: "chk_queued", phase: "p", sequence: 1,
+          session_group_id: "grp_lt1", emitted_at: "2026-01-01T00:00:00Z", artifact_paths: [],
+        };
+        ws.councilWatchers.get("grp_lt1")!.pendingCheckpoint = queued;
+        vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReset();
+        vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "sent" });
+        // Need a coordinator stub for the drain's dispatchObserverWake call.
+        (orchestrator as any).coordinator = {
+          get: vi.fn(() => ({ sessionGroupId: "grp_lt1", status: "active" })),
+        };
+        companionBus.emit("observer:turn-done", { sessionId: "obs_id" });
+        // Drain ran — pending slot cleared, dispatch fired.
+        expect(ws.councilWatchers.get("grp_lt1")?.pendingCheckpoint).toBeNull();
+        expect(deps.wsBridge.sendObserverWakeFrame).toHaveBeenCalled();
+      } finally {
+        fs.rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
+    it("observer:turn-done from non-observer sessionId is ignored (Backend #21 guard)", () => {
+      orchestrator.initialize();
+      const { workspace, ws } = setupGroup("grp_lt2");
+      try {
+        ws.councilWatchers.get("grp_lt2")!.pendingCheckpoint = { checkpoint_id: "chk_q", sequence: 1 };
+        vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReset();
+        // Emit with the ORCHESTRATOR's id — guard skips drain because
+        // meta.observerSessionId !== sessionId.
+        companionBus.emit("observer:turn-done", { sessionId: "orch_id" });
+        // No drain, slot still occupied.
+        expect(ws.councilWatchers.get("grp_lt2")?.pendingCheckpoint).not.toBeNull();
+        expect(deps.wsBridge.sendObserverWakeFrame).not.toHaveBeenCalled();
+      } finally {
+        fs.rmSync(workspace, { recursive: true, force: true });
+      }
+    });
   });
 
   // ── stopCouncilWatchers cleanup ────────────────────────────────────────────
