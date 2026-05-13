@@ -18,7 +18,7 @@ jobs:
 
       - name: Install web dependencies
         working-directory: web
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Run web tests with coverage
         working-directory: web
@@ -26,7 +26,7 @@ jobs:
 
       - name: Install platform dependencies
         working-directory: platform
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Run platform tests with coverage
         working-directory: platform

@@ -20,7 +20,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: web
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Dead code guard (unused locals/params)
         working-directory: web
@@ -46,7 +46,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: web
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Typecheck
         working-directory: web
@@ -83,7 +83,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: platform
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Typecheck
         working-directory: platform

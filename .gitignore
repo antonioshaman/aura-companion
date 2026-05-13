@@ -4,6 +4,10 @@ dist/
 .DS_Store
 bun.lockb
 bun.lock
+# Task 15b: track the workspace lockfile so CI's --frozen-lockfile
+# actually gates dependency drift. The root-level bun.lock is stale
+# from the pre-fork repo and stays ignored.
+!web/bun.lock
 package-lock.json
 test-live.ts
 web/dist/
