@@ -1,8 +1,9 @@
 import { execSync } from "node:child_process";
 import { readdir, readFile, stat, writeFile, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { Hono } from "hono";
+import { log } from "../logger.js";
 
 /** Ensure a resolved path is within one of the allowed base directories.
  *  Returns the resolved absolute path, or null if it escapes all bases. */
@@ -60,11 +61,51 @@ function resolveBranchDiffBases(repoRoot: string): string[] {
 
 export function registerFsRoutes(api: Hono, opts?: { allowedBases?: string[] }): void {
   // Allowed base directories for filesystem access.
-  // Requests must target paths under the user's home directory or process cwd.
-  const allowedBases = () => opts?.allowedBases ?? [homedir(), process.cwd()];
+  // Defaults to the service user's home directory and the process cwd.
+  // Operators can extend the allowlist via `COMPANION_FS_ALLOWED_BASES`
+  // (colon-separated absolute paths) when the service user cannot list
+  // the directories holding user projects — e.g. systemd runs the
+  // server as a non-root user whose `$HOME` is empty while real
+  // projects live elsewhere on the filesystem. `opts.allowedBases`
+  // takes precedence over the env var to keep tests deterministic.
+  //
+  // Non-absolute entries are FILTERED OUT at parse time and surfaced as
+  // a single structured WARN log line — silent misconfiguration is the
+  // hard-to-debug failure mode (operator sets `./projects`, sees 403 on
+  // every list call, has no way to know `./projects` was dropped because
+  // it never resolved against absolute paths). Sibling of
+  // `feedback_alert_text_symptom_not_cause`: this WARN names the
+  // observable cause ("non-absolute path rejected: ./projects"), not
+  // just the downstream symptom (403). One-shot at registerFsRoutes
+  // time; env changes mid-process don't re-validate (Carmack — no
+  // speculative generality for an unobserved edge case).
+  const rawEnv = process.env.COMPANION_FS_ALLOWED_BASES;
+  const parsedEntries = rawEnv ? rawEnv.split(":").map((s) => s.trim()).filter(Boolean) : [];
+  const validExtras = parsedEntries.filter((p) => isAbsolute(p));
+  const rejectedEntries = parsedEntries.filter((p) => !isAbsolute(p));
+  if (rejectedEntries.length > 0) {
+    log.warn("fs-routes", "COMPANION_FS_ALLOWED_BASES rejected non-absolute entries", {
+      event: "fs.allowed_bases.rejected_non_absolute",
+      rejected: rejectedEntries,
+      accepted_count: validExtras.length,
+    });
+  }
+  const allowedBases = () => {
+    if (opts?.allowedBases) return opts.allowedBases;
+    return [homedir(), process.cwd(), ...validExtras];
+  };
+
+  // Default path the folder picker opens when no `?path=` query arrives.
+  // `COMPANION_FS_DEFAULT_PATH` lets operators land users on a useful
+  // directory (e.g. `/root` when projects live there) instead of an
+  // empty service-user home. The default must itself pass the
+  // allowlist guard — `guardPath` is still authoritative; misconfig
+  // surfaces as a 403 on the first list call rather than silently
+  // leaking access.
+  const defaultPath = () => process.env.COMPANION_FS_DEFAULT_PATH || homedir();
 
   api.get("/fs/list", async (c) => {
-    const rawPath = c.req.query("path") || homedir();
+    const rawPath = c.req.query("path") || defaultPath();
     const basePath = guardPath(rawPath, allowedBases());
     if (!basePath) return c.json({ error: "Path outside allowed directories" }, 403);
     try {
