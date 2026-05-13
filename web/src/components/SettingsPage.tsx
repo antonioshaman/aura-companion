@@ -67,8 +67,6 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
   const [providerSaving, setProviderSaving] = useState(false);
   const [providerSaved, setProviderSaved] = useState(false);
   const [providerError, setProviderError] = useState("");
-  const [claudeTokenFocused, setClaudeTokenFocused] = useState(false);
-  const [openaiKeyFocused, setOpenaiKeyFocused] = useState(false);
 
   // Auth section state
   const [authToken, setAuthToken] = useState<string | null>(null);
@@ -607,14 +605,13 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                   <input
                     id="claude-code-token"
                     type="password"
-                    value={claudeCodeTokenConfigured && !claudeTokenFocused && !claudeCodeToken ? "••••••••••••••••" : claudeCodeToken}
+                    value={claudeCodeToken}
                     onChange={(e) => setClaudeCodeToken(e.target.value)}
-                    onFocus={() => setClaudeTokenFocused(true)}
-                    onBlur={() => setClaudeTokenFocused(false)}
-                    placeholder={claudeCodeTokenConfigured ? "Enter a new token to replace" : "Paste token from claude setup-token"}
+                    placeholder={claudeCodeTokenConfigured ? "••••••••••••••••  (enter a new token to replace)" : "Paste token from claude setup-token"}
                     className="w-full px-3 py-2.5 min-h-[44px] text-sm bg-cc-bg rounded-lg text-cc-fg placeholder:text-cc-muted focus:outline-none focus:ring-1 focus:ring-cc-primary/40 transition-shadow"
+                    aria-describedby="claude-code-token-status"
                   />
-                  <p className="text-xs text-cc-muted">
+                  <p id="claude-code-token-status" className="text-xs text-cc-muted">
                     {claudeCodeTokenConfigured ? "Claude Code token configured" : "Claude Code token not configured"}
                   </p>
                 </div>
@@ -630,14 +627,13 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                   <input
                     id="openai-api-key"
                     type="password"
-                    value={openaiApiKeyConfigured && !openaiKeyFocused && !openaiApiKey ? "••••••••••••••••" : openaiApiKey}
+                    value={openaiApiKey}
                     onChange={(e) => setOpenaiApiKey(e.target.value)}
-                    onFocus={() => setOpenaiKeyFocused(true)}
-                    onBlur={() => setOpenaiKeyFocused(false)}
-                    placeholder={openaiApiKeyConfigured ? "Enter a new key to replace" : "sk-..."}
+                    placeholder={openaiApiKeyConfigured ? "••••••••••••••••  (enter a new key to replace)" : "sk-..."}
                     className="w-full px-3 py-2.5 min-h-[44px] text-sm bg-cc-bg rounded-lg text-cc-fg placeholder:text-cc-muted focus:outline-none focus:ring-1 focus:ring-cc-primary/40 transition-shadow"
+                    aria-describedby="openai-api-key-status"
                   />
-                  <p className="text-xs text-cc-muted">
+                  <p id="openai-api-key-status" className="text-xs text-cc-muted">
                     {openaiApiKeyConfigured ? "OpenAI key configured" : "OpenAI key not configured"}
                   </p>
                 </div>
