@@ -110,13 +110,19 @@ const app = new Hono();
 
 // ── Health endpoint — always unauthenticated (used by Fly.io + control plane) ─
 const startTime = Date.now();
-app.get("/health", (c) => {
+const healthHandler = (c: import("hono").Context) => {
   return c.json({
     ok: true,
     uptime: Math.floor((Date.now() - startTime) / 1000),
     sessions: launcher.listSessions().length,
   });
-});
+};
+app.get("/health", healthHandler);
+// Task 15b: /healthz alias — K8s/Docker HEALTHCHECK convention. Bound
+// to transport-liveness (not protocol-readiness — use /ready for that).
+// The two endpoints are intentionally identical so Dockerfile HEALTHCHECK
+// can target either without behaviour drift.
+app.get("/healthz", healthHandler);
 
 // ── Readiness endpoint — Aura deploy resilience (Deploy expert D5) ──────────
 // /health returns 200 the moment Bun's HTTP listener binds, well before the

@@ -20,7 +20,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: web
-        run: bun install
+        run: bun install --frozen-lockfile
 
       - name: Run accessibility tests (axe-core + ARIA)
         working-directory: web
