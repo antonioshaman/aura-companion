@@ -531,6 +531,84 @@ describe("SessionItem", () => {
     expect(screen.getByTestId("council-session-badge")).toBeInTheDocument();
   });
 
+  // --- Sidebar chip redundancy full suppression (TASK extends PR #27) ---
+  //
+  // The BackendBadge to the left of the chip cluster already shows the
+  // orchestrator backend (CC / CX). Rendering a pair-half with the SAME
+  // provider letters is pure visual duplication. The new helper
+  // `pairHalvesAfterBackendCollapse` drops that redundant half so the
+  // asymmetric `claude+codex` case renders a SINGLE chip carrying the
+  // new-information half.
+
+  it("renders a SINGLE chip (codex only) for claude+codex pair on Claude backend", () => {
+    // backend=claude → CC badge already conveys claude → drop the CLAUDE
+    // half of the pair → render just the CODEX chip. No "+" separator.
+    render(
+      <SessionItem
+        {...buildProps({
+          session: makeSession({ backendType: "claude" }),
+          councilPairing: "claude+codex",
+        })}
+      />,
+    );
+    const badge = screen.getByTestId("council-session-badge");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveTextContent(/codex/i);
+    // Anti-assertion: no CLAUDE chip text inside the badge wrapper, and no
+    // visible "+" separator (the latter is only present in two-chip
+    // ProviderBadges rendering).
+    expect(badge).not.toHaveTextContent(/claude/i);
+    expect(badge.textContent).not.toContain("+");
+  });
+
+  it("renders a SINGLE chip (claude only) for claude+codex pair on Codex backend", () => {
+    // Mirror case: backend=codex → CX badge already conveys codex → drop
+    // the CODEX half → render just the CLAUDE chip.
+    render(
+      <SessionItem
+        {...buildProps({
+          session: makeSession({ backendType: "codex" }),
+          councilPairing: "claude+codex",
+        })}
+      />,
+    );
+    const badge = screen.getByTestId("council-session-badge");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveTextContent(/claude/i);
+    expect(badge).not.toHaveTextContent(/codex/i);
+    expect(badge.textContent).not.toContain("+");
+  });
+
+  it("still hides the chip cluster entirely for homogeneous pair on matching backend (PR #27 regression invariant)", () => {
+    // The PR #27 behaviour ("hides ProviderBadges for homogeneous council
+    // pair") must stay green — the new helper is a superset, not a
+    // replacement. claude+claude on a Claude backend → both halves match
+    // the backend → halves.length === 0 → render nothing.
+    render(
+      <SessionItem
+        {...buildProps({
+          session: makeSession({ backendType: "claude" }),
+          councilPairing: "claude+claude",
+        })}
+      />,
+    );
+    expect(screen.queryByTestId("council-session-badge")).not.toBeInTheDocument();
+  });
+
+  it("hides the chip cluster for homogeneous codex pair on Codex backend (symmetric to claude+claude case)", () => {
+    // Same logic on the Codex side — guards against a partial implementation
+    // that only handles the claude+claude path.
+    render(
+      <SessionItem
+        {...buildProps({
+          session: makeSession({ backendType: "codex" }),
+          councilPairing: "codex+codex",
+        })}
+      />,
+    );
+    expect(screen.queryByTestId("council-session-badge")).not.toBeInTheDocument();
+  });
+
   it("renders name on row 1 above the metadata row (chip cluster + cwd)", () => {
     // Structural guard for the two-row layout (UX feedback May 2026). Pre-fix
     // the chip cluster was a direct child of the outer button's flex row,

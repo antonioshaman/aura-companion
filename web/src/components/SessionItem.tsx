@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef, type RefObject } from "react";
 import type { SessionItem as SessionItemType } from "../utils/project-grouping.js";
-import { ProviderBadges, isHomogeneousPairing } from "./council/index.js";
+import { ProviderBadges, pairHalvesAfterBackendCollapse, providerChipClass } from "./council/index.js";
 
 interface SessionItemProps {
   session: SessionItemType;
@@ -269,16 +269,38 @@ export function SessionItem({
                     </svg>
                   </span>
                 )}
-                {/* Council pairing chips: only render when asymmetric.
-                    `claude+claude` would repeat the same label twice and add
-                    no signal — the BackendBadge already shows the orchestrator
-                    backend, and (when blockers exist) the unread STOP counter
-                    discriminates Council pairs from solo sessions. */}
-                {councilPairing && !isHomogeneousPairing(councilPairing) && (
-                  <span data-testid="council-session-badge" title={`Council pair: ${councilPairing}`}>
-                    <ProviderBadges pairing={councilPairing} size="compact" ariaLabel={`Council pair: ${councilPairing}`} />
-                  </span>
-                )}
+                {/* Council pairing chips: render only the pair-halves that
+                    don't duplicate the BackendBadge already shown to the
+                    left. `claude+claude` on a Claude backend → render
+                    nothing (homogeneous; PR #27 behavior). `claude+codex`
+                    on a Claude backend → render just the CODEX chip; the
+                    CC backend badge already says "claude". Same logic on
+                    Codex backend. Extends PR #27. */}
+                {(() => {
+                  if (!councilPairing) return null;
+                  const halves = pairHalvesAfterBackendCollapse(councilPairing, s.backendType);
+                  if (halves.length === 0) return null;
+                  if (halves.length === 1) {
+                    const provider = halves[0];
+                    return (
+                      <span data-testid="council-session-badge" title={`Council pair: ${councilPairing}`}>
+                        <span
+                          data-testid="provider-chip-orchestrator"
+                          role="img"
+                          aria-label={`Council pair: ${councilPairing}`}
+                          className={`font-mono-code uppercase tracking-wide leading-none text-[10px] px-1.5 py-0.5 rounded-md ${providerChipClass(provider)}`}
+                        >
+                          {provider}
+                        </span>
+                      </span>
+                    );
+                  }
+                  return (
+                    <span data-testid="council-session-badge" title={`Council pair: ${councilPairing}`}>
+                      <ProviderBadges pairing={councilPairing} size="compact" ariaLabel={`Council pair: ${councilPairing}`} />
+                    </span>
+                  );
+                })()}
                 {councilUnreadStops !== undefined && councilUnreadStops > 0 && (
                   <span
                     data-testid="council-unread-count"
