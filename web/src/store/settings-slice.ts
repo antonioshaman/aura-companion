@@ -36,6 +36,38 @@ export interface SettingsHydratePayload {
   aiValidationEnabled?: boolean;
   aiValidationAutoApprove?: boolean;
   aiValidationAutoDeny?: boolean;
+  /** PLAN Task 7 — non-secret org UUID, echoed back to populate the form. */
+  anthropicOrganizationId?: string;
+}
+
+/**
+ * PLAN Task 7 — server-verified Claude tier. `null` = never verified
+ * this session; the UI shows "Unknown — Verify" CTA. A populated record
+ * means the user pressed Verify or boot-time hydration ran (only when
+ * an explicit verify exists — we never auto-fetch on mount, per
+ * Friedman P4 "verify on demand, not on session start").
+ */
+export type ClaudeTierLabel =
+  | "max_20x"
+  | "max"
+  | "pro"
+  | "team"
+  | "enterprise"
+  | "free"
+  | "api"
+  | "unknown";
+
+export interface ClaudeTierState {
+  tier: ClaudeTierLabel;
+  /** Marketing-label plan string from the probe (e.g. "Claude Max 20x"). */
+  plan?: string;
+  dailyLimit?: number;
+  /** Whether the most-recent verify hit the cache. */
+  cached: boolean;
+  /** Wallclock ms when the result landed in the slice. */
+  fetchedAt: number;
+  /** Probe latency ms — surfaced in the UI as a small "verified in 320ms" pill. */
+  latencyMs?: number;
 }
 
 export interface SettingsSlice {
@@ -50,6 +82,10 @@ export interface SettingsSlice {
   aiValidationEnabled: boolean | null;
   aiValidationAutoApprove: boolean | null;
   aiValidationAutoDeny: boolean | null;
+  /** PLAN Task 7 — Anthropic org UUID (non-secret, plain string). */
+  anthropicOrganizationId: string | null;
+  /** PLAN Task 7 — verified Claude tier, null until explicit Verify. */
+  claudeTier: ClaudeTierState | null;
 
   /**
    * Whether `hydrateSettings` has been called at least once this session.
@@ -77,6 +113,13 @@ export interface SettingsSlice {
     openaiApiKeyConfigured?: boolean;
     anthropicApiKeyConfigured?: boolean;
   }) => void;
+
+  /**
+   * PLAN Task 7 — set the verified-tier result. Called by the api.ts
+   * `verifyClaudeTier()` helper after a successful POST. `null` clears
+   * the slot (used by invalidate-on-credential-save flow).
+   */
+  setClaudeTier: (next: ClaudeTierState | null) => void;
 }
 
 export const createSettingsSlice: StateCreator<AppState, [], [], SettingsSlice> = (set) => ({
@@ -86,6 +129,8 @@ export const createSettingsSlice: StateCreator<AppState, [], [], SettingsSlice> 
   aiValidationEnabled: null,
   aiValidationAutoApprove: null,
   aiValidationAutoDeny: null,
+  anthropicOrganizationId: null,
+  claudeTier: null,
   settingsHydrated: false,
 
   hydrateSettings: (payload) =>
@@ -114,6 +159,10 @@ export const createSettingsSlice: StateCreator<AppState, [], [], SettingsSlice> 
         typeof payload.aiValidationAutoDeny === "boolean"
           ? payload.aiValidationAutoDeny
           : s.aiValidationAutoDeny,
+      anthropicOrganizationId:
+        typeof payload.anthropicOrganizationId === "string"
+          ? payload.anthropicOrganizationId
+          : s.anthropicOrganizationId,
       settingsHydrated: true,
     })),
 
@@ -132,6 +181,8 @@ export const createSettingsSlice: StateCreator<AppState, [], [], SettingsSlice> 
           ? next.anthropicApiKeyConfigured
           : s.anthropicApiKeyConfigured,
     })),
+
+  setClaudeTier: (next) => set(() => ({ claudeTier: next })),
 });
 
 // ── Narrow selectors (PLAN Task 6 — prevent render storms) ────────────────
@@ -156,4 +207,10 @@ export function selectAiValidationEnabled(s: AppState): boolean | null {
 }
 export function selectSettingsHydrated(s: AppState): boolean {
   return s.settingsHydrated;
+}
+export function selectAnthropicOrganizationId(s: AppState): string | null {
+  return s.anthropicOrganizationId;
+}
+export function selectClaudeTier(s: AppState): ClaudeTierState | null {
+  return s.claudeTier;
 }

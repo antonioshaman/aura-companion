@@ -34,6 +34,11 @@ interface MockStoreState {
   setUpdateInfo: ReturnType<typeof vi.fn>;
   setUpdateOverlayActive: ReturnType<typeof vi.fn>;
   setEditorTabEnabled: ReturnType<typeof vi.fn>;
+  // PLAN Task 6 / 7 — settings-slice fields read via useStore selectors.
+  hydrateSettings: ReturnType<typeof vi.fn>;
+  setProviderConfigured: ReturnType<typeof vi.fn>;
+  setClaudeTier: ReturnType<typeof vi.fn>;
+  claudeTier: null;
 }
 
 let mockState: MockStoreState;
@@ -54,6 +59,10 @@ function createMockState(overrides: Partial<MockStoreState> = {}): MockStoreStat
     setUpdateInfo: vi.fn(),
     setUpdateOverlayActive: vi.fn(),
     setEditorTabEnabled: vi.fn(),
+    hydrateSettings: vi.fn(),
+    setProviderConfigured: vi.fn(),
+    setClaudeTier: vi.fn(),
+    claudeTier: null,
     ...overrides,
   };
 }
@@ -67,6 +76,8 @@ const mockApi = {
   regenerateAuthToken: vi.fn(),
   getAuthQr: vi.fn(),
   verifyAnthropicKey: vi.fn(),
+  verifyClaudeTier: vi.fn(),
+  invalidateClaudeTier: vi.fn(),
 };
 
 const mockTelemetry = {
@@ -84,6 +95,8 @@ vi.mock("../api.js", () => ({
     regenerateAuthToken: (...args: unknown[]) => mockApi.regenerateAuthToken(...args),
     getAuthQr: (...args: unknown[]) => mockApi.getAuthQr(...args),
     verifyAnthropicKey: (...args: unknown[]) => mockApi.verifyAnthropicKey(...args),
+    verifyClaudeTier: (...args: unknown[]) => mockApi.verifyClaudeTier(...args),
+    invalidateClaudeTier: (...args: unknown[]) => mockApi.invalidateClaudeTier(...args),
   },
 }));
 
@@ -143,6 +156,14 @@ beforeEach(() => {
       { label: "Tailscale", url: "http://100.118.112.23:3456", qrDataUrl: "data:image/png;base64,TS_QR" },
     ],
   });
+  // PLAN Task 7 — default tier mocks. Tests asserting verify behaviour
+  // override per-test.
+  mockApi.verifyClaudeTier.mockResolvedValue({
+    tier: "unknown",
+    latencyMs: 10,
+    cached: false,
+  });
+  mockApi.invalidateClaudeTier.mockResolvedValue({ ok: true });
   mockTelemetry.getTelemetryPreferenceEnabled.mockReturnValue(true);
 });
 
@@ -1228,6 +1249,9 @@ describe("SettingsPage", () => {
       expect(mockApi.updateSettings).toHaveBeenCalledWith({
         claudeCodeOAuthToken: "test-oauth-token",
         openaiApiKey: "sk-test-key",
+        // PLAN Task 7 — org ID is always sent with provider save so users
+        // can clear it (empty string) or update without re-typing tokens.
+        anthropicOrganizationId: "",
       });
     });
 
