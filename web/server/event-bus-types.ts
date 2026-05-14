@@ -134,6 +134,38 @@ export interface CompanionEventMap {
     sessionId: string;
   };
 
+  /**
+   * Orchestrator finished a turn — the per-session turn-state machine
+   * just transitioned from `{kind:"in-flight"}` to `{kind:"awaiting-input"}`.
+   * Fired by the Claude adapter on every `result` NDJSON frame that
+   * follows a `user_message` send (the in-flight → awaiting-input
+   * transition); never fires on a session that is still in `awaiting-input`
+   * (e.g. between attach and first send).
+   *
+   * Emitted by the adapter unconditionally for every session — the
+   * downstream filter (idle-timer-manager from Task 7 of the auto-
+   * proceed plan) checks `sessionGroupRole === "orchestrator"` + group
+   * status `=== "active"` + reconnect-grace clear before acting. This
+   * mirrors the `observer:turn-done` shape so the per-half plumbing
+   * stays symmetric.
+   *
+   * `blockedByStop` is the JS-3 axis: when an unresolved STOP finding
+   * exists in the orchestrator's council group, downstream consumers
+   * MUST pause any idle-driven action (auto-proceed timer arming). The
+   * field lives in the type system so a forgetful consumer can't
+   * silently drop it. The adapter itself does NOT know about STOPs —
+   * the council slice / observer pipeline owns that knowledge and may
+   * either mutate the adapter's state via a setter (Task 8 surface) or
+   * compute its own boolean from the event-bus signal stream. Both
+   * approaches keep `blockedByStop` accurate; foundation PR emits
+   * `false` only — Task 8 wires the STOP coupling.
+   */
+  "orchestrator:turn-done": {
+    /** Companion sessionId of the orchestrator-half (NOT cliSessionId). */
+    sessionId: string;
+    blockedByStop: boolean;
+  };
+
   /** Observer review processed end-to-end: parsed from the review file,
    *  validated for grounding, findings hydrated with server-assigned ids,
    *  ready for browser fanout. Subscribers transform the payload into

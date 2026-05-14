@@ -1477,3 +1477,161 @@ describe("sendUserFrameFromServer (Council Mode auto-wake)", () => {
     expect(adapter.getObserverTurnState()).toBe("idle");
   });
 });
+
+// ─── orchestratorTurnState + orchestrator:turn-done event ──────────────────
+//
+// PLAN-aura-orchestrator-idle-auto-proceed Task 4. The orchestrator-half
+// turn-state mirrors the observer's discipline (socket-bound, reset on
+// attach/detach, single transition per turn) but tracks the user-driven
+// cycle instead of the server-driven wake cycle. The discriminated-union
+// shape carries `blockedByStop` so the JS-3 axis ("STOP pauses timer")
+// lives in the type system rather than as a sibling boolean a refactor
+// can silently drop.
+describe("orchestratorTurnState — discriminated union + event emit", () => {
+  let adapter: ClaudeAdapter;
+
+  beforeEach(async () => {
+    adapter = new ClaudeAdapter("sess-orch-1");
+  });
+
+  it("initial state is awaiting-input with blockedByStop=false (no in-flight at construction)", () => {
+    // Construction-time invariant: no turn has been driven yet, so the
+    // state machine starts in `awaiting-input`. The default
+    // `blockedByStop` of false matches "no STOPs known to the adapter"
+    // — the council slice will mutate via setter if/when a STOP appears.
+    expect(adapter.getOrchestratorTurnState()).toEqual({
+      kind: "awaiting-input",
+      blockedByStop: false,
+    });
+  });
+
+  it("user_message send flips state to in-flight", () => {
+    // The in-flight transition is driven by the outgoing-user-message
+    // path. Provenance (real user vs synthetic auto-proceed frame) is
+    // intentionally NOT distinguished at this seam — both produce the
+    // same NDJSON shape on-wire and the CLI's perception of "a turn
+    // is now running" is identical.
+    const ws = createMockSocket("sess-orch-1");
+    adapter.attachWebSocket(ws);
+    const ok = adapter.send({ type: "user_message", content: "hi" } as never);
+    expect(ok).toBe(true);
+    expect(adapter.getOrchestratorTurnState()).toEqual({ kind: "in-flight" });
+  });
+
+  it("result frame after in-flight emits orchestrator:turn-done and flips to awaiting-input", async () => {
+    const { companionBus } = await import("./event-bus.js");
+    const ws = createMockSocket("sess-orch-1");
+    adapter.attachWebSocket(ws);
+    adapter.send({ type: "user_message", content: "hi" } as never);
+    const events: Array<{ sessionId: string; blockedByStop: boolean }> = [];
+    const off = companionBus.on("orchestrator:turn-done", (e) => {
+      events.push(e);
+    });
+    try {
+      adapter.handleRawMessage(makeResultMsg());
+    } finally {
+      off();
+    }
+    expect(events).toEqual([{ sessionId: "sess-orch-1", blockedByStop: false }]);
+    expect(adapter.getOrchestratorTurnState()).toEqual({
+      kind: "awaiting-input",
+      blockedByStop: false,
+    });
+  });
+
+  it("result frame WITHOUT a prior in-flight does NOT emit (no double-fire on replay)", async () => {
+    // Restart-replay can deliver a `result` for a session that the
+    // adapter already considers awaiting-input. Emitting in that case
+    // would over-count iteration counters in the downstream
+    // idle-timer-manager. The transition guard fires only on the
+    // in-flight → awaiting-input edge.
+    const { companionBus } = await import("./event-bus.js");
+    const ws = createMockSocket("sess-orch-1");
+    adapter.attachWebSocket(ws);
+    // Skip the user_message send — go straight to result.
+    const events: unknown[] = [];
+    const off = companionBus.on("orchestrator:turn-done", (e) => {
+      events.push(e);
+    });
+    try {
+      adapter.handleRawMessage(makeResultMsg());
+    } finally {
+      off();
+    }
+    expect(events).toEqual([]);
+  });
+
+  it("attachWebSocket resets to awaiting-input (fresh socket = no in-flight turn)", () => {
+    const ws1 = createMockSocket("sess-orch-1");
+    adapter.attachWebSocket(ws1);
+    adapter.send({ type: "user_message", content: "hi" } as never);
+    expect(adapter.getOrchestratorTurnState()).toEqual({ kind: "in-flight" });
+    // A new socket attaches before the old detach fires — late-detach
+    // race guard. Same defence as the observer-side test on line ~1468.
+    const ws2 = createMockSocket("sess-orch-1");
+    adapter.attachWebSocket(ws2);
+    expect(adapter.getOrchestratorTurnState()).toEqual({
+      kind: "awaiting-input",
+      blockedByStop: false,
+    });
+  });
+
+  it("detachWebSocket resets to awaiting-input even mid-turn", () => {
+    const ws = createMockSocket("sess-orch-1");
+    adapter.attachWebSocket(ws);
+    adapter.send({ type: "user_message", content: "hi" } as never);
+    expect(adapter.getOrchestratorTurnState()).toEqual({ kind: "in-flight" });
+    adapter.detachWebSocket(ws);
+    expect(adapter.getOrchestratorTurnState()).toEqual({
+      kind: "awaiting-input",
+      blockedByStop: false,
+    });
+  });
+
+  it("setOrchestratorBlockedByStop flips the axis when awaiting-input", () => {
+    expect(adapter.getOrchestratorTurnState()).toEqual({
+      kind: "awaiting-input",
+      blockedByStop: false,
+    });
+    adapter.setOrchestratorBlockedByStop(true);
+    expect(adapter.getOrchestratorTurnState()).toEqual({
+      kind: "awaiting-input",
+      blockedByStop: true,
+    });
+    adapter.setOrchestratorBlockedByStop(false);
+    expect(adapter.getOrchestratorTurnState()).toEqual({
+      kind: "awaiting-input",
+      blockedByStop: false,
+    });
+  });
+
+  it("setOrchestratorBlockedByStop is a no-op while in-flight (axis is only meaningful when awaiting)", () => {
+    // The JS-3 axis describes "this awaiting-input is paused because a
+    // STOP must be resolved first". It is semantically meaningless
+    // while a turn is in flight — no idle-driven action can fire
+    // there. The setter ignores calls in that state so a forgetful
+    // caller can't corrupt the union by storing blockedByStop
+    // alongside an in-flight kind.
+    const ws = createMockSocket("sess-orch-1");
+    adapter.attachWebSocket(ws);
+    adapter.send({ type: "user_message", content: "hi" } as never);
+    expect(adapter.getOrchestratorTurnState()).toEqual({ kind: "in-flight" });
+    adapter.setOrchestratorBlockedByStop(true);
+    expect(adapter.getOrchestratorTurnState()).toEqual({ kind: "in-flight" });
+  });
+
+  it("getOrchestratorTurnState returns a fresh copy (caller mutation cannot leak back)", () => {
+    // Defensive accessor — a caller stashing the returned object and
+    // mutating `blockedByStop` must NOT alter the adapter's internal
+    // state. Closes the "I held a reference and changed it" footgun.
+    const snapshot = adapter.getOrchestratorTurnState();
+    if (snapshot.kind === "awaiting-input") {
+      (snapshot as { blockedByStop: boolean }).blockedByStop = true;
+    }
+    // The next read still shows the original value.
+    expect(adapter.getOrchestratorTurnState()).toEqual({
+      kind: "awaiting-input",
+      blockedByStop: false,
+    });
+  });
+});
