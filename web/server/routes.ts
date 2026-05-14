@@ -13,6 +13,10 @@ import { homedir } from "node:os";
 import { COMPANION_HOME } from "./paths.js";
 import { existsSync, readFileSync } from "node:fs";
 import type { SessionOrchestrator } from "./session-orchestrator.js";
+import {
+  parseAutoProceedOnIdleAtBoundary,
+  formatAutoProceedConfigError,
+} from "./auto-proceed-config-validator.js";
 import type { CliLauncher } from "./cli-launcher.js";
 import type { WsBridge } from "./ws-bridge.js";
 import type { TerminalManager } from "./terminal-manager.js";
@@ -186,8 +190,39 @@ export function createRoutes(
 
   // ─── SDK Sessions (--sdk-url) ─────────────────────────────────────
 
+  /**
+   * Normalise the create-session request body: validate `autoProceedOnIdle`
+   * at the HTTP boundary (PLAN-tasks-10-11 Task 10). Either returns a
+   * normalised body with `autoProceedOnIdle` set to the parsed value or
+   * undefined (collapsed), or an error message for a 400 response.
+   *
+   * Returning `error: string` rather than throwing keeps the route handlers
+   * branchless — `if (norm.error) return 400`. Single call site for the
+   * tri-state-collapse keeps the regression-invariant grep-auditable.
+   */
+  function normaliseCreateSessionBody(
+    body: Record<string, unknown>,
+  ): { ok: true; body: Record<string, unknown> } | { ok: false; error: string } {
+    const rawAuto = (body as { autoProceedOnIdle?: unknown }).autoProceedOnIdle;
+    const parsed = parseAutoProceedOnIdleAtBoundary(rawAuto);
+    if (parsed.kind === "invalid") {
+      return { ok: false, error: formatAutoProceedConfigError(parsed.error) };
+    }
+    // Strip the raw field; replace with parsed value or omit entirely.
+    const { autoProceedOnIdle: _stripped, ...rest } = body as Record<string, unknown>;
+    if (parsed.kind === "absent") {
+      return { ok: true, body: rest };
+    }
+    return { ok: true, body: { ...rest, autoProceedOnIdle: parsed.value } };
+  }
+
   api.post("/sessions/create", async (c) => {
-    const body = await c.req.json().catch(() => ({}));
+    const rawBody = await c.req.json().catch(() => ({}));
+    const norm = normaliseCreateSessionBody(rawBody);
+    if (!norm.ok) {
+      return c.json({ error: norm.error }, 400 as any);
+    }
+    const body = norm.body;
     // Council Mode branch — the browser opts in by setting
     // `councilMode: "council"` + `councilPairing: "<a>+<b>"`. The pairing
     // string is server-validated against the supported allow-list inside
@@ -218,7 +253,12 @@ export function createRoutes(
   // ─── SSE Session Creation (with progress streaming) ─────────────────────
 
   api.post("/sessions/create-stream", async (c) => {
-    const body = await c.req.json().catch(() => ({}));
+    const rawBody = await c.req.json().catch(() => ({}));
+    const norm = normaliseCreateSessionBody(rawBody);
+    if (!norm.ok) {
+      return c.json({ error: norm.error }, 400 as any);
+    }
+    const body = norm.body;
 
     return streamSSE(c, async (stream) => {
       // Council Mode branch — same allow-list validation as the non-stream

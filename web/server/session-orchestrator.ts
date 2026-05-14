@@ -144,6 +144,16 @@ export interface CreateSessionRequest {
   // route; the coordinator generates them server-side.
   sessionGroupId?: string;
   sessionGroupRole?: import("./session-types.js").SessionGroupRole;
+  /**
+   * Auto-proceed (idle-timeout) opt-in. Already-parsed-and-validated by
+   * the boundary parser in `routes.ts` (Task 10 — see
+   * `auto-proceed-config-validator.ts`). The orchestrator receives the
+   * fully-clamped value or `undefined`; never raw user input. Tri-state
+   * collapse at the boundary: `false | null | undefined | absent` all
+   * arrive here as `undefined`, so a `presence check` on this field is
+   * the canonical "is auto-proceed enabled for this session" test.
+   */
+  autoProceedOnIdle?: { readonly idleMs: number; readonly maxIterations: number };
 }
 
 /** Public Council Mode pair-create request. The coordinator validates the

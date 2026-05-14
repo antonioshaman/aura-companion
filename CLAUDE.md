@@ -189,6 +189,7 @@ A user-opt-in flag on the New Session form (`councilMode: "council"` + `councilP
 - `EC-7` Filesystem-access predicates inline path resolution OR are exposed only via resolving wrapper.
 - `EC-8` Reconciliation actions require sentinel-before-sweep helpers.
 - `EC-9` Group-lifecycle log lines must be structured JSON with `event` + `sessionGroupId` + (where applicable) `sessionId` + `role`.
+- `EC-13` Observer failsafe: server schedules a 5-min recurring tick per observer that scans `.council/checkpoints/` and synthesises a wake for any unprocessed checkpoint. The observer's system prompt (`.council/prompts/observer-system.md` → `Failsafe` section) documents the matching observer-side behaviour. Pair with `scanForMissedObserverWakes` reconcile on init.
 
 Full conventions list in `conventions.md`. Council review artefacts (per-expert findings + synthesised `FINAL-REVIEW.md`) in `.council/review-output/<TIMESTAMP>/`.
 
