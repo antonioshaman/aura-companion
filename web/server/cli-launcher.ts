@@ -20,6 +20,7 @@ import {
   OBSERVER_DISALLOWED_TOOLS,
   OBSERVER_PERMISSION_MODE,
 } from "./observer-permissions.js";
+import { coerceObserverModel } from "./observer-model-compat.js";
 import { containerManager } from "./container-manager.js";
 import { companionBus } from "./event-bus.js";
 import {
@@ -435,8 +436,35 @@ export class CliLauncher {
         ? callerAllowed.filter((t) => OBSERVER_ALLOWED_TOOLS.includes(t))
         : [...OBSERVER_ALLOWED_TOOLS];
       info.permissionMode = OBSERVER_PERMISSION_MODE;
+      // PLAN Residual #1 fix — Council Mode coordinator passes the same
+      // caller-supplied model to both halves. For `claude+codex` pairing
+      // that ships `claude-opus-4-7` to the Codex observer, which rejects
+      // it at `thread/start` with `invalid_request_error`, blocking
+      // auto-wake reviews entirely. Drop the model field when it does not
+      // match the observer's backend so Codex falls back to its own
+      // default (typically `gpt-5-codex`). Symmetric — also covers
+      // `codex+claude` where a `gpt-*` model would leak to a Claude
+      // observer.
+      const observerBackend = info.backendType ?? "claude";
+      const coerced = coerceObserverModel(options.model, observerBackend);
+      if (coerced.coerced) {
+        console.warn(
+          "[cli-launcher] observer model coerced",
+          JSON.stringify({
+            event: "council.observer_model_coerced",
+            sessionId,
+            sessionGroupId: options.sessionGroupId,
+            role: "observer",
+            backendType: observerBackend,
+            from: options.model,
+            to: null,
+            reason: coerced.reason,
+          }),
+        );
+      }
       return {
         ...options,
+        model: coerced.model,
         systemPrompt: composedSystemPrompt,
         allowedTools: intersectedAllowed,
         disallowedTools: [...OBSERVER_DISALLOWED_TOOLS],
