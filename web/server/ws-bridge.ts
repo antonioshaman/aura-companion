@@ -48,6 +48,10 @@ import {
   handleSessionSubscribe,
   handleSessionAck,
 } from "./ws-bridge-browser.js";
+import {
+  trackStreamForInterrupted,
+  synthesiseInterruptedMessage,
+} from "./ws-bridge-stream-status.js";
 import { validatePermission } from "./ai-validator.js";
 import { getEffectiveAiValidation } from "./ai-validation-settings.js";
 import { companionBus } from "./event-bus.js";
@@ -578,13 +582,27 @@ export class WsBridge {
 
       // -- assistant: append to history, notify listeners ------------------
       if (msg.type === "assistant") {
-        const assistantMsg = { ...msg, timestamp: msg.timestamp || Date.now() };
+        // PLAN Task 12 — stamp `streamStatus: "complete"` on the persisted
+        // form. The consolidated assistant frame IS the completion signal:
+        // by reaching this branch we have a whole turn from the CLI. If a
+        // streaming tracker is still set for this id, clear it so the
+        // disconnect-time interrupted flush doesn't emit a duplicate.
+        if (session.streamingAssistant?.id === msg.message.id) {
+          session.streamingAssistant = null;
+        }
+        const assistantMsg = { ...msg, timestamp: msg.timestamp || Date.now(), streamStatus: "complete" as const };
         this.appendHistory(session, assistantMsg);
         this.persistSession(session);
         companionBus.emit("message:assistant", { sessionId: session.id, message: assistantMsg });
       }
 
       if (msg.type === "stream_event") {
+        // PLAN Task 12 — feed the in-memory stream tracker so a CLI death
+        // between message_start and the consolidated assistant frame can be
+        // surfaced to the browser as an interrupted bubble rather than
+        // silently lost. Tracker is pure-function over wire frames; no
+        // persistence happens here.
+        trackStreamForInterrupted(session, msg);
         companionBus.emit("message:stream_event", { sessionId: session.id, message: msg });
       }
 
@@ -720,6 +738,10 @@ export class WsBridge {
         this.broadcastToBrowsers(session, { type: "permission_cancelled", request_id: reqId });
       }
       session.pendingPermissions.clear();
+      // PLAN Task 12 — flush partial stream as `streamStatus: "interrupted"`
+      // BEFORE persisting so the bubble lands in the same atomic save and
+      // is visible to browsers reconnecting after the disconnect.
+      this.flushInterruptedStream(session);
       session.backendAdapter = null;
       this.persistSession(session);
       console.log(`[ws-bridge] Backend adapter disconnected for session ${sessionId}`);
@@ -939,6 +961,11 @@ export class WsBridge {
       if (session.backendAdapter?.isConnected()) return;
       log.warn("ws-bridge", "CLI disconnect confirmed", { sessionId });
       session.stateMachine.transition("terminated", "disconnect_confirmed");
+      // PLAN Task 12 — flush partial stream as `streamStatus: "interrupted"`
+      // so the persisted history reflects the cut bubble; emit BEFORE
+      // broadcasting `cli_disconnected` so an attached browser receives the
+      // synthesised `assistant` frame in the same flush window.
+      this.flushInterruptedStream(session);
       this.broadcastToBrowsers(session, { type: "cli_disconnected" });
       for (const [reqId] of session.pendingPermissions) {
         this.broadcastToBrowsers(session, { type: "permission_cancelled", request_id: reqId });
@@ -1246,6 +1273,26 @@ export class WsBridge {
   /** Append to messageHistory with cap. Delegates to ws-bridge-persist. */
   private appendHistory(session: Session, msg: BrowserIncomingMessage) {
     appendHistoryFn(session, msg);
+  }
+
+  /**
+   * PLAN Task 12 — if `session.streamingAssistant` carries a partial reply
+   * that the CLI never closed with a consolidated `assistant` frame,
+   * synthesise an assistant message with `streamStatus: "interrupted"`,
+   * append it to history, broadcast it to attached browsers, and clear the
+   * tracker. Caller is responsible for the surrounding `persistSession`
+   * window so the synthesised frame lands on disk in the same write.
+   *
+   * Idempotent: a second call with the tracker already cleared is a no-op.
+   * Drop-no-text: a tracker that only saw `message_start` (no text deltas)
+   * yields no message — we will not fabricate an empty bubble for it.
+   */
+  private flushInterruptedStream(session: Session): void {
+    const synthesised = synthesiseInterruptedMessage(session);
+    session.streamingAssistant = null;
+    if (!synthesised) return;
+    this.appendHistory(session, synthesised);
+    this.broadcastToBrowsers(session, synthesised);
   }
 
   // ── Browser message routing ─────────────────────────────────────────────

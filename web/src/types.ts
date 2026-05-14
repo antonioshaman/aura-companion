@@ -41,6 +41,15 @@ export interface ChatMessage {
   streamingPhase?: "thinking" | "text";
   model?: string;
   stopReason?: string | null;
+  /**
+   * PLAN Task 12 — terminal state of the stream that produced this
+   * assistant message. Mirrors the server-side wire field with the same
+   * name. Absent on user/system messages and on legacy assistant messages
+   * persisted before this field existed — the renderer treats absent as
+   * "complete" so existing histories show no badge. Set to "interrupted"
+   * on a synthesised partial frame after a CLI disconnect.
+   */
+  streamStatus?: "complete" | "interrupted" | "errored";
 }
 
 export interface TaskItem {

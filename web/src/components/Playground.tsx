@@ -432,6 +432,24 @@ const MSG_TOOL_ERROR: ChatMessage = {
   timestamp: Date.now() - 20000,
 };
 
+// PLAN Task 12 — interrupted-stream variant. Mirrors a synthesised assistant
+// message produced by the server after a CLI disconnect mid-stream. The bubble
+// renders the partial text plus the warning badge so playground reviewers can
+// see exactly what users will see after the cut.
+const MSG_ASSISTANT_INTERRUPTED: ChatMessage = {
+  id: "msg-interrupted",
+  role: "assistant",
+  content: "",
+  contentBlocks: [
+    {
+      type: "text",
+      text: "I'll start by reading the middleware. The current shape is a thin Express handler that grabs the session id from the cookie and looks it up in",
+    },
+  ],
+  streamStatus: "interrupted",
+  timestamp: Date.now() - 18000,
+};
+
 // Tasks
 const MOCK_TASKS: TaskItem[] = [
   {
@@ -1066,6 +1084,9 @@ export function Playground() {
             </Card>
             <Card label="Tool result with error">
               <MessageBubble message={MSG_TOOL_ERROR} />
+            </Card>
+            <Card label="Assistant message (interrupted)">
+              <MessageBubble message={MSG_ASSISTANT_INTERRUPTED} />
             </Card>
             <Card label="System message">
               <MessageBubble message={MSG_SYSTEM} />

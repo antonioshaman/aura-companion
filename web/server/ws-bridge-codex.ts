@@ -79,7 +79,16 @@ export function attachCodexAdapterHandlers(
     }
 
     if (msg.type === "assistant") {
-      const assistantMsg = { ...msg, timestamp: msg.timestamp || Date.now() };
+      // PLAN Task 12 — stamp `streamStatus: "complete"` on Codex-path
+      // assistant frames mirroring the Claude-path treatment. Codex bridge
+      // does not currently track a partial streaming target (deltas go
+      // straight to the browser as `stream_event`), but persisted frames
+      // still need the field so the renderer treats them as complete and
+      // the migration semantics match across backends.
+      if (session.streamingAssistant?.id === msg.message.id) {
+        session.streamingAssistant = null;
+      }
+      const assistantMsg = { ...msg, timestamp: msg.timestamp || Date.now(), streamStatus: "complete" as const };
       appendHistory(session, assistantMsg);
       deps.persistSession(session);
       companionBus.emit("message:assistant", { sessionId, message: assistantMsg });
