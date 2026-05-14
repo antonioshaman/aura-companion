@@ -9,7 +9,7 @@ Add a "Council Mode" to Aura Companion that, on session creation, spawns two lin
 
 ## Context
 
-Today users can run the Carmack Council workflow in a single Aura Companion session by invoking each skill in turn — but there is no independent reviewer. Past attempts at a second "watcher" session in Aura Companion left it idle ("болталась и ничего не происходило") because there was no explicit wake mechanism. The orchestrator side reuses existing `session-orchestrator.ts` + `cli-launcher.ts` + worktree machinery; the new piece is *pairing*, *checkpoint-driven activation*, and the UI to make the observer visible without crowding the chat. All Carmack-Council skills already exist under `/home/auracomp/.claude/skills/`; no skill authoring is part of this spec.
+Today users can run the Carmack Council workflow in a single Aura Companion session by invoking each skill in turn — but there is no independent reviewer. Past attempts at a second "watcher" session in Aura Companion left it idle ("болталась и ничего не происходило") because there was no explicit wake mechanism. The orchestrator side reuses existing `session-orchestrator.ts` + `cli-launcher.ts` + worktree machinery; the new piece is *pairing*, *checkpoint-driven activation*, and the UI to make the observer visible without crowding the chat. All Carmack-Council skills already exist under `~/.claude/skills/`; no skill authoring is part of this spec.
 
 ## Scope
 
