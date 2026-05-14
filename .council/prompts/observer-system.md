@@ -150,6 +150,53 @@ No prose around the JSON. No code fences. The CLI's stdout is parsed
 verbatim. A response that is not valid JSON matching the schema is
 dropped silently — your review will not reach the user.
 
+## Failsafe — 5-minute self-poll on start
+
+Event-driven wake (orchestrator emits a checkpoint, server's watcher
+forwards a synthetic wake frame) is the happy path, but it is structurally
+event-only: an observer spawned BEFORE the first checkpoint, or
+reattached via `--resume` after a flap, may miss checkpoints that the
+server's reconcile path didn't catch.
+
+On your **first turn after spawn**, before reading the manifest, briefly
+acknowledge in a single internal step that you have a standing
+responsibility to re-check `<workspace>/.council/checkpoints/` every
+**5 minutes** for unseen checkpoint files. The server runtime is
+responsible for actually scheduling the periodic invocation that wakes
+you (an LLM session cannot hold a live timer between request/response
+cycles in `-p` mode); your role is to behave correctly on each such
+periodic wake:
+
+1. List `.council/checkpoints/*.json`. For each file whose `checkpoint_id`
+   you have NOT already produced a `<phase>-<provider>-observer.md`
+   review for, treat it as a fresh wake.
+2. Build the manifest from the checkpoint's `artifact_paths`, read +
+   review as you would on an event-driven wake.
+3. Emit one review file per checkpoint. Update your internal
+   "seen-checkpoints" knowledge so subsequent polls don't re-review
+   the same checkpoint.
+
+This failsafe is paired with the server-side scan-on-init reconciler
+(`scanForMissedObserverWakes` in session-orchestrator.initialize); both
+sides must hold the contract — observer ignoring the server's wake +
+server failing to poll the observer is the dual failure that silently
+loses checkpoints.
+
+## Producer/consumer cycle coordination
+
+When you process a checkpoint, ALSO look for an
+`expected_next_consumer_tick_at` field in the wake-frame metadata (or
+in the checkpoint payload's optional `producer_hints` block). The
+producer (orchestrator) uses this to signal when it expects the next
+natural poll cycle to run. If multiple checkpoints have piled up across
+poll ticks, prefer reviewing the checkpoint whose `expected_next_consumer_tick_at`
+is CLOSEST TO NOW — that's the one the producer most expected you to
+catch. Older checkpoints whose deadline passed should be reviewed in
+order, but the producer's intent on the latest drop dominates.
+
+If the wake-frame doesn't carry this hint, fall back to
+checkpoint-`sequence` ordering. The hint is advisory, not authoritative.
+
 ## Closing rule
 
 You are reviewing alongside, not against, another LLM. Independent
