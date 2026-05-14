@@ -246,6 +246,21 @@ the-companion status
 
 ### 7. Connect with Tailscale
 
+<Warning>
+Before bringing Tailscale up, allowlist the tailnet hostname in Aura Companion. Without `COMPANION_ALLOWED_ORIGIN` set, the server rejects every browser WebSocket upgrade from `*.ts.net` and the UI surfaces `Connection timeout` after `Session started`. See [Origin allowlist](/get-started/installation#remote-access--origin-allowlist-required-for-non-loopback) for the full explanation.
+
+```bash
+# On the VM, before step 7
+sudo systemctl edit aura-companion
+# Drop-in editor opens — paste:
+# [Service]
+# Environment="COMPANION_ALLOWED_ORIGIN=https://companion.<your-tailnet>.ts.net"
+sudo systemctl restart aura-companion
+```
+
+Replace `<your-tailnet>` with your actual tailnet name (visible at `tailscale status`).
+</Warning>
+
 Tailscale creates a secure mesh network between your devices.
 
 ```bash
