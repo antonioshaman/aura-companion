@@ -3,9 +3,12 @@ import { useStore } from "./index.js";
 import {
   selectAiValidationEnabled,
   selectAnthropicApiKeyConfigured,
+  selectAnthropicOrganizationId,
   selectClaudeCodeOAuthTokenConfigured,
+  selectClaudeTier,
   selectOpenaiApiKeyConfigured,
   selectSettingsHydrated,
+  type ClaudeTierState,
 } from "./settings-slice.js";
 
 beforeEach(() => {
@@ -19,6 +22,8 @@ beforeEach(() => {
     aiValidationEnabled: null,
     aiValidationAutoApprove: null,
     aiValidationAutoDeny: null,
+    anthropicOrganizationId: null,
+    claudeTier: null,
     settingsHydrated: false,
   });
 });
@@ -145,5 +150,87 @@ describe("settings-slice — selectors", () => {
     expect(selectOpenaiApiKeyConfigured(s)).toBeNull();
     expect(selectAiValidationEnabled(s)).toBeNull();
     expect(selectSettingsHydrated(s)).toBe(false);
+  });
+});
+
+// ─── PLAN Task 7 — claudeTier + anthropicOrganizationId ───────────────────
+
+describe("settings-slice — setClaudeTier (PLAN Task 7)", () => {
+  it("stores the verified-tier record and exposes it via the selector", () => {
+    // The route handler calls this with the response payload. Consumer
+    // UI reads via selectClaudeTier and renders the appropriate pill.
+    const tier: ClaudeTierState = {
+      tier: "max_20x",
+      plan: "Claude Max 20x",
+      dailyLimit: 1500,
+      cached: false,
+      fetchedAt: 1_700_000_000_000,
+      latencyMs: 234,
+    };
+    useStore.getState().setClaudeTier(tier);
+    expect(selectClaudeTier(useStore.getState())).toEqual(tier);
+  });
+
+  it("accepts null to clear the slot (invalidate-on-credential-save path)", () => {
+    // When the user saves new credentials, the SettingsPage calls
+    // setClaudeTier(null) AFTER invalidating the server cache so the
+    // pill flips back to "not verified" until the user hits Re-verify.
+    useStore.getState().setClaudeTier({
+      tier: "pro",
+      plan: "Claude Pro",
+      cached: false,
+      fetchedAt: 1,
+    });
+    expect(selectClaudeTier(useStore.getState())).not.toBeNull();
+    useStore.getState().setClaudeTier(null);
+    expect(selectClaudeTier(useStore.getState())).toBeNull();
+  });
+
+  it("overwrites the prior tier (last-write-wins for re-verify)", () => {
+    // Re-verify is a full overwrite — the cache-hit / fresh-probe
+    // distinction is captured in the `cached` flag on the new record.
+    useStore.getState().setClaudeTier({
+      tier: "pro",
+      plan: "Claude Pro",
+      cached: false,
+      fetchedAt: 1,
+    });
+    useStore.getState().setClaudeTier({
+      tier: "max_20x",
+      plan: "Claude Max 20x",
+      cached: true,
+      fetchedAt: 2,
+    });
+    const current = selectClaudeTier(useStore.getState());
+    expect(current?.tier).toBe("max_20x");
+    expect(current?.cached).toBe(true);
+  });
+});
+
+describe("settings-slice — anthropicOrganizationId hydration", () => {
+  it("hydrateSettings backfills anthropicOrganizationId from the payload", () => {
+    // GET /api/settings echoes the org ID back so the form can display
+    // the configured value. Hydration must mirror it onto the slice
+    // for cross-component consumers (e.g. New Session pairing-gate
+    // could surface org-scoped pairing decisions in the future).
+    useStore.getState().hydrateSettings({ anthropicOrganizationId: "bed3566a-uuid" });
+    expect(selectAnthropicOrganizationId(useStore.getState())).toBe("bed3566a-uuid");
+  });
+
+  it("preserves prior org ID when the payload omits the field", () => {
+    // Idempotency invariant — re-hydration that doesn't carry the
+    // field must not erase it. Mirrors the per-field "preserve prior"
+    // semantics of the existing flags.
+    useStore.getState().hydrateSettings({ anthropicOrganizationId: "initial-id" });
+    useStore.getState().hydrateSettings({}); // partial hydration
+    expect(selectAnthropicOrganizationId(useStore.getState())).toBe("initial-id");
+  });
+
+  it("selectAnthropicOrganizationId returns null pre-hydration", () => {
+    expect(selectAnthropicOrganizationId(useStore.getState())).toBeNull();
+  });
+
+  it("selectClaudeTier returns null pre-verify", () => {
+    expect(selectClaudeTier(useStore.getState())).toBeNull();
   });
 });
