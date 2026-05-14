@@ -143,6 +143,34 @@ export class ClaudeAdapter implements IBackendAdapter {
    */
   private observerTurnState: "idle" | "in-flight" = "idle";
 
+  /**
+   * Orchestrator-half per-turn state. Mirrors `observerTurnState` but
+   * tracks the user-driven cycle on the OTHER half of a Council pair
+   * (and on solo sessions). Discriminated union — NOT a boolean — so
+   * the JS-3 axis (`blockedByStop`) lives in the type system rather
+   * than as a sibling field that the next refactor can silently drop.
+   *
+   *  - `{kind:"in-flight"}` — a `user_message` was sent to the CLI and
+   *    we have not yet seen the matching `result` frame back.
+   *  - `{kind:"awaiting-input", blockedByStop:boolean}` — turn done,
+   *    orchestrator is waiting for user input. `blockedByStop=true`
+   *    when an unresolved STOP finding exists in the session's
+   *    Council group; idle-driven consumers MUST pause when this is
+   *    true. The adapter does not own STOP knowledge — it emits
+   *    `false` and exposes a setter for the council slice to flip.
+   *
+   * Initial state is `awaiting-input` because a freshly-attached
+   * session has no in-flight turn yet. Reset to `awaiting-input` on
+   * `attachWebSocket`/`detachWebSocket` so a transient WS flap mid-turn
+   * doesn't leave the state machine permanently in-flight. Fires the
+   * `orchestrator:turn-done` event on the in-flight → awaiting-input
+   * transition only (matches the `observer:turn-done` discipline —
+   * never fires on a still-in-state transition).
+   */
+  private orchestratorTurnState:
+    | { kind: "in-flight" }
+    | { kind: "awaiting-input"; blockedByStop: boolean } = { kind: "awaiting-input", blockedByStop: false };
+
   constructor(
     sessionId: string,
     opts?: {
@@ -169,6 +197,11 @@ export class ClaudeAdapter implements IBackendAdapter {
     // skips the reset, leaving `in-flight` from the prior socket and
     // permanently blocking the dispatcher.
     this.observerTurnState = "idle";
+    // Same discipline for the orchestrator half: a fresh socket has no
+    // in-flight turn. Default `blockedByStop` to false on reattach —
+    // the council slice will re-mutate via setter (Task 8 surface) when
+    // it next reconciles the session against the unresolved-STOP set.
+    this.orchestratorTurnState = { kind: "awaiting-input", blockedByStop: false };
 
     // Flush pending messages
     if (this.pendingMessages.length > 0) {
@@ -197,6 +230,9 @@ export class ClaudeAdapter implements IBackendAdapter {
     if (this.cliSocket !== ws) return;
     this.cliSocket = null;
     this.observerTurnState = "idle";
+    // Mirror reset for the orchestrator-half. See `observerTurnState`
+    // comment immediately above; same socket-bound semantics.
+    this.orchestratorTurnState = { kind: "awaiting-input", blockedByStop: false };
     this.disconnectCb?.();
   }
 
@@ -372,6 +408,15 @@ export class ClaudeAdapter implements IBackendAdapter {
       session_id: msg.session_id || "",
     });
     this.sendToBackend(ndjson);
+    // Track the orchestrator turn flip on the user-message path. The
+    // adapter cannot tell apart a user-typed message from a synthetic
+    // server-sourced one at this seam — both produce identical NDJSON
+    // bodies by design (per the auto-proceed envelope contract). That
+    // is the correct behaviour: the in-flight transition tracks the
+    // CLI's perception of "a turn is now running", not the
+    // provenance of the prompt. Provenance is recorded separately by
+    // the recorder (Task 11 of the auto-proceed plan).
+    this.orchestratorTurnState = { kind: "in-flight" };
     return true;
   }
 
@@ -774,6 +819,20 @@ export class ClaudeAdapter implements IBackendAdapter {
       this.observerTurnState = "idle";
       companionBus.emit("observer:turn-done", { sessionId: this.sessionId });
     }
+    // Orchestrator-half symmetric emit. Only fires on the in-flight →
+    // awaiting-input transition so a `result` arriving for a session
+    // that was already awaiting (e.g. CLI re-handshake replay) does
+    // not double-fire the consumers (idle-timer-manager would
+    // mis-account iteration counters). `blockedByStop` defaults to
+    // false at this seam — the council slice owns the STOP-aware
+    // axis and may mutate via setter (Task 8 wiring).
+    if (this.orchestratorTurnState.kind === "in-flight") {
+      this.orchestratorTurnState = { kind: "awaiting-input", blockedByStop: false };
+      companionBus.emit("orchestrator:turn-done", {
+        sessionId: this.sessionId,
+        blockedByStop: false,
+      });
+    }
     this.browserMessageCb?.({
       type: "result",
       data: msg,
@@ -1077,6 +1136,47 @@ export class ClaudeAdapter implements IBackendAdapter {
    */
   getObserverTurnState(): "idle" | "in-flight" {
     return this.observerTurnState;
+  }
+
+  /**
+   * Test hook + reconcile helper for the orchestrator-half turn-state.
+   * Same caveat as {@link getObserverTurnState} — do NOT gate
+   * production decisions on this; the in-flight transition fires the
+   * `orchestrator:turn-done` bus event atomically with the state
+   * mutation. Use the event stream, not the accessor.
+   */
+  getOrchestratorTurnState():
+    | { kind: "in-flight" }
+    | { kind: "awaiting-input"; blockedByStop: boolean } {
+    // Return a frozen shallow copy to defend against caller mutation.
+    if (this.orchestratorTurnState.kind === "in-flight") {
+      return { kind: "in-flight" };
+    }
+    return {
+      kind: "awaiting-input",
+      blockedByStop: this.orchestratorTurnState.blockedByStop,
+    };
+  }
+
+  /**
+   * Council slice setter for the STOP-aware axis of the orchestrator
+   * turn-state. The adapter does not subscribe to observer findings —
+   * the council slice owns that knowledge and pushes through this
+   * setter when an unresolved STOP appears (true) or all STOPs
+   * resolve (false). A no-op when the state is `in-flight` (the JS-3
+   * axis is only meaningful while awaiting input).
+   *
+   * Idempotent — repeated sets with the same boolean do NOT re-fire
+   * the bus event. The event is reserved for the in-flight →
+   * awaiting-input transition (Task 4) and the future
+   * `blocked-by-stop` axis-flip event (Task 8 surface). Foundation PR
+   * exposes the setter only; downstream consumers and event wiring
+   * land with Task 8.
+   */
+  setOrchestratorBlockedByStop(blocked: boolean): void {
+    if (this.orchestratorTurnState.kind !== "awaiting-input") return;
+    if (this.orchestratorTurnState.blockedByStop === blocked) return;
+    this.orchestratorTurnState = { kind: "awaiting-input", blockedByStop: blocked };
   }
 
   /**
