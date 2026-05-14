@@ -473,6 +473,14 @@ async function gracefulShutdown() {
     if (coordinator) {
       coordinator.cancelAllReconnectTimers();
     }
+    // PLAN Task 12 (v) — synthesise interrupted bubbles for any session
+    // whose CLI was mid-stream when the signal arrived. Done BEFORE the
+    // session-store flush so the synthesised frames land in the same
+    // atomic final write rather than being lost between the two calls.
+    const interruptedCount = wsBridge.flushInterruptedStreamsForShutdown();
+    if (interruptedCount > 0) {
+      console.log(`[server] Flushed ${interruptedCount} interrupted stream(s) on shutdown`);
+    }
     wsBridge.flushSessionStorePendingSync();
     if (coordinator) {
       const { shutdownAllGroups } = await import("./group-shutdown.js");
