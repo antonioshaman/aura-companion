@@ -1688,6 +1688,7 @@ describe("GET /api/settings", () => {
     expect(json).toEqual({
       anthropicApiKeyConfigured: false,
       anthropicModel: "openai/gpt-4o-mini",
+      anthropicOrganizationId: "",
       claudeCodeOAuthTokenConfigured: false,
       openaiApiKeyConfigured: false,
       codexDeviceAuthConfigured: false,
@@ -1867,7 +1868,7 @@ describe("PUT /api/settings", () => {
     expect(settingsManager.updateSettings).toHaveBeenCalledWith({
       anthropicApiKey: "trimmed-key",
       anthropicModel: "claude-sonnet-4-6",
-      anthropicOrganizationId: "",
+      anthropicOrganizationId: undefined,
       linearApiKey: "lin_api_trimmed",
       linearAutoTransition: undefined,
       linearAutoTransitionStateId: undefined,
@@ -1913,7 +1914,7 @@ describe("PUT /api/settings", () => {
     expect(res.status).toBe(200);
     expect(settingsManager.updateSettings).toHaveBeenCalledWith({
       anthropicApiKey: undefined,
-      anthropicOrganizationId: "",
+      anthropicOrganizationId: undefined,
       anthropicModel: "openai/gpt-4o-mini",
       linearApiKey: undefined,
       linearAutoTransition: undefined,
