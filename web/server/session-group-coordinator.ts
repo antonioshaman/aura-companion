@@ -5,6 +5,7 @@ import {
   deriveSideEffects,
   type GroupBusSideEffect,
   type GroupEvent,
+  type GroupIdleTimerEffect,
   type GroupLogEntry,
   type GroupStatus,
   transition,
@@ -111,7 +112,34 @@ export interface SessionGroupCoordinatorDeps {
    *  at module load and passes it here so the coordinator never reads env in
    *  hot paths. */
   graceMs?: number;
+  /** Enacts idle-timer side-effect descriptors emitted by `applyEvent` for
+   *  auto-proceed events (PLAN Task 8). Optional with a no-op default so
+   *  existing unit tests that don't exercise auto-proceed don't need to
+   *  thread a stub. Production wires this to {@link IdleTimerManager}'s
+   *  `arm` / `cancel` / `noteUserMessage` methods through a thin adapter. */
+  idleTimerEnactor?: IdleTimerEnactor;
 }
+
+/**
+ * Narrow surface the coordinator calls into when draining
+ * {@link GroupIdleTimerEffect} descriptors. Mirrors the public method
+ * set of {@link IdleTimerManager} so production wiring is a one-line
+ * pass-through; tests substitute a recording fake.
+ */
+export interface IdleTimerEnactor {
+  arm(sessionId: string, options: { idleMs: number; maxIterations: number }): void;
+  cancel(sessionId: string): void;
+  noteUserMessage(sessionId: string): void;
+}
+
+/** No-op default — used when {@link SessionGroupCoordinatorDeps.idleTimerEnactor}
+ *  is omitted. Exists so the coordinator never branches on `undefined` in
+ *  the hot path of `applyEvent`. */
+const NOOP_IDLE_TIMER_ENACTOR: IdleTimerEnactor = {
+  arm: () => undefined,
+  cancel: () => undefined,
+  noteUserMessage: () => undefined,
+};
 
 /**
  * Per-group reconnect bookkeeping. Coordinator-private — never exposed on
@@ -150,6 +178,7 @@ export class SessionGroupCoordinator {
   private readonly onError: CoordinatorErrorSink;
   private readonly now: () => number;
   private readonly graceMs: number;
+  private readonly idleTimerEnactor: IdleTimerEnactor;
 
   constructor(private deps: SessionGroupCoordinatorDeps) {
     this.onError =
@@ -161,6 +190,7 @@ export class SessionGroupCoordinator {
         ));
     this.now = deps.now ?? (() => Date.now());
     this.graceMs = deps.graceMs ?? 45_000;
+    this.idleTimerEnactor = deps.idleTimerEnactor ?? NOOP_IDLE_TIMER_ENACTOR;
   }
 
   /**
@@ -239,9 +269,14 @@ export class SessionGroupCoordinator {
     const prevStatus = g.status;
     const nextStatus = transition(prevStatus, event);
     g.status = nextStatus;
-    const { busEvents, logEntries } = deriveSideEffects(prevStatus, nextStatus, event);
+    const { busEvents, logEntries, idleTimerEffects } = deriveSideEffects(
+      prevStatus,
+      nextStatus,
+      event,
+    );
     for (const e of busEvents) this.enactBusEvent(sessionGroupId, e);
     for (const entry of logEntries) this.enactLogEntry(sessionGroupId, entry);
+    for (const eff of idleTimerEffects) this.enactIdleTimerEffect(eff);
     return nextStatus;
   }
 
@@ -296,9 +331,10 @@ export class SessionGroupCoordinator {
 
   /**
    * EC-9 structured log entry. Content is bounded to `event` +
-   * `sessionGroupId` + optional `role` + `attempts` (PLAN Task 7 Hunt
-   * recommendation: never include cliSessionId / observerPromptSha256 /
-   * workspace absolute path in operational logs — recordings carry that).
+   * `sessionGroupId` + optional `role` + `attempts` + (auto-proceed-only)
+   * `sessionId` + `iteration` (PLAN Task 7 Hunt recommendation: never
+   * include cliSessionId / observerPromptSha256 / workspace absolute
+   * path in operational logs — recordings carry that).
    */
   private enactLogEntry(sessionGroupId: string, entry: GroupLogEntry): void {
     log.info("session-group-coordinator", "group lifecycle event", {
@@ -306,7 +342,33 @@ export class SessionGroupCoordinator {
       sessionGroupId,
       ...(entry.role ? { role: entry.role } : {}),
       ...(entry.attempts !== undefined ? { attempts: entry.attempts } : {}),
+      ...(entry.sessionId !== undefined ? { sessionId: entry.sessionId } : {}),
+      ...(entry.iteration !== undefined ? { iteration: entry.iteration } : {}),
     });
+  }
+
+  /**
+   * Translate an idle-timer descriptor into a call on the injected
+   * {@link IdleTimerEnactor}. Single choke point — AP-2 keystone — so a
+   * future fourth effect kind is one switch arm here, not a parallel
+   * mutator elsewhere. Production wires this to {@link IdleTimerManager};
+   * tests substitute a recording stub.
+   */
+  private enactIdleTimerEffect(effect: GroupIdleTimerEffect): void {
+    switch (effect.kind) {
+      case "arm-idle-timer":
+        this.idleTimerEnactor.arm(effect.sessionId, {
+          idleMs: effect.idleMs,
+          maxIterations: effect.maxIterations,
+        });
+        return;
+      case "cancel-idle-timer":
+        this.idleTimerEnactor.cancel(effect.sessionId);
+        return;
+      case "note-user-message":
+        this.idleTimerEnactor.noteUserMessage(effect.sessionId);
+        return;
+    }
   }
 
   /**

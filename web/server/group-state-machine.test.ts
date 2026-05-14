@@ -3,6 +3,7 @@ import {
   deriveSideEffects,
   type GroupBusSideEffect,
   type GroupEvent,
+  type GroupIdleTimerEffect,
   type GroupLogEntry,
   type GroupStatus,
   type GroupTransitionSideEffects,
@@ -205,10 +206,11 @@ describe("deriveSideEffects", () => {
   const recOkOrch: GroupEvent = { type: "reconnect_ok", role: "orchestrator" };
   const recFailedObs: GroupEvent = { type: "reconnect_failed", role: "observer" };
   const recFailedOrch: GroupEvent = { type: "reconnect_failed", role: "orchestrator" };
-  const noop: GroupTransitionSideEffects = { busEvents: [], logEntries: [] };
+  const noop: GroupTransitionSideEffects = { busEvents: [], logEntries: [], idleTimerEffects: [] };
   const exited: GroupTransitionSideEffects = {
     busEvents: [{ kind: "exited", reason: "user_archived" }],
     logEntries: [{ event: "group.exited" }],
+    idleTimerEffects: [],
   };
 
   // Helper — what `deriveSideEffects` should produce when an unintentional
@@ -220,24 +222,28 @@ describe("deriveSideEffects", () => {
     return {
       busEvents: [{ kind: "degraded", deadRole: role }],
       logEntries: [{ event: "group.degraded", role }],
+      idleTimerEffects: [],
     };
   }
   function degradedFromReconnectFailed(role: "observer" | "orchestrator"): GroupTransitionSideEffects {
     return {
       busEvents: [{ kind: "degraded", deadRole: role }],
       logEntries: [{ event: "group.reconnect_failed", role, attempts: 1 }],
+      idleTimerEffects: [],
     };
   }
   function reconnectingFromStarted(survivingRole: "observer" | "orchestrator", deadlineMs: number): GroupTransitionSideEffects {
     return {
       busEvents: [{ kind: "reconnecting", survivingRole, deadlineMs }],
       logEntries: [{ event: "group.reconnect_started", role: survivingRole, attempts: 1 }],
+      idleTimerEffects: [],
     };
   }
   function reconnectedOk(role: "observer" | "orchestrator"): GroupTransitionSideEffects {
     return {
       busEvents: [{ kind: "reconnected" }],
       logEntries: [{ event: "group.reconnect_ok", role, attempts: 1 }],
+      idleTimerEffects: [],
     };
   }
 
@@ -311,6 +317,7 @@ describe("deriveSideEffects", () => {
     const result = deriveSideEffects(prev, next, event);
     expect(result.busEvents).toEqual(expected.busEvents);
     expect(result.logEntries).toEqual(expected.logEntries);
+    expect(result.idleTimerEffects).toEqual(expected.idleTimerEffects);
   });
 
   // Inventory tests — the matrix above is the canonical truth, but these
@@ -354,7 +361,11 @@ describe("deriveSideEffects", () => {
   });
 
   it("EC-9 log shape — every emitted log entry carries `event` and never leaks cliSessionId/path/observerPromptSha256", () => {
-    const allowedKeys = new Set(["event", "role", "attempts"]);
+    // PLAN Task 8: auto-proceed notification events extend the EC-9 allowlist
+    // with `sessionId` and `iteration`. Both are still bounded — no cliSessionId,
+    // no observerPromptSha256, no workspace path. The allowlist grows; the
+    // EC-9 floor (structured JSON, no PII / no path) doesn't.
+    const allowedKeys = new Set(["event", "role", "attempts", "sessionId", "iteration"]);
     for (const cell of table) {
       const next = transition(cell.prev, cell.event);
       const result = deriveSideEffects(cell.prev, next, cell.event);
@@ -378,7 +389,13 @@ describe("deriveSideEffects", () => {
   // rather than discover the gap during a production incident.
   it("table is exhaustive — every (state × event-discriminator) is covered", () => {
     const states: GroupStatus[] = ["pairing", "active", "degraded", "reconnecting", "archived"];
-    const eventDiscriminators: GroupEvent["type"][] = [
+    // Lifecycle discriminators only. The six auto-proceed events
+    // (orchestrator_turn_idle / _active, stop_finding_raised / _resolved,
+    // auto_proceed_fired, iteration_cap_tripped) have their own dedicated
+    // coverage block below — they're session-scoped (no group-status
+    // transitions) so cross-multiplying them by GroupStatus produces
+    // mostly-noisy cells without insight.
+    const eventDiscriminators: Array<GroupEvent["type"]> = [
       "both_ready",
       "half_died",
       "half_respawned",
@@ -408,5 +425,189 @@ describe("deriveSideEffects", () => {
     const log: GroupLogEntry = { event: "group.exited" };
     expect(sample.kind).toBe("exited");
     expect(log.event).toBe("group.exited");
+  });
+});
+
+// PLAN-aura-orchestrator-idle-auto-proceed Task 8: state-machine integration
+// for the six auto-proceed events. These are session-scoped — they do NOT
+// change GroupStatus — so the lifecycle matrix above does not cover them.
+// This block is the focused coverage: every event produces the right
+// idle-timer descriptor / log entry, and `transition()` returns `from`
+// unchanged across the full GroupStatus axis.
+describe("auto-proceed events (Task 8)", () => {
+  const SESSION_ID = "sess-orch-1";
+  const STATES: GroupStatus[] = ["pairing", "active", "degraded", "reconnecting", "archived"];
+
+  describe("transition() returns `from` unchanged for every auto-proceed event", () => {
+    // Six new events × five states = 30 cells. Each must be a status no-op:
+    // group lifecycle is unrelated to per-session turn-state. AP-2 is
+    // preserved — these events ride the same `applyEvent` channel but
+    // contribute to idle-timer side effects only.
+    const events: GroupEvent[] = [
+      { type: "orchestrator_turn_idle", sessionId: SESSION_ID, idleMs: 300_000, maxIterations: 10 },
+      { type: "orchestrator_turn_active", sessionId: SESSION_ID },
+      { type: "stop_finding_raised", sessionId: SESSION_ID },
+      { type: "stop_finding_resolved", sessionId: SESSION_ID },
+      { type: "auto_proceed_fired", sessionId: SESSION_ID, iteration: 3, firedAtMs: 1_700_000_000_000 },
+      { type: "iteration_cap_tripped", sessionId: SESSION_ID, iteration: 10, cappedAtMs: 1_700_000_000_000 },
+    ];
+    for (const state of STATES) {
+      for (const ev of events) {
+        it(`(${state} × ${ev.type}) is status-noop`, () => {
+          expect(transition(state, ev)).toBe(state);
+        });
+      }
+    }
+  });
+
+  describe("deriveSideEffects — orchestrator_turn_idle", () => {
+    // arm-idle-timer fires ONLY when prev === "active". Every other status
+    // → no effect. This is the coarse group-status gate per Task 8; the
+    // manager re-checks the full gate stack (state=connected, role=orchestrator,
+    // blockedByStop=false, reconnect-grace clear) at fire time (TOCTOU defence).
+    it("emits arm-idle-timer when prev === active", () => {
+      const ev: GroupEvent = {
+        type: "orchestrator_turn_idle",
+        sessionId: SESSION_ID,
+        idleMs: 300_000,
+        maxIterations: 10,
+      };
+      const next = transition("active", ev);
+      const result = deriveSideEffects("active", next, ev);
+      expect(result.idleTimerEffects).toEqual<GroupIdleTimerEffect[]>([
+        {
+          kind: "arm-idle-timer",
+          sessionId: SESSION_ID,
+          idleMs: 300_000,
+          maxIterations: 10,
+        },
+      ]);
+      expect(result.busEvents).toEqual([]);
+      expect(result.logEntries).toEqual([]);
+    });
+
+    it.each<GroupStatus>(["pairing", "degraded", "reconnecting", "archived"])(
+      "suppresses arm when prev === %s (group not active)",
+      (state) => {
+        const ev: GroupEvent = {
+          type: "orchestrator_turn_idle",
+          sessionId: SESSION_ID,
+          idleMs: 300_000,
+          maxIterations: 10,
+        };
+        const next = transition(state, ev);
+        const result = deriveSideEffects(state, next, ev);
+        expect(result.idleTimerEffects).toEqual([]);
+        expect(result.busEvents).toEqual([]);
+        expect(result.logEntries).toEqual([]);
+      },
+    );
+  });
+
+  describe("deriveSideEffects — orchestrator_turn_active", () => {
+    // note-user-message fires regardless of group status. The manager's
+    // noteUserMessage is idempotent on missing sessions — coarse group
+    // gating at this layer would risk leaving a stale timer armed across
+    // a flap, which the EC-7 TOCTOU defence already prevents anyway.
+    it.each<GroupStatus>(["pairing", "active", "degraded", "reconnecting"])(
+      "emits note-user-message regardless of status (prev=%s)",
+      (state) => {
+        const ev: GroupEvent = { type: "orchestrator_turn_active", sessionId: SESSION_ID };
+        const next = transition(state, ev);
+        const result = deriveSideEffects(state, next, ev);
+        expect(result.idleTimerEffects).toEqual<GroupIdleTimerEffect[]>([
+          { kind: "note-user-message", sessionId: SESSION_ID },
+        ]);
+        expect(result.busEvents).toEqual([]);
+        expect(result.logEntries).toEqual([]);
+      },
+    );
+  });
+
+  describe("deriveSideEffects — stop_finding_raised / _resolved", () => {
+    it("stop_finding_raised emits cancel-idle-timer", () => {
+      const ev: GroupEvent = { type: "stop_finding_raised", sessionId: SESSION_ID };
+      const next = transition("active", ev);
+      const result = deriveSideEffects("active", next, ev);
+      expect(result.idleTimerEffects).toEqual<GroupIdleTimerEffect[]>([
+        { kind: "cancel-idle-timer", sessionId: SESSION_ID },
+      ]);
+      expect(result.busEvents).toEqual([]);
+      expect(result.logEntries).toEqual([]);
+    });
+
+    it("stop_finding_resolved emits no effects (next turn-idle re-arms naturally)", () => {
+      const ev: GroupEvent = { type: "stop_finding_resolved", sessionId: SESSION_ID };
+      const next = transition("active", ev);
+      const result = deriveSideEffects("active", next, ev);
+      expect(result.idleTimerEffects).toEqual([]);
+      expect(result.busEvents).toEqual([]);
+      expect(result.logEntries).toEqual([]);
+    });
+  });
+
+  describe("deriveSideEffects — manager notifications (log-only)", () => {
+    it("auto_proceed_fired produces a single EC-9 log entry, no bus, no idle effect", () => {
+      const ev: GroupEvent = {
+        type: "auto_proceed_fired",
+        sessionId: SESSION_ID,
+        iteration: 3,
+        firedAtMs: 1_700_000_000_000,
+      };
+      const next = transition("active", ev);
+      const result = deriveSideEffects("active", next, ev);
+      expect(result.logEntries).toEqual<GroupLogEntry[]>([
+        {
+          event: "group.auto-proceed.fired",
+          role: "orchestrator",
+          sessionId: SESSION_ID,
+          iteration: 3,
+        },
+      ]);
+      expect(result.busEvents).toEqual([]);
+      expect(result.idleTimerEffects).toEqual([]);
+    });
+
+    it("iteration_cap_tripped produces a single EC-9 log entry, no bus, no idle effect", () => {
+      const ev: GroupEvent = {
+        type: "iteration_cap_tripped",
+        sessionId: SESSION_ID,
+        iteration: 10,
+        cappedAtMs: 1_700_000_000_000,
+      };
+      const next = transition("active", ev);
+      const result = deriveSideEffects("active", next, ev);
+      expect(result.logEntries).toEqual<GroupLogEntry[]>([
+        {
+          event: "group.auto-proceed.cap-reached",
+          role: "orchestrator",
+          sessionId: SESSION_ID,
+          iteration: 10,
+        },
+      ]);
+      expect(result.busEvents).toEqual([]);
+      expect(result.idleTimerEffects).toEqual([]);
+    });
+  });
+
+  // Auto-proceed events never emit `bus events`. The pairing invariant
+  // from the lifecycle matrix (bus.length === log.length) does NOT apply —
+  // here the invariant is "exactly one channel per event": bus | log |
+  // idle-timer, never two at once, never zero (except stop_finding_resolved).
+  it("each auto-proceed event populates exactly one effect channel (or zero for stop_finding_resolved)", () => {
+    const cells: Array<{ event: GroupEvent; expectIdle: boolean; expectLog: boolean }> = [
+      { event: { type: "orchestrator_turn_idle", sessionId: SESSION_ID, idleMs: 1, maxIterations: 1 }, expectIdle: true, expectLog: false },
+      { event: { type: "orchestrator_turn_active", sessionId: SESSION_ID }, expectIdle: true, expectLog: false },
+      { event: { type: "stop_finding_raised", sessionId: SESSION_ID }, expectIdle: true, expectLog: false },
+      { event: { type: "stop_finding_resolved", sessionId: SESSION_ID }, expectIdle: false, expectLog: false },
+      { event: { type: "auto_proceed_fired", sessionId: SESSION_ID, iteration: 1, firedAtMs: 0 }, expectIdle: false, expectLog: true },
+      { event: { type: "iteration_cap_tripped", sessionId: SESSION_ID, iteration: 1, cappedAtMs: 0 }, expectIdle: false, expectLog: true },
+    ];
+    for (const cell of cells) {
+      const result = deriveSideEffects("active", "active", cell.event);
+      expect(result.busEvents).toEqual([]);
+      expect(result.idleTimerEffects.length > 0, `idle expected=${cell.expectIdle} for ${cell.event.type}`).toBe(cell.expectIdle);
+      expect(result.logEntries.length > 0, `log expected=${cell.expectLog} for ${cell.event.type}`).toBe(cell.expectLog);
+    }
   });
 });

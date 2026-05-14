@@ -28,6 +28,11 @@ import { isSupportedPairing as _isSupportedPairing } from "./backend-provider.js
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { IdleTimerManager } from "./idle-timer-manager.js";
+import {
+  buildNoopIdleTimerManager,
+  runAutoProceedBootReconcile,
+} from "./auto-proceed-orchestrator-bindings.js";
 import type { CheckpointPayload, ObserverReviewPayload } from "./council-types.js";
 import { OBSERVER_WAKE_PAYLOAD_VERSION, OBSERVER_WAKE_TIMEOUT_MS, parseCheckpointPayload } from "./council-types.js";
 import { watchCheckpoints } from "./checkpoint-watcher.js";
@@ -102,6 +107,15 @@ export interface SessionOrchestratorDeps {
     unwatch(sessionId: string): void;
   };
   agentExecutor: AgentExecutor;
+  /**
+   * Auto-proceed idle-timer manager (PLAN Task 7+9). Optional with a
+   * disposable null-object default so tests and existing callers that
+   * don't exercise auto-proceed don't need to thread a stub through.
+   * Production wires the real {@link IdleTimerManager} in `index.ts`;
+   * the orchestrator owns the rehydrate-on-boot + dispose-on-shutdown
+   * ladder.
+   */
+  idleTimerManager?: IdleTimerManager;
 }
 
 export interface CreateSessionRequest {
@@ -342,6 +356,18 @@ export class SessionOrchestrator {
   private worktreeTracker: WorktreeTracker;
   private prPoller: SessionOrchestratorDeps["prPoller"];
   private agentExecutor: AgentExecutor;
+  /**
+   * Auto-proceed idle-timer manager (PLAN Task 7+9). Lifecycle:
+   *  - Boot reconcile: in {@link initialize}, after `reconcileCouncilGroups`,
+   *    scan each active group's `.council/state/` for trace JSON and
+   *    rehydrate the per-session iteration counter via `manager.rehydrate`.
+   *  - SIGTERM drain: `disposeAll()` is the FIRST step in `group-shutdown.ts`,
+   *    called BEFORE kill propagation (EC-2 extends naturally — timers
+   *    cleared before kills fire to children).
+   * Null-object when DI omits it so test paths and existing tests don't
+   * crash; production always wires the real manager from `index.ts`.
+   */
+  private idleTimerManager: IdleTimerManager;
 
   // Auto-relaunch state
   private relaunchingSet = new Set<string>();
@@ -403,6 +429,34 @@ export class SessionOrchestrator {
     this.worktreeTracker = deps.worktreeTracker;
     this.prPoller = deps.prPoller;
     this.agentExecutor = deps.agentExecutor;
+    // Null-object default when DI omits the manager. Disposing a null
+    // manager is a no-op; rehydrate is a no-op; arm/cancel/note are no-ops.
+    // Production wires the real manager from `index.ts` so the boot
+    // reconcile path actually rehydrates traces.
+    this.idleTimerManager = deps.idleTimerManager ?? buildNoopIdleTimerManager();
+  }
+
+  /**
+   * Accessor for the gracefulShutdown SIGTERM-drain path in `index.ts`.
+   * Returns the manager so `shutdownAllGroups` can call `disposeAll()`
+   * BEFORE the kill propagation. EC-2 invariant — cancel timers before
+   * kills fire to children.
+   */
+  getIdleTimerManager(): IdleTimerManager {
+    return this.idleTimerManager;
+  }
+
+  /**
+   * Late-injection seam for the idle-timer manager. Necessary because
+   * the production wiring is mutually circular — the manager's
+   * `getSession` / `getGroupStatus` closures reference the orchestrator
+   * (for the coordinator + ws-bridge lookups). `index.ts` constructs the
+   * orchestrator first with the noop default, then builds the real
+   * manager closing over the orchestrator reference, then calls this
+   * setter BEFORE `initialize()` runs the boot reconcile.
+   */
+  setIdleTimerManager(manager: IdleTimerManager): void {
+    this.idleTimerManager = manager;
   }
 
   // ── Initialization (event wiring) ──────────────────────────────────────────
@@ -663,8 +717,47 @@ export class SessionOrchestrator {
     // are armed for any wake we dispatch here.
     this.scanForMissedObserverWakes();
 
+    // PLAN-aura-orchestrator-idle-auto-proceed Task 9: rehydrate the idle
+    // timer manager's per-session iteration counters from on-disk traces.
+    // Must run AFTER `reconcileCouncilGroups` (which populates
+    // `councilGroupMeta` with orchestrator sessionId + workspace cwd) so
+    // each trace maps to a known orchestrator-half. Idempotent — safe to
+    // call multiple times; re-rehydrating with the same trace produces
+    // the same in-memory state.
+    this.rehydrateAutoProceedTraces();
+
     // Reconnection watchdog for stale sessions after server restart
     this.startReconnectionWatchdog();
+  }
+
+  /**
+   * PLAN-aura-orchestrator-idle-auto-proceed Task 9: boot reconcile.
+   *
+   * Walks each active council group's `.council/state/` directory looking
+   * for `<group-id>-auto-proceed-trace.json` files. For each parseable
+   * trace whose `sessionGroupId` matches a reconciled group, calls
+   * {@link IdleTimerManager.rehydrate} with the orchestrator-half session
+   * id so the in-memory iteration counter resumes from disk rather than
+   * starting at zero.
+   *
+   * Logic lives in the dependency-injected
+   * {@link reconcileAutoProceedTraces} reducer so the unit test exercises
+   * the real filesystem + real manager without standing up the
+   * orchestrator's full event-bus harness. This method is just the
+   * concrete-bindings adapter.
+   *
+   * Idempotency: re-running with no on-disk changes is a no-op. Errors
+   * are caught + logged inside the reducer; this method never throws so
+   * `initialize()` always completes.
+   */
+  private rehydrateAutoProceedTraces(): void {
+    runAutoProceedBootReconcile(
+      this.councilGroupMeta,
+      this.councilWatchers,
+      this.idleTimerManager,
+      (entry) =>
+        log.info("session-orchestrator", "auto-proceed reconcile", entry as unknown as Record<string, unknown>),
+    );
   }
 
   /**
@@ -1259,6 +1352,14 @@ export class SessionOrchestrator {
       },
       kill: async (sessionId) => {
         await this.killSession(sessionId);
+      },
+      // PLAN Task 8: route applyEvent's auto-proceed idle-timer descriptors
+      // into the real IdleTimerManager. AP-2 — the state machine is the
+      // sole mutator; this seam is the enactor that drains its effects.
+      idleTimerEnactor: {
+        arm: (sessionId, options) => this.idleTimerManager.arm(sessionId, options),
+        cancel: (sessionId) => this.idleTimerManager.cancel(sessionId),
+        noteUserMessage: (sessionId) => this.idleTimerManager.noteUserMessage(sessionId),
       },
     });
     return this.coordinator;
