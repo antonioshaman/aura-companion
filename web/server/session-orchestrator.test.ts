@@ -1225,6 +1225,235 @@ describe("SessionOrchestrator", () => {
     });
   });
 
+  // ── Archive — Council pair routing (EC-2 fix) ─────────────────────────────
+  //
+  // Validates the P1 fix for the bug where the sidebar's "Archive Council
+  // pair?" confirm modal advertised dual-kill but `archiveSession` was
+  // group-blind: it killed only the clicked half. `coordinator.archiveGroup`
+  // existed + state-machine-tested + documented in CLAUDE.md, but had ZERO
+  // production call sites. The surviving half kept self-polling forever.
+  //
+  // These tests prove the council branch in `archiveSession` ACTUALLY routes
+  // through `coordinator.archiveGroup` and that the EC-2 ordering invariant
+  // is preserved (BOTH session ids in `intentionalKills` BEFORE either kill
+  // runs).
+  describe("archiveSession() — council pair routing (EC-2)", () => {
+    type FakeGroup = {
+      sessionGroupId: string;
+      status: "active" | "degraded" | "pairing" | "reconnecting" | "archived";
+      primary: { sessionId: string };
+      observer: { sessionId: string };
+    };
+
+    function installFakeCoordinator(group: FakeGroup, archiveGroupResult = true) {
+      const archiveGroupSpy = vi.fn(async (sgid: string) => {
+        expect(sgid).toBe(group.sessionGroupId);
+        return archiveGroupResult;
+      });
+      const findBySessionIdSpy = vi.fn((sid: string): FakeGroup | undefined => {
+        if (sid === group.primary.sessionId || sid === group.observer.sessionId) {
+          return group;
+        }
+        return undefined;
+      });
+      // The orchestrator's `coordinator` field is private; reach in via
+      // the same `as any` cast pattern used by `cleanupCouncilForSession`
+      // tests below. Production code constructs the real coordinator in
+      // `initialize()`; for council-routing tests we never need its full
+      // state-machine surface, only the two methods archiveSession reads.
+      (orchestrator as any).coordinator = {
+        findBySessionId: findBySessionIdSpy,
+        archiveGroup: archiveGroupSpy,
+      };
+      return { archiveGroupSpy, findBySessionIdSpy };
+    }
+
+    function fakeGroup(overrides: Partial<FakeGroup> = {}): FakeGroup {
+      return {
+        sessionGroupId: "grp_council_test",
+        status: "active",
+        primary: { sessionId: "s-orch" },
+        observer: { sessionId: "s-obs" },
+        ...overrides,
+      };
+    }
+
+    it("clicking orchestrator half routes through coordinator.archiveGroup with EC-2 ordering", async () => {
+      const group = fakeGroup();
+      // Capture intentionalKills state AT THE MOMENT archiveGroup is called,
+      // not after. This is the EC-2 ordering proof: both ids must already
+      // be in the absorbing set BEFORE coordinator.deps.kill runs against
+      // either half. Without this, the dead half's `session:exited` handler
+      // would enter the reconnecting → degraded ladder instead of the
+      // absorbing intentional-kill branch.
+      let intentionalAtArchiveTime: string[] = [];
+      const archiveGroupSpy = vi.fn(async () => {
+        intentionalAtArchiveTime = Array.from((orchestrator as any).intentionalKills);
+        return true;
+      });
+      (orchestrator as any).coordinator = {
+        findBySessionId: vi.fn((sid: string) =>
+          sid === "s-orch" || sid === "s-obs" ? group : undefined,
+        ),
+        archiveGroup: archiveGroupSpy,
+      };
+
+      const result = await orchestrator.archiveSession("s-orch");
+
+      expect(result.ok).toBe(true);
+      expect(archiveGroupSpy).toHaveBeenCalledTimes(1);
+      expect(archiveGroupSpy).toHaveBeenCalledWith("grp_council_test");
+      // EC-2 ordering: BOTH ids visible in intentionalKills at archive time.
+      expect(intentionalAtArchiveTime).toContain("s-orch");
+      expect(intentionalAtArchiveTime).toContain("s-obs");
+    });
+
+    it("clicking observer half archives the WHOLE pair (P1 symptom fix)", async () => {
+      // The reported bug: clicking either half archived only that half.
+      // Validates that clicking the OBSERVER half also routes through
+      // coordinator.archiveGroup, which then kills both halves.
+      const group = fakeGroup();
+      const { archiveGroupSpy } = installFakeCoordinator(group);
+
+      const result = await orchestrator.archiveSession("s-obs");
+
+      expect(result.ok).toBe(true);
+      expect(archiveGroupSpy).toHaveBeenCalledTimes(1);
+      expect(deps.launcher.setArchived).toHaveBeenCalledWith("s-orch", true);
+      expect(deps.launcher.setArchived).toHaveBeenCalledWith("s-obs", true);
+    });
+
+    it("cleanupWorktree runs EXACTLY ONCE for council pairs (shared workspace)", async () => {
+      // Council pairs share one workspace. A naive fix that delegated to
+      // archiveGroup AND THEN called cleanupWorktree per-half would
+      // double-attempt removal. Observer review WARN #1 flagged this.
+      const group = fakeGroup();
+      installFakeCoordinator(group);
+      deps.worktreeTracker.getBySession.mockImplementation((sid: string) => {
+        if (sid === "s-orch") {
+          return {
+            sessionId: "s-orch",
+            repoRoot: "/repo",
+            branch: "feat",
+            worktreePath: "/wt/feat",
+            createdAt: 1000,
+          };
+        }
+        return undefined;
+      });
+
+      const result = await orchestrator.archiveSession("s-obs");
+
+      expect(result.ok).toBe(true);
+      expect(result.worktree).toMatchObject({ cleaned: true, path: "/wt/feat" });
+      // removeWorktree must be invoked once, on the orchestrator's
+      // provisioned worktree path — not twice for both halves.
+      expect(gitUtils.removeWorktree).toHaveBeenCalledTimes(1);
+      expect(gitUtils.removeWorktree).toHaveBeenCalledWith("/repo", "/wt/feat", {
+        force: false,
+        branchToDelete: undefined,
+      });
+    });
+
+    it("Linear transition runs on the clicked half (not both halves)", async () => {
+      // The clicked sessionId is what carries the linkedIssue in normal
+      // usage (orchestrator-side); observer-half has no linked issue.
+      // The helper consults sessionLinearIssues.getLinearIssue(clickedSid)
+      // exactly once, never twice.
+      const group = fakeGroup();
+      installFakeCoordinator(group);
+      vi.mocked(sessionLinearIssues.getLinearIssue).mockReturnValue({
+        id: "issue-1",
+        identifier: "ENG-42",
+        teamId: "team-1",
+        connectionId: "conn-1",
+      } as any);
+      vi.mocked(resolveApiKey).mockReturnValue({ apiKey: "lin_api_123", connectionId: "conn-1" });
+      vi.mocked(fetchLinearTeamStates).mockResolvedValue([{
+        id: "team-1",
+        key: "ENG",
+        name: "Engineering",
+        states: [{ id: "state-backlog", name: "Backlog", type: "backlog" }],
+      }]);
+      vi.mocked(transitionLinearIssue).mockResolvedValue({ ok: true } as any);
+
+      await orchestrator.archiveSession("s-orch", { linearTransition: "backlog" });
+
+      // getLinearIssue called once with the CLICKED sessionId (s-orch),
+      // never with the observer's sessionId.
+      const linearCalls = vi.mocked(sessionLinearIssues.getLinearIssue).mock.calls;
+      expect(linearCalls.some((c) => c[0] === "s-orch")).toBe(true);
+      expect(linearCalls.some((c) => c[0] === "s-obs")).toBe(false);
+      expect(transitionLinearIssue).toHaveBeenCalledTimes(1);
+    });
+
+    it("falls through to single-session path when group.status === 'archived'", async () => {
+      // Edge case: the group is already archived (re-entrancy / double
+      // user click). The branch condition `group.status !== 'archived'`
+      // must let this fall through to the single-session path rather than
+      // calling archiveGroup again (which is idempotent but would skip
+      // the per-session worktree + Linear flow this caller expects).
+      const group = fakeGroup({ status: "archived" });
+      const { archiveGroupSpy } = installFakeCoordinator(group);
+
+      const result = await orchestrator.archiveSession("s-orch");
+
+      expect(result.ok).toBe(true);
+      expect(archiveGroupSpy).not.toHaveBeenCalled();
+      // Falls through to single-session path: single launcher.kill call,
+      // single setArchived call.
+      expect(deps.launcher.kill).toHaveBeenCalledWith("s-orch");
+      expect(deps.launcher.kill).not.toHaveBeenCalledWith("s-obs");
+    });
+
+    it("falls through to single-session path when no group exists (non-council session)", async () => {
+      // Non-council sessions have no group entry. findBySessionId returns
+      // undefined → the council branch is skipped → existing single-session
+      // path runs as before. Sanity check that the new code didn't break
+      // the baseline 140-test path.
+      (orchestrator as any).coordinator = {
+        findBySessionId: vi.fn(() => undefined),
+        archiveGroup: vi.fn(async () => true),
+      };
+
+      const result = await orchestrator.archiveSession("s-standalone");
+
+      expect(result.ok).toBe(true);
+      expect((orchestrator as any).coordinator.archiveGroup).not.toHaveBeenCalled();
+      expect(deps.launcher.kill).toHaveBeenCalledWith("s-standalone");
+    });
+
+    it("EC-6 canary: archiveSession's function body contains coordinator.archiveGroup + findBySessionId", async () => {
+      // Observer review WARN #2: a file-level grep for `coordinator.archiveGroup`
+      // in session-orchestrator.ts would false-positive on the failure
+      // class IF a sibling helper anywhere else in the file already
+      // referenced the symbol (e.g., the cleanupCouncilForSession helper,
+      // or a future addition). Anchor the canary to archiveSession's
+      // function body specifically, extracted between the marker
+      // `async archiveSession(` and the next section separator
+      // `// ── Delete`. Survives renames of local variables via `\w+`.
+      //
+      // This test will FAIL if a future refactor accidentally removes
+      // the council detect-and-route branch (e.g., during a merge
+      // conflict, an over-eager simplification, or a bad rebase).
+      const { readFileSync } = await import("node:fs");
+      const { fileURLToPath } = await import("node:url");
+      const { dirname, join } = await import("node:path");
+      const here = dirname(fileURLToPath(import.meta.url));
+      const source = readFileSync(join(here, "session-orchestrator.ts"), "utf-8");
+      const archiveStart = source.indexOf("async archiveSession(");
+      expect(archiveStart).toBeGreaterThan(-1);
+      const nextSection = source.indexOf("// ── Delete", archiveStart);
+      expect(nextSection).toBeGreaterThan(archiveStart);
+      const body = source.slice(archiveStart, nextSection);
+      // archiveGroup call — survives renames of `coord` local var via `\w+`.
+      expect(body).toMatch(/\b\w+\.archiveGroup\s*\(/);
+      // findBySessionId call — must be inside the same function body, not
+      // only somewhere else in the file.
+      expect(body).toMatch(/\.findBySessionId\s*\(/);
+    });
+  });
+
   // ── Delete ────────────────────────────────────────────────────────────────
 
   describe("deleteSession()", () => {

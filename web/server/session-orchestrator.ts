@@ -2598,42 +2598,97 @@ export class SessionOrchestrator {
 
   // ── Archive ────────────────────────────────────────────────────────────────
 
-  async archiveSession(sessionId: string, options?: ArchiveSessionOptions): Promise<ArchiveSessionResult> {
-    let linearTransitionResult: ArchiveSessionResult["linearTransition"];
-    const linearTransition = options?.linearTransition;
-
-    if (linearTransition && linearTransition !== "none") {
-      const linkedIssue = sessionLinearIssues.getLinearIssue(sessionId);
-      if (linkedIssue) {
-        const resolved = resolveApiKey(linkedIssue.connectionId);
-        if (resolved) {
-          const { apiKey: linearApiKey, connectionId: resolvedConnId } = resolved;
-          const settings = getSettings();
-          const conn = resolvedConnId !== "legacy" ? getConnection(resolvedConnId) : null;
-          let targetStateId = "";
-
-          if (linearTransition === "backlog" && linkedIssue.teamId) {
-            const teams = await fetchLinearTeamStates(linearApiKey);
-            const team = teams.find((t) => t.id === linkedIssue.teamId);
-            const backlogState = team?.states.find((s) => s.type === "backlog");
-            if (backlogState) targetStateId = backlogState.id;
-          } else if (linearTransition === "configured") {
-            const archiveStateId = conn ? conn.archiveTransitionStateId : settings.linearArchiveTransitionStateId;
-            targetStateId = archiveStateId.trim();
-          }
-
-          if (targetStateId) {
-            try {
-              linearTransitionResult = await transitionLinearIssue(linkedIssue.id, targetStateId, linearApiKey, resolvedConnId);
-            } catch {
-              linearTransitionResult = { ok: false, error: "Transition failed unexpectedly" };
-            }
-          } else {
-            linearTransitionResult = { ok: true, skipped: true };
-          }
-        }
-      }
+  /**
+   * Linear-issue transition helper extracted so archiveSession can apply it
+   * exactly once per archive — both on the single-session path and on the
+   * council-pair path (which must not double-transition the orchestrator's
+   * linked issue if the user clicked the observer-half by accident; the
+   * observer half has no linked issue and this returns undefined harmlessly).
+   */
+  private async maybeTransitionLinearForArchive(
+    sessionId: string,
+    linearTransition: ArchiveSessionOptions["linearTransition"],
+  ): Promise<ArchiveSessionResult["linearTransition"]> {
+    if (!linearTransition || linearTransition === "none") return undefined;
+    const linkedIssue = sessionLinearIssues.getLinearIssue(sessionId);
+    if (!linkedIssue) return undefined;
+    const resolved = resolveApiKey(linkedIssue.connectionId);
+    if (!resolved) return undefined;
+    const { apiKey: linearApiKey, connectionId: resolvedConnId } = resolved;
+    const settings = getSettings();
+    const conn = resolvedConnId !== "legacy" ? getConnection(resolvedConnId) : null;
+    let targetStateId = "";
+    if (linearTransition === "backlog" && linkedIssue.teamId) {
+      const teams = await fetchLinearTeamStates(linearApiKey);
+      const team = teams.find((t) => t.id === linkedIssue.teamId);
+      const backlogState = team?.states.find((s) => s.type === "backlog");
+      if (backlogState) targetStateId = backlogState.id;
+    } else if (linearTransition === "configured") {
+      const archiveStateId = conn ? conn.archiveTransitionStateId : settings.linearArchiveTransitionStateId;
+      targetStateId = archiveStateId.trim();
     }
+    if (!targetStateId) return { ok: true, skipped: true };
+    try {
+      return await transitionLinearIssue(linkedIssue.id, targetStateId, linearApiKey, resolvedConnId);
+    } catch {
+      return { ok: false, error: "Transition failed unexpectedly" };
+    }
+  }
+
+  async archiveSession(sessionId: string, options?: ArchiveSessionOptions): Promise<ArchiveSessionResult> {
+    // EC-2: when the clicked session is part of an active council group,
+    // route the kill through `coordinator.archiveGroup` so BOTH halves'
+    // ids land in `intentionalKills` BEFORE either `launcher.kill` runs
+    // and the `group:exited` bus event fires via the same `applyEvent`
+    // channel as every other lifecycle transition (AP-2). Before this
+    // branch, `archiveSession` was group-blind and the surviving half
+    // kept self-polling indefinitely (P1 reported 2026-05-14).
+    const coord = this.coordinator;
+    const group = coord?.findBySessionId(sessionId);
+    if (coord && group && group.status !== "archived") {
+      const linearTransitionResult = await this.maybeTransitionLinearForArchive(
+        sessionId,
+        options?.linearTransition,
+      );
+
+      // EC-2 ordering: mark BOTH halves intentional BEFORE archiveGroup
+      // calls deps.kill on either. Without this, the dead half's
+      // `session:exited` handler would enter the `reconnecting → degraded`
+      // ladder instead of the absorbing intentional-kill path.
+      this.intentionalKills.add(group.primary.sessionId);
+      this.intentionalKills.add(group.observer.sessionId);
+
+      this.cancelKeepaliveTimer(group.primary.sessionId);
+      this.cancelKeepaliveTimer(group.observer.sessionId);
+      this.wsBridge.cancelDisconnectTimer(group.primary.sessionId);
+      this.wsBridge.cancelDisconnectTimer(group.observer.sessionId);
+      this.prPoller.unwatch(group.primary.sessionId);
+      this.prPoller.unwatch(group.observer.sessionId);
+
+      await coord.archiveGroup(group.sessionGroupId);
+
+      // Worktree cleanup runs ONCE — council pairs share one workspace;
+      // calling cleanupWorktree per-half would double-attempt the same
+      // directory removal (second call is a no-op today, but relying on
+      // that is fragile). Use the orchestrator half's id because the
+      // worktree is provisioned against that side at createCouncilGroup.
+      const worktreeResult = this.cleanupWorktree(group.primary.sessionId, options?.force);
+
+      containerManager.removeContainer(group.primary.sessionId);
+      containerManager.removeContainer(group.observer.sessionId);
+      this.launcher.setArchived(group.primary.sessionId, true);
+      this.launcher.setArchived(group.observer.sessionId, true);
+      this.sessionStore.setArchived(group.primary.sessionId, true);
+      this.sessionStore.setArchived(group.observer.sessionId, true);
+
+      return { ok: true, worktree: worktreeResult, linearTransition: linearTransitionResult };
+    }
+
+    // ── Single-session path (non-council or already-archived group) ─────────
+    const linearTransitionResult = await this.maybeTransitionLinearForArchive(
+      sessionId,
+      options?.linearTransition,
+    );
 
     this.intentionalKills.add(sessionId);
     this.cancelKeepaliveTimer(sessionId);
