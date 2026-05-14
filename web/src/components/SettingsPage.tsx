@@ -3,62 +3,6 @@ import { api } from "../api.js";
 import { useStore } from "../store.js";
 import { getTelemetryPreferenceEnabled, setTelemetryPreferenceEnabled } from "../analytics.js";
 import { navigateToSession, navigateHome } from "../utils/routing.js";
-import type { ClaudeTierState } from "../store/settings-slice.js";
-
-// PLAN Task 7 — visual classification for the verified-tier pill.
-// Friedman P4 calls for "verified-MAX-20x / verified-other-tier /
-// unknown" as three discrete states. We extend that here with
-// per-tier colour mapping so users can distinguish at a glance:
-// the MAX 20x ask is special-cased to the success token because
-// it's the feature flag the verification was added to surface.
-function ClaudeTierPill({ tier }: { tier: ClaudeTierState | null }) {
-  if (!tier) {
-    return (
-      <span
-        role="status"
-        aria-live="polite"
-        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs bg-cc-muted/10 border border-cc-muted/20 text-cc-muted"
-      >
-        <span aria-hidden="true" className="w-1.5 h-1.5 rounded-full bg-cc-muted" />
-        Tier not verified
-      </span>
-    );
-  }
-  const label = tier.plan ?? (
-    tier.tier === "max_20x" ? "Claude Max 20x" :
-    tier.tier === "max" ? "Claude Max" :
-    tier.tier === "pro" ? "Claude Pro" :
-    tier.tier === "team" ? "Claude Team" :
-    tier.tier === "enterprise" ? "Claude Enterprise" :
-    tier.tier === "free" ? "Claude Free" :
-    tier.tier === "api" ? "API account" :
-    "Tier unknown"
-  );
-  const className =
-    tier.tier === "max_20x"
-      ? "bg-cc-success/15 border-cc-success/30 text-cc-success"
-      : tier.tier === "unknown"
-      ? "bg-cc-warning/10 border-cc-warning/25 text-cc-warning"
-      : "bg-cc-primary/10 border-cc-primary/25 text-cc-primary";
-  const dot =
-    tier.tier === "max_20x"
-      ? "bg-cc-success"
-      : tier.tier === "unknown"
-      ? "bg-cc-warning"
-      : "bg-cc-primary";
-  return (
-    <span
-      role="status"
-      aria-live="polite"
-      data-testid="claude-tier-pill"
-      data-tier={tier.tier}
-      className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs border ${className}`}
-    >
-      <span aria-hidden="true" className={`w-1.5 h-1.5 rounded-full ${dot}`} />
-      {label}
-    </span>
-  );
-}
 
 interface SettingsPageProps {
   embedded?: boolean;
@@ -120,15 +64,6 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
   const [claudeCodeTokenConfigured, setClaudeCodeTokenConfigured] = useState(false);
   const [openaiApiKey, setOpenaiApiKey] = useState("");
   const [openaiApiKeyConfigured, setOpenaiApiKeyConfigured] = useState(false);
-  // PLAN Task 7 — non-secret Anthropic org UUID + verified-tier display.
-  // Org ID is plain text (UUID), echoed back from the server. Tier is
-  // verified on-demand via the Re-verify button — we never auto-fetch
-  // on mount (Friedman P4: "verify on demand, not on session start").
-  const [anthropicOrganizationId, setAnthropicOrganizationId] = useState("");
-  const [tierVerifying, setTierVerifying] = useState(false);
-  const [tierError, setTierError] = useState("");
-  const setClaudeTierSlice = useStore((s) => s.setClaudeTier);
-  const claudeTierSlice = useStore((s) => s.claudeTier);
   // Task 6: also hydrate the settings-slice so other consumers (the
   // New Session pairing-availability gate, future MAX 20x verifier)
   // read a single source of truth. The local useState above stays so
@@ -222,9 +157,6 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
           });
         }
         setAnthropicModel(s.anthropicModel || "claude-sonnet-4-6");
-        if (typeof s.anthropicOrganizationId === "string") {
-          setAnthropicOrganizationId(s.anthropicOrganizationId);
-        }
         if (typeof s.aiValidationEnabled === "boolean") setAiValidationEnabled(s.aiValidationEnabled);
         if (typeof s.aiValidationAutoApprove === "boolean") setAiValidationAutoApprove(s.aiValidationAutoApprove);
         if (typeof s.aiValidationAutoDeny === "boolean") setAiValidationAutoDeny(s.aiValidationAutoDeny);
@@ -732,75 +664,6 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                   </p>
                 </div>
 
-                {/* PLAN Task 7 — Anthropic org UUID + Claude tier verification.
-                    Non-secret field (UUID), echoed in cleartext. Tier is
-                    verified on-demand via Verify; never auto-fetched on
-                    mount (Friedman P4). */}
-                <div className="space-y-2 pt-4 border-t border-cc-border">
-                  <label className="block text-sm font-medium" htmlFor="anthropic-org-id">
-                    Anthropic Organization ID
-                  </label>
-                  <p className="text-xs text-cc-muted">
-                    UUID from your Anthropic account. Required for the Claude tier verification probe to hit the org-scoped endpoint.
-                  </p>
-                  <input
-                    id="anthropic-org-id"
-                    type="text"
-                    value={anthropicOrganizationId}
-                    onChange={(e) => setAnthropicOrganizationId(e.target.value)}
-                    placeholder="00000000-0000-0000-0000-000000000000"
-                    className="w-full px-3 py-2.5 min-h-[44px] text-sm bg-cc-bg rounded-lg text-cc-fg placeholder:text-cc-muted focus:outline-none focus:ring-1 focus:ring-cc-primary/40 transition-shadow font-mono-code"
-                    aria-describedby="anthropic-org-id-status"
-                  />
-                  <p id="anthropic-org-id-status" className="text-xs text-cc-muted">
-                    {anthropicOrganizationId.trim() ? "Organization ID set" : "Organization ID not set"}
-                  </p>
-
-                  {/* Tier status pill + Verify button */}
-                  <div className="flex flex-wrap items-center gap-2 pt-2">
-                    <ClaudeTierPill tier={claudeTierSlice} />
-                    <button
-                      type="button"
-                      disabled={tierVerifying}
-                      onClick={async () => {
-                        setTierVerifying(true);
-                        setTierError("");
-                        try {
-                          await api.invalidateClaudeTier();
-                          const res = await api.verifyClaudeTier();
-                          setClaudeTierSlice({
-                            tier: res.tier,
-                            plan: res.plan,
-                            dailyLimit: res.dailyLimit,
-                            cached: res.cached,
-                            fetchedAt: Date.now(),
-                            latencyMs: res.latencyMs,
-                          });
-                        } catch (err: unknown) {
-                          setTierError(err instanceof Error ? err.message : String(err));
-                        } finally {
-                          setTierVerifying(false);
-                        }
-                      }}
-                      className={`px-3 py-1.5 min-h-[36px] rounded-md text-xs font-medium transition-colors ${
-                        tierVerifying
-                          ? "bg-cc-muted/20 text-cc-muted cursor-wait"
-                          : "bg-cc-primary/15 hover:bg-cc-primary/25 text-cc-primary cursor-pointer"
-                      }`}
-                    >
-                      {tierVerifying ? "Verifying…" : claudeTierSlice ? "Re-verify tier" : "Verify tier"}
-                    </button>
-                    {claudeTierSlice?.cached === true && (
-                      <span className="text-[10px] text-cc-muted">(from cache)</span>
-                    )}
-                  </div>
-                  {tierError && (
-                    <div className="px-3 py-2 rounded-lg bg-cc-error/10 border border-cc-error/20 text-xs text-cc-error">
-                      Verification failed: {tierError}
-                    </div>
-                  )}
-                </div>
-
                 {providerError && (
                   <div className="px-3 py-2 rounded-lg bg-cc-error/10 border border-cc-error/20 text-xs text-cc-error">
                     {providerError}
@@ -821,17 +684,10 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                     setProviderError("");
                     setProviderSaved(false);
                     try {
-                      const payload: { claudeCodeOAuthToken?: string; openaiApiKey?: string; anthropicOrganizationId?: string } = {};
+                      const payload: { claudeCodeOAuthToken?: string; openaiApiKey?: string } = {};
                       if (claudeCodeToken.trim()) payload.claudeCodeOAuthToken = claudeCodeToken.trim();
                       if (openaiApiKey.trim()) payload.openaiApiKey = openaiApiKey.trim();
-                      // PLAN Task 7 — always send org ID with provider save so
-                      // a user can clear it (empty string) or update without
-                      // re-typing every token.
-                      payload.anthropicOrganizationId = anthropicOrganizationId.trim();
                       const res = await api.updateSettings(payload);
-                      // Invalidate cached tier — credentials may have flipped it.
-                      try { await api.invalidateClaudeTier(); } catch { /* non-blocking */ }
-                      setClaudeTierSlice(null);
                       setClaudeCodeTokenConfigured(res.claudeCodeOAuthTokenConfigured);
                       setOpenaiApiKeyConfigured(res.openaiApiKeyConfigured);
                       // Task 6: dual-write to slice so other consumers
