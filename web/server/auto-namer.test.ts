@@ -16,7 +16,6 @@ beforeEach(() => {
   vi.mocked(settingsManager.getSettings).mockReturnValue({
     anthropicApiKey: "sk-ant-key",
     anthropicModel: "claude-sonnet-4-6",
-      anthropicOrganizationId: "",
     linearApiKey: "",
     linearAutoTransition: false,
     linearAutoTransitionStateId: "",
@@ -60,7 +59,6 @@ describe("generateSessionTitle", () => {
     vi.mocked(settingsManager.getSettings).mockReturnValue({
       anthropicApiKey: "",
       anthropicModel: "claude-sonnet-4-6",
-      anthropicOrganizationId: "",
       linearApiKey: "",
       linearAutoTransition: false,
       linearAutoTransitionStateId: "",
@@ -110,7 +108,6 @@ describe("generateSessionTitle", () => {
   it("uses configured Anthropic model", async () => {
     vi.mocked(settingsManager.getSettings).mockReturnValue({
       anthropicApiKey: "sk-ant-key",
-      anthropicOrganizationId: "",
       anthropicModel: "claude-haiku-3",
       linearApiKey: "",
       linearAutoTransition: false,
@@ -190,7 +187,6 @@ describe("generateSessionTitle", () => {
   it("uses default model when configured model is empty", async () => {
     vi.mocked(settingsManager.getSettings).mockReturnValue({
       anthropicApiKey: "sk-ant-key",
-      anthropicOrganizationId: "",
       anthropicModel: "",
       linearApiKey: "",
       linearAutoTransition: false,

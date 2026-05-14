@@ -79,7 +79,6 @@ vi.mock("./settings-manager.js", () => ({
   getSettings: vi.fn(() => ({
     anthropicApiKey: "",
     anthropicModel: "claude-sonnet-4-6",
-      anthropicOrganizationId: "",
     linearApiKey: "",
     linearAutoTransition: false,
     linearAutoTransitionStateId: "",
@@ -106,10 +105,6 @@ vi.mock("./settings-manager.js", () => ({
   updateSettings: vi.fn((patch) => ({
     anthropicApiKey: patch.anthropicApiKey ?? "",
     anthropicModel: patch.anthropicModel ?? "claude-sonnet-4-6",
-    anthropicOrganizationId: patch.anthropicOrganizationId ?? "",
-    claudeCodeOAuthToken: patch.claudeCodeOAuthToken ?? "",
-    openaiApiKey: patch.openaiApiKey ?? "",
-    onboardingCompleted: patch.onboardingCompleted ?? false,
     linearApiKey: patch.linearApiKey ?? "",
     linearAutoTransition: patch.linearAutoTransition ?? false,
     linearAutoTransitionStateId: patch.linearAutoTransitionStateId ?? "",
@@ -1227,7 +1222,6 @@ describe("GET /api/sessions/:id/archive-info", () => {
     vi.mocked(settingsManager.getSettings).mockReturnValue({
       anthropicApiKey: "",
       anthropicModel: "claude-sonnet-4-6",
-      anthropicOrganizationId: "",
       linearApiKey: "lin_test_key",
       linearAutoTransition: false,
       linearAutoTransitionStateId: "",
@@ -1598,7 +1592,6 @@ describe("GET /api/settings", () => {
     vi.mocked(settingsManager.getSettings).mockReturnValue({
       anthropicApiKey: "or-secret",
       anthropicModel: "claude-sonnet-4-6",
-      anthropicOrganizationId: "",
       linearApiKey: "",
       linearAutoTransition: false,
       linearAutoTransitionStateId: "",
@@ -1630,7 +1623,6 @@ describe("GET /api/settings", () => {
     expect(json).toEqual({
       anthropicApiKeyConfigured: true,
       anthropicModel: "claude-sonnet-4-6",
-      anthropicOrganizationId: "",
       claudeCodeOAuthTokenConfigured: false,
       openaiApiKeyConfigured: false,
       codexDeviceAuthConfigured: false,
@@ -1655,7 +1647,6 @@ describe("GET /api/settings", () => {
   it("reports key as not configured when empty", async () => {
     vi.mocked(settingsManager.getSettings).mockReturnValue({
       anthropicApiKey: "",
-      anthropicOrganizationId: "",
       anthropicModel: "openai/gpt-4o-mini",
       linearApiKey: "lin_api_123",
       linearAutoTransition: false,
@@ -1688,7 +1679,6 @@ describe("GET /api/settings", () => {
     expect(json).toEqual({
       anthropicApiKeyConfigured: false,
       anthropicModel: "openai/gpt-4o-mini",
-      anthropicOrganizationId: "",
       claudeCodeOAuthTokenConfigured: false,
       openaiApiKeyConfigured: false,
       codexDeviceAuthConfigured: false,
@@ -1715,7 +1705,6 @@ describe("GET /api/settings", () => {
     vi.mocked(settingsManager.getSettings).mockReturnValue({
       anthropicApiKey: "",
       anthropicModel: "claude-sonnet-4-6",
-      anthropicOrganizationId: "",
       linearApiKey: "",
       linearAutoTransition: false,
       linearAutoTransitionStateId: "",
@@ -1753,7 +1742,6 @@ describe("PUT /api/settings", () => {
     vi.mocked(settingsManager.updateSettings).mockReturnValue({
       anthropicApiKey: "new-key",
       anthropicModel: "claude-sonnet-4-6",
-      anthropicOrganizationId: "",
       linearApiKey: "",
       linearAutoTransition: false,
       linearAutoTransitionStateId: "",
@@ -1807,7 +1795,6 @@ describe("PUT /api/settings", () => {
     expect(json).toEqual({
       anthropicApiKeyConfigured: true,
       anthropicModel: "claude-sonnet-4-6",
-      anthropicOrganizationId: "",
       claudeCodeOAuthTokenConfigured: false,
       openaiApiKeyConfigured: false,
       codexDeviceAuthConfigured: false,
@@ -1833,7 +1820,6 @@ describe("PUT /api/settings", () => {
     vi.mocked(settingsManager.updateSettings).mockReturnValue({
       anthropicApiKey: "trimmed-key",
       anthropicModel: "claude-sonnet-4-6",
-      anthropicOrganizationId: "",
       linearApiKey: "lin_api_trimmed",
       linearAutoTransition: false,
       linearAutoTransitionStateId: "",
@@ -1868,7 +1854,6 @@ describe("PUT /api/settings", () => {
     expect(settingsManager.updateSettings).toHaveBeenCalledWith({
       anthropicApiKey: "trimmed-key",
       anthropicModel: "claude-sonnet-4-6",
-      anthropicOrganizationId: undefined,
       linearApiKey: "lin_api_trimmed",
       linearAutoTransition: undefined,
       linearAutoTransitionStateId: undefined,
@@ -1879,7 +1864,6 @@ describe("PUT /api/settings", () => {
   it("updates only model without overriding key", async () => {
     vi.mocked(settingsManager.updateSettings).mockReturnValue({
       anthropicApiKey: "existing-key",
-      anthropicOrganizationId: "",
       anthropicModel: "openai/gpt-4o-mini",
       linearApiKey: "lin_api_existing",
       linearAutoTransition: false,
@@ -1914,7 +1898,6 @@ describe("PUT /api/settings", () => {
     expect(res.status).toBe(200);
     expect(settingsManager.updateSettings).toHaveBeenCalledWith({
       anthropicApiKey: undefined,
-      anthropicOrganizationId: undefined,
       anthropicModel: "openai/gpt-4o-mini",
       linearApiKey: undefined,
       linearAutoTransition: undefined,
@@ -1978,7 +1961,6 @@ describe("PUT /api/settings", () => {
     vi.mocked(settingsManager.updateSettings).mockReturnValue({
       anthropicApiKey: "",
       anthropicModel: "claude-sonnet-4-6",
-      anthropicOrganizationId: "",
       linearApiKey: "",
       linearAutoTransition: false,
       linearAutoTransitionStateId: "",
@@ -2205,7 +2187,6 @@ describe("GET /api/linear/issues", () => {
     vi.mocked(settingsManager.getSettings).mockReturnValue({
       anthropicApiKey: "",
       anthropicModel: "claude-sonnet-4-6",
-      anthropicOrganizationId: "",
       linearApiKey: "",
       linearAutoTransition: false,
       linearAutoTransitionStateId: "",
@@ -2241,7 +2222,6 @@ describe("GET /api/linear/issues", () => {
     vi.mocked(settingsManager.getSettings).mockReturnValue({
       anthropicApiKey: "",
       anthropicModel: "claude-sonnet-4-6",
-      anthropicOrganizationId: "",
       linearApiKey: "lin_api_123",
       linearAutoTransition: false,
       linearAutoTransitionStateId: "",
@@ -2330,7 +2310,6 @@ describe("GET /api/linear/issues", () => {
     vi.mocked(settingsManager.getSettings).mockReturnValue({
       anthropicApiKey: "",
       anthropicModel: "claude-sonnet-4-6",
-      anthropicOrganizationId: "",
       linearApiKey: "lin_api_123",
       linearAutoTransition: false,
       linearAutoTransitionStateId: "",
@@ -2426,7 +2405,6 @@ describe("GET /api/linear/issues", () => {
     vi.mocked(settingsManager.getSettings).mockReturnValue({
       anthropicApiKey: "",
       anthropicModel: "claude-sonnet-4-6",
-      anthropicOrganizationId: "",
       linearApiKey: "lin_api_123",
       linearAutoTransition: false,
       linearAutoTransitionStateId: "",
@@ -2487,7 +2465,6 @@ describe("GET /api/linear/connection", () => {
     vi.mocked(settingsManager.getSettings).mockReturnValue({
       anthropicApiKey: "",
       anthropicModel: "claude-sonnet-4-6",
-      anthropicOrganizationId: "",
       linearApiKey: "",
       linearAutoTransition: false,
       linearAutoTransitionStateId: "",
@@ -2523,7 +2500,6 @@ describe("GET /api/linear/connection", () => {
     vi.mocked(settingsManager.getSettings).mockReturnValue({
       anthropicApiKey: "",
       anthropicModel: "claude-sonnet-4-6",
-      anthropicOrganizationId: "",
       linearApiKey: "lin_api_123",
       linearAutoTransition: false,
       linearAutoTransitionStateId: "",
@@ -2581,7 +2557,6 @@ describe("POST /api/linear/issues/:id/transition", () => {
     vi.mocked(settingsManager.getSettings).mockReturnValue({
       anthropicApiKey: "",
       anthropicModel: "claude-sonnet-4-6",
-      anthropicOrganizationId: "",
       linearApiKey: "lin_api_123",
       linearAutoTransition: false,
       linearAutoTransitionStateId: "state-123",
@@ -2621,7 +2596,6 @@ describe("POST /api/linear/issues/:id/transition", () => {
     vi.mocked(settingsManager.getSettings).mockReturnValue({
       anthropicApiKey: "",
       anthropicModel: "claude-sonnet-4-6",
-      anthropicOrganizationId: "",
       linearApiKey: "lin_api_123",
       linearAutoTransition: true,
       linearAutoTransitionStateId: "",
@@ -2660,7 +2634,6 @@ describe("POST /api/linear/issues/:id/transition", () => {
     vi.mocked(settingsManager.getSettings).mockReturnValue({
       anthropicApiKey: "",
       anthropicModel: "claude-sonnet-4-6",
-      anthropicOrganizationId: "",
       linearApiKey: "",
       linearAutoTransition: true,
       linearAutoTransitionStateId: "state-123",
@@ -2701,7 +2674,6 @@ describe("POST /api/linear/issues/:id/transition", () => {
     vi.mocked(settingsManager.getSettings).mockReturnValue({
       anthropicApiKey: "",
       anthropicModel: "claude-sonnet-4-6",
-      anthropicOrganizationId: "",
       linearApiKey: "lin_api_123",
       linearAutoTransition: true,
       linearAutoTransitionStateId: "state-doing",
@@ -2776,7 +2748,6 @@ describe("POST /api/linear/issues/:id/transition", () => {
     vi.mocked(settingsManager.getSettings).mockReturnValue({
       anthropicApiKey: "",
       anthropicModel: "claude-sonnet-4-6",
-      anthropicOrganizationId: "",
       linearApiKey: "lin_api_123",
       linearAutoTransition: true,
       linearAutoTransitionStateId: "state-doing",
@@ -2830,7 +2801,6 @@ describe("GET /api/linear/projects", () => {
     vi.mocked(settingsManager.getSettings).mockReturnValue({
       anthropicApiKey: "",
       anthropicModel: "claude-sonnet-4-6",
-      anthropicOrganizationId: "",
       linearApiKey: "",
       linearAutoTransition: false,
       linearAutoTransitionStateId: "",
@@ -2866,7 +2836,6 @@ describe("GET /api/linear/projects", () => {
     vi.mocked(settingsManager.getSettings).mockReturnValue({
       anthropicApiKey: "",
       anthropicModel: "claude-sonnet-4-6",
-      anthropicOrganizationId: "",
       linearApiKey: "lin_api_123",
       linearAutoTransition: false,
       linearAutoTransitionStateId: "",
@@ -2932,7 +2901,6 @@ describe("GET /api/linear/project-issues", () => {
     vi.mocked(settingsManager.getSettings).mockReturnValue({
       anthropicApiKey: "",
       anthropicModel: "claude-sonnet-4-6",
-      anthropicOrganizationId: "",
       linearApiKey: "",
       linearAutoTransition: false,
       linearAutoTransitionStateId: "",
@@ -2968,7 +2936,6 @@ describe("GET /api/linear/project-issues", () => {
     vi.mocked(settingsManager.getSettings).mockReturnValue({
       anthropicApiKey: "",
       anthropicModel: "claude-sonnet-4-6",
-      anthropicOrganizationId: "",
       linearApiKey: "lin_api_123",
       linearAutoTransition: false,
       linearAutoTransitionStateId: "",
@@ -3049,7 +3016,6 @@ describe("GET /api/linear/project-issues", () => {
     vi.mocked(settingsManager.getSettings).mockReturnValue({
       anthropicApiKey: "",
       anthropicModel: "claude-sonnet-4-6",
-      anthropicOrganizationId: "",
       linearApiKey: "lin_api_123",
       linearAutoTransition: false,
       linearAutoTransitionStateId: "",
