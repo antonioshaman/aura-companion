@@ -329,7 +329,32 @@ export type BrowserOutgoingMessage =
 export type BrowserIncomingMessageBase =
   | { type: "session_init"; session: SessionState }
   | { type: "session_update"; session: Partial<SessionState> }
-  | { type: "assistant"; message: CLIAssistantMessage["message"]; parent_tool_use_id: string | null; timestamp?: number }
+  | {
+    type: "assistant";
+    message: CLIAssistantMessage["message"];
+    parent_tool_use_id: string | null;
+    timestamp?: number;
+    /**
+     * PLAN Task 12 (schema versioning) — terminal state of the stream that
+     * produced this assistant message. Absent on legacy on-disk records;
+     * load-side reader treats missing as "complete" so existing histories
+     * render unchanged. New writes set:
+     *   - "complete"    — CLI finished the turn and emitted a consolidated
+     *                     `assistant` frame; the persisted message is whole.
+     *   - "interrupted" — CLI streamed deltas then died/disconnected before
+     *                     the consolidated frame arrived. The persisted
+     *                     message is a synthetic snapshot of the partial
+     *                     text; downstream renderers should signal the cut.
+     *   - "errored"     — CLI signalled an error mid-stream (reserved for
+     *                     future use; not produced yet).
+     *
+     * Reason this field belongs on the wire shape (not only on a private
+     * persisted shape): the browser receives historic messages via
+     * `message_history` AND live messages via `assistant`. The renderer
+     * needs the same signal in both cases.
+     */
+    streamStatus?: "complete" | "interrupted" | "errored";
+  }
   | { type: "stream_event"; event: unknown; parent_tool_use_id: string | null }
   | {
     type: "system_event";

@@ -61,6 +61,24 @@ export interface Session {
   stateMachine: SessionStateMachine;
   /** Cleanup function for state machine transition listener — call on session teardown. */
   unsubscribeStateMachine?: () => void;
+  /**
+   * PLAN Task 12 (streamStatus) — in-memory tracker of the assistant message
+   * currently being streamed by the CLI. Populated on `stream_event` for
+   * `message_start`, accumulated on `content_block_delta` text deltas, cleared
+   * on the consolidated `assistant` frame. If the CLI socket closes (confirmed
+   * after the 15s debounce) with this still set, the bridge synthesises a
+   * partial assistant message with `streamStatus: "interrupted"` and persists
+   * it so the next mount renders the cut bubble explicitly rather than
+   * silently losing the partial text. Not persisted itself — recomputed
+   * deterministically from incoming wire frames.
+   */
+  streamingAssistant?: {
+    id: string;
+    text: string;
+    parentToolUseId: string | null;
+    model?: string;
+    startedAt: number;
+  } | null;
 }
 
 export type GitSessionKey =

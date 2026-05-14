@@ -101,6 +101,7 @@ function AssistantMessage({ message }: { message: ChatMessage }) {
 
   const grouped = useMemo(() => groupContentBlocks(blocks), [blocks]);
   const toolUseById = useMemo(() => mapToolUsesById(blocks), [blocks]);
+  const isInterrupted = message.streamStatus === "interrupted";
 
   if (blocks.length === 0 && message.content) {
     // During streaming thinking phase, render as faded italic inline text
@@ -114,6 +115,7 @@ function AssistantMessage({ message }: { message: ChatMessage }) {
           ) : (
             <MarkdownContent text={message.content} showCursor={!!message.isStreaming} />
           )}
+          {isInterrupted ? <InterruptedBadge /> : null}
         </div>
       </div>
     );
@@ -135,7 +137,29 @@ function AssistantMessage({ message }: { message: ChatMessage }) {
           // Grouped tool_uses
           return <ToolGroupBlock key={i} name={group.name} items={group.items} />;
         })}
+        {isInterrupted ? <InterruptedBadge /> : null}
       </div>
+    </div>
+  );
+}
+
+/**
+ * PLAN Task 12 — small inline indicator under an assistant bubble whose
+ * stream was cut by a CLI disconnect/death. Uses `role="status"` so AT
+ * users get an explicit announcement rather than reading a truncated reply
+ * as if it were complete. Renders inline at the bottom of the bubble so
+ * the visual cut stays attached to its content.
+ */
+function InterruptedBadge() {
+  return (
+    <div
+      role="status"
+      className="mt-2 inline-flex items-center gap-1.5 text-[11px] text-cc-warning bg-cc-warning/10 border border-cc-warning/30 rounded-md px-2 py-0.5"
+    >
+      <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" className="w-3 h-3">
+        <path d="M7.293 1.293a1 1 0 0 1 1.414 0L15 7.586a1 1 0 0 1 0 1.414l-6.293 6.293a1 1 0 0 1-1.414 0L1 9a1 1 0 0 1 0-1.414L7.293 1.293Zm.707 3.039a.75.75 0 0 0-.75.75v3.5a.75.75 0 1 0 1.5 0v-3.5a.75.75 0 0 0-.75-.75Zm0 6.5a.875.875 0 1 0 0 1.75.875.875 0 0 0 0-1.75Z" />
+      </svg>
+      <span>Interrupted — CLI disconnected before reply completed</span>
     </div>
   );
 }

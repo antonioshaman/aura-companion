@@ -605,6 +605,7 @@ function handleParsedMessage(
         parentToolUseId: data.parent_tool_use_id,
         model: msg.model,
         stopReason: msg.stop_reason,
+        streamStatus: data.streamStatus,
       };
       // Clear any streaming draft first, then upsert the real message.
       // Using clearStreamingDraftMessage + upsertAssistantMessage instead of
@@ -994,6 +995,7 @@ function handleParsedMessage(
             parentToolUseId: histMsg.parent_tool_use_id,
             model: msg.model,
             stopReason: msg.stop_reason,
+            streamStatus: histMsg.streamStatus,
           };
           const existingIndex = chatMessages.findIndex((m) => m.role === "assistant" && m.id === assistantMsg.id);
           if (existingIndex === -1) {

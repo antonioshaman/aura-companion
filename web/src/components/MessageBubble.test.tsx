@@ -582,6 +582,92 @@ describe("MessageBubble - ToolGroupBlock", () => {
   });
 });
 
+// ─── streamStatus rendering (PLAN Task 12) ──────────────────────────────────
+
+describe("MessageBubble - interrupted stream status", () => {
+  it("renders an Interrupted indicator on assistant messages with streamStatus 'interrupted'", () => {
+    // Server synthesises an assistant frame with `streamStatus: "interrupted"`
+    // after the CLI disconnects mid-stream. The bubble must explicitly tell
+    // users the reply was cut so they don't read truncated text as final.
+    const msg = makeMessage({
+      role: "assistant",
+      content: "I will start by reading the middleware file. The current",
+      streamStatus: "interrupted",
+    });
+    render(<MessageBubble message={msg} />);
+
+    expect(screen.getByText(/Interrupted/)).toBeTruthy();
+    // The badge uses role="status" so AT users get an announcement instead
+    // of having to parse the truncated body for the cut.
+    expect(screen.getByRole("status")).toBeTruthy();
+  });
+
+  it("renders Interrupted indicator alongside structured content blocks", () => {
+    // When the partial stream produced enough text to land as content blocks
+    // (rare but possible if a delta included a code fence boundary), the
+    // badge still needs to render at the bottom of the bubble.
+    const msg = makeMessage({
+      role: "assistant",
+      content: "",
+      contentBlocks: [
+        { type: "text", text: "Beginning the refactor — first I'll" },
+      ],
+      streamStatus: "interrupted",
+    });
+    render(<MessageBubble message={msg} />);
+
+    expect(screen.getByText(/Interrupted/)).toBeTruthy();
+  });
+
+  it("does NOT render Interrupted indicator on streamStatus 'complete'", () => {
+    // Completed messages must not carry the warning visual. This protects
+    // against accidental migrations that flip the default from "absent"
+    // (treated as complete) to "interrupted" for legacy histories.
+    const msg = makeMessage({
+      role: "assistant",
+      content: "Final answer, all done.",
+      streamStatus: "complete",
+    });
+    render(<MessageBubble message={msg} />);
+
+    expect(screen.queryByText(/Interrupted/)).toBeNull();
+  });
+
+  it("does NOT render Interrupted indicator when streamStatus is absent (legacy migration default)", () => {
+    // Existing on-disk histories predating Task 12 lack the field. The
+    // renderer must treat absent as "complete", not as "interrupted",
+    // otherwise every legacy chat shows the warning on first load.
+    const msg = makeMessage({
+      role: "assistant",
+      content: "Legacy reply with no streamStatus field.",
+    });
+    render(<MessageBubble message={msg} />);
+
+    expect(screen.queryByText(/Interrupted/)).toBeNull();
+  });
+
+  it("passes accessibility scan with interrupted indicator visible", async () => {
+    // The interrupted badge is a new piece of always-on chrome on cut
+    // bubbles. axe must remain green so the new role="status" element
+    // doesn't introduce a contrast or aria violation on first ship.
+    //
+    // NB: we use an empty-content message so the scan exercises ONLY the
+    // badge surface. Including a content body would route through the
+    // file-level react-markdown mock, which (intentionally) exercises
+    // every renderer including a standalone <li> — that's a known mock
+    // artefact and is not what this axe scan is checking.
+    const { axe } = await import("vitest-axe");
+    const msg = makeMessage({
+      role: "assistant",
+      content: "",
+      streamStatus: "interrupted",
+    });
+    const { container } = render(<MessageBubble message={msg} />);
+    const results = await axe(container);
+    expect(results).toHaveNoViolations();
+  });
+});
+
 // ─── ContentBlockRenderer edge case ─────────────────────────────────────────
 
 describe("MessageBubble - ContentBlockRenderer", () => {
