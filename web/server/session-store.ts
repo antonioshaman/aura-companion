@@ -10,7 +10,27 @@ import type {
 
 // ─── Serializable session shape ─────────────────────────────────────────────
 
+/**
+ * Current schema version for the persisted-session record.
+ *
+ * PLAN Task 12 slice (i) — load-side discriminator that lets a
+ * future-version server reject older JSON shapes loudly rather than
+ * silently parsing with wrong defaults. Bump when adding/renaming any
+ * field on `PersistedSession` or nested `SessionState`. Migrations chain
+ * in `migratePersistedSession`.
+ *
+ * Versions:
+ *  - v0 (implicit) — pre-Task-12 records on disk WITHOUT the field.
+ *                    Loader treats `undefined` as v0 → no-op migrate to v1.
+ *  - v1            — first explicit version. Same shape as v0; adds the
+ *                    field. Future v2 means a real shape change.
+ */
+export const CURRENT_SESSION_SCHEMA_VERSION = 1 as const;
+
 export interface PersistedSession {
+  /** PLAN Task 12 (i) — explicit schema version. Optional because legacy
+   *  on-disk records lack it; `migratePersistedSession` fills it in. */
+  schemaVersion?: number;
   id: string;
   state: SessionState;
   messageHistory: BrowserIncomingMessage[];
@@ -21,6 +41,33 @@ export interface PersistedSession {
   lastAckSeq?: number;
   processedClientMessageIds?: string[];
   archived?: boolean;
+}
+
+/**
+ * Apply load-time schema migration to a parsed persisted session.
+ *
+ * Returns `null` when the on-disk version is from a newer server — caller
+ * treats null as "skip this record". Pure, idempotent.
+ */
+export function migratePersistedSession(
+  raw: PersistedSession,
+  logger: { warn: (msg: string) => void } = { warn: (msg) => console.warn(msg) },
+): PersistedSession | null {
+  const version = raw.schemaVersion;
+
+  if (typeof version === "number" && version > CURRENT_SESSION_SCHEMA_VERSION) {
+    logger.warn(
+      `[session-store] migrate: session ${raw.id} has schemaVersion=${version} ` +
+      `(this server understands up to ${CURRENT_SESSION_SCHEMA_VERSION}). Skipping.`,
+    );
+    return null;
+  }
+
+  // v0 (no field) → v1 (no shape change, just stamp the version).
+  if (version === undefined) {
+    return { ...raw, schemaVersion: CURRENT_SESSION_SCHEMA_VERSION };
+  }
+  return raw;
 }
 
 // ─── Store ──────────────────────────────────────────────────────────────────
@@ -207,7 +254,13 @@ export class SessionStore {
   /** Immediate write — use for critical state changes. */
   saveSync(session: PersistedSession): void {
     try {
-      writeFileSync(this.filePath(session.id), JSON.stringify(session), "utf-8");
+      // PLAN Task 12 (i) — always stamp the current schema version on writes
+      // so load-side discriminator is uniform across all on-disk records.
+      const stamped: PersistedSession = {
+        ...session,
+        schemaVersion: CURRENT_SESSION_SCHEMA_VERSION,
+      };
+      writeFileSync(this.filePath(session.id), JSON.stringify(stamped), "utf-8");
     } catch (err) {
       console.error(`[session-store] Failed to save session ${session.id}:`, err);
     }
@@ -217,7 +270,8 @@ export class SessionStore {
   load(sessionId: string): PersistedSession | null {
     try {
       const raw = readFileSync(this.filePath(sessionId), "utf-8");
-      return JSON.parse(raw) as PersistedSession;
+      const parsed = JSON.parse(raw) as PersistedSession;
+      return migratePersistedSession(parsed);
     } catch {
       return null;
     }
@@ -231,7 +285,9 @@ export class SessionStore {
       for (const file of files) {
         try {
           const raw = readFileSync(join(this.dir, file), "utf-8");
-          sessions.push(JSON.parse(raw));
+          const parsed = JSON.parse(raw) as PersistedSession;
+          const migrated = migratePersistedSession(parsed);
+          if (migrated) sessions.push(migrated);
         } catch {
           // Skip corrupt files
         }
