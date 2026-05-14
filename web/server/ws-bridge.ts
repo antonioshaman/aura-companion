@@ -390,6 +390,38 @@ export class WsBridge {
     });
   }
 
+  /**
+   * PLAN Task 12 (v) — at shutdown, walk every session and synthesise an
+   * interrupted assistant frame for any in-flight stream that the CLI
+   * never closed with a consolidated `assistant`. The existing per-session
+   * `flushInterruptedStream` already covers CLI disconnect; this is the
+   * sibling path for "the server itself is going down with active streams
+   * mid-token". Without this, SIGTERM during a long generation leaves the
+   * persisted history with no record of the in-flight reply (same data
+   * loss the disconnect path closed). Returns the count of synthesised
+   * frames for the shutdown log.
+   *
+   * Idempotent: re-running after the trackers are already null is a no-op.
+   * Does NOT itself persist the store — caller invokes
+   * `flushSessionStorePendingSync` immediately after so all the
+   * synthesised frames land in the same final write.
+   */
+  flushInterruptedStreamsForShutdown(): number {
+    let synthesised = 0;
+    for (const session of this.sessions.values()) {
+      if (session.streamingAssistant && session.streamingAssistant.text.length > 0) {
+        this.flushInterruptedStream(session);
+        synthesised += 1;
+      } else {
+        // Clear the tracker even if no text (no synthesis happens) so the
+        // post-shutdown invariant `streamingAssistant === null` holds for
+        // every session.
+        session.streamingAssistant = null;
+      }
+    }
+    return synthesised;
+  }
+
   /** Return per-session memory stats for diagnostics. */
   getSessionMemoryStats(): { id: string; browsers: number; historyLen: number; eventBufferLen: number; pendingMsgs: number }[] {
     return Array.from(this.sessions.values()).map((s) => ({

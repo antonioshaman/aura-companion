@@ -4902,3 +4902,99 @@ describe("Browser heartbeat", () => {
     expect(browser.send.mock.calls.length).toBe(sentAfterFirstTick);
   });
 });
+
+// ─── flushInterruptedStreamsForShutdown (PLAN Task 12-v) ──────────────────
+
+describe("flushInterruptedStreamsForShutdown", () => {
+  it("synthesises interrupted assistant frames for every session with in-flight text", () => {
+    // Multi-session shutdown scenario: two concurrent sessions, both
+    // mid-stream. SIGTERM arrives. Each must get its own interrupted
+    // bubble appended to history so the next mount renders the cut
+    // explicitly rather than silently losing the partial reply.
+    const sessionA = bridge.getOrCreateSession("shutdown-A");
+    const sessionB = bridge.getOrCreateSession("shutdown-B");
+
+    sessionA.streamingAssistant = {
+      id: "msg-a",
+      text: "Partial answer from session A.",
+      parentToolUseId: null,
+      model: "claude-sonnet-4-6",
+      startedAt: Date.now(),
+    };
+    sessionB.streamingAssistant = {
+      id: "msg-b",
+      text: "Another partial answer from session B.",
+      parentToolUseId: null,
+      model: "claude-sonnet-4-6",
+      startedAt: Date.now(),
+    };
+
+    const count = bridge.flushInterruptedStreamsForShutdown();
+    expect(count).toBe(2);
+
+    // History grew by exactly one interrupted assistant frame per session.
+    const aHistory = sessionA.messageHistory;
+    const bHistory = sessionB.messageHistory;
+    const aLast = aHistory[aHistory.length - 1];
+    const bLast = bHistory[bHistory.length - 1];
+    expect(aLast.type).toBe("assistant");
+    expect(bLast.type).toBe("assistant");
+    if (aLast.type === "assistant") expect(aLast.streamStatus).toBe("interrupted");
+    if (bLast.type === "assistant") expect(bLast.streamStatus).toBe("interrupted");
+
+    // Both trackers cleared — post-shutdown invariant.
+    expect(sessionA.streamingAssistant).toBeNull();
+    expect(sessionB.streamingAssistant).toBeNull();
+  });
+
+  it("clears empty-text trackers without synthesising a bubble", () => {
+    // A session that just received `message_start` but no deltas before
+    // shutdown should NOT get a fabricated empty bubble — but the
+    // tracker still needs clearing so the post-shutdown invariant holds.
+    const session = bridge.getOrCreateSession("shutdown-empty");
+    session.streamingAssistant = {
+      id: "msg-empty",
+      text: "",
+      parentToolUseId: null,
+      startedAt: Date.now(),
+    };
+
+    const count = bridge.flushInterruptedStreamsForShutdown();
+    expect(count).toBe(0);
+    expect(session.streamingAssistant).toBeNull();
+    // No new history entries from a zero-text flush.
+    expect(session.messageHistory).toHaveLength(0);
+  });
+
+  it("is a no-op when no sessions have in-flight streams", () => {
+    // Quiet shutdown — no streaming activity at all. Must report 0 and
+    // not mutate any session history.
+    bridge.getOrCreateSession("quiet-1");
+    bridge.getOrCreateSession("quiet-2");
+    const count = bridge.flushInterruptedStreamsForShutdown();
+    expect(count).toBe(0);
+  });
+
+  it("is idempotent on repeated invocation", () => {
+    // Re-running shutdown flush (e.g. SIGTERM after SIGINT during cleanup)
+    // must not double-synthesise an interrupted bubble or undo the
+    // tracker clear.
+    const session = bridge.getOrCreateSession("idempo");
+    session.streamingAssistant = {
+      id: "msg-idempo",
+      text: "Some partial.",
+      parentToolUseId: null,
+      startedAt: Date.now(),
+    };
+
+    const first = bridge.flushInterruptedStreamsForShutdown();
+    const second = bridge.flushInterruptedStreamsForShutdown();
+    expect(first).toBe(1);
+    expect(second).toBe(0);
+    // Exactly one interrupted frame in history — not two.
+    const interruptedFrames = session.messageHistory.filter(
+      (m) => m.type === "assistant" && m.streamStatus === "interrupted",
+    );
+    expect(interruptedFrames).toHaveLength(1);
+  });
+});
