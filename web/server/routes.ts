@@ -39,6 +39,8 @@ import { registerLinearConnectionRoutes } from "./routes/linear-connection-route
 import { getConnection, resolveApiKey } from "./linear-connections.js";
 import { registerLinearOAuthConnectionRoutes } from "./routes/linear-oauth-connection-routes.js";
 import { getSettings } from "./settings-manager.js";
+import { probeClaudeTier } from "./auth-tier-prober.js";
+import { tierCache } from "./auth-tier-cache.js";
 import { discoverClaudeSessions } from "./claude-session-discovery.js";
 import { getClaudeSessionHistoryPage } from "./claude-session-history.js";
 import { verifyToken, getToken, regenerateToken, getAllAddresses } from "./auth-manager.js";
@@ -182,6 +184,57 @@ export function createRoutes(
   api.post("/auth/regenerate", (c) => {
     const token = regenerateToken();
     return c.json({ token });
+  });
+
+  // ─── Claude tier verification (PLAN Task 7) ─────────────────────────
+  //
+  // On-demand probe of the Anthropic OAuth token against a chain of
+  // candidate endpoints. Result cached in-memory with TTL (1h default).
+  // Frontend Settings/Providers card calls verify on click + on save of
+  // new credentials (preceded by invalidate).
+  //
+  // Returns `{ tier, plan?, dailyLimit?, latencyMs, probedEndpoint?, cached }`
+  // where `tier` is one of `max_20x | max | pro | team | enterprise | free
+  // | api | unknown`. The route NEVER infers Opus availability from
+  // model-listing heuristics — only what the probe surface directly says.
+  api.post("/auth/verify-claude-tier", async (c) => {
+    const settings = getSettings();
+    const token = settings.claudeCodeOAuthToken || settings.anthropicApiKey;
+    const organizationId = settings.anthropicOrganizationId || undefined;
+
+    if (!token) {
+      return c.json({ tier: "unknown", reason: "no_token_configured", cached: false }, 200 as any);
+    }
+
+    // Cache-hit fast path.
+    const cached = tierCache.get(token, organizationId);
+    if (cached) {
+      return c.json({ ...cached, cached: true }, 200 as any);
+    }
+
+    // Cold probe. `fetch` is global in Bun + Node 18+.
+    const fetcher: import("./auth-tier-prober.js").FetchLike = async (url, init) => {
+      const res = await fetch(url, init);
+      return {
+        ok: res.ok,
+        status: res.status,
+        text: () => res.text(),
+      };
+    };
+    const result = await probeClaudeTier(token, organizationId, fetcher);
+    tierCache.set(token, organizationId, result);
+    return c.json({ ...result, cached: false }, 200 as any);
+  });
+
+  // Cache invalidate — called by Settings UI when the user saves new
+  // credentials (which may flip the tier) or hits "Re-verify". Always
+  // 200 — invalidating a non-existent cache entry is a no-op.
+  api.post("/auth/invalidate-claude-tier", async (_c) => {
+    const settings = getSettings();
+    const token = settings.claudeCodeOAuthToken || settings.anthropicApiKey;
+    const organizationId = settings.anthropicOrganizationId || undefined;
+    if (token) tierCache.invalidate(token, organizationId);
+    return _c.json({ ok: true }, 200 as any);
   });
 
   // ─── SDK Sessions (--sdk-url) ─────────────────────────────────────

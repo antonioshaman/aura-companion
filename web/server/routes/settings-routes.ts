@@ -11,6 +11,10 @@ export function registerSettingsRoutes(api: Hono): void {
     return c.json({
       anthropicApiKeyConfigured: !!settings.anthropicApiKey.trim(),
       anthropicModel: settings.anthropicModel || DEFAULT_ANTHROPIC_MODEL,
+      // PLAN Task 7 — org ID is non-secret so it ships in cleartext (UUID).
+      // The tier-verify route reads it from settings server-side; UI also
+      // surfaces it back so users can confirm the configured value.
+      anthropicOrganizationId: settings.anthropicOrganizationId,
       claudeCodeOAuthTokenConfigured: !!settings.claudeCodeOAuthToken.trim(),
       openaiApiKeyConfigured: !!settings.openaiApiKey.trim(),
       codexDeviceAuthConfigured: hasContainerCodexAuth(),
@@ -39,6 +43,9 @@ export function registerSettingsRoutes(api: Hono): void {
     }
     if (body.anthropicModel !== undefined && typeof body.anthropicModel !== "string") {
       return c.json({ error: "anthropicModel must be a string" }, 400);
+    }
+    if (body.anthropicOrganizationId !== undefined && typeof body.anthropicOrganizationId !== "string") {
+      return c.json({ error: "anthropicOrganizationId must be a string" }, 400);
     }
     if (body.linearApiKey !== undefined && typeof body.linearApiKey !== "string") {
       return c.json({ error: "linearApiKey must be a string" }, 400);
@@ -104,6 +111,7 @@ export function registerSettingsRoutes(api: Hono): void {
       return c.json({ error: "dockerAutoUpdate must be a boolean" }, 400);
     }
     const hasAnyField = body.anthropicApiKey !== undefined || body.anthropicModel !== undefined
+      || body.anthropicOrganizationId !== undefined
       || body.claudeCodeOAuthToken !== undefined || body.openaiApiKey !== undefined
       || body.onboardingCompleted !== undefined
       || body.linearApiKey !== undefined || body.linearAutoTransition !== undefined
@@ -133,6 +141,10 @@ export function registerSettingsRoutes(api: Hono): void {
       anthropicModel:
         typeof body.anthropicModel === "string"
           ? (body.anthropicModel.trim() || DEFAULT_ANTHROPIC_MODEL)
+          : undefined,
+      anthropicOrganizationId:
+        typeof body.anthropicOrganizationId === "string"
+          ? body.anthropicOrganizationId.trim()
           : undefined,
       claudeCodeOAuthToken:
         typeof body.claudeCodeOAuthToken === "string"
@@ -216,6 +228,7 @@ export function registerSettingsRoutes(api: Hono): void {
     return c.json({
       anthropicApiKeyConfigured: !!settings.anthropicApiKey.trim(),
       anthropicModel: settings.anthropicModel || DEFAULT_ANTHROPIC_MODEL,
+      anthropicOrganizationId: settings.anthropicOrganizationId,
       claudeCodeOAuthTokenConfigured: !!settings.claudeCodeOAuthToken.trim(),
       openaiApiKeyConfigured: !!settings.openaiApiKey.trim(),
       codexDeviceAuthConfigured: hasContainerCodexAuth(),

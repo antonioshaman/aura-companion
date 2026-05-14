@@ -409,6 +409,8 @@ export interface TailscaleStatus {
 export interface AppSettings {
   anthropicApiKeyConfigured: boolean;
   anthropicModel: string;
+  /** PLAN Task 7 — non-secret org UUID. */
+  anthropicOrganizationId: string;
   claudeCodeOAuthTokenConfigured: boolean;
   openaiApiKeyConfigured: boolean;
   codexDeviceAuthConfigured: boolean;
@@ -852,6 +854,24 @@ export async function verifyAuthToken(token: string): Promise<boolean> {
   }
 }
 
+/**
+ * PLAN Task 7 — server-side Claude tier verification response shape.
+ * Mirrors the `auth-tier-prober.ts` `ClaudeTierResult` plus a `cached`
+ * flag the route adds so the UI can render a "verified just now" vs
+ * "cached from earlier" distinction.
+ */
+export interface ClaudeTierResponse {
+  tier: "max_20x" | "max" | "pro" | "team" | "enterprise" | "free" | "api" | "unknown";
+  plan?: string;
+  dailyLimit?: number;
+  latencyMs: number;
+  probedEndpoint?: string;
+  rawExcerpt?: string;
+  cached: boolean;
+  /** Set on the no-token early-exit path. */
+  reason?: string;
+}
+
 export const api = {
   // Auth
   getAuthQr: () =>
@@ -860,6 +880,15 @@ export const api = {
     get<{ token: string }>("/auth/token"),
   regenerateAuthToken: () =>
     post<{ token: string }>("/auth/regenerate"),
+
+  /**
+   * PLAN Task 7 — verify the Claude tier server-side. Cached for ~1h;
+   * the UI invalidates first when the user saves new credentials.
+   */
+  verifyClaudeTier: () =>
+    post<ClaudeTierResponse>("/auth/verify-claude-tier"),
+  invalidateClaudeTier: () =>
+    post<{ ok: boolean }>("/auth/invalidate-claude-tier"),
 
   createSession: (opts?: CreateSessionOpts) =>
     post<{ sessionId: string; state: string; cwd: string }>(
