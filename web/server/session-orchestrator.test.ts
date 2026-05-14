@@ -267,6 +267,52 @@ describe("SessionOrchestrator", () => {
       expect(companionBus.listenerCount("session:first-turn-completed")).toBeGreaterThan(0);
     });
 
+    // PLAN-aura-orchestrator-idle-auto-proceed Task 9 — boot reconcile wiring.
+    // The full reconcile-loop logic lives in
+    // `auto-proceed-orchestrator-bindings.ts` and is tested there end-to-end
+    // (real filesystem + real IdleTimerManager). The orchestrator-side
+    // contract this exercises is the three-part adapter surface:
+    //   1. Constructor falls back to the noop manager when DI omits it
+    //      (`getIdleTimerManager()` returns a usable instance).
+    //   2. `setIdleTimerManager(...)` replaces the manager (covers the
+    //      late-injection seam `index.ts` uses to break the construct cycle).
+    //   3. `initialize()` invokes `rehydrateAutoProceedTraces()` which
+    //      delegates to `runAutoProceedBootReconcile` — with no council
+    //      groups in `councilGroupMeta`, the inner driver short-circuits
+    //      cleanly without touching the filesystem.
+    it("idle-timer manager DI: get/set + rehydrate-on-init wiring exercised end-to-end", async () => {
+      // Pre-init: noop manager from the DI default. Constructor branch
+      // exercised. The returned instance must respond to dispose without throwing.
+      const noop = orchestrator.getIdleTimerManager();
+      expect(noop).toBeDefined();
+      expect(() => noop.disposeAll()).not.toThrow();
+
+      // Late-injection seam: replace with a fresh real manager. Asserts
+      // the setter actually mutates the instance field — otherwise
+      // `index.ts`'s mutual-cycle workaround would silently leave the
+      // noop manager in production.
+      const { IdleTimerManager: IdleTimerManagerCtor } = await import("./idle-timer-manager.js");
+      const { FakeClock } = await import("./clock-source.js");
+      const replacement = new IdleTimerManagerCtor({
+        clock: new FakeClock(0),
+        getSession: () => null,
+        getGroupStatus: () => "active",
+        persistTrace: () => ({ ok: true }),
+        appendSummary: () => ({ ok: true }),
+        sendSyntheticFrame: () => ({ ok: false, error: "test" }),
+        logEvent: () => undefined,
+      });
+      orchestrator.setIdleTimerManager(replacement);
+      expect(orchestrator.getIdleTimerManager()).toBe(replacement);
+
+      // initialize() exercises the rehydrate delegation path. With no
+      // council groups present (default mock returns empty), the driver's
+      // early-return fires; no log emit; no manager state mutation.
+      orchestrator.initialize();
+      // Manager remains pristine — no session was rehydrated.
+      expect(replacement.getIterationCount("any-session")).toBe(0);
+    });
+
     it("CLI session ID callback delegates to launcher.setCLISessionId", () => {
       orchestrator.initialize();
 

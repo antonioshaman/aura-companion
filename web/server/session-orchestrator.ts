@@ -29,13 +29,10 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { IdleTimerManager } from "./idle-timer-manager.js";
-import { readAutoProceedTrace } from "./auto-proceed-state.js";
-import { resolveCouncilStateDir } from "./council-state-path.js";
 import {
-  reconcileAutoProceedTraces,
-  type AutoProceedReconcileGroup,
-  type AutoProceedReconcileLogEntry,
-} from "./auto-proceed-reconcile.js";
+  buildNoopIdleTimerManager,
+  runAutoProceedBootReconcile,
+} from "./auto-proceed-orchestrator-bindings.js";
 import type { CheckpointPayload, ObserverReviewPayload } from "./council-types.js";
 import { OBSERVER_WAKE_PAYLOAD_VERSION, OBSERVER_WAKE_TIMEOUT_MS, parseCheckpointPayload } from "./council-types.js";
 import { watchCheckpoints } from "./checkpoint-watcher.js";
@@ -99,25 +96,6 @@ const CODEX_APP_SERVER_CONTAINER_PORT = Number(
 const NOVNC_CONTAINER_PORT = 6080;
 
 // ── Types ────────────────────────────────────────────────────────────────────
-
-/**
- * Build a fully-functional but inert {@link IdleTimerManager} — every
- * dependency is a stub that succeeds without doing real work. Used as
- * the DI default so existing test paths (and `index.ts` callers that
- * predate the auto-proceed feature) don't crash. The boot-reconcile
- * pass and SIGTERM-drain become harmless no-ops.
- */
-function buildNoopIdleTimerManager(): IdleTimerManager {
-  return new IdleTimerManager({
-    clock: { now: () => Date.now(), schedule: () => ({ cancel: () => undefined }) },
-    getSession: () => null,
-    getGroupStatus: () => "unknown",
-    persistTrace: () => ({ ok: true }),
-    appendSummary: () => ({ ok: true }),
-    sendSyntheticFrame: () => ({ ok: false, error: "noop-manager-not-wired" }),
-    logEvent: () => undefined,
-  });
-}
 
 export interface SessionOrchestratorDeps {
   launcher: CliLauncher;
@@ -773,47 +751,13 @@ export class SessionOrchestrator {
    * `initialize()` always completes.
    */
   private rehydrateAutoProceedTraces(): void {
-    const reconcileGroups: AutoProceedReconcileGroup[] = [];
-    for (const [groupId, meta] of this.councilGroupMeta) {
-      // Placeholder synthetic ids (`__missing_orch_…`) from partial-pair
-      // reconcile must not enter the rehydrate path — the manager's
-      // state map keys on real sessionIds only.
-      if (meta.primarySessionId.startsWith("__missing_")) continue;
-      const watcher = this.councilWatchers.get(groupId);
-      if (!watcher) continue; // Without a watcher entry we don't know the cwd.
-      reconcileGroups.push({
-        sessionGroupId: groupId,
-        workspaceRoot: watcher.cwd,
-        orchestratorSessionId: meta.primarySessionId,
-      });
-    }
-    reconcileAutoProceedTraces(reconcileGroups, {
-      listStateFiles: (workspaceRoot) => {
-        const dirResult = resolveCouncilStateDir(workspaceRoot);
-        if (!dirResult.ok) {
-          return { kind: "read-failed", error: dirResult.error };
-        }
-        try {
-          return { kind: "ok", files: readdirSync(dirResult.value) };
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-            return { kind: "missing" };
-          }
-          return { kind: "read-failed", error: err };
-        }
-      },
-      readTrace: (workspaceRoot, groupId) => readAutoProceedTrace(workspaceRoot, groupId),
-      rehydrate: (sessionId, trace, expectedGroupId) =>
-        this.idleTimerManager.rehydrate(sessionId, trace, expectedGroupId),
-      logEvent: (entry: AutoProceedReconcileLogEntry) => {
-        // EC-9-shaped structured emit. `log.info` keeps every reconcile
-        // line searchable by `event=auto-proceed.reconcile_*` without
-        // leaking workspace path or cliSessionId. The cast is to satisfy
-        // the logger's index-signature requirement — the entry is a
-        // closed-shape interface but its fields are all loggable.
-        log.info("session-orchestrator", "auto-proceed reconcile", entry as unknown as Record<string, unknown>);
-      },
-    });
+    runAutoProceedBootReconcile(
+      this.councilGroupMeta,
+      this.councilWatchers,
+      this.idleTimerManager,
+      (entry) =>
+        log.info("session-orchestrator", "auto-proceed reconcile", entry as unknown as Record<string, unknown>),
+    );
   }
 
   /**
