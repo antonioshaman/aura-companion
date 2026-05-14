@@ -1,7 +1,7 @@
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, readdirSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { SessionStore, type PersistedSession } from "./session-store.js";
+import { SessionStore, migrateLegacyTmpdirSessions, type PersistedSession } from "./session-store.js";
 
 let tempDir: string;
 let store: SessionStore;
@@ -286,5 +286,133 @@ describe("saveLauncher / loadLauncher", () => {
   it("returns null when no launcher file exists", () => {
     const loaded = store.loadLauncher();
     expect(loaded).toBeNull();
+  });
+});
+
+// ─── migrateLegacyTmpdirSessions (PLAN Task 12-iii) ───────────────────────
+
+describe("migrateLegacyTmpdirSessions", () => {
+  let legacyDir: string;
+  let newDir: string;
+  let logs: { warn: string[]; info: string[] };
+  let logger: { warn: (msg: string) => void; info: (msg: string) => void };
+
+  beforeEach(() => {
+    legacyDir = mkdtempSync(join(tmpdir(), "migrate-legacy-"));
+    newDir = mkdtempSync(join(tmpdir(), "migrate-new-"));
+    // The migration tests use an empty target dir to exercise the
+    // happy-path copy. `mkdtempSync` creates the dir; remove it so the
+    // populated-target guard tests are deterministic.
+    rmSync(newDir, { recursive: true, force: true });
+    logs = { warn: [], info: [] };
+    logger = {
+      warn: (msg) => logs.warn.push(msg),
+      info: (msg) => logs.info.push(msg),
+    };
+  });
+
+  afterEach(() => {
+    rmSync(legacyDir, { recursive: true, force: true });
+    rmSync(newDir, { recursive: true, force: true });
+  });
+
+  function writeSessionJson(dir: string, id: string): void {
+    writeFileSync(join(dir, `${id}.json`), JSON.stringify({ id, messageHistory: [] }), "utf-8");
+  }
+
+  it("skips with no_source when the legacy directory does not exist", () => {
+    // Fresh install path — no `$TMPDIR/vibe-sessions/` ever existed,
+    // migration must be a silent no-op so the boot log isn't polluted.
+    rmSync(legacyDir, { recursive: true, force: true });
+    const outcome = migrateLegacyTmpdirSessions(legacyDir, newDir, logger);
+    expect(outcome.ran).toBe(false);
+    expect(outcome.skippedReason).toBe("no_source");
+    expect(outcome.copied).toBe(0);
+    expect(existsSync(newDir)).toBe(false);
+  });
+
+  it("skips with no_source when legacy directory exists but is empty", () => {
+    // `/tmp/vibe-sessions/` may be created by another version then
+    // emptied; we must not flag a zero-file copy as a real migration.
+    const outcome = migrateLegacyTmpdirSessions(legacyDir, newDir, logger);
+    expect(outcome.ran).toBe(false);
+    expect(outcome.skippedReason).toBe("no_source");
+  });
+
+  it("copies session JSONs from legacy to new directory", () => {
+    writeSessionJson(legacyDir, "session-A");
+    writeSessionJson(legacyDir, "session-B");
+    const outcome = migrateLegacyTmpdirSessions(legacyDir, newDir, logger);
+
+    expect(outcome.ran).toBe(true);
+    expect(outcome.copied).toBe(2);
+    expect(outcome.failed).toBe(0);
+    expect(outcome.launcherCopied).toBe(false);
+    expect(outcome.skippedReason).toBeUndefined();
+
+    expect(existsSync(join(newDir, "session-A.json"))).toBe(true);
+    expect(existsSync(join(newDir, "session-B.json"))).toBe(true);
+    // Source preserved for rollback.
+    expect(existsSync(join(legacyDir, "session-A.json"))).toBe(true);
+    expect(existsSync(join(legacyDir, "session-B.json"))).toBe(true);
+  });
+
+  it("flags the launcher.json sidecar separately so it doesn't inflate the session count", () => {
+    // launcher.json carries the CLI PID map, not a session — counting it
+    // as a session would inflate the migration log and hide a zero-session
+    // case where only the sidecar is present.
+    writeSessionJson(legacyDir, "session-1");
+    writeFileSync(join(legacyDir, "launcher.json"), JSON.stringify({ pids: [1234] }), "utf-8");
+    const outcome = migrateLegacyTmpdirSessions(legacyDir, newDir, logger);
+
+    expect(outcome.copied).toBe(1);
+    expect(outcome.launcherCopied).toBe(true);
+    expect(existsSync(join(newDir, "launcher.json"))).toBe(true);
+  });
+
+  it("skips with target_already_populated when new directory already has session JSONs", () => {
+    // Idempotency — re-running migration after first successful copy
+    // must not overwrite live state in the new dir with stale tmpdir
+    // copies.
+    writeSessionJson(legacyDir, "session-1");
+    mkdirSync(newDir, { recursive: true });
+    writeSessionJson(newDir, "session-1");
+    const outcome = migrateLegacyTmpdirSessions(legacyDir, newDir, logger);
+    expect(outcome.ran).toBe(false);
+    expect(outcome.skippedReason).toBe("target_already_populated");
+    // Target preserved — not clobbered.
+    expect(existsSync(join(newDir, "session-1.json"))).toBe(true);
+  });
+
+  it("treats a target containing ONLY launcher.json as still empty (migrates real sessions in)", () => {
+    // Rare but legal interleaving: launcher.json may be written by
+    // another process before the first session is persisted. Empty
+    // sessions + launcher.json present must still allow migration in.
+    writeSessionJson(legacyDir, "session-X");
+    mkdirSync(newDir, { recursive: true });
+    writeFileSync(join(newDir, "launcher.json"), JSON.stringify({}), "utf-8");
+    const outcome = migrateLegacyTmpdirSessions(legacyDir, newDir, logger);
+    expect(outcome.ran).toBe(true);
+    expect(outcome.copied).toBe(1);
+  });
+
+  it("never deletes source files (rollback contract)", () => {
+    writeSessionJson(legacyDir, "session-keep");
+    migrateLegacyTmpdirSessions(legacyDir, newDir, logger);
+    // Source must remain readable after migration so rolling back to
+    // the pre-Task-12 binary continues to find the data.
+    const remaining = readdirSync(legacyDir);
+    expect(remaining).toContain("session-keep.json");
+  });
+
+  it("ignores non-JSON files in source (defensive)", () => {
+    // Stray text files in `$TMPDIR/vibe-sessions/` (editor lockfiles,
+    // tmp scratch) must not abort migration or get carried into the new
+    // dir.
+    writeSessionJson(legacyDir, "real");
+    writeFileSync(join(legacyDir, "scratch.tmp"), "garbage", "utf-8");
+    const outcome = migrateLegacyTmpdirSessions(legacyDir, newDir, logger);
+    expect(outcome.copied).toBe(1);
+    expect(existsSync(join(newDir, "scratch.tmp"))).toBe(false);
   });
 });
