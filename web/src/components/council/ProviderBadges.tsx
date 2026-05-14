@@ -59,6 +59,39 @@ export function isHomogeneousPairing(pairing: string): boolean {
   return parsed.orchestrator === parsed.observer;
 }
 
+/**
+ * Return the pair halves that should remain visible given the backend
+ * already shown alongside (e.g. the `CC`/`CX` BackendBadge in SessionItem).
+ * Backend `"claude"` hides any `"claude"` half; backend `"codex"` hides any
+ * `"codex"` half. Halves are returned in orchestrator-then-observer order so
+ * callers preserve the original pairing direction.
+ *
+ * Returns `[]` for malformed input — caller renders nothing, matching the
+ * homogeneous-suppression behavior shipped in PR #27. Returns `[]` for
+ * homogeneous pairs whose provider matches the backend (e.g.
+ * `claude+claude` on a Claude backend). The single-chip case is the
+ * asymmetric pairing (`claude+codex`) where one half duplicates the
+ * backend indicator and the other adds genuine signal.
+ */
+export function pairHalvesAfterBackendCollapse(
+  pairing: string,
+  backend: "claude" | "codex",
+): string[] {
+  const parsed = parsePairing(pairing);
+  if (!parsed) return [];
+  return [parsed.orchestrator, parsed.observer].filter((half) => half !== backend);
+}
+
+/**
+ * Tailwind class string for a single provider chip. Exported so callers in
+ * dense rows (SessionItem) can render a one-off chip without depending on
+ * the full ProviderBadges pair-rendering component — keeps the styling
+ * token co-located with its semantic meaning while letting the caller use
+ * plain markup. See `pairHalvesAfterBackendCollapse` for the suppression
+ * rule that produces the single-chip case.
+ */
+export { providerChipClass };
+
 interface BadgeProps {
   provider: string;
   role: "orchestrator" | "observer";

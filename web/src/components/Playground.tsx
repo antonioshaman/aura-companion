@@ -3277,6 +3277,90 @@ function PlaygroundSessionItems() {
           />
         </div>
       </Card>
+
+      {/* Council pair — homogeneous claude+claude on Claude backend (PR #27
+          regression invariant: chip cluster suppressed entirely, only CC
+          backend badge remains). */}
+      <Card label="Council pair — claude+claude on Claude backend (chips suppressed)">
+        <div className="bg-cc-sidebar rounded-lg p-1">
+          <SessionItem
+            session={mockSession({
+              isConnected: true,
+              status: "running",
+              backendType: "claude",
+            })}
+            isActive={false}
+            sessionName="Refactor session-orchestrator"
+            permCount={0}
+            isRecentlyRenamed={false}
+            councilPairing="claude+claude"
+            {...noopSessionItemProps}
+          />
+        </div>
+      </Card>
+
+      {/* Council pair — claude+codex on Claude backend. Backend chip already
+          says claude (CC); the redundant CLAUDE half is dropped and only the
+          new-information CODEX chip remains. */}
+      <Card label="Council pair — claude+codex on Claude backend (orchestrator-half suppressed)">
+        <div className="bg-cc-sidebar rounded-lg p-1">
+          <SessionItem
+            session={mockSession({
+              isConnected: true,
+              status: "running",
+              backendType: "claude",
+            })}
+            isActive={false}
+            sessionName="Council review of routes.ts"
+            permCount={0}
+            isRecentlyRenamed={false}
+            councilPairing="claude+codex"
+            {...noopSessionItemProps}
+          />
+        </div>
+      </Card>
+
+      {/* Council pair — claude+codex on Codex backend. Mirror of the above:
+          CX backend badge already says codex; the redundant CODEX half is
+          dropped and only the CLAUDE chip remains. */}
+      <Card label="Council pair — claude+codex on Codex backend (observer-half suppressed)">
+        <div className="bg-cc-sidebar rounded-lg p-1">
+          <SessionItem
+            session={mockSession({
+              isConnected: true,
+              status: "running",
+              backendType: "codex",
+            })}
+            isActive={false}
+            sessionName="Codex-driven implementation"
+            permCount={0}
+            isRecentlyRenamed={false}
+            councilPairing="claude+codex"
+            {...noopSessionItemProps}
+          />
+        </div>
+      </Card>
+
+      {/* Council pair — with unresolved STOPs. The red counter remains
+          visible alongside the surviving single chip. */}
+      <Card label="Council pair — claude+codex on Claude backend + 2 unread STOPs">
+        <div className="bg-cc-sidebar rounded-lg p-1">
+          <SessionItem
+            session={mockSession({
+              isConnected: true,
+              status: "running",
+              backendType: "claude",
+            })}
+            isActive={false}
+            sessionName="Pair under active review"
+            permCount={0}
+            isRecentlyRenamed={false}
+            councilPairing="claude+codex"
+            councilUnreadStops={2}
+            {...noopSessionItemProps}
+          />
+        </div>
+      </Card>
     </div>
   );
 }
