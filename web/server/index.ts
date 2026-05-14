@@ -15,7 +15,7 @@ import { cacheControlMiddleware } from "./cache-headers.js";
 import { createRoutes } from "./routes.js";
 import { CliLauncher } from "./cli-launcher.js";
 import { WsBridge } from "./ws-bridge.js";
-import { SessionStore } from "./session-store.js";
+import { SessionStore, migrateLegacyTmpdirSessions } from "./session-store.js";
 import { WorktreeTracker } from "./worktree-tracker.js";
 import { containerManager } from "./container-manager.js";
 import { join } from "node:path";
@@ -52,6 +52,14 @@ import { DEFAULT_PORT_DEV, DEFAULT_PORT_PROD } from "./constants.js";
 const defaultPort = process.env.NODE_ENV === "production" ? DEFAULT_PORT_PROD : DEFAULT_PORT_DEV;
 const port = Number(process.env.PORT) || defaultPort;
 const host = process.env.HOST || "0.0.0.0";
+// PLAN Task 12 (iii) — migrate legacy `$TMPDIR/vibe-sessions/` data into
+// the new `~/.companion/sessions/` durable location BEFORE the store
+// claims the target dir. Skipped (no-op) when COMPANION_SESSION_DIR
+// overrides the default — operators with an explicit path opt out of
+// the auto-migration by definition.
+if (!process.env.COMPANION_SESSION_DIR) {
+  migrateLegacyTmpdirSessions();
+}
 const sessionStore = new SessionStore(process.env.COMPANION_SESSION_DIR);
 const wsBridge = new WsBridge();
 const launcher = new CliLauncher(port);
