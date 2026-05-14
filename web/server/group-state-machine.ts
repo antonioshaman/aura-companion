@@ -38,7 +38,64 @@ export type GroupEvent =
   | { type: "reconnect_ok"; role: GroupRole }
   | { type: "reconnect_failed"; role: GroupRole }
   | { type: "user_archived" }
-  | { type: "user_killed" };
+  | { type: "user_killed" }
+  // ── Auto-proceed (orchestrator-idle) events ──────────────────────────
+  //
+  // Session-scoped (not group-status-changing) events that drive the
+  // idle-timer manager via the side-effect channel. AP-2: routing arm/
+  // disarm through `applyEvent` rather than a parallel mutator is the
+  // single source of truth — see PLAN-aura-orchestrator-idle-auto-proceed
+  // Task 8. `transition()` returns `from` unchanged for all six; only
+  // `deriveSideEffects` produces output.
+  | {
+    /** Orchestrator-half entered `awaiting-input` with no STOP blocker.
+     *  Emitted by the bus listener for `orchestrator:turn-done` when
+     *  `blockedByStop === false`. Effect: arm the per-session idle
+     *  timer (gated downstream on group `status === "active"`). */
+    type: "orchestrator_turn_idle";
+    sessionId: string;
+    idleMs: number;
+    maxIterations: number;
+  }
+  | {
+    /** Orchestrator-half left `awaiting-input` (user typed, OR a synthetic
+     *  fire flipped it to `in-flight`). Effect: advance the manager's
+     *  turn-token + cancel any pending timer. Idempotent. */
+    type: "orchestrator_turn_active";
+    sessionId: string;
+  }
+  | {
+    /** Observer raised a STOP finding bound to the orchestrator-half's
+     *  group. Effect: cancel any pending timer; subsequent
+     *  `orchestrator_turn_idle` events while the STOP is unresolved
+     *  carry `blockedByStop=true` upstream and produce no arm. */
+    type: "stop_finding_raised";
+    sessionId: string;
+  }
+  | {
+    /** The previously-raised STOP was resolved. Effect: no immediate
+     *  action — the next `orchestrator_turn_idle` re-arms naturally. */
+    type: "stop_finding_resolved";
+    sessionId: string;
+  }
+  | {
+    /** Notification from the manager that a synthetic auto-proceed
+     *  frame was successfully sent. Effect: EC-9 log entry only — the
+     *  manager has already persisted the trace before the send. */
+    type: "auto_proceed_fired";
+    sessionId: string;
+    iteration: number;
+    firedAtMs: number;
+  }
+  | {
+    /** Notification from the manager that the iteration cap was hit on
+     *  a fire attempt. Effect: EC-9 log entry only — `cappedAt` was
+     *  already persisted by the manager. */
+    type: "iteration_cap_tripped";
+    sessionId: string;
+    iteration: number;
+    cappedAtMs: number;
+  };
 
 /**
  * Returns the next status given the current status and an event. Unknown
@@ -99,6 +156,39 @@ export type GroupBusSideEffect =
   | { kind: "reconnecting"; survivingRole: GroupRole; deadlineMs: number }
   | { kind: "reconnected" };
 
+/**
+ * Idle-timer side-effect descriptors for the auto-proceed pipeline. These
+ * are session-scoped (not group-status-changing) — `applyEvent` drains
+ * them through an injected `IdleTimerEnactor` rather than the bus. See
+ * PLAN Task 8: routing arm/disarm through `applyEvent` is the AP-2
+ * single-source-of-truth invariant for the orchestrator-idle pipeline.
+ */
+export type GroupIdleTimerEffect =
+  | {
+    /** Arm a fresh idle timer for the orchestrator-half session. The
+     *  manager re-evaluates its own gate stack at fire time (EC-7
+     *  TOCTOU defence) — this descriptor is the request, not the
+     *  guarantee. */
+    kind: "arm-idle-timer";
+    sessionId: string;
+    idleMs: number;
+    maxIterations: number;
+  }
+  | {
+    /** Cancel any pending idle timer for the session. Idempotent —
+     *  cancelling an un-armed session is a no-op. */
+    kind: "cancel-idle-timer";
+    sessionId: string;
+  }
+  | {
+    /** Advance the manager's monotonic per-session turn-token (cancels
+     *  any pending timer + invalidates an in-flight fire callback that
+     *  re-reads the token). Emitted when the orchestrator's turn-state
+     *  flips back to `in-flight` (user typed OR synthetic fire). */
+    kind: "note-user-message";
+    sessionId: string;
+  };
+
 /** EC-9-shaped log entry descriptor. Fields are the canonical set; no leakage
  *  of cliSessionId / observerPromptSha256 / workspace path. */
 export interface GroupLogEntry {
@@ -107,16 +197,29 @@ export interface GroupLogEntry {
     | "group.reconnect_ok"
     | "group.reconnect_failed"
     | "group.degraded"
-    | "group.exited";
+    | "group.exited"
+    | "group.auto-proceed.fired"
+    | "group.auto-proceed.cap-reached";
   role?: GroupRole;
   /** Always `1` in current scope (no group-level retry). Carried as a field
    *  so a future multi-attempt extension is a field-update, not a wire shape change. */
   attempts?: number;
+  /** Orchestrator-half companion sessionId — present only on auto-proceed
+   *  notification entries. Lifecycle log lines omit this field (the
+   *  sessionGroupId in `enactLogEntry` is enough context). */
+  sessionId?: string;
+  /** Iteration counter at the moment of the auto-proceed notification.
+   *  Present on `group.auto-proceed.fired` and `group.auto-proceed.cap-reached`. */
+  iteration?: number;
 }
 
 export interface GroupTransitionSideEffects {
   busEvents: GroupBusSideEffect[];
   logEntries: GroupLogEntry[];
+  /** Idle-timer descriptors — auto-proceed pipeline. Empty for every
+   *  existing lifecycle event; populated only for the six auto-proceed
+   *  events. Drained alongside `busEvents` / `logEntries` by `applyEvent`. */
+  idleTimerEffects: GroupIdleTimerEffect[];
 }
 
 /**
@@ -138,7 +241,61 @@ export function deriveSideEffects(
 ): GroupTransitionSideEffects {
   const busEvents: GroupBusSideEffect[] = [];
   const logEntries: GroupLogEntry[] = [];
-  if (prev === next) return { busEvents, logEntries };
+  const idleTimerEffects: GroupIdleTimerEffect[] = [];
+
+  // ── Auto-proceed events (PLAN Task 8) ────────────────────────────────
+  //
+  // These do not change `GroupStatus` (`transition()` returns `from`
+  // unchanged), so the `prev === next` early-return below would suppress
+  // their effects. Handle them first; the lifecycle table runs only when
+  // we fall through.
+  //
+  // Group-status gate is enforced HERE: arm-idle-timer fires only while
+  // `prev === "active"` (the manager re-checks all gates at fire time
+  // — TOCTOU defence — so this is a coarse early-exit, not authoritative).
+  // Cancel + note-user-message fire regardless of status so a STOP-raised
+  // event during reconnecting still clears the pending timer.
+  switch (event.type) {
+    case "orchestrator_turn_idle":
+      if (prev === "active") {
+        idleTimerEffects.push({
+          kind: "arm-idle-timer",
+          sessionId: event.sessionId,
+          idleMs: event.idleMs,
+          maxIterations: event.maxIterations,
+        });
+      }
+      return { busEvents, logEntries, idleTimerEffects };
+    case "orchestrator_turn_active":
+      idleTimerEffects.push({ kind: "note-user-message", sessionId: event.sessionId });
+      return { busEvents, logEntries, idleTimerEffects };
+    case "stop_finding_raised":
+      idleTimerEffects.push({ kind: "cancel-idle-timer", sessionId: event.sessionId });
+      return { busEvents, logEntries, idleTimerEffects };
+    case "stop_finding_resolved":
+      // No-op effect — the next `orchestrator_turn_idle` will re-arm
+      // naturally once the orchestrator next flips back to awaiting-input.
+      return { busEvents, logEntries, idleTimerEffects };
+    case "auto_proceed_fired":
+      logEntries.push({
+        event: "group.auto-proceed.fired",
+        role: "orchestrator",
+        sessionId: event.sessionId,
+        iteration: event.iteration,
+      });
+      return { busEvents, logEntries, idleTimerEffects };
+    case "iteration_cap_tripped":
+      logEntries.push({
+        event: "group.auto-proceed.cap-reached",
+        role: "orchestrator",
+        sessionId: event.sessionId,
+        iteration: event.iteration,
+      });
+      return { busEvents, logEntries, idleTimerEffects };
+  }
+
+  // ── Lifecycle events (existing) ──────────────────────────────────────
+  if (prev === next) return { busEvents, logEntries, idleTimerEffects };
 
   // → reconnecting
   if (next === "reconnecting" && event.type === "reconnect_started") {
@@ -152,7 +309,7 @@ export function deriveSideEffects(
       role: event.survivingRole,
       attempts: 1,
     });
-    return { busEvents, logEntries };
+    return { busEvents, logEntries, idleTimerEffects };
   }
 
   // reconnecting → active
@@ -163,7 +320,7 @@ export function deriveSideEffects(
       role: event.role,
       attempts: 1,
     });
-    return { busEvents, logEntries };
+    return { busEvents, logEntries, idleTimerEffects };
   }
 
   // → degraded (covers both `half_died` and `reconnect_failed`)
@@ -182,15 +339,15 @@ export function deriveSideEffects(
     } else {
       logEntries.push({ event: "group.degraded", role: deadRole });
     }
-    return { busEvents, logEntries };
+    return { busEvents, logEntries, idleTimerEffects };
   }
 
   // → archived (terminal)
   if (next === "archived") {
     busEvents.push({ kind: "exited", reason: "user_archived" });
     logEntries.push({ event: "group.exited" });
-    return { busEvents, logEntries };
+    return { busEvents, logEntries, idleTimerEffects };
   }
 
-  return { busEvents, logEntries };
+  return { busEvents, logEntries, idleTimerEffects };
 }

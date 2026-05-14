@@ -27,6 +27,10 @@ import { initLogFile, closeLogFile } from "./logger.js";
 import { CronScheduler } from "./cron-scheduler.js";
 import { AgentExecutor } from "./agent-executor.js";
 import { SessionOrchestrator } from "./session-orchestrator.js";
+import { IdleTimerManager } from "./idle-timer-manager.js";
+import { SystemClock } from "./clock-source.js";
+import { writeAutoProceedTrace, appendAfkSummary } from "./auto-proceed-state.js";
+import { log as appLog } from "./logger.js";
 import { migrateCronJobsToAgents } from "./agent-cron-migrator.js";
 import { migrateLinearCredentialsToAgents } from "./linear-credential-migration.js";
 import { authenticateManagedWebSocket } from "./ws-auth.js";
@@ -73,10 +77,83 @@ const cronScheduler = new CronScheduler(launcher, wsBridge);
 const agentExecutor = new AgentExecutor(launcher, wsBridge);
 const linearAgentBridge = new LinearAgentBridge(agentExecutor, wsBridge);
 
+// PLAN-aura-orchestrator-idle-auto-proceed Task 9: construct orchestrator
+// FIRST (without the manager), then build the real {@link IdleTimerManager}
+// whose `getSession` / `getGroupStatus` closures reference the orchestrator,
+// then inject the manager via `setIdleTimerManager()` BEFORE `initialize()`
+// runs the boot reconcile. The two have a mutual reference cycle — manager
+// reads orchestrator's coordinator + ws-bridge state, orchestrator's
+// rehydrate path calls into manager — and late-injection is the cleanest
+// pattern for that without sacrificing type safety (a generic `Lazy<T>` or
+// proxy would push the cycle off the type system and onto runtime checks).
 const orchestrator = new SessionOrchestrator({
   launcher, wsBridge, sessionStore, worktreeTracker,
   prPoller, agentExecutor,
 });
+
+const idleTimerManager = new IdleTimerManager({
+  clock: SystemClock,
+  getSession: (sessionId) => {
+    const info = launcher.getSession(sessionId);
+    if (!info || info.archived) return null;
+    // Adapter-side orchestratorTurnState lives on the ClaudeAdapter (Task 4).
+    // For sessions without a connected adapter or non-Claude backend, expose
+    // a safe default — the manager's gate stack treats `in-flight` as a
+    // skip reason which prevents accidental firing during transient states.
+    const session = wsBridge.getSession(sessionId);
+    const adapter = session?.backendAdapter;
+    // Narrow without importing ClaudeAdapter here to avoid a cycle; the
+    // structural cast below mirrors `wsBridge.sendObserverWakeFrame`'s
+    // instance-check pattern.
+    const turnState =
+      (adapter as unknown as {
+        orchestratorTurnState?:
+          | { kind: "in-flight" }
+          | { kind: "awaiting-input"; blockedByStop: boolean };
+      })?.orchestratorTurnState ?? { kind: "in-flight" as const };
+    return {
+      sessionId: info.sessionId,
+      sessionGroupId: info.sessionGroupId ?? null,
+      sessionGroupRole: info.sessionGroupRole ?? null,
+      state: session ? "connected" : "exited",
+      orchestratorTurnState: turnState,
+      workspaceRoot: info.cwd,
+      reconnectGraceActive: false,
+      councilPhase: "council-implement",
+    };
+  },
+  getGroupStatus: (sessionGroupId): "pairing" | "active" | "degraded" | "archived" | "reconnecting" | "unknown" => {
+    const coord = orchestrator.getCouncilCoordinator();
+    if (!coord) return "unknown";
+    const group = coord.get(sessionGroupId);
+    return group?.status ?? "unknown";
+  },
+  persistTrace: (workspaceRoot, groupId, trace) => {
+    const result = writeAutoProceedTrace(workspaceRoot, groupId, trace);
+    if (!result.ok) return { ok: false, error: result.error };
+    return { ok: true };
+  },
+  appendSummary: (workspaceRoot, groupId, entry) => {
+    const result = appendAfkSummary(workspaceRoot, groupId, entry);
+    if (!result.ok) return { ok: false, error: result.error };
+    return { ok: true };
+  },
+  sendSyntheticFrame: () => {
+    // PLAN Task 11 wires the real `synthetic: true` recorder envelope +
+    // `ClaudeAdapter.send` pass-through. Until that ships, the fire path
+    // is unreachable in production (no caller emits the
+    // `orchestrator_turn_idle` event through the state machine yet), so
+    // returning a structured failure is safe; if a future change reaches
+    // here unexpectedly, the EC-9 `idle-timer.fire-failed` log line
+    // surfaces it loudly.
+    return { ok: false, error: "synthetic-send-not-wired-task-11" };
+  },
+  logEvent: (entry) => {
+    appLog.info("idle-timer-manager", entry.event, entry as unknown as Record<string, unknown>);
+  },
+});
+
+orchestrator.setIdleTimerManager(idleTimerManager);
 
 // ── Cloud relay connection (for receiving webhooks behind a firewall) ────────
 // The relay forwards platform webhooks (e.g. GitHub, Slack) to the Companion
@@ -494,8 +571,21 @@ async function gracefulShutdown() {
       const { shutdownAllGroups } = await import("./group-shutdown.js");
       const groupIds = coordinator.listGroupIds();
       if (groupIds.length > 0) {
-        const summary = await shutdownAllGroups(coordinator, groupIds, { timeoutMs: 8_000 });
+        // PLAN Task 9: pass the idle-timer manager so `shutdownAllGroups`
+        // cancels every armed timer BEFORE kill propagation. Always set,
+        // even when zero groups exist — disposeAll is idempotent and the
+        // cost is one Map iteration over an empty state.
+        const summary = await shutdownAllGroups(coordinator, groupIds, {
+          timeoutMs: 8_000,
+          idleTimerManager: orchestrator.getIdleTimerManager(),
+        });
         console.log(`[server] Council shutdown summary:`, summary);
+      } else {
+        // Even with no live groups, the manager may hold rehydrated
+        // counters and could be re-armed in-flight via a `session:cli-id-received`
+        // race during shutdown. Best-effort dispose so the SIGTERM exit
+        // path never leaves a fire callback pending.
+        orchestrator.getIdleTimerManager().disposeAll();
       }
     }
   } catch (err) {

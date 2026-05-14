@@ -87,6 +87,69 @@ describe("shutdownAllGroups", () => {
     expect(summary.timedOut).toBe(1);
   });
 
+  // PLAN-aura-orchestrator-idle-auto-proceed Task 9: idle-timer manager
+  // SIGTERM drain. `disposeAll()` MUST be called BEFORE any kill is dispatched
+  // so a pending fire callback can't land mid-archive. Verified by an
+  // ordering recorder: a stub manager that pushes "dispose" onto a shared
+  // order array, and a kill fake that pushes "kill". The first entry must
+  // always be "dispose".
+  it("calls idleTimerManager.disposeAll BEFORE the first kill (EC-2 ordering)", async () => {
+    const order: string[] = [];
+    let n = 0;
+    const spawn: SessionSpawner = async () => ({ sessionId: `sess-${++n}` });
+    const kill = vi.fn(async (id: string) => {
+      order.push(`kill:${id}`);
+    });
+    const coord = new SessionGroupCoordinator({ spawn, kill });
+    const g = await coord.createGroup({ cwd: "/w", primary: "claude", observer: "claude" });
+    const idleTimerManager = {
+      disposeAll: vi.fn(() => {
+        order.push("dispose");
+      }),
+    };
+    const summary = await shutdownAllGroups(coord, [g.sessionGroupId], {
+      timeoutMs: 5_000,
+      idleTimerManager,
+    });
+    expect(summary.archived).toBe(1);
+    expect(idleTimerManager.disposeAll).toHaveBeenCalledTimes(1);
+    expect(order[0]).toBe("dispose");
+    expect(order.slice(1)).toEqual([
+      `kill:${g.primary.sessionId}`,
+      `kill:${g.observer.sessionId}`,
+    ]);
+  });
+
+  // disposeAll is called even when no groups exist — the manager may hold
+  // rehydrated counters from boot reconcile that need to be released
+  // before the process exits (otherwise an in-flight handshake race could
+  // re-arm a timer mid-shutdown).
+  it("calls disposeAll even on the empty-workload fast path", async () => {
+    const { coord } = makeCoord();
+    const disposeAll = vi.fn();
+    const summary = await shutdownAllGroups(coord, [], { timeoutMs: 5_000, idleTimerManager: { disposeAll } });
+    expect(summary).toEqual({ total: 0, archived: 0, failed: 0, timedOut: 0, durationMs: 0 });
+    expect(disposeAll).toHaveBeenCalledTimes(1);
+  });
+
+  // A throwing disposeAll must not abort the shutdown loop — kill cascade
+  // is still bounded by `timeoutMs` regardless, so swallow + continue.
+  it("continues the shutdown loop if disposeAll throws", async () => {
+    const { coord, kill } = makeCoord();
+    const a = await coord.createGroup({ cwd: "/a", primary: "claude", observer: "claude" });
+    const disposeAll = vi.fn(() => {
+      throw new Error("test-dispose-failure");
+    });
+    const summary = await shutdownAllGroups(coord, [a.sessionGroupId], {
+      timeoutMs: 5_000,
+      idleTimerManager: { disposeAll },
+    });
+    // Despite the throw, kills still ran and the group archived.
+    expect(summary.archived).toBe(1);
+    expect(disposeAll).toHaveBeenCalledTimes(1);
+    expect(kill).toHaveBeenCalledTimes(2);
+  });
+
   // Deterministic duration reporting via injected clock.
   it("reports durationMs based on the injected clock", async () => {
     const { coord } = makeCoord();
