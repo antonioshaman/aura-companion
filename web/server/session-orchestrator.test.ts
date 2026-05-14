@@ -2413,8 +2413,11 @@ describe("SessionOrchestrator", () => {
       expect(out.reason).toBe("adapter_missing");
     });
 
-    // Bridge returns unsupported_backend (Codex pairing not wired).
-    it("returns skipped:unsupported_backend on Codex pairing", () => {
+    // Bridge returns unsupported_backend — defensive branch for any
+    // future adapter that doesn't implement sendUserFrameFromServer.
+    // Both ClaudeAdapter + CodexAdapter now route through; this test
+    // covers the residual `else` arm for an adapter without wake.
+    it("returns skipped:unsupported_backend for an adapter without wake support", () => {
       seedActiveGroup("grp_d_un");
       vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "unsupported_backend" });
       const out = callDispatch("grp_d_un", validPayload("grp_d_un"));

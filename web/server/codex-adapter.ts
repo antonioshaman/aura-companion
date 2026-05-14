@@ -22,6 +22,7 @@ import type {
   McpServerConfig,
 } from "./session-types.js";
 import type { RecorderManager } from "./recorder.js";
+import type { ObserverWakeSendOutcome } from "./claude-adapter.js";
 import { reportProtocolDrift } from "./protocol-monitor.js";
 import { log } from "./logger.js";
 
@@ -845,6 +846,97 @@ export class CodexAdapter implements IBackendAdapter {
     this.flushPendingOutgoing();
 
     return this.dispatchOutgoing(msg);
+  }
+
+  /**
+   * Council Mode — server-originated wake frame to the Codex observer.
+   *
+   * Mirrors {@link ClaudeAdapter.sendUserFrameFromServer} but uses
+   * Codex's JSON-RPC `turn/start` mechanism. Unlike Claude's flat NDJSON
+   * `{type: "user", ...}` envelope, Codex needs a structured RPC call
+   * with `threadId` + `input` array + `approvalPolicy` + `sandboxPolicy`.
+   *
+   * Fire-and-forget: the synchronous return reports gate decisions;
+   * the actual `turn/start` round-trip resolves asynchronously and
+   * flips {@link currentTurnId} on success or logs on failure. The
+   * wake dispatcher in `session-orchestrator` does NOT await this —
+   * it has already decided "wake sent" based on the gate outcome,
+   * which matches the existing ClaudeAdapter wake contract.
+   *
+   * Gates (parallel to ClaudeAdapter):
+   *  - Initialisation: Codex needs a `threadId`; pre-init wakes get
+   *    `socket_disconnected` rather than queueing (the dispatcher's
+   *    retry path takes over instead of building a backlog).
+   *  - Transport: ICodexTransport.isConnected() — when proxy WS is
+   *    flapping or after `cleanupAndDisconnect`, refuse the wake.
+   *  - Turn-state: {@link currentTurnId} non-null === mid-turn ===
+   *    `busy`. Mirrors Claude's `observerTurnState === "in-flight"`.
+   *
+   * No `onActivityUpdate` callback — Codex doesn't (yet) participate
+   * in the same idle-kill timer infrastructure as Claude; if/when it
+   * does, hook it here. Documented as a known-asymmetry, NOT a bug.
+   */
+  sendUserFrameFromServer(content: string): ObserverWakeSendOutcome {
+    // Gate 1: initialisation. Pre-init wakes get socket_disconnected
+    // so the dispatcher retries on the next checkpoint rather than
+    // queueing in the adapter's pendingOutgoing buffer (which is for
+    // browser-originated messages, not server-synthesised wakes).
+    if (!this.initialized || !this.threadId || this.initInProgress) {
+      return { kind: "socket_disconnected" };
+    }
+    // Gate 2: transport.
+    if (!this.transport.isConnected()) {
+      return { kind: "socket_disconnected" };
+    }
+    // Gate 3: turn-state. Codex's currentTurnId tracks one in-flight
+    // turn at a time; while set, the observer is mid-turn and a
+    // second turn/start would race or be rejected by the Codex server.
+    if (this.currentTurnId) {
+      return { kind: "busy" };
+    }
+
+    const input = [{ type: "text", text: content }];
+    const turnParams: Record<string, unknown> = {
+      threadId: this.threadId,
+      input,
+      cwd: this.getExecutionCwd(),
+      approvalPolicy: this.mapApprovalPolicy(this.currentPermissionMode),
+      sandboxPolicy: this.mapSandboxPolicyObject(this.currentPermissionMode),
+    };
+
+    // Record BEFORE call so a crash mid-dispatch leaves a forensic trail.
+    // origin: "server:council-wake" distinguishes this from browser-relayed
+    // user input in replay (recorder v2 schema — see RECORDING_HEADER_VERSION).
+    this.options.recorder?.record(
+      this.sessionId,
+      "out",
+      JSON.stringify({ method: "turn/start", params: turnParams }),
+      "cli",
+      "codex",
+      this.getExecutionCwd(),
+      "server:council-wake",
+    );
+
+    // Fire-and-forget. Synchronous return reports the gate outcome;
+    // async resolution flips currentTurnId on success.
+    this.transport.call("turn/start", turnParams).then(
+      (result) => {
+        const typed = result as { turn?: { id?: string } };
+        if (typed?.turn?.id) {
+          this.currentTurnId = typed.turn.id;
+        }
+      },
+      (err) => {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        log.warn(
+          "codex-adapter",
+          "observer wake turn/start failed",
+          { sessionId: this.sessionId, error: errMsg, event: "council.wake.failed_async" },
+        );
+      },
+    );
+
+    return { kind: "sent" };
   }
 
   /**

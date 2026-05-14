@@ -10,6 +10,7 @@ import type {
 import type { SessionStore } from "./session-store.js";
 import type { IBackendAdapter } from "./backend-adapter.js";
 import { ClaudeAdapter, type ObserverWakeSendOutcome } from "./claude-adapter.js";
+import { CodexAdapter } from "./codex-adapter.js";
 import { OBSERVER_WAKE_TIMEOUT_MS } from "./council-types.js";
 import type { RecorderManager } from "./recorder.js";
 import { resolveSessionGitInfo } from "./session-git-info.js";
@@ -197,10 +198,19 @@ export class WsBridge {
     const session = this.sessions.get(sessionId);
     if (!session) return { kind: "session_unknown" };
     if (!session.backendAdapter) return { kind: "adapter_missing" };
-    if (!(session.backendAdapter instanceof ClaudeAdapter)) {
-      return { kind: "unsupported_backend" };
+    // Both adapter classes implement sendUserFrameFromServer with the
+    // same signature + outcome union. Dispatch by instance check rather
+    // than via IBackendAdapter so a future adapter (e.g. mock for tests)
+    // that doesn't implement wake is explicitly rejected with
+    // `unsupported_backend` rather than running with a non-existent
+    // method.
+    if (
+      session.backendAdapter instanceof ClaudeAdapter
+      || session.backendAdapter instanceof CodexAdapter
+    ) {
+      return session.backendAdapter.sendUserFrameFromServer(content);
     }
-    return session.backendAdapter.sendUserFrameFromServer(content);
+    return { kind: "unsupported_backend" };
   }
 
   /**
