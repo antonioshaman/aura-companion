@@ -232,7 +232,8 @@ interface CouncilWatcherEntry {
  *     - `observer_unknown` — no observer half mapped for this group
  *     - `group_not_active` — group status is pairing/degraded/reconnecting/archived
  *     - `adapter_missing` — session exists but its backend adapter is null (transient)
- *     - `unsupported_backend` — adapter is not ClaudeAdapter (Codex pairing not yet wired)
+ *     - `unsupported_backend` — adapter implements neither ClaudeAdapter nor
+ *       CodexAdapter (defensive branch for a future mock/null adapter)
  *     - `socket_disconnected` — observer cliSocket null or not OPEN
  *     - `backpressure` — observer socket's bufferedAmount exceeds threshold
  *     - `observer_busy` — observer turn-state is in-flight (queue in Task 4)
