@@ -370,8 +370,19 @@ export class IdleTimerManager {
    * frame's tool-use window is still open from the CLI's POV.
    */
   isSyntheticTurnInFlight(sessionId: string): boolean {
-    return this.states.get(sessionId)?.pendingSyntheticTurnToken !== null
-      && this.states.get(sessionId)?.pendingSyntheticTurnToken !== undefined;
+    // CR-3 fix: single read of state, then explicit chain. The previous
+    // shape called `this.states.get(sessionId)` twice and ANDed the two
+    // independent `?.pendingSyntheticTurnToken` reads — a torn-read
+    // window where macrotask interleaving between the two `.get` calls
+    // can see a non-null token first then null second (gate flips to
+    // false) AND a fragile reliance on operator precedence for
+    // never-armed sessions (`undefined !== null && undefined !== undefined`
+    // happens to be false by accident; trivial refactor inverts it).
+    // Explicit `state === undefined` short-circuit returns false; only
+    // then is the token field consulted.
+    const state = this.states.get(sessionId);
+    if (state === undefined) return false;
+    return state.pendingSyntheticTurnToken !== null;
   }
 
   /**

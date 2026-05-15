@@ -79,6 +79,18 @@ export interface Session {
     model?: string;
     startedAt: number;
   } | null;
+  /**
+   * OBS-STOP-1 fix — pending `appendSystemPrompt` buffered when
+   * `injectSystemPrompt` is called BEFORE the CLI WebSocket connects
+   * (the early session-creation-service.ts:461 path). Without buffering,
+   * the previous `if (backendAdapter instanceof ClaudeAdapter)` guard
+   * silently no-op'd and the prompt was lost. `handleCLIOpen` consumes
+   * this in the kickoff initialize so there is exactly ONE initialize
+   * control_request per session lifecycle, carrying any accumulated
+   * `appendSystemPrompt` rather than a bare kickoff that races a
+   * later second initialize.
+   */
+  pendingSystemPromptInjection?: string | null;
 }
 
 export type GitSessionKey =

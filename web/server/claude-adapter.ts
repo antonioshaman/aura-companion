@@ -882,21 +882,32 @@ export class ClaudeAdapter implements IBackendAdapter {
     if (msg.request.subtype === "can_use_tool") {
       // Task 11.8 — auto-proceed denylist gate. When a synthetic turn is
       // in flight and the requested tool is in the denylist (Bash:git push,
-      // network operations, destructive filesystem actions etc.), respond
-      // directly with `behavior: "deny"` and do NOT surface the
+      // git commit, gh pr create, gh pr merge — publish-to-others ops),
+      // respond directly with `behavior: "deny"` and do NOT surface the
       // permission request to the user's browser. This prevents an
-      // unattended auto-proceed loop from triggering destructive operations
+      // unattended auto-proceed loop from triggering publish operations
       // that would have required explicit user approval.
+      //
+      // CR-1 fix (fail-CLOSED on probe-null): the previous predicate
+      // `this.idleTimerProbe?.isSyntheticTurnInFlight(...)` optional-
+      // chained to `undefined` when the probe was null and the entire
+      // denylist branch was skipped — fail-OPEN. Three council reviewers
+      // (Willison × Hunt × Subprocess) converged on the same DI-ordering
+      // risk. The fix: if the probe is null but the tool itself is in
+      // the denylist, deny REGARDLESS of in-flight state (defence-in-
+      // depth over availability — the synthetic-turn case is unattended
+      // and a malformed/missing probe should not auto-allow). Per
+      // `feedback_multi_expert_convergence_promotion` this is structural
+      // truth, not paranoia.
       //
       // Honest scope: the denylist is a defence-in-depth string-match
       // filter and CANNOT catch shell-escapes (`bash -c '...'`, command
-      // substitution, chained operators). See `auto-proceed-permissions.ts`
-      // for documented limitations. The PR description over-claims its
-      // coverage at your own risk.
-      if (
-        this.idleTimerProbe?.isSyntheticTurnInFlight(this.sessionId) &&
-        isToolUseDeniedForSynthetic(msg.request.tool_name, msg.request.input)
-      ) {
+      // substitution, chained operators), nor non-string tool_name from
+      // protocol drift (covered separately in auto-proceed-permissions.ts).
+      const toolDenylisted = isToolUseDeniedForSynthetic(msg.request.tool_name, msg.request.input);
+      const probeReportsInFlight = this.idleTimerProbe?.isSyntheticTurnInFlight(this.sessionId);
+      const probeMissing = this.idleTimerProbe === null;
+      if (toolDenylisted && (probeReportsInFlight || probeMissing)) {
         const denyNdjson = JSON.stringify({
           type: "control_response",
           response: {
@@ -1125,6 +1136,22 @@ export class ClaudeAdapter implements IBackendAdapter {
    */
   sendOrchestratorSyntheticFrame(content: string): ObserverWakeSendOutcome {
     this.onActivityUpdate?.();
+
+    // CR-2 fix: orchestrator turn-state gate. The previous shape
+    // explicitly handwaved the check to the caller (IdleTimerManager.fire)
+    // running in a different stack — a TOCTOU window where a real user
+    // could flip orchestratorTurnState to `in-flight` via
+    // handleOutgoingUserMessage between the manager's read and this
+    // adapter's send. The CLI would then have two `user` frames pending
+    // against one orchestrator slot; the second result-frame to arrive
+    // would fire the in-flight → awaiting-input transition prematurely,
+    // clear the synthetic sticky token, and the genuine user's later
+    // result would find state already `awaiting-input` and silently
+    // drop both the bus event AND cleanup. Carmack: the check and the
+    // act must be the same act. Mirrors `sendUserFrameFromServer` Gate 1.
+    if (this.orchestratorTurnState.kind === "in-flight") {
+      return { kind: "busy" };
+    }
 
     if (!this.cliSocket) {
       return { kind: "socket_disconnected" };

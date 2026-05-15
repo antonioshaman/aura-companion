@@ -2737,15 +2737,20 @@ export class SessionOrchestrator {
       this.prPoller.unwatch(group.primary.sessionId);
       this.prPoller.unwatch(group.observer.sessionId);
 
-      await coord.archiveGroup(group.sessionGroupId);
-
-      // Task 11.8 — clear the pending-synthetic-turn sticky token on the
-      // orchestrator half once the group is archived. The `session:exited`
-      // listener above also clears on the individual half-deaths that
-      // archiveGroup fires, but explicit cleanup here guards against any
-      // ordering between archive and the bus-emit being inverted by a
-      // future refactor. Idempotent — calling twice is a no-op.
+      // CR-5 fix: clear the pending-synthetic-turn sticky token BEFORE
+      // archiveGroup's awaited kills. Previously the clear ran AFTER the
+      // await — current behaviour was safe ONLY because archiveGroup's
+      // kills synchronously fire `session:exited` → listener clears. A
+      // future async-kill refactor (deferring `deps.kill` to setImmediate
+      // for re-entry hygiene) inverts the safety: the explicit clear at
+      // step 3 would then race the eventual exit-emit, leaving a window
+      // where the sticky token survives the archive. Move BEFORE await
+      // so it's unconditionally before any kill — listener handles late
+      // edge cases as belt-and-braces, not as the primary defence.
+      // Idempotent on never-armed sessions.
       this.idleTimerManager.clearPendingSyntheticTurn(group.primary.sessionId);
+
+      await coord.archiveGroup(group.sessionGroupId);
 
       // Worktree cleanup runs ONCE — council pairs share one workspace;
       // calling cleanupWorktree per-half would double-attempt the same
