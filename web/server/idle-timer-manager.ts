@@ -169,6 +169,39 @@ interface ArmedTimerState {
   lastObjectiveGateResult: "pass" | "fail" | null;
   /** Active timer handle from the clock — cancelled on user-message / dispose. */
   timer: ClockTimer | null;
+  /**
+   * PLAN Task 11.4 — sticky synthetic-turn token. Set to the `turnToken`
+   * value AT FIRE TIME (so the manager records WHICH turn the synthetic
+   * frame belongs to) and cleared ONLY when:
+   *   (a) the terminal `result` NDJSON frame for that turn is observed
+   *       (via `noteTerminalResultFrame` — wired by the adapter's
+   *       `result`-frame observer in PR Task 11.8);
+   *   (b) `cli_session_exited` for this session (caller invokes
+   *       `clearPendingSyntheticTurn` from the orchestrator's exit
+   *       handler — addresses observer review v3 WARN on clear-on-failure
+   *       semantics);
+   *   (c) `cli_session_relaunched` via `--resume` (same orchestrator wire);
+   *   (d) session archive (same orchestrator wire, also covered by the
+   *       `clearPendingSyntheticTurn` call in archiveSession's council
+   *       branch — Task 11.8).
+   *
+   * NOT cleared by `noteUserMessage` — user typing during a pending
+   * synthetic turn keeps the flag sticky, which is the race-defence the
+   * denylist gate (Task 11.5) relies on: a `can_use_tool` for `Bash:git
+   * push` arriving from a user-typed prompt mid-synthetic-turn correctly
+   * denies because the synthetic is still in-flight from the CLI's POV
+   * even though the user has typed.
+   *
+   * Shape choice — `number | null` rather than `boolean`. The manager's
+   * single-firer invariant guarantees at-most-one synthetic turn per
+   * session in-flight, so boolean would correctness-suffice today.
+   * The numeric form preserves the original `turnToken` value at stamp
+   * time, which lets forensic EC-9 logs correlate "denied: git push"
+   * back to the specific synthetic fire that's pending (audit-trail
+   * Carmack). If a future architectural change ever lets two synthetic
+   * turns overlap, the number form is the path of least migration.
+   */
+  pendingSyntheticTurnToken: number | null;
 }
 
 /**
@@ -208,6 +241,7 @@ export class IdleTimerManager {
       cappedAt: null,
       lastObjectiveGateResult: null,
       timer: null,
+      pendingSyntheticTurnToken: null,
     };
     fresh.iterationCount = trace.iterationCount;
     fresh.firedAt = [...trace.firedAt];
@@ -263,6 +297,7 @@ export class IdleTimerManager {
         cappedAt: null,
         lastObjectiveGateResult: null,
         timer: null,
+        pendingSyntheticTurnToken: null,
       };
     state.options = options;
     state.turnToken += 1;
@@ -321,6 +356,53 @@ export class IdleTimerManager {
   /** Test-only: is a timer currently armed for this session. */
   isArmed(sessionId: string): boolean {
     return this.states.get(sessionId)?.timer != null;
+  }
+
+  /**
+   * PLAN Task 11.4 — sticky synthetic-turn accessor for the denylist
+   * gate (Task 11.5) and downstream consumers. Returns `true` between
+   * the manager's successful `fire()` and the matching
+   * `noteTerminalResultFrame` / `clearPendingSyntheticTurn` call.
+   *
+   * Specifically does NOT flip false on `noteUserMessage` — the
+   * stickiness is the race-defence: if the user types `git push` mid
+   * synthetic-turn, the denylist STILL refuses because the synthetic
+   * frame's tool-use window is still open from the CLI's POV.
+   */
+  isSyntheticTurnInFlight(sessionId: string): boolean {
+    return this.states.get(sessionId)?.pendingSyntheticTurnToken !== null
+      && this.states.get(sessionId)?.pendingSyntheticTurnToken !== undefined;
+  }
+
+  /**
+   * PLAN Task 11.4 — wired from the adapter's terminal `result` NDJSON
+   * frame observer (Task 11.8). Clears the sticky pending-synthetic-turn
+   * flag, unblocking the denylist gate for subsequent user-typed tool
+   * uses. Idempotent — safe to call when no synthetic is pending or for
+   * a session that's never armed.
+   */
+  noteTerminalResultFrame(sessionId: string): void {
+    const state = this.states.get(sessionId);
+    if (!state) return;
+    state.pendingSyntheticTurnToken = null;
+  }
+
+  /**
+   * PLAN Task 11.4 — orchestrator-side clear for the race-defence
+   * cleanup paths the observer review (v3 WARN) called out:
+   *   (b) `cli_session_exited` for this session,
+   *   (c) `cli_session_relaunched` via `--resume`,
+   *   (d) session archive.
+   *
+   * Aliased to `noteTerminalResultFrame` semantically — the flag flips
+   * false either way — but exposed under a distinct name so call sites
+   * (and grep canaries) make the "abnormal completion" path visible vs
+   * the happy-path terminal-result-frame path. Idempotent.
+   */
+  clearPendingSyntheticTurn(sessionId: string): void {
+    const state = this.states.get(sessionId);
+    if (!state) return;
+    state.pendingSyntheticTurnToken = null;
   }
 
   /**
@@ -476,6 +558,13 @@ export class IdleTimerManager {
       });
       return { kind: "send-failed", error: sendResult.error };
     }
+
+    // PLAN Task 11.4 — stamp the sticky pending-synthetic-turn token.
+    // Records the turnToken value at fire time so the denylist gate
+    // (Task 11.5) can observe `isSyntheticTurnInFlight = true` until the
+    // terminal `result` NDJSON frame for THIS turn is seen. NOT cleared
+    // by `noteUserMessage` — see field docstring on `ArmedTimerState`.
+    state.pendingSyntheticTurnToken = state.turnToken;
 
     // Best-effort AFK summary — failure here is logged but does NOT
     // revert the trace (the trace is the cap-authoritative counter;

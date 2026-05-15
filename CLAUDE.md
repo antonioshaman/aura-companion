@@ -142,6 +142,7 @@ Each entry captures:
 - `dir`: `"in"` (received by server) or `"out"` (sent by server)
 - `ch`: `"cli"` (Claude Code / Codex process) or `"browser"` (frontend WebSocket)
 - `raw`: the exact original string — never re-serialized, preserving the true protocol payload
+- `origin` (optional, on `"out"` frames only): provenance of the send. One of `"browser"` (default; field usually omitted on-disk to keep entry size minimal — browser-relayed sends are the common case), `"server:council-wake"` (synthesised by the Council Mode auto-wake dispatcher), or `"server:auto-proceed"` (synthesised by the orchestrator-idle auto-proceed pipeline on idle-timeout). Inbound (`"in"`) frames never carry `origin` — provenance is implicit from the CLI subprocess.
 
 **REST API**:
 - `GET /api/recordings` — list all recording files with metadata
