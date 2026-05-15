@@ -2804,6 +2804,7 @@ describe("noteCliActivity dispatcher (Task 11.7 — idle-kill clock split)", () 
     // Inject a probe that reports synthetic-in-flight for this session.
     bridge.setIdleTimerProbe({
       isSyntheticTurnInFlight: (sid) => sid === "s-clock-2",
+      noteTerminalResultFrame: () => {},
     });
 
     const session = bridge.getSession("s-clock-2")!;
@@ -2829,6 +2830,7 @@ describe("noteCliActivity dispatcher (Task 11.7 — idle-kill clock split)", () 
 
     bridge.setIdleTimerProbe({
       isSyntheticTurnInFlight: () => true,
+      noteTerminalResultFrame: () => {},
     });
 
     const session = bridge.getSession("s-clock-3")!;
@@ -2855,7 +2857,7 @@ describe("noteCliActivity dispatcher (Task 11.7 — idle-kill clock split)", () 
     bridge.handleBrowserOpen(browser, "s-clock-4");
 
     // Step 1: synthetic phase — clock locked.
-    bridge.setIdleTimerProbe({ isSyntheticTurnInFlight: () => true });
+    bridge.setIdleTimerProbe({ isSyntheticTurnInFlight: () => true, noteTerminalResultFrame: () => {} });
     const session = bridge.getSession("s-clock-4")!;
     const initial = session.lastCliActivityTs;
     await new Promise((r) => setTimeout(r, 5));
@@ -2871,7 +2873,7 @@ describe("noteCliActivity dispatcher (Task 11.7 — idle-kill clock split)", () 
     expect(session.lastCliActivityTs).toBe(initial);
 
     // Step 2: user types — synthetic turn implicitly cleared, probe flips.
-    bridge.setIdleTimerProbe({ isSyntheticTurnInFlight: () => false });
+    bridge.setIdleTimerProbe({ isSyntheticTurnInFlight: () => false, noteTerminalResultFrame: () => {} });
     await new Promise((r) => setTimeout(r, 5));
     await bridge.handleCLIMessage(cli, JSON.stringify({
       type: "tool_progress",
