@@ -131,3 +131,67 @@ These must be followed — flag violations as findings.
 **Principle:** `references/quality-persistence.md` → Principle 7 (Replay determinism)
 
 ---
+
+### AP-4: Late-injection via setter is the blessed shape for mutual-cycle DI
+
+**Pattern:** When two long-lived classes have a reference cycle (e.g. `IdleTimerManager` needs `getSession`/`getGroupStatus` closing over the orchestrator + bridge; the orchestrator's rehydrate path calls into the manager), the canonical resolution is: construct the first dependency with a noop placeholder, build the second dependency closing over the first, then inject the real instance back via a `set<Name>` method BEFORE `initialize()` runs. Mirrors the `orchestrator.setIdleTimerManager` + `wsBridge.setIdleTimerProbe` pattern in `index.ts`. Lazy proxies / `Lazy<T>` pushers off the type system are explicit non-options — late-injection keeps cycle resolution visible in the bootstrap code.
+**Origin:** Council Review 2026-05-15-0336 — Task 11 wire-up established the pattern at three sites (orchestrator↔manager, bridge↔probe, adapter↔probe). Convergent recommendation from Backend + Subprocess + Fowler experts.
+**Rationale:** Cycle is real; lazy alternatives hide it. Setter pattern surfaces the ordering in one place.
+
+---
+
+### EC-14: Late-injected probe interfaces must live as a named exported type at the producer
+
+**Convention:** Any narrow-surface "probe" interface (a subset of a manager's API passed via late-injection to a consumer) MUST be exported as a named type from the producer module (e.g. `export type IdleTimerProbe = { ... }` in `idle-timer-manager.ts`) and imported via `import type` at every consumer site. Inline duplicate `{ method1(): boolean; method2(): void }` declarations at the consumer's field + setter parameter + closure-passing site are forbidden — 3-to-5-way inline duplication creates a drift footgun that ships green-locally / red-on-CI under any interface widening (proven: PR #54 commit `8cdbc74` shipped 11.7 widening, `ws-bridge.test.ts` stubs not updated, CI typecheck caught it, fix landed in `ffb48d3`).
+**Origin:** Fowler × Backend — Council Review 2026-05-15-0336 (finding #9)
+**Principle:** `references/refactoring.md` → Principle 4 (Names that lie or mislead)
+
+---
+
+### EC-15: Bridge-boundary discriminated unions require exhaustive consumer-site `switch`
+
+**Convention:** Any consumer that maps a typed discriminated union crossing the `WsBridge` boundary (`BridgeObserverWakeOutcome`, future `BridgeEnqueueOutcome` from PR #52, etc.) MUST use `switch (outcome.kind) { case "x": ...; case "y": ...; }` followed by `const _exhaustive: never = outcome; void _exhaustive;` tail. If/else cascades with terminal `else` fall through are forbidden — a future variant added to the producer will silently stringify at the consumer site, hiding protocol drift. Wake-path consumer at `session-orchestrator.ts:1808-1953` is the reference; the auto-proceed mapping at `index.ts:147-158` is the regression that broke this convention and is finding #4 of this review.
+**Origin:** Realtime/NDJSON Protocol — Council Review 2026-05-15-0336 (finding #4)
+**Principle:** `references/quality-realtime.md` → Principle 7 (Protocol drift)
+
+---
+
+### EC-16: Server-originated WS frames must carry an `origin` discriminator through `routeBrowserMessage`
+
+**Convention:** Any code path that injects a frame into `routeBrowserMessage` from a non-browser source — `cron-scheduler`, `agent-executor`, `linear-agent-bridge`, REST `POST /sessions/:id/message`, future synthetic auto-proceed paths — MUST thread an `origin: "browser" | "server:cron" | "server:agent" | "server:linear" | "server:auto-proceed"` discriminator on the frame. Observers registered via `onUserFrameObserved` filter on origin and skip non-browser-originated frames; `IdleTimerManager.noteUserMessage` only fires for `origin === "browser"`. Mirrors the recorder origin pattern already documented in CLAUDE.md. Without this, server-originated injections silently advance the auto-proceed turn-token and cancel pending fires — cron+council sessions never reach auto-proceed.
+**Origin:** Bun/Hono/TS Backend — Council Review 2026-05-15-0336 (finding #12)
+**Principle:** `references/quality-backend.md` → Principle 2 (Validate at every protocol boundary)
+
+---
+
+### EC-17: Defence-in-depth gates must fail-CLOSED on probe-null or runtime-shape-violation
+
+**Convention:** Any gate that the codebase positions as a "defence-in-depth" safety check (denylist gates, permission predicates, type-narrowing guards) MUST fail-CLOSED on the absence of its decision input — `null` probe, non-string `tool_name`, malformed `tool_input`, etc. Tested explicitly via probe-null and malformed-input paths. The current shape "optional-chain short-circuit + `&&` operator" produces fail-OPEN (the gate is bypassed when the probe is null) and is the regression at finding #1 of this review (3-expert convergence Willison × Hunt × Subprocess). The rule generalises: optimising for test ergonomics (no probe required) by trading away the safety promise is the wrong tradeoff for any gate marketed as defence-in-depth.
+**Origin:** Willison × Hunt × Subprocess — Council Review 2026-05-15-0336 (finding #1)
+**Principle:** `references/quality-llm.md` → Principle 3 (LLM-graded permission with no rule-based fallback is fail-open)
+
+---
+
+### EC-18: Cross-module probe-coupled wiring (3+ classes via DI) requires integration-level test, not only component-level coverage
+
+**Convention:** When a contract spans 3+ classes via late-injection (the Task 11 pattern: `IdleTimerManager` ↔ `WsBridge` ↔ `ClaudeAdapter` coupled through `idleTimerProbe`), component-level tests are necessary but not sufficient. Required: at least one integration-level test that drives the full pipeline through its 5-step state machine (arm → fire → user-frame races → can_use_tool gate → result-frame transition) with FakeClock + spy harnesses on every probe method. Without it, cross-module probe-state desync (the bridge probe says `synthetic-in-flight` but the adapter's closure captured a stale probe at construction time) is invisible — every component test passes, the integration boundary fails silently. Per `feedback_partial_fix_passed_as_complete`: the integration boundary IS the defect surface for cross-class probe wiring.
+**Origin:** Beck — Council Review 2026-05-15-0336 (finding #7, P1.4 from beck.md)
+**Principle:** `references/quality-testing.md` → Risk-calibrated coverage
+
+---
+
+### EC-19: Static-grep canaries must anchor on function name, brace-counted body extraction, never literal substring
+
+**Convention:** Any test-side canary that asserts "this mutation/symbol occurs only inside function F's body" MUST use a regex anchored on the function name (e.g. `\bfunctionName\s*\([^)]*\)\s*:?\s*[a-zA-Z]*\s*\{`) followed by brace-counting body extraction, NOT literal substring search of the function's expected body bytes. Literal-substring canaries weaken silently under parameter renames, access modifier changes, return-type annotation additions, and any other source-cosmetic edit. The 11.7 EC-6 canary at `ws-bridge.test.ts:2862-2880` is the reference implementation — survives renames of `session` parameter, `private` ↔ public toggle, and TypeScript return-type changes. Universal sibling: `feedback_static_grep_canary_regex_over_substring`.
+**Origin:** Beck × Kent Beck (Test Quality) — Council Review 2026-05-15-0336 (positive recognition, codified as convention)
+**Principle:** `references/quality-testing.md` → Structure-insensitive assertions
+
+---
+
+### EC-20: Producer↔consumer path/filename conventions live as exported constants, never in agent prompts or self-memory
+
+**Convention:** Any cross-module producer↔consumer contract over filesystem path or filename shape (observer review files, checkpoint files, recording files, council artifacts, future conventions) MUST be expressed as ONE exported constant + helper pair (regex/pattern for consumers, builder function for producers) co-located with the canonical consumer module. Agent harnesses, monitoring code, prompts, and external tooling MUST import the constant — never hardcode the pattern in system prompts or agent self-memory. Reference implementation: `web/server/review-watcher.ts` exports `OBSERVER_REVIEW_FILE_PATTERN` (consumer regex) + `buildObserverReviewFilename(phase, provider)` (producer helper). Each helper MUST throw on inputs that would produce a name failing the pattern — silent fallback to a "best-effort" name is forbidden because consumer parse-fail then masquerades as producer silence (`feedback_consumer_path_drift_before_silent_claim`). The om_event_bot incident (2026-05-15) was a consumer-side self-prompt filter on `FIXES-applied-from-observer-*` while producer wrote canonical `<phase>-<provider>-observer.md` — exactly the drift class this convention closes.
+**Origin:** Council Review 2026-05-15-0520 Prevention #5 (consumer path drift) — emergent from cross-pair debugging
+**Principle:** `references/refactoring.md` → P4 (names reveal design) + `references/quality-persistence.md` → P9 (don't build on filesystem assumptions); sibling memory `feedback_consumer_path_drift_before_silent_claim` (universal)
+
+---
