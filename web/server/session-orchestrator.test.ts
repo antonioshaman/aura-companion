@@ -323,6 +323,79 @@ describe("SessionOrchestrator", () => {
       expect(deps.launcher.setCLISessionId).toHaveBeenCalledWith("s1", "cli-id-123");
     });
 
+    // CR-7 (council review 2026-05-15-0336 finding #7 / Beck P1.1):
+    // `initialize()` subscribes `wsBridge.onUserFrameObserved` to
+    // `idleTimerManager.noteUserMessage`. Without this test, a future
+    // refactor that deletes the subscription line would still pass every
+    // existing test — the bridge has a stub `onUserFrameObserved: vi.fn(() => () => {})`
+    // and the manager's `noteUserMessage` is also independently tested,
+    // but the WIRING between them was untested. The bug class is
+    // `feedback_call_site_presence_not_just_symbol_export` — every
+    // standalone symbol works, the line connecting them silently breaks
+    // and auto-proceed continues firing under real user activity.
+    it("CR-7: initialize() subscribes onUserFrameObserved → idleTimerManager.noteUserMessage", () => {
+      const noteUserMessage = vi.fn();
+      // Capture the callback the orchestrator registers so we can
+      // invoke it ourselves (the bridge mock won't actually fire it).
+      let captured: ((sid: string) => void) | null = null;
+      (deps.wsBridge as any).onUserFrameObserved = vi.fn((cb: (sid: string) => void) => {
+        captured = cb;
+        return () => {};
+      });
+      // Replace the noop idle-timer manager with a spy-capable stub.
+      orchestrator.setIdleTimerManager({
+        noteUserMessage,
+        // Stub the other methods so the manager interface is satisfied.
+        disposeAll: () => {},
+        getIterationCount: () => 0,
+        isSyntheticTurnInFlight: () => false,
+        noteTerminalResultFrame: () => {},
+        clearPendingSyntheticTurn: () => {},
+        armForSession: () => undefined,
+        cancelForSession: () => undefined,
+        rehydrateFromTrace: () => undefined,
+      } as any);
+
+      orchestrator.initialize();
+
+      // The orchestrator MUST have called onUserFrameObserved during
+      // initialize() — symbol-presence assertion.
+      expect((deps.wsBridge as any).onUserFrameObserved).toHaveBeenCalledTimes(1);
+      expect(captured).not.toBeNull();
+
+      // BEHAVIOURAL — invoking the captured callback must forward to
+      // the manager's noteUserMessage. This is the wiring under test.
+      captured!("sess-from-tab-b");
+      expect(noteUserMessage).toHaveBeenCalledWith("sess-from-tab-b");
+    });
+
+    // CR-7 / Beck P1.2: the new `session:exited` listener (added in PR #54
+    // Task 11.8) calls `idleTimerManager.clearPendingSyntheticTurn` on EVERY
+    // session exit so an orphaned sticky-token from a session that died
+    // mid-synthetic-turn cannot survive across `--resume`. The existing
+    // session:exited listener-count tests assert count ≥ N but do NOT
+    // distinguish handlers — a regression deleting THIS specific listener
+    // keeps the count valid and ships green.
+    it("CR-7: session:exited fires idleTimerManager.clearPendingSyntheticTurn", () => {
+      const clearPendingSyntheticTurn = vi.fn();
+      orchestrator.setIdleTimerManager({
+        noteUserMessage: () => {},
+        clearPendingSyntheticTurn,
+        disposeAll: () => {},
+        getIterationCount: () => 0,
+        isSyntheticTurnInFlight: () => false,
+        noteTerminalResultFrame: () => {},
+        armForSession: () => undefined,
+        cancelForSession: () => undefined,
+        rehydrateFromTrace: () => undefined,
+      } as any);
+
+      orchestrator.initialize();
+      companionBus.emit("session:exited", { sessionId: "s-exited-1", exitCode: 0 });
+
+      expect(clearPendingSyntheticTurn).toHaveBeenCalledWith("s-exited-1");
+    });
+
     it("session exit callback notifies agentExecutor", () => {
       orchestrator.initialize();
 
