@@ -13,6 +13,12 @@ interface SessionItemProps {
   councilPairing?: string;
   /** Number of unresolved STOP findings in the group (drives red unread badge). */
   councilUnreadStops?: number;
+  /**
+   * Council Mode role for this session — drives the ☼/☽ glyph prefix and
+   * the " · orchestrator"/" · observer" suffix on the session name row.
+   * Undefined when the session isn't part of a council pair. (2026-05-15 Item 17)
+   */
+  councilRole?: "orchestrator" | "observer";
   onSelect: (id: string) => void;
   onStartRename: (id: string, currentName: string) => void;
   onArchive: (e: React.MouseEvent, id: string) => void;
@@ -89,6 +95,7 @@ export function SessionItem({
   isRecentlyRenamed,
   councilPairing,
   councilUnreadStops,
+  councilRole,
   onSelect,
   onStartRename,
   onArchive,
@@ -239,14 +246,37 @@ export function SessionItem({
           />
         ) : (
           <div className="flex-1 min-w-0">
-            {/* Row 1 — name, full inner width */}
+            {/* Row 1 — name, full inner width. Council role decoration
+                (2026-05-15 Item 17): ☼ glyph for orchestrator, ☽ for
+                observer, plus " · {role}" suffix. Glyph is aria-hidden
+                because the suffix carries the same info as accessible text
+                (so screen readers read the role once, not twice). */}
             <span
               className={`text-[12.5px] font-medium truncate block leading-snug ${
                 isActive ? "text-cc-fg" : "text-cc-fg/90"
               } ${isRecentlyRenamed ? "animate-name-appear" : ""}`}
               onAnimationEnd={() => onClearRecentlyRenamed(s.id)}
             >
+              {councilRole && (
+                <span
+                  aria-hidden="true"
+                  data-testid="council-role-glyph"
+                  className={`inline-block mr-1 ${
+                    councilRole === "orchestrator" ? "text-amber-400" : "text-sky-300"
+                  }`}
+                >
+                  {councilRole === "orchestrator" ? "☼" : "☽"}
+                </span>
+              )}
               {label}
+              {councilRole && (
+                <span
+                  data-testid="council-role-suffix"
+                  className="text-cc-muted/60 font-normal"
+                >
+                  {" · "}{councilRole}
+                </span>
+              )}
             </span>
             {/* Row 2 — meta: cwd (truncates first) + chip cluster (shrink-0). */}
             <div className="flex items-center gap-1.5 mt-px min-w-0">

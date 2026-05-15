@@ -163,6 +163,7 @@ type SessionItemSharedProps = Omit<
   | "isRecentlyRenamed"
   | "councilPairing"
   | "councilUnreadStops"
+  | "councilRole"
 >;
 
 interface CollapsibleSessionListProps {
@@ -176,7 +177,7 @@ interface CollapsibleSessionListProps {
   sessionNames: Map<string, string>;
   pendingPermissions: Map<string, Map<string, unknown>>;
   recentlyRenamed: Set<string>;
-  getCouncilInfo: (id: string) => { pairing?: string; unreadStops?: number };
+  getCouncilInfo: (id: string) => { pairing?: string; unreadStops?: number; role?: "orchestrator" | "observer" };
   sessionItemProps: SessionItemSharedProps;
 }
 
@@ -224,6 +225,7 @@ function CollapsibleSessionList({
                 isRecentlyRenamed={recentlyRenamed.has(s.id)}
                 councilPairing={council.pairing}
                 councilUnreadStops={council.unreadStops}
+                councilRole={council.role}
                 {...sessionItemProps}
               />
             );
@@ -653,7 +655,7 @@ export function Sidebar() {
    * from the store maps. Hoisted out of the JSX so the closure cost stays
    * bounded as the session list grows.
    */
-  function councilInfoFor(sessionId: string): { pairing?: string; unreadStops?: number } {
+  function councilInfoFor(sessionId: string): { pairing?: string; unreadStops?: number; role?: "orchestrator" | "observer" } {
     const groupId = groupBySessionId.get(sessionId);
     if (!groupId) return {};
     const group = groups.get(groupId);
@@ -666,7 +668,15 @@ export function Sidebar() {
       if (dismissedStopIds.has(f.id)) continue;
       unread++;
     }
-    return { pairing: group.pairing, unreadStops: unread };
+    // Council Review 2026-05-15 Item 17 — derive role from GroupRecord
+    // membership rather than plumbing a new field through SessionItem's
+    // data shape. The role-pair invariant is owned by the council slice.
+    // GroupRecord.primarySessionId is the orchestrator half; observerSessionId
+    // is the observer half.
+    let role: "orchestrator" | "observer" | undefined;
+    if (group.primarySessionId === sessionId) role = "orchestrator";
+    else if (group.observerSessionId === sessionId) role = "observer";
+    return { pairing: group.pairing, unreadStops: unread, role };
   }
 
   return (
