@@ -12,6 +12,7 @@
 import { randomUUID } from "node:crypto";
 import type { ServerWebSocket } from "bun";
 import type { IBackendAdapter } from "./backend-adapter.js";
+import type { IdleTimerProbe } from "./idle-timer-manager.js";
 import type {
   BrowserIncomingMessage,
   BrowserOutgoingMessage,
@@ -131,10 +132,7 @@ export class ClaudeAdapter implements IBackendAdapter {
   //      sticky token so the next idle re-armament starts clean.
   // Null in unit tests that don't exercise auto-proceed (default-safe:
   // gate falls open, terminator no-ops).
-  private idleTimerProbe: {
-    isSyntheticTurnInFlight(sessionId: string): boolean;
-    noteTerminalResultFrame(sessionId: string): void;
-  } | null;
+  private idleTimerProbe: IdleTimerProbe | null;
 
   private protocolDriftSeen = new Set<string>();
   private parseErrorSeen = new Set<string>();
@@ -192,10 +190,7 @@ export class ClaudeAdapter implements IBackendAdapter {
     opts?: {
       recorder?: RecorderManager | null;
       onActivityUpdate?: () => void;
-      idleTimerProbe?: {
-        isSyntheticTurnInFlight(sessionId: string): boolean;
-        noteTerminalResultFrame(sessionId: string): void;
-      } | null;
+      idleTimerProbe?: IdleTimerProbe | null;
     },
   ) {
     this.sessionId = sessionId;

@@ -577,3 +577,52 @@ describe("IdleTimerManager — sticky pendingSyntheticTurnToken (Task 11.4)", ()
     expect(m.isSyntheticTurnInFlight("sess-orch-1")).toBe(true);
   });
 });
+
+// Council Review #9 (probe interface drift) — EC-14 + EC-19 canary.
+// Asserts the inline `{isSyntheticTurnInFlight, noteTerminalResultFrame}`
+// probe shape no longer appears in production code; consumers must
+// `import type { IdleTimerProbe }` from this module instead. The shape
+// previously lived inline at 3 production sites + N test fixtures —
+// drift was inevitable on the next method addition.
+describe("EC-14 probe interface — IdleTimerProbe is exported + consumed by name", () => {
+  it("no production file declares the inline {isSyntheticTurnInFlight, noteTerminalResultFrame} probe shape", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const serverDir = path.dirname(new URL(import.meta.url).pathname);
+    const entries = fs.readdirSync(serverDir, { withFileTypes: true });
+    const offending: Array<{ file: string; lineNum: number; preview: string }> = [];
+    // Shape regex — matches the structural probe declaration whether
+    // inline as a property type, an options field, or a constructor arg.
+    // Tolerates whitespace/newline between the two methods so reformatting
+    // doesn't false-pass.
+    const shapeRegex = /isSyntheticTurnInFlight\s*\([^)]*\)\s*:\s*boolean\s*[;,\n]\s*noteTerminalResultFrame\s*\(/;
+    for (const ent of entries) {
+      if (!ent.isFile()) continue;
+      if (!ent.name.endsWith(".ts")) continue;
+      // Test files may legitimately mock the probe surface inline; not
+      // production code, not bound by EC-14.
+      if (ent.name.endsWith(".test.ts")) continue;
+      // The producer itself defines the type — allowed.
+      if (ent.name === "idle-timer-manager.ts") continue;
+      const text = fs.readFileSync(path.join(serverDir, ent.name), "utf-8");
+      const m = shapeRegex.exec(text);
+      if (m) {
+        const lineNum = text.slice(0, m.index).split("\n").length;
+        offending.push({ file: ent.name, lineNum, preview: m[0].slice(0, 100) });
+      }
+    }
+    expect(
+      offending,
+      `Production files duplicate the IdleTimerProbe inline shape. Replace with \`import type { IdleTimerProbe } from "./idle-timer-manager.js"\`. Offenders:\n${offending.map((o) => `${o.file}:${o.lineNum} → ${o.preview}`).join("\n")}`,
+    ).toEqual([]);
+  });
+
+  it("IdleTimerManager implements IdleTimerProbe (structural compatibility)", () => {
+    const h = buildHarness();
+    const m: IdleTimerManager = new IdleTimerManager(h.deps);
+    // Compile-time check: assignability to the probe surface.
+    const probe: import("./idle-timer-manager.js").IdleTimerProbe = m;
+    expect(typeof probe.isSyntheticTurnInFlight).toBe("function");
+    expect(typeof probe.noteTerminalResultFrame).toBe("function");
+  });
+});

@@ -10,6 +10,7 @@ import type {
 import type { SessionStore } from "./session-store.js";
 import type { IBackendAdapter } from "./backend-adapter.js";
 import { ClaudeAdapter, type ObserverWakeSendOutcome } from "./claude-adapter.js";
+import type { IdleTimerProbe } from "./idle-timer-manager.js";
 import { OBSERVER_WAKE_TIMEOUT_MS } from "./council-types.js";
 import type { RecorderManager } from "./recorder.js";
 import { resolveSessionGitInfo } from "./session-git-info.js";
@@ -116,10 +117,7 @@ export class WsBridge {
    * {@link noteCliActivity} defaults to advancing the clock (safe
    * pre-Task-11 behaviour).
    */
-  private idleTimerProbe: {
-    isSyntheticTurnInFlight(sessionId: string): boolean;
-    noteTerminalResultFrame(sessionId: string): void;
-  } | null = null;
+  private idleTimerProbe: IdleTimerProbe | null = null;
   private static readonly GIT_SESSION_KEYS: GitSessionKey[] = [
     "git_branch",
     "is_worktree",
@@ -137,12 +135,7 @@ export class WsBridge {
    * user-driven. Idempotent; calling with `null` re-arms the safe-default
    * branch where every CLI activity tick advances `lastCliActivityTs`.
    */
-  setIdleTimerProbe(
-    probe: {
-      isSyntheticTurnInFlight(sessionId: string): boolean;
-      noteTerminalResultFrame(sessionId: string): void;
-    } | null,
-  ): void {
+  setIdleTimerProbe(probe: IdleTimerProbe | null): void {
     this.idleTimerProbe = probe;
   }
 
