@@ -191,7 +191,7 @@ export function formatObserverInvocationLog(
     stopCountRaw: clampCount(input.stopCountRaw),
     stopCountGrounded: clampCount(input.stopCountGrounded),
     downgradeCount: clampCount(input.downgradeCount),
-    latencyMs: clampCount(input.latencyMs),
+    latencyMs: clampLatencyMs(input.latencyMs),
     observerProvider: input.observerProvider,
     observerModel: input.observerModel,
     observerCliVersion: input.observerCliVersion,
@@ -204,5 +204,29 @@ export function formatObserverInvocationLog(
 
 function clampCount(n: number): number {
   if (typeof n !== "number" || !Number.isFinite(n) || n < 0) return 0;
+  return Math.floor(n);
+}
+
+/**
+ * Latency clamp — distinct from `clampCount` because zero latency on a
+ * `result` frame is structurally impossible. A negative input indicates
+ * clock skew (NTP step, `Date.now()` going backwards) and should surface
+ * as a forensic signal rather than be silently floored to 0 (which would
+ * masquerade as "instant response" in latency dashboards).
+ *
+ * Council Review 2026-05-15-1015 CR-18 (Backend P3-3): the prior shared
+ * `clampCount` was used for both counts and latency — counts SHOULD floor
+ * negatives to 0 (a missing field is a 0-count), but latency should not.
+ */
+function clampLatencyMs(n: number): number {
+  if (typeof n !== "number" || !Number.isFinite(n)) return 0;
+  if (n < 0) {
+    // Surface the anomaly but don't poison aggregation with a negative
+    // number that downstream `SUM()` queries would mis-add.
+    console.warn(
+      `[observer-attribution] negative latency observed (${n}ms) — clock skew or Date.now() inversion; clamping to 0`,
+    );
+    return 0;
+  }
   return Math.floor(n);
 }

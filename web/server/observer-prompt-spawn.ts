@@ -20,6 +20,7 @@
  * filesystem touch when the caller already knows it wants bundled.
  */
 
+import { realpathSync } from "node:fs";
 import { join } from "node:path";
 import {
   loadBundledObserverPromptValidated,
@@ -90,10 +91,24 @@ export function resolveObserverPromptForSpawn(opts: {
       fallbackReason: "no-workspace-cwd",
     };
   }
-  const promptPath = join(cwd, ".council", "prompts", "observer-system.md");
-  // Posix segment count — `/foo/bar/baz` → 3. Windows fallback splits on
-  // `\` too. Empty leading segment from absolute path is dropped via filter.
-  const expectedPathDepth = promptPath.split(/[/\\]/).filter((s) => s.length > 0).length;
+  // Council Review 2026-05-15-1015 CR-6 (Hunt P2 — path traversal):
+  // realpath the workspace cwd BEFORE joining the prompt path so any `..`
+  // segments in the caller-supplied cwd are collapsed against the actual
+  // filesystem (not just lexically). This makes the resulting prompt path
+  // canonical-by-construction — `cwd === "/srv/aura/workspaces/123/../../etc"`
+  // resolves to `/srv/aura/etc` BEFORE the `.council/prompts/...` segments
+  // are appended, so the resulting path is `/srv/aura/etc/.council/...` AND
+  // we know it's contained under the realpath'd cwd (no escape via `..`).
+  // The fs touch also catches a cwd that doesn't exist — preferable to
+  // proceeding to `loadObserverSystemPrompt` and throwing an unhelpful
+  // ENOENT against the joined path.
+  const canonicalCwd = realpathSync(cwd);
+  const promptPath = join(canonicalCwd, ".council", "prompts", "observer-system.md");
+  // Posix segment count — `/foo/bar/baz` → 3. Empty leading segment from
+  // absolute path is dropped via filter. Council Review 2026-05-15-1015
+  // CR-19: dropped the `\\` Windows branch — Aura is Bun-on-Linux per
+  // CLAUDE.md; the path here is always POSIX.
+  const expectedPathDepth = promptPath.split("/").filter((s) => s.length > 0).length;
   const artifact = resolveObserverSystemPrompt(promptPath);
   return {
     artifact,

@@ -127,14 +127,11 @@ describe("resolveObserverPromptForSpawn", () => {
     },
   );
 
-  // Belt-and-braces: depth counts are non-negative integers
-  it("expectedPathDepth is a non-negative integer", () => {
-    const a = resolveObserverPromptForSpawn({ cwd: undefined });
-    expect(Number.isInteger(a.expectedPathDepth)).toBe(true);
-    expect(a.expectedPathDepth).toBeGreaterThanOrEqual(0);
-
-    const b = resolveObserverPromptForSpawn({ cwd: dir });
-    expect(Number.isInteger(b.expectedPathDepth)).toBe(true);
-    expect(b.expectedPathDepth).toBeGreaterThan(0);
-  });
+  // Council Review 2026-05-15-1015 CR-21 (Beck B7): deleted the
+  // tautological "expectedPathDepth is non-negative integer" row.
+  // The type signature (`expectedPathDepth: number`) plus the
+  // production expression (`split("/").filter(Boolean).length`)
+  // make both properties unfalsifiable by construction. Coverage
+  // is preserved via Branch 1 (asserts `> 0`) + Branch 3 (asserts
+  // bundled-with-cwd produces `> 0`).
 });

@@ -15,6 +15,7 @@ import type { RecorderManager } from "./recorder.js";
 import { CodexAdapter } from "./codex-adapter.js";
 import { resolveBinary, getEnrichedPath } from "./path-resolver.js";
 import { resolveObserverPromptForSpawn } from "./observer-prompt-spawn.js";
+import { assertExhaustiveObserverPromptSource } from "./observer-prompt.js";
 import { log } from "./logger.js";
 import {
   OBSERVER_ALLOWED_TOOLS,
@@ -344,8 +345,9 @@ export class CliLauncher {
     // (orchestrator/observer), an explicit `cwd` is REQUIRED. The prior
     // `options.cwd || process.cwd()` default silently fired the
     // bundled-fallback under Docker (`cwd=/app`, no `.council/prompts/`)
-    // because by the time `applyCouncilObserverSpawnConfig` ran,
-    // `info.cwd` was already populated and its "no-workspace-cwd" branch
+    // because by the time `buildObserverSpawnOverrides` ran (formerly
+    // `applyCouncilObserverSpawnConfig`), `info.cwd` was already populated
+    // and its "no-workspace-cwd" branch
     // was structurally unreachable. Fail-loud here closes the silent-
     // bundled trap. Solo (non-council) sessions retain the
     // `process.cwd()` default — they're not subject to the bundled-prompt
@@ -470,18 +472,29 @@ export class CliLauncher {
       // sink (Hunt P3 #4). SHA field renamed `bundledSha256` →
       // `observerPromptSha256` to match `SdkSessionInfo.observerPromptSha256`
       // (Backend P3 #3 — consistent field names across modules).
-      if (resolution.artifact.source === "bundled" && resolution.fallbackReason !== null) {
-        log.warn("council.observer-prompt.bundled-fallback", "observer prompt fell back to bundled", {
-          event: "council.observer-prompt.bundled-fallback",
-          sessionGroupId: options.sessionGroupId,
-          sessionId,
-          role: "observer",
-          expectedPathPresent: resolution.expectedPathPresent,
-          expectedPathDepth: resolution.expectedPathDepth,
-          observerPromptSha256: resolution.artifact.sha256,
-          observerPromptSource: resolution.artifact.source,
-          reason: resolution.fallbackReason,
-        });
+      // Council Review 2026-05-15-1015 CR-10: switch + never tripwire on
+      // the source discriminator. A future "remote"/"cache" source would
+      // otherwise silently no-op the WARN-on-fallback branch.
+      switch (resolution.artifact.source) {
+        case "workspace":
+          break;
+        case "bundled":
+          if (resolution.fallbackReason !== null) {
+            log.warn("council.observer-prompt.bundled-fallback", "observer prompt fell back to bundled", {
+              event: "council.observer-prompt.bundled-fallback",
+              sessionGroupId: options.sessionGroupId,
+              sessionId,
+              role: "observer",
+              expectedPathPresent: resolution.expectedPathPresent,
+              expectedPathDepth: resolution.expectedPathDepth,
+              observerPromptSha256: resolution.artifact.sha256,
+              observerPromptSource: resolution.artifact.source,
+              reason: resolution.fallbackReason,
+            });
+          }
+          break;
+        default:
+          assertExhaustiveObserverPromptSource(resolution.artifact.source);
       }
 
       // Compose with any orchestrator-side systemPrompt that flowed in
@@ -602,9 +615,9 @@ export class CliLauncher {
 
     // Subprocess P1#4: pass council context back into the relaunch
     // options so the observer prompt + tool restrictions get re-applied
-    // by `applyCouncilObserverSpawnConfig`. Without this, every
-    // auto-relaunched observer spawned as a plain unrole-d session with
-    // full default tools.
+    // by `buildObserverSpawnOverrides` (formerly `applyCouncilObserverSpawnConfig`).
+    // Without this, every auto-relaunched observer spawned as a plain
+    // unrole-d session with full default tools.
     const baseRelaunchOptions: LaunchOptions = info.backendType === "codex"
       ? {
         model: info.model,

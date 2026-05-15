@@ -129,7 +129,10 @@ describe("loadObserverSystemPrompt", () => {
   // assertion: that test is replaced by the resolver-level fallback
   // assertion in `resolveObserverSystemPrompt`'s suite — see below.
   it("throws on missing file (loader-layer contract; fallback is the resolver's job)", () => {
-    expect(() => loadObserverSystemPrompt(join(dir, "no-such-file.md"))).toThrow(/cannot stat/);
+    // Council Review 2026-05-15-1015 CR-7: wrapFsError message now carries
+    // operation name + code only — no raw path bytes. Test updated to match
+    // the redacted shape: `stat workspace prompt failed (ENOENT)`.
+    expect(() => loadObserverSystemPrompt(join(dir, "no-such-file.md"))).toThrow(/stat workspace prompt failed/);
   });
 
   // Beck rec — preserve ENOENT discriminator through Error.cause so the

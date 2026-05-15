@@ -121,11 +121,11 @@ export function loadObserverSystemPrompt(sourcePath: string): ObserverPromptArti
   try {
     size = statSync(sourcePath).size;
   } catch (err) {
-    throw wrapFsError(`observer-prompt: cannot stat ${sourcePath}`, err);
+    throw wrapFsError("stat workspace prompt", err);
   }
   if (size > OBSERVER_PROMPT_MAX_BYTES) {
     throw new Error(
-      `observer-prompt: ${sourcePath} is ${size} bytes, exceeds OBSERVER_PROMPT_MAX_BYTES (${OBSERVER_PROMPT_MAX_BYTES})`,
+      `observer-prompt: workspace prompt is ${size} bytes, exceeds OBSERVER_PROMPT_MAX_BYTES (${OBSERVER_PROMPT_MAX_BYTES})`,
     );
   }
 
@@ -139,13 +139,13 @@ export function loadObserverSystemPrompt(sourcePath: string): ObserverPromptArti
   try {
     body = readFileSync(sourcePath, "utf-8");
   } catch (err) {
-    throw wrapFsError(`observer-prompt: cannot read ${sourcePath}`, err);
+    throw wrapFsError("read workspace prompt", err);
   }
   return parseObserverSystemPromptBody(body, sourcePath);
 }
 
 /**
- * Pure: wrap a node:fs error with a friendlier message AND stamp the
+ * Pure: wrap a node:fs error with an operation-name message AND stamp the
  * underlying `code` (ENOENT, EACCES, EISDIR, ELOOP, ...) directly on the
  * thrown wrapper so callers can discriminate via `err.code` without a
  * chain-walk. Cause stays attached for forensic depth.
@@ -154,13 +154,53 @@ export function loadObserverSystemPrompt(sourcePath: string): ObserverPromptArti
  * the prior `(err as {cause?:unknown}).cause` + `(cause as {code?:unknown})?.code`
  * pattern loses to drift the first time another layer wraps. One named
  * field at the producer is one grep target.
+ *
+ * Council Review 2026-05-15-1015 CR-7 + CR-9 + CR-16:
+ * - Message carries operation + code only — NEVER a filesystem path. Raw
+ *   path bytes in `Error.message` flow through `session:relaunch-failed.reason`
+ *   into EC-9 group-lifecycle logs and leak operator topology on every
+ *   non-ENOENT failure (the (present, depth) hardening was bypassed via
+ *   the error channel).
+ * - Non-`Error` thrown values are handled defensively (`throw 42`,
+ *   `throw "boom"` are legal JS) and normalised so `cause` is always an
+ *   Error instance for consumers walking the chain.
+ * - SECURITY WARNING for downstream loggers: the `cause` field carries
+ *   the raw `node:fs` error, whose `.path` and `.dest` properties contain
+ *   the absolute workspace path verbatim. A pretty-printing logger that
+ *   serialises causes (`util.inspect({showHidden:true})`, structured-log
+ *   shims that walk `cause` chains) re-leaks operator topology with zero
+ *   diff in this file. Callers MUST redact `.path` and `.dest` from
+ *   `err.cause` before serialising to a shared log sink.
  */
-function wrapFsError(prefix: string, underlying: unknown): Error & { code?: string } {
-  const detail = underlying instanceof Error ? underlying.message : String(underlying);
-  const wrapped = new Error(`${prefix}: ${detail}`, { cause: underlying }) as Error & { code?: string };
-  const code = (underlying as { code?: unknown })?.code;
-  if (typeof code === "string") wrapped.code = code;
+function wrapFsError(operation: string, underlying: unknown): Error & { code?: string } {
+  const isObj = typeof underlying === "object" && underlying !== null;
+  const rawCode = isObj && "code" in underlying
+    ? (underlying as { code?: unknown }).code
+    : undefined;
+  const code = typeof rawCode === "string" ? rawCode : undefined;
+  const message = code
+    ? `observer-prompt: ${operation} failed (${code})`
+    : `observer-prompt: ${operation} failed`;
+  const normalisedCause = underlying instanceof Error
+    ? underlying
+    : new Error(String(underlying));
+  const wrapped = new Error(message, { cause: normalisedCause }) as Error & { code?: string };
+  if (code) wrapped.code = code;
   return wrapped;
+}
+
+/**
+ * Exhaustiveness tripwire for the `"workspace" | "bundled"` source
+ * discriminator. Used at every branch that gates behaviour on the source
+ * field — if a future contributor adds a third source ("remote", "cache",
+ * etc.) the TypeScript compiler points them at every unhandled site.
+ *
+ * Council Review 2026-05-15-1015 CR-10 (Backend P2-4): the source union
+ * is referenced in 6+ places; without a `never` tripwire a third value
+ * would silently no-op the conditional branches.
+ */
+export function assertExhaustiveObserverPromptSource(s: never): never {
+  throw new Error(`unhandled observer prompt source: ${s as string}`);
 }
 
 /**
@@ -190,9 +230,17 @@ function parseObserverSystemPromptBody(body: string, sourceLabel: string): Obser
     );
   }
 
+  // Council Review 2026-05-15-1015 CR-7: redact the `sourceLabel` from the
+  // thrown Error.message. On the workspace branch the label is the absolute
+  // path; embedding it leaks operator topology through `session:relaunch-failed.reason`
+  // → EC-9 group-lifecycle log. The artifact still carries `sourceLabel`
+  // on its own field for in-memory forensic use.
+  const sourceKind = sourceLabel === BUNDLED_OBSERVER_PROMPT_SOURCE_LABEL
+    ? "bundled artifact"
+    : "workspace prompt";
   const version = parseObserverPromptHeader(body);
   if (version === null) {
-    throw new Error(`observer-prompt: missing or malformed header in ${sourceLabel} (expected '<!-- observer-system-prompt vN -->')`);
+    throw new Error(`observer-prompt: missing or malformed header in ${sourceKind} (expected '<!-- observer-system-prompt vN -->')`);
   }
   if (version !== OBSERVER_PROMPT_SCHEMA_VERSION) {
     throw new Error(
