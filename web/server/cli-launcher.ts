@@ -532,6 +532,15 @@ export class CliLauncher {
     const info = this.sessions.get(sessionId);
     if (!info) return { ok: false, error: "Session not found" };
 
+    // Council Review 2026-05-15-1015 CR-20 (Subprocess P3): capture the
+    // drift baseline BEFORE the old proc is killed. Today's exit handler
+    // doesn't clear observerPromptSha256/Source, so the post-kill snapshot
+    // is safe by accident — but a future "exit handler clears state"
+    // cleanup would silently disable drift detection. Move the snapshot
+    // here so the baseline always reflects the pre-relaunch state.
+    const previousObserverPromptSha = info.observerPromptSha256;
+    const previousObserverPromptSource = info.observerPromptSource;
+
     // Kill old process(es) if still alive.
     // Snapshot both handles first because killing the proxy can trigger the
     // WS session exit handler, which clears `this.processes`.
@@ -645,16 +654,11 @@ export class CliLauncher {
         sessionGroupId: info.sessionGroupId,
         sessionGroupRole: info.sessionGroupRole,
       };
-    // Council Review 2026-05-15-0820 P2 #7: capture the previous prompt
-    // attribution BEFORE re-resolving so we can detect drift (workspace ↔
-    // bundled, or sha change) across the relaunch boundary. Drift is only
-    // observable on this branch — Claude `--resume` bakes the prompt at
-    // original spawn, but the fresh-fallback path here (uptime<5000ms cleared
-    // cliSessionId, no resume → re-issued `--append-system-prompt`) actually
-    // re-emits the prompt argv with whatever the resolver finds NOW.
-    const previousObserverPromptSha = info.observerPromptSha256;
-    const previousObserverPromptSource = info.observerPromptSource;
-
+    // Council Review 2026-05-15-0820 P2 #7: detect drift in observer
+    // prompt provenance across the relaunch boundary. Snapshot captured
+    // BEFORE the old proc kill (CR-20) — see relaunch() entry. Drift is
+    // only observable on the fresh-fallback path; the --resume path is
+    // gated below (CR-3).
     let effectiveRelaunchOptions: LaunchOptions;
     try {
       effectiveRelaunchOptions = this.buildObserverSpawnOverrides(sessionId, info, baseRelaunchOptions);
@@ -700,6 +704,7 @@ export class CliLauncher {
       (info.observerPromptSha256 !== previousObserverPromptSha ||
         info.observerPromptSource !== previousObserverPromptSource)
     ) {
+      const crossedSourceBoundary = info.observerPromptSource !== previousObserverPromptSource;
       log.warn("council.observer-prompt.source-drift", "observer prompt source drifted across relaunch", {
         event: "council.observer-prompt.source-drift",
         sessionGroupId: info.sessionGroupId,
@@ -715,7 +720,23 @@ export class CliLauncher {
           source: info.observerPromptSource,
         },
         cause: "session_exited",
+        crossedSourceBoundary,
       });
+      // Council Review 2026-05-15-1015 CR-17 (Hunt P3): hard refusal on
+      // workspace↔bundled source crossing. The transition swaps the
+      // observer's role definition, tool policy, and review schema —
+      // potentially in response to hostile workspace mutation on a
+      // multi-tenant host. Operator must restart the group to acknowledge
+      // the policy change. SHA-only drift within the same source
+      // (workspace artifact edited in place) stays WARN-only.
+      if (crossedSourceBoundary) {
+        info.state = "exited";
+        info.exitCode = 1;
+        this.persistState();
+        const reason = `observer-prompt-source-drift-refused: ${previousObserverPromptSource} → ${info.observerPromptSource}`;
+        companionBus.emit("session:relaunch-failed", { sessionId, reason });
+        return { ok: false, error: reason };
+      }
     }
     if (info.backendType === "codex") {
       this.spawnCodex(sessionId, info, effectiveRelaunchOptions);

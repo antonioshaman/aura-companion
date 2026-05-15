@@ -1628,7 +1628,7 @@ describe("observer-prompt bundled fallback (Task 9 — integration)", () => {
   // workspace→bundled, bundled→workspace, no-change. Without these,
   // a refactor that broadens the gate (fires on cold-start) or
   // narrows it (never fires) goes green via typecheck.
-  it("emits source-drift WARN when workspace prompt disappears between observer spawns (workspace → bundled)", async () => {
+  it("emits source-drift WARN AND refuses relaunch when workspace prompt disappears between observer spawns (workspace → bundled)", async () => {
     const { mkdirSync, writeFileSync, rmSync } = await import("node:fs");
     const workspacePromptDir = join(tempDir, ".council", "prompts");
     mkdirSync(workspacePromptDir, { recursive: true });
@@ -1653,10 +1653,15 @@ describe("observer-prompt bundled fallback (Task 9 — integration)", () => {
     rmSync(promptPath);
 
     const warnSpy = vi.spyOn(log, "warn");
-    const secondProc = createMockProc(54321);
-    mockSpawn.mockReturnValueOnce(secondProc);
-    await launcher.relaunch("test-session-id");
+    const relaunchFailedCalls: Array<{ sessionId: string; reason: string }> = [];
+    companionBus.on("session:relaunch-failed", (p) => { relaunchFailedCalls.push(p); });
+    const result = await launcher.relaunch("test-session-id");
 
+    // Council Review 2026-05-15-1015 CR-17: workspace↔bundled crossing is
+    // a hard refusal. WARN still fires (forensic record) AND relaunch
+    // fails with the source-drift-refused reason.
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/^observer-prompt-source-drift-refused: workspace → bundled$/);
     const driftCalls = warnSpy.mock.calls.filter(
       (call) => call[0] === "council.observer-prompt.source-drift",
     );
@@ -1664,10 +1669,14 @@ describe("observer-prompt bundled fallback (Task 9 — integration)", () => {
     const payload = driftCalls[0][2] as Record<string, unknown>;
     expect((payload.previous as { source: string }).source).toBe("workspace");
     expect((payload.current as { source: string }).source).toBe("bundled");
+    expect(payload.crossedSourceBoundary).toBe(true);
+    // session:relaunch-failed fires once with the refusal reason.
+    expect(relaunchFailedCalls).toHaveLength(1);
+    expect(relaunchFailedCalls[0].reason).toMatch(/source-drift-refused/);
     warnSpy.mockRestore();
   });
 
-  it("emits source-drift WARN when workspace prompt appears between observer spawns (bundled → workspace)", async () => {
+  it("emits source-drift WARN AND refuses relaunch when workspace prompt appears between observer spawns (bundled → workspace)", async () => {
     let resolveFirst: (code: number) => void = () => {};
     const firstProc = {
       pid: 12345,
@@ -1692,10 +1701,11 @@ describe("observer-prompt bundled fallback (Task 9 — integration)", () => {
     );
 
     const warnSpy = vi.spyOn(log, "warn");
-    const secondProc = createMockProc(54321);
-    mockSpawn.mockReturnValueOnce(secondProc);
-    await launcher.relaunch("test-session-id");
+    const result = await launcher.relaunch("test-session-id");
 
+    // CR-17 hard refusal on bundled → workspace crossing too.
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/^observer-prompt-source-drift-refused: bundled → workspace$/);
     const driftCalls = warnSpy.mock.calls.filter(
       (call) => call[0] === "council.observer-prompt.source-drift",
     );
@@ -1703,6 +1713,7 @@ describe("observer-prompt bundled fallback (Task 9 — integration)", () => {
     const payload = driftCalls[0][2] as Record<string, unknown>;
     expect((payload.previous as { source: string }).source).toBe("bundled");
     expect((payload.current as { source: string }).source).toBe("workspace");
+    expect(payload.crossedSourceBoundary).toBe(true);
     warnSpy.mockRestore();
   });
 

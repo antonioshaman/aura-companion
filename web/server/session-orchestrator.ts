@@ -2953,21 +2953,32 @@ export class SessionOrchestrator {
       if (session?.stateMachine) {
         session.stateMachine.transition("starting", "relaunch_initiated");
       }
+      // Council Review 2026-05-15-1015 CR-12 (Subprocess P2): mark this
+      // session intentional BEFORE the launcher's SIGTERM on the old proc.
+      // Without this, the old proc's `session:exited` event arms the
+      // council reconnect timer (45s grace), then the new proc's spawn
+      // clears it — producing a transient `reconnecting → active` UI
+      // flicker on every relaunch. Marking intentional first short-circuits
+      // the listener at session-orchestrator.ts:1333. ALWAYS clear in the
+      // finally — failure paths must not leave the mark in place because
+      // `scheduleProactiveRelaunch` reads `intentionalKills` to skip
+      // proactive recovery and a stale mark would lock keepalive out.
+      this.intentionalKills.add(sessionId);
       try {
         const result = await this.launcher.relaunch(sessionId);
         if (!result.ok && result.error) {
           this.wsBridge.broadcastToSession(sessionId, { type: "error", message: result.error });
-          // Council Review 2026-05-15-1015 CR-2: observer prompt-config
-          // errors are deterministic — the launcher already emitted
-          // `session:relaunch-failed` and re-trying will fail identically.
-          // (a) Skip the duplicate emit so the council listener doesn't
-          //     fire twice → guard-violation WARN noise.
-          // (b) Rollback the retry-counter increment so a misconfigured
-          //     prompt file doesn't exhaust the budget after 3 attempts,
-          //     locking the operator out of recovery once the file is
-          //     fixed (D4 — config errors are not crashes).
-          const isObserverConfigError = result.error.startsWith("observer spawn config load failed");
-          if (isObserverConfigError) {
+          // Council Review 2026-05-15-1015 CR-2 + CR-17: errors the
+          // launcher emitted on the typed channel itself — skip the
+          // duplicate orchestrator emit + rollback the retry counter
+          // (deterministic, retrying cannot fix). Includes:
+          // - `observer spawn config load failed` (CR-2)
+          // - `observer-prompt-source-drift-refused:` (CR-17 — workspace
+          //   ↔ bundled boundary requires operator ack via group restart)
+          const isLauncherEmittedFailure =
+            result.error.startsWith("observer spawn config load failed") ||
+            result.error.startsWith("observer-prompt-source-drift-refused:");
+          if (isLauncherEmittedFailure) {
             this.autoRelaunchCounts.set(sessionId, count);
           } else {
             companionBus.emit("session:relaunch-failed", { sessionId, reason: result.error });
@@ -2976,13 +2987,13 @@ export class SessionOrchestrator {
           metricsCollector.recordRelaunchSucceeded();
           this.autoRelaunchCounts.delete(sessionId);
           this.relaunchExhaustedNotified.delete(sessionId);
-          // Clear intentionalKills so future crashes can use proactive keepalive.
-          // After a successful relaunch, the session is alive again — any prior
-          // idle-kill intent no longer applies.
-          this.intentionalKills.delete(sessionId);
         }
         // ok=false without error: keep count to preserve the retry budget
       } finally {
+        // CR-12: clean up the intentional mark in ALL paths (success,
+        // failure, throw). Leaving it set on failure would block the
+        // next `scheduleProactiveRelaunch` indefinitely.
+        this.intentionalKills.delete(sessionId);
         setTimeout(() => this.relaunchingSet.delete(sessionId), RELAUNCH_COOLDOWN_MS);
       }
     } else {
