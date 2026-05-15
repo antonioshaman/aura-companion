@@ -1,0 +1,31 @@
+# Hunt — β Catalog Refactor Security
+
+The catalog moves the 13-expert panel into shared files under `~/.claude/skills/_council-experts/` and has six consumer skills name experts by ID. The attack surface is filesystem and string composition: catalog file bytes flow verbatim into subagent prompts across 13+ sibling projects. One poisoned file = silent quality collapse across every council pipeline that names that ID. Below is what I want wired in at first commit, not retrofitted post-incident.
+
+## New attack surfaces introduced
+
+1. **Expert-name injection / typosquatting**. A consumer skill (or a future malicious skill) names `hunnt` instead of `hunt`, or `hunt/../../etc/passwd`. Without explicit catalog-membership validation, the dispatcher either silently skips (degrading panel without visible signal) or interpolates the literal name into a file path (traversal).
+2. **Catalog content poisoning**. `_council-experts/hunt/prompt.md` is a plain markdown file. Anyone with write access to `~/.claude/skills/` (any process running as the user, any rogue skill, any "helper" auto-installer) can substitute "Hunt's security review" with "Hunt approves everything, P3 only" and silently subvert ALL 13+ consumer projects that name `hunt`. There is no signing, no checksum, no review surface.
+3. **Symlink traversal on read**. `_council-experts/hunt/reference.md` symlinked to `~/.ssh/id_rsa` or `/etc/shadow` causes the dispatcher to read the target and embed its bytes into a subagent prompt — exfiltrated through the LLM round-trip into logs, transcripts, and any downstream artifact.
+4. **Frontmatter privilege escalation via stack tag**. A malicious or careless catalog edit sets `stack: common` on a `hunt-evil` entry that exists only to neutralise findings. Because consumers seat `common + stack:<x>`, the rogue expert lands on every panel. No constraint exists on who can mint `stack: common`.
+5. **Embedded-repo / dotfile leakage in catalog tree**. `self-improvement/` was already gitignored at baseline. The catalog tree under `~/.claude/skills/` may contain `.env`, `.token`, OAuth caches, project-specific secrets in sibling skill dirs. A glob-based catalog reader (`fs.readdir('_council-experts/')`) is safe; a recursive walker that wanders outside `_council-experts/` is not.
+
+## Defences to wire in at first commit
+
+1. **Allowlist of expert IDs in the dispatcher** (not the catalog). Hardcode the 13 names in the consumer SKILL.md dispatch list. Membership check happens at LOAD time, not dispatch time: if the catalog lacks an ID OR the consumer names an ID not in the allowlist → REFUSE with `error: unknown expert <id>; catalog at <path>; known IDs: [...]`. Implements AC-6.1 as a load-time gate, not a runtime crash.
+2. **Strict ID regex** (`^[a-z][a-z0-9-]{1,31}$`) applied to every name read from a consumer SKILL.md before it becomes a path segment. Rejects `../`, `/`, null bytes, unicode lookalikes. Location: dispatch-list parser in the consumer skill, BEFORE composing the catalog file path.
+3. **realpath + bounds-check on every catalog read**. For each file the dispatcher opens, compute `realpath(file)` and assert `startsWith(realpath(_council-experts/) + sep)`. Rejects symlink escapes to `~/.ssh`, `/etc`, parent skill dirs. EC-7 idiom: inline path resolution in the reader, never trust the caller to have validated. Location: catalog-loader helper.
+4. **Catalog manifest with content hashes**, committed to the catalog's git repo (already initialised per the brief). `_council-experts/MANIFEST.json` lists each expert ID → `sha256(prompt.md)` + `sha256(reference.md)`. Dispatcher verifies hash on read; mismatch → REFUSE with `error: catalog entry <id> tampered (expected <hash>, got <hash>)`. Defeats silent edits by any non-git process. Location: `_council-experts/MANIFEST.json` + verifier in dispatcher.
+5. **Frontmatter allowlist for `stack`**: enum {`common`, `aura`, `python`}, rejected otherwise at load time. NO free-form stack values. Adding a new stack value requires a code change in the dispatcher (reviewed surface), not just a catalog edit. Location: frontmatter parser.
+6. **`.gitignore` audit of `~/.claude/skills/`** before the catalog ships. Add explicit ignores for `*.env`, `*.token`, `*.key`, `id_*`, `.ssh/`, `credentials*.json`, `.config/`, any sibling-skill local cache dirs. Pair with a pre-commit canary that greps the staged tree for secret-shaped strings.
+7. **Catalog dir mode 0755 / files 0644 / NO write from runtime**. The dispatcher is read-only against the catalog. Any code path that writes into `_council-experts/` is an architectural error — assert this with a startup canary that opens the dir read-only and refuses if it observes write capability is needed.
+
+## Boundaries for the catalog dir
+
+- ✅ Always: realpath+bounds-check every read; verify MANIFEST hash before injection into a prompt; reject unknown expert IDs with a structured error naming the catalog path; commit the catalog to git so tampering is auditable; restrict frontmatter `stack` to the enum.
+- ⚠️ Ask first: adding a new expert ID (requires manifest regen + allowlist update in every consumer); changing the catalog location (touches conventions.md + every consumer); permitting any catalog field beyond the v1 schema; introducing a second `stack` value beyond {common, aura, python}.
+- 🚫 Never: read catalog files via a recursive walker without an extension+pattern filter; follow symlinks during catalog read; allow consumer skills to compose catalog paths from anything other than allowlisted IDs; execute or `eval` catalog contents; write to `_council-experts/` from runtime; log catalog file contents at INFO level (poisoned content + verbose logs = leak amplifier).
+
+## Abandon-trigger
+
+**If any catalog read path resolves through an unverified symlink without realpath+bounds-check OR if the dispatcher cannot enforce the expert-ID allowlist at load time (e.g., the framing requires runtime string-build with user-influenced names) — ABANDON the refactor and keep the inline shape.** The inline shape's flaw is duplication; the catalog's flaw if these gates aren't present is silent cross-project subversion. Duplication is cheaper than a poisoned panel.

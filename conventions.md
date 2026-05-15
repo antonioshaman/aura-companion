@@ -219,3 +219,11 @@ These must be followed — flag violations as findings.
 **Principle:** `references/security.md` → P3 (minimise state / `console.log` of bodies) + P9 (assume breach — stack traces in error responses); sibling memory `feedback_format_transformation_validation` (universal — format-aware redaction at the wrapper boundary)
 
 ---
+
+### EC-24: Council subagent prompts live in the shared `_council-experts/` catalog, named by ID — never inlined in consumer SKILL.md
+
+**Convention:** Consumer skills (`council-plan`, `council-plan-aura`, `council-review`, `council-review-aura`) MUST reference subagent prompts by expert ID via a `### Council panel` section listing `- <id>` entries. The prompt body for each (expert, phase) pair lives at `~/.claude/skills/_council-experts/<id>/<phase>.md` and is consumed verbatim at dispatch time (with the brief's domain-file list substituted into the `[list ONLY <X>'s domain files]` placeholder). Inline `### Subagent N: <Name>` blocks in SKILL.md are forbidden — `verify-catalog.sh` (canary C1 in `_council-experts/.verify/`) fails on any reappearance. Expert IDs MUST match `^[a-z][a-z0-9-]{1,31}$` (canary C3); catalog files MUST NOT be symlinks (canary C4); catalog data files MUST be mode 644 (canary C5). Byte-identity between current catalog and the baseline pre-refactor inline blocks is asserted by `verify-panels.py` (AC-3.2 contract from `specs/council-experts-catalog.md`).
+**Origin:** Council Review β 2026-05-15 (catalog refactor) — Fowler (structure), Beck (verifiability), Hunt (defences). Memory entry: `feedback_shared_global_infra_refactor_requires_dedicated_window` (pre-flight checklist for shared `~/.claude/skills/` infra).
+**Principle:** `references/refactoring.md` → P4 (names reveal design) + `references/security.md` → P3 (filesystem-string injection); spec `specs/council-experts-catalog.md` AC-1/AC-3/AC-5
+
+---
