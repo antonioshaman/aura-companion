@@ -71,11 +71,18 @@ export type RecordingLifecycleEvent =
  *   relayed from a browser-originated message via the adapter's
  *   `send()` method.
  * - `"server:council-wake"` — frame synthesised by the server's
- *   Council Mode auto-wake dispatcher (Story 2 AC#1). Inbound frames
- *   (`dir: "in"`) never carry an origin — provenance is implicit from
- *   the CLI subprocess.
+ *   Council Mode auto-wake dispatcher (Story 2 AC#1).
+ * - `"server:auto-proceed"` — frame synthesised by the orchestrator-side
+ *   auto-proceed pipeline (PLAN-aura-orchestrator-idle-auto-proceed
+ *   Task 11) on idle-timeout. Distinguishes the auto-proceed synthetic
+ *   from the observer-wake synthetic in replay/forensic analysis so
+ *   incident triage can tell "idle nudge fired" apart from "observer
+ *   was woken".
+ *
+ * Inbound frames (`dir: "in"`) never carry an origin — provenance is
+ * implicit from the CLI subprocess.
  */
-export type RecordingOrigin = "browser" | "server:council-wake";
+export type RecordingOrigin = "browser" | "server:council-wake" | "server:auto-proceed";
 
 export interface RecordingEntry {
   ts: number;

@@ -458,3 +458,122 @@ describe("IdleTimerManager — re-arm semantics", () => {
     expect(h.sendCalls.length).toBe(1);
   });
 });
+
+// ── Task 11.4: sticky pendingSyntheticTurnToken race-defence ─────────────────
+//
+// The denylist gate (Task 11.5) reads `isSyntheticTurnInFlight(sessionId)`
+// to decide whether tool uses like `Bash:git push` should be denied. The
+// sticky-token semantics make this safe against the race where the user
+// types mid-synthetic-turn: the flag stays TRUE between the manager's
+// `fire()` and the matching `noteTerminalResultFrame()` / explicit clear,
+// regardless of `noteUserMessage` activity. Observer v3 review WARN on
+// clear-on-failure semantics drove the additional cleanup paths.
+
+describe("IdleTimerManager — sticky pendingSyntheticTurnToken (Task 11.4)", () => {
+  it("isSyntheticTurnInFlight is false before any fire", () => {
+    const h = buildHarness();
+    const m = new IdleTimerManager(h.deps);
+    expect(m.isSyntheticTurnInFlight("sess-orch-1")).toBe(false);
+    // Also false for never-armed sessions.
+    expect(m.isSyntheticTurnInFlight("never-armed")).toBe(false);
+  });
+
+  it("isSyntheticTurnInFlight flips to true after a successful fire()", () => {
+    const h = buildHarness();
+    const m = new IdleTimerManager(h.deps);
+    m.arm("sess-orch-1", VALID_OPTS);
+    expect(m.isSyntheticTurnInFlight("sess-orch-1")).toBe(false);
+    h.clock.advance(VALID_OPTS.idleMs);
+    expect(h.sendCalls.length).toBe(1);
+    // Stamp happens AFTER successful send.
+    expect(m.isSyntheticTurnInFlight("sess-orch-1")).toBe(true);
+  });
+
+  it("does NOT flip to true when the send fails", () => {
+    // send-failed must not stamp the sticky token — otherwise a transient
+    // socket-disconnect during the synthetic dispatch would leave the
+    // denylist gate permanently armed against subsequent user-typed tools.
+    const h = buildHarness();
+    h.sendShouldFail.value = "socket-closed";
+    const m = new IdleTimerManager(h.deps);
+    m.arm("sess-orch-1", VALID_OPTS);
+    h.clock.advance(VALID_OPTS.idleMs);
+    expect(h.sendCalls.length).toBe(1);
+    expect(m.isSyntheticTurnInFlight("sess-orch-1")).toBe(false);
+  });
+
+  it("STAYS sticky-true through noteUserMessage (the load-bearing race defence)", () => {
+    // The race the sticky-token guards against: user types mid synthetic
+    // turn → `noteUserMessage` advances the turn-token + cancels the
+    // (already-fired) timer. The `pendingSyntheticTurnToken` MUST NOT
+    // clear here — the CLI's view of the synthetic turn is still open
+    // until the `result` NDJSON frame arrives. If the gate flipped false
+    // here, a user-typed `Bash:git push` immediately after would slip
+    // past the denylist while the synthetic tool-use is still in-flight
+    // upstream.
+    const h = buildHarness();
+    const m = new IdleTimerManager(h.deps);
+    m.arm("sess-orch-1", VALID_OPTS);
+    h.clock.advance(VALID_OPTS.idleMs);
+    expect(m.isSyntheticTurnInFlight("sess-orch-1")).toBe(true);
+    m.noteUserMessage("sess-orch-1");
+    expect(m.isSyntheticTurnInFlight("sess-orch-1")).toBe(true);
+  });
+
+  it("clears on noteTerminalResultFrame (happy-path completion)", () => {
+    const h = buildHarness();
+    const m = new IdleTimerManager(h.deps);
+    m.arm("sess-orch-1", VALID_OPTS);
+    h.clock.advance(VALID_OPTS.idleMs);
+    expect(m.isSyntheticTurnInFlight("sess-orch-1")).toBe(true);
+    m.noteTerminalResultFrame("sess-orch-1");
+    expect(m.isSyntheticTurnInFlight("sess-orch-1")).toBe(false);
+  });
+
+  it("clears on clearPendingSyntheticTurn (abnormal completion paths)", () => {
+    // Observer v3 WARN clear-on-failure semantics: token must clear on
+    // session-exit / relaunch / archive — not only on terminal result.
+    // Orchestrator wires these cleanup paths to `clearPendingSyntheticTurn`.
+    const h = buildHarness();
+    const m = new IdleTimerManager(h.deps);
+    m.arm("sess-orch-1", VALID_OPTS);
+    h.clock.advance(VALID_OPTS.idleMs);
+    expect(m.isSyntheticTurnInFlight("sess-orch-1")).toBe(true);
+    m.clearPendingSyntheticTurn("sess-orch-1");
+    expect(m.isSyntheticTurnInFlight("sess-orch-1")).toBe(false);
+  });
+
+  it("noteTerminalResultFrame is idempotent + safe on never-armed sessions", () => {
+    const h = buildHarness();
+    const m = new IdleTimerManager(h.deps);
+    // Never-armed.
+    expect(() => m.noteTerminalResultFrame("never-armed")).not.toThrow();
+    // Armed-but-not-fired.
+    m.arm("sess-orch-1", VALID_OPTS);
+    expect(() => m.noteTerminalResultFrame("sess-orch-1")).not.toThrow();
+    expect(m.isSyntheticTurnInFlight("sess-orch-1")).toBe(false);
+    // Already-cleared.
+    h.clock.advance(VALID_OPTS.idleMs);
+    m.noteTerminalResultFrame("sess-orch-1");
+    expect(() => m.noteTerminalResultFrame("sess-orch-1")).not.toThrow();
+    expect(m.isSyntheticTurnInFlight("sess-orch-1")).toBe(false);
+  });
+
+  it("re-arm cycle: fire → stamp → noteResult clears → next fire re-stamps", () => {
+    // Verifies the second iteration's stamp is independent of the first
+    // (no leakage of the previous turnToken value).
+    const h = buildHarness();
+    const m = new IdleTimerManager(h.deps);
+    m.arm("sess-orch-1", VALID_OPTS);
+    h.clock.advance(VALID_OPTS.idleMs);
+    expect(m.isSyntheticTurnInFlight("sess-orch-1")).toBe(true);
+    m.noteTerminalResultFrame("sess-orch-1");
+    expect(m.isSyntheticTurnInFlight("sess-orch-1")).toBe(false);
+    // Simulate a user message + re-arm.
+    m.noteUserMessage("sess-orch-1");
+    m.arm("sess-orch-1", VALID_OPTS);
+    h.clock.advance(VALID_OPTS.idleMs);
+    expect(h.sendCalls.length).toBe(2);
+    expect(m.isSyntheticTurnInFlight("sess-orch-1")).toBe(true);
+  });
+});
