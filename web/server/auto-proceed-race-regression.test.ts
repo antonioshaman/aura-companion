@@ -72,6 +72,10 @@ import {
   type IdleTimerSessionView,
 } from "./idle-timer-manager.js";
 import { FakeClock } from "./clock-source.js";
+import type {
+  CLIControlRequestMessage,
+  CLIResultMessage,
+} from "./session-types.js";
 
 const SID = "sess-race-1";
 const GROUP = "grp_race_test_0001";
@@ -166,7 +170,12 @@ describe("auto-proceed manager↔adapter probe-state interleaving (EC-18, Beck P
     // LIVE — must see true and deny without surfacing to browser.
     // Probe-null fail-CLOSED coverage lives in claude-adapter.test.ts:1736-1769;
     // this test asserts the live-read contract specifically.
-    adapter.handleRawMessage(JSON.stringify({
+    //
+    // Council review 2026-05-15-0520 P2 #3: frames bound to the typed
+    // `CLIControlRequestMessage` exports so a schema bump (new required
+    // field) fails compile rather than this test passing against a fake
+    // shape production never emits.
+    const denyRequest: CLIControlRequestMessage = {
       type: "control_request",
       request_id: "req-deny",
       request: {
@@ -176,7 +185,8 @@ describe("auto-proceed manager↔adapter probe-state interleaving (EC-18, Beck P
         description: "Push to remote",
         tool_use_id: "tu-deny",
       },
-    }));
+    };
+    adapter.handleRawMessage(JSON.stringify(denyRequest));
     expect(browserMessages).not.toContainEqual(
       expect.objectContaining({ type: "permission_request" }),
     );
@@ -193,11 +203,22 @@ describe("auto-proceed manager↔adapter probe-state interleaving (EC-18, Beck P
     // `in-flight` via `send(user_message)` so the transition is real
     // (mirrors claude-adapter.test.ts:1797-1814 pattern; non-transition
     // result frames intentionally no-op the probe call).
-    // Error/abort terminal states covered elsewhere; this asserts the
-    // `result` happy-path predicate fires once and the live manager state
-    // mutates accordingly.
+    //
+    // Council review 2026-05-15-0520 P2 #5: predicate scope in this assertion
+    // is THE happy-path (`subtype: "success", is_error: false`) — that's the
+    // terminal closer this step pins. Error/abort terminal subtypes
+    // (`error_during_execution`, `error_max_turns`, `error_max_budget_usd`,
+    // `error_max_structured_output_retries`) are NOT exercised here.
+    // TODO: add sibling test `auto-proceed-race-regression-error-terminal.test.ts`
+    // that drives `subtype: "error_max_turns"` + asserts same `isSyntheticTurnInFlight === false`
+    // post-state. Without it, a refactor narrowing `handleResultMessage`'s
+    // terminator scope to `success`-only would silently leak on error paths.
+    //
+    // P2 #3 follow-on: result frame typed against `CLIResultMessage`. The
+    // prior hand-rolled literal carried `usage.server_tool_use` (not in the
+    // type) and omitted `stop_reason` (required). Compile-time fixed here.
     adapter.send({ type: "user_message", content: "hi" });
-    adapter.handleRawMessage(JSON.stringify({
+    const resultFrame: CLIResultMessage = {
       type: "result",
       subtype: "success",
       duration_ms: 100,
@@ -207,15 +228,22 @@ describe("auto-proceed manager↔adapter probe-state interleaving (EC-18, Beck P
       result: "done",
       session_id: SID,
       total_cost_usd: 0,
+      stop_reason: null,
       uuid: "uuid-result-1",
-      usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, server_tool_use: { web_search_requests: 0 } },
-    }));
+      usage: {
+        input_tokens: 1,
+        output_tokens: 1,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+      },
+    };
+    adapter.handleRawMessage(JSON.stringify(resultFrame));
     expect(manager.isSyntheticTurnInFlight(SID)).toBe(false);
 
     // Step 5: another can_use_tool for Bash:git push, now AFTER terminal.
     // Adapter's live probe-read sees false → gate falls through to the
     // normal user-permission path → browser receives `permission_request`.
-    adapter.handleRawMessage(JSON.stringify({
+    const allowRequest: CLIControlRequestMessage = {
       type: "control_request",
       request_id: "req-allow",
       request: {
@@ -225,7 +253,8 @@ describe("auto-proceed manager↔adapter probe-state interleaving (EC-18, Beck P
         description: "Push to remote",
         tool_use_id: "tu-allow",
       },
-    }));
+    };
+    adapter.handleRawMessage(JSON.stringify(allowRequest));
     const permReq = browserMessages.find((m) => m.type === "permission_request");
     expect(permReq).toBeDefined();
     expect(permReq).toMatchObject({ type: "permission_request" });
@@ -248,6 +277,50 @@ describe("auto-proceed manager↔adapter probe-state interleaving (EC-18, Beck P
       denyFrameBehavior: "deny",
       browserPermType: "permission_request",
     });
+  });
+
+  // Council Review 2026-05-15-0520 P2 #6: TOCTOU axis defence.
+  // `IdleTimerManager.checkGate()` MUST re-read session state via `getSession`
+  // at fire time, NOT trust an arm-time snapshot (EC-7 idiom). The prior
+  // test's `getSession: () => buildSessionView()` returned identical shape on
+  // every call, giving no observable signal of the re-read invariant. This
+  // sibling test drives a state CHANGE between arm and fire — if the manager
+  // had cached the view at arm time, it would still see `state: "connected"`
+  // and fire; the EC-7 implementation re-reads, sees `state: "exited"`, and
+  // skips. The assertion catches a regression that captures the view at arm.
+  it("TOCTOU defence: state change between arm and fire skips the synthetic send", () => {
+    let callCount = 0;
+    const toctouGetSession = vi.fn((): IdleTimerSessionView | null => {
+      callCount++;
+      // First call (arm-time gate check) returns connected. Second call
+      // (fire-time re-read) returns exited — the EC-7 invariant says fire
+      // must check fresh state and refuse.
+      if (callCount === 1) return buildSessionView();
+      return { ...buildSessionView(), state: "exited" };
+    });
+    const sendSpy = vi.fn(() => ({ ok: true as const }));
+    const toctouManager = new IdleTimerManager({
+      clock,
+      getSession: toctouGetSession,
+      getGroupStatus: () => "active",
+      persistTrace: () => ({ ok: true }),
+      appendSummary: () => ({ ok: true }),
+      sendSyntheticFrame: sendSpy,
+      logEvent: () => undefined,
+    });
+    expect(toctouManager.arm(SID, { idleMs: 1_000, maxIterations: 3 })).toEqual({ kind: "armed" });
+    // Arm consumed one `getSession` call. Now advance — fire-time gate
+    // re-evaluates and sees the exited state.
+    clock.advance(1_000);
+    // sendSyntheticFrame MUST NOT have fired. The synthetic-in-flight token
+    // MUST remain unset because fire was skipped, not just sent-then-cleared.
+    expect(sendSpy).not.toHaveBeenCalled();
+    expect(toctouManager.isSyntheticTurnInFlight(SID)).toBe(false);
+    // `getSession` was called at least twice — arm-time AND fire-time — so
+    // the re-read invariant is observable. If the manager had cached the
+    // view, callCount would be 1 and the send would have fired.
+    expect(toctouGetSession.mock.calls.length).toBeGreaterThanOrEqual(2);
+    toctouManager.disposeAll();
   });
 
   // Task 12 — EC-19 static-grep canary. Council review 2026-05-15-0520 P1 #1
