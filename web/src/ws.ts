@@ -1190,6 +1190,38 @@ function handleParsedMessage(
         // to `reviewing-stalled`.
         wakeTimeoutMs: data.wakeTimeoutMs,
       });
+      // Bootstrap historical findings from REST. Without this, a tab
+      // connecting / reloading after the live `group:review` event has
+      // no way to discover the findings — UI stuck on "Awaiting first
+      // checkpoint" even with review files on disk. Closes
+      // `feedback_aura_observer_panel_no_rest_bootstrap`. Idempotent —
+      // findings dedup by deterministic id so live WS events converge
+      // with REST-bootstrapped findings without double-render.
+      import("./api.js").then(({ api }) => {
+        api.fetchGroupFindings(data.sessionGroupId).then((res) => {
+          if (res.reviewCount === 0) return; // nothing to bootstrap
+          // Bootstrap calls appendObserverReview with a synthetic
+          // checkpoint envelope per review — slice already dedups by
+          // finding id, so re-arrival on next live event is a no-op.
+          store.appendObserverReview({
+            sessionGroupId: res.sessionGroupId,
+            checkpointId: "rest-bootstrap", // synthetic — real checkpoint ids carried inside finding ids
+            phase: "rest-bootstrap",
+            findings: res.findings,
+            downgrades: res.downgrades,
+            observerModel: res.observerModel ?? "",
+            observerProvider: res.observerProvider ?? "",
+            timestamp: Date.now(),
+          });
+        }).catch((err) => {
+          // REST bootstrap is best-effort — live WS events still arrive.
+          // Log structurally for forensic; don't disturb panel state.
+          console.warn("[ws] fetchGroupFindings bootstrap failed", {
+            sessionGroupId: data.sessionGroupId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      });
       break;
     }
 

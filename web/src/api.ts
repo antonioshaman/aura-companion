@@ -1,5 +1,5 @@
 import type { SdkSessionInfo } from "./types.js";
-import type { ContentBlock } from "./types.js";
+import type { ContentBlock, BrowserObserverFinding, BrowserObserverDowngrade } from "./types.js";
 import { captureEvent, captureException } from "./analytics.js";
 
 const BASE = "/api";
@@ -868,6 +868,22 @@ export const api = {
     ),
 
   listSessions: () => get<SdkSessionInfo[]>("/sessions"),
+
+  // Council Mode — REST bootstrap of group findings on browser reload /
+  // late connect / reconnect race. Pairs with `group:review` live WS events;
+  // findings dedup by deterministic id so REST + WS converge.
+  // Closes `feedback_aura_observer_panel_no_rest_bootstrap`.
+  fetchGroupFindings: (groupId: string) =>
+    get<{
+      sessionGroupId: string;
+      findings: BrowserObserverFinding[];
+      downgrades: BrowserObserverDowngrade[];
+      reviewCount: number;
+      observerProvider?: string;
+      observerModel?: string;
+    }>(`/groups/${encodeURIComponent(groupId)}/findings`),
+
+
   discoverClaudeSessions: (limit = 200) =>
     get<{ sessions: ClaudeDiscoveredSession[] }>(
       `/claude/sessions/discover?limit=${encodeURIComponent(String(limit))}`,

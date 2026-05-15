@@ -27,14 +27,14 @@ import { SessionGroupCoordinator } from "./session-group-coordinator.js";
 import { isSupportedPairing as _isSupportedPairing } from "./backend-provider.js";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, existsSync } from "node:fs";
 import { IdleTimerManager } from "./idle-timer-manager.js";
 import {
   buildNoopIdleTimerManager,
   runAutoProceedBootReconcile,
 } from "./auto-proceed-orchestrator-bindings.js";
 import type { CheckpointPayload, ObserverReviewPayload } from "./council-types.js";
-import { OBSERVER_WAKE_PAYLOAD_VERSION, OBSERVER_WAKE_TIMEOUT_MS, parseCheckpointPayload } from "./council-types.js";
+import { OBSERVER_WAKE_PAYLOAD_VERSION, OBSERVER_WAKE_TIMEOUT_MS, parseCheckpointPayload, parseObserverReviewPayload } from "./council-types.js";
 import { watchCheckpoints } from "./checkpoint-watcher.js";
 import { watchReviews } from "./review-watcher.js";
 import { validateObserverFindings } from "./observer-grounding.js";
@@ -2886,6 +2886,118 @@ export class SessionOrchestrator {
     const role: "orchestrator" | "observer" =
       meta.primarySessionId === sessionId ? "orchestrator" : "observer";
     return { sessionGroupId, role };
+  }
+
+  /**
+   * REST bootstrap for the ObserverPanel — read all review files for a council
+   * group from disk, parse them, run the same grounding validation the WS
+   * pipeline uses, and return hydrated findings the browser can populate
+   * immediately on reconnect / page reload.
+   *
+   * Closes `feedback_aura_observer_panel_no_rest_bootstrap` — historically the
+   * browser council slice was populated EXCLUSIVELY from live `group:review`
+   * WS events; a tab connecting after the event missed everything. This
+   * method is the deterministic bootstrap that complements the WS live path.
+   *
+   * Returns null when:
+   *   - the group is unknown to this orchestrator (already archived, never created)
+   *   - the workspace cwd cannot be read
+   * Returns `{findings: [], reviewCount: 0}` when the group is known but has no
+   * review files yet (panel renders `never-checkpointed-yet`).
+   */
+  async getGroupReviewsForBootstrap(sessionGroupId: string): Promise<{
+    sessionGroupId: string;
+    findings: BrowserObserverFinding[];
+    downgrades: BrowserObserverDowngrade[];
+    reviewCount: number;
+    observerProvider?: string;
+    observerModel?: string;
+  } | null> {
+    const meta = this.councilGroupMeta.get(sessionGroupId);
+    if (!meta) return null;
+    const watcher = this.councilWatchers.get(sessionGroupId);
+    if (!watcher) return null;
+    const reviewsDir = join(watcher.cwd, ".council", "reviews");
+    if (!existsSync(reviewsDir)) {
+      return { sessionGroupId, findings: [], downgrades: [], reviewCount: 0 };
+    }
+    // Pinned filename shape from review-watcher: `<phase>-<provider>-observer.md`.
+    // Duplicated here intentionally — extracting to a shared constant would
+    // touch review-watcher (out of scope for this fix); revisit per EC-20.
+    const filenamePattern = /^[A-Za-z0-9_-][A-Za-z0-9_.\-]{0,63}-(claude|codex)-observer\.md$/;
+    const allFindings: BrowserObserverFinding[] = [];
+    const allDowngrades: BrowserObserverDowngrade[] = [];
+    let observerProvider: string | undefined;
+    let observerModel: string | undefined;
+    let reviewCount = 0;
+    let entries: string[] = [];
+    try {
+      entries = readdirSync(reviewsDir).filter((f) => filenamePattern.test(f));
+    } catch (err) {
+      log.warn("session-orchestrator", "getGroupReviewsForBootstrap: readdir failed", {
+        sessionGroupId,
+        reviewsDir,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return { sessionGroupId, findings: [], downgrades: [], reviewCount: 0 };
+    }
+    for (const file of entries) {
+      const filePath = join(reviewsDir, file);
+      let raw: string;
+      try {
+        raw = readFileSync(filePath, "utf-8");
+      } catch {
+        continue;
+      }
+      const payload = parseObserverReviewPayload(raw);
+      if (!payload) continue;
+      reviewCount++;
+      observerProvider = observerProvider ?? payload.observer_provider;
+      observerModel = observerModel ?? payload.observer_model;
+      // Apply same grounding validation as the WS path so REST-bootstrapped
+      // findings match WS-arrived findings byte-for-byte after deterministic
+      // ID dedup. Re-use `validateObserverFindings` from observer-grounding.
+      const manifest = buildObserverContextManifest({
+        current: watcher.lastCheckpoint ?? { artifact_paths: [] },
+        previous: watcher.previousCheckpoint ?? undefined,
+      });
+      const modifiedFiles = new Set(manifest.delta.length > 0
+        ? manifest.delta
+        : (watcher.lastCheckpoint?.artifact_paths ?? []));
+      const result = validateObserverFindings(payload, { workspaceRoot: watcher.cwd, modifiedFiles });
+      result.findings.forEach((f, idx) => {
+        const id = deterministicFindingId({
+          sessionGroupId,
+          checkpointId: payload.checkpoint_id,
+          observerProvider: payload.observer_provider,
+          findingIndex: idx,
+          evidencePath: f.evidence_path,
+          claim: f.claim,
+        });
+        const downgrade = result.downgrades.find((d) => d.index === idx);
+        const out: BrowserObserverFinding = {
+          id,
+          severity: f.severity,
+          claim: f.claim,
+          evidence_path: f.evidence_path,
+          ...(f.evidence_lines !== undefined ? { evidence_lines: f.evidence_lines } : {}),
+          ...(f.confidence !== undefined ? { confidence: f.confidence } : {}),
+          ...(downgrade ? { wasDowngraded: true, downgradeReason: downgrade.reason } : {}),
+        };
+        allFindings.push(out);
+        if (downgrade) {
+          allDowngrades.push({ id, reason: downgrade.reason });
+        }
+      });
+    }
+    return {
+      sessionGroupId,
+      findings: allFindings,
+      downgrades: allDowngrades,
+      reviewCount,
+      ...(observerProvider !== undefined && { observerProvider }),
+      ...(observerModel !== undefined && { observerModel }),
+    };
   }
 
   // ── Cleanup ────────────────────────────────────────────────────────────────
