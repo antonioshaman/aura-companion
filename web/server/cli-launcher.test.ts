@@ -5,8 +5,17 @@ import { tmpdir } from "node:os";
 
 // ─── Hoisted mocks ──────────────────────────────────────────────────────────
 
-// Mock randomUUID so session IDs are deterministic
-vi.mock("node:crypto", () => ({ randomUUID: () => "test-session-id" }));
+// Mock randomUUID so session IDs are deterministic.
+// observer-prompt.ts (transitively imported via cli-launcher) uses
+// `createHash` — passthrough to the real implementation so the bundled
+// fallback path can hash its body correctly.
+vi.mock("node:crypto", async (importOriginal) => {
+  const actual = (await importOriginal()) as typeof import("node:crypto");
+  return {
+    ...actual,
+    randomUUID: () => "test-session-id",
+  };
+});
 
 // Mock path-resolver for binary resolution
 const mockResolveBinary = vi.hoisted(() => vi.fn((_name: string): string | null => "/usr/bin/claude"));
@@ -1394,5 +1403,85 @@ describe("isCmdScript platform guard", () => {
     // On non-Windows, .cmd files should be spawned directly (no cmd.exe wrapping)
     expect(cmdAndArgs[0]).toBe("/usr/local/bin/claude.cmd");
     expect(cmdAndArgs[0]).not.toBe("cmd.exe");
+  });
+});
+
+// Council Plan PLAN-aura-observer-prompt-bundled-fallback.md Task 9 —
+// integration test for `applyCouncilObserverSpawnConfig` through the
+// public `launch()` surface. Exercised on the Claude backend (the
+// codex variant lives in `codex websocket launcher` describe above
+// once the bundled-fallback path stabilises). Covers both source-axis
+// values: workspace-present → loaded; workspace-absent → bundled +
+// info field stamped + spawn argv carries the bundled body.
+describe("observer-prompt bundled fallback (Task 9 — integration)", () => {
+  // Need to import the bundled constants inside the describe so the
+  // module-load happens after the file's hoisted mocks settle.
+  let BUNDLED_OBSERVER_PROMPT: string;
+  let BUNDLED_OBSERVER_PROMPT_SHA256: string;
+
+  beforeEach(async () => {
+    const mod = await import("./observer-prompt-bundled.js");
+    BUNDLED_OBSERVER_PROMPT = mod.BUNDLED_OBSERVER_PROMPT;
+    BUNDLED_OBSERVER_PROMPT_SHA256 = mod.BUNDLED_OBSERVER_PROMPT_SHA256;
+  });
+
+  it("falls back to bundled prompt + stamps observerPromptSource='bundled' when workspace .council/prompts/ is absent", () => {
+    // tempDir created in outer beforeEach is empty — no .council/.
+    const info = launcher.launch({
+      cwd: tempDir,
+      sessionGroupRole: "observer",
+      sessionGroupId: "grp_int_test_1",
+    });
+    expect(info.observerPromptSource).toBe("bundled");
+    expect(info.observerPromptSha256).toBe(BUNDLED_OBSERVER_PROMPT_SHA256);
+
+    // Spawn argv MUST carry the bundled body via --append-system-prompt.
+    expect(mockSpawn).toHaveBeenCalledOnce();
+    const [cmdAndArgs] = mockSpawn.mock.calls[0];
+    const argv = cmdAndArgs as string[];
+    const appendIdx = argv.indexOf("--append-system-prompt");
+    expect(appendIdx).toBeGreaterThan(-1);
+    // Next argv element is the prompt body. Must equal the bundled
+    // body bytes verbatim — proves the fallback reached the spawn
+    // argv, not just the in-memory `info` field.
+    expect(argv[appendIdx + 1]).toBe(BUNDLED_OBSERVER_PROMPT);
+  });
+
+  it("loads workspace prompt + stamps observerPromptSource='workspace' when the file exists and is valid", async () => {
+    // Plant a workspace prompt that matches the loader's contract.
+    const { mkdirSync, writeFileSync } = await import("node:fs");
+    const workspacePromptDir = join(tempDir, ".council", "prompts");
+    mkdirSync(workspacePromptDir, { recursive: true });
+    const workspaceBody = "<!-- observer-system-prompt v1 -->\n\n" + "y".repeat(512);
+    writeFileSync(join(workspacePromptDir, "observer-system.md"), workspaceBody);
+
+    const info = launcher.launch({
+      cwd: tempDir,
+      sessionGroupRole: "observer",
+      sessionGroupId: "grp_int_test_2",
+    });
+    expect(info.observerPromptSource).toBe("workspace");
+    // Hash must match the workspace bytes, NOT the bundled hash.
+    expect(info.observerPromptSha256).not.toBe(BUNDLED_OBSERVER_PROMPT_SHA256);
+    const { createHash } = await import("node:crypto");
+    const expectedSha = createHash("sha256").update(workspaceBody, "utf8").digest("hex");
+    expect(info.observerPromptSha256).toBe(expectedSha);
+
+    const [cmdAndArgs] = mockSpawn.mock.calls[0];
+    const argv = cmdAndArgs as string[];
+    const appendIdx = argv.indexOf("--append-system-prompt");
+    expect(appendIdx).toBeGreaterThan(-1);
+    expect(argv[appendIdx + 1]).toBe(workspaceBody);
+  });
+
+  it("non-observer role bypasses the bundled fallback entirely (no observerPromptSource stamped)", () => {
+    // Orchestrator role does not run applyCouncilObserverSpawnConfig.
+    const info = launcher.launch({
+      cwd: tempDir,
+      sessionGroupRole: "orchestrator",
+      sessionGroupId: "grp_int_test_3",
+    });
+    expect(info.observerPromptSource).toBeUndefined();
+    expect(info.observerPromptSha256).toBeUndefined();
   });
 });

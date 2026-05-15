@@ -14,7 +14,8 @@ import type { BackendType } from "./session-types.js";
 import type { RecorderManager } from "./recorder.js";
 import { CodexAdapter } from "./codex-adapter.js";
 import { resolveBinary, getEnrichedPath } from "./path-resolver.js";
-import { loadObserverSystemPrompt } from "./observer-prompt.js";
+import { resolveObserverSystemPrompt } from "./observer-prompt.js";
+import { log } from "./logger.js";
 import {
   OBSERVER_ALLOWED_TOOLS,
   OBSERVER_DISALLOWED_TOOLS,
@@ -151,6 +152,20 @@ export interface SdkSessionInfo {
    *  (observer role only). Used by the recorder + invocation log so a
    *  forensic re-run can identify which prompt revision the model saw. */
   observerPromptSha256?: string;
+  /**
+   * Provenance of the observer prompt resolved at spawn time:
+   * - `"workspace"` — loaded from `<cwd>/.council/prompts/observer-system.md`
+   * - `"bundled"` — workspace file absent (ENOENT); fell back to the
+   *    bundled artifact shipped with aura-companion
+   * (Council Plan PLAN-aura-observer-prompt-bundled-fallback.md Task 4)
+   *
+   * Consumers (recorder attribution, EC-9 invocation log, UI provenance
+   * display, replay determinism) MUST distinguish on THIS field rather
+   * than infer from `observerPromptSha256` alone — the two can coincide
+   * if a workspace copies the bundled body verbatim, but the policy
+   * intent (custom override vs default) is the same the field reflects.
+   */
+  observerPromptSource?: "workspace" | "bundled";
 }
 
 export interface LaunchOptions {
@@ -407,10 +422,17 @@ export class CliLauncher {
    * auto-relaunches keeps its role + restrictions — the previous wiring
    * applied them only on the initial `spawnCLI` call.
    *
+   * Council Plan PLAN-aura-observer-prompt-bundled-fallback.md Task 3:
+   * routes through {@link resolveObserverSystemPrompt}, which falls
+   * back to the bundled artifact on workspace-file ENOENT. Malformed-
+   * but-present, EACCES, EISDIR, ELOOP all still throw → orchestrator
+   * rollback as before. The cwd-fallback to `process.cwd()` is REMOVED
+   * (Backend rec #4): the silent-bundled trap under Docker (cwd=/app
+   * has no `.council/prompts/`) is closed by requiring an explicit
+   * workspace cwd. If neither `options.cwd` nor `info.cwd` is set, we
+   * fall through to the bundled path directly with a distinct log reason.
+   *
    * Returns `options` unchanged when the session isn't an observer.
-   * Throws on missing/malformed prompt so the council create-pair path
-   * can roll back the orchestrator half (silent "undirected observer"
-   * is impossible).
    */
   private applyCouncilObserverSpawnConfig(
     sessionId: string,
@@ -419,15 +441,67 @@ export class CliLauncher {
   ): LaunchOptions {
     if (options.sessionGroupRole !== "observer") return options;
     try {
-      const cwdForPrompt = options.cwd || info.cwd || process.cwd();
-      const promptPath = join(cwdForPrompt, ".council", "prompts", "observer-system.md");
-      const artifact = loadObserverSystemPrompt(promptPath);
-      info.observerPromptSha256 = artifact.sha256;
+      // Tightened cwd resolution — no `process.cwd()` fallback. The
+      // workspace cwd is REQUIRED context; if it's missing, the resolver
+      // sees an empty/sentinel path, throws (loader rejects non-absolute),
+      // and we emit the explicit `no-workspace-cwd` fallback below.
+      const cwdForPrompt = options.cwd || info.cwd || "";
+      let artifactBody: string;
+      let artifactSha: string;
+      let source: "workspace" | "bundled";
+      let expectedPath = "";
+      let fallbackReason: "ENOENT" | "no-workspace-cwd" | null = null;
+
+      if (cwdForPrompt) {
+        const promptPath = join(cwdForPrompt, ".council", "prompts", "observer-system.md");
+        expectedPath = promptPath;
+        const resolved = resolveObserverSystemPrompt(promptPath);
+        artifactBody = resolved.body;
+        artifactSha = resolved.sha256;
+        source = resolved.source;
+        if (source === "bundled") {
+          fallbackReason = "ENOENT";
+        }
+      } else {
+        // No workspace cwd available — go directly to bundled. The
+        // resolver itself requires an absolute path; bypass it here
+        // by importing the bundled artifact via the resolver with a
+        // sentinel path that we know will ENOENT.
+        // Simpler: call resolveObserverSystemPrompt with a definitely-
+        // non-existent absolute sentinel path so it falls back uniformly.
+        const sentinelPath = "/__aura_no_workspace_cwd_for_observer_prompt__/.council/prompts/observer-system.md";
+        const resolved = resolveObserverSystemPrompt(sentinelPath);
+        artifactBody = resolved.body;
+        artifactSha = resolved.sha256;
+        source = resolved.source;
+        fallbackReason = "no-workspace-cwd";
+        expectedPath = "<no-cwd>";
+      }
+
+      info.observerPromptSha256 = artifactSha;
+      info.observerPromptSource = source;
+
+      // Council Plan Task 5: structured WARN log on bundled-fallback path.
+      // Operator visibility — workspace-present is the happy path; the
+      // bundled branch is an opt-in misconfiguration deserving notice.
+      // Never include the prompt body bytes (Hunt P3 — exfiltration channel).
+      if (source === "bundled" && fallbackReason !== null) {
+        log.warn("council.observer-prompt.bundled-fallback", "observer prompt fell back to bundled", {
+          event: "council.observer-prompt.bundled-fallback",
+          sessionGroupId: options.sessionGroupId,
+          sessionId,
+          role: "observer",
+          expectedPath,
+          bundledSha256: artifactSha,
+          reason: fallbackReason,
+        });
+      }
+
       // Compose with any orchestrator-side systemPrompt that flowed in
       // (no caller does this today; preserved for forward-compat).
       const composedSystemPrompt = options.systemPrompt
-        ? `${artifact.body}\n\n${options.systemPrompt}`
-        : artifact.body;
+        ? `${artifactBody}\n\n${options.systemPrompt}`
+        : artifactBody;
       // Caller-supplied allowedTools intersect with the observer profile —
       // never widened.
       const callerAllowed = options.allowedTools ?? [];

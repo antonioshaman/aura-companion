@@ -46,7 +46,8 @@
     "branding:dry": "bun scripts/apply-aura-branding.ts --root .. --dry-run",
     "drift:check": "bun scripts/aura-drift-check.ts",
     "drift:dry": "bun scripts/aura-drift-check.ts --dry-run",
-    "drift:pin": "bun scripts/aura-drift-check.ts --pin"
+    "drift:pin": "bun scripts/aura-drift-check.ts --pin",
+    "build-observer-prompt-bundle": "bun scripts/build-observer-prompt-bundle.ts"
   },
   "dependencies": {
     "@codemirror/lang-cpp": "^6.0.3",

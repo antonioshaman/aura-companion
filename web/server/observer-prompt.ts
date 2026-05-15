@@ -25,6 +25,10 @@ import {
   type CheckpointPayload,
   type ObserverWakePayload,
 } from "./council-types.js";
+import {
+  BUNDLED_OBSERVER_PROMPT,
+  BUNDLED_OBSERVER_PROMPT_SHA256,
+} from "./observer-prompt-bundled.js";
 
 export const OBSERVER_PROMPT_SCHEMA_VERSION = 1 as const;
 
@@ -72,12 +76,24 @@ export function parseObserverPromptHeader(raw: string): number | null {
  *
  * Throws on missing file, oversize body, missing or unsupported header
  * version, body shorter than `OBSERVER_PROMPT_MIN_BODY_BYTES`. The throw
- * path is the contract — a silent fallback prompt would mean the model
- * loaded "something" that may not match the schema the rest of the
- * pipeline assumes.
+ * on missing-file is the contract AT THIS LEVEL — this function loads a
+ * specific file from disk; if the file isn't there, it throws.
+ *
+ * Fallback policy is the {@link resolveObserverSystemPrompt} resolver's
+ * concern — it composes this function for the workspace path, catches
+ * `code === "ENOENT"` only, and falls back to the bundled artifact
+ * through the SAME validator below (preserving the schema-mismatch
+ * guarantee the original anti-fallback design relied on). Every other
+ * fs error (EACCES, EISDIR, ELOOP) still propagates as the loud throw —
+ * fallback would silently mask "you mounted the workspace wrong."
  *
  * `sourcePath` must be absolute — relative paths are a misconfiguration
  * vector (relative to *what*? process cwd is unstable).
+ *
+ * Council Plan PLAN-aura-observer-prompt-bundled-fallback.md Task 11
+ * rewrote the prior anti-fallback wording — the schema-mismatch hazard
+ * is now mitigated at the resolver layer, not by refusing fallback
+ * everywhere.
  */
 export function loadObserverSystemPrompt(sourcePath: string): ObserverPromptArtifact {
   if (typeof sourcePath !== "string" || sourcePath.length === 0 || sourcePath.includes("\0")) {
@@ -88,13 +104,15 @@ export function loadObserverSystemPrompt(sourcePath: string): ObserverPromptArti
   }
 
   // Pre-check size via stat — avoids reading a multi-megabyte file just
-  // to reject it on the byte-count test below.
+  // to reject it on the byte-count test below. Preserve the underlying
+  // error as `cause` so {@link resolveObserverSystemPrompt} can
+  // discriminate ENOENT from EACCES/EISDIR/ELOOP.
   let size: number;
   try {
     size = statSync(sourcePath).size;
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
-    throw new Error(`observer-prompt: cannot stat ${sourcePath}: ${detail}`);
+    throw new Error(`observer-prompt: cannot stat ${sourcePath}: ${detail}`, { cause: err });
   }
   if (size > OBSERVER_PROMPT_MAX_BYTES) {
     throw new Error(
@@ -103,6 +121,21 @@ export function loadObserverSystemPrompt(sourcePath: string): ObserverPromptArti
   }
 
   const body = readFileSync(sourcePath, "utf-8");
+  return parseObserverSystemPromptBody(body, sourcePath);
+}
+
+/**
+ * Pure: validate an already-loaded prompt body against the artifact
+ * schema (header sentinel, byte-size ceiling, body-length floor) and
+ * return the typed artifact. Extracted from {@link loadObserverSystemPrompt}
+ * so the bundled-fallback path in {@link resolveObserverSystemPrompt}
+ * can reuse identical validation without a disk round-trip.
+ *
+ * `sourcePath` is informational — embedded in error messages and on the
+ * returned artifact — and must be a non-empty string; the bundled path
+ * passes a sentinel like `"<bundled:observer-system-v1>"`.
+ */
+function parseObserverSystemPromptBody(body: string, sourcePath: string): ObserverPromptArtifact {
   const byteLen = Buffer.byteLength(body, "utf8");
   if (byteLen > OBSERVER_PROMPT_MAX_BYTES) {
     throw new Error(
@@ -128,6 +161,75 @@ export function loadObserverSystemPrompt(sourcePath: string): ObserverPromptArti
   const sha256 = createHash("sha256").update(body, "utf8").digest("hex");
 
   return { version, body, sha256, sourcePath };
+}
+
+/**
+ * Sentinel `sourcePath` value the resolver uses when returning the
+ * bundled artifact. NOT a filesystem path — kept distinguishable from
+ * any plausible workspace path so consumers parsing `sourcePath` know
+ * the artifact didn't come from disk.
+ */
+export const BUNDLED_OBSERVER_PROMPT_SOURCE_PATH = "<bundled:observer-system-v1>";
+
+/** Artifact extended with a discriminator naming WHICH source produced it. */
+export interface ResolvedObserverPrompt extends ObserverPromptArtifact {
+  source: "workspace" | "bundled";
+}
+
+/**
+ * Resolve the observer system-prompt artifact for a given workspace.
+ *
+ * Composes {@link loadObserverSystemPrompt} for the workspace path. On
+ * `code === "ENOENT"` ONLY, falls back to the bundled artifact
+ * (validated through {@link parseObserverSystemPromptBody} — same
+ * schema gate as the workspace path). Every other error propagates
+ * unchanged — EACCES, EISDIR, ELOOP, and any malformed-but-present
+ * artifact failure still throws, preserving the "explicit intent must
+ * surface" contract from the prior anti-fallback design.
+ *
+ * Returned artifact's `source` field discriminates `"workspace"` (the
+ * workspace file was loaded) from `"bundled"` (the workspace file was
+ * absent and the in-repo default was used). Consumers (recorder, EC-9
+ * structured logs, UI provenance display) MUST distinguish on this
+ * field rather than infer from `sha256` alone.
+ *
+ * `workspacePath` must be absolute — the same constraint
+ * {@link loadObserverSystemPrompt} enforces; the resolver does not
+ * pre-validate that argument, the loader does.
+ */
+export function resolveObserverSystemPrompt(workspacePath: string): ResolvedObserverPrompt {
+  try {
+    const artifact = loadObserverSystemPrompt(workspacePath);
+    return { ...artifact, source: "workspace" };
+  } catch (err) {
+    // Discriminate ENOENT via the underlying fs error's `code` property,
+    // preserved through `Error.cause` on the loader's wrapped throw at
+    // `loadObserverSystemPrompt`'s `statSync` catch block. EACCES (perm
+    // denied), ELOOP (symlink loop), EISDIR (it's a directory), and any
+    // other errno must NOT trigger fallback — those signal "the file
+    // exists or could exist, but the system refuses to read it,"
+    // operational errors the operator must see.
+    const cause = (err as { cause?: unknown }).cause;
+    const code = (cause as { code?: unknown })?.code;
+    if (code === "ENOENT") {
+      const bundled = parseObserverSystemPromptBody(
+        BUNDLED_OBSERVER_PROMPT,
+        BUNDLED_OBSERVER_PROMPT_SOURCE_PATH,
+      );
+      // Belt-and-braces — assert the bundled hash matches what the
+      // build-time stamping computed. Catches a future bundler
+      // transform that mutates the string literal's bytes (CRLF
+      // normalisation, minification, template-literal preprocessing)
+      // before the validator sees them.
+      if (bundled.sha256 !== BUNDLED_OBSERVER_PROMPT_SHA256) {
+        throw new Error(
+          `observer-prompt: bundled artifact SHA mismatch — computed ${bundled.sha256} vs stamped ${BUNDLED_OBSERVER_PROMPT_SHA256}`,
+        );
+      }
+      return { ...bundled, source: "bundled" };
+    }
+    throw err;
+  }
 }
 
 // ── Per-checkpoint context manifest ─────────────────────────────────────────
