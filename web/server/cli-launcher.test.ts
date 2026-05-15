@@ -81,6 +81,7 @@ vi.mock("node:fs", async (importOriginal) => {
 import { SessionStore } from "./session-store.js";
 import { CliLauncher } from "./cli-launcher.js";
 import { companionBus } from "./event-bus.js";
+import { log } from "./logger.js";
 
 // ─── Bun.spawn mock ─────────────────────────────────────────────────────────
 
@@ -1425,7 +1426,14 @@ describe("observer-prompt bundled fallback (Task 9 — integration)", () => {
     BUNDLED_OBSERVER_PROMPT_SHA256 = mod.BUNDLED_OBSERVER_PROMPT_SHA256;
   });
 
-  it("falls back to bundled prompt + stamps observerPromptSource='bundled' when workspace .council/prompts/ is absent", () => {
+  it("falls back to bundled prompt + stamps observerPromptSource='bundled' when workspace .council/prompts/ is absent", async () => {
+    // Council Review 2026-05-15-1015 CR-4 (B3): spy log.warn to pin the
+    // bundled-fallback WARN payload SHAPE — not just that it fired.
+    // Negative key assertion on `expectedPath` is the structural enforcer
+    // for the topology-disclosure mitigation; any future refactor that
+    // re-introduces the raw workspace path string into the WARN body
+    // breaks the spy assertion.
+    const warnSpy = vi.spyOn(log, "warn");
     // tempDir created in outer beforeEach is empty — no .council/.
     const info = launcher.launch({
       cwd: tempDir,
@@ -1451,6 +1459,33 @@ describe("observer-prompt bundled fallback (Task 9 — integration)", () => {
     // body bytes verbatim — proves the fallback reached the spawn
     // argv, not just the in-memory `info` field.
     expect(argv[appendIdx + 1]).toBe(BUNDLED_OBSERVER_PROMPT);
+
+    // Council Review 2026-05-15-1015 CR-5: SHA cross-axis pin. The
+    // argv body and the info.observerPromptSha256 are two separate
+    // write paths; assert their SHAs agree so a future refactor that
+    // breaks one but not the other cannot pass by coincidence.
+    const { createHash } = await import("node:crypto");
+    const argvSha = createHash("sha256").update(argv[appendIdx + 1], "utf8").digest("hex");
+    expect(argvSha).toBe(info.observerPromptSha256);
+
+    // Council Review 2026-05-15-1015 CR-4 (B3): WARN shape pin.
+    const bundledFallbackCalls = warnSpy.mock.calls.filter(
+      (call) => call[0] === "council.observer-prompt.bundled-fallback",
+    );
+    expect(bundledFallbackCalls).toHaveLength(1);
+    const warnPayload = bundledFallbackCalls[0][2] as Record<string, unknown>;
+    expect(warnPayload.event).toBe("council.observer-prompt.bundled-fallback");
+    expect(warnPayload.expectedPathPresent).toBe(true);
+    expect(warnPayload.expectedPathDepth).toBeGreaterThan(0);
+    expect(warnPayload.observerPromptSha256).toBe(BUNDLED_OBSERVER_PROMPT_SHA256);
+    expect(warnPayload.observerPromptSource).toBe("bundled");
+    expect(warnPayload.reason).toBe("ENOENT");
+    // Negative key assertions — CR-1 topology-disclosure mitigation:
+    // raw workspace path bytes MUST NOT appear in any log payload key.
+    expect(Object.keys(warnPayload)).not.toContain("expectedPath");
+    expect(Object.keys(warnPayload)).not.toContain("observerPromptSourceLabel");
+
+    warnSpy.mockRestore();
   });
 
   it("loads workspace prompt + stamps observerPromptSource='workspace' when the file exists and is valid", async () => {
@@ -1480,6 +1515,11 @@ describe("observer-prompt bundled fallback (Task 9 — integration)", () => {
     const appendIdx = argv.indexOf("--append-system-prompt");
     expect(appendIdx).toBeGreaterThan(-1);
     expect(argv[appendIdx + 1]).toBe(workspaceBody);
+
+    // Council Review 2026-05-15-1015 CR-5: SHA cross-axis pin —
+    // argv body and info.observerPromptSha256 must agree.
+    const argvSha = createHash("sha256").update(argv[appendIdx + 1], "utf8").digest("hex");
+    expect(argvSha).toBe(info.observerPromptSha256);
   });
 
   it("non-observer role bypasses the bundled fallback entirely (no observerPromptSource stamped)", () => {
@@ -1496,6 +1536,210 @@ describe("observer-prompt bundled fallback (Task 9 — integration)", () => {
     const [cmdAndArgs] = mockSpawn.mock.calls[0];
     const argv = cmdAndArgs as string[];
     expect(argv.indexOf("--append-system-prompt")).toBe(-1);
+  });
+
+  // Council Review 2026-05-15-1015 CR-4 (B1): `session:relaunch-failed`
+  // emit on observer prompt-config throw during relaunch. The typed
+  // channel exists at event-bus-types.ts:28; without a behavioural
+  // assertion, a refactor that flips the role gate (e.g. === "orchestrator")
+  // or drops the emit entirely goes green via typecheck alone.
+  it("emits session:relaunch-failed on the typed channel when observer prompt-config throws during relaunch", async () => {
+    const { mkdirSync, writeFileSync } = await import("node:fs");
+    const workspacePromptDir = join(tempDir, ".council", "prompts");
+    mkdirSync(workspacePromptDir, { recursive: true });
+    const promptPath = join(workspacePromptDir, "observer-system.md");
+    const validBody = "<!-- observer-system-prompt v1 -->\n\n" + "y".repeat(512);
+    writeFileSync(promptPath, validBody);
+
+    // First launch with valid workspace prompt.
+    let resolveFirst: (code: number) => void = () => {};
+    const firstProc = {
+      pid: 12345,
+      kill: vi.fn(() => { resolveFirst(0); }),
+      exited: new Promise<number>((r) => { resolveFirst = r; }),
+      stdout: null,
+      stderr: null,
+    };
+    mockSpawn.mockReturnValueOnce(firstProc);
+    launcher.launch({
+      cwd: tempDir,
+      sessionGroupRole: "observer",
+      sessionGroupId: "grp_int_test_relaunch_failed",
+    });
+    // No setCLISessionId — relaunch is fresh (no `--resume`), so
+    // buildObserverSpawnOverrides re-runs and re-evaluates the workspace.
+
+    // Break the workspace prompt before relaunch.
+    writeFileSync(promptPath, "no header here\n" + "y".repeat(512));
+
+    // Subscribe BEFORE relaunch. Capture every payload.
+    const relaunchFailedCalls: Array<{ sessionId: string; reason: string }> = [];
+    companionBus.on("session:relaunch-failed", (payload) => {
+      relaunchFailedCalls.push(payload);
+    });
+
+    const result = await launcher.relaunch("test-session-id");
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("observer spawn config load failed");
+
+    // The typed channel MUST fire exactly once with the right shape.
+    expect(relaunchFailedCalls).toHaveLength(1);
+    expect(relaunchFailedCalls[0].sessionId).toBe("test-session-id");
+    expect(relaunchFailedCalls[0].reason).toMatch(/^observer-prompt-config-failed:/);
+  });
+
+  // Council Review 2026-05-15-1015 CR-4 (B1, negative-control): the
+  // typed channel must NOT fire on orchestrator-role relaunch failures.
+  // The launcher's role gate at cli-launcher.ts:661 confines the emit
+  // to observer-role sessions; this row pins that contract.
+  it("does NOT emit session:relaunch-failed for non-observer-role relaunch failures", async () => {
+    // Orchestrator role launch — buildObserverSpawnOverrides early-returns.
+    let resolveFirst: (code: number) => void = () => {};
+    const firstProc = {
+      pid: 12345,
+      kill: vi.fn(() => { resolveFirst(0); }),
+      exited: new Promise<number>((r) => { resolveFirst = r; }),
+      stdout: null,
+      stderr: null,
+    };
+    mockSpawn.mockReturnValueOnce(firstProc);
+    launcher.launch({
+      cwd: tempDir,
+      sessionGroupRole: "orchestrator",
+      sessionGroupId: "grp_int_test_no_emit",
+    });
+
+    const secondProc = createMockProc(54321);
+    mockSpawn.mockReturnValueOnce(secondProc);
+
+    const relaunchFailedCalls: Array<{ sessionId: string; reason: string }> = [];
+    companionBus.on("session:relaunch-failed", (payload) => {
+      relaunchFailedCalls.push(payload);
+    });
+
+    const result = await launcher.relaunch("test-session-id");
+    expect(result.ok).toBe(true);
+    // No failed-emit because no failure AND no observer role.
+    expect(relaunchFailedCalls).toHaveLength(0);
+  });
+
+  // Council Review 2026-05-15-1015 CR-4 (B2): `source-drift` WARN
+  // behavioural pin. Three rows cover the state-transition matrix —
+  // workspace→bundled, bundled→workspace, no-change. Without these,
+  // a refactor that broadens the gate (fires on cold-start) or
+  // narrows it (never fires) goes green via typecheck.
+  it("emits source-drift WARN when workspace prompt disappears between observer spawns (workspace → bundled)", async () => {
+    const { mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+    const workspacePromptDir = join(tempDir, ".council", "prompts");
+    mkdirSync(workspacePromptDir, { recursive: true });
+    const promptPath = join(workspacePromptDir, "observer-system.md");
+    writeFileSync(promptPath, "<!-- observer-system-prompt v1 -->\n\n" + "y".repeat(512));
+
+    let resolveFirst: (code: number) => void = () => {};
+    const firstProc = {
+      pid: 12345,
+      kill: vi.fn(() => { resolveFirst(0); }),
+      exited: new Promise<number>((r) => { resolveFirst = r; }),
+      stdout: null,
+      stderr: null,
+    };
+    mockSpawn.mockReturnValueOnce(firstProc);
+    launcher.launch({
+      cwd: tempDir,
+      sessionGroupRole: "observer",
+      sessionGroupId: "grp_int_drift_w2b",
+    });
+    // Drop the workspace prompt — drift baseline captured during relaunch.
+    rmSync(promptPath);
+
+    const warnSpy = vi.spyOn(log, "warn");
+    const secondProc = createMockProc(54321);
+    mockSpawn.mockReturnValueOnce(secondProc);
+    await launcher.relaunch("test-session-id");
+
+    const driftCalls = warnSpy.mock.calls.filter(
+      (call) => call[0] === "council.observer-prompt.source-drift",
+    );
+    expect(driftCalls).toHaveLength(1);
+    const payload = driftCalls[0][2] as Record<string, unknown>;
+    expect((payload.previous as { source: string }).source).toBe("workspace");
+    expect((payload.current as { source: string }).source).toBe("bundled");
+    warnSpy.mockRestore();
+  });
+
+  it("emits source-drift WARN when workspace prompt appears between observer spawns (bundled → workspace)", async () => {
+    let resolveFirst: (code: number) => void = () => {};
+    const firstProc = {
+      pid: 12345,
+      kill: vi.fn(() => { resolveFirst(0); }),
+      exited: new Promise<number>((r) => { resolveFirst = r; }),
+      stdout: null,
+      stderr: null,
+    };
+    mockSpawn.mockReturnValueOnce(firstProc);
+    launcher.launch({
+      cwd: tempDir,
+      sessionGroupRole: "observer",
+      sessionGroupId: "grp_int_drift_b2w",
+    });
+    // Plant a workspace prompt — drift baseline captured during relaunch.
+    const { mkdirSync, writeFileSync } = await import("node:fs");
+    const workspacePromptDir = join(tempDir, ".council", "prompts");
+    mkdirSync(workspacePromptDir, { recursive: true });
+    writeFileSync(
+      join(workspacePromptDir, "observer-system.md"),
+      "<!-- observer-system-prompt v1 -->\n\n" + "y".repeat(512),
+    );
+
+    const warnSpy = vi.spyOn(log, "warn");
+    const secondProc = createMockProc(54321);
+    mockSpawn.mockReturnValueOnce(secondProc);
+    await launcher.relaunch("test-session-id");
+
+    const driftCalls = warnSpy.mock.calls.filter(
+      (call) => call[0] === "council.observer-prompt.source-drift",
+    );
+    expect(driftCalls).toHaveLength(1);
+    const payload = driftCalls[0][2] as Record<string, unknown>;
+    expect((payload.previous as { source: string }).source).toBe("bundled");
+    expect((payload.current as { source: string }).source).toBe("workspace");
+    warnSpy.mockRestore();
+  });
+
+  it("does NOT emit source-drift WARN when prompt source and sha are unchanged across relaunches", async () => {
+    const { mkdirSync, writeFileSync } = await import("node:fs");
+    const workspacePromptDir = join(tempDir, ".council", "prompts");
+    mkdirSync(workspacePromptDir, { recursive: true });
+    writeFileSync(
+      join(workspacePromptDir, "observer-system.md"),
+      "<!-- observer-system-prompt v1 -->\n\n" + "y".repeat(512),
+    );
+
+    let resolveFirst: (code: number) => void = () => {};
+    const firstProc = {
+      pid: 12345,
+      kill: vi.fn(() => { resolveFirst(0); }),
+      exited: new Promise<number>((r) => { resolveFirst = r; }),
+      stdout: null,
+      stderr: null,
+    };
+    mockSpawn.mockReturnValueOnce(firstProc);
+    launcher.launch({
+      cwd: tempDir,
+      sessionGroupRole: "observer",
+      sessionGroupId: "grp_int_drift_none",
+    });
+
+    const warnSpy = vi.spyOn(log, "warn");
+    const secondProc = createMockProc(54321);
+    mockSpawn.mockReturnValueOnce(secondProc);
+    await launcher.relaunch("test-session-id");
+
+    const driftCalls = warnSpy.mock.calls.filter(
+      (call) => call[0] === "council.observer-prompt.source-drift",
+    );
+    expect(driftCalls).toHaveLength(0);
+    warnSpy.mockRestore();
   });
 });
 

@@ -480,7 +480,6 @@ export class CliLauncher {
           expectedPathDepth: resolution.expectedPathDepth,
           observerPromptSha256: resolution.artifact.sha256,
           observerPromptSource: resolution.artifact.source,
-          observerPromptSourceLabel: resolution.artifact.sourceLabel,
           reason: resolution.fallbackReason,
         });
       }
@@ -674,8 +673,15 @@ export class CliLauncher {
     // that would otherwise be invisible — workspace file appeared, was
     // deleted, or got edited between initial spawn and this relaunch.
     // Identity transitions (same source, same sha) are noise — skip.
+    //
+    // Council Review 2026-05-15-1015 CR-3: gate on `!resumeSessionId`.
+    // On `--resume` the model still sees the prompt baked at original
+    // spawn; emitting drift WARN would advertise a transition that did
+    // not happen model-side. Drift is only observable on the fresh
+    // fallback path (cliSessionId cleared, no resume).
     if (
       info.sessionGroupRole === "observer" &&
+      !effectiveRelaunchOptions.resumeSessionId &&
       previousObserverPromptSha !== undefined &&
       previousObserverPromptSource !== undefined &&
       (info.observerPromptSha256 !== previousObserverPromptSha ||
@@ -804,7 +810,19 @@ export class CliLauncher {
     // dispatch so both Claude and Codex receive them; spawnCLI consumes
     // `options.systemPrompt` and `options.disallowedTools` for its
     // backend-specific argv shape.
-    if (options.systemPrompt && options.sessionGroupRole === "observer") {
+    //
+    // Council Review 2026-05-15-1015 CR-3 (Subprocess P2 → P1): skip on
+    // `--resume`. Claude `--resume` bakes the system prompt at the
+    // original spawn; re-emitting `--append-system-prompt` on resume has
+    // no runtime effect on the model but would make the drift WARN lie
+    // about provenance ("source transitioned" when the model still sees
+    // the old prompt). Only the fresh-fallback path (uptime<5000ms
+    // cleared cliSessionId → no resume) actually re-applies the prompt.
+    if (
+      options.systemPrompt &&
+      options.sessionGroupRole === "observer" &&
+      !options.resumeSessionId
+    ) {
       args.push("--append-system-prompt", options.systemPrompt);
     }
     if (options.disallowedTools && options.disallowedTools.length > 0) {

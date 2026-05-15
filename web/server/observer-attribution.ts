@@ -159,13 +159,6 @@ export interface ObserverInvocationLogEntryInput {
    * not carry it; readers tolerate `undefined` as "unknown provenance".
    */
   observerPromptSource?: "workspace" | "bundled";
-  /**
-   * Informational label naming where the artifact came from. For
-   * workspace it is the absolute path; for bundled it is the sentinel
-   * `BUNDLED_OBSERVER_PROMPT_SOURCE_LABEL`. Optional for the same
-   * backwards-compatibility reason as `observerPromptSource`.
-   */
-  observerPromptSourceLabel?: string;
 }
 
 export interface ObserverInvocationLogEntry extends ObserverInvocationLogEntryInput {
@@ -205,9 +198,6 @@ export function formatObserverInvocationLog(
     promptSha256: input.promptSha256,
     ...(input.observerPromptSource !== undefined && {
       observerPromptSource: input.observerPromptSource,
-    }),
-    ...(input.observerPromptSourceLabel !== undefined && {
-      observerPromptSourceLabel: input.observerPromptSourceLabel,
     }),
   };
 }

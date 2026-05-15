@@ -287,13 +287,13 @@ interface CouncilGroupMeta {
   observerPromptSha256?: string;
   /**
    * Provenance of the observer prompt at spawn time (workspace vs bundled).
-   * Council Plan Bug B Cleanup Task 12: forensic-replay needs the
-   * (sha + source + label) triplet — sha alone collides when a workspace
-   * copies the bundled body verbatim.
+   * Council Review 2026-05-15-1015 CR-1: the path-shaped label was dropped
+   * from log egress because it disclosed operator topology on every
+   * invocation (multi-expert convergence — Hunt P1, Fowler P2, Backend P2-5).
+   * Source discriminator + sha256 carry sufficient forensic-replay value;
+   * label stays in-memory only on the SdkSessionInfo's artifact.
    */
   observerPromptSource?: "workspace" | "bundled";
-  /** Sentinel-or-path label naming where the prompt artifact was loaded from. */
-  observerPromptSourceLabel?: string;
   /** Wallclock (ms) when the group was created — used to compute invocation latency. */
   createdAt: number;
   /** Wallclock (ms) when the most recent checkpoint reached this orchestrator — used to compute observer wake-to-emit latency. */
@@ -2123,7 +2123,6 @@ export class SessionOrchestrator {
             observerCliVersion: payload.observer_cli_version,
             promptSha256: meta.observerPromptSha256 ?? "",
             observerPromptSource: meta.observerPromptSource,
-            observerPromptSourceLabel: meta.observerPromptSourceLabel,
           }),
         });
       }
@@ -2253,7 +2252,6 @@ export class SessionOrchestrator {
         pairing: pairingLabel,
         observerPromptSha256: observerInfo.observerPromptSha256,
         observerPromptSource: observerInfo.observerPromptSource,
-        observerPromptSourceLabel: undefined,
         createdAt: Date.now(),
         lastCheckpointReceivedAt: null,
       });
@@ -2959,11 +2957,21 @@ export class SessionOrchestrator {
         const result = await this.launcher.relaunch(sessionId);
         if (!result.ok && result.error) {
           this.wsBridge.broadcastToSession(sessionId, { type: "error", message: result.error });
-          // PLAN Task 5: deterministic spawn failure — let council reconnect
-          // listeners short-circuit immediately. `ok=false` without `error`
-          // is the "spawn happened but maybe needs another attempt" branch;
-          // we keep that silent so the retry budget isn't burned.
-          companionBus.emit("session:relaunch-failed", { sessionId, reason: result.error });
+          // Council Review 2026-05-15-1015 CR-2: observer prompt-config
+          // errors are deterministic — the launcher already emitted
+          // `session:relaunch-failed` and re-trying will fail identically.
+          // (a) Skip the duplicate emit so the council listener doesn't
+          //     fire twice → guard-violation WARN noise.
+          // (b) Rollback the retry-counter increment so a misconfigured
+          //     prompt file doesn't exhaust the budget after 3 attempts,
+          //     locking the operator out of recovery once the file is
+          //     fixed (D4 — config errors are not crashes).
+          const isObserverConfigError = result.error.startsWith("observer spawn config load failed");
+          if (isObserverConfigError) {
+            this.autoRelaunchCounts.set(sessionId, count);
+          } else {
+            companionBus.emit("session:relaunch-failed", { sessionId, reason: result.error });
+          }
         } else if (result.ok) {
           metricsCollector.recordRelaunchSucceeded();
           this.autoRelaunchCounts.delete(sessionId);
