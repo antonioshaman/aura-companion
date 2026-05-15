@@ -116,7 +116,10 @@ export class WsBridge {
    * {@link noteCliActivity} defaults to advancing the clock (safe
    * pre-Task-11 behaviour).
    */
-  private idleTimerProbe: { isSyntheticTurnInFlight(sessionId: string): boolean } | null = null;
+  private idleTimerProbe: {
+    isSyntheticTurnInFlight(sessionId: string): boolean;
+    noteTerminalResultFrame(sessionId: string): void;
+  } | null = null;
   private static readonly GIT_SESSION_KEYS: GitSessionKey[] = [
     "git_branch",
     "is_worktree",
@@ -134,7 +137,12 @@ export class WsBridge {
    * user-driven. Idempotent; calling with `null` re-arms the safe-default
    * branch where every CLI activity tick advances `lastCliActivityTs`.
    */
-  setIdleTimerProbe(probe: { isSyntheticTurnInFlight(sessionId: string): boolean } | null): void {
+  setIdleTimerProbe(
+    probe: {
+      isSyntheticTurnInFlight(sessionId: string): boolean;
+      noteTerminalResultFrame(sessionId: string): void;
+    } | null,
+  ): void {
     this.idleTimerProbe = probe;
   }
 
@@ -308,6 +316,24 @@ export class WsBridge {
       return { kind: "unsupported_backend" };
     }
     return session.backendAdapter.sendUserFrameFromServer(content);
+  }
+
+  /**
+   * Task 11.8 — orchestrator-half auto-proceed synthetic frame send.
+   * Mirror of {@link sendObserverWakeFrame} but routes to the
+   * orchestrator-half adapter with recorder origin `server:auto-proceed`.
+   * Production caller is {@link IdleTimerManager}'s `sendSyntheticFrame`
+   * DI seam (wired in `index.ts`). Returns the same outcome shape so
+   * the manager's EC-9 logger can correlate failures across both paths.
+   */
+  sendOrchestratorSyntheticFrame(sessionId: string, content: string): BridgeObserverWakeOutcome {
+    const session = this.sessions.get(sessionId);
+    if (!session) return { kind: "session_unknown" };
+    if (!session.backendAdapter) return { kind: "adapter_missing" };
+    if (!(session.backendAdapter instanceof ClaudeAdapter)) {
+      return { kind: "unsupported_backend" };
+    }
+    return session.backendAdapter.sendOrchestratorSyntheticFrame(content);
   }
 
   /**
@@ -996,6 +1022,17 @@ export class WsBridge {
         // funnel through the same dispatcher so synthetic turns don't
         // sneak the clock forward via a parallel mutator.
         onActivityUpdate: () => { this.noteCliActivity(session); },
+        // Task 11.8 — adapter consults the probe synchronously inside
+        // `handleControlRequest` (denylist gate) and `handleResultMessage`
+        // (sticky-token cleanup). The probe is set once via
+        // `setIdleTimerProbe` (index.ts late-injection); reading here at
+        // construction time would capture null because the manager is
+        // built AFTER the bridge. Pass a closure that re-reads the
+        // current probe on each call.
+        idleTimerProbe: {
+          isSyntheticTurnInFlight: (sid) => this.idleTimerProbe?.isSyntheticTurnInFlight(sid) ?? false,
+          noteTerminalResultFrame: (sid) => { this.idleTimerProbe?.noteTerminalResultFrame(sid); },
+        },
       });
       // Wire up the shared event pipeline via attachBackendAdapter
       // (also broadcasts cli_connected for new adapters)
