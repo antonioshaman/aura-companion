@@ -1767,23 +1767,30 @@ describe("EC-19 canaries — buildObserverSpawnOverrides routing + sentinel-path
     const path = await import("node:path");
     const src = fs.readFileSync(path.join(__dirname, "cli-launcher.ts"), "utf-8");
 
-    function extractFunctionBody(anchor: RegExp): string | null {
-      const match = anchor.exec(src);
-      if (!match) return null;
-      const openIdx = src.indexOf("{", match.index);
-      if (openIdx < 0) return null;
-      let depth = 1;
-      for (let i = openIdx + 1; i < src.length; i++) {
-        if (src[i] === "{") depth++;
-        else if (src[i] === "}") {
-          depth--;
-          if (depth === 0) return src.slice(openIdx, i + 1);
+    // Council Review 2026-05-15-1015 CR-14 (Beck B5): replaced the regex
+    // anchor with `indexOf` on a literal signature prefix. The prior
+    // regex `/\bprivate\s+buildObserverSpawnOverrides\s*\([^)]*\)\s*:?\s*[a-zA-Z]*\s*\{/`
+    // was brittle to (i) default args containing `)` in the parameter list
+    // and (ii) return-type widenings like `LaunchOptions | undefined`.
+    // A literal `indexOf` strips both fragilities — the brace-counted
+    // body walker downstream is what enforces the body bounds.
+    const signaturePrefix = "private buildObserverSpawnOverrides(";
+    const sigIdx = src.indexOf(signaturePrefix);
+    expect(sigIdx, "buildObserverSpawnOverrides signature must be locatable").toBeGreaterThan(-1);
+    const openIdx = src.indexOf("{", sigIdx);
+    expect(openIdx, "opening brace must follow the signature").toBeGreaterThan(-1);
+    let depth = 1;
+    let body: string | null = null;
+    for (let i = openIdx + 1; i < src.length; i++) {
+      if (src[i] === "{") depth++;
+      else if (src[i] === "}") {
+        depth--;
+        if (depth === 0) {
+          body = src.slice(openIdx, i + 1);
+          break;
         }
       }
-      return null;
     }
-
-    const body = extractFunctionBody(/\bprivate\s+buildObserverSpawnOverrides\s*\([^)]*\)\s*:?\s*[a-zA-Z]*\s*\{/);
     expect(body, "buildObserverSpawnOverrides body must be locatable").not.toBeNull();
 
     // Positive: must invoke the spawn-helper, not the raw loader.
@@ -1795,34 +1802,87 @@ describe("EC-19 canaries — buildObserverSpawnOverrides routing + sentinel-path
     expect(body!).not.toMatch(/loadObserverSystemPrompt\s*\(/);
   });
 
-  it("the sentinel-path string is absent from production code (only test/spec/docs may reference it)", async () => {
+  it("magic-string sentinel paths under web/server/ are absent from production code (shape canary)", async () => {
     // Council Review 2026-05-15-0820 Hunt rec #3 + Task 5: the magic
     // string `/__aura_no_workspace_cwd_for_observer_prompt__/` used to
     // live in cli-launcher.ts as a synthetic ENOENT trip. With the
     // `loadBundledObserverPromptValidated()` direct-call refactor, the
-    // sentinel is dead. This canary asserts no production file
-    // resurrects the pattern (e.g., a copy-pasted "I'll fix this with
-    // a sentinel too" regression).
+    // sentinel is dead.
+    //
+    // Council Review 2026-05-15-1015 CR-14 (Beck B6): the prior canary
+    // matched the literal historical token only. A future engineer who
+    // re-introduces the defect under a DIFFERENT name
+    // (`__aura_observer_no_cwd__`, `__aura_observer_fallback_v2__`) would
+    // escape the canary without tripping it. Widened to a shape-matching
+    // regex over the magic-string CLASS — any path-like literal under
+    // `web/server/` with underscores and "observer" in its name flunks.
     const fs = await import("node:fs");
     const path = await import("node:path");
     const serverDir = path.join(__dirname);
     const entries = fs.readdirSync(serverDir, { withFileTypes: true });
-    const offending: string[] = [];
-    const sentinelToken = "__aura_no_workspace_cwd_for_observer_prompt__";
+    const offending: Array<{ file: string; match: string }> = [];
+    // Shape: leading slash + double-underscore + word chars including
+    // "observer" + double-underscore + trailing slash OR end-of-string-
+    // like char. Catches `/__aura_..._observer_..._/` patterns regardless
+    // of the specific token.
+    const shapeRegex = /["'`]\/__\w*observer\w*__\//;
+    // Plus the literal historical token as a sibling row — pinned to
+    // catch the EXACT regression we already saw, in addition to the
+    // shape class above.
+    const literalToken = "__aura_no_workspace_cwd_for_observer_prompt__";
     for (const ent of entries) {
       if (!ent.isFile()) continue;
       if (!ent.name.endsWith(".ts")) continue;
-      // Test files are allowed to mention the historical token in
-      // canary assertions (this very test does).
+      // Test files are allowed to mention these patterns in canary
+      // assertions (this very test does).
       if (ent.name.endsWith(".test.ts")) continue;
       const text = fs.readFileSync(path.join(serverDir, ent.name), "utf-8");
-      if (text.includes(sentinelToken)) {
-        offending.push(ent.name);
+      const shapeMatch = shapeRegex.exec(text);
+      if (shapeMatch) {
+        offending.push({ file: ent.name, match: `shape: ${shapeMatch[0]}` });
+      }
+      if (text.includes(literalToken)) {
+        offending.push({ file: ent.name, match: `literal: ${literalToken}` });
       }
     }
     expect(
       offending,
-      `Production files contain the dead sentinel-path token. Use loadBundledObserverPromptValidated() directly. Offenders:\n${offending.join("\n")}`,
+      `Production files contain a sentinel-path magic string. Use loadBundledObserverPromptValidated() directly. Offenders:\n${offending.map((o) => `${o.file} → ${o.match}`).join("\n")}`,
+    ).toEqual([]);
+  });
+
+  // Council Review 2026-05-15-1015 CR-8 (Backend P2): the typed
+  // `session:relaunch-failed` channel contract is "relaunch-only" —
+  // emit sites are confined to `cli-launcher.ts:relaunch()` and
+  // `session-orchestrator.ts:handleAutoRelaunch()`. Cold-start
+  // (`cli-launcher.ts:launch()`) surfaces failures as REST 503 via
+  // the orchestrator's spawn rollback; emitting from launch() would
+  // race a listener that may not yet exist for the group. This canary
+  // asserts no other production file calls `companionBus.emit("session:relaunch-failed", ...)`.
+  it("session:relaunch-failed emit sites are confined to relaunch + handleAutoRelaunch", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const serverDir = path.join(__dirname);
+    const allowedFiles = new Set(["cli-launcher.ts", "session-orchestrator.ts"]);
+    const entries = fs.readdirSync(serverDir, { withFileTypes: true });
+    const offending: Array<{ file: string; lineNum: number; line: string }> = [];
+    const emitRegex = /companionBus\.emit\(\s*["']session:relaunch-failed["']/;
+    for (const ent of entries) {
+      if (!ent.isFile()) continue;
+      if (!ent.name.endsWith(".ts")) continue;
+      if (ent.name.endsWith(".test.ts")) continue;
+      if (allowedFiles.has(ent.name)) continue;
+      const text = fs.readFileSync(path.join(serverDir, ent.name), "utf-8");
+      const lines = text.split("\n");
+      for (let i = 0; i < lines.length; i++) {
+        if (emitRegex.test(lines[i])) {
+          offending.push({ file: ent.name, lineNum: i + 1, line: lines[i].trim() });
+        }
+      }
+    }
+    expect(
+      offending,
+      `session:relaunch-failed must only be emitted from cli-launcher.ts:relaunch() or session-orchestrator.ts:handleAutoRelaunch(). Offenders:\n${offending.map((o) => `${o.file}:${o.lineNum} → ${o.line}`).join("\n")}`,
     ).toEqual([]);
   });
 });
