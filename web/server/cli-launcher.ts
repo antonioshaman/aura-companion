@@ -14,7 +14,7 @@ import type { BackendType } from "./session-types.js";
 import type { RecorderManager } from "./recorder.js";
 import { CodexAdapter } from "./codex-adapter.js";
 import { resolveBinary, getEnrichedPath } from "./path-resolver.js";
-import { resolveObserverSystemPrompt } from "./observer-prompt.js";
+import { resolveObserverPromptForSpawn } from "./observer-prompt-spawn.js";
 import { log } from "./logger.js";
 import {
   OBSERVER_ALLOWED_TOOLS,
@@ -408,7 +408,7 @@ export class CliLauncher {
     // Council Mode observer spawn config (council review #1 P1#1) is
     // applied uniformly across both backends and reused on relaunch so
     // the council context isn't lost on every non-initial spawn (#4).
-    const effectiveOptions = this.applyCouncilObserverSpawnConfig(sessionId, info, options);
+    const effectiveOptions = this.buildObserverSpawnOverrides(sessionId, info, options);
 
     this.sessions.set(sessionId, info);
     if (effectiveOptions.env) {
@@ -431,93 +431,65 @@ export class CliLauncher {
   }
 
   /**
-   * Hunt + Fowler P1#1 + Subprocess P1#4: Council Mode observer spawns
-   * must apply (a) the observer system-prompt artifact AND (b) the
-   * narrow observer tool profile (EC-1) regardless of backend. Called
-   * from both `launch()` and `relaunch()` so a crashed observer that
-   * auto-relaunches keeps its role + restrictions — the previous wiring
-   * applied them only on the initial `spawnCLI` call.
+   * Compose the LaunchOptions overrides for a Council Mode observer
+   * spawn — applies (a) the observer system-prompt artifact AND (b) the
+   * narrow observer tool profile (EC-1). Called from both `launch()` and
+   * `relaunch()` so an auto-relaunched observer keeps its role + restrictions.
    *
-   * Council Plan PLAN-aura-observer-prompt-bundled-fallback.md Task 3:
-   * routes through {@link resolveObserverSystemPrompt}, which falls
-   * back to the bundled artifact on workspace-file ENOENT. Malformed-
-   * but-present, EACCES, EISDIR, ELOOP all still throw → orchestrator
-   * rollback as before. The cwd-fallback to `process.cwd()` is REMOVED
-   * (Backend rec #4): the silent-bundled trap under Docker (cwd=/app
-   * has no `.council/prompts/`) is closed by requiring an explicit
-   * workspace cwd. If neither `options.cwd` nor `info.cwd` is set, we
-   * fall through to the bundled path directly with a distinct log reason.
+   * Resolution policy lives in {@link resolveObserverPromptForSpawn} —
+   * this method owns ONLY the spawn-options composition. Council Review
+   * 2026-05-15-0820 P2 #5 (Fowler): the prior `applyCouncilObserverSpawnConfig`
+   * shape grew to ~110 LOC interleaving (i) artifact resolution, (ii) log
+   * emission, (iii) options composition. Extracting (i) to its own free
+   * function leaves this method as ~40 LOC of straight-line composition;
+   * renamed `buildObserverSpawnOverrides` because the new name no longer
+   * promises side-effect-heavy "apply" behavior.
    *
    * Returns `options` unchanged when the session isn't an observer.
    */
-  private applyCouncilObserverSpawnConfig(
+  private buildObserverSpawnOverrides(
     sessionId: string,
     info: SdkSessionInfo,
     options: LaunchOptions,
   ): LaunchOptions {
     if (options.sessionGroupRole !== "observer") return options;
     try {
-      // Tightened cwd resolution — no `process.cwd()` fallback. The
-      // workspace cwd is REQUIRED context; if it's missing, the resolver
-      // sees an empty/sentinel path, throws (loader rejects non-absolute),
-      // and we emit the explicit `no-workspace-cwd` fallback below.
-      const cwdForPrompt = options.cwd || info.cwd || "";
-      let artifactBody: string;
-      let artifactSha: string;
-      let source: "workspace" | "bundled";
-      let expectedPath = "";
-      let fallbackReason: "ENOENT" | "no-workspace-cwd" | null = null;
+      const resolution = resolveObserverPromptForSpawn({
+        cwd: options.cwd || info.cwd,
+      });
 
-      if (cwdForPrompt) {
-        const promptPath = join(cwdForPrompt, ".council", "prompts", "observer-system.md");
-        expectedPath = promptPath;
-        const resolved = resolveObserverSystemPrompt(promptPath);
-        artifactBody = resolved.body;
-        artifactSha = resolved.sha256;
-        source = resolved.source;
-        if (source === "bundled") {
-          fallbackReason = "ENOENT";
-        }
-      } else {
-        // No workspace cwd available — go directly to bundled. The
-        // resolver itself requires an absolute path; bypass it here
-        // by importing the bundled artifact via the resolver with a
-        // sentinel path that we know will ENOENT.
-        // Simpler: call resolveObserverSystemPrompt with a definitely-
-        // non-existent absolute sentinel path so it falls back uniformly.
-        const sentinelPath = "/__aura_no_workspace_cwd_for_observer_prompt__/.council/prompts/observer-system.md";
-        const resolved = resolveObserverSystemPrompt(sentinelPath);
-        artifactBody = resolved.body;
-        artifactSha = resolved.sha256;
-        source = resolved.source;
-        fallbackReason = "no-workspace-cwd";
-        expectedPath = "<no-cwd>";
-      }
+      info.observerPromptSha256 = resolution.artifact.sha256;
+      info.observerPromptSource = resolution.artifact.source;
 
-      info.observerPromptSha256 = artifactSha;
-      info.observerPromptSource = source;
-
-      // Council Plan Task 5: structured WARN log on bundled-fallback path.
-      // Operator visibility — workspace-present is the happy path; the
-      // bundled branch is an opt-in misconfiguration deserving notice.
-      // Never include the prompt body bytes (Hunt P3 — exfiltration channel).
-      if (source === "bundled" && fallbackReason !== null) {
+      // Council Plan Task 5 + Council Review 2026-05-15-0820 P2 #8/#9:
+      // structured WARN log on bundled-fallback path. Operator visibility —
+      // workspace-present is the happy path; the bundled branch is an
+      // opt-in misconfiguration deserving notice. Path fields are
+      // categorical (`present` + `depth`), NOT the raw workspace path —
+      // raw paths leaked operator topology if logs egressed to a shared
+      // sink (Hunt P3 #4). SHA field renamed `bundledSha256` →
+      // `observerPromptSha256` to match `SdkSessionInfo.observerPromptSha256`
+      // (Backend P3 #3 — consistent field names across modules).
+      if (resolution.artifact.source === "bundled" && resolution.fallbackReason !== null) {
         log.warn("council.observer-prompt.bundled-fallback", "observer prompt fell back to bundled", {
           event: "council.observer-prompt.bundled-fallback",
           sessionGroupId: options.sessionGroupId,
           sessionId,
           role: "observer",
-          expectedPath,
-          bundledSha256: artifactSha,
-          reason: fallbackReason,
+          expectedPathPresent: resolution.expectedPathPresent,
+          expectedPathDepth: resolution.expectedPathDepth,
+          observerPromptSha256: resolution.artifact.sha256,
+          observerPromptSource: resolution.artifact.source,
+          observerPromptSourceLabel: resolution.artifact.sourceLabel,
+          reason: resolution.fallbackReason,
         });
       }
 
       // Compose with any orchestrator-side systemPrompt that flowed in
       // (no caller does this today; preserved for forward-compat).
       const composedSystemPrompt = options.systemPrompt
-        ? `${artifactBody}\n\n${options.systemPrompt}`
-        : artifactBody;
+        ? `${resolution.artifact.body}\n\n${options.systemPrompt}`
+        : resolution.artifact.body;
       // Caller-supplied allowedTools intersect with the observer profile —
       // never widened.
       const callerAllowed = options.allowedTools ?? [];
@@ -661,17 +633,70 @@ export class CliLauncher {
         sessionGroupId: info.sessionGroupId,
         sessionGroupRole: info.sessionGroupRole,
       };
+    // Council Review 2026-05-15-0820 P2 #7: capture the previous prompt
+    // attribution BEFORE re-resolving so we can detect drift (workspace ↔
+    // bundled, or sha change) across the relaunch boundary. Drift is only
+    // observable on this branch — Claude `--resume` bakes the prompt at
+    // original spawn, but the fresh-fallback path here (uptime<5000ms cleared
+    // cliSessionId, no resume → re-issued `--append-system-prompt`) actually
+    // re-emits the prompt argv with whatever the resolver finds NOW.
+    const previousObserverPromptSha = info.observerPromptSha256;
+    const previousObserverPromptSource = info.observerPromptSource;
+
     let effectiveRelaunchOptions: LaunchOptions;
     try {
-      effectiveRelaunchOptions = this.applyCouncilObserverSpawnConfig(sessionId, info, baseRelaunchOptions);
+      effectiveRelaunchOptions = this.buildObserverSpawnOverrides(sessionId, info, baseRelaunchOptions);
     } catch (err) {
       info.state = "exited";
       info.exitCode = 1;
       this.persistState();
+      // Council Review 2026-05-15-0820 P2 #8 (D4): emit `session:relaunch-failed`
+      // (NOT `session:exited`). The typed channel exists at
+      // `event-bus-types.ts:28` and is already wired in
+      // `session-orchestrator.ts:711` to fast-fail the coordinator's
+      // reconnecting state through `reconnect_failed → group:degraded`.
+      // Without this emit, the coordinator sits in `reconnecting` for the
+      // full 45s grace window for a recovery that has zero chance —
+      // observer prompt-config will fail identically on every retry.
+      if (info.sessionGroupRole === "observer") {
+        const reason = `observer-prompt-config-failed: ${err instanceof Error ? err.message : String(err)}`;
+        companionBus.emit("session:relaunch-failed", { sessionId, reason });
+      }
       return {
         ok: false,
         error: err instanceof Error ? err.message : String(err),
       };
+    }
+
+    // Council Review 2026-05-15-0820 P2 #7 (D7 / drift detection): when the
+    // re-resolved (source, sha) differs from the previous spawn's stamp,
+    // emit a structured drift WARN. Operator visibility into a transition
+    // that would otherwise be invisible — workspace file appeared, was
+    // deleted, or got edited between initial spawn and this relaunch.
+    // Identity transitions (same source, same sha) are noise — skip.
+    if (
+      info.sessionGroupRole === "observer" &&
+      previousObserverPromptSha !== undefined &&
+      previousObserverPromptSource !== undefined &&
+      (info.observerPromptSha256 !== previousObserverPromptSha ||
+        info.observerPromptSource !== previousObserverPromptSource)
+    ) {
+      log.warn("council.observer-prompt.source-drift", "observer prompt source drifted across relaunch", {
+        event: "council.observer-prompt.source-drift",
+        sessionGroupId: info.sessionGroupId,
+        sessionId,
+        role: "observer",
+        backend: info.backendType,
+        previous: {
+          sha256: previousObserverPromptSha,
+          source: previousObserverPromptSource,
+        },
+        current: {
+          sha256: info.observerPromptSha256,
+          source: info.observerPromptSource,
+        },
+        cause: "session_exited",
+      });
     }
     if (info.backendType === "codex") {
       this.spawnCodex(sessionId, info, effectiveRelaunchOptions);

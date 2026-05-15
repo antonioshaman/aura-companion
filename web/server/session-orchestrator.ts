@@ -285,6 +285,15 @@ interface CouncilGroupMeta {
   pairing: string;
   /** Sha256 of the observer prompt artifact at spawn time, captured for invocation-log forensic re-run. */
   observerPromptSha256?: string;
+  /**
+   * Provenance of the observer prompt at spawn time (workspace vs bundled).
+   * Council Plan Bug B Cleanup Task 12: forensic-replay needs the
+   * (sha + source + label) triplet — sha alone collides when a workspace
+   * copies the bundled body verbatim.
+   */
+  observerPromptSource?: "workspace" | "bundled";
+  /** Sentinel-or-path label naming where the prompt artifact was loaded from. */
+  observerPromptSourceLabel?: string;
   /** Wallclock (ms) when the group was created — used to compute invocation latency. */
   createdAt: number;
   /** Wallclock (ms) when the most recent checkpoint reached this orchestrator — used to compute observer wake-to-emit latency. */
@@ -1057,6 +1066,7 @@ export class SessionOrchestrator {
         observerSessionId,
         pairing,
         observerPromptSha256: observer?.observerPromptSha256,
+        observerPromptSource: observer?.observerPromptSource,
         createdAt: (orchestrator ?? observer)?.createdAt ?? Date.now(),
         lastCheckpointReceivedAt: null,
       });
@@ -2112,6 +2122,8 @@ export class SessionOrchestrator {
             observerModel: payload.observer_model,
             observerCliVersion: payload.observer_cli_version,
             promptSha256: meta.observerPromptSha256 ?? "",
+            observerPromptSource: meta.observerPromptSource,
+            observerPromptSourceLabel: meta.observerPromptSourceLabel,
           }),
         });
       }
@@ -2240,6 +2252,8 @@ export class SessionOrchestrator {
         observerSessionId: group.observer.sessionId,
         pairing: pairingLabel,
         observerPromptSha256: observerInfo.observerPromptSha256,
+        observerPromptSource: observerInfo.observerPromptSource,
+        observerPromptSourceLabel: undefined,
         createdAt: Date.now(),
         lastCheckpointReceivedAt: null,
       });

@@ -143,6 +143,29 @@ export interface ObserverInvocationLogEntryInput {
   observerCliVersion: string;
   /** SHA-256 of the observer system-prompt artifact at invocation time. Forensic re-run. */
   promptSha256: string;
+  /**
+   * Provenance of the observer system-prompt at invocation time:
+   * - `"workspace"` — loaded from `<cwd>/.council/prompts/observer-system.md`
+   * - `"bundled"` — workspace file absent (ENOENT); the in-repo default was used
+   *
+   * Council Review 2026-05-15-0820 P3 #15 / Willison W1 + Council Plan
+   * Bug B Cleanup Task 12: forensic replay needs the triplet (sha256 +
+   * source + sourceLabel) to reconstruct WHICH loader path served the
+   * prompt at this invocation. SHA alone collides when a workspace
+   * copies the bundled body verbatim; the source/label discriminates
+   * the policy intent.
+   *
+   * Optional for backwards compatibility — older recorder entries may
+   * not carry it; readers tolerate `undefined` as "unknown provenance".
+   */
+  observerPromptSource?: "workspace" | "bundled";
+  /**
+   * Informational label naming where the artifact came from. For
+   * workspace it is the absolute path; for bundled it is the sentinel
+   * `BUNDLED_OBSERVER_PROMPT_SOURCE_LABEL`. Optional for the same
+   * backwards-compatibility reason as `observerPromptSource`.
+   */
+  observerPromptSourceLabel?: string;
 }
 
 export interface ObserverInvocationLogEntry extends ObserverInvocationLogEntryInput {
@@ -180,6 +203,12 @@ export function formatObserverInvocationLog(
     observerModel: input.observerModel,
     observerCliVersion: input.observerCliVersion,
     promptSha256: input.promptSha256,
+    ...(input.observerPromptSource !== undefined && {
+      observerPromptSource: input.observerPromptSource,
+    }),
+    ...(input.observerPromptSourceLabel !== undefined && {
+      observerPromptSourceLabel: input.observerPromptSourceLabel,
+    }),
   };
 }
 

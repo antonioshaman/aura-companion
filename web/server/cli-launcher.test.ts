@@ -1439,6 +1439,12 @@ describe("observer-prompt bundled fallback (Task 9 — integration)", () => {
     expect(mockSpawn).toHaveBeenCalledOnce();
     const [cmdAndArgs] = mockSpawn.mock.calls[0];
     const argv = cmdAndArgs as string[];
+    // Council Plan Bug B Cleanup Task 13: cardinality guard — exactly
+    // one --append-system-prompt flag. Without this, a future refactor
+    // that double-emits the flag (e.g., container vs host argv paths
+    // both appending) silently last-wins on the CLI; first occurrence
+    // becomes dead. The cardinality check is structure-insensitive.
+    expect(argv.filter((a) => a === "--append-system-prompt").length).toBe(1);
     const appendIdx = argv.indexOf("--append-system-prompt");
     expect(appendIdx).toBeGreaterThan(-1);
     // Next argv element is the prompt body. Must equal the bundled
@@ -1469,13 +1475,15 @@ describe("observer-prompt bundled fallback (Task 9 — integration)", () => {
 
     const [cmdAndArgs] = mockSpawn.mock.calls[0];
     const argv = cmdAndArgs as string[];
+    // Cardinality guard (Task 13) — same defence as the bundled row above.
+    expect(argv.filter((a) => a === "--append-system-prompt").length).toBe(1);
     const appendIdx = argv.indexOf("--append-system-prompt");
     expect(appendIdx).toBeGreaterThan(-1);
     expect(argv[appendIdx + 1]).toBe(workspaceBody);
   });
 
   it("non-observer role bypasses the bundled fallback entirely (no observerPromptSource stamped)", () => {
-    // Orchestrator role does not run applyCouncilObserverSpawnConfig.
+    // Orchestrator role does not run buildObserverSpawnOverrides.
     const info = launcher.launch({
       cwd: tempDir,
       sessionGroupRole: "orchestrator",
@@ -1483,5 +1491,83 @@ describe("observer-prompt bundled fallback (Task 9 — integration)", () => {
     });
     expect(info.observerPromptSource).toBeUndefined();
     expect(info.observerPromptSha256).toBeUndefined();
+    // Council Plan Bug B Cleanup Task 13 (negative-control): the
+    // observer-only argv flag must NOT appear on the orchestrator's spawn.
+    const [cmdAndArgs] = mockSpawn.mock.calls[0];
+    const argv = cmdAndArgs as string[];
+    expect(argv.indexOf("--append-system-prompt")).toBe(-1);
+  });
+});
+
+// Council Plan Bug B Cleanup Task 14: EC-19 static-grep canary anchoring
+// the call-site routing from `buildObserverSpawnOverrides` to
+// `resolveObserverPromptForSpawn`. Lives in cli-launcher.test.ts (per
+// Beck override of Fowler #8 — call-site canaries belong with the
+// CONSUMER, not the producer module). Plus a sentinel-grep canary
+// asserting the old `__aura_no_workspace_cwd_for_observer_prompt__`
+// magic-string path is gone from non-test code (Hunt rec #3).
+describe("EC-19 canaries — buildObserverSpawnOverrides routing + sentinel-path elimination", () => {
+  it("buildObserverSpawnOverrides body calls resolveObserverPromptForSpawn (not the raw loader)", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const src = fs.readFileSync(path.join(__dirname, "cli-launcher.ts"), "utf-8");
+
+    function extractFunctionBody(anchor: RegExp): string | null {
+      const match = anchor.exec(src);
+      if (!match) return null;
+      const openIdx = src.indexOf("{", match.index);
+      if (openIdx < 0) return null;
+      let depth = 1;
+      for (let i = openIdx + 1; i < src.length; i++) {
+        if (src[i] === "{") depth++;
+        else if (src[i] === "}") {
+          depth--;
+          if (depth === 0) return src.slice(openIdx, i + 1);
+        }
+      }
+      return null;
+    }
+
+    const body = extractFunctionBody(/\bprivate\s+buildObserverSpawnOverrides\s*\([^)]*\)\s*:?\s*[a-zA-Z]*\s*\{/);
+    expect(body, "buildObserverSpawnOverrides body must be locatable").not.toBeNull();
+
+    // Positive: must invoke the spawn-helper, not the raw loader.
+    expect(body!).toMatch(/resolveObserverPromptForSpawn\s*\(/);
+    // Negative: must NOT call the raw `loadObserverSystemPrompt` directly
+    // — that would bypass the per-error-code fallback table the helper
+    // owns. Same revert-vector class as the prior EC-19 canary on the
+    // resolver call site in `observer-prompt.test.ts`.
+    expect(body!).not.toMatch(/loadObserverSystemPrompt\s*\(/);
+  });
+
+  it("the sentinel-path string is absent from production code (only test/spec/docs may reference it)", async () => {
+    // Council Review 2026-05-15-0820 Hunt rec #3 + Task 5: the magic
+    // string `/__aura_no_workspace_cwd_for_observer_prompt__/` used to
+    // live in cli-launcher.ts as a synthetic ENOENT trip. With the
+    // `loadBundledObserverPromptValidated()` direct-call refactor, the
+    // sentinel is dead. This canary asserts no production file
+    // resurrects the pattern (e.g., a copy-pasted "I'll fix this with
+    // a sentinel too" regression).
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const serverDir = path.join(__dirname);
+    const entries = fs.readdirSync(serverDir, { withFileTypes: true });
+    const offending: string[] = [];
+    const sentinelToken = "__aura_no_workspace_cwd_for_observer_prompt__";
+    for (const ent of entries) {
+      if (!ent.isFile()) continue;
+      if (!ent.name.endsWith(".ts")) continue;
+      // Test files are allowed to mention the historical token in
+      // canary assertions (this very test does).
+      if (ent.name.endsWith(".test.ts")) continue;
+      const text = fs.readFileSync(path.join(serverDir, ent.name), "utf-8");
+      if (text.includes(sentinelToken)) {
+        offending.push(ent.name);
+      }
+    }
+    expect(
+      offending,
+      `Production files contain the dead sentinel-path token. Use loadBundledObserverPromptValidated() directly. Offenders:\n${offending.join("\n")}`,
+    ).toEqual([]);
   });
 });

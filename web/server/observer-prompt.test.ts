@@ -10,10 +10,11 @@ import {
   assertWakeManifestPathAllowed,
   buildObserverContextManifest,
   buildObserverWakePayload,
+  loadBundledObserverPromptValidated,
   loadObserverSystemPrompt,
   parseObserverPromptHeader,
   resolveObserverSystemPrompt,
-  BUNDLED_OBSERVER_PROMPT_SOURCE_PATH,
+  BUNDLED_OBSERVER_PROMPT_SOURCE_LABEL,
 } from "./observer-prompt.js";
 import {
   BUNDLED_OBSERVER_PROMPT,
@@ -88,7 +89,7 @@ describe("loadObserverSystemPrompt", () => {
     const artifact = loadObserverSystemPrompt(promptPath);
     expect(artifact.version).toBe(OBSERVER_PROMPT_SCHEMA_VERSION);
     expect(artifact.body).toBe(body);
-    expect(artifact.sourcePath).toBe(promptPath);
+    expect(artifact.sourceLabel).toBe(promptPath);
     // The sha256 is deterministic — match what an independent hash gives us.
     const expected = createHash("sha256").update(body, "utf8").digest("hex");
     expect(artifact.sha256).toBe(expected);
@@ -213,7 +214,7 @@ describe("resolveObserverSystemPrompt", () => {
     writeFileSync(workspacePath, body);
     const resolved = resolveObserverSystemPrompt(workspacePath);
     expect(resolved.source).toBe("workspace");
-    expect(resolved.sourcePath).toBe(workspacePath);
+    expect(resolved.sourceLabel).toBe(workspacePath);
     expect(resolved.body).toBe(body);
     // Hash matches the workspace bytes, NOT the bundled fixture — the
     // override is real, not papered over with the bundled fallback.
@@ -228,7 +229,7 @@ describe("resolveObserverSystemPrompt", () => {
     // Workspace file deliberately NOT written.
     const resolved = resolveObserverSystemPrompt(workspacePath);
     expect(resolved.source).toBe("bundled");
-    expect(resolved.sourcePath).toBe(BUNDLED_OBSERVER_PROMPT_SOURCE_PATH);
+    expect(resolved.sourceLabel).toBe(BUNDLED_OBSERVER_PROMPT_SOURCE_LABEL);
     expect(resolved.body).toBe(BUNDLED_OBSERVER_PROMPT);
     expect(resolved.sha256).toBe(BUNDLED_OBSERVER_PROMPT_SHA256);
     expect(resolved.version).toBe(OBSERVER_PROMPT_SCHEMA_VERSION);
@@ -330,6 +331,44 @@ describe("resolveObserverSystemPrompt", () => {
     expect(parseObserverPromptHeader(BUNDLED_OBSERVER_PROMPT)).toBe(OBSERVER_PROMPT_SCHEMA_VERSION);
     expect(BUNDLED_OBSERVER_PROMPT.length).toBeGreaterThan(256);
     expect(BUNDLED_OBSERVER_PROMPT.length).toBeLessThan(OBSERVER_PROMPT_MAX_BYTES);
+  });
+
+  // Council Plan Bug B Cleanup Task 15(b) — `loadBundledObserverPromptValidated`
+  // direct API tests. Minimum mutation-resistant set: independent SHA
+  // (createHash direct, not the module's own helper), shape pin, header
+  // parses, sourceLabel sentinel pin. Per Beck — 4 tests, no more.
+
+  it("loadBundledObserverPromptValidated: returns artifact with source=bundled, validated SHA", () => {
+    const artifact = loadBundledObserverPromptValidated();
+    expect(artifact.source).toBe("bundled");
+    expect(artifact.sourceLabel).toBe(BUNDLED_OBSERVER_PROMPT_SOURCE_LABEL);
+    expect(artifact.version).toBe(OBSERVER_PROMPT_SCHEMA_VERSION);
+  });
+
+  it("loadBundledObserverPromptValidated: SHA-256 of returned body matches stamped constant (independent hash)", () => {
+    // Independent verification — re-hash the returned body with the same
+    // recipe the build script + parser use. Catches a regression where
+    // the helper returns a body that disagrees with its own sha256 field.
+    const artifact = loadBundledObserverPromptValidated();
+    const computed = createHash("sha256").update(artifact.body, "utf8").digest("hex");
+    expect(artifact.sha256).toBe(computed);
+    expect(artifact.sha256).toBe(BUNDLED_OBSERVER_PROMPT_SHA256);
+  });
+
+  it("loadBundledObserverPromptValidated: returned body parses cleanly as v1 header", () => {
+    const artifact = loadBundledObserverPromptValidated();
+    expect(parseObserverPromptHeader(artifact.body)).toBe(OBSERVER_PROMPT_SCHEMA_VERSION);
+  });
+
+  it("loadBundledObserverPromptValidated: shape is loader-compatible (extends ObserverPromptArtifact)", () => {
+    const artifact = loadBundledObserverPromptValidated();
+    expect(artifact).toEqual({
+      version: OBSERVER_PROMPT_SCHEMA_VERSION,
+      body: expect.any(String),
+      sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      sourceLabel: BUNDLED_OBSERVER_PROMPT_SOURCE_LABEL,
+      source: "bundled",
+    });
   });
 
   // Council Plan Bug B Review P2 #9 — canonical-vs-bundled byte-equality.
