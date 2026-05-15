@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -159,7 +159,10 @@ beforeEach(() => {
   delete process.env.COMPANION_FORCE_BYPASS_IN_CONTAINER;
   // Default to stdio for most tests; WS launcher behavior is covered explicitly below.
   process.env.COMPANION_CODEX_TRANSPORT = "stdio";
-  tempDir = mkdtempSync(join(tmpdir(), "launcher-test-"));
+  // CR-6 fix added `realpathSync(cwd)` inside resolveObserverPromptForSpawn —
+  // canonicalise here so path-equality assertions don't diverge on macOS
+  // (`/var/folders/...` vs `/private/var/folders/...`).
+  tempDir = realpathSync(mkdtempSync(join(tmpdir(), "launcher-test-")));
   store = new SessionStore(tempDir);
   launcher = new CliLauncher(3456);
   launcher.setStore(store);

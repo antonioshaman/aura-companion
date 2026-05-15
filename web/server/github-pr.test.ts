@@ -1,5 +1,18 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+// ─── Stub Bun.spawn for vitest (runs under Node, not Bun) ───────────────────
+// `fetchPRInfoAsync` + `getRepoSlugAsync` use `Bun.spawn`; node lacks it.
+// Tests below spy on `Bun.spawn` via `vi.spyOn` and provide per-call return
+// values — the default identity here is a no-op throw, ensuring any
+// un-mocked call surfaces as an error rather than a hang.
+if (typeof (globalThis as { Bun?: unknown }).Bun === "undefined") {
+  (globalThis as { Bun: unknown }).Bun = {
+    spawn: () => {
+      throw new Error("Bun.spawn not mocked in test");
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Mocks
 // ---------------------------------------------------------------------------
@@ -415,6 +428,177 @@ describe("fetchPRInfo", () => {
 
     const result = await mod.fetchPRInfo("/project", "main");
     expect(result).toBeNull();
+  });
+});
+
+// ===========================================================================
+// fetchPRInfoAsync — Bun.spawn-driven path (coverage gate for github-pr.ts)
+// ===========================================================================
+//
+// The async variant mirrors `fetchPRInfo` but uses `Bun.spawn` instead of
+// `node:child_process` so the call doesn't block the event loop. Mocking
+// Bun.spawn requires stubbing the global; we factory-build a fake proc
+// matching the subset of the Bun.Subprocess interface the code touches
+// (`exited`, `stdout`, `kill`).
+
+interface FakeProcInit {
+  exitCode: number;
+  stdout?: string;
+}
+
+function makeFakeProc(init: FakeProcInit) {
+  return {
+    pid: 999,
+    exited: Promise.resolve(init.exitCode),
+    stdout: new ReadableStream({
+      start(controller) {
+        if (init.stdout !== undefined) {
+          controller.enqueue(new TextEncoder().encode(init.stdout));
+        }
+        controller.close();
+      },
+    }),
+    kill: vi.fn(),
+  };
+}
+
+describe("fetchPRInfoAsync (Bun.spawn-driven path)", () => {
+  let bunSpawnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    // Default: `which gh` returns a path so isGhAvailable caches true.
+    mockExecSync.mockReturnValueOnce("/opt/homebrew/bin/gh");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    bunSpawnSpy = vi.spyOn(Bun, "spawn" as never) as any;
+    // Spy on the global persists across tests because the Bun stub is
+    // module-scope. Explicit reset purges call history + queued returns
+    // so each test starts at zero.
+    bunSpawnSpy.mockReset();
+  });
+
+  it("returns null when gh is not available", async () => {
+    mockExecSync.mockReset();
+    mockExecSync.mockImplementation(() => { throw new Error("not found"); });
+    const result = await mod.fetchPRInfoAsync("/some/path", "main");
+    expect(result).toBeNull();
+    expect(bunSpawnSpy).not.toHaveBeenCalled();
+  });
+
+  it("returns parsed PR info on success", async () => {
+    bunSpawnSpy
+      // First Bun.spawn call: `git remote get-url origin` for slug resolution
+      .mockReturnValueOnce(makeFakeProc({
+        exitCode: 0,
+        stdout: "git@github.com:owner/repo.git\n",
+      }) as never)
+      // Second Bun.spawn call: `gh api graphql` for the PR query
+      .mockReturnValueOnce(makeFakeProc({
+        exitCode: 0,
+        stdout: JSON.stringify(makeGraphQLResponse()),
+      }) as never);
+
+    const result = await mod.fetchPRInfoAsync("/project", "feat/dark-mode");
+    expect(result).not.toBeNull();
+    expect(result!.number).toBe(162);
+    expect(result!.state).toBe("OPEN");
+    expect(bunSpawnSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns null when repo slug cannot be resolved (git remote fails)", async () => {
+    bunSpawnSpy.mockReturnValueOnce(makeFakeProc({ exitCode: 1 }) as never);
+    const result = await mod.fetchPRInfoAsync("/not-a-repo", "main");
+    expect(result).toBeNull();
+  });
+
+  it("returns null when slug parser produces no owner/name (empty remote url)", async () => {
+    bunSpawnSpy.mockReturnValueOnce(makeFakeProc({ exitCode: 0, stdout: "\n" }) as never);
+    const result = await mod.fetchPRInfoAsync("/weird-repo", "main");
+    expect(result).toBeNull();
+  });
+
+  it("returns null when gh api graphql exits non-zero", async () => {
+    bunSpawnSpy
+      .mockReturnValueOnce(makeFakeProc({
+        exitCode: 0,
+        stdout: "git@github.com:owner/repo.git",
+      }) as never)
+      .mockReturnValueOnce(makeFakeProc({ exitCode: 1, stdout: "" }) as never);
+
+    const result = await mod.fetchPRInfoAsync("/project", "main");
+    expect(result).toBeNull();
+  });
+
+  it("returns null when gh api graphql stdout is malformed JSON", async () => {
+    bunSpawnSpy
+      .mockReturnValueOnce(makeFakeProc({
+        exitCode: 0,
+        stdout: "git@github.com:owner/repo.git",
+      }) as never)
+      .mockReturnValueOnce(makeFakeProc({
+        exitCode: 0,
+        stdout: "NOT VALID JSON{{{",
+      }) as never);
+
+    const result = await mod.fetchPRInfoAsync("/project", "main");
+    expect(result).toBeNull();
+  });
+
+  it("caches results within the adaptive TTL window", async () => {
+    bunSpawnSpy
+      .mockReturnValueOnce(makeFakeProc({
+        exitCode: 0,
+        stdout: "git@github.com:owner/repo.git",
+      }) as never)
+      .mockReturnValueOnce(makeFakeProc({
+        exitCode: 0,
+        stdout: JSON.stringify(makeGraphQLResponse()),
+      }) as never);
+
+    const first = await mod.fetchPRInfoAsync("/project", "feat/cached-async");
+    const second = await mod.fetchPRInfoAsync("/project", "feat/cached-async");
+
+    expect(first).toEqual(second);
+    // Slug-fetch (1) + graphql (1) = 2 calls. Second invocation hits cache,
+    // no additional Bun.spawn dispatch.
+    expect(bunSpawnSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns null and caches the null when no PR matches the branch", async () => {
+    const emptyResponse = { data: { repository: { pullRequests: { nodes: [] } } } };
+    bunSpawnSpy
+      .mockReturnValueOnce(makeFakeProc({
+        exitCode: 0,
+        stdout: "git@github.com:owner/repo.git",
+      }) as never)
+      .mockReturnValueOnce(makeFakeProc({
+        exitCode: 0,
+        stdout: JSON.stringify(emptyResponse),
+      }) as never);
+
+    const result = await mod.fetchPRInfoAsync("/project", "no-pr-branch");
+    expect(result).toBeNull();
+  });
+
+  it("propagates exception path: Bun.spawn throws synchronously", async () => {
+    bunSpawnSpy
+      .mockReturnValueOnce(makeFakeProc({
+        exitCode: 0,
+        stdout: "git@github.com:owner/repo.git",
+      }) as never)
+      .mockImplementationOnce((() => {
+        throw new Error("spawn ENOENT");
+      }) as never);
+    const result = await mod.fetchPRInfoAsync("/project", "main");
+    expect(result).toBeNull();
+  });
+});
+
+// ===========================================================================
+// _clearCaches — exercise the test-only helper to close coverage on l.162
+// ===========================================================================
+describe("_clearCaches", () => {
+  it("resets module-level caches without throwing", () => {
+    expect(() => mod._clearCaches()).not.toThrow();
   });
 });
 

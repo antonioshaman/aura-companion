@@ -8,7 +8,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, chmodSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, chmodSync, symlinkSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { resolveObserverPromptForSpawn } from "./observer-prompt-spawn.js";
@@ -29,7 +29,12 @@ describe("resolveObserverPromptForSpawn", () => {
   let promptPath: string;
 
   beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "obs-spawn-"));
+    // CR-6 fix added `realpathSync(cwd)` inside `resolveObserverPromptForSpawn`
+    // for workspace-bounds containment. On macOS `tmpdir()` returns
+    // `/var/folders/...` but `realpath` resolves to `/private/var/folders/...`
+    // (Linux is identity). Canonicalise the dir HERE so test fixtures and
+    // assertions speak the same dialect as the production function.
+    dir = realpathSync(mkdtempSync(join(tmpdir(), "obs-spawn-")));
     promptDir = join(dir, ".council", "prompts");
     promptPath = join(promptDir, "observer-system.md");
   });
