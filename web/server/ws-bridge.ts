@@ -10,6 +10,7 @@ import type {
 import type { SessionStore } from "./session-store.js";
 import type { IBackendAdapter } from "./backend-adapter.js";
 import { ClaudeAdapter, type ObserverWakeSendOutcome } from "./claude-adapter.js";
+import type { IdleTimerProbe } from "./idle-timer-manager.js";
 import { OBSERVER_WAKE_TIMEOUT_MS } from "./council-types.js";
 import type { RecorderManager } from "./recorder.js";
 import { resolveSessionGitInfo } from "./session-git-info.js";
@@ -116,10 +117,7 @@ export class WsBridge {
    * {@link noteCliActivity} defaults to advancing the clock (safe
    * pre-Task-11 behaviour).
    */
-  private idleTimerProbe: {
-    isSyntheticTurnInFlight(sessionId: string): boolean;
-    noteTerminalResultFrame(sessionId: string): void;
-  } | null = null;
+  private idleTimerProbe: IdleTimerProbe | null = null;
   private static readonly GIT_SESSION_KEYS: GitSessionKey[] = [
     "git_branch",
     "is_worktree",
@@ -137,12 +135,7 @@ export class WsBridge {
    * user-driven. Idempotent; calling with `null` re-arms the safe-default
    * branch where every CLI activity tick advances `lastCliActivityTs`.
    */
-  setIdleTimerProbe(
-    probe: {
-      isSyntheticTurnInFlight(sessionId: string): boolean;
-      noteTerminalResultFrame(sessionId: string): void;
-    } | null,
-  ): void {
+  setIdleTimerProbe(probe: IdleTimerProbe | null): void {
     this.idleTimerProbe = probe;
   }
 
@@ -1226,13 +1219,29 @@ export class WsBridge {
 
   /** Send a user message into a session programmatically (no browser required).
    *  Used by the cron scheduler and agent executor to send prompts to autonomous sessions. */
-  injectUserMessage(sessionId: string, content: string): void {
+  /**
+   * Server-driven user_message injection. Used by cron-scheduler,
+   * linear-agent-bridge, and the system REST endpoint to programmatically
+   * advance a session as if a user had typed.
+   *
+   * Council Review #12 (EC-16) — `origin` discriminator threaded through
+   * `routeBrowserMessage` so server-driven frames are distinguishable
+   * from real browser-typed user_messages. The userFrameObservers fanout
+   * (currently the idle-timer manager's `noteUserMessage`) skips for
+   * server-origins because automated injection isn't user activity; the
+   * synthetic-turn token must not advance on cron/agent fires.
+   */
+  injectUserMessage(
+    sessionId: string,
+    content: string,
+    origin?: "server:cron" | "server:agent" | "server:rest",
+  ): void {
     const session = this.sessions.get(sessionId);
     if (!session) {
       console.error(`[ws-bridge] Cannot inject message: session ${sessionId} not found`);
       return;
     }
-    this.routeBrowserMessage(session, { type: "user_message", content });
+    this.routeBrowserMessage(session, { type: "user_message", content }, undefined, origin);
   }
 
   /** Configure MCP servers on a session programmatically (no browser required).
@@ -1503,6 +1512,7 @@ export class WsBridge {
     session: Session,
     msg: BrowserOutgoingMessage,
     ws?: ServerWebSocket<SocketData>,
+    origin?: "server:cron" | "server:agent" | "server:rest",
   ) {
     // Bridge-level message types — never forwarded to backend
     if (msg.type === "session_subscribe") {
@@ -1550,19 +1560,36 @@ export class WsBridge {
     // -- user_message: store in history before delegating to adapter ------
     if (msg.type === "user_message") {
       metricsCollector.recordTurnStarted(session.id);
+      // Council Review #12 (EC-16) — server-driven user_message frames
+      // (cron-scheduler, linear-agent-bridge, REST `/sessions/:id/inject`)
+      // are NOT user activity and MUST NOT advance the synthetic-turn
+      // token via `IdleTimerManager.noteUserMessage`. Skip the
+      // userFrameObservers fanout for any non-browser origin; log
+      // structurally for forensics.
+      const isServerOrigin = origin !== undefined && origin.startsWith("server:");
+      if (isServerOrigin) {
+        log.info("ws-bridge", "server-driven user_message injection", {
+          event: "ws-bridge.server-driven-user-message",
+          sessionId: session.id,
+          sessionGroupId: session.state.sessionGroupId,
+          origin,
+        });
+      }
       // Task 11.6 — cross-tab single-firer for IdleTimerManager.noteUserMessage.
       // Fire BEFORE history append + state-machine transition so the
       // observer (and downstream auto-proceed turn-token advance) sees the
       // frame at the same logical point as the session state mutation. A
       // thrown observer must not corrupt history — guarded per-callback.
-      for (const observer of this.userFrameObservers) {
-        try {
-          observer(session.id);
-        } catch (err) {
-          log.warn("ws-bridge", "userFrameObserver threw", {
-            sessionId: session.id,
-            error: String(err),
-          });
+      if (!isServerOrigin) {
+        for (const observer of this.userFrameObservers) {
+          try {
+            observer(session.id);
+          } catch (err) {
+            log.warn("ws-bridge", "userFrameObserver threw", {
+              sessionId: session.id,
+              error: String(err),
+            });
+          }
         }
       }
       const ts = Date.now();

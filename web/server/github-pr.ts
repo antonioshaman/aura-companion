@@ -62,20 +62,59 @@ export function _resetGhAvailable() {
 const repoSlugCache = new Map<string, { slug: string | null; timestamp: number }>();
 const REPO_SLUG_TTL = 5 * 60_000; // 5 minutes
 
+/**
+ * Pure: parse a `git remote get-url <name>` URL string into an `owner/name`
+ * slug for GitHub. Returns null on unrecognised shapes.
+ *
+ * Accepts the three canonical remote-URL forms:
+ *   git@github.com:owner/name.git
+ *   https://github.com/owner/name.git
+ *   ssh://git@github.com/owner/name(.git?)
+ *
+ * Anchored at the END of the string so trailing `.git` is optional. Owner
+ * and name are captured non-greedily and constrained to non-slash chars.
+ */
+export function parseGitRemoteOriginSlug(remoteUrl: string): string | null {
+  if (typeof remoteUrl !== "string" || remoteUrl.length === 0) return null;
+  const trimmed = remoteUrl.trim();
+  // Match the LAST `/owner/name(.git)?` segment of the URL. `:` covers
+  // the SSH `git@github.com:owner/name` shape; `/` covers HTTPS and
+  // `ssh://...` shapes.
+  const match = trimmed.match(/[:/]([^/:\s]+)\/([^/:\s]+?)(?:\.git)?\s*$/);
+  if (!match) return null;
+  const owner = match[1];
+  const name = match[2];
+  if (!owner || !name) return null;
+  return `${owner}/${name}`;
+}
+
+/**
+ * Resolve the GitHub `owner/name` slug for the workspace at `cwd`,
+ * deriving it from `git remote get-url origin` rather than `gh repo view`.
+ *
+ * Council Plan PR-display fix (2026-05-15): the prior implementation used
+ * `gh repo view`, which resolves to whichever repo `gh` considers the
+ * default — frequently the UPSTREAM repo on a forked workspace because
+ * `gh repo set-default` was never configured to point at origin. Result:
+ * the sidebar's GITHUB PR panel queried upstream PRs that didn't belong
+ * to the user's fork. Parsing `origin` directly is authoritative for the
+ * "where do I push to?" question, which is what the user expects the
+ * sidebar to track.
+ */
 function getRepoSlug(cwd: string): string | null {
   const cached = repoSlugCache.get(cwd);
   if (cached && Date.now() - cached.timestamp < REPO_SLUG_TTL) {
     return cached.slug;
   }
   try {
-    const slug = execSync("gh repo view --json nameWithOwner --jq .nameWithOwner", {
+    const remoteUrl = execSync("git remote get-url origin", {
       cwd,
       stdio: "pipe",
-      timeout: 10_000,
+      timeout: 5_000,
     })
       .toString()
       .trim();
-    const result = slug || null;
+    const result = parseGitRemoteOriginSlug(remoteUrl);
     repoSlugCache.set(cwd, { slug: result, timestamp: Date.now() });
     return result;
   } catch {
@@ -91,18 +130,18 @@ async function getRepoSlugAsync(cwd: string): Promise<string | null> {
   }
   try {
     const proc = Bun.spawn(
-      ["gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
+      ["git", "remote", "get-url", "origin"],
       { cwd, stdout: "pipe", stderr: "pipe" },
     );
-    const timeout = setTimeout(() => proc.kill(), 10_000);
+    const timeout = setTimeout(() => proc.kill(), 5_000);
     const exitCode = await proc.exited;
     clearTimeout(timeout);
     if (exitCode !== 0) {
       repoSlugCache.set(cwd, { slug: null, timestamp: Date.now() });
       return null;
     }
-    const slug = (await new Response(proc.stdout).text()).trim();
-    const result = slug || null;
+    const remoteUrl = (await new Response(proc.stdout).text()).trim();
+    const result = parseGitRemoteOriginSlug(remoteUrl);
     repoSlugCache.set(cwd, { slug: result, timestamp: Date.now() });
     return result;
   } catch {

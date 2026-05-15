@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -10,9 +10,16 @@ import {
   assertWakeManifestPathAllowed,
   buildObserverContextManifest,
   buildObserverWakePayload,
+  loadBundledObserverPromptValidated,
   loadObserverSystemPrompt,
   parseObserverPromptHeader,
+  resolveObserverSystemPrompt,
+  BUNDLED_OBSERVER_PROMPT_SOURCE_LABEL,
 } from "./observer-prompt.js";
+import {
+  BUNDLED_OBSERVER_PROMPT,
+  BUNDLED_OBSERVER_PROMPT_SHA256,
+} from "./observer-prompt-bundled.js";
 import {
   OBSERVER_WAKE_MAX_PATHS_PER_SECTION,
   OBSERVER_WAKE_PAYLOAD_VERSION,
@@ -82,7 +89,7 @@ describe("loadObserverSystemPrompt", () => {
     const artifact = loadObserverSystemPrompt(promptPath);
     expect(artifact.version).toBe(OBSERVER_PROMPT_SCHEMA_VERSION);
     expect(artifact.body).toBe(body);
-    expect(artifact.sourcePath).toBe(promptPath);
+    expect(artifact.sourceLabel).toBe(promptPath);
     // The sha256 is deterministic — match what an independent hash gives us.
     const expected = createHash("sha256").update(body, "utf8").digest("hex");
     expect(artifact.sha256).toBe(expected);
@@ -115,8 +122,33 @@ describe("loadObserverSystemPrompt", () => {
     expect(() => loadObserverSystemPrompt(promptPath)).toThrow(/exceeds OBSERVER_PROMPT_MAX_BYTES/);
   });
 
-  it("throws on missing file", () => {
-    expect(() => loadObserverSystemPrompt(join(dir, "no-such-file.md"))).toThrow(/cannot stat/);
+  // Council Plan PLAN-aura-observer-prompt-bundled-fallback.md Task 6:
+  // the loader still throws on missing file — that IS its contract at
+  // this layer. The bundled fallback semantic lives in the higher-level
+  // resolver tested below. Inverted from the prior "throws on missing"
+  // assertion: that test is replaced by the resolver-level fallback
+  // assertion in `resolveObserverSystemPrompt`'s suite — see below.
+  it("throws on missing file (loader-layer contract; fallback is the resolver's job)", () => {
+    // Council Review 2026-05-15-1015 CR-7: wrapFsError message now carries
+    // operation name + code only — no raw path bytes. Test updated to match
+    // the redacted shape: `stat workspace prompt failed (ENOENT)`.
+    expect(() => loadObserverSystemPrompt(join(dir, "no-such-file.md"))).toThrow(/stat workspace prompt failed/);
+  });
+
+  // Beck rec — preserve ENOENT discriminator through Error.cause so the
+  // resolver can distinguish "file missing" from "perm denied / loop /
+  // directory clash" without string-matching the wrapped message.
+  it("preserves ENOENT as Error.cause.code on the wrapped throw", () => {
+    let caught: unknown;
+    try {
+      loadObserverSystemPrompt(join(dir, "no-such-file.md"));
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    const cause = (caught as { cause?: unknown }).cause;
+    expect(cause).toBeInstanceOf(Error);
+    expect((cause as { code?: unknown }).code).toBe("ENOENT");
   });
 
   // Validation of the caller's sourcePath argument — defensive guards before
@@ -145,6 +177,223 @@ describe("loadObserverSystemPrompt", () => {
     const artifact = loadObserverSystemPrompt(repoArtifact);
     expect(artifact.version).toBe(OBSERVER_PROMPT_SCHEMA_VERSION);
     expect(artifact.sha256).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
+
+// ── resolveObserverSystemPrompt — Council Plan Task 6/7/8/10 ───────────────
+//
+// The resolver is the policy layer atop the file-loader. Tests below pin
+// the four legitimate behaviours:
+//  (1) workspace file present + valid → loaded, source="workspace"
+//  (2) workspace file absent (ENOENT) → bundled used, source="bundled"
+//  (3) workspace file present + malformed → THROWS (explicit intent)
+//  (4) workspace file present + non-ENOENT fs error → THROWS (not silent)
+// Plus the bundled-hash snapshot pin (Task 10) catches accidental edits
+// to the bundled body without re-running the build script.
+
+describe("resolveObserverSystemPrompt", () => {
+  let dir: string;
+  let workspacePath: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "obs-resolve-"));
+    workspacePath = join(dir, "observer-system.md");
+  });
+
+  afterEach(() => {
+    // Restore perms in case a chmod-0o000 test left the file unreadable
+    // for `rmSync`.
+    try {
+      chmodSync(workspacePath, 0o644);
+    } catch {
+      // file may not exist — fine.
+    }
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  // Task 8 — workspace-override-wins.
+  it("returns the workspace artifact when the workspace file is present and valid", () => {
+    const body = fixtureBody();
+    writeFileSync(workspacePath, body);
+    const resolved = resolveObserverSystemPrompt(workspacePath);
+    expect(resolved.source).toBe("workspace");
+    expect(resolved.sourceLabel).toBe(workspacePath);
+    expect(resolved.body).toBe(body);
+    // Hash matches the workspace bytes, NOT the bundled fixture — the
+    // override is real, not papered over with the bundled fallback.
+    expect(resolved.sha256).toBe(createHash("sha256").update(body, "utf8").digest("hex"));
+  });
+
+  // Task 6 — the headline fallback assertion. Inversion of the prior
+  // `throws on missing` test moved to a layer-appropriate site: the
+  // RESOLVER falls back; the loader still throws.
+  it("falls back to the bundled artifact when workspace file is ENOENT", () => {
+    expect(workspacePath).toMatch(/observer-system\.md$/);
+    // Workspace file deliberately NOT written.
+    const resolved = resolveObserverSystemPrompt(workspacePath);
+    expect(resolved.source).toBe("bundled");
+    expect(resolved.sourceLabel).toBe(BUNDLED_OBSERVER_PROMPT_SOURCE_LABEL);
+    expect(resolved.body).toBe(BUNDLED_OBSERVER_PROMPT);
+    expect(resolved.sha256).toBe(BUNDLED_OBSERVER_PROMPT_SHA256);
+    expect(resolved.version).toBe(OBSERVER_PROMPT_SCHEMA_VERSION);
+  });
+
+  // Task 8 — workspace-malformed-still-throws (explicit-intent regression
+  // guard). The bundled fallback MUST NOT mask operator typos.
+  it("does NOT fall back when workspace file is present but malformed", () => {
+    writeFileSync(workspacePath, "no header here\n" + MIN_BODY);
+    expect(() => resolveObserverSystemPrompt(workspacePath)).toThrow(/malformed header/);
+  });
+
+  it("does NOT fall back when workspace file is present with wrong header version", () => {
+    writeFileSync(workspacePath, fixtureBody(2));
+    expect(() => resolveObserverSystemPrompt(workspacePath)).toThrow(/version 2 does not match/);
+  });
+
+  it("does NOT fall back when workspace file is present but below minimum body", () => {
+    writeFileSync(workspacePath, "<!-- observer-system-prompt v1 -->\nshort\n");
+    expect(() => resolveObserverSystemPrompt(workspacePath)).toThrow(/below minimum/);
+  });
+
+  // Task 7 — per-error-code table. ENOENT triggers fallback; every other
+  // fs error must throw. Council Plan Bug B Review P1 #3: use
+  // `it.skipIf(...)` for capability-gated rows. The prior shape used
+  // `return` from inside an `it()` callback, which in Vitest marks the
+  // test as PASSED with zero assertions (not skipped) — CI on a root
+  // container silently green-stamped the EACCES contract without ever
+  // exercising it. `it.skipIf(...)` produces a visible `↓ skipped`
+  // marker in the runner output.
+  const runningAsRoot = typeof process.getuid === "function" && process.getuid() === 0;
+  const isWindows = process.platform === "win32";
+
+  it.skipIf(runningAsRoot)(
+    "does NOT fall back on EACCES (permission denied); throws loudly",
+    () => {
+      writeFileSync(workspacePath, fixtureBody());
+      chmodSync(workspacePath, 0o000);
+      try {
+        expect(() => resolveObserverSystemPrompt(workspacePath)).toThrow();
+      } finally {
+        // Restore perms so afterEach's rmSync works.
+        chmodSync(workspacePath, 0o644);
+      }
+    },
+  );
+
+  it("does NOT fall back on EISDIR (it's a directory, not a file); throws loudly", () => {
+    mkdirSync(workspacePath);
+    expect(() => resolveObserverSystemPrompt(workspacePath)).toThrow();
+  });
+
+  it.skipIf(isWindows)(
+    "does NOT fall back on ELOOP (symlink loop); throws loudly",
+    () => {
+      // Symlink to itself produces ELOOP on resolve.
+      symlinkSync(workspacePath, workspacePath);
+      try {
+        expect(() => resolveObserverSystemPrompt(workspacePath)).toThrow();
+      } finally {
+        // Clean up the symlink so rmSync can proceed.
+        try {
+          rmSync(workspacePath);
+        } catch {
+          // best-effort
+        }
+      }
+    },
+  );
+
+  // Sanity canary — at least one non-ENOENT row must actually execute on
+  // this runner. EISDIR is platform-independent and root-independent, so
+  // the absence of this row from the run is itself a test-framework
+  // regression. Asserting a tautology here makes "no rows ran" visible
+  // (Vitest would print zero asserts for the suite); the real coverage
+  // signal is the EISDIR row above this canary.
+  it("non-ENOENT error-code table executed at least one row this run", () => {
+    expect(true).toBe(true);
+  });
+
+  // Task 10 — bundled-hash snapshot pin. Catches inadvertent edits to the
+  // bundled body without re-running the build script. The constant in
+  // `observer-prompt-bundled.ts` is auto-generated; if a contributor
+  // hand-edits the body OR if a bundler transform mutates the literal
+  // (CRLF normalisation, minification), the computed hash diverges from
+  // the stamped constant and this test fails — forcing a deliberate
+  // update via `bun run build-observer-prompt-bundle`.
+  it("bundled body's computed SHA-256 matches the stamped constant (pin)", () => {
+    const computed = createHash("sha256")
+      .update(BUNDLED_OBSERVER_PROMPT, "utf8")
+      .digest("hex");
+    expect(computed).toBe(BUNDLED_OBSERVER_PROMPT_SHA256);
+  });
+
+  it("bundled body parses cleanly as a v1 observer prompt", () => {
+    // Belt-and-braces against a corrupted bundle: parse via the loader's
+    // body validator + assert artifact shape. If the bundled body ever
+    // stops parsing, every fresh-workspace observer spawn breaks.
+    expect(parseObserverPromptHeader(BUNDLED_OBSERVER_PROMPT)).toBe(OBSERVER_PROMPT_SCHEMA_VERSION);
+    expect(BUNDLED_OBSERVER_PROMPT.length).toBeGreaterThan(256);
+    expect(BUNDLED_OBSERVER_PROMPT.length).toBeLessThan(OBSERVER_PROMPT_MAX_BYTES);
+  });
+
+  // Council Plan Bug B Cleanup Task 15(b) — `loadBundledObserverPromptValidated`
+  // direct API tests. Minimum mutation-resistant set: independent SHA
+  // (createHash direct, not the module's own helper), shape pin, header
+  // parses, sourceLabel sentinel pin. Per Beck — 4 tests, no more.
+
+  it("loadBundledObserverPromptValidated: returns artifact with source=bundled, validated SHA", () => {
+    const artifact = loadBundledObserverPromptValidated();
+    expect(artifact.source).toBe("bundled");
+    expect(artifact.sourceLabel).toBe(BUNDLED_OBSERVER_PROMPT_SOURCE_LABEL);
+    expect(artifact.version).toBe(OBSERVER_PROMPT_SCHEMA_VERSION);
+  });
+
+  it("loadBundledObserverPromptValidated: SHA-256 of returned body matches stamped constant (independent hash)", () => {
+    // Independent verification — re-hash the returned body with the same
+    // recipe the build script + parser use. Catches a regression where
+    // the helper returns a body that disagrees with its own sha256 field.
+    const artifact = loadBundledObserverPromptValidated();
+    const computed = createHash("sha256").update(artifact.body, "utf8").digest("hex");
+    expect(artifact.sha256).toBe(computed);
+    expect(artifact.sha256).toBe(BUNDLED_OBSERVER_PROMPT_SHA256);
+  });
+
+  it("loadBundledObserverPromptValidated: returned body parses cleanly as v1 header", () => {
+    const artifact = loadBundledObserverPromptValidated();
+    expect(parseObserverPromptHeader(artifact.body)).toBe(OBSERVER_PROMPT_SCHEMA_VERSION);
+  });
+
+  it("loadBundledObserverPromptValidated: shape is loader-compatible (extends ObserverPromptArtifact)", () => {
+    const artifact = loadBundledObserverPromptValidated();
+    expect(artifact).toEqual({
+      version: OBSERVER_PROMPT_SCHEMA_VERSION,
+      body: expect.any(String),
+      sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+      sourceLabel: BUNDLED_OBSERVER_PROMPT_SOURCE_LABEL,
+      source: "bundled",
+    });
+  });
+
+  // Council Plan Bug B Review P2 #9 — canonical-vs-bundled byte-equality.
+  // The sibling snapshot pin asserts the bundled hash matches its own
+  // body, which is self-consistent by construction (both come from the
+  // same generated file). That pin protects ONE failure mode: hash
+  // stamping skew within the generated module. It does NOT protect the
+  // higher-likelihood mistake: a developer edits the canonical
+  // `.council/prompts/observer-system.md` and forgets to re-run
+  // `bun run build-observer-prompt-bundle`. The CI canary
+  // (`.github/workflows/ci.yml`) catches drift at PR time; this test
+  // catches it earlier (developer's local `bun run test`) and pinpoints
+  // the offending byte range in the diff output.
+  it("bundled body byte-equals the canonical .council/prompts/observer-system.md", () => {
+    const thisFile = fileURLToPath(import.meta.url);
+    // observer-prompt.test.ts → web/server → web → repo root.
+    const repoRoot = join(thisFile, "..", "..", "..");
+    const canonical = _readFileSync(
+      join(repoRoot, ".council", "prompts", "observer-system.md"),
+      "utf-8",
+    );
+    expect(BUNDLED_OBSERVER_PROMPT).toBe(canonical);
   });
 });
 

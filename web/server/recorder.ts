@@ -82,7 +82,17 @@ export type RecordingLifecycleEvent =
  * Inbound frames (`dir: "in"`) never carry an origin — provenance is
  * implicit from the CLI subprocess.
  */
-export type RecordingOrigin = "browser" | "server:council-wake" | "server:auto-proceed";
+export type RecordingOrigin =
+  | "browser"
+  | "server:council-wake"
+  | "server:auto-proceed"
+  // Council Review #12 (EC-16) — server-driven `injectUserMessage` paths.
+  // Added so the bridge can discriminate provenance on inbound-shaped
+  // user_message frames that were synthesised by server code, not typed
+  // by a human at a browser tab.
+  | "server:cron"
+  | "server:agent"
+  | "server:rest";
 
 export interface RecordingEntry {
   ts: number;

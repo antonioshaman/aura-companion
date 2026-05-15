@@ -205,10 +205,31 @@ interface ArmedTimerState {
 }
 
 /**
+ * Late-inject probe contract for downstream consumers (claude-adapter,
+ * ws-bridge) that need to read synthetic-turn state without owning a
+ * reference to the full {@link IdleTimerManager}. Per convention EC-14:
+ * the type lives at the producer (this file) and consumers `import type`
+ * — never duplicate the inline `{method(): T}` shape across consumer
+ * sites, which weakens silently the first time the shape evolves.
+ *
+ * Council Review #9 (probe interface drift) — the shape was previously
+ * inlined at 3 production sites (claude-adapter.ts field + ctor opts;
+ * ws-bridge.ts field) plus N test fixtures. Drift was inevitable on the
+ * next method addition; one named type at the producer closes that.
+ */
+export interface IdleTimerProbe {
+  isSyntheticTurnInFlight(sessionId: string): boolean;
+  noteTerminalResultFrame(sessionId: string): void;
+}
+
+/**
  * The manager itself. One instance per orchestrator process; tests
  * construct fresh instances per assertion via the `deps` seam.
+ *
+ * Implements {@link IdleTimerProbe} structurally — consumers that need
+ * only the probe surface inject `IdleTimerProbe`, never the full manager.
  */
-export class IdleTimerManager {
+export class IdleTimerManager implements IdleTimerProbe {
   private readonly states = new Map<string, ArmedTimerState>();
 
   constructor(private readonly deps: IdleTimerManagerDeps) {}

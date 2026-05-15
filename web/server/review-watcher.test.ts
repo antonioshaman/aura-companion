@@ -2,7 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { watchReviews, type ReviewDropReason } from "./review-watcher.js";
+import {
+  watchReviews,
+  type ReviewDropReason,
+  OBSERVER_REVIEW_FILE_PATTERN,
+  buildObserverReviewFilename,
+} from "./review-watcher.js";
 import { writeAtomicJson } from "./atomic-write.js";
 import { COUNCIL_SCHEMA_VERSION, type ObserverReviewPayload } from "./council-types.js";
 
@@ -194,5 +199,74 @@ describe("watchReviews", () => {
     await watchPromise;
     expect(seen.map((r) => r.checkpoint_id)).toEqual(["chk-retry"]);
     expect(onDropped).toHaveBeenCalledWith("handler-error", "phase-retry-codex-observer.md", expect.stringContaining("transient boom"));
+  });
+});
+
+// Council Review 2026-05-15-0520 Prevention #5 / EC-20: the observer review
+// filename convention is a producer↔consumer contract that consumer-side
+// agents must NOT redefine in self-prompts. The pattern + helper exported
+// from this module are the single source of truth. Tests below pin the
+// contract on both sides and assert the helper rejects malformed inputs
+// rather than constructing names that would silently fail consumer parse.
+describe("OBSERVER_REVIEW_FILE_PATTERN — exported producer/consumer contract", () => {
+  it("matches canonical names for both providers", () => {
+    expect(OBSERVER_REVIEW_FILE_PATTERN.test("council-plan-claude-observer.md")).toBe(true);
+    expect(OBSERVER_REVIEW_FILE_PATTERN.test("council-implement-codex-observer.md")).toBe(true);
+    expect(OBSERVER_REVIEW_FILE_PATTERN.test("council-review-claude-observer.md")).toBe(true);
+  });
+
+  it("rejects names that don't carry the provider segment (collides under claude+codex pairing)", () => {
+    expect(OBSERVER_REVIEW_FILE_PATTERN.test("council-plan-observer.md")).toBe(false);
+  });
+
+  it("rejects unknown providers", () => {
+    expect(OBSERVER_REVIEW_FILE_PATTERN.test("council-plan-gpt-observer.md")).toBe(false);
+    expect(OBSERVER_REVIEW_FILE_PATTERN.test("council-plan-CLAUDE-observer.md")).toBe(false);
+  });
+
+  it("rejects names from convention-drift patterns (the failure class Prevention #5 closes)", () => {
+    // The om_event_bot drift case: consumer self-prompt was filtering on
+    // `FIXES-applied-from-observer-*` while producer wrote the canonical
+    // `<phase>-<provider>-observer.md`. If a future consumer/producer hardcodes
+    // the wrong pattern in its own code, this regex catches it.
+    expect(OBSERVER_REVIEW_FILE_PATTERN.test("FIXES-applied-from-observer-1.md")).toBe(false);
+    expect(OBSERVER_REVIEW_FILE_PATTERN.test("observer-claude-council-plan.md")).toBe(false);
+  });
+});
+
+describe("buildObserverReviewFilename — producer-side helper", () => {
+  it("produces a name matching OBSERVER_REVIEW_FILE_PATTERN for valid inputs", () => {
+    const name = buildObserverReviewFilename("council-plan", "claude");
+    expect(name).toBe("council-plan-claude-observer.md");
+    expect(OBSERVER_REVIEW_FILE_PATTERN.test(name)).toBe(true);
+  });
+
+  it("produces distinct names for the two providers (claude+codex pairing collision defence)", () => {
+    const claudeName = buildObserverReviewFilename("council-review", "claude");
+    const codexName = buildObserverReviewFilename("council-review", "codex");
+    expect(claudeName).not.toBe(codexName);
+    expect(OBSERVER_REVIEW_FILE_PATTERN.test(claudeName)).toBe(true);
+    expect(OBSERVER_REVIEW_FILE_PATTERN.test(codexName)).toBe(true);
+  });
+
+  it("throws on empty phase", () => {
+    expect(() => buildObserverReviewFilename("", "claude")).toThrow(/non-empty/);
+  });
+
+  it("throws on phase exceeding 64-char ceiling", () => {
+    const tooLong = "x".repeat(65);
+    expect(() => buildObserverReviewFilename(tooLong, "claude")).toThrow(/64 chars/);
+  });
+
+  it("throws on phase with illegal characters that would fail the pattern", () => {
+    // Path-traversal attempt and shell-meta — the regex's char class is the
+    // authoritative gate; helper surfaces the failure rather than producing
+    // a name that consumer parse silently rejects.
+    expect(() => buildObserverReviewFilename("../etc/passwd", "claude")).toThrow(/illegal characters/);
+    expect(() => buildObserverReviewFilename("phase with space", "claude")).toThrow(/illegal characters/);
+  });
+
+  it("throws on unknown provider", () => {
+    expect(() => buildObserverReviewFilename("council-plan", "gpt" as never)).toThrow(/claude.*codex/);
   });
 });

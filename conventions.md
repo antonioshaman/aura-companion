@@ -131,3 +131,99 @@ These must be followed — flag violations as findings.
 **Principle:** `references/quality-persistence.md` → Principle 7 (Replay determinism)
 
 ---
+
+### AP-4: Late-injection via setter is the blessed shape for mutual-cycle DI
+
+**Pattern:** When two long-lived classes have a reference cycle (e.g. `IdleTimerManager` needs `getSession`/`getGroupStatus` closing over the orchestrator + bridge; the orchestrator's rehydrate path calls into the manager), the canonical resolution is: construct the first dependency with a noop placeholder, build the second dependency closing over the first, then inject the real instance back via a `set<Name>` method BEFORE `initialize()` runs. Mirrors the `orchestrator.setIdleTimerManager` + `wsBridge.setIdleTimerProbe` pattern in `index.ts`. Lazy proxies / `Lazy<T>` pushers off the type system are explicit non-options — late-injection keeps cycle resolution visible in the bootstrap code.
+**Origin:** Council Review 2026-05-15-0336 — Task 11 wire-up established the pattern at three sites (orchestrator↔manager, bridge↔probe, adapter↔probe). Convergent recommendation from Backend + Subprocess + Fowler experts.
+**Rationale:** Cycle is real; lazy alternatives hide it. Setter pattern surfaces the ordering in one place.
+
+---
+
+### EC-14: Late-injected probe interfaces must live as a named exported type at the producer
+
+**Convention:** Any narrow-surface "probe" interface (a subset of a manager's API passed via late-injection to a consumer) MUST be exported as a named type from the producer module (e.g. `export type IdleTimerProbe = { ... }` in `idle-timer-manager.ts`) and imported via `import type` at every consumer site. Inline duplicate `{ method1(): boolean; method2(): void }` declarations at the consumer's field + setter parameter + closure-passing site are forbidden — 3-to-5-way inline duplication creates a drift footgun that ships green-locally / red-on-CI under any interface widening (proven: PR #54 commit `8cdbc74` shipped 11.7 widening, `ws-bridge.test.ts` stubs not updated, CI typecheck caught it, fix landed in `ffb48d3`).
+**Origin:** Fowler × Backend — Council Review 2026-05-15-0336 (finding #9)
+**Principle:** `references/refactoring.md` → Principle 4 (Names that lie or mislead)
+
+---
+
+### EC-15: Bridge-boundary discriminated unions require exhaustive consumer-site `switch`
+
+**Convention:** Any consumer that maps a typed discriminated union crossing the `WsBridge` boundary (`BridgeObserverWakeOutcome`, future `BridgeEnqueueOutcome` from PR #52, etc.) MUST use `switch (outcome.kind) { case "x": ...; case "y": ...; }` followed by `const _exhaustive: never = outcome; void _exhaustive;` tail. If/else cascades with terminal `else` fall through are forbidden — a future variant added to the producer will silently stringify at the consumer site, hiding protocol drift. Wake-path consumer at `session-orchestrator.ts:1808-1953` is the reference; the auto-proceed mapping at `index.ts:147-158` is the regression that broke this convention and is finding #4 of this review.
+**Origin:** Realtime/NDJSON Protocol — Council Review 2026-05-15-0336 (finding #4)
+**Principle:** `references/quality-realtime.md` → Principle 7 (Protocol drift)
+
+---
+
+### EC-16: Server-originated WS frames must carry an `origin` discriminator through `routeBrowserMessage`
+
+**Convention:** Any code path that injects a frame into `routeBrowserMessage` from a non-browser source — `cron-scheduler`, `agent-executor`, `linear-agent-bridge`, REST `POST /sessions/:id/message`, future synthetic auto-proceed paths — MUST thread an `origin: "browser" | "server:cron" | "server:agent" | "server:linear" | "server:auto-proceed"` discriminator on the frame. Observers registered via `onUserFrameObserved` filter on origin and skip non-browser-originated frames; `IdleTimerManager.noteUserMessage` only fires for `origin === "browser"`. Mirrors the recorder origin pattern already documented in CLAUDE.md. Without this, server-originated injections silently advance the auto-proceed turn-token and cancel pending fires — cron+council sessions never reach auto-proceed.
+**Origin:** Bun/Hono/TS Backend — Council Review 2026-05-15-0336 (finding #12)
+**Principle:** `references/quality-backend.md` → Principle 2 (Validate at every protocol boundary)
+
+---
+
+### EC-17: Defence-in-depth gates must fail-CLOSED on probe-null or runtime-shape-violation
+
+**Convention:** Any gate that the codebase positions as a "defence-in-depth" safety check (denylist gates, permission predicates, type-narrowing guards) MUST fail-CLOSED on the absence of its decision input — `null` probe, non-string `tool_name`, malformed `tool_input`, etc. Tested explicitly via probe-null and malformed-input paths. The current shape "optional-chain short-circuit + `&&` operator" produces fail-OPEN (the gate is bypassed when the probe is null) and is the regression at finding #1 of this review (3-expert convergence Willison × Hunt × Subprocess). The rule generalises: optimising for test ergonomics (no probe required) by trading away the safety promise is the wrong tradeoff for any gate marketed as defence-in-depth.
+**Origin:** Willison × Hunt × Subprocess — Council Review 2026-05-15-0336 (finding #1)
+**Principle:** `references/quality-llm.md` → Principle 3 (LLM-graded permission with no rule-based fallback is fail-open)
+
+---
+
+### EC-18: Cross-module probe-coupled wiring (3+ classes via DI) requires integration-level test, not only component-level coverage
+
+**Convention:** When a contract spans 3+ classes via late-injection (the Task 11 pattern: `IdleTimerManager` ↔ `WsBridge` ↔ `ClaudeAdapter` coupled through `idleTimerProbe`), component-level tests are necessary but not sufficient. Required: at least one integration-level test that drives the full pipeline through its 5-step state machine (arm → fire → user-frame races → can_use_tool gate → result-frame transition) with FakeClock + spy harnesses on every probe method. Without it, cross-module probe-state desync (the bridge probe says `synthetic-in-flight` but the adapter's closure captured a stale probe at construction time) is invisible — every component test passes, the integration boundary fails silently. Per `feedback_partial_fix_passed_as_complete`: the integration boundary IS the defect surface for cross-class probe wiring.
+**Origin:** Beck — Council Review 2026-05-15-0336 (finding #7, P1.4 from beck.md)
+**Principle:** `references/quality-testing.md` → Risk-calibrated coverage
+
+---
+
+### EC-19: Static-grep canaries must anchor on function name, brace-counted body extraction, never literal substring
+
+**Convention:** Any test-side canary that asserts "this mutation/symbol occurs only inside function F's body" MUST use a regex anchored on the function name (e.g. `\bfunctionName\s*\([^)]*\)\s*:?\s*[a-zA-Z]*\s*\{`) followed by brace-counting body extraction, NOT literal substring search of the function's expected body bytes. Literal-substring canaries weaken silently under parameter renames, access modifier changes, return-type annotation additions, and any other source-cosmetic edit. The 11.7 EC-6 canary at `ws-bridge.test.ts:2862-2880` is the reference implementation — survives renames of `session` parameter, `private` ↔ public toggle, and TypeScript return-type changes. Universal sibling: `feedback_static_grep_canary_regex_over_substring`.
+**Origin:** Beck × Kent Beck (Test Quality) — Council Review 2026-05-15-0336 (positive recognition, codified as convention)
+**Principle:** `references/quality-testing.md` → Structure-insensitive assertions
+
+---
+
+### EC-20: Producer↔consumer path/filename conventions live as exported constants, never in agent prompts or self-memory
+
+**Convention:** Any cross-module producer↔consumer contract over filesystem path or filename shape (observer review files, checkpoint files, recording files, council artifacts, future conventions) MUST be expressed as ONE exported constant + helper pair (regex/pattern for consumers, builder function for producers) co-located with the canonical consumer module. Agent harnesses, monitoring code, prompts, and external tooling MUST import the constant — never hardcode the pattern in system prompts or agent self-memory. Reference implementation: `web/server/review-watcher.ts` exports `OBSERVER_REVIEW_FILE_PATTERN` (consumer regex) + `buildObserverReviewFilename(phase, provider)` (producer helper). Each helper MUST throw on inputs that would produce a name failing the pattern — silent fallback to a "best-effort" name is forbidden because consumer parse-fail then masquerades as producer silence (`feedback_consumer_path_drift_before_silent_claim`). The om_event_bot incident (2026-05-15) was a consumer-side self-prompt filter on `FIXES-applied-from-observer-*` while producer wrote canonical `<phase>-<provider>-observer.md` — exactly the drift class this convention closes.
+**Origin:** Council Review 2026-05-15-0520 Prevention #5 (consumer path drift) — emergent from cross-pair debugging
+**Principle:** `references/refactoring.md` → P4 (names reveal design) + `references/quality-persistence.md` → P9 (don't build on filesystem assumptions); sibling memory `feedback_consumer_path_drift_before_silent_claim` (universal)
+
+---
+
+### EC-21: Documented log/event triplet fields must derive from a single source — never independent optional spreads
+
+**Convention:** When a log line or event payload documents a forensic-replay triplet (or N-tuple) of fields that MUST appear together — e.g. `(promptSha256, observerPromptSource, observerPromptVersion)` for observer invocation, `(sessionId, sessionGroupId, role)` for EC-9 — the producer MUST construct them from a single source-of-truth artifact or capture them through a single discriminated tuple shape. Independent optional spread idioms (`...(x !== undefined && { x: ... }), ...(y !== undefined && { y: ... })`) are forbidden because they let half the triplet ship while the other half silently drops; the documented contract is asserted at JSDoc level but unenforced at runtime. The CR-1 / CR-13 incident at `observer-attribution.ts:formatObserverInvocationLog` shipped `observerPromptSource` without `observerPromptSourceLabel` for every restart-recovered group because the orchestrator's reconstruction path only captured one of the two — type-system accepted it, contract was silently violated.
+**Origin:** Council Review 2026-05-15-1015 Backend P2-3 + Fowler P2 + Hunt P1 (CR-1 multi-expert convergence)
+**Principle:** `references/quality-backend.md` → P8 (catch typing as `unknown`, narrow explicitly) + `references/refactoring.md` → P5 (Primitive Obsession); sibling memory `feedback_council_documented_contract_canary` (contract-in-JSDoc-only is doku-not-enforcement)
+
+---
+
+### EC-22: Typed-channel event emit paths require behavioural-assertion tests, not just typecheck pins
+
+**Convention:** Any code path that emits on a typed event channel (`companionBus.emit("X", ...)`), writes a structured log line (`log.warn("event-name", ...)` with stable schema), or fans out on a side-effect surface MUST have a behavioural test that subscribes to the channel/spies on the log and asserts the emit fired with the right payload shape. Tests that exercise only the happy-path return value while leaving the side-effect path covered by typecheck alone silently green-stamp a refactor that flips the conditional, inverts the emit order, or replaces the emit with a `noop`. Reference: the γ fix-pass added 3 P1 test rows for `session:relaunch-failed` (positive + negative-control), `council.observer-prompt.source-drift` (3 transition rows including no-change), and `council.observer-prompt.bundled-fallback` (shape pin + negative key assertion). Pair this with EC-19 for static-grep canaries when behavioural tests can't reach the path (initialisation-time code, type-system-only assertions). Same defect class as `feedback_call_site_presence_not_just_symbol_export` and `feedback_recovery_branch_reachability`.
+**Origin:** Council Review 2026-05-15-1015 Beck B1+B2+B3 (CR-4 — three side-effect emit paths shipped with zero behavioural assertion)
+**Principle:** `references/quality-testing.md` → Mutation resistance + structure-insensitive assertions; sibling memories `feedback_verify_test_bodies_not_just_names`, `feedback_call_site_presence_not_just_symbol_export`
+
+---
+
+### EC-23: Filesystem paths in log/event payloads MUST be `(present, depth)` pair, SHA, or sentinel — never raw path bytes
+
+**Convention:** Structured log lines and event payloads (companionBus events, EC-9 invocation logs, audit trails, monitoring fanout) MUST NOT contain raw absolute filesystem path strings on production code paths. Allowed shapes: `(present: boolean, depth: number)` integer pair, SHA-256 hex of the path, or a sentinel token like `<bundled:observer-system-vN>`. Raw paths leak operator topology (username inside `/home/X/`, project name inside `/Users/X/work/<repo>/`, container internals) if logs egress to a shared sink (managed Loggly, multi-tenant Honeycomb, screen-shared debug session). Apply transitively: if a path bytes enters via `Error.message`, `Error.cause.path`, or wrapper construction, redact at the boundary — `wrapFsError` in `observer-prompt.ts` is the reference (operation + code only; cause preserved but JSDoc warns consumers must redact `.path`/`.dest` before serialising). EC-23 is the egress sibling of EC-7 (filesystem-access predicates inline resolution) — together they bound both ingress and egress of path bytes.
+**Origin:** Council Review 2026-05-15-1015 Hunt P1 + Fowler P2 + Backend P2-5 (CR-1 multi-expert convergence) + Hunt P2 (CR-7 — wrapFsError echoed path bytes into Error.message)
+**Principle:** `references/security.md` → P3 (minimise state / `console.log` of bodies) + P9 (assume breach — stack traces in error responses); sibling memory `feedback_format_transformation_validation` (universal — format-aware redaction at the wrapper boundary)
+
+---
+
+### EC-24: Council subagent prompts live in the shared `_council-experts/` catalog, named by ID — never inlined in consumer SKILL.md
+
+**Convention:** Consumer skills (`council-plan`, `council-plan-aura`, `council-review`, `council-review-aura`) MUST reference subagent prompts by expert ID via a `### Council panel` section listing `- <id>` entries. The prompt body for each (expert, phase) pair lives at `~/.claude/skills/_council-experts/<id>/<phase>.md` and is consumed verbatim at dispatch time (with the brief's domain-file list substituted into the `[list ONLY <X>'s domain files]` placeholder). Inline `### Subagent N: <Name>` blocks in SKILL.md are forbidden — `verify-catalog.sh` (canary C1 in `_council-experts/.verify/`) fails on any reappearance. Expert IDs MUST match `^[a-z][a-z0-9-]{1,31}$` (canary C3); catalog files MUST NOT be symlinks (canary C4); catalog data files MUST be mode 644 (canary C5). Byte-identity between current catalog and the baseline pre-refactor inline blocks is asserted by `verify-panels.py` (AC-3.2 contract from `specs/council-experts-catalog.md`).
+**Origin:** Council Review β 2026-05-15 (catalog refactor) — Fowler (structure), Beck (verifiability), Hunt (defences). Memory entry: `feedback_shared_global_infra_refactor_requires_dedicated_window` (pre-flight checklist for shared `~/.claude/skills/` infra).
+**Principle:** `references/refactoring.md` → P4 (names reveal design) + `references/security.md` → P3 (filesystem-string injection); spec `specs/council-experts-catalog.md` AC-1/AC-3/AC-5
+
+---

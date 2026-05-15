@@ -12,6 +12,7 @@
 import { randomUUID } from "node:crypto";
 import type { ServerWebSocket } from "bun";
 import type { IBackendAdapter } from "./backend-adapter.js";
+import type { IdleTimerProbe } from "./idle-timer-manager.js";
 import type {
   BrowserIncomingMessage,
   BrowserOutgoingMessage,
@@ -131,10 +132,7 @@ export class ClaudeAdapter implements IBackendAdapter {
   //      sticky token so the next idle re-armament starts clean.
   // Null in unit tests that don't exercise auto-proceed (default-safe:
   // gate falls open, terminator no-ops).
-  private idleTimerProbe: {
-    isSyntheticTurnInFlight(sessionId: string): boolean;
-    noteTerminalResultFrame(sessionId: string): void;
-  } | null;
+  private idleTimerProbe: IdleTimerProbe | null;
 
   private protocolDriftSeen = new Set<string>();
   private parseErrorSeen = new Set<string>();
@@ -192,10 +190,7 @@ export class ClaudeAdapter implements IBackendAdapter {
     opts?: {
       recorder?: RecorderManager | null;
       onActivityUpdate?: () => void;
-      idleTimerProbe?: {
-        isSyntheticTurnInFlight(sessionId: string): boolean;
-        noteTerminalResultFrame(sessionId: string): void;
-      } | null;
+      idleTimerProbe?: IdleTimerProbe | null;
     },
   ) {
     this.sessionId = sessionId;
@@ -254,6 +249,14 @@ export class ClaudeAdapter implements IBackendAdapter {
     // Mirror reset for the orchestrator-half. See `observerTurnState`
     // comment immediately above; same socket-bound semantics.
     this.orchestratorTurnState = { kind: "awaiting-input", blockedByStop: false };
+    // Council Review #13 — mid-flap cleanup: clear pendingControlRequests
+    // so unresolved Promise resolvers from the now-dead socket don't leak
+    // into the next attach. `disconnect()` already clears this (line 283);
+    // detachWebSocket is the WS-close-event path that bypassed it. Without
+    // this, a flap with in-flight control requests can wedge memory plus
+    // leave the next attach's caller waiting on a resolver that will
+    // never fire.
+    this.pendingControlRequests.clear();
     this.disconnectCb?.();
   }
 

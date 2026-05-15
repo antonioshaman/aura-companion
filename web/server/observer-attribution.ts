@@ -143,6 +143,30 @@ export interface ObserverInvocationLogEntryInput {
   observerCliVersion: string;
   /** SHA-256 of the observer system-prompt artifact at invocation time. Forensic re-run. */
   promptSha256: string;
+  /**
+   * Provenance of the observer system-prompt at invocation time:
+   * - `"workspace"` — loaded from `<cwd>/.council/prompts/observer-system.md`
+   * - `"bundled"` — workspace file absent (ENOENT); the in-repo default was used
+   *
+   * Council Review 2026-05-15-0820 P3 #15 / Willison W1 + Council Plan
+   * Bug B Cleanup Task 12: forensic replay needs the triplet (sha256 +
+   * source + sourceLabel) to reconstruct WHICH loader path served the
+   * prompt at this invocation. SHA alone collides when a workspace
+   * copies the bundled body verbatim; the source/label discriminates
+   * the policy intent.
+   *
+   * Optional for backwards compatibility — older recorder entries may
+   * not carry it; readers tolerate `undefined` as "unknown provenance".
+   */
+  observerPromptSource?: "workspace" | "bundled";
+  /**
+   * Schema version of the observer prompt at invocation time. Council
+   * Review 2026-05-15-1015 CR-13 (Willison W1): forensic-replay needs
+   * the version to distinguish v1 vs v2 observer behaviour across the
+   * recording corpus — sha+source alone collide when the artifact body
+   * was the same but the schema-version contract evolved.
+   */
+  observerPromptVersion?: number;
 }
 
 export interface ObserverInvocationLogEntry extends ObserverInvocationLogEntryInput {
@@ -175,15 +199,45 @@ export function formatObserverInvocationLog(
     stopCountRaw: clampCount(input.stopCountRaw),
     stopCountGrounded: clampCount(input.stopCountGrounded),
     downgradeCount: clampCount(input.downgradeCount),
-    latencyMs: clampCount(input.latencyMs),
+    latencyMs: clampLatencyMs(input.latencyMs),
     observerProvider: input.observerProvider,
     observerModel: input.observerModel,
     observerCliVersion: input.observerCliVersion,
     promptSha256: input.promptSha256,
+    ...(input.observerPromptSource !== undefined && {
+      observerPromptSource: input.observerPromptSource,
+    }),
+    ...(input.observerPromptVersion !== undefined && {
+      observerPromptVersion: input.observerPromptVersion,
+    }),
   };
 }
 
 function clampCount(n: number): number {
   if (typeof n !== "number" || !Number.isFinite(n) || n < 0) return 0;
+  return Math.floor(n);
+}
+
+/**
+ * Latency clamp — distinct from `clampCount` because zero latency on a
+ * `result` frame is structurally impossible. A negative input indicates
+ * clock skew (NTP step, `Date.now()` going backwards) and should surface
+ * as a forensic signal rather than be silently floored to 0 (which would
+ * masquerade as "instant response" in latency dashboards).
+ *
+ * Council Review 2026-05-15-1015 CR-18 (Backend P3-3): the prior shared
+ * `clampCount` was used for both counts and latency — counts SHOULD floor
+ * negatives to 0 (a missing field is a 0-count), but latency should not.
+ */
+function clampLatencyMs(n: number): number {
+  if (typeof n !== "number" || !Number.isFinite(n)) return 0;
+  if (n < 0) {
+    // Surface the anomaly but don't poison aggregation with a negative
+    // number that downstream `SUM()` queries would mis-add.
+    console.warn(
+      `[observer-attribution] negative latency observed (${n}ms) — clock skew or Date.now() inversion; clamping to 0`,
+    );
+    return 0;
+  }
   return Math.floor(n);
 }

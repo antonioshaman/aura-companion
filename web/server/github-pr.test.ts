@@ -1,5 +1,18 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+// ─── Stub Bun.spawn for vitest (runs under Node, not Bun) ───────────────────
+// `fetchPRInfoAsync` + `getRepoSlugAsync` use `Bun.spawn`; node lacks it.
+// Tests below spy on `Bun.spawn` via `vi.spyOn` and provide per-call return
+// values — the default identity here is a no-op throw, ensuring any
+// un-mocked call surfaces as an error rather than a hang.
+if (typeof (globalThis as { Bun?: unknown }).Bun === "undefined") {
+  (globalThis as { Bun: unknown }).Bun = {
+    spawn: () => {
+      throw new Error("Bun.spawn not mocked in test");
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Mocks
 // ---------------------------------------------------------------------------
@@ -347,8 +360,8 @@ describe("fetchPRInfo", () => {
   it("returns parsed PR info on success", async () => {
     // which gh + gh repo view use execSync; gh api graphql uses execFileSync
     mockExecSync
-      .mockReturnValueOnce("/opt/homebrew/bin/gh")       // which gh
-      .mockReturnValueOnce("The-Vibe-Company/companion"); // gh repo view
+      .mockReturnValueOnce("/opt/homebrew/bin/gh")                                  // which gh
+      .mockReturnValueOnce("git@github.com:The-Vibe-Company/companion.git");        // git remote get-url origin
     mockExecFileSync
       .mockReturnValueOnce(JSON.stringify(makeGraphQLResponse())); // gh api graphql
 
@@ -370,7 +383,7 @@ describe("fetchPRInfo", () => {
   it("returns null when graphql query fails", async () => {
     mockExecSync
       .mockReturnValueOnce("/opt/homebrew/bin/gh")       // which gh
-      .mockReturnValueOnce("owner/repo");                // gh repo view
+      .mockReturnValueOnce("git@github.com:owner/repo.git");                // gh repo view
     mockExecFileSync
       .mockImplementationOnce(() => { throw new Error("timeout"); }); // gh api graphql
 
@@ -382,7 +395,7 @@ describe("fetchPRInfo", () => {
     const emptyResponse = { data: { repository: { pullRequests: { nodes: [] } } } };
     mockExecSync
       .mockReturnValueOnce("/opt/homebrew/bin/gh")
-      .mockReturnValueOnce("owner/repo");
+      .mockReturnValueOnce("git@github.com:owner/repo.git");
     mockExecFileSync
       .mockReturnValueOnce(JSON.stringify(emptyResponse));
 
@@ -393,7 +406,7 @@ describe("fetchPRInfo", () => {
   it("caches results within TTL", async () => {
     mockExecSync
       .mockReturnValueOnce("/opt/homebrew/bin/gh")
-      .mockReturnValueOnce("owner/repo");
+      .mockReturnValueOnce("git@github.com:owner/repo.git");
     mockExecFileSync
       .mockReturnValueOnce(JSON.stringify(makeGraphQLResponse()));
 
@@ -409,12 +422,183 @@ describe("fetchPRInfo", () => {
   it("returns null for malformed JSON response", async () => {
     mockExecSync
       .mockReturnValueOnce("/opt/homebrew/bin/gh")
-      .mockReturnValueOnce("owner/repo");
+      .mockReturnValueOnce("git@github.com:owner/repo.git");
     mockExecFileSync
       .mockReturnValueOnce("NOT VALID JSON{{{");
 
     const result = await mod.fetchPRInfo("/project", "main");
     expect(result).toBeNull();
+  });
+});
+
+// ===========================================================================
+// fetchPRInfoAsync — Bun.spawn-driven path (coverage gate for github-pr.ts)
+// ===========================================================================
+//
+// The async variant mirrors `fetchPRInfo` but uses `Bun.spawn` instead of
+// `node:child_process` so the call doesn't block the event loop. Mocking
+// Bun.spawn requires stubbing the global; we factory-build a fake proc
+// matching the subset of the Bun.Subprocess interface the code touches
+// (`exited`, `stdout`, `kill`).
+
+interface FakeProcInit {
+  exitCode: number;
+  stdout?: string;
+}
+
+function makeFakeProc(init: FakeProcInit) {
+  return {
+    pid: 999,
+    exited: Promise.resolve(init.exitCode),
+    stdout: new ReadableStream({
+      start(controller) {
+        if (init.stdout !== undefined) {
+          controller.enqueue(new TextEncoder().encode(init.stdout));
+        }
+        controller.close();
+      },
+    }),
+    kill: vi.fn(),
+  };
+}
+
+describe("fetchPRInfoAsync (Bun.spawn-driven path)", () => {
+  let bunSpawnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    // Default: `which gh` returns a path so isGhAvailable caches true.
+    mockExecSync.mockReturnValueOnce("/opt/homebrew/bin/gh");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    bunSpawnSpy = vi.spyOn(Bun, "spawn" as never) as any;
+    // Spy on the global persists across tests because the Bun stub is
+    // module-scope. Explicit reset purges call history + queued returns
+    // so each test starts at zero.
+    bunSpawnSpy.mockReset();
+  });
+
+  it("returns null when gh is not available", async () => {
+    mockExecSync.mockReset();
+    mockExecSync.mockImplementation(() => { throw new Error("not found"); });
+    const result = await mod.fetchPRInfoAsync("/some/path", "main");
+    expect(result).toBeNull();
+    expect(bunSpawnSpy).not.toHaveBeenCalled();
+  });
+
+  it("returns parsed PR info on success", async () => {
+    bunSpawnSpy
+      // First Bun.spawn call: `git remote get-url origin` for slug resolution
+      .mockReturnValueOnce(makeFakeProc({
+        exitCode: 0,
+        stdout: "git@github.com:owner/repo.git\n",
+      }) as never)
+      // Second Bun.spawn call: `gh api graphql` for the PR query
+      .mockReturnValueOnce(makeFakeProc({
+        exitCode: 0,
+        stdout: JSON.stringify(makeGraphQLResponse()),
+      }) as never);
+
+    const result = await mod.fetchPRInfoAsync("/project", "feat/dark-mode");
+    expect(result).not.toBeNull();
+    expect(result!.number).toBe(162);
+    expect(result!.state).toBe("OPEN");
+    expect(bunSpawnSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns null when repo slug cannot be resolved (git remote fails)", async () => {
+    bunSpawnSpy.mockReturnValueOnce(makeFakeProc({ exitCode: 1 }) as never);
+    const result = await mod.fetchPRInfoAsync("/not-a-repo", "main");
+    expect(result).toBeNull();
+  });
+
+  it("returns null when slug parser produces no owner/name (empty remote url)", async () => {
+    bunSpawnSpy.mockReturnValueOnce(makeFakeProc({ exitCode: 0, stdout: "\n" }) as never);
+    const result = await mod.fetchPRInfoAsync("/weird-repo", "main");
+    expect(result).toBeNull();
+  });
+
+  it("returns null when gh api graphql exits non-zero", async () => {
+    bunSpawnSpy
+      .mockReturnValueOnce(makeFakeProc({
+        exitCode: 0,
+        stdout: "git@github.com:owner/repo.git",
+      }) as never)
+      .mockReturnValueOnce(makeFakeProc({ exitCode: 1, stdout: "" }) as never);
+
+    const result = await mod.fetchPRInfoAsync("/project", "main");
+    expect(result).toBeNull();
+  });
+
+  it("returns null when gh api graphql stdout is malformed JSON", async () => {
+    bunSpawnSpy
+      .mockReturnValueOnce(makeFakeProc({
+        exitCode: 0,
+        stdout: "git@github.com:owner/repo.git",
+      }) as never)
+      .mockReturnValueOnce(makeFakeProc({
+        exitCode: 0,
+        stdout: "NOT VALID JSON{{{",
+      }) as never);
+
+    const result = await mod.fetchPRInfoAsync("/project", "main");
+    expect(result).toBeNull();
+  });
+
+  it("caches results within the adaptive TTL window", async () => {
+    bunSpawnSpy
+      .mockReturnValueOnce(makeFakeProc({
+        exitCode: 0,
+        stdout: "git@github.com:owner/repo.git",
+      }) as never)
+      .mockReturnValueOnce(makeFakeProc({
+        exitCode: 0,
+        stdout: JSON.stringify(makeGraphQLResponse()),
+      }) as never);
+
+    const first = await mod.fetchPRInfoAsync("/project", "feat/cached-async");
+    const second = await mod.fetchPRInfoAsync("/project", "feat/cached-async");
+
+    expect(first).toEqual(second);
+    // Slug-fetch (1) + graphql (1) = 2 calls. Second invocation hits cache,
+    // no additional Bun.spawn dispatch.
+    expect(bunSpawnSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns null and caches the null when no PR matches the branch", async () => {
+    const emptyResponse = { data: { repository: { pullRequests: { nodes: [] } } } };
+    bunSpawnSpy
+      .mockReturnValueOnce(makeFakeProc({
+        exitCode: 0,
+        stdout: "git@github.com:owner/repo.git",
+      }) as never)
+      .mockReturnValueOnce(makeFakeProc({
+        exitCode: 0,
+        stdout: JSON.stringify(emptyResponse),
+      }) as never);
+
+    const result = await mod.fetchPRInfoAsync("/project", "no-pr-branch");
+    expect(result).toBeNull();
+  });
+
+  it("propagates exception path: Bun.spawn throws synchronously", async () => {
+    bunSpawnSpy
+      .mockReturnValueOnce(makeFakeProc({
+        exitCode: 0,
+        stdout: "git@github.com:owner/repo.git",
+      }) as never)
+      .mockImplementationOnce((() => {
+        throw new Error("spawn ENOENT");
+      }) as never);
+    const result = await mod.fetchPRInfoAsync("/project", "main");
+    expect(result).toBeNull();
+  });
+});
+
+// ===========================================================================
+// _clearCaches — exercise the test-only helper to close coverage on l.162
+// ===========================================================================
+describe("_clearCaches", () => {
+  it("resets module-level caches without throwing", () => {
+    expect(() => mod._clearCaches()).not.toThrow();
   });
 });
 
@@ -494,5 +678,116 @@ describe("computeAdaptiveTTL", () => {
       reviewDecision: "CHANGES_REQUESTED",
       checksSummary: { total: 3, success: 1, failure: 0, pending: 2 },
     }))).toBe(10_000);
+  });
+});
+
+// ─── parseGitRemoteOriginSlug — PR display fix 2026-05-15 ───────────────────
+//
+// The PR-display bug: Aura sidebar was showing upstream's PRs on a forked
+// workspace because `gh repo view` defaulted to upstream. `getRepoSlug` now
+// parses `git remote get-url origin` directly through this pure helper.
+// Tests pin the parser against canonical GitHub remote-URL shapes plus
+// negative cases.
+
+describe("parseGitRemoteOriginSlug", () => {
+  it("parses SSH form (git@github.com:owner/name.git)", () => {
+    expect(mod.parseGitRemoteOriginSlug("git@github.com:antonioshaman/aura-companion.git")).toBe(
+      "antonioshaman/aura-companion",
+    );
+  });
+
+  it("parses HTTPS form (https://github.com/owner/name.git)", () => {
+    expect(mod.parseGitRemoteOriginSlug("https://github.com/antonioshaman/aura-companion.git")).toBe(
+      "antonioshaman/aura-companion",
+    );
+  });
+
+  it("parses HTTPS form without .git suffix", () => {
+    expect(mod.parseGitRemoteOriginSlug("https://github.com/antonioshaman/aura-companion")).toBe(
+      "antonioshaman/aura-companion",
+    );
+  });
+
+  it("parses ssh:// protocol form (ssh://git@github.com/owner/name.git)", () => {
+    expect(mod.parseGitRemoteOriginSlug("ssh://git@github.com/antonioshaman/aura-companion.git")).toBe(
+      "antonioshaman/aura-companion",
+    );
+  });
+
+  it("trims surrounding whitespace and trailing newlines", () => {
+    expect(mod.parseGitRemoteOriginSlug("  git@github.com:owner/name.git\n")).toBe("owner/name");
+  });
+
+  it("returns null on empty string", () => {
+    expect(mod.parseGitRemoteOriginSlug("")).toBeNull();
+  });
+
+  it("returns null on non-string input", () => {
+    expect(mod.parseGitRemoteOriginSlug(null as unknown as string)).toBeNull();
+    expect(mod.parseGitRemoteOriginSlug(undefined as unknown as string)).toBeNull();
+  });
+
+  it("returns null on malformed URL with no owner/name segment", () => {
+    expect(mod.parseGitRemoteOriginSlug("not-a-url")).toBeNull();
+    expect(mod.parseGitRemoteOriginSlug("https://github.com/")).toBeNull();
+  });
+
+  it("distinguishes upstream slug from origin slug — parser is deterministic on input", () => {
+    // The bug-class assertion: parser is pure on its input. The fix is at
+    // the CALL SITE (`getRepoSlug` runs `git remote get-url origin`).
+    // Pinning that both slugs parse correctly proves the parser doesn't
+    // collapse to whichever GitHub host it sees.
+    expect(mod.parseGitRemoteOriginSlug("git@github.com:The-Vibe-Company/companion.git")).toBe(
+      "The-Vibe-Company/companion",
+    );
+    expect(mod.parseGitRemoteOriginSlug("git@github.com:antonioshaman/aura-companion.git")).toBe(
+      "antonioshaman/aura-companion",
+    );
+  });
+});
+
+// ─── getRepoSlug — call-site canary ─────────────────────────────────────────
+
+describe("getRepoSlug — call-site canary (uses git remote, not gh repo view)", () => {
+  it("invokes `git remote get-url origin`, NOT `gh repo view`", async () => {
+    // The PR-display bug was that the prior implementation shelled out to
+    // `gh repo view --json nameWithOwner --jq .nameWithOwner`, which
+    // delegates to gh's default-repo resolution (frequently upstream on a
+    // forked workspace). The fix routes through git directly. This canary
+    // pins the call site: both sync + async helpers must invoke
+    // `git remote get-url origin` and NOT `gh repo view`.
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const src = fs.readFileSync(path.join(__dirname, "github-pr.ts"), "utf-8");
+
+    function extractFunctionBody(anchor: RegExp): string | null {
+      const match = anchor.exec(src);
+      if (!match) return null;
+      const openIdx = src.indexOf("{", match.index);
+      if (openIdx < 0) return null;
+      let depth = 1;
+      for (let i = openIdx + 1; i < src.length; i++) {
+        if (src[i] === "{") depth++;
+        else if (src[i] === "}") {
+          depth--;
+          if (depth === 0) return src.slice(openIdx, i + 1);
+        }
+      }
+      return null;
+    }
+
+    const syncBody = extractFunctionBody(/\bfunction\s+getRepoSlug\s*\([^)]*\)\s*:?\s*[^{]*\{/);
+    const asyncBody = extractFunctionBody(/\basync\s+function\s+getRepoSlugAsync\s*\([^)]*\)\s*:?\s*[^{]*\{/);
+    expect(syncBody, "getRepoSlug body must be locatable").not.toBeNull();
+    expect(asyncBody, "getRepoSlugAsync body must be locatable").not.toBeNull();
+
+    // Positive: both must invoke `git remote get-url origin`.
+    expect(syncBody!).toMatch(/git\s+remote\s+get-url\s+origin/);
+    expect(asyncBody!).toMatch(/"git",\s*"remote",\s*"get-url",\s*"origin"/);
+
+    // Negative: NEITHER body may shell out to `gh repo view` — that's the
+    // regression path that returns upstream's slug on a fork.
+    expect(syncBody!).not.toMatch(/gh\s+repo\s+view/);
+    expect(asyncBody!).not.toMatch(/"gh",\s*"repo",\s*"view"/);
   });
 });

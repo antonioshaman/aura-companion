@@ -24,6 +24,19 @@ export interface CompanionEventMap {
    * `reconnecting` listeners short-circuit to `reconnect_failed` rather
    * than wait out the full grace window for an outcome already decided
    * (PLAN Task 5, Subprocess council recommendation).
+   *
+   * **CONTRACT: relaunch-only.** This channel fires from:
+   *   - `cli-launcher.ts:relaunch()` — on observer-prompt-config throw,
+   *     workspace↔bundled drift refusal (CR-17), or spawn failure.
+   *   - `session-orchestrator.ts:handleAutoRelaunch()` — on retry-budget
+   *     exhaustion OR launcher failures the launcher didn't already emit.
+   *
+   * Cold-start (`cli-launcher.ts:launch()`) does NOT emit on this channel
+   * — failures surface as REST 503 via the orchestrator's spawn rollback.
+   * Council Review 2026-05-15-1015 CR-8: a static-grep canary in
+   * `cli-launcher.test.ts` asserts emit-site confinement; a future
+   * refactor that fires this channel from `launch()` or any other site
+   * will trip the canary so we re-examine the contract.
    */
   "session:relaunch-failed": { sessionId: string; reason: string };
 

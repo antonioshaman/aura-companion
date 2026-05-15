@@ -285,6 +285,18 @@ interface CouncilGroupMeta {
   pairing: string;
   /** Sha256 of the observer prompt artifact at spawn time, captured for invocation-log forensic re-run. */
   observerPromptSha256?: string;
+  /**
+   * Provenance of the observer prompt at spawn time (workspace vs bundled).
+   * Council Review 2026-05-15-1015 CR-1: the path-shaped label was dropped
+   * from log egress because it disclosed operator topology on every
+   * invocation (multi-expert convergence — Hunt P1, Fowler P2, Backend P2-5).
+   * Source discriminator + sha256 carry sufficient forensic-replay value;
+   * label stays in-memory only on the SdkSessionInfo's artifact.
+   */
+  observerPromptSource?: "workspace" | "bundled";
+  /** Schema version parsed from the observer prompt's header at spawn time
+   *  (CR-13, forward-compat for v2 migration). */
+  observerPromptVersion?: number;
   /** Wallclock (ms) when the group was created — used to compute invocation latency. */
   createdAt: number;
   /** Wallclock (ms) when the most recent checkpoint reached this orchestrator — used to compute observer wake-to-emit latency. */
@@ -1057,6 +1069,7 @@ export class SessionOrchestrator {
         observerSessionId,
         pairing,
         observerPromptSha256: observer?.observerPromptSha256,
+        observerPromptSource: observer?.observerPromptSource,
         createdAt: (orchestrator ?? observer)?.createdAt ?? Date.now(),
         lastCheckpointReceivedAt: null,
       });
@@ -2112,6 +2125,8 @@ export class SessionOrchestrator {
             observerModel: payload.observer_model,
             observerCliVersion: payload.observer_cli_version,
             promptSha256: meta.observerPromptSha256 ?? "",
+            observerPromptSource: meta.observerPromptSource,
+            observerPromptVersion: meta.observerPromptVersion,
           }),
         });
       }
@@ -2203,9 +2218,21 @@ export class SessionOrchestrator {
 
     const coordinator = this.getOrCreateCoordinatorSync();
 
+    // Council Plan Bug B Review P1 #2 — refuse to default to
+    // `process.cwd()` here. Council Mode requires an explicit workspace
+    // cwd so the observer prompt resolution gets a real workspace path
+    // (not the server's `/app` under Docker). Without this throw, the
+    // upstream `process.cwd()` default silently triggered the bundled-
+    // fallback path with `reason: "ENOENT"` — the distinct
+    // `no-workspace-cwd` branch was structurally unreachable.
+    if (!req.base.cwd || typeof req.base.cwd !== "string" || req.base.cwd.length === 0) {
+      throw new Error(
+        "createCouncilGroup: explicit cwd is required for Council Mode session creation; refusing to fall back to process.cwd()",
+      );
+    }
     try {
       const group = await coordinator.createGroup({
-        cwd: req.base.cwd ?? process.cwd(),
+        cwd: req.base.cwd,
         primary: parsed.primary,
         observer: parsed.observer,
         model: req.base.model,
@@ -2228,6 +2255,8 @@ export class SessionOrchestrator {
         observerSessionId: group.observer.sessionId,
         pairing: pairingLabel,
         observerPromptSha256: observerInfo.observerPromptSha256,
+        observerPromptSource: observerInfo.observerPromptSource,
+        observerPromptVersion: observerInfo.observerPromptVersion,
         createdAt: Date.now(),
         lastCheckpointReceivedAt: null,
       });
@@ -2929,26 +2958,47 @@ export class SessionOrchestrator {
       if (session?.stateMachine) {
         session.stateMachine.transition("starting", "relaunch_initiated");
       }
+      // Council Review 2026-05-15-1015 CR-12 (Subprocess P2): mark this
+      // session intentional BEFORE the launcher's SIGTERM on the old proc.
+      // Without this, the old proc's `session:exited` event arms the
+      // council reconnect timer (45s grace), then the new proc's spawn
+      // clears it — producing a transient `reconnecting → active` UI
+      // flicker on every relaunch. Marking intentional first short-circuits
+      // the listener at session-orchestrator.ts:1333. ALWAYS clear in the
+      // finally — failure paths must not leave the mark in place because
+      // `scheduleProactiveRelaunch` reads `intentionalKills` to skip
+      // proactive recovery and a stale mark would lock keepalive out.
+      this.intentionalKills.add(sessionId);
       try {
         const result = await this.launcher.relaunch(sessionId);
         if (!result.ok && result.error) {
           this.wsBridge.broadcastToSession(sessionId, { type: "error", message: result.error });
-          // PLAN Task 5: deterministic spawn failure — let council reconnect
-          // listeners short-circuit immediately. `ok=false` without `error`
-          // is the "spawn happened but maybe needs another attempt" branch;
-          // we keep that silent so the retry budget isn't burned.
-          companionBus.emit("session:relaunch-failed", { sessionId, reason: result.error });
+          // Council Review 2026-05-15-1015 CR-2 + CR-17: errors the
+          // launcher emitted on the typed channel itself — skip the
+          // duplicate orchestrator emit + rollback the retry counter
+          // (deterministic, retrying cannot fix). Includes:
+          // - `observer spawn config load failed` (CR-2)
+          // - `observer-prompt-source-drift-refused:` (CR-17 — workspace
+          //   ↔ bundled boundary requires operator ack via group restart)
+          const isLauncherEmittedFailure =
+            result.error.startsWith("observer spawn config load failed") ||
+            result.error.startsWith("observer-prompt-source-drift-refused:");
+          if (isLauncherEmittedFailure) {
+            this.autoRelaunchCounts.set(sessionId, count);
+          } else {
+            companionBus.emit("session:relaunch-failed", { sessionId, reason: result.error });
+          }
         } else if (result.ok) {
           metricsCollector.recordRelaunchSucceeded();
           this.autoRelaunchCounts.delete(sessionId);
           this.relaunchExhaustedNotified.delete(sessionId);
-          // Clear intentionalKills so future crashes can use proactive keepalive.
-          // After a successful relaunch, the session is alive again — any prior
-          // idle-kill intent no longer applies.
-          this.intentionalKills.delete(sessionId);
         }
         // ok=false without error: keep count to preserve the retry budget
       } finally {
+        // CR-12: clean up the intentional mark in ALL paths (success,
+        // failure, throw). Leaving it set on failure would block the
+        // next `scheduleProactiveRelaunch` indefinitely.
+        this.intentionalKills.delete(sessionId);
         setTimeout(() => this.relaunchingSet.delete(sessionId), RELAUNCH_COOLDOWN_MS);
       }
     } else {

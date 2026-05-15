@@ -146,9 +146,12 @@ export class CronScheduler {
       // Wait for CLI to connect, then send the prompt
       await this.waitForCLIConnection(sessionInfo.sessionId);
 
-      // Send the prompt with cron prefix for traceability
+      // Send the prompt with cron prefix for traceability.
+      // Council Review #12 (EC-16) — explicit "server:cron" origin so the
+      // bridge's userFrameObservers skip this frame (cron-driven turns
+      // aren't user activity).
       const fullPrompt = `[cron:${job.id} ${job.name}]\n\n${job.prompt}`;
-      this.wsBridge.injectUserMessage(sessionInfo.sessionId, fullPrompt);
+      this.wsBridge.injectUserMessage(sessionInfo.sessionId, fullPrompt, "server:cron");
 
       // Update job tracking
       cronStore.updateJob(jobId, {

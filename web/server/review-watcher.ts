@@ -28,8 +28,53 @@ const SEEN_LRU_CAP = 256;
  * the same checkpoint write to distinct paths — without it, the
  * `claude+codex` pairing collides under the debounce window and one
  * review is silently dropped (Persistence council review #5).
+ *
+ * Exported so agent harnesses, monitoring code, and external tools converge
+ * on the SAME source of truth instead of hardcoding the pattern in prompts
+ * or self-memory (Council Review 2026-05-15-0520 Prevention #5 / EC-20).
+ * Consumers MUST NOT redefine this regex locally — drift between consumer-
+ * side path expectations and producer-side reality is the
+ * `feedback_consumer_path_drift_before_silent_claim` failure class. Pair
+ * with {@link buildObserverReviewFilename} on the producer/writer side.
  */
-const REVIEW_FILE_PATTERN = /^[A-Za-z0-9_-][A-Za-z0-9_.\-]{0,63}-(claude|codex)-observer\.md$/;
+export const OBSERVER_REVIEW_FILE_PATTERN = /^[A-Za-z0-9_-][A-Za-z0-9_.\-]{0,63}-(claude|codex)-observer\.md$/;
+
+/**
+ * Build the canonical observer-review filename for a given (phase, provider).
+ * The single source of truth for the producer side; mirrors
+ * {@link OBSERVER_REVIEW_FILE_PATTERN} on the consumer side.
+ *
+ * `phase` must match the phase-token rules enforced by `isValidPhase` in
+ * `council-types.ts` (bounded, A-Z/a-z/0-9/_/-/. only). Length is bounded
+ * to 64 chars by `OBSERVER_REVIEW_FILE_PATTERN`; this helper enforces the
+ * same ceiling.
+ *
+ * Throws on invalid input rather than producing a silently-malformed name —
+ * a writer that can't construct a valid filename has lost the contract and
+ * the failure must surface, not be papered over with a fallback path.
+ */
+export function buildObserverReviewFilename(
+  phase: string,
+  provider: "claude" | "codex",
+): string {
+  if (typeof phase !== "string" || phase.length === 0 || phase.length > 64) {
+    throw new RangeError(
+      `buildObserverReviewFilename: phase must be a non-empty string ≤64 chars (got ${typeof phase} length ${(phase as string)?.length})`,
+    );
+  }
+  if (provider !== "claude" && provider !== "codex") {
+    throw new RangeError(
+      `buildObserverReviewFilename: provider must be "claude" or "codex" (got ${JSON.stringify(provider)})`,
+    );
+  }
+  const filename = `${phase}-${provider}-observer.md`;
+  if (!OBSERVER_REVIEW_FILE_PATTERN.test(filename)) {
+    throw new RangeError(
+      `buildObserverReviewFilename: constructed name ${JSON.stringify(filename)} fails OBSERVER_REVIEW_FILE_PATTERN — phase token has illegal characters`,
+    );
+  }
+  return filename;
+}
 
 export type ReviewDropReason =
   | "invalid-schema"
@@ -93,7 +138,7 @@ export async function watchReviews(opts: ReviewWatcherOptions): Promise<void> {
       // pattern under `.md` is a legitimate operator misconfig the
       // observer should learn about.
       if (!file.endsWith(".md")) continue;
-      if (!REVIEW_FILE_PATTERN.test(file)) {
+      if (!OBSERVER_REVIEW_FILE_PATTERN.test(file)) {
         onDropped("invalid-filename", file);
         continue;
       }

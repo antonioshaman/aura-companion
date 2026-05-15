@@ -33,7 +33,7 @@
     "dev:vite": "vite",
     "build": "vite build",
     "start": "NODE_ENV=production bun server/index.ts",
-    "prepublishOnly": "bun run build",
+    "prepublishOnly": "bun run build-observer-prompt-bundle && git diff --exit-code -- server/observer-prompt-bundled.ts && bun run build",
     "typecheck": "tsc --noEmit",
     "deadcode:check": "tsc --project tsconfig.deadcode.json",
     "dry:check": "jscpd src server --min-lines 20 --threshold 1.5 --reporters console --ignore \"**/*.test.ts,**/*.test.tsx,**/*.spec.ts,**/*.spec.tsx\"",
@@ -46,7 +46,8 @@
     "branding:dry": "bun scripts/apply-aura-branding.ts --root .. --dry-run",
     "drift:check": "bun scripts/aura-drift-check.ts",
     "drift:dry": "bun scripts/aura-drift-check.ts --dry-run",
-    "drift:pin": "bun scripts/aura-drift-check.ts --pin"
+    "drift:pin": "bun scripts/aura-drift-check.ts --pin",
+    "build-observer-prompt-bundle": "bun scripts/build-observer-prompt-bundle.ts"
   },
   "dependencies": {
     "@codemirror/lang-cpp": "^6.0.3",

@@ -25,6 +25,10 @@ import {
   type CheckpointPayload,
   type ObserverWakePayload,
 } from "./council-types.js";
+import {
+  BUNDLED_OBSERVER_PROMPT,
+  BUNDLED_OBSERVER_PROMPT_SHA256,
+} from "./observer-prompt-bundled.js";
 
 export const OBSERVER_PROMPT_SCHEMA_VERSION = 1 as const;
 
@@ -47,8 +51,17 @@ export interface ObserverPromptArtifact {
   body: string;
   /** SHA-256 of the body, hex-encoded. Used by the recorder to tag invocations. */
   sha256: string;
-  /** Absolute filesystem path the artifact was loaded from. Informational. */
-  sourcePath: string;
+  /**
+   * Informational label describing where the artifact came from.
+   *
+   * For workspace loads (via {@link loadObserverSystemPrompt}) this is the
+   * absolute filesystem path. For the bundled fallback it is the sentinel
+   * {@link BUNDLED_OBSERVER_PROMPT_SOURCE_LABEL} — NOT a path consumers
+   * can `dirname()` or `existsSync()` against. Renamed from `sourcePath`
+   * (Council Review 2026-05-15-0820 Fowler P3 #4 — the field carried two
+   * shapes and the path-name lied about the bundled variant).
+   */
+  sourceLabel: string;
 }
 
 /**
@@ -72,12 +85,24 @@ export function parseObserverPromptHeader(raw: string): number | null {
  *
  * Throws on missing file, oversize body, missing or unsupported header
  * version, body shorter than `OBSERVER_PROMPT_MIN_BODY_BYTES`. The throw
- * path is the contract — a silent fallback prompt would mean the model
- * loaded "something" that may not match the schema the rest of the
- * pipeline assumes.
+ * on missing-file is the contract AT THIS LEVEL — this function loads a
+ * specific file from disk; if the file isn't there, it throws.
+ *
+ * Fallback policy is the {@link resolveObserverSystemPrompt} resolver's
+ * concern — it composes this function for the workspace path, catches
+ * `code === "ENOENT"` only, and falls back to the bundled artifact
+ * through the SAME validator below (preserving the schema-mismatch
+ * guarantee the original anti-fallback design relied on). Every other
+ * fs error (EACCES, EISDIR, ELOOP) still propagates as the loud throw —
+ * fallback would silently mask "you mounted the workspace wrong."
  *
  * `sourcePath` must be absolute — relative paths are a misconfiguration
  * vector (relative to *what*? process cwd is unstable).
+ *
+ * Council Plan PLAN-aura-observer-prompt-bundled-fallback.md Task 11
+ * rewrote the prior anti-fallback wording — the schema-mismatch hazard
+ * is now mitigated at the resolver layer, not by refusing fallback
+ * everywhere.
  */
 export function loadObserverSystemPrompt(sourcePath: string): ObserverPromptArtifact {
   if (typeof sourcePath !== "string" || sourcePath.length === 0 || sourcePath.includes("\0")) {
@@ -88,21 +113,111 @@ export function loadObserverSystemPrompt(sourcePath: string): ObserverPromptArti
   }
 
   // Pre-check size via stat — avoids reading a multi-megabyte file just
-  // to reject it on the byte-count test below.
+  // to reject it on the byte-count test below. Council Review 2026-05-15-0820
+  // P2 #6 (D1): stamp `code` directly on the wrapped Error so the resolver
+  // discriminates ENOENT via a single named field, not a chain-walk. The
+  // cause stays attached for forensic depth.
   let size: number;
   try {
     size = statSync(sourcePath).size;
   } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
-    throw new Error(`observer-prompt: cannot stat ${sourcePath}: ${detail}`);
+    throw wrapFsError("stat workspace prompt", err);
   }
   if (size > OBSERVER_PROMPT_MAX_BYTES) {
     throw new Error(
-      `observer-prompt: ${sourcePath} is ${size} bytes, exceeds OBSERVER_PROMPT_MAX_BYTES (${OBSERVER_PROMPT_MAX_BYTES})`,
+      `observer-prompt: workspace prompt is ${size} bytes, exceeds OBSERVER_PROMPT_MAX_BYTES (${OBSERVER_PROMPT_MAX_BYTES})`,
     );
   }
 
-  const body = readFileSync(sourcePath, "utf-8");
+  // Council Plan Bug B Cleanup Task 1b: wrap readFileSync symmetrically.
+  // Prior shape was unwrapped — a stat-success-then-read-ENOENT race (file
+  // unlinked between stat and read, editor `:w` truncate-then-rename) threw
+  // an ENOENT whose `.code` lived directly on the error, not on a wrapper.
+  // Symmetric wrap means the resolver's `err.code === "ENOENT"` discriminator
+  // works identically for either fs call's failure (Persistence P3 #1).
+  let body: string;
+  try {
+    body = readFileSync(sourcePath, "utf-8");
+  } catch (err) {
+    throw wrapFsError("read workspace prompt", err);
+  }
+  return parseObserverSystemPromptBody(body, sourcePath);
+}
+
+/**
+ * Pure: wrap a node:fs error with an operation-name message AND stamp the
+ * underlying `code` (ENOENT, EACCES, EISDIR, ELOOP, ...) directly on the
+ * thrown wrapper so callers can discriminate via `err.code` without a
+ * chain-walk. Cause stays attached for forensic depth.
+ *
+ * Council Review 2026-05-15-0820 D1 (Fowler × Backend × Hunt convergent):
+ * the prior `(err as {cause?:unknown}).cause` + `(cause as {code?:unknown})?.code`
+ * pattern loses to drift the first time another layer wraps. One named
+ * field at the producer is one grep target.
+ *
+ * Council Review 2026-05-15-1015 CR-7 + CR-9 + CR-16:
+ * - Message carries operation + code only — NEVER a filesystem path. Raw
+ *   path bytes in `Error.message` flow through `session:relaunch-failed.reason`
+ *   into EC-9 group-lifecycle logs and leak operator topology on every
+ *   non-ENOENT failure (the (present, depth) hardening was bypassed via
+ *   the error channel).
+ * - Non-`Error` thrown values are handled defensively (`throw 42`,
+ *   `throw "boom"` are legal JS) and normalised so `cause` is always an
+ *   Error instance for consumers walking the chain.
+ * - SECURITY WARNING for downstream loggers: the `cause` field carries
+ *   the raw `node:fs` error, whose `.path` and `.dest` properties contain
+ *   the absolute workspace path verbatim. A pretty-printing logger that
+ *   serialises causes (`util.inspect({showHidden:true})`, structured-log
+ *   shims that walk `cause` chains) re-leaks operator topology with zero
+ *   diff in this file. Callers MUST redact `.path` and `.dest` from
+ *   `err.cause` before serialising to a shared log sink.
+ */
+function wrapFsError(operation: string, underlying: unknown): Error & { code?: string } {
+  const isObj = typeof underlying === "object" && underlying !== null;
+  const rawCode = isObj && "code" in underlying
+    ? (underlying as { code?: unknown }).code
+    : undefined;
+  const code = typeof rawCode === "string" ? rawCode : undefined;
+  const message = code
+    ? `observer-prompt: ${operation} failed (${code})`
+    : `observer-prompt: ${operation} failed`;
+  const normalisedCause = underlying instanceof Error
+    ? underlying
+    : new Error(String(underlying));
+  const wrapped = new Error(message, { cause: normalisedCause }) as Error & { code?: string };
+  if (code) wrapped.code = code;
+  return wrapped;
+}
+
+/**
+ * Exhaustiveness tripwire for the `"workspace" | "bundled"` source
+ * discriminator. Used at every branch that gates behaviour on the source
+ * field — if a future contributor adds a third source ("remote", "cache",
+ * etc.) the TypeScript compiler points them at every unhandled site.
+ *
+ * Council Review 2026-05-15-1015 CR-10 (Backend P2-4): the source union
+ * is referenced in 6+ places; without a `never` tripwire a third value
+ * would silently no-op the conditional branches.
+ */
+export function assertExhaustiveObserverPromptSource(s: never): never {
+  throw new Error(`unhandled observer prompt source: ${s as string}`);
+}
+
+/**
+ * Pure: validate an already-loaded prompt body against the artifact
+ * schema (header sentinel, byte-size ceiling, body-length floor) and
+ * return the typed artifact. Extracted from {@link loadObserverSystemPrompt}
+ * so the bundled-fallback path in {@link resolveObserverSystemPrompt}
+ * can reuse identical validation without a disk round-trip.
+ *
+ * `sourceLabel` is informational — embedded in error messages and on the
+ * returned artifact's `sourceLabel` field. For workspace artifacts it is
+ * the absolute filesystem path; for bundled it is the sentinel
+ * {@link BUNDLED_OBSERVER_PROMPT_SOURCE_LABEL}. Renamed from `sourcePath`
+ * (Council Review 2026-05-15-0820 Fowler P3 #4 — name lied about the
+ * bundled case).
+ */
+function parseObserverSystemPromptBody(body: string, sourceLabel: string): ObserverPromptArtifact {
   const byteLen = Buffer.byteLength(body, "utf8");
   if (byteLen > OBSERVER_PROMPT_MAX_BYTES) {
     throw new Error(
@@ -115,9 +230,17 @@ export function loadObserverSystemPrompt(sourcePath: string): ObserverPromptArti
     );
   }
 
+  // Council Review 2026-05-15-1015 CR-7: redact the `sourceLabel` from the
+  // thrown Error.message. On the workspace branch the label is the absolute
+  // path; embedding it leaks operator topology through `session:relaunch-failed.reason`
+  // → EC-9 group-lifecycle log. The artifact still carries `sourceLabel`
+  // on its own field for in-memory forensic use.
+  const sourceKind = sourceLabel === BUNDLED_OBSERVER_PROMPT_SOURCE_LABEL
+    ? "bundled artifact"
+    : "workspace prompt";
   const version = parseObserverPromptHeader(body);
   if (version === null) {
-    throw new Error(`observer-prompt: missing or malformed header in ${sourcePath} (expected '<!-- observer-system-prompt vN -->')`);
+    throw new Error(`observer-prompt: missing or malformed header in ${sourceKind} (expected '<!-- observer-system-prompt vN -->')`);
   }
   if (version !== OBSERVER_PROMPT_SCHEMA_VERSION) {
     throw new Error(
@@ -127,7 +250,111 @@ export function loadObserverSystemPrompt(sourcePath: string): ObserverPromptArti
 
   const sha256 = createHash("sha256").update(body, "utf8").digest("hex");
 
-  return { version, body, sha256, sourcePath };
+  return { version, body, sha256, sourceLabel };
+}
+
+/**
+ * Sentinel `sourceLabel` value used by {@link loadBundledObserverPromptValidated}
+ * when returning the bundled artifact. NOT a filesystem path — kept
+ * distinguishable from any plausible workspace path so consumers parsing
+ * `sourceLabel` know the artifact didn't come from disk.
+ *
+ * Council Review 2026-05-15-1015 CR-13 (Willison W2): derived from
+ * {@link OBSERVER_PROMPT_SCHEMA_VERSION} at module-load time so the
+ * embedded `vN` segment cannot lag a future v1→v2 schema bump. Prior
+ * shape was a static string literal `<bundled:observer-system-v1>` that
+ * required manual sync with three other places (the .md header, the
+ * SCHEMA_VERSION constant, the parser's equality gate).
+ */
+export const BUNDLED_OBSERVER_PROMPT_SOURCE_LABEL = `<bundled:observer-system-v${OBSERVER_PROMPT_SCHEMA_VERSION}>` as const;
+
+/** Artifact extended with a discriminator naming WHICH source produced it. */
+export interface ResolvedObserverPrompt extends ObserverPromptArtifact {
+  source: "workspace" | "bundled";
+}
+
+/**
+ * Load the bundled observer-prompt artifact, validated through the same
+ * schema gate as workspace artifacts. Returns a {@link ResolvedObserverPrompt}
+ * with `source: "bundled"` and the bundled sentinel as its `sourceLabel`.
+ *
+ * Council Review 2026-05-15-0820 P2 #4/#5 (D3): exposed as a direct API
+ * so callers that already know they want the bundled artifact (e.g., the
+ * "no workspace cwd" branch in spawn-config) call this helper directly
+ * instead of going through the workspace-path resolver with a synthetic
+ * sentinel path designed to trip ENOENT. That sentinel-path indirection
+ * was a control-flow-via-magic-string smell + a multi-tenant-host attack
+ * vector (Hunt P3 #2).
+ *
+ * The runtime SHA re-check stays — three-gate trichotomy (CI canary +
+ * test-time pin + runtime re-hash) catches distinct bundler-mutation
+ * failure modes (CRLF normalisation, minify-syntax string-literal
+ * mangling, template-literal preprocessing, npm pack/unpack line-ending
+ * shifts). The parser already computes the hash; this gate compares its
+ * output against the build-time-stamped constant — no double-hash work.
+ * Fowler reversed his own prior P3 #3 on Council Review 2026-05-15-0820;
+ * keep the gate but document the three failure-modes the comment now
+ * names explicitly.
+ */
+export function loadBundledObserverPromptValidated(): ResolvedObserverPrompt {
+  const bundled = parseObserverSystemPromptBody(
+    BUNDLED_OBSERVER_PROMPT,
+    BUNDLED_OBSERVER_PROMPT_SOURCE_LABEL,
+  );
+  // Three-gate trichotomy — TWO failure modes ((1) sha-vs-body integrity,
+  // (2) source-tree vs generator-output integrity) checked at THREE
+  // distinct lifecycle stages (Council Review 2026-05-15-1015 CR-22 /
+  // Willison W8 rewording):
+  // - CI canary: `bun run build-observer-prompt-bundle && git diff --exit-code`
+  //   targets failure mode (2) at commit time.
+  // - Test-time pin (`BUNDLED_OBSERVER_PROMPT_SHA256 === sha(body)`)
+  //   targets failure mode (1) at test time.
+  // - This runtime gate targets failure mode (1) at spawn time, catching
+  //   post-build mutation (Bun's --define, npm pack/unpack CRLF shifts,
+  //   future SDK that string-rewrites at import). Runs per-call by design —
+  //   module-load-time check would miss runtime template-literal
+  //   preprocessing.
+  if (bundled.sha256 !== BUNDLED_OBSERVER_PROMPT_SHA256) {
+    throw new Error(
+      `observer-prompt: bundled artifact SHA mismatch — computed ${bundled.sha256} vs stamped ${BUNDLED_OBSERVER_PROMPT_SHA256}`,
+    );
+  }
+  return { ...bundled, source: "bundled" };
+}
+
+/**
+ * Resolve the observer system-prompt artifact for a given workspace.
+ *
+ * Composes {@link loadObserverSystemPrompt} for the workspace path. On
+ * `code === "ENOENT"` ONLY, falls back to the bundled artifact via
+ * {@link loadBundledObserverPromptValidated}. Every other error
+ * propagates unchanged — EACCES, EISDIR, ELOOP, and any malformed-
+ * but-present artifact failure still throws, preserving the "explicit
+ * intent must surface" contract from the prior anti-fallback design.
+ *
+ * Council Review 2026-05-15-0820 P2 #6 (D1): discriminator reads
+ * `err.code` directly on the wrapped throw (stamped by
+ * {@link wrapFsError}), not via a chain-walk into `err.cause.code`.
+ * One named field, one grep target, immune to future re-wrapping.
+ *
+ * Returned artifact's `source` field discriminates `"workspace"` (the
+ * workspace file was loaded) from `"bundled"` (the workspace file was
+ * absent and the in-repo default was used).
+ *
+ * `workspacePath` must be absolute — the same constraint
+ * {@link loadObserverSystemPrompt} enforces.
+ */
+export function resolveObserverSystemPrompt(workspacePath: string): ResolvedObserverPrompt {
+  try {
+    const artifact = loadObserverSystemPrompt(workspacePath);
+    return { ...artifact, source: "workspace" };
+  } catch (err) {
+    const code = (err as { code?: unknown })?.code;
+    if (code === "ENOENT") {
+      return loadBundledObserverPromptValidated();
+    }
+    throw err;
+  }
 }
 
 // ── Per-checkpoint context manifest ─────────────────────────────────────────

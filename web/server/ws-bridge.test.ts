@@ -3064,6 +3064,47 @@ describe("onUserFrameObserved (Task 11.6)", () => {
     const session = bridge.getSession("s-uf-6")!;
     expect(session.messageHistory.some((m) => m.type === "user_message")).toBe(true);
   });
+
+  // Council Review #12 (EC-16) — server-driven user_message injection
+  // MUST skip the userFrameObservers fanout. Cron / agent / REST origins
+  // are not user activity; advancing the synthetic-turn token on them
+  // would race the legitimate user-typed-frame stickiness.
+  it("does NOT fire observers when injectUserMessage carries a server: origin (#12 EC-16)", () => {
+    const cli = makeCliSocket("s-uf-server-1");
+    const browser = makeBrowserSocket("s-uf-server-1");
+    bridge.handleCLIOpen(cli, "s-uf-server-1");
+    bridge.handleBrowserOpen(browser, "s-uf-server-1");
+
+    const observed: string[] = [];
+    bridge.onUserFrameObserved((sid) => observed.push(sid));
+
+    bridge.injectUserMessage("s-uf-server-1", "cron prompt", "server:cron");
+    bridge.injectUserMessage("s-uf-server-1", "agent prompt", "server:agent");
+    bridge.injectUserMessage("s-uf-server-1", "rest prompt", "server:rest");
+
+    // Zero observer fires across all three server-origin injections.
+    expect(observed).toEqual([]);
+
+    // History append still happens (forensic record is preserved).
+    const session = bridge.getSession("s-uf-server-1")!;
+    const userMessages = session.messageHistory.filter((m) => m.type === "user_message");
+    expect(userMessages.length).toBe(3);
+  });
+
+  it("DOES fire observers when injectUserMessage has no origin (legacy / browser-equivalent path)", () => {
+    const cli = makeCliSocket("s-uf-server-2");
+    const browser = makeBrowserSocket("s-uf-server-2");
+    bridge.handleCLIOpen(cli, "s-uf-server-2");
+    bridge.handleBrowserOpen(browser, "s-uf-server-2");
+
+    const observed: string[] = [];
+    bridge.onUserFrameObserved((sid) => observed.push(sid));
+
+    // No origin argument — backwards-compat with callers predating EC-16.
+    bridge.injectUserMessage("s-uf-server-2", "untagged");
+
+    expect(observed).toEqual(["s-uf-server-2"]);
+  });
 });
 
 // ─── handleCLIMessage with Buffer ─────────────────────────────────────────────

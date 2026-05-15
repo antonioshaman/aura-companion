@@ -578,7 +578,9 @@ describe("POST /api/sessions/:id/message", () => {
     const json = await res.json();
     expect(json.ok).toBe(true);
     expect(json.sessionId).toBe("sess-1");
-    expect(wsBridge.injectUserMessage).toHaveBeenCalledWith("sess-1", "hello world");
+    // Council Review #12 (EC-16) — the REST inject path now tags
+    // `origin: "server:rest"` so the bridge can skip userFrameObservers.
+    expect(wsBridge.injectUserMessage).toHaveBeenCalledWith("sess-1", "hello world", "server:rest");
   });
 
   it("returns 404 when the session does not exist", async () => {
