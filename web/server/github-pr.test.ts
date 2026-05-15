@@ -347,8 +347,8 @@ describe("fetchPRInfo", () => {
   it("returns parsed PR info on success", async () => {
     // which gh + gh repo view use execSync; gh api graphql uses execFileSync
     mockExecSync
-      .mockReturnValueOnce("/opt/homebrew/bin/gh")       // which gh
-      .mockReturnValueOnce("The-Vibe-Company/companion"); // gh repo view
+      .mockReturnValueOnce("/opt/homebrew/bin/gh")                                  // which gh
+      .mockReturnValueOnce("git@github.com:The-Vibe-Company/companion.git");        // git remote get-url origin
     mockExecFileSync
       .mockReturnValueOnce(JSON.stringify(makeGraphQLResponse())); // gh api graphql
 
@@ -370,7 +370,7 @@ describe("fetchPRInfo", () => {
   it("returns null when graphql query fails", async () => {
     mockExecSync
       .mockReturnValueOnce("/opt/homebrew/bin/gh")       // which gh
-      .mockReturnValueOnce("owner/repo");                // gh repo view
+      .mockReturnValueOnce("git@github.com:owner/repo.git");                // gh repo view
     mockExecFileSync
       .mockImplementationOnce(() => { throw new Error("timeout"); }); // gh api graphql
 
@@ -382,7 +382,7 @@ describe("fetchPRInfo", () => {
     const emptyResponse = { data: { repository: { pullRequests: { nodes: [] } } } };
     mockExecSync
       .mockReturnValueOnce("/opt/homebrew/bin/gh")
-      .mockReturnValueOnce("owner/repo");
+      .mockReturnValueOnce("git@github.com:owner/repo.git");
     mockExecFileSync
       .mockReturnValueOnce(JSON.stringify(emptyResponse));
 
@@ -393,7 +393,7 @@ describe("fetchPRInfo", () => {
   it("caches results within TTL", async () => {
     mockExecSync
       .mockReturnValueOnce("/opt/homebrew/bin/gh")
-      .mockReturnValueOnce("owner/repo");
+      .mockReturnValueOnce("git@github.com:owner/repo.git");
     mockExecFileSync
       .mockReturnValueOnce(JSON.stringify(makeGraphQLResponse()));
 
@@ -409,7 +409,7 @@ describe("fetchPRInfo", () => {
   it("returns null for malformed JSON response", async () => {
     mockExecSync
       .mockReturnValueOnce("/opt/homebrew/bin/gh")
-      .mockReturnValueOnce("owner/repo");
+      .mockReturnValueOnce("git@github.com:owner/repo.git");
     mockExecFileSync
       .mockReturnValueOnce("NOT VALID JSON{{{");
 
@@ -494,5 +494,116 @@ describe("computeAdaptiveTTL", () => {
       reviewDecision: "CHANGES_REQUESTED",
       checksSummary: { total: 3, success: 1, failure: 0, pending: 2 },
     }))).toBe(10_000);
+  });
+});
+
+// ─── parseGitRemoteOriginSlug — PR display fix 2026-05-15 ───────────────────
+//
+// The PR-display bug: Aura sidebar was showing upstream's PRs on a forked
+// workspace because `gh repo view` defaulted to upstream. `getRepoSlug` now
+// parses `git remote get-url origin` directly through this pure helper.
+// Tests pin the parser against canonical GitHub remote-URL shapes plus
+// negative cases.
+
+describe("parseGitRemoteOriginSlug", () => {
+  it("parses SSH form (git@github.com:owner/name.git)", () => {
+    expect(mod.parseGitRemoteOriginSlug("git@github.com:antonioshaman/aura-companion.git")).toBe(
+      "antonioshaman/aura-companion",
+    );
+  });
+
+  it("parses HTTPS form (https://github.com/owner/name.git)", () => {
+    expect(mod.parseGitRemoteOriginSlug("https://github.com/antonioshaman/aura-companion.git")).toBe(
+      "antonioshaman/aura-companion",
+    );
+  });
+
+  it("parses HTTPS form without .git suffix", () => {
+    expect(mod.parseGitRemoteOriginSlug("https://github.com/antonioshaman/aura-companion")).toBe(
+      "antonioshaman/aura-companion",
+    );
+  });
+
+  it("parses ssh:// protocol form (ssh://git@github.com/owner/name.git)", () => {
+    expect(mod.parseGitRemoteOriginSlug("ssh://git@github.com/antonioshaman/aura-companion.git")).toBe(
+      "antonioshaman/aura-companion",
+    );
+  });
+
+  it("trims surrounding whitespace and trailing newlines", () => {
+    expect(mod.parseGitRemoteOriginSlug("  git@github.com:owner/name.git\n")).toBe("owner/name");
+  });
+
+  it("returns null on empty string", () => {
+    expect(mod.parseGitRemoteOriginSlug("")).toBeNull();
+  });
+
+  it("returns null on non-string input", () => {
+    expect(mod.parseGitRemoteOriginSlug(null as unknown as string)).toBeNull();
+    expect(mod.parseGitRemoteOriginSlug(undefined as unknown as string)).toBeNull();
+  });
+
+  it("returns null on malformed URL with no owner/name segment", () => {
+    expect(mod.parseGitRemoteOriginSlug("not-a-url")).toBeNull();
+    expect(mod.parseGitRemoteOriginSlug("https://github.com/")).toBeNull();
+  });
+
+  it("distinguishes upstream slug from origin slug — parser is deterministic on input", () => {
+    // The bug-class assertion: parser is pure on its input. The fix is at
+    // the CALL SITE (`getRepoSlug` runs `git remote get-url origin`).
+    // Pinning that both slugs parse correctly proves the parser doesn't
+    // collapse to whichever GitHub host it sees.
+    expect(mod.parseGitRemoteOriginSlug("git@github.com:The-Vibe-Company/companion.git")).toBe(
+      "The-Vibe-Company/companion",
+    );
+    expect(mod.parseGitRemoteOriginSlug("git@github.com:antonioshaman/aura-companion.git")).toBe(
+      "antonioshaman/aura-companion",
+    );
+  });
+});
+
+// ─── getRepoSlug — call-site canary ─────────────────────────────────────────
+
+describe("getRepoSlug — call-site canary (uses git remote, not gh repo view)", () => {
+  it("invokes `git remote get-url origin`, NOT `gh repo view`", async () => {
+    // The PR-display bug was that the prior implementation shelled out to
+    // `gh repo view --json nameWithOwner --jq .nameWithOwner`, which
+    // delegates to gh's default-repo resolution (frequently upstream on a
+    // forked workspace). The fix routes through git directly. This canary
+    // pins the call site: both sync + async helpers must invoke
+    // `git remote get-url origin` and NOT `gh repo view`.
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const src = fs.readFileSync(path.join(__dirname, "github-pr.ts"), "utf-8");
+
+    function extractFunctionBody(anchor: RegExp): string | null {
+      const match = anchor.exec(src);
+      if (!match) return null;
+      const openIdx = src.indexOf("{", match.index);
+      if (openIdx < 0) return null;
+      let depth = 1;
+      for (let i = openIdx + 1; i < src.length; i++) {
+        if (src[i] === "{") depth++;
+        else if (src[i] === "}") {
+          depth--;
+          if (depth === 0) return src.slice(openIdx, i + 1);
+        }
+      }
+      return null;
+    }
+
+    const syncBody = extractFunctionBody(/\bfunction\s+getRepoSlug\s*\([^)]*\)\s*:?\s*[^{]*\{/);
+    const asyncBody = extractFunctionBody(/\basync\s+function\s+getRepoSlugAsync\s*\([^)]*\)\s*:?\s*[^{]*\{/);
+    expect(syncBody, "getRepoSlug body must be locatable").not.toBeNull();
+    expect(asyncBody, "getRepoSlugAsync body must be locatable").not.toBeNull();
+
+    // Positive: both must invoke `git remote get-url origin`.
+    expect(syncBody!).toMatch(/git\s+remote\s+get-url\s+origin/);
+    expect(asyncBody!).toMatch(/"git",\s*"remote",\s*"get-url",\s*"origin"/);
+
+    // Negative: NEITHER body may shell out to `gh repo view` — that's the
+    // regression path that returns upstream's slug on a fork.
+    expect(syncBody!).not.toMatch(/gh\s+repo\s+view/);
+    expect(asyncBody!).not.toMatch(/"gh",\s*"repo",\s*"view"/);
   });
 });
