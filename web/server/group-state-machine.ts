@@ -197,6 +197,7 @@ export interface GroupLogEntry {
     | "group.reconnect_ok"
     | "group.reconnect_failed"
     | "group.degraded"
+    | "group.half_respawned"
     | "group.exited"
     | "group.auto-proceed.fired"
     | "group.auto-proceed.cap-reached";
@@ -317,6 +318,29 @@ export function deriveSideEffects(
     busEvents.push({ kind: "reconnected" });
     logEntries.push({
       event: "group.reconnect_ok",
+      role: event.role,
+      attempts: 1,
+    });
+    return { busEvents, logEntries, idleTimerEffects };
+  }
+
+  // degraded → active (post-grace handshake recovery).
+  //
+  // Symmetric with `reconnect_ok`: when a half re-handshakes AFTER the
+  // reconnect grace window expired and the pair has already settled in
+  // `degraded`, `session:cli-id-received` emits `half_respawned` to drive
+  // the recovery transition. Replay `group:created` (via the `reconnected`
+  // bus descriptor) so browsers flip status back to active. Log an EC-9
+  // line so the recovery is observable from journalctl alongside the
+  // earlier `group.degraded`.
+  //
+  // Closes the gap where `transition()` defined this recovery but no
+  // producer emitted the event in production — pairs were stuck in
+  // degraded permanently despite halves re-handshaking.
+  if (prev === "degraded" && next === "active" && event.type === "half_respawned") {
+    busEvents.push({ kind: "reconnected" });
+    logEntries.push({
+      event: "group.half_respawned",
       role: event.role,
       attempts: 1,
     });

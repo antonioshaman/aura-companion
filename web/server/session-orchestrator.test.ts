@@ -3353,6 +3353,171 @@ describe("SessionOrchestrator", () => {
       }
     });
 
+    // Post-grace recovery: when a half re-handshakes AFTER the reconnect
+    // grace window expired and the pair is already settled in `degraded`,
+    // the `session:cli-id-received` handler must emit `half_respawned` so
+    // the state machine flips back to `active` and `dispatchObserverWake`
+    // stops refusing checkpoints.
+    //
+    // Without this branch, the pair was structurally terminal in
+    // production — `transition()` defined the recovery transition, tests
+    // covered the state-machine pure function, but no producer ever
+    // emitted `half_respawned`. Symptom seen on 2026-05-15: pair
+    // `grp_e81a5ef...` sat in degraded for 17+ minutes with both halves
+    // alive (chat working via `isOperable`), while every checkpoint POST
+    // was refused with `reason=group_not_active`.
+    it("post-grace recovery: cli-id-received on a degraded pair fires half_respawned and flips to active", async () => {
+      const fs = await import("node:fs");
+      const os = await import("node:os");
+      const path = await import("node:path");
+      const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "council-recovery-")));
+      try {
+        (deps.launcher.listSessions as any).mockReturnValue([
+          { sessionId: "orch-real", sessionGroupId: "grp_recover", sessionGroupRole: "orchestrator",
+            backendType: "claude", cwd: ws, archived: false, createdAt: 1, state: "running" },
+          { sessionId: "obs-real", sessionGroupId: "grp_recover", sessionGroupRole: "observer",
+            backendType: "claude", cwd: ws, archived: false, createdAt: 2, state: "running" },
+        ]);
+        // initialize() also installs the `session:cli-id-received` handler
+        // we're exercising — without it, the emit below is a no-op.
+        orchestrator.initialize();
+        const obs = orchestrator as unknown as {
+          reconcileCouncilGroups: () => void;
+          stopCouncilWatchers: (id: string) => void;
+          coordinator: {
+            get: (id: string) => { status: string } | undefined;
+            applyEvent: (id: string, event: { type: string; role?: string }) => void;
+          };
+        };
+        obs.reconcileCouncilGroups();
+        // Both-halves-alive reconcile lands in `active`.
+        expect(obs.coordinator.get("grp_recover")?.status).toBe("active");
+
+        // Drive the pair into `degraded` via `half_died` (observer falls
+        // off the bus). The state machine settles immediately — no
+        // reconnect context is armed by this transition.
+        obs.coordinator.applyEvent("grp_recover", { type: "half_died", role: "observer" });
+        expect(obs.coordinator.get("grp_recover")?.status).toBe("degraded");
+
+        // The observer's session reconnects later (e.g. server restart
+        // → --resume → cli handshake). Before this fix, this event was a
+        // silent no-op because `getReconnectContext` returned undefined.
+        companionBus.emit("session:cli-id-received", { sessionId: "obs-real", cliSessionId: "cli-obs-1" });
+
+        // Recovery: state flips back to active. Observer wake gate
+        // (dispatchObserverWake Gate 1) will accept future checkpoints.
+        expect(obs.coordinator.get("grp_recover")?.status).toBe("active");
+
+        obs.stopCouncilWatchers("grp_recover");
+      } finally {
+        fs.rmSync(ws, { recursive: true, force: true });
+      }
+    });
+
+    // Symmetric: the orchestrator half can also flap and recover.
+    it("post-grace recovery: degraded × half_respawned for orchestrator role also flips to active", async () => {
+      const fs = await import("node:fs");
+      const os = await import("node:os");
+      const path = await import("node:path");
+      const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "council-recovery-orch-")));
+      try {
+        (deps.launcher.listSessions as any).mockReturnValue([
+          { sessionId: "orch-r", sessionGroupId: "grp_recover_o", sessionGroupRole: "orchestrator",
+            backendType: "claude", cwd: ws, archived: false, createdAt: 1, state: "running" },
+          { sessionId: "obs-r", sessionGroupId: "grp_recover_o", sessionGroupRole: "observer",
+            backendType: "claude", cwd: ws, archived: false, createdAt: 2, state: "running" },
+        ]);
+        orchestrator.initialize();
+        const obs = orchestrator as unknown as {
+          reconcileCouncilGroups: () => void;
+          stopCouncilWatchers: (id: string) => void;
+          coordinator: {
+            get: (id: string) => { status: string } | undefined;
+            applyEvent: (id: string, event: { type: string; role?: string }) => void;
+          };
+        };
+        obs.reconcileCouncilGroups();
+        obs.coordinator.applyEvent("grp_recover_o", { type: "half_died", role: "orchestrator" });
+        expect(obs.coordinator.get("grp_recover_o")?.status).toBe("degraded");
+
+        companionBus.emit("session:cli-id-received", { sessionId: "orch-r", cliSessionId: "cli-orch-1" });
+        expect(obs.coordinator.get("grp_recover_o")?.status).toBe("active");
+
+        obs.stopCouncilWatchers("grp_recover_o");
+      } finally {
+        fs.rmSync(ws, { recursive: true, force: true });
+      }
+    });
+
+    // Identity boundary: the recovery branch must NOT fire for an
+    // unrelated sessionId that happens to arrive while the pair is
+    // degraded. Only sessionIds tracked in `councilGroupMeta` (i.e. real
+    // halves of the registered pair) are eligible for recovery — otherwise
+    // a stray handshake from another session would be misattributed.
+    it("post-grace recovery: unrelated sessionId does NOT trigger half_respawned", async () => {
+      const fs = await import("node:fs");
+      const os = await import("node:os");
+      const path = await import("node:path");
+      const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "council-recovery-stray-")));
+      try {
+        (deps.launcher.listSessions as any).mockReturnValue([
+          { sessionId: "orch-s", sessionGroupId: "grp_stray", sessionGroupRole: "orchestrator",
+            backendType: "claude", cwd: ws, archived: false, createdAt: 1, state: "running" },
+          { sessionId: "obs-s", sessionGroupId: "grp_stray", sessionGroupRole: "observer",
+            backendType: "claude", cwd: ws, archived: false, createdAt: 2, state: "running" },
+        ]);
+        orchestrator.initialize();
+        const obs = orchestrator as unknown as {
+          reconcileCouncilGroups: () => void;
+          stopCouncilWatchers: (id: string) => void;
+          coordinator: {
+            get: (id: string) => { status: string } | undefined;
+            applyEvent: (id: string, event: { type: string; role?: string }) => void;
+          };
+        };
+        obs.reconcileCouncilGroups();
+        obs.coordinator.applyEvent("grp_stray", { type: "half_died", role: "observer" });
+        expect(obs.coordinator.get("grp_stray")?.status).toBe("degraded");
+
+        // Handshake from an unrelated solo session — must not affect the
+        // council group's state.
+        companionBus.emit("session:cli-id-received", { sessionId: "unrelated-solo", cliSessionId: "cli-other" });
+        expect(obs.coordinator.get("grp_stray")?.status).toBe("degraded");
+
+        obs.stopCouncilWatchers("grp_stray");
+      } finally {
+        fs.rmSync(ws, { recursive: true, force: true });
+      }
+    });
+
+    // EC-6 static-grep canary (per `feedback_call_site_presence_not_just_symbol_export`):
+    // the recovery transition is only reachable if at least one production
+    // (non-test) emit site for `half_respawned` exists. The state machine
+    // shipped the recovery branch + unit tests months ago without a
+    // production emit site — pairs sat in degraded forever. Asserting the
+    // call site is present in production source (not just tests) prevents
+    // a future refactor from silently removing it.
+    it("static canary: half_respawned has at least one production emit site outside tests", async () => {
+      const fs = await import("node:fs");
+      const path = await import("node:path");
+      const root = path.resolve(__dirname);
+      const files = fs.readdirSync(root).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"));
+      let emitSites = 0;
+      // Match an applyEvent (or transition-builder) carrying `type: "half_respawned"`.
+      // Tolerates whitespace + key ordering shifts; rejects matches inside
+      // strings/comments by requiring `type:` directly before the literal.
+      const pattern = /type\s*:\s*"half_respawned"/;
+      for (const f of files) {
+        const raw = fs.readFileSync(path.join(root, f), "utf-8");
+        const matches = raw.match(new RegExp(pattern, "g")) ?? [];
+        // The state-machine type definition itself uses this literal in the
+        // `GroupEvent` union — exclude the file that defines the type.
+        if (f === "group-state-machine.ts") continue;
+        emitSites += matches.length;
+      }
+      expect(emitSites, "no production emit site for half_respawned — recovery transition is unreachable").toBeGreaterThan(0);
+    });
+
     // Archived half means the group was intentionally torn down. Partial-
     // pair grace MUST NOT apply — that would re-arm a reconnect cycle on
     // a group the user (or shutdown path) had already given up on. Fixed

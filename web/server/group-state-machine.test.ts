@@ -246,6 +246,19 @@ describe("deriveSideEffects", () => {
       idleTimerEffects: [],
     };
   }
+  // Symmetric with `reconnectedOk`: the recovery path that fires when a
+  // half re-handshakes AFTER the reconnect grace expired and the pair is
+  // already settled in `degraded`. Without this descriptor the recovery
+  // was a state-machine-only flip that browsers never observed (the
+  // `group:created` replay channel that the old test label gestured at
+  // had no production caller — see PR description).
+  function halfRespawnedFromDegraded(role: "observer" | "orchestrator"): GroupTransitionSideEffects {
+    return {
+      busEvents: [{ kind: "reconnected" }],
+      logEntries: [{ event: "group.half_respawned", role, attempts: 1 }],
+      idleTimerEffects: [],
+    };
+  }
 
   // The full table — every (prev × event) cell with the expected side
   // effects. The `next` column is intentionally computed via `transition()`
@@ -279,10 +292,14 @@ describe("deriveSideEffects", () => {
     // ── from degraded ──
     { prev: "degraded", event: { type: "both_ready" }, expected: noop, label: "degraded × both_ready (no transition)" },
     { prev: "degraded", event: { type: "half_died", role: "observer" }, expected: noop, label: "degraded × half_died (no transition — already degraded)" },
-    // degraded → active via half_respawned has no descriptor emission;
-    // session-orchestrator's recovery path re-emits group:created via the
-    // synthetic replay channel, not through deriveSideEffects.
-    { prev: "degraded", event: { type: "half_respawned", role: "observer" }, expected: noop, label: "degraded × half_respawned → active (no side effect; group:created replayed elsewhere)" },
+    // degraded → active via half_respawned fires the post-grace recovery
+    // descriptor: `{kind:"reconnected"}` so the orchestrator's existing
+    // `group:created` listener replays the wire frame (symmetric with
+    // `reconnect_ok`), plus an EC-9 `group.half_respawned` log entry so
+    // operators can correlate the recovery against the earlier
+    // `group.degraded` in journalctl.
+    { prev: "degraded", event: { type: "half_respawned", role: "observer" }, expected: halfRespawnedFromDegraded("observer"), label: "degraded × half_respawned/observer → active" },
+    { prev: "degraded", event: { type: "half_respawned", role: "orchestrator" }, expected: halfRespawnedFromDegraded("orchestrator"), label: "degraded × half_respawned/orchestrator → active" },
     { prev: "degraded", event: survObs, expected: noop, label: "degraded × reconnect_started (no transition)" },
     { prev: "degraded", event: recOkObs, expected: noop, label: "degraded × reconnect_ok (no transition)" },
     { prev: "degraded", event: recFailedObs, expected: noop, label: "degraded × reconnect_failed (no transition)" },

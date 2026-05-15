@@ -526,17 +526,60 @@ export class SessionOrchestrator {
       try {
         const coord = this.coordinator;
         if (!coord) return;
-        // Find the group this sessionId belongs to via meta cache.
+        // Find the group this sessionId belongs to via meta cache. Capture
+        // the role too — the post-grace recovery branch below needs it to
+        // build a typed `half_respawned` event, and recomputing it from the
+        // GroupRecord would be a second lookup with no extra safety.
         let foundGroupId: string | null = null;
+        let foundRole: SessionGroupRole | null = null;
         for (const [groupId, meta] of this.councilGroupMeta) {
-          if (meta.primarySessionId === sessionId || meta.observerSessionId === sessionId) {
+          if (meta.primarySessionId === sessionId) {
             foundGroupId = groupId;
+            foundRole = "orchestrator";
+            break;
+          }
+          if (meta.observerSessionId === sessionId) {
+            foundGroupId = groupId;
+            foundRole = "observer";
             break;
           }
         }
-        if (!foundGroupId) return;
+        if (!foundGroupId || !foundRole) return;
         const ctx = coord.getReconnectContext(foundGroupId);
-        if (!ctx) return; // No reconnect armed for this group — normal handshake, nothing to do.
+        if (!ctx) {
+          // No reconnect armed. Two sub-cases:
+          //
+          // 1) Normal handshake on an active pair (orchestrator/observer
+          //    came up cleanly without a prior `half_died` event in flight)
+          //    — nothing to do.
+          //
+          // 2) **Post-grace recovery**: the half flapped earlier, the
+          //    reconnect grace window expired without a re-handshake, the
+          //    state machine settled in `degraded`, and the half is only
+          //    now coming back through `--resume`. `getReconnectContext`
+          //    returns undefined because the grace timer was cleaned up at
+          //    expiry, so the earlier handler shape silently dropped the
+          //    handshake. `degraded × half_respawned → active` exists in
+          //    the state machine; emit it here so the pair recovers.
+          //
+          // Without this branch, a settled `degraded` pair was structurally
+          // terminal in production — `dispatchObserverWake` Gate 1 refused
+          // every checkpoint with `reason=group_not_active`, while chat
+          // (which is `isOperable` in degraded) kept working. Users saw a
+          // working pair that silently never produced observer reviews.
+          const groupRecord = coord.get(foundGroupId);
+          if (groupRecord?.status === "degraded") {
+            coord.applyEvent(foundGroupId, { type: "half_respawned", role: foundRole });
+            // Council Mode auto-wake: drain any checkpoint that arrived
+            // while the pair was stuck in degraded. Mirrors the symmetric
+            // drain on `reconnect_ok` below — without this, the first
+            // post-recovery checkpoint sits on disk until the next POST.
+            if (foundRole === "observer") {
+              this.drainPendingObserverWake(foundGroupId);
+            }
+          }
+          return;
+        }
         if (ctx.snapshotSessionId !== sessionId) {
           // Identity mismatch: the handshake came from a session we did NOT
           // snapshot as the dead half. Possible causes: a follow-up
