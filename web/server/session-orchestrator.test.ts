@@ -3741,4 +3741,152 @@ describe("SessionOrchestrator", () => {
       expect(orchestrator.getCouncilGroupBySessionId("orphan_sid")).toBeNull();
     });
   });
+
+  // ─── getGroupReviewsForBootstrap ──────────────────────────────────────────
+  //
+  // REST bootstrap that complements the WS `group:review` live path.
+  // Browser council slice was historically populated EXCLUSIVELY from
+  // live events — a tab connecting after the event missed everything.
+  // This method walks `<cwd>/.council/reviews/*-observer.md`, runs the
+  // same grounding validation as the WS pipeline, and returns hydrated
+  // findings with deterministic ids so REST + WS dedupe cleanly.
+  describe("getGroupReviewsForBootstrap", () => {
+    function seedGroup(groupId: string, cwd: string, artifactPaths: string[] = []) {
+      const ws = orchestrator as unknown as {
+        councilWatchers: Map<string, {
+          cwd: string;
+          abort: AbortController;
+          lastCheckpoint: { sequence: number; checkpoint_id: string; phase: string; artifact_paths: string[] } | null;
+          previousCheckpoint: { sequence: number; artifact_paths: string[] } | null;
+        }>;
+        councilGroupMeta: Map<string, { primarySessionId: string; observerSessionId: string; pairing: string; createdAt: number; lastCheckpointReceivedAt: number | null }>;
+      };
+      ws.councilWatchers.set(groupId, {
+        cwd,
+        abort: new AbortController(),
+        lastCheckpoint: { sequence: 0, checkpoint_id: "chk_a", phase: "council-plan", artifact_paths: artifactPaths },
+        previousCheckpoint: null,
+      });
+      ws.councilGroupMeta.set(groupId, {
+        primarySessionId: "sess_orch",
+        observerSessionId: "sess_obs",
+        pairing: "claude+claude",
+        createdAt: Date.now(),
+        lastCheckpointReceivedAt: Date.now() - 100,
+      });
+    }
+
+    // Path 1: meta map miss — group archived or never created. Critical
+    // null-return contract for the REST authorize step in `routes.ts`.
+    it("returns null when the sessionGroupId is not in councilGroupMeta", async () => {
+      const result = await orchestrator.getGroupReviewsForBootstrap("grp_never_created");
+      expect(result).toBeNull();
+    });
+
+    // Path 2: watcher map miss (e.g. between archive sentinel and meta
+    // teardown). Still returns null — REST caller treats as 404, not as
+    // "no findings yet".
+    it("returns null when the watcher entry is gone (mid-teardown race)", async () => {
+      const ws = orchestrator as unknown as {
+        councilGroupMeta: Map<string, { primarySessionId: string; observerSessionId: string; pairing: string; createdAt: number; lastCheckpointReceivedAt: number | null }>;
+      };
+      ws.councilGroupMeta.set("grp_meta_only", {
+        primarySessionId: "p",
+        observerSessionId: "o",
+        pairing: "claude+claude",
+        createdAt: Date.now(),
+        lastCheckpointReceivedAt: null,
+      });
+      const result = await orchestrator.getGroupReviewsForBootstrap("grp_meta_only");
+      expect(result).toBeNull();
+    });
+
+    // Path 3: group is registered, but no reviews/ dir exists yet (group
+    // was just spawned, observer hasn't fired). Browser panel renders
+    // `never-checkpointed-yet`. Returns the shape, not null.
+    it("returns empty findings/downgrades when the reviews dir is absent", async () => {
+      const { mkdtempSync, rmSync, realpathSync } = require("node:fs") as typeof import("node:fs");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      const workspace = realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-bootstrap-")));
+      try {
+        seedGroup("grp_no_reviews", workspace);
+        const result = await orchestrator.getGroupReviewsForBootstrap("grp_no_reviews");
+        expect(result).toEqual({
+          sessionGroupId: "grp_no_reviews",
+          findings: [],
+          downgrades: [],
+          reviewCount: 0,
+        });
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
+    // Path 4: reviews dir exists with real files. Exercises the full
+    // walk + parseObserverReviewPayload + validateObserverFindings +
+    // deterministic ID assignment. Asserts:
+    //   - reviewCount counts only parseable files
+    //   - findings carry stable `fnd_<hex>` ids
+    //   - in-scope STOP survives grounding
+    //   - out-of-scope STOP is downgraded with reason captured in downgrades[]
+    //   - observerProvider/observerModel taken from the first parsed file
+    it("walks review files, returns hydrated findings with deterministic ids and downgrade markers", async () => {
+      const { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } = require("node:fs") as typeof import("node:fs");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      const workspace = realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-bootstrap-walk-")));
+      try {
+        mkdirSync(pathJoin(workspace, "src"), { recursive: true });
+        writeFileSync(pathJoin(workspace, "src/a.ts"), "// in-scope\n");
+        mkdirSync(pathJoin(workspace, ".council", "reviews"), { recursive: true });
+        const reviewBody = {
+          schema_version: 1,
+          checkpoint_id: "chk_a",
+          phase: "council-plan",
+          session_group_id: "grp_walk",
+          reviewed_at: "2026-01-01T00:00:00Z",
+          observer_provider: "claude",
+          observer_model: "claude-opus-4-7",
+          observer_cli_version: "1.0.0",
+          observer_wake_payload_version_echo: 1,
+          findings: [
+            { severity: "STOP", claim: "in scope", evidence_path: "src/a.ts" },
+            { severity: "STOP", claim: "out of scope", evidence_path: "src/missing.ts" },
+          ],
+        };
+        writeFileSync(
+          pathJoin(workspace, ".council", "reviews", "council-plan-claude-observer.md"),
+          JSON.stringify(reviewBody),
+        );
+        // Garbage file under the same dir — must be ignored (filename
+        // pattern is anchored). Without the pattern, a hand-edited note
+        // would crash the bootstrap walk.
+        writeFileSync(
+          pathJoin(workspace, ".council", "reviews", "stray-note.txt"),
+          "not a review",
+        );
+        seedGroup("grp_walk", workspace, ["src/a.ts"]);
+        const result = await orchestrator.getGroupReviewsForBootstrap("grp_walk");
+        expect(result).not.toBeNull();
+        expect(result!.sessionGroupId).toBe("grp_walk");
+        expect(result!.reviewCount).toBe(1);
+        expect(result!.observerProvider).toBe("claude");
+        expect(result!.observerModel).toBe("claude-opus-4-7");
+        expect(result!.findings).toHaveLength(2);
+        const inScope = result!.findings[0]!;
+        const outOfScope = result!.findings[1]!;
+        expect(inScope.id).toMatch(/^fnd_[0-9a-f]+$/);
+        expect(inScope.claim).toBe("in scope");
+        expect(inScope.wasDowngraded).toBeUndefined();
+        expect(outOfScope.id).toMatch(/^fnd_[0-9a-f]+$/);
+        expect(outOfScope.wasDowngraded).toBe(true);
+        expect(outOfScope.downgradeReason).toBeDefined();
+        expect(result!.downgrades).toHaveLength(1);
+        expect(result!.downgrades[0]!.id).toBe(outOfScope.id);
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+  });
 });
