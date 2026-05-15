@@ -1278,21 +1278,42 @@ export class WsBridge {
     };
   }
 
-  /** Bootstrap kickoff for sessions that never get browser-driven traffic
-   *  (e.g. Council Mode observers). Sends a bare `initialize` control_request
-   *  on CLI ws_open so the CLI emits its `system` init and reaches "ready"
-   *  state without depending on user input or browser activity. Claude-only. */
+  /**
+   * Bootstrap kickoff for sessions that never get browser-driven traffic
+   * (e.g. Council Mode observers). Sends ONE `initialize` control_request
+   * on CLI ws_open so the CLI emits its `system` init and reaches "ready"
+   * state without depending on user input or browser activity. Claude-only.
+   *
+   * OBS-STOP-1 fix: if `session.pendingSystemPromptInjection` is set
+   * (because `injectSystemPrompt` was called before the WS connected),
+   * include the prompt in the kickoff's `appendSystemPrompt` field and
+   * clear the pending slot. This collapses what was previously a two-
+   * initialize race (bare kickoff at WS open → later second initialize
+   * with prompt, second silently dropped) into one well-formed init.
+   */
   sendInitializeKickoff(sessionId: string): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;
     if (!(session.backendAdapter instanceof ClaudeAdapter)) return;
     const { randomUUID } = require("node:crypto") as typeof import("node:crypto");
+    const pendingPrompt = session.pendingSystemPromptInjection;
+    const request: { subtype: "initialize"; appendSystemPrompt?: string } =
+      pendingPrompt
+        ? { subtype: "initialize", appendSystemPrompt: pendingPrompt }
+        : { subtype: "initialize" };
     const ndjson = JSON.stringify({
       type: "control_request",
       request_id: randomUUID(),
-      request: { subtype: "initialize" },
+      request,
     });
     session.backendAdapter.sendRawNDJSON(ndjson);
+    if (pendingPrompt) {
+      // Clear the pending slot — kickoff just consumed it. A future
+      // `injectSystemPrompt` after this point is a legitimate mid-session
+      // re-init (agent-executor mid-flow) and goes through the existing
+      // direct-send path.
+      session.pendingSystemPromptInjection = null;
+    }
   }
 
   /** Send an initialize control request with context appended to the system prompt.
@@ -1304,15 +1325,29 @@ export class WsBridge {
       console.error(`[ws-bridge] Cannot inject system prompt: session ${sessionId} not found`);
       return;
     }
-    if (session.backendAdapter instanceof ClaudeAdapter) {
-      const { randomUUID } = require("node:crypto") as typeof import("node:crypto");
-      const ndjson = JSON.stringify({
-        type: "control_request",
-        request_id: randomUUID(),
-        request: { subtype: "initialize", appendSystemPrompt },
-      });
-      session.backendAdapter.sendRawNDJSON(ndjson);
+    // OBS-STOP-1 fix: if the adapter is not yet connected, buffer the
+    // prompt for the upcoming kickoff to consume. Previously the guard
+    // `if (backendAdapter instanceof ClaudeAdapter)` silently no-op'd
+    // and the prompt was lost — the session-creation-service.ts:461
+    // path called `injectSystemPrompt` BEFORE the CLI subprocess had
+    // handshaked the WS back, hitting this exact silent-loss path.
+    if (!(session.backendAdapter instanceof ClaudeAdapter)) {
+      session.pendingSystemPromptInjection = appendSystemPrompt;
+      return;
     }
+    // Adapter already connected — direct send. This is the agent-executor
+    // mid-flow path (line 211 of agent-executor.ts), where the prompt
+    // arrives after handleCLIOpen has already fired the kickoff but
+    // before any user_message has been sent. Per the existing JSDoc
+    // contract ("Must be called before the first user message"), the
+    // CLI accepts a second initialize when it carries `appendSystemPrompt`.
+    const { randomUUID } = require("node:crypto") as typeof import("node:crypto");
+    const ndjson = JSON.stringify({
+      type: "control_request",
+      request_id: randomUUID(),
+      request: { subtype: "initialize", appendSystemPrompt },
+    });
+    session.backendAdapter.sendRawNDJSON(ndjson);
   }
 
   handleBrowserClose(ws: ServerWebSocket<SocketData>) {

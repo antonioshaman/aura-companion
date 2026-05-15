@@ -1733,11 +1733,19 @@ describe("auto-proceed denylist gate (Task 11.8)", () => {
     expect(browserMessageCb).toHaveBeenCalledWith(expect.objectContaining({ type: "permission_request" }));
   });
 
-  it("no probe configured → gate falls open (safe default, all can_use_tool requests reach the browser)", () => {
+  it("CR-1 fix: no probe configured → DENYLISTED tool fails CLOSED at the adapter (defence-in-depth)", () => {
+    // CR-1 (council review 2026-05-15-0336 finding #1, 3-expert convergence
+    // Willison × Hunt × Subprocess): the previous shape fell OPEN on
+    // `idleTimerProbe === null` because the optional-chain in the gate
+    // predicate short-circuited the entire denylist branch. Now the gate
+    // denies a denylisted tool REGARDLESS of probe presence — defence-
+    // in-depth over availability. A future DI ordering change that ships
+    // a session without a probe no longer silently re-opens the gate.
     const browserMessageCb = vi.fn();
+    const ws = createMockSocket("sess-11-8-4");
     const adapter = new ClaudeAdapter("sess-11-8-4");
     adapter.onBrowserMessage(browserMessageCb);
-    adapter.attachWebSocket(createMockSocket("sess-11-8-4"));
+    adapter.attachWebSocket(ws);
 
     adapter.handleRawMessage(JSON.stringify({
       type: "control_request",
@@ -1751,8 +1759,36 @@ describe("auto-proceed denylist gate (Task 11.8)", () => {
       },
     }));
 
-    // Without a probe, the adapter cannot know the turn-state — defaults
-    // to "treat as user-driven" which means the browser sees the request.
+    // Browser-side permission UI does NOT fire — the gate short-circuited
+    // even without a probe, because the tool IS denylisted.
+    expect(browserMessageCb).not.toHaveBeenCalledWith(expect.objectContaining({ type: "permission_request" }));
+    // CLI got a deny control_response directly.
+    expect(ws.send).toHaveBeenCalled();
+    const sent = JSON.parse((ws.send.mock.calls[0][0] as string).replace(/\n$/, ""));
+    expect(sent.response.response.behavior).toBe("deny");
+  });
+
+  it("no probe configured + NON-denylisted tool → gate falls open (safe default for ordinary tools)", () => {
+    // The fail-closed promise covers ONLY the denylist; non-denylisted
+    // tools still flow through to the browser permission UI when no
+    // probe is present, preserving the existing user-permission contract.
+    const browserMessageCb = vi.fn();
+    const adapter = new ClaudeAdapter("sess-11-8-4b");
+    adapter.onBrowserMessage(browserMessageCb);
+    adapter.attachWebSocket(createMockSocket("sess-11-8-4b"));
+
+    adapter.handleRawMessage(JSON.stringify({
+      type: "control_request",
+      request_id: "req-ordinary",
+      request: {
+        subtype: "can_use_tool",
+        tool_name: "Read",
+        input: { file_path: "/tmp/foo.txt" },
+        description: "Read a file",
+        tool_use_id: "tu-ordinary",
+      },
+    }));
+
     expect(browserMessageCb).toHaveBeenCalledWith(expect.objectContaining({ type: "permission_request" }));
   });
 });
