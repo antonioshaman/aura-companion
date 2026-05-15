@@ -195,3 +195,27 @@ These must be followed — flag violations as findings.
 **Principle:** `references/refactoring.md` → P4 (names reveal design) + `references/quality-persistence.md` → P9 (don't build on filesystem assumptions); sibling memory `feedback_consumer_path_drift_before_silent_claim` (universal)
 
 ---
+
+### EC-21: Documented log/event triplet fields must derive from a single source — never independent optional spreads
+
+**Convention:** When a log line or event payload documents a forensic-replay triplet (or N-tuple) of fields that MUST appear together — e.g. `(promptSha256, observerPromptSource, observerPromptVersion)` for observer invocation, `(sessionId, sessionGroupId, role)` for EC-9 — the producer MUST construct them from a single source-of-truth artifact or capture them through a single discriminated tuple shape. Independent optional spread idioms (`...(x !== undefined && { x: ... }), ...(y !== undefined && { y: ... })`) are forbidden because they let half the triplet ship while the other half silently drops; the documented contract is asserted at JSDoc level but unenforced at runtime. The CR-1 / CR-13 incident at `observer-attribution.ts:formatObserverInvocationLog` shipped `observerPromptSource` without `observerPromptSourceLabel` for every restart-recovered group because the orchestrator's reconstruction path only captured one of the two — type-system accepted it, contract was silently violated.
+**Origin:** Council Review 2026-05-15-1015 Backend P2-3 + Fowler P2 + Hunt P1 (CR-1 multi-expert convergence)
+**Principle:** `references/quality-backend.md` → P8 (catch typing as `unknown`, narrow explicitly) + `references/refactoring.md` → P5 (Primitive Obsession); sibling memory `feedback_council_documented_contract_canary` (contract-in-JSDoc-only is doku-not-enforcement)
+
+---
+
+### EC-22: Typed-channel event emit paths require behavioural-assertion tests, not just typecheck pins
+
+**Convention:** Any code path that emits on a typed event channel (`companionBus.emit("X", ...)`), writes a structured log line (`log.warn("event-name", ...)` with stable schema), or fans out on a side-effect surface MUST have a behavioural test that subscribes to the channel/spies on the log and asserts the emit fired with the right payload shape. Tests that exercise only the happy-path return value while leaving the side-effect path covered by typecheck alone silently green-stamp a refactor that flips the conditional, inverts the emit order, or replaces the emit with a `noop`. Reference: the γ fix-pass added 3 P1 test rows for `session:relaunch-failed` (positive + negative-control), `council.observer-prompt.source-drift` (3 transition rows including no-change), and `council.observer-prompt.bundled-fallback` (shape pin + negative key assertion). Pair this with EC-19 for static-grep canaries when behavioural tests can't reach the path (initialisation-time code, type-system-only assertions). Same defect class as `feedback_call_site_presence_not_just_symbol_export` and `feedback_recovery_branch_reachability`.
+**Origin:** Council Review 2026-05-15-1015 Beck B1+B2+B3 (CR-4 — three side-effect emit paths shipped with zero behavioural assertion)
+**Principle:** `references/quality-testing.md` → Mutation resistance + structure-insensitive assertions; sibling memories `feedback_verify_test_bodies_not_just_names`, `feedback_call_site_presence_not_just_symbol_export`
+
+---
+
+### EC-23: Filesystem paths in log/event payloads MUST be `(present, depth)` pair, SHA, or sentinel — never raw path bytes
+
+**Convention:** Structured log lines and event payloads (companionBus events, EC-9 invocation logs, audit trails, monitoring fanout) MUST NOT contain raw absolute filesystem path strings on production code paths. Allowed shapes: `(present: boolean, depth: number)` integer pair, SHA-256 hex of the path, or a sentinel token like `<bundled:observer-system-vN>`. Raw paths leak operator topology (username inside `/home/X/`, project name inside `/Users/X/work/<repo>/`, container internals) if logs egress to a shared sink (managed Loggly, multi-tenant Honeycomb, screen-shared debug session). Apply transitively: if a path bytes enters via `Error.message`, `Error.cause.path`, or wrapper construction, redact at the boundary — `wrapFsError` in `observer-prompt.ts` is the reference (operation + code only; cause preserved but JSDoc warns consumers must redact `.path`/`.dest` before serialising). EC-23 is the egress sibling of EC-7 (filesystem-access predicates inline resolution) — together they bound both ingress and egress of path bytes.
+**Origin:** Council Review 2026-05-15-1015 Hunt P1 + Fowler P2 + Backend P2-5 (CR-1 multi-expert convergence) + Hunt P2 (CR-7 — wrapFsError echoed path bytes into Error.message)
+**Principle:** `references/security.md` → P3 (minimise state / `console.log` of bodies) + P9 (assume breach — stack traces in error responses); sibling memory `feedback_format_transformation_validation` (universal — format-aware redaction at the wrapper boundary)
+
+---
