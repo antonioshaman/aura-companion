@@ -146,15 +146,48 @@ const idleTimerManager = new IdleTimerManager({
     // origin `server:auto-proceed`).
     const outcome = wsBridge.sendOrchestratorSyntheticFrame(sessionId, body);
     if (outcome.kind === "sent") return { ok: true };
-    // Map the bridge's typed outcome to the manager's expected
-    // `{ok:false, error}` shape so EC-9 `idle-timer.fire-failed` log
-    // lines carry the precise failure reason from upstream.
-    const errorDetail =
-      outcome.kind === "backpressure"
-        ? `backpressure(buffered=${outcome.bufferedAmount})`
-        : outcome.kind === "failed"
-          ? `failed(${outcome.error})`
-          : outcome.kind;
+    // CR-4 (council review 2026-05-15-0336 finding #4) — exhaustive
+    // switch + `never` tripwire. The previous shape (cascade if/else
+    // with terminal fall-through to `outcome.kind`) silently swallowed
+    // any future BridgeObserverWakeOutcome variant as a bare kind
+    // string. Sister consumer at `session-orchestrator.ts:1808` already
+    // uses this discipline; the auto-proceed path here had drifted off
+    // it. When PR #52's outbound FIFO lands and adds `{kind:"queued"}`
+    // (or any future variant), the typecheck breaks here for human
+    // attention instead of stringifying. Per EC-15 (codified in
+    // conventions.md from this review).
+    let errorDetail: string;
+    switch (outcome.kind) {
+      case "session_unknown":
+        errorDetail = "session_unknown";
+        break;
+      case "adapter_missing":
+        errorDetail = "adapter_missing";
+        break;
+      case "unsupported_backend":
+        errorDetail = "unsupported_backend";
+        break;
+      case "socket_disconnected":
+        errorDetail = "socket_disconnected";
+        break;
+      case "busy":
+        errorDetail = "busy";
+        break;
+      case "backpressure":
+        errorDetail = `backpressure(buffered=${outcome.bufferedAmount})`;
+        break;
+      case "failed":
+        errorDetail = `failed(${outcome.error})`;
+        break;
+      default: {
+        // Exhaustiveness tripwire — if BridgeObserverWakeOutcome widens
+        // with a new variant and this switch isn't updated, the next
+        // line fails to compile.
+        const _exhaustive: never = outcome;
+        void _exhaustive;
+        errorDetail = "unknown";
+      }
+    }
     return { ok: false, error: errorDetail };
   },
   logEvent: (entry) => {
