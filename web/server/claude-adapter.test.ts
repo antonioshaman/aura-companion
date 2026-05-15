@@ -1778,17 +1778,17 @@ describe("ClaudeAdapter outbound queue asymmetric overflow (PLAN Task 11.2)", ()
     for (let i = 0; i < 16; i++) {
       adapter.enqueueOutboundFrame("synthetic", `s${i}`);
     }
-    expect(adapter.enqueueOutboundFrame("synthetic", "extra").error).toBe(
-      "queue-full",
-    );
+    const result = adapter.enqueueOutboundFrame("synthetic", "extra");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toBe("queue-full");
   });
 
   it("queue overflow with all-user is reported as queue-full-no-evictable", () => {
     for (let i = 0; i < 16; i++) {
       adapter.enqueueOutboundFrame("user", `u${i}`);
     }
-    expect(adapter.enqueueOutboundFrame("user", "extra").error).toBe(
-      "queue-full-no-evictable",
-    );
+    const result = adapter.enqueueOutboundFrame("user", "extra");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toBe("queue-full-no-evictable");
   });
 });
