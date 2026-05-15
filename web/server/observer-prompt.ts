@@ -259,11 +259,14 @@ function parseObserverSystemPromptBody(body: string, sourceLabel: string): Obser
  * distinguishable from any plausible workspace path so consumers parsing
  * `sourceLabel` know the artifact didn't come from disk.
  *
- * Renamed from `BUNDLED_OBSERVER_PROMPT_SOURCE_PATH` (Council Review
- * 2026-05-15-0820 Fowler P3 #4) for symmetry with the renamed
- * `ObserverPromptArtifact.sourceLabel` field.
+ * Council Review 2026-05-15-1015 CR-13 (Willison W2): derived from
+ * {@link OBSERVER_PROMPT_SCHEMA_VERSION} at module-load time so the
+ * embedded `vN` segment cannot lag a future v1→v2 schema bump. Prior
+ * shape was a static string literal `<bundled:observer-system-v1>` that
+ * required manual sync with three other places (the .md header, the
+ * SCHEMA_VERSION constant, the parser's equality gate).
  */
-export const BUNDLED_OBSERVER_PROMPT_SOURCE_LABEL = "<bundled:observer-system-v1>";
+export const BUNDLED_OBSERVER_PROMPT_SOURCE_LABEL = `<bundled:observer-system-v${OBSERVER_PROMPT_SCHEMA_VERSION}>` as const;
 
 /** Artifact extended with a discriminator naming WHICH source produced it. */
 export interface ResolvedObserverPrompt extends ObserverPromptArtifact {
@@ -298,12 +301,19 @@ export function loadBundledObserverPromptValidated(): ResolvedObserverPrompt {
     BUNDLED_OBSERVER_PROMPT,
     BUNDLED_OBSERVER_PROMPT_SOURCE_LABEL,
   );
-  // Three-gate trichotomy: CI canary catches source-tree drift; test-
-  // time pin catches build-output drift; THIS runtime check catches
-  // post-build mutation (bundler transforms — CRLF normalisation,
-  // minify-syntax, template-literal preprocessing, npm tarball
-  // line-ending shifts). All three gates target distinct failure modes
-  // at distinct lifecycle stages.
+  // Three-gate trichotomy — TWO failure modes ((1) sha-vs-body integrity,
+  // (2) source-tree vs generator-output integrity) checked at THREE
+  // distinct lifecycle stages (Council Review 2026-05-15-1015 CR-22 /
+  // Willison W8 rewording):
+  // - CI canary: `bun run build-observer-prompt-bundle && git diff --exit-code`
+  //   targets failure mode (2) at commit time.
+  // - Test-time pin (`BUNDLED_OBSERVER_PROMPT_SHA256 === sha(body)`)
+  //   targets failure mode (1) at test time.
+  // - This runtime gate targets failure mode (1) at spawn time, catching
+  //   post-build mutation (Bun's --define, npm pack/unpack CRLF shifts,
+  //   future SDK that string-rewrites at import). Runs per-call by design —
+  //   module-load-time check would miss runtime template-literal
+  //   preprocessing.
   if (bundled.sha256 !== BUNDLED_OBSERVER_PROMPT_SHA256) {
     throw new Error(
       `observer-prompt: bundled artifact SHA mismatch — computed ${bundled.sha256} vs stamped ${BUNDLED_OBSERVER_PROMPT_SHA256}`,

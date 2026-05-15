@@ -294,6 +294,9 @@ interface CouncilGroupMeta {
    * label stays in-memory only on the SdkSessionInfo's artifact.
    */
   observerPromptSource?: "workspace" | "bundled";
+  /** Schema version parsed from the observer prompt's header at spawn time
+   *  (CR-13, forward-compat for v2 migration). */
+  observerPromptVersion?: number;
   /** Wallclock (ms) when the group was created — used to compute invocation latency. */
   createdAt: number;
   /** Wallclock (ms) when the most recent checkpoint reached this orchestrator — used to compute observer wake-to-emit latency. */
@@ -2123,6 +2126,7 @@ export class SessionOrchestrator {
             observerCliVersion: payload.observer_cli_version,
             promptSha256: meta.observerPromptSha256 ?? "",
             observerPromptSource: meta.observerPromptSource,
+            observerPromptVersion: meta.observerPromptVersion,
           }),
         });
       }
@@ -2252,6 +2256,7 @@ export class SessionOrchestrator {
         pairing: pairingLabel,
         observerPromptSha256: observerInfo.observerPromptSha256,
         observerPromptSource: observerInfo.observerPromptSource,
+        observerPromptVersion: observerInfo.observerPromptVersion,
         createdAt: Date.now(),
         lastCheckpointReceivedAt: null,
       });

@@ -38,6 +38,17 @@ const sha256 = createHash("sha256").update(body, "utf8").digest("hex");
 // reviewable in a diff without quote/newline footguns. The 9 KiB embedded
 // prose lives in a `.ts` source file but does not interfere with
 // TypeScript's parsing.
+//
+// Council Review 2026-05-15-1015 CR-22 (Willison W7): emit first/last
+// ~200 chars of the body into a preceding comment so a reviewer scanning
+// the generated TS can eyeball the header sentinel + closing rule without
+// expanding the one-line escaped literal. The CI canary catches drift
+// from the .md; this comment helps catch a malicious hand-edit that
+// re-runs the generator to produce coherent (body, sha) but with hostile
+// content injected into the middle of the body.
+const previewHead = body.slice(0, 200).replace(/\*\//g, "*\\/");
+const previewTail = body.slice(-200).replace(/\*\//g, "*\\/");
+
 const bundleContent = `/**
  * AUTO-GENERATED — do not hand-edit.
  *
@@ -52,6 +63,16 @@ const bundleContent = `/**
  * \`OBSERVER_PROMPT_MAX_BYTES\` ceiling, \`OBSERVER_PROMPT_MIN_BODY_BYTES\`
  * floor). The build step verifies the artifact parses before emitting
  * this file; downstream callers may trust the constants are loader-valid.
+ *
+ * Reviewable preview (first/last ~200 chars of the body):
+ *
+ *   HEAD:
+ *   ${previewHead.replace(/\n/g, "\n *   ")}
+ *
+ *   ...
+ *
+ *   TAIL:
+ *   ${previewTail.replace(/\n/g, "\n *   ")}
  *
  * CI canary: \`bun run build-observer-prompt-bundle && git diff --exit-code\`
  * fails if this file drifts from the canonical artifact.

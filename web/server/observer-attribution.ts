@@ -159,6 +159,14 @@ export interface ObserverInvocationLogEntryInput {
    * not carry it; readers tolerate `undefined` as "unknown provenance".
    */
   observerPromptSource?: "workspace" | "bundled";
+  /**
+   * Schema version of the observer prompt at invocation time. Council
+   * Review 2026-05-15-1015 CR-13 (Willison W1): forensic-replay needs
+   * the version to distinguish v1 vs v2 observer behaviour across the
+   * recording corpus — sha+source alone collide when the artifact body
+   * was the same but the schema-version contract evolved.
+   */
+  observerPromptVersion?: number;
 }
 
 export interface ObserverInvocationLogEntry extends ObserverInvocationLogEntryInput {
@@ -198,6 +206,9 @@ export function formatObserverInvocationLog(
     promptSha256: input.promptSha256,
     ...(input.observerPromptSource !== undefined && {
       observerPromptSource: input.observerPromptSource,
+    }),
+    ...(input.observerPromptVersion !== undefined && {
+      observerPromptVersion: input.observerPromptVersion,
     }),
   };
 }

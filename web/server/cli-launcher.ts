@@ -167,6 +167,15 @@ export interface SdkSessionInfo {
    * intent (custom override vs default) is the same the field reflects.
    */
   observerPromptSource?: "workspace" | "bundled";
+  /**
+   * Schema version parsed from the observer prompt's header sentinel at
+   * spawn time (`<!-- observer-system-prompt vN -->`). Council Review
+   * 2026-05-15-1015 CR-13 (Willison W1): forward-compat for v2 migration —
+   * recordings and EC-9 logs need this to distinguish observer behaviour
+   * across schema bumps, otherwise the corpus silently mixes v1 and v2
+   * evidence and the deterministic-regression-test property is lost.
+   */
+  observerPromptVersion?: number;
 }
 
 export interface LaunchOptions {
@@ -462,6 +471,7 @@ export class CliLauncher {
 
       info.observerPromptSha256 = resolution.artifact.sha256;
       info.observerPromptSource = resolution.artifact.source;
+      info.observerPromptVersion = resolution.artifact.version;
 
       // Council Plan Task 5 + Council Review 2026-05-15-0820 P2 #8/#9:
       // structured WARN log on bundled-fallback path. Operator visibility —
@@ -489,6 +499,7 @@ export class CliLauncher {
               expectedPathDepth: resolution.expectedPathDepth,
               observerPromptSha256: resolution.artifact.sha256,
               observerPromptSource: resolution.artifact.source,
+              observerPromptVersion: resolution.artifact.version,
               reason: resolution.fallbackReason,
             });
           }
@@ -540,6 +551,7 @@ export class CliLauncher {
     // here so the baseline always reflects the pre-relaunch state.
     const previousObserverPromptSha = info.observerPromptSha256;
     const previousObserverPromptSource = info.observerPromptSource;
+    const previousObserverPromptVersion = info.observerPromptVersion;
 
     // Kill old process(es) if still alive.
     // Snapshot both handles first because killing the proxy can trigger the
@@ -714,10 +726,12 @@ export class CliLauncher {
         previous: {
           sha256: previousObserverPromptSha,
           source: previousObserverPromptSource,
+          version: previousObserverPromptVersion,
         },
         current: {
           sha256: info.observerPromptSha256,
           source: info.observerPromptSource,
+          version: info.observerPromptVersion,
         },
         cause: "session_exited",
         crossedSourceBoundary,

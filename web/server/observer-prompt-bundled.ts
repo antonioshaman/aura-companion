@@ -13,6 +13,26 @@
  * floor). The build step verifies the artifact parses before emitting
  * this file; downstream callers may trust the constants are loader-valid.
  *
+ * Reviewable preview (first/last ~200 chars of the body):
+ *
+ *   HEAD:
+ *   <!-- observer-system-prompt v1 -->
+ *   
+ *   # Observer System Prompt — Carmack Council Independent Reviewer
+ *   
+ *   You are the **Observer** half of a Council Mode pair. A separate orchestrator
+ *   LLM session (in a dif
+ *
+ *   ...
+ *
+ *   TAIL:
+ *   g rule
+ *   
+ *   You are reviewing alongside, not against, another LLM. Independent
+ *   signal is the value of this pairing. A polite review that catches one
+ *   real defect beats a thorough review that catches none.
+ *   
+ *
  * CI canary: `bun run build-observer-prompt-bundle && git diff --exit-code`
  * fails if this file drifts from the canonical artifact.
  */
