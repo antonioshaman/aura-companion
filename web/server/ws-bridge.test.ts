@@ -2768,6 +2768,121 @@ describe("Multiple browser sockets", () => {
   });
 });
 
+// Task 11.6 — cross-tab single-firer for user-frame observation. The
+// bridge fires the registered callback ONCE per user_message frame
+// regardless of how many browser tabs are connected to the session;
+// production wires this to `IdleTimerManager.noteUserMessage` to advance
+// the per-session turn-token (cancels pending auto-proceed fires).
+describe("onUserFrameObserved (Task 11.6)", () => {
+  it("fires the registered callback exactly once per user_message frame, regardless of tab count", () => {
+    const cli = makeCliSocket("s-uf-1");
+    const browser1 = makeBrowserSocket("s-uf-1");
+    const browser2 = makeBrowserSocket("s-uf-1");
+    const browser3 = makeBrowserSocket("s-uf-1");
+    bridge.handleCLIOpen(cli, "s-uf-1");
+    bridge.handleBrowserOpen(browser1, "s-uf-1");
+    bridge.handleBrowserOpen(browser2, "s-uf-1");
+    bridge.handleBrowserOpen(browser3, "s-uf-1");
+
+    const observed: string[] = [];
+    bridge.onUserFrameObserved((sid) => observed.push(sid));
+
+    // Frame from tab B — only this tab sent it, but the bridge dispatches
+    // through `routeBrowserMessage` once, so the observer must fire once.
+    bridge.handleBrowserMessage(browser2, JSON.stringify({ type: "user_message", content: "hello from tab B" }));
+
+    expect(observed).toEqual(["s-uf-1"]);
+  });
+
+  it("fires for each separate user_message frame (N frames → N callbacks)", () => {
+    const cli = makeCliSocket("s-uf-2");
+    const browser = makeBrowserSocket("s-uf-2");
+    bridge.handleCLIOpen(cli, "s-uf-2");
+    bridge.handleBrowserOpen(browser, "s-uf-2");
+
+    const observed: string[] = [];
+    bridge.onUserFrameObserved((sid) => observed.push(sid));
+
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "one" }));
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "two" }));
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "three" }));
+
+    expect(observed).toEqual(["s-uf-2", "s-uf-2", "s-uf-2"]);
+  });
+
+  it("does NOT fire for non-user_message frames (permission_response, interrupt, etc.)", () => {
+    const cli = makeCliSocket("s-uf-3");
+    const browser = makeBrowserSocket("s-uf-3");
+    bridge.handleCLIOpen(cli, "s-uf-3");
+    bridge.handleBrowserOpen(browser, "s-uf-3");
+
+    const observed: string[] = [];
+    bridge.onUserFrameObserved((sid) => observed.push(sid));
+
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "interrupt" }));
+    bridge.handleBrowserMessage(browser, JSON.stringify({
+      type: "permission_response",
+      request_id: "req-1",
+      behavior: "allow",
+    }));
+
+    expect(observed).toEqual([]);
+  });
+
+  it("supports multiple observers; all fire on a single user_message frame", () => {
+    const cli = makeCliSocket("s-uf-4");
+    const browser = makeBrowserSocket("s-uf-4");
+    bridge.handleCLIOpen(cli, "s-uf-4");
+    bridge.handleBrowserOpen(browser, "s-uf-4");
+
+    const a: string[] = [];
+    const b: string[] = [];
+    bridge.onUserFrameObserved((sid) => a.push(sid));
+    bridge.onUserFrameObserved((sid) => b.push(sid));
+
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "x" }));
+
+    expect(a).toEqual(["s-uf-4"]);
+    expect(b).toEqual(["s-uf-4"]);
+  });
+
+  it("returned unsubscribe function removes the observer (no-fire after unsub)", () => {
+    const cli = makeCliSocket("s-uf-5");
+    const browser = makeBrowserSocket("s-uf-5");
+    bridge.handleCLIOpen(cli, "s-uf-5");
+    bridge.handleBrowserOpen(browser, "s-uf-5");
+
+    const observed: string[] = [];
+    const unsub = bridge.onUserFrameObserved((sid) => observed.push(sid));
+
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "before" }));
+    expect(observed).toEqual(["s-uf-5"]);
+
+    unsub();
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "after" }));
+    expect(observed).toEqual(["s-uf-5"]); // unchanged
+  });
+
+  it("isolates observer errors (one throws, others still fire, history append continues)", () => {
+    const cli = makeCliSocket("s-uf-6");
+    const browser = makeBrowserSocket("s-uf-6");
+    bridge.handleCLIOpen(cli, "s-uf-6");
+    bridge.handleBrowserOpen(browser, "s-uf-6");
+
+    const ok: string[] = [];
+    bridge.onUserFrameObserved(() => { throw new Error("observer-A failed"); });
+    bridge.onUserFrameObserved((sid) => ok.push(sid));
+
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "x" }));
+
+    // The thrown observer must NOT block subsequent observers or
+    // the user-frame's history-append (downstream of the loop).
+    expect(ok).toEqual(["s-uf-6"]);
+    const session = bridge.getSession("s-uf-6")!;
+    expect(session.messageHistory.some((m) => m.type === "user_message")).toBe(true);
+  });
+});
+
 // ─── handleCLIMessage with Buffer ─────────────────────────────────────────────
 
 describe("handleCLIMessage with Buffer", () => {

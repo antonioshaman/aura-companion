@@ -181,6 +181,7 @@ function createMockBridge() {
     attachBackendAdapter: vi.fn(),
     cancelDisconnectTimer: vi.fn(() => false),
     sendObserverWakeFrame: vi.fn(() => ({ kind: "sent" })),
+    onUserFrameObserved: vi.fn(() => () => {}),
   } as any;
 }
 

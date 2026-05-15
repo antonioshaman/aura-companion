@@ -480,6 +480,22 @@ export class SessionOrchestrator {
       this.launcher.setCLISessionId(sessionId, cliSessionId);
     });
 
+    // Task 11.6 — cross-tab single-firer wiring for the auto-proceed
+    // turn-token. The bridge fires `onUserFrameObserved` once per
+    // browser→server `user_message` frame regardless of tab count.
+    // Forwarding to `idleTimerManager.noteUserMessage` advances the
+    // per-session monotonic turn-token, which cancels any pending
+    // synthetic-fire and invalidates an in-flight fire callback (the
+    // re-read inside `fire()` is the actual single-firer gate; this
+    // wiring is the observability path that drives it).
+    //
+    // Production caller for `IdleTimerManager.noteUserMessage` — closes
+    // the call-site gap from Task 11.1 foundation work where the method
+    // shipped with unit tests but no production wiring.
+    this.wsBridge.onUserFrameObserved((sessionId) => {
+      this.idleTimerManager.noteUserMessage(sessionId);
+    });
+
     // Council Mode auto-wake (Task 4 drain hook): when the observer
     // half's adapter flips turn-state from `in-flight` to `idle`
     // (a `result` NDJSON frame arrived), drain the per-group

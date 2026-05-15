@@ -94,6 +94,16 @@ export class WsBridge {
   private recorder: RecorderManager | null = null;
   private autoNamingAttempted = new Set<string>();
   private userMsgCounter = 0;
+  /**
+   * Cross-tab single-firer observers for user-frame arrivals (Task 11.6).
+   * The bridge routes each browser→server user frame through
+   * `routeBrowserMessage` exactly once regardless of how many tabs are
+   * connected, so a callback registered here fires once per frame — not
+   * per tab. Production wires this to `IdleTimerManager.noteUserMessage`
+   * so the auto-proceed pipeline's turn-token advances on any tab's typing,
+   * not just the originating socket.
+   */
+  private userFrameObservers: Array<(sessionId: string) => void> = [];
   private static readonly GIT_SESSION_KEYS: GitSessionKey[] = [
     "git_branch",
     "is_worktree",
@@ -102,6 +112,31 @@ export class WsBridge {
     "git_ahead",
     "git_behind",
   ];
+
+  /**
+   * Register a callback that fires whenever ANY browser tab sends a
+   * `user_message` frame to ANY session — caller filters by sessionId.
+   *
+   * The bridge's `routeBrowserMessage` is the single dispatch point for
+   * browser frames, so the callback fires once per frame regardless of
+   * tab count. Production caller is `SessionOrchestrator.initialize`
+   * wiring `IdleTimerManager.noteUserMessage(sid)`, which advances the
+   * per-session turn-token (cancels any pending auto-proceed fire — see
+   * `feedback_call_site_presence_not_just_symbol_export`: the manager's
+   * `noteUserMessage` method was tested standalone in Task 11.1 but had
+   * no production caller until this wiring landed in Task 11.6).
+   *
+   * Returns an unsubscribe function for symmetry with `companionBus.on`;
+   * the orchestrator never calls it (DI lifetime = process lifetime), but
+   * tests use it to keep their mock observers isolated.
+   */
+  onUserFrameObserved(callback: (sessionId: string) => void): () => void {
+    this.userFrameObservers.push(callback);
+    return () => {
+      const idx = this.userFrameObservers.indexOf(callback);
+      if (idx >= 0) this.userFrameObservers.splice(idx, 1);
+    };
+  }
 
   /** Set the Linear agent session ID on a Companion session and persist it. */
   setLinearSessionId(sessionId: string, linearSessionId: string): void {
@@ -1370,6 +1405,21 @@ export class WsBridge {
     // -- user_message: store in history before delegating to adapter ------
     if (msg.type === "user_message") {
       metricsCollector.recordTurnStarted(session.id);
+      // Task 11.6 — cross-tab single-firer for IdleTimerManager.noteUserMessage.
+      // Fire BEFORE history append + state-machine transition so the
+      // observer (and downstream auto-proceed turn-token advance) sees the
+      // frame at the same logical point as the session state mutation. A
+      // thrown observer must not corrupt history — guarded per-callback.
+      for (const observer of this.userFrameObservers) {
+        try {
+          observer(session.id);
+        } catch (err) {
+          log.warn("ws-bridge", "userFrameObserver threw", {
+            sessionId: session.id,
+            error: String(err),
+          });
+        }
+      }
       const ts = Date.now();
       const userMessage: BrowserIncomingMessage = {
         type: "user_message",
