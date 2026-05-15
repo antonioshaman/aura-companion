@@ -397,6 +397,28 @@ describe("Connection lifecycle", () => {
     expect(disconnectCb).toHaveBeenCalledOnce();
   });
 
+  // Council Review #13 — mid-flap cleanup: detachWebSocket clears
+  // pendingControlRequests so the unresolved Promise resolvers from the
+  // now-dead socket don't leak into the next attach. `disconnect()`
+  // already clears this; detachWebSocket was the WS-close-event path
+  // that bypassed it.
+  it("detachWebSocket clears pendingControlRequests (#13 mid-flap cleanup)", () => {
+    const ws = createMockSocket("sess-1");
+    adapter.attachWebSocket(ws);
+    // Plant a fake pending request via the private map. Mirrors what
+    // sendControlRequest does on the path between request-out and
+    // response-in.
+    const pendingMap = (adapter as unknown as {
+      pendingControlRequests: Map<string, { subtype: string; resolve: (r: unknown) => void }>;
+    }).pendingControlRequests;
+    pendingMap.set("test-req-1", { subtype: "set_permission_mode", resolve: () => {} });
+    pendingMap.set("test-req-2", { subtype: "interrupt", resolve: () => {} });
+    expect(pendingMap.size).toBe(2);
+
+    adapter.detachWebSocket(ws);
+    expect(pendingMap.size).toBe(0);
+  });
+
   it("detachWebSocket with a stale socket (different ws) does nothing", () => {
     // If a new WebSocket replaced an old one, closing the old one should
     // NOT clear the current connection or trigger the disconnect callback.

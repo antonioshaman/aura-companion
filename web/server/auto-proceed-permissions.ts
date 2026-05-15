@@ -4,8 +4,13 @@
  * PLAN-aura-orchestrator-idle-auto-proceed Task 11.5: when the
  * orchestrator's idle-timer fires a synthetic `[auto-proceed:idle-timeout]`
  * frame to nudge a stalled session, the resulting CLI tool uses should be
- * **prohibited from invoking destructive write-out operations** like
- * `git push`, `git commit`, `gh pr create`, `gh pr merge`.
+ * **prohibited from invoking publish-to-others operations** — `git push`,
+ * `git commit`, `gh pr create`, `gh pr merge`. These commands all
+ * communicate outcomes to other humans / shared remotes; the user being
+ * AFK (the synthetic's precondition) means there's no chance to review
+ * before publication. (Council Review #10 — prose was previously
+ * "destructive" but the list is publish-only; "destructive" implies
+ * `rm -rf` shapes that are NOT on this list and are out of scope.)
  *
  * Rationale: an auto-proceed nudge is an unattended-operation signal —
  * the user is AFK by design (the synthetic only fires after a
@@ -85,14 +90,27 @@ export const SYNTHETIC_FRAME_TOOL_DENYLIST: ReadonlySet<string> = new Set([
  *                  entry. Caller should respond to the CLI with
  *                  `{behavior:"deny", message: ...}`.
  */
-export function isToolUseDeniedForSynthetic(toolName: string, toolInput: unknown): boolean {
+export function isToolUseDeniedForSynthetic(toolName: unknown, toolInput: unknown): boolean {
+  // Council Review #11 — fail-CLOSED on non-string toolName. The TypeScript
+  // signature has historically been `toolName: string`, but the wire boundary
+  // (NDJSON from the CLI) is `unknown` by construction — a malformed frame
+  // could send a number, null, or object. Treat any non-string as a denied
+  // operation: the gate is a behavioural guardrail, and the safe default
+  // when type-narrowing fails is "deny, ask the user manually."
+  if (typeof toolName !== "string") return true;
   if (toolName === "Bash") {
     if (typeof toolInput !== "object" || toolInput === null) return false;
     const command = (toolInput as { command?: unknown }).command;
     if (typeof command !== "string") return false;
-    // ASCII leading-whitespace normalisation. See module-level docs on
-    // limitations — Unicode whitespace evasion is out of scope.
-    const trimmed = command.trimStart();
+    // ASCII leading-whitespace normalisation + Council Review #15 ZW-class
+    // stripping. The ZW class (U+200B ZWSP, U+200C ZWNJ, U+200D ZWJ,
+    // U+FEFF ZWNBSP/BOM, U+2060 WORD JOINER) renders invisible in editors
+    // and many terminals — embedded in `g​it push` it would bypass
+    // a literal `startsWith("git push")` check while still rendering and
+    // (in shells that tolerate it) potentially executing as `git push`.
+    // Strip pre-match so the prefix comparison sees the canonical form.
+    const cleaned = command.replace(/[\u200B\u200C\u200D\uFEFF\u2060]/g, "");
+    const trimmed = cleaned.trimStart();
     for (const entry of SYNTHETIC_FRAME_TOOL_DENYLIST) {
       if (!entry.startsWith("Bash:")) continue;
       const prefix = entry.slice("Bash:".length);
@@ -108,12 +126,19 @@ export function isToolUseDeniedForSynthetic(toolName: string, toolInput: unknown
  * response so the CLI's user-visible chat thread shows WHY the tool was
  * blocked. Keep concise — appears inline in the CLI's tool-use feedback.
  */
-export function denialMessageForSynthetic(toolName: string, toolInput: unknown): string {
+export function denialMessageForSynthetic(toolName: unknown, toolInput: unknown): string {
   if (toolName === "Bash" && typeof toolInput === "object" && toolInput !== null) {
     const command = (toolInput as { command?: unknown }).command;
     if (typeof command === "string") {
-      const head = command.trimStart().split("\n", 1)[0]?.slice(0, 80) ?? "";
-      return `Auto-proceed synthetic frame may not invoke destructive operations (denied: \`${head}\`). Engage manually to push / commit / open PRs.`;
+      // Council Review #14 — strip backticks from the embedded command
+      // head. The denial message uses a markdown code span (`` `...` ``)
+      // to wrap the rejected command for readability in the CLI's chat
+      // surface; if `command` itself contains a backtick, the span breaks
+      // and downstream markdown renderers misinterpret the rest of the
+      // message. Replace with a Unicode look-alike (U+2018) which renders
+      // safely in any context.
+      const head = command.trimStart().split("\n", 1)[0]?.slice(0, 80).replace(/`/g, "‘") ?? "";
+      return `Auto-proceed synthetic frame may not invoke publish-to-others operations (denied: \`${head}\`). Engage manually to push / commit / open PRs.`;
     }
   }
   return "Auto-proceed synthetic frame may not invoke this operation. Engage manually to proceed.";

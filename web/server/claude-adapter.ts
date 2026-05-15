@@ -254,6 +254,14 @@ export class ClaudeAdapter implements IBackendAdapter {
     // Mirror reset for the orchestrator-half. See `observerTurnState`
     // comment immediately above; same socket-bound semantics.
     this.orchestratorTurnState = { kind: "awaiting-input", blockedByStop: false };
+    // Council Review #13 — mid-flap cleanup: clear pendingControlRequests
+    // so unresolved Promise resolvers from the now-dead socket don't leak
+    // into the next attach. `disconnect()` already clears this (line 283);
+    // detachWebSocket is the WS-close-event path that bypassed it. Without
+    // this, a flap with in-flight control requests can wedge memory plus
+    // leave the next attach's caller waiting on a resolver that will
+    // never fire.
+    this.pendingControlRequests.clear();
     this.disconnectCb?.();
   }
 
