@@ -154,6 +154,14 @@ const idleTimerManager = new IdleTimerManager({
 });
 
 orchestrator.setIdleTimerManager(idleTimerManager);
+// Task 11.7 — narrow-surface late-injection: the bridge needs to know
+// whether the in-flight turn is synthetic so its CLI-activity callbacks
+// can skip the idle-kill clock update. Mirrors the orchestrator's
+// mutual-cycle pattern (manager constructed after bridge + orchestrator,
+// then injected back).
+wsBridge.setIdleTimerProbe({
+  isSyntheticTurnInFlight: (sid) => idleTimerManager.isSyntheticTurnInFlight(sid),
+});
 
 // ── Cloud relay connection (for receiving webhooks behind a firewall) ────────
 // The relay forwards platform webhooks (e.g. GitHub, Slack) to the Companion

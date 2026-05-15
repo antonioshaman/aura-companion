@@ -104,6 +104,19 @@ export class WsBridge {
    * not just the originating socket.
    */
   private userFrameObservers: Array<(sessionId: string) => void> = [];
+
+  /**
+   * Narrow read-only view of {@link IdleTimerManager} used by the
+   * idle-kill clock split (Task 11.7). The bridge only needs to know
+   * whether a synthetic auto-proceed turn is in flight for a given
+   * session; the full manager surface stays in `SessionOrchestrator`.
+   * Late-injected via {@link setIdleTimerManager} from `index.ts`
+   * (after the manager is constructed) — mirrors the orchestrator's
+   * mutual-cycle pattern. `null` until set, in which case
+   * {@link noteCliActivity} defaults to advancing the clock (safe
+   * pre-Task-11 behaviour).
+   */
+  private idleTimerProbe: { isSyntheticTurnInFlight(sessionId: string): boolean } | null = null;
   private static readonly GIT_SESSION_KEYS: GitSessionKey[] = [
     "git_branch",
     "is_worktree",
@@ -112,6 +125,61 @@ export class WsBridge {
     "git_ahead",
     "git_behind",
   ];
+
+  /**
+   * Late-inject the idle-timer manager's synthetic-turn probe (Task 11.7).
+   * `index.ts` calls this after constructing the real
+   * {@link IdleTimerManager} so the bridge's activity-tracking sites can
+   * gate on whether the in-flight turn is synthetic (auto-proceed) vs
+   * user-driven. Idempotent; calling with `null` re-arms the safe-default
+   * branch where every CLI activity tick advances `lastCliActivityTs`.
+   */
+  setIdleTimerProbe(probe: { isSyntheticTurnInFlight(sessionId: string): boolean } | null): void {
+    this.idleTimerProbe = probe;
+  }
+
+  /**
+   * Idle-kill clock activity dispatcher (Task 11.7). Called from every
+   * CLI→browser activity callback. Queries the late-injected idle-timer
+   * probe and routes to {@link noteUserActivity} (advances the clock)
+   * or {@link noteSyntheticActivity} (no-op for the clock) so synthetic
+   * auto-proceed turns don't extend the idle-kill window indefinitely.
+   *
+   * Without this split: a session with auto-proceed iterating every few
+   * minutes would never reach the 24h idle threshold, because each
+   * synthetic-driven CLI response would reset the clock. The split
+   * preserves "user typing keeps session alive" while letting silent
+   * auto-proceed loops time out.
+   */
+  private noteCliActivity(session: Session): void {
+    if (this.idleTimerProbe?.isSyntheticTurnInFlight(session.id)) {
+      this.noteSyntheticActivity(session);
+    } else {
+      this.noteUserActivity(session);
+    }
+  }
+
+  /**
+   * The ONLY production code path that writes `session.lastCliActivityTs`
+   * outside session initialization and {@link startIdleKillWatchdog}'s
+   * fresh-start reset (Task 11.7). The EC-6 static-grep canary in
+   * `ws-bridge.test.ts` asserts this — any other mutation site is a bug.
+   */
+  private noteUserActivity(session: Session): void {
+    session.lastCliActivityTs = Date.now();
+  }
+
+  /**
+   * No-op for the idle-kill clock (Task 11.7). Placeholder for future
+   * synthetic-activity telemetry (per-session synthetic-turn counter,
+   * last-synthetic-ts, etc.) without violating the idle-clock invariant.
+   * Argument is intentionally captured so call sites typecheck identically
+   * to {@link noteUserActivity}.
+   */
+  private noteSyntheticActivity(_session: Session): void {
+    // Intentionally empty — synthetic frames do not advance the
+    // idle-kill clock. See `noteCliActivity` JSDoc for the rationale.
+  }
 
   /**
    * Register a callback that fires whenever ANY browser tab sends a
@@ -563,8 +631,9 @@ export class WsBridge {
 
     // ── onBrowserMessage — messages from backend → browsers ──────────────
     adapter.onBrowserMessage((msg) => {
-      // Track activity for idle detection
-      session.lastCliActivityTs = Date.now();
+      // Task 11.7 — idle-kill clock split. Synthetic auto-proceed turns
+      // do NOT advance the clock; only user-driven CLI activity does.
+      this.noteCliActivity(session);
       metricsCollector.recordMessageProcessed(msg.type);
 
       // -- session_init: merge into session state, broadcast, persist -----
@@ -922,7 +991,11 @@ export class WsBridge {
       isNewAdapter = true;
       adapter = new ClaudeAdapter(sessionId, {
         recorder: this.recorder,
-        onActivityUpdate: () => { session.lastCliActivityTs = Date.now(); },
+        // Task 11.7 — same idle-kill split as the `attachBackendAdapter`
+        // path above. Adapter-internal activity ticks (stream chunks etc.)
+        // funnel through the same dispatcher so synthetic turns don't
+        // sneak the clock forward via a parallel mutator.
+        onActivityUpdate: () => { this.noteCliActivity(session); },
       });
       // Wire up the shared event pipeline via attachBackendAdapter
       // (also broadcasts cli_connected for new adapters)
