@@ -340,6 +340,22 @@ export class CliLauncher {
    */
   launch(options: LaunchOptions = {}): SdkSessionInfo {
     const sessionId = randomUUID();
+    // Council Plan Bug B Review P1 #2 — for council-role sessions
+    // (orchestrator/observer), an explicit `cwd` is REQUIRED. The prior
+    // `options.cwd || process.cwd()` default silently fired the
+    // bundled-fallback under Docker (`cwd=/app`, no `.council/prompts/`)
+    // because by the time `applyCouncilObserverSpawnConfig` ran,
+    // `info.cwd` was already populated and its "no-workspace-cwd" branch
+    // was structurally unreachable. Fail-loud here closes the silent-
+    // bundled trap. Solo (non-council) sessions retain the
+    // `process.cwd()` default — they're not subject to the bundled-prompt
+    // fallback path and the default is operationally useful for
+    // single-shot launches.
+    if (options.sessionGroupRole && !options.cwd) {
+      throw new Error(
+        `cli-launcher.launch: explicit cwd is required for council-role sessions (role=${options.sessionGroupRole}); refusing to fall back to process.cwd()`,
+      );
+    }
     const cwd = options.cwd || process.cwd();
     const backendType = options.backendType || "claude";
 

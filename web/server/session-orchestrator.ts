@@ -2203,9 +2203,21 @@ export class SessionOrchestrator {
 
     const coordinator = this.getOrCreateCoordinatorSync();
 
+    // Council Plan Bug B Review P1 #2 — refuse to default to
+    // `process.cwd()` here. Council Mode requires an explicit workspace
+    // cwd so the observer prompt resolution gets a real workspace path
+    // (not the server's `/app` under Docker). Without this throw, the
+    // upstream `process.cwd()` default silently triggered the bundled-
+    // fallback path with `reason: "ENOENT"` — the distinct
+    // `no-workspace-cwd` branch was structurally unreachable.
+    if (!req.base.cwd || typeof req.base.cwd !== "string" || req.base.cwd.length === 0) {
+      throw new Error(
+        "createCouncilGroup: explicit cwd is required for Council Mode session creation; refusing to fall back to process.cwd()",
+      );
+    }
     try {
       const group = await coordinator.createGroup({
-        cwd: req.base.cwd ?? process.cwd(),
+        cwd: req.base.cwd,
         primary: parsed.primary,
         observer: parsed.observer,
         model: req.base.model,
