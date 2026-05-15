@@ -480,6 +480,35 @@ export class SessionOrchestrator {
       this.launcher.setCLISessionId(sessionId, cliSessionId);
     });
 
+    // Task 11.6 — cross-tab single-firer wiring for the auto-proceed
+    // turn-token. The bridge fires `onUserFrameObserved` once per
+    // browser→server `user_message` frame regardless of tab count.
+    // Forwarding to `idleTimerManager.noteUserMessage` advances the
+    // per-session monotonic turn-token, which cancels any pending
+    // synthetic-fire and invalidates an in-flight fire callback (the
+    // re-read inside `fire()` is the actual single-firer gate; this
+    // wiring is the observability path that drives it).
+    //
+    // Production caller for `IdleTimerManager.noteUserMessage` — closes
+    // the call-site gap from Task 11.1 foundation work where the method
+    // shipped with unit tests but no production wiring.
+    this.wsBridge.onUserFrameObserved((sessionId) => {
+      this.idleTimerManager.noteUserMessage(sessionId);
+    });
+
+    // Task 11.8 — clear the pending-synthetic-turn sticky token on every
+    // session exit. Without this, a session that died mid-synthetic-turn
+    // (CLI crash before result-frame, container teardown, manual kill)
+    // would leave the sticky token armed in the manager; if the same
+    // sessionId were later re-used (--resume), the next can_use_tool
+    // check would falsely treat the resumed session as auto-proceed-
+    // driven. `clearPendingSyntheticTurn` is idempotent on never-armed
+    // sessions, so firing it on every exit is safe regardless of
+    // whether auto-proceed was actually in play.
+    companionBus.on("session:exited", ({ sessionId }) => {
+      this.idleTimerManager.clearPendingSyntheticTurn(sessionId);
+    });
+
     // Council Mode auto-wake (Task 4 drain hook): when the observer
     // half's adapter flips turn-state from `in-flight` to `idle`
     // (a `result` NDJSON frame arrived), drain the per-group
@@ -2709,6 +2738,14 @@ export class SessionOrchestrator {
       this.prPoller.unwatch(group.observer.sessionId);
 
       await coord.archiveGroup(group.sessionGroupId);
+
+      // Task 11.8 — clear the pending-synthetic-turn sticky token on the
+      // orchestrator half once the group is archived. The `session:exited`
+      // listener above also clears on the individual half-deaths that
+      // archiveGroup fires, but explicit cleanup here guards against any
+      // ordering between archive and the bus-emit being inverted by a
+      // future refactor. Idempotent — calling twice is a no-op.
+      this.idleTimerManager.clearPendingSyntheticTurn(group.primary.sessionId);
 
       // Worktree cleanup runs ONCE — council pairs share one workspace;
       // calling cleanupWorktree per-half would double-attempt the same

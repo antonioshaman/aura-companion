@@ -138,15 +138,24 @@ const idleTimerManager = new IdleTimerManager({
     if (!result.ok) return { ok: false, error: result.error };
     return { ok: true };
   },
-  sendSyntheticFrame: () => {
-    // PLAN Task 11 wires the real `synthetic: true` recorder envelope +
-    // `ClaudeAdapter.send` pass-through. Until that ships, the fire path
-    // is unreachable in production (no caller emits the
-    // `orchestrator_turn_idle` event through the state machine yet), so
-    // returning a structured failure is safe; if a future change reaches
-    // here unexpectedly, the EC-9 `idle-timer.fire-failed` log line
-    // surfaces it loudly.
-    return { ok: false, error: "synthetic-send-not-wired-task-11" };
+  sendSyntheticFrame: (sessionId, body) => {
+    // Task 11.8 wiring — replaces the prior stub
+    // `{ok:false, error:"synthetic-send-not-wired-task-11"}` with the
+    // real bridge call. The bridge resolves the orchestrator-half adapter
+    // and routes through `sendOrchestratorSyntheticFrame` (recorder
+    // origin `server:auto-proceed`).
+    const outcome = wsBridge.sendOrchestratorSyntheticFrame(sessionId, body);
+    if (outcome.kind === "sent") return { ok: true };
+    // Map the bridge's typed outcome to the manager's expected
+    // `{ok:false, error}` shape so EC-9 `idle-timer.fire-failed` log
+    // lines carry the precise failure reason from upstream.
+    const errorDetail =
+      outcome.kind === "backpressure"
+        ? `backpressure(buffered=${outcome.bufferedAmount})`
+        : outcome.kind === "failed"
+          ? `failed(${outcome.error})`
+          : outcome.kind;
+    return { ok: false, error: errorDetail };
   },
   logEvent: (entry) => {
     appLog.info("idle-timer-manager", entry.event, entry as unknown as Record<string, unknown>);
@@ -154,6 +163,15 @@ const idleTimerManager = new IdleTimerManager({
 });
 
 orchestrator.setIdleTimerManager(idleTimerManager);
+// Task 11.7 — narrow-surface late-injection: the bridge needs to know
+// whether the in-flight turn is synthetic so its CLI-activity callbacks
+// can skip the idle-kill clock update. Mirrors the orchestrator's
+// mutual-cycle pattern (manager constructed after bridge + orchestrator,
+// then injected back).
+wsBridge.setIdleTimerProbe({
+  isSyntheticTurnInFlight: (sid) => idleTimerManager.isSyntheticTurnInFlight(sid),
+  noteTerminalResultFrame: (sid) => idleTimerManager.noteTerminalResultFrame(sid),
+});
 
 // ── Cloud relay connection (for receiving webhooks behind a firewall) ────────
 // The relay forwards platform webhooks (e.g. GitHub, Slack) to the Companion

@@ -2768,6 +2768,304 @@ describe("Multiple browser sockets", () => {
   });
 });
 
+// Task 11.7 — idle-kill clock split. Synthetic auto-proceed turns must
+// NOT advance `lastCliActivityTs`; only user-driven CLI activity does.
+// Without this split a session under auto-proceed would never reach the
+// idle-kill threshold and run forever.
+describe("noteCliActivity dispatcher (Task 11.7 — idle-kill clock split)", () => {
+  it("advances lastCliActivityTs when no synthetic turn is in flight (user activity)", async () => {
+    const cli = makeCliSocket("s-clock-1");
+    const browser = makeBrowserSocket("s-clock-1");
+    bridge.handleCLIOpen(cli, "s-clock-1");
+    bridge.handleBrowserOpen(browser, "s-clock-1");
+
+    // No probe injected → safe-default branch (treats everything as user).
+    const session = bridge.getSession("s-clock-1")!;
+    const before = session.lastCliActivityTs;
+    await new Promise((r) => setTimeout(r, 5));
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "tool_progress",
+      tool_use_id: "tu-1",
+      tool_name: "Bash",
+      parent_tool_use_id: null,
+      elapsed_time_seconds: 1,
+      uuid: "uuid-clock-1",
+      session_id: "s-clock-1",
+    }));
+    expect(session.lastCliActivityTs).toBeGreaterThan(before);
+  });
+
+  it("does NOT advance lastCliActivityTs when synthetic turn is in flight (auto-proceed activity)", async () => {
+    const cli = makeCliSocket("s-clock-2");
+    const browser = makeBrowserSocket("s-clock-2");
+    bridge.handleCLIOpen(cli, "s-clock-2");
+    bridge.handleBrowserOpen(browser, "s-clock-2");
+
+    // Inject a probe that reports synthetic-in-flight for this session.
+    bridge.setIdleTimerProbe({
+      isSyntheticTurnInFlight: (sid) => sid === "s-clock-2",
+      noteTerminalResultFrame: () => {},
+    });
+
+    const session = bridge.getSession("s-clock-2")!;
+    const before = session.lastCliActivityTs;
+    await new Promise((r) => setTimeout(r, 5));
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "tool_progress",
+      tool_use_id: "tu-2",
+      tool_name: "Bash",
+      parent_tool_use_id: null,
+      elapsed_time_seconds: 1,
+      uuid: "uuid-clock-2",
+      session_id: "s-clock-2",
+    }));
+    expect(session.lastCliActivityTs).toBe(before);
+  });
+
+  it("100 synthetic-driven CLI frames in sequence do not advance the clock", async () => {
+    const cli = makeCliSocket("s-clock-3");
+    const browser = makeBrowserSocket("s-clock-3");
+    bridge.handleCLIOpen(cli, "s-clock-3");
+    bridge.handleBrowserOpen(browser, "s-clock-3");
+
+    bridge.setIdleTimerProbe({
+      isSyntheticTurnInFlight: () => true,
+      noteTerminalResultFrame: () => {},
+    });
+
+    const session = bridge.getSession("s-clock-3")!;
+    const before = session.lastCliActivityTs;
+    for (let i = 0; i < 100; i++) {
+      await bridge.handleCLIMessage(cli, JSON.stringify({
+        type: "tool_progress",
+        tool_use_id: `tu-burst-${i}`,
+        tool_name: "Bash",
+        parent_tool_use_id: null,
+        elapsed_time_seconds: 1,
+        uuid: `uuid-burst-${i}`,
+        session_id: "s-clock-3",
+      }));
+    }
+    // Clock untouched across 100 synthetic-driven CLI ticks.
+    expect(session.lastCliActivityTs).toBe(before);
+  });
+
+  it("a user frame DOES advance the clock even if the prior synthetic burst did not", async () => {
+    const cli = makeCliSocket("s-clock-4");
+    const browser = makeBrowserSocket("s-clock-4");
+    bridge.handleCLIOpen(cli, "s-clock-4");
+    bridge.handleBrowserOpen(browser, "s-clock-4");
+
+    // Step 1: synthetic phase — clock locked.
+    bridge.setIdleTimerProbe({ isSyntheticTurnInFlight: () => true, noteTerminalResultFrame: () => {} });
+    const session = bridge.getSession("s-clock-4")!;
+    const initial = session.lastCliActivityTs;
+    await new Promise((r) => setTimeout(r, 5));
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "tool_progress",
+      tool_use_id: "tu-syn",
+      tool_name: "Bash",
+      parent_tool_use_id: null,
+      elapsed_time_seconds: 1,
+      uuid: "uuid-syn",
+      session_id: "s-clock-4",
+    }));
+    expect(session.lastCliActivityTs).toBe(initial);
+
+    // Step 2: user types — synthetic turn implicitly cleared, probe flips.
+    bridge.setIdleTimerProbe({ isSyntheticTurnInFlight: () => false, noteTerminalResultFrame: () => {} });
+    await new Promise((r) => setTimeout(r, 5));
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "tool_progress",
+      tool_use_id: "tu-user",
+      tool_name: "Bash",
+      parent_tool_use_id: null,
+      elapsed_time_seconds: 1,
+      uuid: "uuid-user",
+      session_id: "s-clock-4",
+    }));
+    expect(session.lastCliActivityTs).toBeGreaterThan(initial);
+  });
+
+  // EC-6 static-grep canary (per `feedback_call_site_presence_not_just_symbol_export`
+  // + `feedback_static_grep_canary_regex_over_substring`). The clock-split
+  // invariant lives in the dispatcher; any direct `session.lastCliActivityTs =`
+  // assignment outside the two sanctioned locations is a regression risk:
+  //   1. `noteUserActivity(session)` — the canonical write path
+  //   2. `startIdleKillWatchdog(sessionId)` — fresh-start reset on watchdog arm
+  //
+  // Regex extracts the function body using `\bnoteUserActivity\s*\([^)]*\)\s*[:;a-zA-Z {]*\{` and
+  // `\bstartIdleKillWatchdog\s*\([^)]*\)\s*[:;a-zA-Z {]*\{` as anchors, then
+  // brace-counts until the matching `}`. Survives refactors that rename the
+  // parameter, change the access modifier (`private` ↔ public), or add a
+  // return-type annotation, because the anchor is the function NAME not
+  // surrounding text.
+  it("EC-6 canary: session.lastCliActivityTs = is mutated ONLY in noteUserActivity or startIdleKillWatchdog bodies", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const file = path.join(__dirname, "ws-bridge.ts");
+    const src = fs.readFileSync(file, "utf-8");
+
+    function extractFunctionBody(anchor: RegExp): string | null {
+      const match = anchor.exec(src);
+      if (!match) return null;
+      const openIdx = src.indexOf("{", match.index);
+      if (openIdx < 0) return null;
+      let depth = 1;
+      for (let i = openIdx + 1; i < src.length; i++) {
+        if (src[i] === "{") depth++;
+        else if (src[i] === "}") {
+          depth--;
+          if (depth === 0) return src.slice(openIdx, i + 1);
+        }
+      }
+      return null;
+    }
+
+    const noteUserActivityBody = extractFunctionBody(/\bnoteUserActivity\s*\([^)]*\)\s*:?\s*[a-zA-Z]*\s*\{/);
+    const startWatchdogBody = extractFunctionBody(/\bstartIdleKillWatchdog\s*\([^)]*\)\s*\{/);
+    expect(noteUserActivityBody, "noteUserActivity body must be locatable").not.toBeNull();
+    expect(startWatchdogBody, "startIdleKillWatchdog body must be locatable").not.toBeNull();
+
+    const allowedSpans: string[] = [noteUserActivityBody!, startWatchdogBody!];
+
+    // Find every `session.lastCliActivityTs = ` mutation in the file.
+    const mutationPattern = /session\.lastCliActivityTs\s*=/g;
+    const offendingExcerpts: string[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = mutationPattern.exec(src)) !== null) {
+      const inAllowed = allowedSpans.some((body) => {
+        const bodyStartInFile = src.indexOf(body);
+        return m!.index >= bodyStartInFile && m!.index < bodyStartInFile + body.length;
+      });
+      if (!inAllowed) {
+        // Capture ~80 chars of context for the failure message.
+        const ctx = src.slice(Math.max(0, m.index - 40), m.index + 80);
+        offendingExcerpts.push(`@${m.index}: ${ctx.replace(/\s+/g, " ")}`);
+      }
+    }
+    expect(
+      offendingExcerpts,
+      `Forbidden mutation site(s) of session.lastCliActivityTs outside noteUserActivity / startIdleKillWatchdog:\n${offendingExcerpts.join("\n")}`,
+    ).toEqual([]);
+  });
+});
+
+// Task 11.6 — cross-tab single-firer for user-frame observation. The
+// bridge fires the registered callback ONCE per user_message frame
+// regardless of how many browser tabs are connected to the session;
+// production wires this to `IdleTimerManager.noteUserMessage` to advance
+// the per-session turn-token (cancels pending auto-proceed fires).
+describe("onUserFrameObserved (Task 11.6)", () => {
+  it("fires the registered callback exactly once per user_message frame, regardless of tab count", () => {
+    const cli = makeCliSocket("s-uf-1");
+    const browser1 = makeBrowserSocket("s-uf-1");
+    const browser2 = makeBrowserSocket("s-uf-1");
+    const browser3 = makeBrowserSocket("s-uf-1");
+    bridge.handleCLIOpen(cli, "s-uf-1");
+    bridge.handleBrowserOpen(browser1, "s-uf-1");
+    bridge.handleBrowserOpen(browser2, "s-uf-1");
+    bridge.handleBrowserOpen(browser3, "s-uf-1");
+
+    const observed: string[] = [];
+    bridge.onUserFrameObserved((sid) => observed.push(sid));
+
+    // Frame from tab B — only this tab sent it, but the bridge dispatches
+    // through `routeBrowserMessage` once, so the observer must fire once.
+    bridge.handleBrowserMessage(browser2, JSON.stringify({ type: "user_message", content: "hello from tab B" }));
+
+    expect(observed).toEqual(["s-uf-1"]);
+  });
+
+  it("fires for each separate user_message frame (N frames → N callbacks)", () => {
+    const cli = makeCliSocket("s-uf-2");
+    const browser = makeBrowserSocket("s-uf-2");
+    bridge.handleCLIOpen(cli, "s-uf-2");
+    bridge.handleBrowserOpen(browser, "s-uf-2");
+
+    const observed: string[] = [];
+    bridge.onUserFrameObserved((sid) => observed.push(sid));
+
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "one" }));
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "two" }));
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "three" }));
+
+    expect(observed).toEqual(["s-uf-2", "s-uf-2", "s-uf-2"]);
+  });
+
+  it("does NOT fire for non-user_message frames (permission_response, interrupt, etc.)", () => {
+    const cli = makeCliSocket("s-uf-3");
+    const browser = makeBrowserSocket("s-uf-3");
+    bridge.handleCLIOpen(cli, "s-uf-3");
+    bridge.handleBrowserOpen(browser, "s-uf-3");
+
+    const observed: string[] = [];
+    bridge.onUserFrameObserved((sid) => observed.push(sid));
+
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "interrupt" }));
+    bridge.handleBrowserMessage(browser, JSON.stringify({
+      type: "permission_response",
+      request_id: "req-1",
+      behavior: "allow",
+    }));
+
+    expect(observed).toEqual([]);
+  });
+
+  it("supports multiple observers; all fire on a single user_message frame", () => {
+    const cli = makeCliSocket("s-uf-4");
+    const browser = makeBrowserSocket("s-uf-4");
+    bridge.handleCLIOpen(cli, "s-uf-4");
+    bridge.handleBrowserOpen(browser, "s-uf-4");
+
+    const a: string[] = [];
+    const b: string[] = [];
+    bridge.onUserFrameObserved((sid) => a.push(sid));
+    bridge.onUserFrameObserved((sid) => b.push(sid));
+
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "x" }));
+
+    expect(a).toEqual(["s-uf-4"]);
+    expect(b).toEqual(["s-uf-4"]);
+  });
+
+  it("returned unsubscribe function removes the observer (no-fire after unsub)", () => {
+    const cli = makeCliSocket("s-uf-5");
+    const browser = makeBrowserSocket("s-uf-5");
+    bridge.handleCLIOpen(cli, "s-uf-5");
+    bridge.handleBrowserOpen(browser, "s-uf-5");
+
+    const observed: string[] = [];
+    const unsub = bridge.onUserFrameObserved((sid) => observed.push(sid));
+
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "before" }));
+    expect(observed).toEqual(["s-uf-5"]);
+
+    unsub();
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "after" }));
+    expect(observed).toEqual(["s-uf-5"]); // unchanged
+  });
+
+  it("isolates observer errors (one throws, others still fire, history append continues)", () => {
+    const cli = makeCliSocket("s-uf-6");
+    const browser = makeBrowserSocket("s-uf-6");
+    bridge.handleCLIOpen(cli, "s-uf-6");
+    bridge.handleBrowserOpen(browser, "s-uf-6");
+
+    const ok: string[] = [];
+    bridge.onUserFrameObserved(() => { throw new Error("observer-A failed"); });
+    bridge.onUserFrameObserved((sid) => ok.push(sid));
+
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "x" }));
+
+    // The thrown observer must NOT block subsequent observers or
+    // the user-frame's history-append (downstream of the loop).
+    expect(ok).toEqual(["s-uf-6"]);
+    const session = bridge.getSession("s-uf-6")!;
+    expect(session.messageHistory.some((m) => m.type === "user_message")).toBe(true);
+  });
+});
+
 // ─── handleCLIMessage with Buffer ─────────────────────────────────────────────
 
 describe("handleCLIMessage with Buffer", () => {
