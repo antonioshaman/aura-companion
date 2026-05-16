@@ -144,14 +144,16 @@ Based on John Carmack's engineering philosophy. A council of domain experts revi
 
 | Skill | Description |
 |-------|------------|
-| `/council-plan` | Architect features with 9 domain experts before writing code |
-| `/council-review` | Deep multi-perspective code review with 10 experts (security, refactoring, UX, backend, database, deploy, LLM, UI, testing) |
+| `/council-plan` | Architect features with v1 domain experts before writing code |
+| `/council-review` | Deep multi-perspective code review with v1 experts (security, refactoring, UX, backend, database, deploy, LLM, UI, testing) |
 | `/council-implement` | Execute council plans task-by-task with per-task expert guidance |
 | `/spec-writer` | Generate structured specs with Job Stories + Gherkin acceptance criteria |
 | `/test-architect` | Audit test quality, detect AI shortcut patterns, specify tests before implementation |
 | `/self-improvement` | Continuous learning: logs errors, corrections, and feature requests |
 
 **Council experts include:** Troy Hunt (security), Martin Fowler (refactoring), Kent Beck (testing), Brandur Leach (databases), Simon Willison (LLM pipelines), Karri Saarinen (UI), Vitaly Friedman (UX), and specialized Telegram, Backend, and Deploy experts.
+
+**v2 expert catalog in development.** A person-named v2 catalog (14 current experts → 22 with Phase 3β tension-pair expansion) is being built on the `feat/council-v2-pipeline` branch. v2 reseats the council on real-person surnames for LLM-dispatch reliability and adds ideological-tension pairs (Fowler ↔ Uncle Bob, Ritchie ↔ Torvalds, Beck ↔ Hickey, Hunt ↔ Willison, Majors ↔ Hashimoto) so synthesis becomes resolution rather than aggregation. **v1 remains production default** until atomic-swap promotion (Phase 6). See [Expert Catalog v2 Roadmap](docs/reference/expert-catalog-v2-roadmap.mdx) for the full list, status, and rationale; opt into v2 explicitly via `-v2` skill variants (`/council-plan-v2`, `/council-review-v2`, etc.).
 
 ### Design & UX (18 skills from [impeccable](https://github.com/pbakaus/impeccable))
 
