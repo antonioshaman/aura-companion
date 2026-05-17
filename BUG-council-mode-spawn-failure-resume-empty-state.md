@@ -126,6 +126,18 @@ The orchestrator-half user-message also gets lost because the UI's send-gate see
 - Observer process argv (lots of detail — see Phase 3β hotfix worktree commit)
 - Both PIDs were alive at 22:47 with 2:09 etime — proves long-running deadlock, not transient timeout
 
+### Secondary observation: workspace bootstrap (operator hypothesis confirmed partially)
+
+Operator reported "this was a project that never had Council Mode run before; some files were probably missing." Verified `/root/SpiritMiner/.council/` state at the live-repro moment:
+
+| Path | State | Created by | Note |
+|---|---|---|---|
+| `.council/checkpoints/` | ✓ exists | `startCouncilWatchers.mkdirSync({recursive:true})` | Auto-created at 20:47 (same time as observer spawn) |
+| `.council/reviews/` | ✓ exists | Same | Same |
+| `.council/prompts/observer-system.md` | ✗ missing | (not auto-created) | **NOT a blocker** — `observer-prompt.ts` falls back to bundled artifact (`observer-prompt-bundled.ts`) when ENOENT. Observer argv confirmed the full Observer System Prompt got injected via `--append-system-prompt`. The bundled-fallback canary held. |
+
+The operator's intuition is right that fresh-project bootstrap can fail, but `feedback_council_mode_workspace_bootstrap_gap` is structurally closed (bundled fallback works). The remaining layer-2 concern: **`mkdirSync` race vs `fs.watch.attach`** (per `feedback_fs_watch_event_only_needs_init_scan`) — if a checkpoint file lands between `mkdir` returning and `fs.watch.attach` arming, the watcher misses it. That's a secondary risk worth verifying in the Path A fix's regression test, but it doesn't explain the live deadlock (no checkpoint was ever written by orchestrator — the orchestrator's UI was stuck in "Reconnecting…" preventing it from receiving the user's first message).
+
 ## Tracking
 
 - Bug captured here for Phase 3β scope inclusion (or hotfix branch if user prioritises).
