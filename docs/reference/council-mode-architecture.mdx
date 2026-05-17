@@ -113,7 +113,7 @@ All transitions go through `applyEvent` on the `SessionGroupCoordinator`, which 
 
 Council Mode is constrained by the AP- (architecture-pattern) and EC- (edge-case) conventions ratified in [`conventions.md`](https://github.com/antonioshaman/aura-companion/blob/main/conventions.md) at the repo root. Reviewers MUST NOT re-flag violations of these as new findings unless the convention itself is being changed.
 
-`conventions.md` is the authoritative, evolving list — currently spanning `AP-1..AP-4` and `EC-1..EC-32`. The most load-bearing entries for the architecture below:
+`conventions.md` is the authoritative, evolving list — currently spanning `AP-1..AP-4` and `EC-1..EC-33` (with gaps at EC-13 and EC-25..EC-29 reserved for future entries). The most load-bearing entries for the architecture below:
 
 - **`AP-2`** — `group-state-machine.ts` is the single source of truth for group lifecycle status.
 - **`AP-3`** — `council-types.ts` hosts both writer and reader schemas in one file.
@@ -122,7 +122,7 @@ Council Mode is constrained by the AP- (architecture-pattern) and EC- (edge-case
 - **`EC-4`** — Filesystem watcher debounce never silently coalesces distinct payloads. Key by `(file, mtimeNs)` and log `onDropped("superseded")`.
 - **`EC-6`** — Load-bearing protocol parsers require replay-based regression tests.
 - **`EC-7`** — Filesystem-access predicates inline path resolution OR are exposed only via a resolving wrapper.
-- **`EC-13`** — Observer failsafe: a recurring 5-minute tick scans `.council/checkpoints/` for unprocessed entries and synthesises a wake. Bounds worst-case observer latency.
+- **`EC-12`** — `fs.watch`-driven pipelines require an explicit pre-scan reconcile on initialize (the observer failsafe: scan `.council/checkpoints/` for unprocessed entries on startup and synthesise wakes; bounds worst-case observer latency).
 
 For rationale and the complete AP- / EC- enumeration, follow the link above — `conventions.md` is the canonical reference; this page deliberately does not restate it.
 
