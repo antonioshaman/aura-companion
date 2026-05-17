@@ -60,9 +60,75 @@ The combination matches: spawn races client connect (#1), resume creates the pai
 - "Session failed" → manual refresh + retype → works is a "wash, rinse, repeat" footgun that operators will hit every Council Mode session until fixed.
 - Observer half going silent (operator's working theory: never picked up) means the pair is one-directional in production — defeating Phase 3α' Council Mode investment.
 
+## ✅ Live repro captured 2026-05-17 22:47 — ROOT CAUSE FOUND
+
+Reproduced live on SpiritMiner project, session "Bright Nova" (group `grp_f1e01155c40d5364592646356b8daede`). Server-side state via `GET /api/sessions`:
+
+| Half | `state` | `cliSessionId` | `pid` | `etime` |
+|---|---|---|---|---|
+| Orchestrator (`72b3e201...`) | `connected` | `a27eae40-...` ✓ | 2572559 | 2:09 alive |
+| Observer (`52af8c9d...`) | `connected` | **`null`** ❌ | 2572627 | 2:09 alive |
+
+**Observer process is alive but `cliSessionId` is null after 2h+. Process argv shows `--print` (i.e. `-p` non-interactive mode).**
+
+This is the smoking-gun intersection of TWO existing memory rules:
+
+1. **`feedback_noninteractive_cli_handshake_emit_on_input`** — "Non-interactive CLIs (`-p`, `--print`) emit identity field (cliSessionId, ReadyForQuery-equivalent) **only AFTER first input** — gating a smoke test on it deadlocks." Observer is invoked with `--print` and waits for its first wake-frame before emitting `system { type: "init", session_id: ... }`.
+
+2. **`feedback_protocol_handshake_vs_transport_state`** — "`state=connected` = transport open, не protocol-ready. Gate UI/tests on the handshake-result field (cliSessionId, ReadyForQuery, initialize-ack), не на socket state." Server-side `state: "connected"` for the observer is true (transport open) but `cliSessionId: null` means protocol-not-ready. UI's "Reconnecting…" banner is the group-aware status fired because one half is protocol-unready.
+
+### The deadlock chain
+
+```
+Server: spawns observer with --print -p
+   ↓
+Observer (CLI): waits for first input before emitting cliSessionId
+   ↓
+Server: tracks observer state="connected" but cliSessionId=null
+   ↓
+Group-state-machine: one half not protocol-ready → group treated as degraded/reconnecting
+   ↓
+UI: "Reconnecting…" banner on orchestrator; observer pane "Awaiting first checkpoint"
+   ↓
+Server: never sends observer a wake-frame because the group is degraded
+   ↓
+Observer: never gets first input → never emits cliSessionId → loop forever
+```
+
+The orchestrator-half user-message also gets lost because the UI's send-gate sees the group is "reconnecting" and either drops the send or queues it indefinitely.
+
+### Fix shape (1 of 3 paths)
+
+**Path A — server-side wake-zero on spawn (preferred):**
+- After spawning the observer with `--print`, immediately send a minimal "wake_zero" frame (empty/sentinel checkpoint with `observer_wake_payload_version` and a no-op `delta`) to unstick the CLI handshake.
+- Observer then emits `cliSessionId`, group reaches "active", normal flow resumes.
+- This matches `feedback_in_memory_derived_state_reconcile_on_restart` recovery shape.
+
+**Path B — gate group-ready differently:**
+- Group-state-machine should NOT require observer's `cliSessionId` to mark "active". Observer's `state="connected"` (transport ready) is sufficient because the observer's protocol handshake is by design event-driven (only fires on wake).
+- Decouple "observer ready to receive wakes" (transport-state) from "observer has emitted identity" (handshake-state).
+
+**Path C — switch observer to interactive mode (probably wrong):**
+- Drop `--print -p` from observer spawn argv. Use the interactive long-running session shape.
+- Cost: blows up the observer's "one cycle, one review file out" contract (the entire SDK design assumes `-p`).
+- Don't do this; Path A or B are correct.
+
+### Concrete files to change (Path A — minimum-change fix)
+
+- `web/server/cli-launcher.ts` — `applyCouncilObserverSpawnConfig`: after spawn, send a wake-zero frame via the bridge.
+- `web/server/ws-bridge.ts` — add a `sendObserverWakeZero(sessionId, sessionGroupId)` helper that emits a minimal valid `observer_wake` frame.
+- `web/server/session-group-coordinator.ts` — `spawnGroup`: call `sendObserverWakeZero` after observer half lands in transport-connected state.
+- Regression test: integration test that spawns a Council Mode pair, asserts both halves reach `state="connected"` AND `cliSessionId != null` within ≤5s.
+
+### Forensic data preserved
+
+- Live `GET /api/sessions` snapshot above
+- Observer process argv (lots of detail — see Phase 3β hotfix worktree commit)
+- Both PIDs were alive at 22:47 with 2:09 etime — proves long-running deadlock, not transient timeout
+
 ## Tracking
 
 - Bug captured here for Phase 3β scope inclusion (or hotfix branch if user prioritises).
 - Cross-reference: this bug class is a sibling of every failure mode the 3 cited memories describe — they collectively suggest a systemic create-time-bootstrap problem in Council Mode pair spawn, not a one-off.
 
-**Next action:** Phase 3β session should start with this bug as the first user-visible failure to close. Hotfix path: dedicated tmux worktree + branch `fix/council-mode-spawn-bootstrap` + repro capture + targeted fix (likely 1-2 lines in `createCouncilGroup` to bootstrap from response, plus a regression integration test that asserts both halves have non-empty context after pair-spawn).
+**Next action:** **HOTFIX-class** — this is P0 not P1. Council Mode pair-spawn is structurally deadlocked on every fresh project. Recommended path: dedicated tmux worktree + branch `fix/council-mode-observer-wake-zero` + Path A fix above + the regression test. Estimated ≤2h with the live repro evidence above.
