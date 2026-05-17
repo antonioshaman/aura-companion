@@ -1281,6 +1281,19 @@ function handleParsedMessage(
       break;
     }
 
+    case "group_convergence": {
+      // Bidirectional pipeline Story 4.1 — server-authoritative convergence
+      // state. Frontend stores cycleNumber / threshold / convergenceState
+      // on the GroupRecord; ObserverPanel + Sidebar badges read off it.
+      store.applyConvergence({
+        sessionGroupId: data.sessionGroupId,
+        cycleNumber: data.cycleNumber,
+        convergenceThreshold: data.convergenceThreshold,
+        convergenceState: data.convergenceState,
+      });
+      break;
+    }
+
     default: {
       console.debug("[ws] Unhandled message type:", (data as { type: string }).type);
       break;

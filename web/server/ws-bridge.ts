@@ -1234,7 +1234,7 @@ export class WsBridge {
   injectUserMessage(
     sessionId: string,
     content: string,
-    origin?: "server:cron" | "server:agent" | "server:rest",
+    origin?: "server:cron" | "server:agent" | "server:rest" | "council:peer",
   ): void {
     const session = this.sessions.get(sessionId);
     if (!session) {
@@ -1512,7 +1512,7 @@ export class WsBridge {
     session: Session,
     msg: BrowserOutgoingMessage,
     ws?: ServerWebSocket<SocketData>,
-    origin?: "server:cron" | "server:agent" | "server:rest",
+    origin?: "server:cron" | "server:agent" | "server:rest" | "council:peer",
   ) {
     // Bridge-level message types — never forwarded to backend
     if (msg.type === "session_subscribe") {
@@ -1613,10 +1613,14 @@ export class WsBridge {
       // token via `IdleTimerManager.noteUserMessage`. Skip the
       // userFrameObservers fanout for any non-browser origin; log
       // structurally for forensics.
+      // Bidirectional pipeline: `council:peer` frames are inter-half
+      // coordination, not user typing — same skip semantic.
       const isServerOrigin = origin !== undefined && origin.startsWith("server:");
-      if (isServerOrigin) {
-        log.info("ws-bridge", "server-driven user_message injection", {
-          event: "ws-bridge.server-driven-user-message",
+      const isCouncilPeer = origin === "council:peer";
+      const skipUserFrameObservers = isServerOrigin || isCouncilPeer;
+      if (skipUserFrameObservers) {
+        log.info("ws-bridge", "non-user user_message injection", {
+          event: "ws-bridge.non-user-user-message",
           sessionId: session.id,
           sessionGroupId: session.state.sessionGroupId,
           origin,
@@ -1627,7 +1631,7 @@ export class WsBridge {
       // observer (and downstream auto-proceed turn-token advance) sees the
       // frame at the same logical point as the session state mutation. A
       // thrown observer must not corrupt history — guarded per-callback.
-      if (!isServerOrigin) {
+      if (!skipUserFrameObservers) {
         for (const observer of this.userFrameObservers) {
           try {
             observer(session.id);

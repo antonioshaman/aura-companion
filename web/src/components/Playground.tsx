@@ -3122,9 +3122,82 @@ function CouncilModeSection() {
             <CouncilDegradedPanelDemo />
           </div>
         </Card>
+        <Card label="ObserverPanel — cycle-progress (bidir Story 4.1.5)">
+          <div className="h-[460px] bg-cc-bg rounded-md overflow-hidden">
+            <CouncilCycleProgressPanelDemo />
+          </div>
+        </Card>
+        <Card label="ObserverPanel — converged ✅ (bidir Story 4.1.5)">
+          <div className="h-[460px] bg-cc-bg rounded-md overflow-hidden">
+            <CouncilConvergedPanelDemo />
+          </div>
+        </Card>
       </div>
     </Section>
   );
+}
+
+// ── Bidirectional pipeline convergence playground demos ─────────────────────
+//
+// Story 4.1.5 mandates badge variants live in the same panel as the existing
+// status pills. Two mocks: a mid-cycle pair and a fully-converged pair so
+// designers can sanity-check the emerald-500 token + emoji + accessible-label
+// triad without driving a real Council session.
+
+const COUNCIL_CYCLE_PROGRESS_SESSION = "playground-council-cycle-progress-orch";
+const COUNCIL_CYCLE_PROGRESS_GROUP = "playground-council-cycle-progress-grp";
+
+function CouncilCycleProgressPanelDemo() {
+  const upsertGroup = useStore((s) => s.upsertGroup);
+  const applyConvergence = useStore((s) => s.applyConvergence);
+  const removeGroup = useStore((s) => s.removeGroup);
+
+  useEffect(() => {
+    upsertGroup({
+      sessionGroupId: COUNCIL_CYCLE_PROGRESS_GROUP,
+      primarySessionId: COUNCIL_CYCLE_PROGRESS_SESSION,
+      observerSessionId: "playground-council-cycle-progress-obs",
+      status: "active",
+      pairing: "claude+claude",
+    });
+    applyConvergence({
+      sessionGroupId: COUNCIL_CYCLE_PROGRESS_GROUP,
+      cycleNumber: 2,
+      convergenceThreshold: 3,
+      convergenceState: "in-progress",
+    });
+    return () => removeGroup(COUNCIL_CYCLE_PROGRESS_GROUP);
+  }, [upsertGroup, applyConvergence, removeGroup]);
+
+  return <ObserverPanel sessionId={COUNCIL_CYCLE_PROGRESS_SESSION} onRespawnHalf={async () => {}} />;
+}
+
+const COUNCIL_CONVERGED_SESSION = "playground-council-converged-orch";
+const COUNCIL_CONVERGED_GROUP = "playground-council-converged-grp";
+
+function CouncilConvergedPanelDemo() {
+  const upsertGroup = useStore((s) => s.upsertGroup);
+  const applyConvergence = useStore((s) => s.applyConvergence);
+  const removeGroup = useStore((s) => s.removeGroup);
+
+  useEffect(() => {
+    upsertGroup({
+      sessionGroupId: COUNCIL_CONVERGED_GROUP,
+      primarySessionId: COUNCIL_CONVERGED_SESSION,
+      observerSessionId: "playground-council-converged-obs",
+      status: "active",
+      pairing: "claude+codex",
+    });
+    applyConvergence({
+      sessionGroupId: COUNCIL_CONVERGED_GROUP,
+      cycleNumber: 3,
+      convergenceThreshold: 3,
+      convergenceState: "converged",
+    });
+    return () => removeGroup(COUNCIL_CONVERGED_GROUP);
+  }, [upsertGroup, applyConvergence, removeGroup]);
+
+  return <ObserverPanel sessionId={COUNCIL_CONVERGED_SESSION} onRespawnHalf={async () => {}} />;
 }
 
 const COUNCIL_DEGRADED_DEMO_SESSION = "playground-council-degraded-orch";

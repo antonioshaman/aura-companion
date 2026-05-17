@@ -484,6 +484,29 @@ export type BrowserIncomingMessageBase =
      * were dropped — keeps the on-wire payload minimal in the happy path.
      */
     supersededCheckpointIds?: string[];
+  }
+  | {
+    /**
+     * Bidirectional pipeline Story 4.1 — convergence-tracker state update.
+     * Server-authoritative; frontend never derives its own counter.
+     *
+     * `transition` discriminates which kind of change happened:
+     *   - `cycle-progress`  counter changed (may be increment or reset)
+     *   - `converged`       threshold reached; UI flips ☼ row to ✅ badge
+     *   - `revoked`         STOP arrived post-convergence; back to in-progress
+     *
+     * `cycleNumber` / `convergenceThreshold` / `convergenceState` carry
+     * the full server-side state so the frontend can render without
+     * tracking prior values. Cumulative absolute values, not deltas.
+     */
+    type: "group_convergence";
+    sessionGroupId: string;
+    transition: "cycle-progress" | "converged" | "revoked";
+    cycleNumber: number;
+    convergenceThreshold: number;
+    convergenceState: "in-progress" | "converged" | "revoked";
+    /** Wallclock (ms) the server processed the transition. */
+    timestamp: number;
   };
 
 /**

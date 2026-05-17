@@ -3240,6 +3240,37 @@ describe("onUserFrameObserved (Task 11.6)", () => {
 
     expect(observed).toEqual(["s-uf-server-2"]);
   });
+
+  // Bidirectional pipeline Story 2.3 — peer messages crossing between
+  // orchestrator and observer halves carry `origin: "council:peer"` and
+  // MUST share the same userFrameObservers-skip semantic as `server:`
+  // origins. A peer ping is inter-half coordination, not user typing —
+  // the synthetic-turn token cannot advance on it (would race the
+  // legitimate user-typed-frame stickiness, exact symptom EC-16 closed).
+  //
+  // Verifier guards against feedback_verify_test_bodies_not_just_names:
+  // assert exact zero fire across all three peer injections, AND
+  // history append still succeeds (forensic preserved for the operator
+  // to see the pair conversation per Story 2.3 visibility AC).
+  it("does NOT fire observers when injectUserMessage carries origin council:peer (bidir pipeline)", () => {
+    const cli = makeCliSocket("s-uf-peer-1");
+    const browser = makeBrowserSocket("s-uf-peer-1");
+    bridge.handleCLIOpen(cli, "s-uf-peer-1");
+    bridge.handleBrowserOpen(browser, "s-uf-peer-1");
+
+    const observed: string[] = [];
+    bridge.onUserFrameObserved((sid) => observed.push(sid));
+
+    bridge.injectUserMessage("s-uf-peer-1", "[from-observer: STOP] auth bypass at routes.ts:84", "council:peer");
+    bridge.injectUserMessage("s-uf-peer-1", "[from-observer: WARN] missing test on extracted helper", "council:peer");
+    bridge.injectUserMessage("s-uf-peer-1", "[from-orchestrator: INFO] advancing to task 4", "council:peer");
+
+    expect(observed).toEqual([]);
+
+    const session = bridge.getSession("s-uf-peer-1")!;
+    const userMessages = session.messageHistory.filter((m) => m.type === "user_message");
+    expect(userMessages.length).toBe(3);
+  });
 });
 
 // ─── handleCLIMessage with Buffer ─────────────────────────────────────────────
