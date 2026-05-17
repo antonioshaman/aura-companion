@@ -158,7 +158,7 @@ describe("detectStack — Refusal (AC-3.x)", () => {
     // (c) suggests explicit overrides
     expect(text).toContain("To override, run:");
     expect(text).toContain("/council-plan-aura");
-    expect(text).toContain("/council-plan-python");
+    expect(text).toContain("/council-plan ");
   });
   it("AC-3.2: refusal stays scanable (compact structure)", () => {
     const w = newWorkspace();

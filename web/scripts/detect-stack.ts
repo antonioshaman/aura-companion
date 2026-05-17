@@ -82,7 +82,12 @@ export interface MarkerCheck {
   reason?: MarkerReason;
 }
 
-export type DetectionKind = "aura" | "python" | "ambiguous" | "unknown";
+export type DetectionKind =
+  | "aura"
+  | "python"
+  | "ambiguous"
+  | "unknown"
+  | "override_conflict";
 
 export interface DetectionResult {
   kind: DetectionKind;
@@ -90,6 +95,10 @@ export interface DetectionResult {
   overrideUsed: boolean;
   overridePath: string | null;
   overrideMalformed: boolean;
+  /** When kind === "override_conflict": the auto-detected kind that disagrees with override.value. */
+  overrideConflictAutoDetected?: "aura" | "python" | "ambiguous";
+  /** When kind === "override_conflict": the override-asserted value. */
+  overrideConflictAsserted?: "aura" | "python";
 }
 
 // =============================================================================
@@ -436,6 +445,41 @@ export function detectStack(workspaceRoot: string): DetectionResult {
   ];
 
   if (override.value !== null) {
+    // Ask-First override-conflict gate (spec §⚠️): if the override disagrees with
+    // what auto-detection would have decided, surface the conflict instead of
+    // silently honoring the override. Caller must ask the user which to honor.
+    const auraNamesAF = new Set<string>([
+      MARKER_NAMES.AURA_PACKAGE_NAME,
+      MARKER_NAMES.AURA_PACKAGE_HONO,
+      MARKER_NAMES.AURA_WS_BRIDGE,
+    ]);
+    const pythonNamesAF = new Set<string>([
+      MARKER_NAMES.PYTHON_PYPROJECT_AIOGRAM,
+      MARKER_NAMES.PYTHON_REQS_AIOGRAM,
+    ]);
+    const auraSeen = checked.some((c) =>
+      c.matched.some((m) => auraNamesAF.has(m)),
+    );
+    const pythonSeen = checked.some((c) =>
+      c.matched.some((m) => pythonNamesAF.has(m)),
+    );
+    // Conflict only when auto-detection found markers of the OPPOSITE kind.
+    // Mixed (auraSeen && pythonSeen) is "ambiguous" — override resolves it, not conflict.
+    // Single-kind disagreement IS conflict (override says aura, only python markers found).
+    const opposingMarkerSeen =
+      (override.value === "aura" && pythonSeen && !auraSeen) ||
+      (override.value === "python" && auraSeen && !pythonSeen);
+    if (opposingMarkerSeen) {
+      return {
+        kind: "override_conflict",
+        checked,
+        overrideUsed: true,
+        overridePath: override.absolutePath,
+        overrideMalformed: false,
+        overrideConflictAutoDetected: override.value === "aura" ? "python" : "aura",
+        overrideConflictAsserted: override.value,
+      };
+    }
     return {
       kind: override.value,
       checked,
@@ -493,7 +537,7 @@ export function detectStack(workspaceRoot: string): DetectionResult {
 const OVERRIDE_FOOTER = [
   "To override, run:",
   "  /council-plan-aura      # if this workspace is the Aura companion",
-  "  /council-plan-python    # if this workspace is the Python bot (suffixed variant)",
+  "  /council-plan            # if this workspace is the Python bot (suffixless variant)",
 ];
 
 function dedupedMarkerList(checked: MarkerCheck[]): string[] {
