@@ -2143,6 +2143,61 @@ export function Playground() {
               </div>
             </Card>
             <div className="mt-4" />
+            <Card label="Plan mode + discovery-skill refuse-affordance">
+              <div className="border-t border-cc-border bg-cc-card px-4 py-3">
+                <div className="relative bg-cc-input-bg/95 border border-cc-primary/40 rounded-[14px] shadow-[0_10px_30px_rgba(0,0,0,0.10)] overflow-visible">
+                  <div
+                    role="alert"
+                    className="mx-3 mt-2 mb-1 px-3 py-2 rounded-md border border-cc-warning/40 bg-cc-warning/8 text-[12px] text-cc-fg flex items-start gap-2"
+                  >
+                    <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5 mt-0.5 shrink-0 text-cc-warning" aria-hidden="true">
+                      <path d="M8 1.5L0.5 14.5h15L8 1.5zm0 5v4M8 12v.5" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" fill="none" />
+                    </svg>
+                    <div className="flex-1">
+                      <span>Plan mode disables discovery questions. </span>
+                      <span className="underline text-cc-primary font-medium">
+                        Switch to agent mode
+                      </span>
+                      <span> to continue.</span>
+                    </div>
+                  </div>
+                  <div className="flex items-end gap-2 px-2.5 py-2">
+                    <div className="mb-0.5 flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border border-cc-primary/40 text-[12px] font-semibold text-cc-primary bg-cc-primary/8">
+                      <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
+                        <rect x="3" y="3" width="3.5" height="10" rx="0.75" />
+                        <rect x="9.5" y="3" width="3.5" height="10" rx="0.75" />
+                      </svg>
+                      <span>plan</span>
+                    </div>
+                    <textarea
+                      readOnly
+                      value="/council-plan-aura"
+                      rows={1}
+                      className="flex-1 min-w-0 px-2 py-1.5 text-sm bg-transparent resize-none text-cc-fg font-sans-ui"
+                      style={{ minHeight: "36px" }}
+                    />
+                    <div className="mb-0.5 flex items-center gap-1.5">
+                      <div className="flex items-center justify-center w-9 h-9 rounded-full bg-cc-primary text-white shadow-[0_6px_20px_rgba(0,0,0,0.18)]">
+                        <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5">
+                          <path d="M3 2l11 6-11 6V9.5l7-1.5-7-1.5V2z" />
+                        </svg>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </Card>
+            <div className="mt-4" />
+            <Card label="Council observer — Composer suppressed">
+              <div className="border-t border-cc-border bg-cc-card px-4 py-3">
+                <div className="px-4 py-6 text-center text-xs text-cc-muted italic">
+                  Observer half of a Council pair has no Composer.
+                  The toggle would be rejected server-side anyway (EC-1);
+                  better not to render it at all.
+                </div>
+              </div>
+            </Card>
+            <div className="mt-4" />
             <Card label="Running — stop button visible">
               <div className="border-t border-cc-border bg-cc-card px-4 py-3">
                 <div className="relative bg-cc-input-bg/95 border border-cc-border rounded-[14px] shadow-[0_10px_30px_rgba(0,0,0,0.10)] overflow-visible">

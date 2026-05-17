@@ -1542,6 +1542,53 @@ export class WsBridge {
       return;
     }
 
+    // -- set_permission_mode: observer-guard + EC-9 telemetry chokepoint --
+    // Council Mode (EC-1 server mirror): the observer's permissionMode is
+    // locked at spawn (buildObserverSpawnOverrides). Any runtime
+    // set_permission_mode targeting an observer must be rejected here BEFORE
+    // adapter delivery, regardless of which client crafted the frame.
+    // EC-17 fail-closed: a council session whose role probe is null MUST
+    // reject — silent allow would let a corrupted council session mutate
+    // observer state. `from` snapshot taken before delivery so the
+    // adapter's post-send mutation doesn't collapse the transition.
+    if (msg.type === "set_permission_mode") {
+      const from = session.state.permissionMode;
+      const to = msg.mode;
+      const sessionGroupId = session.state.sessionGroupId;
+      const sessionGroupRole = session.state.sessionGroupRole;
+      if (sessionGroupRole === "observer") {
+        log.warn("ws-bridge", "set_permission_mode rejected on observer", {
+          event: "composer.permission-mode.observer-rejected",
+          sessionId: session.id,
+          sessionGroupId,
+          sessionGroupRole,
+          from,
+          to,
+        });
+        return;
+      }
+      if (sessionGroupId !== undefined && sessionGroupRole === undefined) {
+        log.warn("ws-bridge", "set_permission_mode rejected — role probe null", {
+          event: "composer.permission-mode.role-probe-null",
+          sessionId: session.id,
+          sessionGroupId,
+          from,
+          to,
+        });
+        return;
+      }
+      log.info("ws-bridge", "Composer permission-mode toggled", {
+        event: "composer.permission-mode.toggled",
+        sessionId: session.id,
+        sessionGroupId,
+        sessionGroupRole,
+        from,
+        to,
+        backend: session.backendType,
+      });
+      // fall through to existing adapter delivery
+    }
+
     // -- set_ai_validation: bridge-level, not forwarded to backend --------
     if (msg.type === "set_ai_validation") {
       handleSetAiValidation(session, msg);

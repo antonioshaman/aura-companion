@@ -883,3 +883,176 @@ describe("Composer image attachment", () => {
     expect(screen.queryByAltText("test.png")).toBeFalsy();
   });
 });
+
+// ─── Plan-mode + interactive-discovery-skill refuse-affordance ────────────
+// Headline fix for the spec: typing `/<discovery-skill>` while the composer
+// is in plan mode must surface an inline affordance and refuse to dispatch.
+// These tests assert BOTH halves of the gate (render + handleSend short-
+// circuit) so a future refactor that splits the derived flag silently
+// regresses one half but not the other → tests fail.
+
+describe("Composer plan-mode refuse-affordance", () => {
+  // Helper: set up a plan-mode session whose `previousPermissionMode` map
+  // has no entry for s1 (i.e. the empty-previous case the Codex fix targets).
+  // Default setupMockStore preloads "acceptEdits" which masks the empty case.
+  function planModeStore(opts: { backend?: "claude" | "codex"; emptyPrev?: boolean } = {}) {
+    setupMockStore({ session: { permissionMode: "plan", backend_type: opts.backend ?? "claude" } });
+    if (opts.emptyPrev) {
+      (mockStoreState.previousPermissionMode as Map<string, string>).delete("s1");
+    }
+  }
+
+  it("renders the affordance text when text matches a discovery skill in plan mode", () => {
+    planModeStore();
+    const { container } = render(<Composer sessionId="s1" />);
+    const textarea = container.querySelector("textarea")!;
+    fireEvent.change(textarea, { target: { value: "/council-plan-aura" } });
+    // Affordance is a role="alert" with a stable testid; assert it exists.
+    expect(screen.getByTestId("composer-plan-mode-affordance")).toBeTruthy();
+    expect(
+      screen.getByText(/Plan mode disables discovery questions/i),
+    ).toBeTruthy();
+  });
+
+  it("does NOT render the affordance for ordinary messages", () => {
+    planModeStore();
+    const { container } = render(<Composer sessionId="s1" />);
+    const textarea = container.querySelector("textarea")!;
+    fireEvent.change(textarea, { target: { value: "hello, how are you?" } });
+    expect(screen.queryByTestId("composer-plan-mode-affordance")).toBeNull();
+  });
+
+  it("does NOT render the affordance when NOT in plan mode (agent mode honours typed /skill)", () => {
+    // Agent mode + typing a discovery slash command is a legitimate dispatch
+    // path — the affordance must only surface when plan-mode actively gates.
+    setupMockStore({ session: { permissionMode: "acceptEdits" } });
+    const { container } = render(<Composer sessionId="s1" />);
+    const textarea = container.querySelector("textarea")!;
+    fireEvent.change(textarea, { target: { value: "/council-plan-aura" } });
+    expect(screen.queryByTestId("composer-plan-mode-affordance")).toBeNull();
+  });
+
+  it("Send press does NOT dispatch a user_message when refuse-affordance is active", () => {
+    planModeStore();
+    const { container } = render(<Composer sessionId="s1" />);
+    const textarea = container.querySelector("textarea")!;
+    fireEvent.change(textarea, { target: { value: "/council-plan-aura" } });
+    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+    // Critical: the WS frame was suppressed by handleSend's early-return.
+    expect(mockSendToSession).not.toHaveBeenCalledWith(
+      "s1",
+      expect.objectContaining({ type: "user_message" }),
+    );
+  });
+
+  it("Clicking the inline 'Switch to agent mode' action calls toggleMode", () => {
+    // The affordance carries a clickable inline action that flips the mode.
+    // Asserts the action wires through to sendToSession with set_permission_mode
+    // restoring whatever the previousPermissionMode was (acceptEdits default here).
+    planModeStore();
+    const { container } = render(<Composer sessionId="s1" />);
+    const textarea = container.querySelector("textarea")!;
+    fireEvent.change(textarea, { target: { value: "/council-plan-aura" } });
+    fireEvent.click(screen.getByText(/Switch to agent mode/i));
+    expect(mockSendToSession).toHaveBeenCalledWith(
+      "s1",
+      expect.objectContaining({ type: "set_permission_mode" }),
+    );
+  });
+
+  it("affordance passes axe accessibility scan", async () => {
+    // Per CLAUDE.md: every component visual state must axe-pass.
+    const { axe } = await import("vitest-axe");
+    planModeStore();
+    const { container } = render(<Composer sessionId="s1" />);
+    const textarea = container.querySelector("textarea")!;
+    fireEvent.change(textarea, { target: { value: "/council-plan-aura" } });
+    const results = await axe(container);
+    expect(results).toHaveNoViolations();
+  });
+});
+
+// ─── Codex fallback fix (THE silent-privilege-upgrade canary) ────────────
+// The original Composer.tsx:302 fell back to "bypassPermissions" for a
+// Codex session with no previously-saved mode. These tests anchor the
+// fix at both the wire-level (sendToSession call) and the structured-log
+// level (console.warn shape).
+
+describe("Composer Codex plan→agent restore fallback", () => {
+  it("Codex session with no previous-mode entry restores to 'default', NEVER 'bypassPermissions'", () => {
+    setupMockStore({ session: { permissionMode: "plan", backend_type: "codex" } });
+    // Critical: clear the map entry so the empty-previous code path actually fires.
+    // The default setupMockStore preloads "acceptEdits" which would mask the bug.
+    (mockStoreState.previousPermissionMode as Map<string, string>).delete("s1");
+    render(<Composer sessionId="s1" />);
+    const modeButtons = screen.getAllByTitle("Toggle mode (Shift+Tab)");
+    fireEvent.click(modeButtons[0]);
+    // Regression canary — if a future refactor flips this back to
+    // "bypassPermissions" the assertion catches it.
+    expect(mockSendToSession).toHaveBeenCalledWith("s1", {
+      type: "set_permission_mode",
+      mode: "default",
+    });
+    expect(mockSendToSession).not.toHaveBeenCalledWith("s1", {
+      type: "set_permission_mode",
+      mode: "bypassPermissions",
+    });
+  });
+
+  it("Codex empty-previous fallback emits client-side structured WARN", () => {
+    // console.warn carries the structured event payload for forensic
+    // correlation. EC-9-shaped fields without the EC-9 transport (which
+    // is server-side); justified because the server cannot reliably
+    // reconstruct user vs auto-fallback intent.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    setupMockStore({ session: { permissionMode: "plan", backend_type: "codex" } });
+    (mockStoreState.previousPermissionMode as Map<string, string>).delete("s1");
+    render(<Composer sessionId="s1" />);
+    const modeButtons = screen.getAllByTitle("Toggle mode (Shift+Tab)");
+    fireEvent.click(modeButtons[0]);
+    expect(warnSpy).toHaveBeenCalledWith(
+      "composer.toggle.codex-fallback-default",
+      expect.objectContaining({
+        event: "composer.toggle.codex-fallback-default",
+        sessionId: "s1",
+        chosenMode: "default",
+        backend: "codex",
+      }),
+    );
+    warnSpy.mockRestore();
+  });
+
+  it("Claude session with no previous-mode entry restores to 'acceptEdits' (negative control — Claude branch unchanged)", () => {
+    // Ensures the helper didn't accidentally widen its fix to Claude.
+    setupMockStore({ session: { permissionMode: "plan", backend_type: "claude" } });
+    (mockStoreState.previousPermissionMode as Map<string, string>).delete("s1");
+    render(<Composer sessionId="s1" />);
+    const modeButtons = screen.getAllByTitle("Toggle mode (Shift+Tab)");
+    fireEvent.click(modeButtons[0]);
+    expect(mockSendToSession).toHaveBeenCalledWith("s1", {
+      type: "set_permission_mode",
+      mode: "acceptEdits",
+    });
+  });
+
+  it("Codex session with a saved previous-mode passes through (no fallback)", () => {
+    // Passthrough branch — covers the common case where the user toggled
+    // INTO plan from a saved mode, then toggles back. No WARN should fire.
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    setupMockStore({ session: { permissionMode: "plan", backend_type: "codex" } });
+    (mockStoreState.previousPermissionMode as Map<string, string>).set("s1", "bypassPermissions");
+    render(<Composer sessionId="s1" />);
+    const modeButtons = screen.getAllByTitle("Toggle mode (Shift+Tab)");
+    fireEvent.click(modeButtons[0]);
+    expect(mockSendToSession).toHaveBeenCalledWith("s1", {
+      type: "set_permission_mode",
+      mode: "bypassPermissions",
+    });
+    // No fallback WARN fires when the prior mode was saved.
+    expect(warnSpy).not.toHaveBeenCalledWith(
+      "composer.toggle.codex-fallback-default",
+      expect.any(Object),
+    );
+    warnSpy.mockRestore();
+  });
+});
