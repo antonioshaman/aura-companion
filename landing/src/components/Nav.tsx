@@ -12,7 +12,7 @@ export function Nav() {
           <a
             href="https://github.com/antonioshaman/aura-companion"
             target="_blank"
-            rel="noopener"
+            rel="noopener noreferrer"
             className="text-sm text-cc-muted hover:text-cc-fg transition-colors hidden sm:block font-mono-code"
           >
             GitHub
@@ -20,7 +20,7 @@ export function Nav() {
           <a
             href="https://github.com/antonioshaman/aura-companion"
             target="_blank"
-            rel="noopener"
+            rel="noopener noreferrer"
             className="inline-flex items-center gap-2 px-4 py-2.5 bg-cc-primary text-[#fff4eb] rounded-lg text-[13px] font-medium font-mono-code hover:bg-cc-primary-hover transition-all hover:-translate-y-px border border-[#8e3518] shadow-[0_3px_0_0_#8e3518]"
           >
             Open Repo

@@ -9,15 +9,15 @@ description: Complete reference for CLI commands, environment variables, and RES
 
 | Command | Description |
 |---|---|
-| `the-companion` | Start server in foreground (default) |
-| `the-companion serve` | Start server in foreground (explicit) |
-| `the-companion install` | Register as a background service (launchd/systemd) |
-| `the-companion start` | Start the background service |
-| `the-companion stop` | Stop the background service |
-| `the-companion restart` | Restart the background service |
-| `the-companion uninstall` | Remove the background service |
-| `the-companion status` | Show service status |
-| `the-companion logs` | Tail service log files |
+| `aura-companion` | Start server in foreground (default) |
+| `aura-companion serve` | Start server in foreground (explicit) |
+| `aura-companion install` | Register as a background service (launchd/systemd) |
+| `aura-companion start` | Start the background service |
+| `aura-companion stop` | Stop the background service |
+| `aura-companion restart` | Restart the background service |
+| `aura-companion uninstall` | Remove the background service |
+| `aura-companion status` | Show service status |
+| `aura-companion logs` | Tail service log files |
 
 ### Options
 
@@ -29,16 +29,16 @@ description: Complete reference for CLI commands, environment variables, and RES
 
 ```bash
 # Custom port
-the-companion --port 8080
+aura-companion --port 8080
 
 # Custom auth token
-COMPANION_AUTH_TOKEN="my-token" the-companion
+COMPANION_AUTH_TOKEN="my-token" aura-companion
 
 # Install and run as service
-the-companion install && the-companion start && the-companion status
+aura-companion install && aura-companion start && aura-companion status
 
 # View logs
-the-companion logs
+aura-companion logs
 ```
 
 ## Environment variables

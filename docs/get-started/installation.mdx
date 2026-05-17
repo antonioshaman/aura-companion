@@ -28,7 +28,7 @@ Make sure your CLI is authenticated before proceeding — run `claude` or `codex
 ## Try it instantly
 
 ```bash
-bunx the-companion
+bunx aura-companion
 ```
 
 Open [http://localhost:3456](http://localhost:3456).
@@ -36,7 +36,7 @@ Open [http://localhost:3456](http://localhost:3456).
 ## Install globally
 
 ```bash
-bun install -g the-companion
+bun install -g aura-companion
 ```
 
 ### Background service
@@ -45,16 +45,16 @@ Register as a background service so it starts automatically and survives reboots
 
 ```bash
 # Register (launchd on macOS, systemd on Linux)
-the-companion install
+aura-companion install
 
 # Start the service
-the-companion start
+aura-companion start
 ```
 
 ### Custom port
 
 ```bash
-the-companion --port 8080
+aura-companion --port 8080
 ```
 
 ## Authentication
@@ -72,7 +72,7 @@ cd web && bun run generate-token --force
 Or set via environment variable:
 
 ```bash
-COMPANION_AUTH_TOKEN="my-secret-token" bunx the-companion
+COMPANION_AUTH_TOKEN="my-secret-token" bunx aura-companion
 ```
 
 ## Your first session
@@ -80,7 +80,7 @@ COMPANION_AUTH_TOKEN="my-secret-token" bunx the-companion
 ### 1. Start the server
 
 ```bash
-bunx the-companion
+bunx aura-companion
 ```
 
 Open [http://localhost:3456](http://localhost:3456).
