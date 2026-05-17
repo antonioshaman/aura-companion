@@ -1234,7 +1234,7 @@ export class WsBridge {
   injectUserMessage(
     sessionId: string,
     content: string,
-    origin?: "server:cron" | "server:agent" | "server:rest",
+    origin?: "server:cron" | "server:agent" | "server:rest" | "council:peer",
   ): void {
     const session = this.sessions.get(sessionId);
     if (!session) {
@@ -1512,7 +1512,7 @@ export class WsBridge {
     session: Session,
     msg: BrowserOutgoingMessage,
     ws?: ServerWebSocket<SocketData>,
-    origin?: "server:cron" | "server:agent" | "server:rest",
+    origin?: "server:cron" | "server:agent" | "server:rest" | "council:peer",
   ) {
     // Bridge-level message types — never forwarded to backend
     if (msg.type === "session_subscribe") {
@@ -1542,6 +1542,53 @@ export class WsBridge {
       return;
     }
 
+    // -- set_permission_mode: observer-guard + EC-9 telemetry chokepoint --
+    // Council Mode (EC-1 server mirror): the observer's permissionMode is
+    // locked at spawn (buildObserverSpawnOverrides). Any runtime
+    // set_permission_mode targeting an observer must be rejected here BEFORE
+    // adapter delivery, regardless of which client crafted the frame.
+    // EC-17 fail-closed: a council session whose role probe is null MUST
+    // reject — silent allow would let a corrupted council session mutate
+    // observer state. `from` snapshot taken before delivery so the
+    // adapter's post-send mutation doesn't collapse the transition.
+    if (msg.type === "set_permission_mode") {
+      const from = session.state.permissionMode;
+      const to = msg.mode;
+      const sessionGroupId = session.state.sessionGroupId;
+      const sessionGroupRole = session.state.sessionGroupRole;
+      if (sessionGroupRole === "observer") {
+        log.warn("ws-bridge", "set_permission_mode rejected on observer", {
+          event: "composer.permission-mode.observer-rejected",
+          sessionId: session.id,
+          sessionGroupId,
+          sessionGroupRole,
+          from,
+          to,
+        });
+        return;
+      }
+      if (sessionGroupId !== undefined && sessionGroupRole === undefined) {
+        log.warn("ws-bridge", "set_permission_mode rejected — role probe null", {
+          event: "composer.permission-mode.role-probe-null",
+          sessionId: session.id,
+          sessionGroupId,
+          from,
+          to,
+        });
+        return;
+      }
+      log.info("ws-bridge", "Composer permission-mode toggled", {
+        event: "composer.permission-mode.toggled",
+        sessionId: session.id,
+        sessionGroupId,
+        sessionGroupRole,
+        from,
+        to,
+        backend: session.backendType,
+      });
+      // fall through to existing adapter delivery
+    }
+
     // -- set_ai_validation: bridge-level, not forwarded to backend --------
     if (msg.type === "set_ai_validation") {
       handleSetAiValidation(session, msg);
@@ -1566,10 +1613,14 @@ export class WsBridge {
       // token via `IdleTimerManager.noteUserMessage`. Skip the
       // userFrameObservers fanout for any non-browser origin; log
       // structurally for forensics.
+      // Bidirectional pipeline: `council:peer` frames are inter-half
+      // coordination, not user typing — same skip semantic.
       const isServerOrigin = origin !== undefined && origin.startsWith("server:");
-      if (isServerOrigin) {
-        log.info("ws-bridge", "server-driven user_message injection", {
-          event: "ws-bridge.server-driven-user-message",
+      const isCouncilPeer = origin === "council:peer";
+      const skipUserFrameObservers = isServerOrigin || isCouncilPeer;
+      if (skipUserFrameObservers) {
+        log.info("ws-bridge", "non-user user_message injection", {
+          event: "ws-bridge.non-user-user-message",
           sessionId: session.id,
           sessionGroupId: session.state.sessionGroupId,
           origin,
@@ -1580,7 +1631,7 @@ export class WsBridge {
       // observer (and downstream auto-proceed turn-token advance) sees the
       // frame at the same logical point as the session state mutation. A
       // thrown observer must not corrupt history — guarded per-callback.
-      if (!isServerOrigin) {
+      if (!skipUserFrameObservers) {
         for (const observer of this.userFrameObservers) {
           try {
             observer(session.id);

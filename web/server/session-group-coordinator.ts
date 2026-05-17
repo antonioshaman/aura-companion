@@ -96,6 +96,12 @@ export interface GroupRecord {
   observer: GroupMember;
   status: GroupStatus;
   createdAt: number;
+  /** Bidirectional pipeline Story 4.1: clean-cycle counter, server-authoritative.
+   *  Absent on solo (non-Council) sessions and on freshly-created pairs that
+   *  have not yet had any review processed. */
+  cycleNumber?: number;
+  convergenceThreshold?: number;
+  convergenceState?: "in-progress" | "converged" | "revoked";
 }
 
 export interface SessionGroupCoordinatorDeps {

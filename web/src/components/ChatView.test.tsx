@@ -58,6 +58,7 @@ function setupStore(overrides: {
   cliReconnecting?: boolean;
   hasPendingPerms?: boolean;
   hasAiResolved?: boolean;
+  sessionGroupRole?: "orchestrator" | "observer";
 } = {}) {
   const {
     connectionStatus = "connected",
@@ -65,6 +66,7 @@ function setupStore(overrides: {
     cliReconnecting = false,
     hasPendingPerms = false,
     hasAiResolved = false,
+    sessionGroupRole,
   } = overrides;
 
   const connMap = new Map<string, string>();
@@ -88,6 +90,11 @@ function setupStore(overrides: {
     aiResolved.set("s1", [{ tool: "Read", decision: "approved" }]);
   }
 
+  // Sessions map — ChatView reads `sessions.get(sessionId)?.sessionGroupRole`
+  // to decide whether to mount Composer (observer half: NO composer).
+  const sessionsMap = new Map<string, { sessionGroupRole?: "orchestrator" | "observer" }>();
+  sessionsMap.set("s1", sessionGroupRole !== undefined ? { sessionGroupRole } : {});
+
   mockStoreState = {
     connectionStatus: connMap,
     cliConnected: cliMap,
@@ -96,6 +103,7 @@ function setupStore(overrides: {
     aiResolvedPermissions: aiResolved,
     clearAiResolvedPermissions: vi.fn(),
     setCliReconnecting: mockSetCliReconnecting,
+    sessions: sessionsMap,
     // Council Mode slice — ChatView reads `groupBySessionId`, `findings`,
     // `dismissedStopIds`, and `dismissStop` to render the BlockerBanner
     // in the permission slot. Empty maps mean no blocker is shown.
@@ -237,5 +245,36 @@ describe("ChatView", () => {
     setupStore({ hasAiResolved: true });
     render(<ChatView sessionId="s1" />);
     expect(screen.getByTestId("ai-validation-badge")).toBeTruthy();
+  });
+
+  // ─── Council Mode: observer Composer suppression ────────────────────────
+  // EC-1 server-side enforcement is the boundary; the ChatView guard is the
+  // affordance. Mounting Composer under the observer half would expose a
+  // toggle whose set_permission_mode the server rejects anyway — better not
+  // to render. These tests anchor the structural invariant.
+
+  it("does NOT mount Composer when sessionGroupRole is 'observer'", () => {
+    setupStore({ sessionGroupRole: "observer" });
+    render(<ChatView sessionId="s1" />);
+    // Composer is mocked with data-testid="composer"; assert it's absent.
+    expect(screen.queryByTestId("composer")).toBeNull();
+    // Negative-control: MessageFeed (and the rest of chat surface) IS
+    // rendered for the observer — only Composer is suppressed.
+    expect(screen.getByTestId("message-feed")).toBeTruthy();
+  });
+
+  it("DOES mount Composer when sessionGroupRole is 'orchestrator'", () => {
+    setupStore({ sessionGroupRole: "orchestrator" });
+    render(<ChatView sessionId="s1" />);
+    expect(screen.getByTestId("composer")).toBeTruthy();
+  });
+
+  it("DOES mount Composer when sessionGroupRole is undefined (non-council solo session)", () => {
+    // Critical: undefined must not collapse to "observer". Strict equality
+    // on the guard prevents accidentally suppressing Composer for every
+    // non-council session.
+    setupStore({ sessionGroupRole: undefined });
+    render(<ChatView sessionId="s1" />);
+    expect(screen.getByTestId("composer")).toBeTruthy();
   });
 });

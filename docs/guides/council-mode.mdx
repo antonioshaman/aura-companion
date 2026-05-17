@@ -5,9 +5,28 @@ description: Paired orchestrator + observer sessions — independent review in o
 
 # Council Mode
 
-Council Mode pairs your main agent with an independent reviewer that wakes on every phase checkpoint, reads only the just-changed surface, and pushes grounded findings back into your chat. The multi-agent pattern that worked manually in past pipelines — catching ~2 P1 issues per phase that single-author review missed — is reproducible in one click instead of requiring two terminals and manual coordination.
+Council Mode pairs your main agent (the **orchestrator**) with an independent **observer** session that wakes on every phase checkpoint, reads only the just-changed surface, and pushes grounded findings back into your chat. The multi-agent pattern that worked manually in past pipelines — catching a couple of P1 issues per phase that single-author review missed — is reproducible in one click instead of two terminals.
 
-<img src="../screenshots/council-mode-overview.png" alt="Council Mode running: orchestrator chat on the left, ObserverPanel showing observer findings on the right, multiple paired sessions in the sidebar with provider badges" />
+<img src="../screenshots/council-mode-overview.png" alt="Council Mode showing orchestrator chat alongside the observer panel surfacing a STOP finding" width="100%" />
+
+## What the observer is — and isn't
+
+The observer is an LLM. It can hallucinate, miss real defects, and over-flag stylistic noise. A `STOP` finding is a prompt to **look**, not a verdict to obey; the user is the final judge of every finding. The grounding gate described below keeps findings honest about the files they reference, but it does not — and cannot — make the observer's *judgement* correct. Calibrate trust accordingly.
+
+## What the observer can and cannot do
+
+**Can:**
+
+- Read the manifest delta of the most recent checkpoint (just-changed files).
+- Emit findings against those files only.
+- Run again on the next checkpoint, fresh.
+
+**Cannot:**
+
+- Write to your workspace. The write boundary is enforced at spawn argv (tool allow-list + permission mode).
+- Reach files outside the checkpoint manifest. Server-side grounding gate downgrades any STOP that strays.
+- Persist memory across phases. Each wake is independent — the observer reads only the current checkpoint's delta vs the previous, via `buildObserverContextManifest`.
+- Run your tests, execute code, or see your conversation with the orchestrator beyond what landed in the checkpoint.
 
 ## When to use it
 
@@ -17,7 +36,7 @@ Turn Council Mode on when you want a second pair of eyes on a Carmack-Council pi
 - Security-sensitive code paths (auth, permission gates, write boundaries).
 - Test specs — the observer often catches missing negative ACs or vacuously-passing assertions.
 
-Leave it off for trivial one-shot fixes — the overhead of two sessions and the BlockerBanner ceremony is not worth it.
+Leave it off for trivial one-shot fixes; the overhead of two sessions and the BlockerBanner ceremony is not worth it.
 
 ## Enabling Council Mode
 
@@ -29,7 +48,7 @@ On the **New Session** dialog:
 | Pairing | Behaviour | When to pick |
 |---|---|---|
 | **`claude+claude`** (default) | Two Claude Code sessions sharing one workspace. Symmetric tooling, same model family. | Default. Lowest friction. |
-| **`claude+codex`** (experimental) | Orchestrator on Claude, observer on Codex. Cross-model independence. | When you want a fundamentally different reasoning pass on the artefacts — caught issues that two Claudes would echo each other on. |
+| **`claude+codex`** (experimental) | Orchestrator on Claude, observer on Codex. Cross-model independence — different reasoning pass on the artefacts. | When you want correlated-failure-mode resistance: two Claudes tend to echo each other's blind spots (same training distribution, similar refusal patterns), while a Codex observer can surface issues a Claude observer would rationalise past. Cost: asymmetric tooling, separate billing, and the observer prompt is currently tuned on Claude. |
 
 3. Click **Start**. The backend spawns two linked sessions sharing one `sessionGroupId`, one workspace (single git worktree), and identical env/permissions.
 
@@ -37,52 +56,60 @@ On the **New Session** dialog:
 If the observer-side provider has no working credentials, the launch is rejected with an inline error naming the missing credential — no half-paired session is created. The orchestrator never starts alone.
 </Note>
 
-## What you see in the UI
+## ObserverPanel states
 
-### Orchestrator chat (main pane)
+The status pill in the panel header is in exactly one of seven states. The priority ladder ("top wins") is encoded by the order below:
 
-This is where you drive the work — exactly like a single session. The only difference is the **BlockerBanner**, which appears in the chat slot when the observer surfaces an unresolved `STOP/BLOCKER` finding. The banner shows the claim (JSX-escaped), the file it references, and a primary action to address it. Dismiss with the close button once you've handled it.
+1. `degraded` — observer process died and has not been respawned. Orchestrator continues; manual respawn available.
+2. `blocker-found` — at least one unresolved STOP.
+3. `reconnecting` — observer's CLI subprocess is reconnecting after a transport blip.
+4. `reviewing` — observer is mid-pass on the latest checkpoint.
+5. `spawning` — initial boot — system prompt loaded, CLI not yet ready.
+6. `sleeping` — all clear. No unresolved findings.
+7. `never-checkpointed-yet` — observer is up but the orchestrator has not written a first checkpoint, so there is nothing to review yet.
 
-### Observer panel (right sibling of chat)
-
-A collapsible rail with two halves:
-
-- **Status pill** — one of seven states (priority ladder, top wins):
-
-  | State | Meaning |
-  |---|---|
-  | `degraded` | Observer process died and has not been respawned. Orchestrator continues; manual respawn available. |
-  | `blocker-found` | At least one unresolved STOP. |
-  | `reconnecting` | Observer's CLI subprocess is reconnecting after a transport blip. |
-  | `reviewing` | Observer is mid-pass on the latest checkpoint. |
-  | `spawning` | Initial boot — system prompt loaded, CLI not yet ready. |
-  | `sleeping` | All clear. No unresolved findings. |
-  | `never-checkpointed-yet` | Observer is up but the orchestrator has not written a first checkpoint, so there is nothing to review yet. |
-
-- **Findings log** (`role="log"`, `aria-live="polite"`) — chronological list of all observer findings (STOP, NOTE, suggestion). Each entry shows the deterministic `fnd_<hex>` id, the phase, the claim, and the evidence path. Dismissed STOPs collapse but stay visible for audit.
-
-<img src="../screenshots/council-mode-anatomy.png" alt="Council Mode UI anatomy — ProviderBadges (claude+codex compact and default sizes), BlockerBanner with a STOP finding showing evidence path and Open evidence / Mark addressed / Dismiss for now actions, DegradedBanner in observer-offline and orchestrator-offline states, FindingsLog in empty state and with a full STOP/WARN/NOTE/INFO/DOWNGRADED mix" />
-
-### Provider badges (sidebar)
-
-Each session row in the sidebar shows provider chips. For a `claude+claude` pair, you see one symmetric chip. For `claude+codex`, you see two asymmetric chips so the active billing source is visible at a glance.
-
-### Keyboard shortcuts
+## Keyboard shortcuts
 
 | Shortcut | Action |
 |---|---|
-| `Cmd/Ctrl+Shift+O` | Toggle the Observer panel open/closed (any focused state). |
+| `Cmd/Ctrl+Shift+O` | Toggle the Observer panel open/closed. |
 | `Cmd/Ctrl+Shift+B` | Focus the BlockerBanner's primary action. |
 
-If unresolved STOPs exist anywhere across your sessions, the browser tab title gets a `(N)` prefix counting them — you don't have to keep the tab focused to notice.
+If unresolved STOPs exist anywhere across your sessions, the browser tab title gets an `(N)` prefix counting them — you don't need to keep the tab focused to notice.
 
 ## How findings get grounded
 
-The observer doesn't get to invent issues out of thin air. Every finding is checked against the modified surface of the checkpoint that triggered the review:
+Every observer finding is checked against the modified surface of the checkpoint that triggered the review. STOPs only reach the BlockerBanner when they reference real, just-changed files. STOPs whose `evidence_path` is **not** in the checkpoint's `modifiedFiles` set, or which does not exist on disk, are **downgraded to NOTE** server-side. The observer's write boundary is enforced at the spawn argv (tool allow-list + permission mode intersected with caller config).
 
-- A **STOP** whose `evidence_path` is **not** in the checkpoint's `modifiedFiles` set, or which does not exist on disk, is **downgraded to NOTE** server-side. STOPs only reach the BlockerBanner when they reference real, just-changed files.
-- Findings get deterministic `fnd_<hex>` ids derived from `(sessionGroupId, checkpointId, observerProvider, findingIndex, evidence_path, claim)`. Restart-replay produces stable ids; the browser dedupes so you never see the same finding twice.
-- The observer's write boundary is enforced at the spawn argv (tool allow-list + permission mode intersected with caller config). The observer can read code, but it cannot modify it.
+### Worked example
+
+1. You write code and the orchestrator records a checkpoint listing `modifiedFiles: ["web/server/foo.ts"]`.
+2. The observer wakes, reads the delta, and emits two findings:
+   - **STOP** with `evidence_path: "web/server/foo.ts"` — claim about a real change.
+   - **STOP** with `evidence_path: "web/server/bar.ts"` — claim about a file that didn't change this checkpoint.
+3. The server runs `validateObserverFindings`:
+   - First STOP survives → wrapped and broadcast as a BlockerBanner.
+   - Second STOP is downgraded to NOTE (out-of-delta), recorded with a downgrade reason, broadcast for audit only.
+4. The browser renders the surviving STOP in the BlockerBanner slot and lists both findings in the FindingsLog — the demoted one tagged `DOWNGRADED` with the reason visible.
+
+You see exactly what the observer claimed and exactly what the server did with it; nothing is silently suppressed.
+
+## Finding lifecycle
+
+A finding moves through four user-visible states:
+
+- **Raised** — STOP reaches the BlockerBanner; the FindingsLog row is unread.
+- **Resolved** — you address the underlying issue and dismiss the banner; FindingsLog row stays for audit.
+- **Downgraded** — the grounding gate demoted a STOP to NOTE before it reached the banner; visible only in FindingsLog with the demotion reason.
+- **Archived** — the session closes; findings persist on disk for post-hoc review.
+
+## Restart-replay determinism
+
+Findings carry deterministic `fnd_<hex>` ids derived from `(sessionGroupId, checkpointId, observerProvider, findingIndex, evidence_path, claim)`. If the observer crashes after writing a review file and the orchestrator restarts, the same review file re-processed produces the same finding ids; the browser dedupes so you don't see duplicates. **What is deterministic:** the id, given identical inputs. **What is not:** the claim text — re-running the observer on the same checkpoint may yield differently-worded claims (LLM non-determinism) and therefore different ids.
+
+## Provider badges (sidebar)
+
+Each session row in the sidebar shows provider chips. For a `claude+claude` pair, you see one symmetric chip. For `claude+codex`, you see two asymmetric chips so the active billing source is visible at a glance.
 
 ## Degraded mode
 
@@ -94,7 +121,7 @@ To recover:
 2. Click **Respawn observer** in the DegradedBanner.
 3. The backend re-spawns the observer half with the same workspace, system prompt, and group id. State resumes from the most recent checkpoint on disk.
 
-If respawn keeps failing, check `~/.companion/recordings/` for the observer's last frames — the JSON-RPC handshake errors are the most common signal (missing credential, model unavailable for the chosen provider).
+If respawn keeps failing, pull the observer's recording at `~/.companion/recordings/` and filter by `sessionGroupRole=observer` — the JSON-RPC handshake errors are the most common signal (missing credential, model unavailable for the chosen provider).
 
 ## Workspace artefacts
 
@@ -103,7 +130,7 @@ While Council Mode runs, the workspace gets a `.council/` subtree:
 ```
 .council/
 ├── prompts/
-│   └── observer-system.md      # Versioned (v1) role definition, loaded at observer spawn
+│   └── observer-system.md      # Optional per-workspace override; bundled fallback fires on ENOENT
 ├── checkpoints/
 │   └── <phase>.json            # Orchestrator writes after each Carmack phase
 ├── reviews/
@@ -111,17 +138,21 @@ While Council Mode runs, the workspace gets a `.council/` subtree:
 └── review-output/<TIMESTAMP>/  # Per-expert findings + synthesised FINAL-REVIEW.md
 ```
 
-You can commit these — they're useful for post-hoc review and reproducible Council debugging. The filename contract carries `<provider>` so a `claude+codex` pairing produces two distinct review files per checkpoint without colliding under the watcher's debounce window.
+The `<provider>` filename segment is contract surface — a `claude+codex` pairing produces two distinct review files per checkpoint without colliding under the watcher's debounce window.
+
+You can commit these artefacts — they're useful for post-hoc review and reproducible Council debugging.
 
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| ObserverPanel stuck on `spawning` | Observer CLI failed to boot — credential missing or system prompt artefact unreadable. | Check `.council/prompts/observer-system.md` exists and is readable; verify the observer-provider credential. |
-| BlockerBanner never appears even after phase | Observer's review file path didn't land in `modifiedFiles` (all STOPs downgraded to NOTE). | Check `docs/reference/council-mode-architecture.mdx` for the grounding gate; widen the checkpoint manifest if your phase legitimately touches files outside the modified set. |
+| ObserverPanel stuck on `spawning` | Observer CLI failed to boot — credential missing OR the workspace's `.council/prompts/observer-system.md` is present-but-unreadable (`EACCES` / `EISDIR` / `ELOOP`). `ENOENT` does NOT block spawn — the bundled fallback fires and logs `council.observer-prompt.bundled-fallback`. | Verify the observer-provider credential. If a workspace override exists, check `chmod`/`stat`. To intentionally use the bundled prompt, delete the workspace override. |
+| BlockerBanner never appears even after a phase | Observer's STOP `evidence_path` didn't land in `modifiedFiles` (all STOPs downgraded to NOTE — visible in FindingsLog as `DOWNGRADED`). | Confirm in the FindingsLog. Widen the checkpoint manifest if your phase legitimately touches files outside the modified set. |
 | Status pill flips `reviewing → sleeping` with no findings | Observer ran to completion but had nothing to flag — this is the happy path. | No action. Phase is clean. |
 | Two STOPs on the same finding | Stale browser state from a server restart before the dedup id landed. | Hard-refresh; the deterministic `fnd_<hex>` will collapse them. |
 | `claude+codex` pairing produces one review file, not two | Observer wrote to the wrong filename or the watcher debounced two writes. | The filename **must** include the `<provider>` segment — this is the contract; if your observer is custom, ensure it writes `<phase>-codex-observer.md`, not `<phase>-observer.md`. |
+| Wrote a checkpoint and no review for >5 min | Observer is alive but missed the event (rare — `fs.watch` edge / macOS dirname quirk). | Wait one more failsafe cycle: a recurring 5-minute scan reconciles unprocessed checkpoints. Worst-case observer latency is bounded by this tick. |
+| Suspicious-looking finding ("did the observer just hallucinate?") | LLM judgement nondeterminism. | Pull the observer recording at `~/.companion/recordings/` (filter by `sessionGroupRole=observer`), find the JSON-RPC frame around the review-file write — the raw observer output, the `modifiedFiles` set, and the grounding-gate decision are all there. Recordings are the ground truth for any disputed finding. |
 
 ## Limits in v1
 
@@ -131,4 +162,6 @@ You can commit these — they're useful for post-hoc review and reproducible Cou
 - Observer system prompts cannot be hot-swapped mid-session.
 - Codex observer is optional, not mandatory; Codex stays an experimental adapter.
 
-For the wire protocol, state machine, and the AP-/EC- convention floor, see the [Council Mode architecture reference](/reference/council-mode-architecture).
+## Further reading
+
+For the wire protocol, state machine, and convention floor, see the [Council Mode architecture reference](/reference/council-mode-architecture).

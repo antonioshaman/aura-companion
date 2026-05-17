@@ -182,6 +182,17 @@ export interface CouncilSlice {
     supersededCheckpointIds?: string[];
   }) => void;
 
+  /**
+   * Bidirectional pipeline Story 4.1 — server-published convergence
+   * state. Apply atomically to the GroupRecord; never derived client-side.
+   */
+  applyConvergence: (args: {
+    sessionGroupId: string;
+    cycleNumber: number;
+    convergenceThreshold: number;
+    convergenceState: "in-progress" | "converged" | "revoked";
+  }) => void;
+
   // Actions — panel state
   setObserverPanelOpen: (sessionId: string, open: boolean) => void;
   toggleObserverPanel: (sessionId: string) => void;
@@ -316,6 +327,20 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
       const newDowngrades = downgrades.filter((d) => !seenDowngradeIds.has(d.id));
       groundingDowngrades.set(sessionGroupId, [...priorDowngrades, ...newDowngrades]);
       return { groups, findings, groundingDowngrades };
+    }),
+
+  applyConvergence: ({ sessionGroupId, cycleNumber, convergenceThreshold, convergenceState }) =>
+    set((s) => {
+      const existing = s.groups.get(sessionGroupId);
+      if (!existing) return {};
+      const groups = new Map(s.groups);
+      groups.set(sessionGroupId, {
+        ...existing,
+        cycleNumber,
+        convergenceThreshold,
+        convergenceState,
+      });
+      return { groups };
     }),
 
   setObserverPanelOpen: (sessionId, open) =>

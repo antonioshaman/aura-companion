@@ -8,6 +8,7 @@ import type { ContainerConfig, ContainerInfo } from "./container-manager.js";
 import { containerManager } from "./container-manager.js";
 import { imagePullManager } from "./image-pull-manager.js";
 import * as envManager from "./env-manager.js";
+import { ConvergenceTracker } from "./convergence-tracker.js";
 import * as sandboxManager from "./sandbox-manager.js";
 import * as gitUtils from "./git-utils.js";
 import * as sessionNames from "./session-names.js";
@@ -390,6 +391,14 @@ export class SessionOrchestrator {
    * crash; production always wires the real manager from `index.ts`.
    */
   private idleTimerManager: IdleTimerManager;
+
+  /**
+   * Bidirectional pipeline Story 4.1: convergence tracker folds the
+   * `group:review` stream into a per-group clean-cycle counter. Lazy-
+   * initialised in {@link initialize} after `wireGroupListeners` so the
+   * `group:convergence` listener is armed before the tracker can emit.
+   */
+  private convergenceTracker: ConvergenceTracker | null = null;
 
   // Auto-relaunch state
   private relaunchingSet = new Set<string>();
@@ -793,6 +802,18 @@ export class SessionOrchestrator {
     // (Fowler council review #15) so the council surface is visibly
     // separated from the solo-session lifecycle wiring above.
     this.wireGroupListeners();
+
+    // Bidirectional pipeline Story 4.1 — convergence tracker. Attached
+    // AFTER wireGroupListeners so the `group:convergence` listener is
+    // armed first; any review processed between attach and first emit
+    // is fanned to browsers without race.
+    this.convergenceTracker = new ConvergenceTracker({
+      isFrozen: (sessionGroupId: string) => {
+        const status = this.coordinator?.get(sessionGroupId)?.status;
+        return status === "degraded" || status === "reconnecting";
+      },
+    });
+    this.convergenceTracker.attach();
 
     // Council Mode group reconciliation. Pairs created in a previous server
     // uptime are restored from launcher state (which itself hydrates from
@@ -1277,6 +1298,37 @@ export class SessionOrchestrator {
         observerProvider,
         timestamp: Date.now(),
         ...(superseded.length > 0 ? { supersededCheckpointIds: superseded } : {}),
+      });
+    });
+
+    // Bidirectional pipeline Story 4.1 — convergence-tracker fanout.
+    // The tracker is wired in initialize(); here we forward its bus
+    // emissions to the browsers in the same group as a `group_update`
+    // payload carrying the new convergence fields. Frontend reads
+    // them off `GroupRecord` (server-authoritative; no client-side
+    // counter).
+    companionBus.on("group:convergence", ({ sessionGroupId, transition, cycleNumber, convergenceThreshold }) => {
+      const convergenceState: "in-progress" | "converged" | "revoked" =
+        transition === "converged"
+          ? "converged"
+          : transition === "revoked"
+            ? "revoked"
+            : "in-progress";
+      this.wsBridge.broadcastToGroup(this.getGroupMemberIds(sessionGroupId), {
+        type: "group_convergence",
+        sessionGroupId,
+        transition,
+        cycleNumber,
+        convergenceThreshold,
+        convergenceState,
+        timestamp: Date.now(),
+      });
+      log.info("session-orchestrator", "convergence transition", {
+        event: "council.convergence.transition",
+        sessionGroupId,
+        transition,
+        cycleNumber,
+        convergenceThreshold,
       });
     });
 
