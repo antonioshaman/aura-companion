@@ -407,8 +407,20 @@ export type BrowserIncomingMessageBase =
      * `"active"` (the variant fires only on a transition that leaves the
      * group active); REST bootstrap may emit `"degraded"` or
      * `"reconnecting"` when the user reloads mid-state.
+     *
+     * **Optional on the wire** — mirrors the Task 9 precedent that made
+     * `wakeTimeoutMs` optional. The persistent event buffer
+     * (`session-store.ts:39 — eventBuffer?: BufferedBrowserEvent[]`) survives
+     * a server restart, so a pre-PR-#68 server that buffered a `group_created`
+     * frame, then upgrades onto this PR, will replay that legacy frame to a
+     * reconnecting browser inside an `event_replay` envelope WITHOUT the
+     * `status` field. Making the field optional keeps the type contract
+     * truthful across the upgrade window; the client falls back to
+     * `"active"` (the only sensible default for a `group_created` push) for
+     * such legacy frames. New emits always carry `status` because they
+     * route through `buildBrowserGroupRecord`.
      */
-    status: "pairing" | "active" | "degraded" | "archived" | "reconnecting";
+    status?: "pairing" | "active" | "degraded" | "archived" | "reconnecting";
     /**
      * Task 9: server-published auto-wake-to-review timeout in
      * milliseconds. Frontend uses this to bound the `reviewing` panel

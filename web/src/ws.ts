@@ -1187,10 +1187,19 @@ function handleParsedMessage(
         // and the REST bootstrap (`GET /api/groups`) go through this
         // variant, so a reload mid-`degraded` or mid-`reconnecting` pair
         // hydrates with the true status instead of the legacy hardcoded
-        // `"active"`. Fallback to `"active"` for buffered messages from
-        // a pre-PR-#68 server replay path (defensive — server-side change
-        // is additive, but the wire field is treated as required by the
-        // type, so this fallback is structurally unreachable today).
+        // `"active"`.
+        //
+        // The `?? "active"` fallback is a LEGACY-REPLAY SAFETY NET — NOT
+        // dead code. The session event buffer is persisted to disk
+        // (`session-store.ts:39 — eventBuffer?: BufferedBrowserEvent[]`)
+        // and rehydrated on server restart. A pre-PR-#68 server that
+        // buffered a `group_created` frame, then upgrades onto this PR,
+        // will replay that legacy frame (no `status` field) to a
+        // reconnecting browser inside an `event_replay` envelope. The
+        // wire variant is correspondingly optional on `status` to keep
+        // the type contract truthful across the upgrade window. Future
+        // cleanup MUST NOT delete this fallback while persisted event
+        // buffers from older server versions might still exist.
         status: data.status ?? "active",
         pairing: data.pairing,
         // Task 9: server-published wake-to-review timeout. The panel-
