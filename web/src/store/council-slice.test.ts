@@ -318,6 +318,70 @@ describe("hydrateGroups", () => {
     expect(s.groupBySessionId.get("p_new")).toBe("grp_new");
     expect(s.groupBySessionId.get("p_ex")).toBe("grp_existing");
   });
+
+  // PICKUP §2.3 hydrate→WS sequence contract. The realistic mount flow:
+  //   1. App.tsx fires `fetchGroups()` → `hydrateGroups([...])` (REST).
+  //   2. A live `group_created` push arrives shortly after for the same
+  //      pair (server emits it on bus when a tab that was in a closed-WS
+  //      state reconnects, or when the group reconnects via the recovery
+  //      path).
+  // The WS dispatch path in `ws.ts` calls `upsertGroup`, which always
+  // overwrites by Map semantics. The contract under test: the second
+  // arrival MUST NOT produce a double-insert (groups.size stays 1), MUST
+  // NOT swap the role mapping in `groupBySessionId`, and MUST NOT split
+  // the pair across two records. The REST and WS wire shapes are
+  // produced by the same `buildBrowserGroupRecord` helper (PR #68 C1.1),
+  // so they agree on the primary/observer assignment; this test pins
+  // that contract at the store layer so a future regression that
+  // accidentally diverged the two assembly paths would surface here.
+  it("hydrate then live group_created for the same sessionGroupId — no double-insert, no role swap, reverse-index intact", () => {
+    const groupId = "grp_seq";
+    const primaryId = "orch_seq";
+    const observerId = "obs_seq";
+
+    // 1. REST bootstrap lands first.
+    useStore.getState().hydrateGroups([
+      group({
+        sessionGroupId: groupId,
+        primarySessionId: primaryId,
+        observerSessionId: observerId,
+        pairing: "claude+codex",
+      }),
+    ]);
+    {
+      const s = useStore.getState();
+      expect(s.groups.size).toBe(1);
+      expect(s.groupBySessionId.get(primaryId)).toBe(groupId);
+      expect(s.groupBySessionId.get(observerId)).toBe(groupId);
+    }
+
+    // 2. Subsequent live `group_created` arrives for the same pair —
+    //    `ws.ts` dispatches `upsertGroup`. Both REST and WS go through
+    //    `buildBrowserGroupRecord` server-side so the role assignment is
+    //    structurally identical.
+    useStore.getState().upsertGroup(
+      group({
+        sessionGroupId: groupId,
+        primarySessionId: primaryId,
+        observerSessionId: observerId,
+        pairing: "claude+codex",
+      }),
+    );
+
+    // 3. Invariants AFTER the WS arrival:
+    //    - groups.size remains 1 (no double-insert from sequencing)
+    //    - primary/observer role mapping unchanged (no role swap)
+    //    - groupBySessionId has exactly 2 entries (one per half), both
+    //      resolving to the same sessionGroupId
+    const s = useStore.getState();
+    expect(s.groups.size).toBe(1);
+    const stored = s.groups.get(groupId);
+    expect(stored?.primarySessionId).toBe(primaryId);
+    expect(stored?.observerSessionId).toBe(observerId);
+    expect(s.groupBySessionId.size).toBe(2);
+    expect(s.groupBySessionId.get(primaryId)).toBe(groupId);
+    expect(s.groupBySessionId.get(observerId)).toBe(groupId);
+  });
 });
 
 // ── recordCheckpoint ────────────────────────────────────────────────────────
