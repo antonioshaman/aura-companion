@@ -3741,4 +3741,118 @@ describe("SessionOrchestrator", () => {
       expect(orchestrator.getCouncilGroupBySessionId("orphan_sid")).toBeNull();
     });
   });
+
+  // ─── getAllGroupsForBootstrap ─────────────────────────────────────────────
+  //
+  // PR #68 — Council Mode group REST bootstrap. The browser's
+  // `groupBySessionId` map is populated EXCLUSIVELY from the live
+  // `group:created` push, so a reload after pair creation leaves the
+  // Sidebar without ☼/☽ glyphs (`BUG-council-mode-group-rest-bootstrap-gap.md`).
+  // This method is the REST counterpart — every live group, in the same
+  // browser wire shape the live push emits, fetched on app mount.
+  describe("getAllGroupsForBootstrap", () => {
+    // Helper: seed the coordinator directly via `registerExternalGroup`
+    // so we don't have to drive the full createSession spawn pipeline
+    // (which requires mocking the launcher's full surface). Mirrors the
+    // pattern used by other council tests in this file and by the
+    // `reconcileCouncilGroups()` restart path.
+    function seedCoordGroup(gid: string, orchId: string, obsId: string, status: string = "active", observerBackend: "claude" | "codex" = "claude") {
+      const coord = (orchestrator as unknown as {
+        getOrCreateCoordinatorSync: () => {
+          registerExternalGroup: (r: unknown) => void;
+          applyEvent: (id: string, ev: { type: string; role?: string }) => unknown;
+        };
+      }).getOrCreateCoordinatorSync();
+      coord.registerExternalGroup({
+        sessionGroupId: gid,
+        primary: { sessionId: orchId, backendType: "claude" },
+        observer: { sessionId: obsId, backendType: observerBackend },
+        status: "active",
+        createdAt: Date.now(),
+      });
+      if (status === "degraded") {
+        coord.applyEvent(gid, { type: "half_died", role: "observer" });
+      }
+    }
+
+    it("returns an empty array when no coordinator has been created (no Council Mode usage)", () => {
+      // Fresh orchestrator, no createCouncilGroup invocation — coordinator
+      // is lazily constructed, so the bootstrap method must short-circuit.
+      expect(orchestrator.getAllGroupsForBootstrap()).toEqual([]);
+    });
+
+    it("returns one wire-shape record per active group, with status + pairing label", () => {
+      seedCoordGroup("grp_b1", "orch_b1", "obs_b1", "active", "claude");
+      seedCoordGroup("grp_b2", "orch_b2", "obs_b2", "active", "codex");
+      const out = orchestrator.getAllGroupsForBootstrap();
+      expect(out).toHaveLength(2);
+      // Order is not guaranteed (Map iteration order is insertion order in
+      // practice, but the wire contract does not pin it). Index by group id.
+      const byId = new Map(out.map((g) => [g.sessionGroupId, g]));
+      expect(byId.get("grp_b1")).toEqual({
+        sessionGroupId: "grp_b1",
+        primarySessionId: "orch_b1",
+        observerSessionId: "obs_b1",
+        pairing: "claude+claude",
+        status: "active",
+        wakeTimeoutMs: expect.any(Number),
+      });
+      expect(byId.get("grp_b2")).toEqual({
+        sessionGroupId: "grp_b2",
+        primarySessionId: "orch_b2",
+        observerSessionId: "obs_b2",
+        pairing: "claude+codex",
+        status: "active",
+        wakeTimeoutMs: expect.any(Number),
+      });
+    });
+
+    // Symmetry with the live `group:created` push: the panel-state deriver
+    // bounds the `reviewing` interval by `lastCheckpointAt + wakeTimeoutMs`.
+    // REST-bootstrapped groups must receive the same constant or the deriver
+    // would silently fall back to a frontend default — diverging behaviour.
+    it("populates wakeTimeoutMs with the same constant the group_created push uses", async () => {
+      const { OBSERVER_WAKE_TIMEOUT_MS } = await import("./council-types.js");
+      seedCoordGroup("grp_wt", "orch_wt", "obs_wt", "active", "claude");
+      const out = orchestrator.getAllGroupsForBootstrap();
+      expect(out[0]?.wakeTimeoutMs).toBe(OBSERVER_WAKE_TIMEOUT_MS);
+    });
+
+    // Reload during degraded pair MUST surface the true status. Without
+    // this, the panel header pill would render "active" against a dead
+    // half — the bootstrap path would silently mask the very condition
+    // the operator needs to see.
+    it("preserves degraded status across bootstrap (does not flatten to active)", () => {
+      seedCoordGroup("grp_d1", "orch_d1", "obs_d1", "degraded", "claude");
+      const out = orchestrator.getAllGroupsForBootstrap();
+      expect(out).toHaveLength(1);
+      expect(out[0]?.status).toBe("degraded");
+    });
+
+    // Archived groups are torn down — they must not appear in the Sidebar.
+    // The orchestrator filters at this boundary (the coordinator returns
+    // every record including archived; the visibility policy belongs here).
+    it("filters out archived groups from the bootstrap response", () => {
+      const coord = (orchestrator as unknown as {
+        getOrCreateCoordinatorSync: () => {
+          registerExternalGroup: (r: unknown) => void;
+          applyEvent: (id: string, ev: { type: string }) => unknown;
+        };
+      }).getOrCreateCoordinatorSync();
+      coord.registerExternalGroup({
+        sessionGroupId: "grp_arch",
+        primary: { sessionId: "orch_arch", backendType: "claude" },
+        observer: { sessionId: "obs_arch", backendType: "claude" },
+        status: "active",
+        createdAt: Date.now(),
+      });
+      coord.applyEvent("grp_arch", { type: "user_archived" });
+      // Also seed one healthy group so we can verify selective filtering,
+      // not blanket emptiness from a coordinator-wide bug.
+      seedCoordGroup("grp_live", "orch_live", "obs_live", "active", "claude");
+      const out = orchestrator.getAllGroupsForBootstrap();
+      expect(out).toHaveLength(1);
+      expect(out[0]?.sessionGroupId).toBe("grp_live");
+    });
+  });
 });

@@ -48,6 +48,7 @@ import {
 } from "./council-wake-sentinel.js";
 import { formatObserverInvocationLog } from "./observer-attribution.js";
 import type {
+  BrowserGroupRecord,
   BrowserObserverDowngrade,
   BrowserObserverFinding,
 } from "./session-types.js";
@@ -2938,6 +2939,43 @@ export class SessionOrchestrator {
     const role: "orchestrator" | "observer" =
       meta.primarySessionId === sessionId ? "orchestrator" : "observer";
     return { sessionGroupId, role };
+  }
+
+  /**
+   * REST bootstrap for Council Mode group records — return every live
+   * group the coordinator currently tracks, in the same wire shape the
+   * `group_created` push event uses. Used by the browser on app mount /
+   * reload to repopulate `groupBySessionId` so the Sidebar glyph + role
+   * suffix render correctly even when the original `group_created` event
+   * arrived while no browser was connected.
+   *
+   * Closes the bootstrap gap described in
+   * `BUG-council-mode-group-rest-bootstrap-gap.md` — historically the
+   * browser's group store was populated EXCLUSIVELY by the live
+   * `group:created` push, so a reload after pair creation left the
+   * Sidebar without the ☼/☽ decoration and the ObserverPanel without
+   * pair context.
+   *
+   * Returns an empty array when no coordinator exists yet (no Council
+   * Mode usage this server uptime). Archived groups are filtered out —
+   * they should not appear in the Sidebar list of active pairs.
+   */
+  getAllGroupsForBootstrap(): BrowserGroupRecord[] {
+    if (!this.coordinator) return [];
+    const records = this.coordinator.listAll();
+    const out: BrowserGroupRecord[] = [];
+    for (const g of records) {
+      if (g.status === "archived") continue;
+      out.push({
+        sessionGroupId: g.sessionGroupId,
+        primarySessionId: g.primary.sessionId,
+        observerSessionId: g.observer.sessionId,
+        pairing: `${g.primary.backendType}+${g.observer.backendType}`,
+        status: g.status,
+        wakeTimeoutMs: OBSERVER_WAKE_TIMEOUT_MS,
+      });
+    }
+    return out;
   }
 
   /**

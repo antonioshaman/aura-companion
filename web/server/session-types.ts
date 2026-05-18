@@ -534,6 +534,42 @@ export interface BrowserObserverDowngrade {
   reason: "evidence_not_in_modified_set" | "evidence_missing_on_disk" | "wake_version_mismatch";
 }
 
+/**
+ * Council Mode group — browser wire shape. The subset of the coordinator's
+ * `GroupRecord` the browser needs to render the Sidebar glyph + ObserverPanel
+ * pair context. Returned by:
+ *
+ *   1. The REST bootstrap endpoint `GET /api/groups` (PR #68 — close the
+ *      bootstrap gap where `group:created` events are lost on reload).
+ *   2. The producer-side mapper inside `SessionOrchestrator` that the
+ *      `group:created` listener can also use, so the wire shape and the
+ *      bootstrap shape stay in lockstep (AP-3: writer + reader schemas
+ *      co-located in one file).
+ *
+ * `status` is INCLUDED here (unlike the original `group_created` wire
+ * variant which implicitly meant "active") because a browser reloading
+ * mid-degraded or mid-reconnecting pair MUST receive the true status —
+ * otherwise the panel renders a stale "active" pill against a dead half.
+ *
+ * `wakeTimeoutMs` mirrors the server's {@link OBSERVER_WAKE_TIMEOUT_MS}
+ * constant so the panel-state deriver bounds the `reviewing` interval
+ * identically whether the group surfaced via REST bootstrap or the live
+ * `group_created` push.
+ */
+export interface BrowserGroupRecord {
+  sessionGroupId: string;
+  primarySessionId: string;
+  observerSessionId: string;
+  /** Server-validated pairing label, e.g. "claude+claude" / "claude+codex". */
+  pairing: string;
+  /** Live coordinator status — see `GroupStatus` in `group-state-machine.ts`. */
+  status: "pairing" | "active" | "degraded" | "archived" | "reconnecting";
+  /** Optional: which half died (populated only when status === "degraded"). */
+  deadRole?: SessionGroupRole;
+  /** Task 9 — server-published wake-to-review bound; see `group_created`. */
+  wakeTimeoutMs?: number;
+}
+
 export type BrowserIncomingMessage = BrowserIncomingMessageBase & { seq?: number };
 
 export type ReplayableBrowserIncomingMessage = Exclude<BrowserIncomingMessageBase, { type: "event_replay" }>;
