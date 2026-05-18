@@ -259,3 +259,15 @@ These must be followed — flag violations as findings.
 **Principle:** `references/quality-deploy.md` → P10 (know your gaps — operator surprise = unshipped capability) + `references/quality-llm.md` → P3 (rule-first / model-second — fail with structured diagnostic, not "skill not found"); sibling memories `feedback_skill_md_vs_references_drift`, `feedback_skill_fork_dont_replace`, `feedback_skill_refs_copy_not_symlink`
 
 ---
+
+### AP-14: Multi-producer wire shapes route through one assembly site
+
+**Convention:** Any wire variant emitted by ≥2 server-side producers MUST funnel through a single assembly helper. The helper accepts the *minimum data the wire shape needs* — each producer passes whatever fields it has locally — and owns *every* derived field (concatenated labels, server-owned constants, defaults for transiently-absent inputs). No producer constructs the wire record in-line. Examples of canonical-application: `buildBrowserGroupRecord` in `web/server/browser-group-record.ts` is the assembly site for the `group_created` wire variant, consumed by all three producers (`session-orchestrator.ts` live push listener, `session-orchestrator.ts` REST bootstrap snapshot, `ws-bridge.ts` synthetic hydration). Field ordering, pairing concatenation (`primary+observer`), `wakeTimeoutMs` from the server-owned constant, and the launcher-propagation-lag fallback for `backendType: undefined` are mechanically un-driftable across producers because there is only one assembly site. Counter-pattern: per-producer inline construction, even when identical at a moment in time, ships a drift footgun that fires the day a new field is added at one site and forgotten at another — exactly how the PR #68 bug class (Sidebar lost ☼/☽ glyph + role suffix on browser reload) was constructed.
+
+**Origin:** Council Review 2026-05-18-1121 — `buildBrowserGroupRecord` keystone refactor for PR #68 (council-mode-bootstrap-rest). Convergent recommendation from Fowler (refactoring, finding 4) + dahl (Bun/NDJSON/WS, finding 1) + beck (Test Quality, parity test for cross-site behavioural equivalence).
+
+**Rationale:** Producer-side defaults applied inline at each call site are silently load-bearing — a "well-formed" wire record at producer A and a malformed one at producer B is the canonical symptom of mapper drift. Centralising the assembly into one helper turns "every producer must remember to apply the fallback" into "the helper applies it once" — a refactoring of capability rather than discipline.
+
+**Principle:** `references/refactoring.md` → P1 (Don't Repeat Yourself across producers of the same wire shape); `references/quality-llm.md` → P3 (rule-first / model-second — encode the invariant in code, not in producer-side review checklists).
+
+---
