@@ -1137,6 +1137,8 @@ describe("Browser handlers", () => {
       primarySessionId: "g_orch",
       observerSessionId: "g_obs",
       pairing: "claude+claude",
+      // PR #68: status is now part of the wire variant — see session-types.ts.
+      status: "active",
       wakeTimeoutMs: 90_000,
     });
 

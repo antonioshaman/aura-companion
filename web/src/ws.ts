@@ -1182,7 +1182,16 @@ function handleParsedMessage(
         sessionGroupId: data.sessionGroupId,
         primarySessionId: data.primarySessionId,
         observerSessionId: data.observerSessionId,
-        status: "active",
+        // PR #68: server now publishes the live coordinator status via
+        // the shared `buildBrowserGroupRecord` helper. Both the live push
+        // and the REST bootstrap (`GET /api/groups`) go through this
+        // variant, so a reload mid-`degraded` or mid-`reconnecting` pair
+        // hydrates with the true status instead of the legacy hardcoded
+        // `"active"`. Fallback to `"active"` for buffered messages from
+        // a pre-PR-#68 server replay path (defensive — server-side change
+        // is additive, but the wire field is treated as required by the
+        // type, so this fallback is structurally unreachable today).
+        status: data.status ?? "active",
         pairing: data.pairing,
         // Task 9: server-published wake-to-review timeout. The panel-
         // state deriver (Task 11) bounds the `reviewing` interval by

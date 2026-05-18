@@ -401,6 +401,15 @@ export type BrowserIncomingMessageBase =
     /** Server-validated pairing label, e.g. "claude+claude" or "claude+codex". */
     pairing: string;
     /**
+     * PR #68: server emits the live coordinator status so REST bootstrap
+     * (`GET /api/groups`) and the live push share one wire shape via the
+     * `buildBrowserGroupRecord` helper. The push path always emits
+     * `"active"` (the variant fires only on a transition that leaves the
+     * group active); REST bootstrap may emit `"degraded"` or
+     * `"reconnecting"` when the user reloads mid-state.
+     */
+    status: "pairing" | "active" | "degraded" | "archived" | "reconnecting";
+    /**
      * Task 9: server-published auto-wake-to-review timeout in
      * milliseconds. Frontend uses this to bound the `reviewing` panel
      * state — past this deadline without an `observer_review` arrival,

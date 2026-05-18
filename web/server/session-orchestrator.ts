@@ -52,6 +52,7 @@ import type {
   BrowserObserverDowngrade,
   BrowserObserverFinding,
 } from "./session-types.js";
+import { buildBrowserGroupRecord } from "./browser-group-record.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -1191,19 +1192,29 @@ export class SessionOrchestrator {
     companionBus.on("group:created", ({ sessionGroupId, primarySessionId, observerSessionId }) => {
       const primary = this.launcher.getSession(primarySessionId);
       const observer = this.launcher.getSession(observerSessionId);
-      const pairing = `${primary?.backendType ?? "claude"}+${observer?.backendType ?? "claude"}`;
+      // PR #68: route the wire-shape assembly through the shared helper
+      // (`buildBrowserGroupRecord`). Same helper drives `getAllGroupsForBootstrap`
+      // and `ws-bridge.deriveGroupCreatedForBrowser` — pairing label,
+      // wakeTimeoutMs, and field ordering cannot drift across the three
+      // construction sites. Launcher remains the canonical source for the
+      // post-spawn backend type (with the legacy `?? "claude"` defensive
+      // fallback preserved); status is hardcoded `"active"` because this
+      // listener only fires on a transition that leaves the group active.
+      const wire = buildBrowserGroupRecord({
+        sessionGroupId,
+        primary: {
+          sessionId: primarySessionId,
+          backendType: (primary?.backendType ?? "claude") as BackendType,
+        },
+        observer: {
+          sessionId: observerSessionId,
+          backendType: (observer?.backendType ?? "claude") as BackendType,
+        },
+        status: "active",
+      });
       this.wsBridge.broadcastToGroup([primarySessionId, observerSessionId], {
         type: "group_created",
-        sessionGroupId,
-        primarySessionId,
-        observerSessionId,
-        pairing,
-        // Task 9: publish the wake-to-review timeout so the frontend
-        // panel-state deriver bounds the `reviewing` interval. Mirrors
-        // {@link OBSERVER_WAKE_TIMEOUT_MS} from this module — kept
-        // as a single constant the server owns; the frontend never
-        // hardcodes its own copy.
-        wakeTimeoutMs: OBSERVER_WAKE_TIMEOUT_MS,
+        ...wire,
       });
     });
     companionBus.on("group:exited", ({ sessionGroupId, reason }) => {
@@ -2966,14 +2977,16 @@ export class SessionOrchestrator {
     const out: BrowserGroupRecord[] = [];
     for (const g of records) {
       if (g.status === "archived") continue;
-      out.push({
+      // Shared helper — same construction site as the live push and the
+      // ws-bridge synthetic hydration. Pairing label + wakeTimeoutMs +
+      // field ordering cannot drift across the three producers because
+      // there is only one assembly site.
+      out.push(buildBrowserGroupRecord({
         sessionGroupId: g.sessionGroupId,
-        primarySessionId: g.primary.sessionId,
-        observerSessionId: g.observer.sessionId,
-        pairing: `${g.primary.backendType}+${g.observer.backendType}`,
+        primary: g.primary,
+        observer: g.observer,
         status: g.status,
-        wakeTimeoutMs: OBSERVER_WAKE_TIMEOUT_MS,
-      });
+      }));
     }
     return out;
   }

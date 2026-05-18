@@ -3854,5 +3854,57 @@ describe("SessionOrchestrator", () => {
       expect(out).toHaveLength(1);
       expect(out[0]?.sessionGroupId).toBe("grp_live");
     });
+
+    // PR #68 PICKUP §"shared mapper" invariant. The live `group_created`
+    // push and the REST `getAllGroupsForBootstrap` snapshot MUST produce
+    // byte-identical wire fields for the same coordinator state — that is
+    // why both routes through the shared `buildBrowserGroupRecord` helper.
+    // This test exercises both paths against the same seed and asserts
+    // the five shared fields are equal field-by-field. A future refactor
+    // that re-inlines one of the producers would diverge on at least one
+    // field and trip this canary.
+    it("cross-site parity: push fanout and getAllGroupsForBootstrap emit identical wire fields for the same coordinator state", () => {
+      orchestrator.initialize();
+      // Seed the launcher's session map so the push listener can resolve
+      // backendType for the pairing label — matches the coordinator's
+      // record so the parity assertion is over the helper's output, not a
+      // launcher/coordinator divergence.
+      vi.mocked(deps.launcher.getSession).mockImplementation((id: string) => {
+        if (id === "orch_parity") return { sessionId: "orch_parity", state: "running", cwd: "/w", createdAt: 0, backendType: "claude" } as any;
+        if (id === "obs_parity") return { sessionId: "obs_parity", state: "running", cwd: "/w", createdAt: 0, backendType: "codex" } as any;
+        return undefined;
+      });
+      const coord = (orchestrator as unknown as {
+        getOrCreateCoordinatorSync: () => { registerExternalGroup: (r: unknown) => void };
+      }).getOrCreateCoordinatorSync();
+      coord.registerExternalGroup({
+        sessionGroupId: "grp_parity",
+        primary: { sessionId: "orch_parity", backendType: "claude" },
+        observer: { sessionId: "obs_parity", backendType: "codex" },
+        status: "active",
+        createdAt: Date.now(),
+      });
+
+      // Path 1 — live push: emit the bus event, capture broadcastToGroup args.
+      companionBus.emit("group:created", {
+        sessionGroupId: "grp_parity",
+        primarySessionId: "orch_parity",
+        observerSessionId: "obs_parity",
+      });
+      const pushCalls = vi.mocked(deps.wsBridge.broadcastToGroup).mock.calls;
+      const pushMsg = pushCalls.find((c: unknown[]) => (c[1] as { sessionGroupId?: string }).sessionGroupId === "grp_parity")?.[1] as Record<string, unknown> | undefined;
+      expect(pushMsg).toBeDefined();
+
+      // Path 2 — REST bootstrap.
+      const boot = orchestrator.getAllGroupsForBootstrap().find((g) => g.sessionGroupId === "grp_parity");
+      expect(boot).toBeDefined();
+
+      // Shared field parity — the five fields produced by the helper
+      // MUST be byte-identical. `type` is push-only ("group_created"),
+      // so it's excluded from the comparison.
+      for (const field of ["sessionGroupId", "primarySessionId", "observerSessionId", "pairing", "status", "wakeTimeoutMs"] as const) {
+        expect(boot![field]).toEqual(pushMsg![field]);
+      }
+    });
   });
 });
