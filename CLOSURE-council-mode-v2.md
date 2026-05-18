@@ -153,6 +153,38 @@ Council-skill dispatch (`/council-plan-aura-v2`, `/council-implement-aura-v2`, `
 
 Writer pickup-prompts for hybrid/full-council scopes MUST embed the council-dispatch invocation explicitly — otherwise mono finishes and pushes without engaging the council lens.
 
+### Phase 3γ — Council-skill surface unification roadmap (operator decision 2026-05-18, codified as dec-011)
+
+The Phase 3α v2 catalog enrichment is **back-end** work; the user-facing skill surface is still fragmented:
+
+| Current state (post-3α) | Skill | Stack | Catalog |
+|---|---|---|---|
+| `/council-plan` | router | auto-detect | dispatches to non-v2 variants (gap) |
+| `/council-plan-v2` | leaf | Python | v2-enriched |
+| `/council-plan-aura` | leaf | Aura | v1 (legacy) |
+| `/council-plan-aura-v2` | leaf | Aura | v2-enriched |
+
+(Same shape for `-implement-*` + `-review-*` → 4 × 3 = 12 user-visible skill entries.)
+
+Phase 0 router exists in skills-repo HEAD `a593c16` and dispatches via filesystem markers (`web/package.json:name=aura-companion` / `web/package.json:dependencies.hono` / `web/server/ws-bridge.ts` for Aura; `pyproject.toml:aiogram` / `requirements.txt:^aiogram + bot/` for Python; `.council-stack-override` for explicit override). **Refuses loudly on ambiguous/unknown** — no silent fallback.
+
+**Phase 3γ goal:** user invokes 3 suffixless verbs (`/council-plan`, `/council-implement`, `/council-review`), router auto-routes to the right v2-enriched panel under the hood. The 5-skill canonical pipeline becomes:
+
+```
+1. /spec-writer       — Job Stories + Gherkin acceptance criteria
+2. /council-plan      — Phase 0 router → stack-specific 9-expert plan
+3. /council-implement — Phase 0 router → stack-specific atomic-task execution
+4. /council-review    — Phase 0 router → stack-specific multi-expert review
+5. /test-architect    — Carmack × Beck test audit / spec (stack-agnostic)
+```
+
+**Two execution paths:**
+
+- **Path A:** update Phase 0 dispatch rules in the 3 router SKILL.md files to route `stack=aura → /council-*-aura-v2` and `stack=python → /council-*-v2`. Keeps `-v2` / `-aura-v2` variants. Smaller surface change but leaves legacy `-aura` / non-`-v2` variants reachable.
+- **Path B (recommended end state):** fold v2 enrichment directly INTO suffixless variants; delete `-v2` / `-aura-v2` forks entirely. User-visible surface = 3 skills. All 14 Phase-3α experts live in catalog. Transition strategy: keep `-v2` / `-aura-v2` as deprecated aliases for one release cycle, then remove.
+
+**Transitional pickup-prompts** (e.g. PR #68 writer) explicitly invoke `/council-review-aura-v2` because Phase 0 router isn't validated in aura-companion runtime yet. After PR #68 merges, first clean test of the router happens on Phase 3β catalog-expansion PRs (PR #69+).
+
 ---
 
 ## Phase 3α — IMPLEMENTATION CLOSED ✓
