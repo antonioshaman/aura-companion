@@ -143,6 +143,16 @@ This branch ships ONE bug document (`BUG-council-mode-group-rest-bootstrap-gap.m
 
 8 expert candidates queued for Phase 3β catalog expansion: Lerdorf, Colvin, torvalds, unclebob, evans, hickey, majors, sridharan. Estimated ~22 commits (each new expert ≈ 3-5 commits for full dir + meta.yaml + plan/review prompts + `references/quality-<id>.md` authored from scratch). Plus the bootstrap-fix hotfix sprint above.
 
+### Skill-protocol invocation policy (operator decision 2026-05-18, codified as dec-010)
+
+Council-skill dispatch (`/council-plan-aura-v2`, `/council-implement-aura-v2`, `/council-review-aura-v2`) invocation is **scope-thresholded** — not blanket-applied to every PR:
+
+- **PR #68 (bootstrap-fix hotfix, ~4 commits, single subsystem)**: mono writer-tmux + single-reviewer validator-tmux, NO `/council-plan` upfront — BUT mandatory `/council-review-aura-v2` on the final branch BEFORE `gh pr create` (hybrid mode C). Catches multi-expert lens at the PR boundary without planning overhead.
+- **Phase 3β catalog expansion (8 expert candidates, ~22 commits, multiple cross-cutting subsystems)**: **mandatory full council protocol from the start** — `/council-plan-aura-v2` for sequenced plan + per-task `/council-implement-aura-v2` + `/council-review-aura-v2` before each PR.
+- **General threshold** (memory: `feedback_skill_protocol_scope_threshold`): <5 commits=mono, 5-15=hybrid (mono impl + council-review pre-push), ≥15 or catalog seats=full council.
+
+Writer pickup-prompts for hybrid/full-council scopes MUST embed the council-dispatch invocation explicitly — otherwise mono finishes and pushes without engaging the council lens.
+
 ---
 
 ## Phase 3α — IMPLEMENTATION CLOSED ✓
