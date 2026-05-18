@@ -1281,20 +1281,22 @@ export class WsBridge {
     // same construction site as the live push from `session-orchestrator`
     // and the REST bootstrap. Status is hardcoded `"active"` because this
     // synthetic hydration only fires when both halves are registered on
-    // the bridge (and thus by definition the pair is live). Legacy
-    // defensive `?? "claude"` fallback preserved for sessions whose
-    // backend type hasn't propagated yet from the spawner.
+    // the bridge (and thus by definition the pair is live). The
+    // defensive backend-type fallback is internal to the helper now
+    // (Fowler fix-pass): pass undefined-tolerant values, the helper
+    // applies `DEFAULT_BACKEND_TYPE` for ws-bridge sessions whose
+    // backendType hasn't propagated yet from the spawner.
     return {
       type: "group_created",
       ...buildBrowserGroupRecord({
         sessionGroupId: groupId,
         primary: {
           sessionId: primary.id,
-          backendType: (primary.backendType ?? "claude") as BackendType,
+          backendType: primary.backendType,
         },
         observer: {
           sessionId: observer.id,
-          backendType: (observer.backendType ?? "claude") as BackendType,
+          backendType: observer.backendType,
         },
         status: "active",
       }),

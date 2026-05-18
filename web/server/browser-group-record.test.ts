@@ -99,4 +99,45 @@ describe("buildBrowserGroupRecord", () => {
       "wakeTimeoutMs",
     ]);
   });
+
+  // PR #68 Fowler fix-pass — the helper internalises the
+  // launcher-propagation-lag fallback for `backendType: undefined`.
+  // Two of three call sites (live push + ws-bridge synthetic hydration)
+  // source backendType from launcher / bridge Session maps where it can
+  // be transiently undefined right after spawn. The helper applies
+  // `DEFAULT_BACKEND_TYPE = "claude"` so the wire never carries an
+  // ill-formed `"undefined+undefined"` pairing label.
+  it("applies the internal default when primary backendType is undefined", () => {
+    const out = buildBrowserGroupRecord({
+      sessionGroupId: "grp_fb_p",
+      primary: { sessionId: "p", backendType: undefined },
+      observer: { sessionId: "o", backendType: "codex" },
+      status: "active",
+    });
+    expect(out.pairing).toBe("claude+codex");
+  });
+
+  it("applies the internal default when observer backendType is undefined", () => {
+    const out = buildBrowserGroupRecord({
+      sessionGroupId: "grp_fb_o",
+      primary: { sessionId: "p", backendType: "claude" },
+      observer: { sessionId: "o", backendType: undefined },
+      status: "active",
+    });
+    expect(out.pairing).toBe("claude+claude");
+  });
+
+  it("applies the internal default when both backendType values are undefined", () => {
+    // The early-bootstrap edge case — neither launcher nor bridge has
+    // wired backend metadata yet. Output MUST be a well-formed pairing
+    // string, never `"undefined+undefined"`.
+    const out = buildBrowserGroupRecord({
+      sessionGroupId: "grp_fb_both",
+      primary: { sessionId: "p", backendType: undefined },
+      observer: { sessionId: "o", backendType: undefined },
+      status: "active",
+    });
+    expect(out.pairing).toBe("claude+claude");
+    expect(out.pairing).not.toContain("undefined");
+  });
 });

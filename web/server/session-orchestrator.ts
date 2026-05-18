@@ -1196,19 +1196,21 @@ export class SessionOrchestrator {
       // (`buildBrowserGroupRecord`). Same helper drives `getAllGroupsForBootstrap`
       // and `ws-bridge.deriveGroupCreatedForBrowser` — pairing label,
       // wakeTimeoutMs, and field ordering cannot drift across the three
-      // construction sites. Launcher remains the canonical source for the
-      // post-spawn backend type (with the legacy `?? "claude"` defensive
-      // fallback preserved); status is hardcoded `"active"` because this
-      // listener only fires on a transition that leaves the group active.
+      // construction sites. Launcher is the canonical source for the
+      // post-spawn backend type; pass undefined-tolerant values straight
+      // through — the helper applies its internal `DEFAULT_BACKEND_TYPE`
+      // fallback for launcher-propagation-lag (Fowler fix-pass).
+      // Status is hardcoded `"active"` because this listener only fires
+      // on a transition that leaves the group active.
       const wire = buildBrowserGroupRecord({
         sessionGroupId,
         primary: {
           sessionId: primarySessionId,
-          backendType: (primary?.backendType ?? "claude") as BackendType,
+          backendType: primary?.backendType,
         },
         observer: {
           sessionId: observerSessionId,
-          backendType: (observer?.backendType ?? "claude") as BackendType,
+          backendType: observer?.backendType,
         },
         status: "active",
       });

@@ -32,10 +32,37 @@
 import { OBSERVER_WAKE_TIMEOUT_MS } from "./council-types.js";
 import type { BackendType, BrowserGroupRecord } from "./session-types.js";
 
+/**
+ * Default backend type used when a producer cannot resolve one for a
+ * pair half — covers launcher-propagation-lag where `SdkSessionInfo.backendType`
+ * is briefly absent right after spawn, before the launcher's setup
+ * callback finishes wiring backend metadata. The coordinator's
+ * `GroupRecord` always carries a resolved `backendType`, so REST
+ * bootstrap callers pass concrete values; live push + ws-bridge
+ * synthetic hydration callers may pass `undefined` and rely on this
+ * default.
+ *
+ * Keeping the default INSIDE the helper (rather than at each call site)
+ * is the load-bearing structural decision: a fourth producer added in
+ * the future cannot accidentally pass `undefined` cast as `BackendType`
+ * and emit `pairing: "undefined+undefined"`. The type-system contract is
+ * `BackendType | undefined` for input; the OUTPUT is always a well-formed
+ * pairing string.
+ */
+const DEFAULT_BACKEND_TYPE: BackendType = "claude";
+
 export interface BrowserGroupRecordParts {
   sessionGroupId: string;
-  primary: { sessionId: string; backendType: BackendType };
-  observer: { sessionId: string; backendType: BackendType };
+  /**
+   * Pair half identity. `backendType` is optional because the live-push
+   * and ws-bridge synthetic hydration call sites source it from the
+   * launcher map (where it may be briefly undefined post-spawn), while
+   * the REST bootstrap path sources it from the coordinator's
+   * `GroupRecord` (where it is always defined). The helper applies the
+   * `DEFAULT_BACKEND_TYPE` fallback once, internally.
+   */
+  primary: { sessionId: string; backendType: BackendType | undefined };
+  observer: { sessionId: string; backendType: BackendType | undefined };
   status: BrowserGroupRecord["status"];
 }
 
@@ -46,13 +73,20 @@ export interface BrowserGroupRecordParts {
  * the OUTPUT shape is mechanically identical because there's only one
  * field-assembly site. Drift between push and REST bootstrap — the
  * specific gap PR #68 closes — becomes impossible by construction.
+ *
+ * The `backendType` fallback is now internal — callers MUST NOT pre-apply
+ * `?? "claude"` at the call site. Doing so re-introduces the bug class
+ * the helper was extracted to prevent (Fowler P2 finding on PR #68
+ * review).
  */
 export function buildBrowserGroupRecord(parts: BrowserGroupRecordParts): BrowserGroupRecord {
+  const primaryBackend = parts.primary.backendType ?? DEFAULT_BACKEND_TYPE;
+  const observerBackend = parts.observer.backendType ?? DEFAULT_BACKEND_TYPE;
   return {
     sessionGroupId: parts.sessionGroupId,
     primarySessionId: parts.primary.sessionId,
     observerSessionId: parts.observer.sessionId,
-    pairing: `${parts.primary.backendType}+${parts.observer.backendType}`,
+    pairing: `${primaryBackend}+${observerBackend}`,
     status: parts.status,
     wakeTimeoutMs: OBSERVER_WAKE_TIMEOUT_MS,
   };
