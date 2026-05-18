@@ -35,7 +35,7 @@ import {
   runAutoProceedBootReconcile,
 } from "./auto-proceed-orchestrator-bindings.js";
 import type { CheckpointPayload, ObserverReviewPayload } from "./council-types.js";
-import { OBSERVER_WAKE_PAYLOAD_VERSION, OBSERVER_WAKE_TIMEOUT_MS, parseCheckpointPayload, parseObserverReviewPayload } from "./council-types.js";
+import { OBSERVER_WAKE_PAYLOAD_VERSION, parseCheckpointPayload, parseObserverReviewPayload } from "./council-types.js";
 import { watchCheckpoints } from "./checkpoint-watcher.js";
 import { watchReviews } from "./review-watcher.js";
 import { validateObserverFindings } from "./observer-grounding.js";

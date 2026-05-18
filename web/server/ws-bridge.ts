@@ -11,7 +11,6 @@ import type { SessionStore } from "./session-store.js";
 import type { IBackendAdapter } from "./backend-adapter.js";
 import { ClaudeAdapter, type ObserverWakeSendOutcome } from "./claude-adapter.js";
 import type { IdleTimerProbe } from "./idle-timer-manager.js";
-import { OBSERVER_WAKE_TIMEOUT_MS } from "./council-types.js";
 import { buildBrowserGroupRecord } from "./browser-group-record.js";
 import type { RecorderManager } from "./recorder.js";
 import { resolveSessionGitInfo } from "./session-git-info.js";
