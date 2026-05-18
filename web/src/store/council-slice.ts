@@ -159,6 +159,21 @@ export interface CouncilSlice {
 
   // Actions — group lifecycle
   upsertGroup: (group: GroupRecord) => void;
+  /**
+   * PR #68 — REST bootstrap dispatch for `GET /api/groups`. Hydrates the
+   * `groups` + `groupBySessionId` maps from the server snapshot WITHOUT
+   * overwriting groups already present in live state. Idempotency contract:
+   *
+   *   - if `sessionGroupId` not present → insert (full record)
+   *   - if `sessionGroupId` already present → leave as-is (live WS wins)
+   *
+   * The asymmetry matters because WS-arrived records carry mutable runtime
+   * fields (`lastCheckpointAt`, `observerReviewing`, `recentlySupersededCheckpointIds`,
+   * `convergenceState`, etc.) that the REST snapshot does NOT include.
+   * Re-overwriting from REST would clobber those fields and the panel
+   * state would visibly regress for a tab that was already in sync.
+   */
+  hydrateGroups: (groups: GroupRecord[]) => void;
   removeGroup: (sessionGroupId: string) => void;
   setGroupStatus: (sessionGroupId: string, status: SessionGroupStatus, opts?: { deadRole?: SessionRole }) => void;
   recordCheckpoint: (args: {
@@ -228,6 +243,37 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
       if (!findings.has(group.sessionGroupId)) findings.set(group.sessionGroupId, []);
       const groundingDowngrades = new Map(s.groundingDowngrades);
       if (!groundingDowngrades.has(group.sessionGroupId)) groundingDowngrades.set(group.sessionGroupId, []);
+      return { groups, groupBySessionId, findings, groundingDowngrades };
+    }),
+
+  hydrateGroups: (incoming) =>
+    set((s) => {
+      // Fast no-op path: empty REST response → no state mutation, no
+      // re-render. Common in fresh-install / server-cold-start.
+      if (incoming.length === 0) return {};
+      const groups = new Map(s.groups);
+      const groupBySessionId = new Map(s.groupBySessionId);
+      const findings = new Map(s.findings);
+      const groundingDowngrades = new Map(s.groundingDowngrades);
+      let mutated = false;
+      for (const g of incoming) {
+        // Idempotent: only insert if absent — live WS wins for any group
+        // already in the store. This protects mutable runtime fields
+        // (lastCheckpointAt, observerReviewing, recentlySupersededCheckpointIds,
+        // convergenceState) that REST does NOT carry.
+        if (groups.has(g.sessionGroupId)) continue;
+        groups.set(g.sessionGroupId, g);
+        groupBySessionId.set(g.primarySessionId, g.sessionGroupId);
+        groupBySessionId.set(g.observerSessionId, g.sessionGroupId);
+        if (!findings.has(g.sessionGroupId)) findings.set(g.sessionGroupId, []);
+        if (!groundingDowngrades.has(g.sessionGroupId)) groundingDowngrades.set(g.sessionGroupId, []);
+        mutated = true;
+      }
+      // No-mutation short-circuit: every incoming group was already
+      // present. Returning the same map references avoids a spurious
+      // re-render that would fan out to every FindingsLog announcer /
+      // Sidebar selector subscribed to council state.
+      if (!mutated) return {};
       return { groups, groupBySessionId, findings, groundingDowngrades };
     }),
 

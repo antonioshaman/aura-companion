@@ -93,6 +93,9 @@ vi.mock("./api.js", () => ({
     getChangedFiles: vi.fn().mockResolvedValue({ files: [] }),
     checkForUpdate: vi.fn().mockResolvedValue(null),
     getSettings: vi.fn().mockResolvedValue({ publicUrl: "" }),
+    // PR #68: App.tsx fires fetchGroups() on auth flip. Mocked to a
+    // resolved-empty shape so authenticated tests don't hit `undefined`.
+    fetchGroups: vi.fn().mockResolvedValue({ groups: [] }),
   },
 }));
 
