@@ -7,6 +7,14 @@ vi.mock("./utils/names.js", () => ({
   generateUniqueSessionName: vi.fn(() => "Test Session"),
 }));
 
+// PR #68 friedman fix-pass — `scheduleGroupRefetchAfterReconnect` dynamic-
+// imports `./api.js` so we mock the api surface here to capture the
+// fetchGroups call without touching the real REST client.
+const mockFetchGroups = vi.hoisted(() => vi.fn().mockResolvedValue({ groups: [] }));
+vi.mock("./api.js", () => ({
+  api: { fetchGroups: mockFetchGroups },
+}));
+
 let wsModule: typeof import("./ws.js");
 let useStore: typeof import("./store.js").useStore;
 
@@ -2041,5 +2049,97 @@ describe("handleMessage: assistant clears only completed tool progress", () => {
     expect(progress?.has("tu-a")).toBeFalsy();
     // tu-b should still be present (still running)
     expect(progress?.get("tu-b")).toEqual({ toolName: "Glob", elapsedSeconds: 2 });
+  });
+});
+
+// ===========================================================================
+// Post-reconnect group bootstrap refetch (PR #68 friedman fix-pass)
+// ===========================================================================
+//
+// `BUG-council-mode-group-rest-bootstrap-gap.md` left a recovery hole:
+// if the App.tsx mount-effect `fetchGroups` call fails (network blip,
+// server 500), the user has no UI to retry. The friedman P2 fix says:
+// dispatch the same `fetchGroups → hydrateGroups` pipeline on every
+// successful WS reconnect — a strong correlated signal that the
+// original bootstrap may have failed in the same blip. These tests pin
+// the wiring.
+describe("post-reconnect group bootstrap refetch", () => {
+  beforeEach(() => {
+    mockFetchGroups.mockClear();
+    mockFetchGroups.mockResolvedValue({ groups: [] });
+    // Seed sdkSessions so `shouldReconnectSession` returns true.
+    useStore.getState().setSdkSessions([
+      { sessionId: "s1", state: "connected", cwd: "/", createdAt: 0 },
+    ]);
+  });
+
+  it("does NOT call fetchGroups on the INITIAL connect (no reconnect timer existed)", async () => {
+    wsModule.connectSession("s1");
+    lastWs.onopen?.(new Event("open"));
+    // Advance past the debounce window — fetch must still be 0.
+    await vi.advanceTimersByTimeAsync(300);
+    expect(mockFetchGroups).not.toHaveBeenCalled();
+  });
+
+  it("calls fetchGroups after a successful reconnect (timer existed → wasReconnect)", async () => {
+    // First connect — initial mount path.
+    wsModule.connectSession("s1");
+    lastWs.onopen?.(new Event("open"));
+    expect(mockFetchGroups).not.toHaveBeenCalled();
+
+    // Simulate WS drop → reconnect scheduler arms a timer.
+    lastWs.readyState = MockWebSocket.CLOSED;
+    lastWs.onclose?.();
+    // Reconnect timer fires after WS_RECONNECT_DELAY_MS (2000ms).
+    await vi.advanceTimersByTimeAsync(2000);
+    // New socket opened by scheduleReconnect → connectSession → ws.onopen
+    lastWs.onopen?.(new Event("open"));
+
+    // Debounce window — fetch fires once at ~250ms after the open.
+    await vi.advanceTimersByTimeAsync(300);
+    expect(mockFetchGroups).toHaveBeenCalledTimes(1);
+  });
+
+  it("debounces multiple concurrent reconnects into a single fetchGroups call", async () => {
+    // Two sessions both reconnect within the debounce window.
+    useStore.getState().setSdkSessions([
+      { sessionId: "s1", state: "connected", cwd: "/", createdAt: 0 },
+      { sessionId: "s2", state: "connected", cwd: "/", createdAt: 0 },
+    ]);
+    wsModule.connectSession("s1");
+    const ws1 = lastWs;
+    ws1.onopen?.(new Event("open"));
+    wsModule.connectSession("s2");
+    const ws2 = lastWs;
+    ws2.onopen?.(new Event("open"));
+
+    // Stagger the closes by 1ms so each reconnect timer fires sequentially
+    // and we can grab the new MockWebSocket off `lastWs` (the mock
+    // overwrites `lastWs` on every `new WebSocket(...)`, so concurrent
+    // timer firings would lose the first socket's reference). Real
+    // production reconnects are not synchronous either — a 1ms skew is
+    // a faithful model of the multi-session connect-storm scenario.
+    ws1.readyState = MockWebSocket.CLOSED;
+    ws1.onclose?.();
+    await vi.advanceTimersByTimeAsync(1);
+    ws2.readyState = MockWebSocket.CLOSED;
+    ws2.onclose?.();
+
+    // Fire s1's reconnect timer (armed at t=0, fires at t=2000).
+    await vi.advanceTimersByTimeAsync(1999);
+    const ws3 = lastWs;
+    ws3.onopen?.(new Event("open"));
+
+    // Fire s2's reconnect timer (armed at t=1, fires at t=2001).
+    // Second onopen re-enters `scheduleGroupRefetchAfterReconnect`,
+    // sees the pending timer already armed, and bails — that IS the
+    // debounce contract we're pinning.
+    await vi.advanceTimersByTimeAsync(1);
+    const ws4 = lastWs;
+    ws4.onopen?.(new Event("open"));
+
+    // Drain the debounce window (armed at t=2000 for 250ms → fires at t=2250).
+    await vi.advanceTimersByTimeAsync(300);
+    expect(mockFetchGroups).toHaveBeenCalledTimes(1);
   });
 });

@@ -487,6 +487,23 @@ export class SessionGroupCoordinator {
   }
 
   /**
+   * Snapshot of all GroupRecords currently tracked by this coordinator.
+   * Each call returns a fresh array so the caller can iterate without
+   * observing later mutations. Used by REST bootstrap
+   * ({@link SessionOrchestrator.getAllGroupsForBootstrap}) so a browser
+   * connecting / reloading AFTER the `group:created` event was emitted can
+   * still discover live pairs and render the Sidebar glyph + ObserverPanel
+   * pair context.
+   *
+   * Returns `archived` groups too — the caller decides whether to filter
+   * them out. The coordinator is the lifecycle authority; consumers express
+   * their own visibility policy.
+   */
+  listAll(): GroupRecord[] {
+    return Array.from(this.groups.values());
+  }
+
+  /**
    * Tear down the pair. Both halves are marked archived in the state
    * machine BEFORE either kill call runs, so an exit event from the
    * first kill cannot trigger a respawn racing the second kill.

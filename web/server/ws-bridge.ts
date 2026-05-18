@@ -11,7 +11,7 @@ import type { SessionStore } from "./session-store.js";
 import type { IBackendAdapter } from "./backend-adapter.js";
 import { ClaudeAdapter, type ObserverWakeSendOutcome } from "./claude-adapter.js";
 import type { IdleTimerProbe } from "./idle-timer-manager.js";
-import { OBSERVER_WAKE_TIMEOUT_MS } from "./council-types.js";
+import { buildBrowserGroupRecord } from "./browser-group-record.js";
 import type { RecorderManager } from "./recorder.js";
 import { resolveSessionGitInfo } from "./session-git-info.js";
 import type {
@@ -1276,14 +1276,29 @@ export class WsBridge {
     if (!counterpart) return null;
     const primary = role === "orchestrator" ? session : counterpart;
     const observer = role === "observer" ? session : counterpart;
-    const pairing = `${primary.backendType ?? "claude"}+${observer.backendType ?? "claude"}`;
+    // PR #68: route through the shared `buildBrowserGroupRecord` helper —
+    // same construction site as the live push from `session-orchestrator`
+    // and the REST bootstrap. Status is hardcoded `"active"` because this
+    // synthetic hydration only fires when both halves are registered on
+    // the bridge (and thus by definition the pair is live). The
+    // defensive backend-type fallback is internal to the helper now
+    // (Fowler fix-pass): pass undefined-tolerant values, the helper
+    // applies `DEFAULT_BACKEND_TYPE` for ws-bridge sessions whose
+    // backendType hasn't propagated yet from the spawner.
     return {
       type: "group_created",
-      sessionGroupId: groupId,
-      primarySessionId: primary.id,
-      observerSessionId: observer.id,
-      pairing,
-      wakeTimeoutMs: OBSERVER_WAKE_TIMEOUT_MS,
+      ...buildBrowserGroupRecord({
+        sessionGroupId: groupId,
+        primary: {
+          sessionId: primary.id,
+          backendType: primary.backendType,
+        },
+        observer: {
+          sessionId: observer.id,
+          backendType: observer.backendType,
+        },
+        status: "active",
+      }),
     };
   }
 

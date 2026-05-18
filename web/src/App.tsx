@@ -174,6 +174,33 @@ export default function App() {
     }).catch(() => {});
   }, [isAuthenticated]);
 
+  // PR #68 — REST bootstrap of Council Mode group records on app mount.
+  // The browser's `groupBySessionId` map was previously populated
+  // EXCLUSIVELY by the live `group:created` push, so a tab reloading
+  // after pair creation landed without the Sidebar ☼/☽ glyph + role
+  // suffix and without ObserverPanel pair context
+  // (`BUG-council-mode-group-rest-bootstrap-gap.md`).
+  //
+  // `hydrateGroups` is idempotent — it only INSERTS groups not already
+  // in the store, so this bootstrap cannot clobber mutable runtime
+  // fields (lastCheckpointAt, observerReviewing, …) that a concurrent
+  // live `group:created` push may have populated first. Failure is
+  // best-effort: live WS events still arrive on the next group_*
+  // frame, so a network blip here doesn't strand the UI.
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    api.fetchGroups().then(({ groups }) => {
+      useStore.getState().hydrateGroups(groups);
+    }).catch((err) => {
+      // Best-effort — live WS still arrives. Log structurally so a
+      // forensic grep ("council.bootstrap.fetch_failed") finds it.
+      console.warn("[app] fetchGroups bootstrap failed", {
+        event: "council.bootstrap.fetch_failed",
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, [isAuthenticated]);
+
   // Show Docker image update dialog if an app update just completed
   useEffect(() => {
     if (localStorage.getItem("companion_docker_prompt_pending") === "1") {

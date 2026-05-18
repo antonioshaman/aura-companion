@@ -478,6 +478,28 @@ export function createRoutes(
     return c.json(result);
   });
 
+  // ─── Council Mode — REST bootstrap of group records ──────────────────────
+  //
+  // Closes `BUG-council-mode-group-rest-bootstrap-gap.md` (PR #68). The
+  // browser's `groupBySessionId` map is populated EXCLUSIVELY by the live
+  // `group:created` push, so a tab reloading after pair creation lands
+  // without the Sidebar ☼/☽ glyph + role suffix and without ObserverPanel
+  // pair context.
+  //
+  // This route snapshots every live group the orchestrator's coordinator
+  // currently tracks, in the same wire shape (via `buildBrowserGroupRecord`)
+  // that the live push uses. Archived groups are filtered server-side
+  // (visibility policy at the orchestrator boundary). Empty array when no
+  // Council Mode pairs are alive — a legitimate state at server cold-start.
+  //
+  // Symmetric to `GET /api/groups/:groupId/findings` above (PR #61's
+  // ObserverPanel bootstrap), which solved the same class of problem for
+  // findings.
+  api.get("/groups", (c) => {
+    const groups = orchestrator.getAllGroupsForBootstrap();
+    return c.json({ groups });
+  });
+
   api.get("/sessions", (c) => {
     const sessions = launcher.listSessions();
     const names = sessionNames.getAllNames();
