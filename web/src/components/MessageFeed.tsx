@@ -15,6 +15,7 @@ import { ToolExecutionBar } from "./ToolExecutionBar.js";
 import { ToolTurnSummary } from "./ToolTurnSummary.js";
 import { EmptyChatState } from "./chat/EmptyChatState.js";
 import { AssistantAvatar } from "./chat/AssistantAvatar.js";
+import { ResumeIndicator } from "./chat/ResumeIndicator.js";
 
 const FEED_PAGE_SIZE = 100;
 const RESUME_HISTORY_PAGE_SIZE = 40;
@@ -23,12 +24,6 @@ const savedDistanceFromBottomBySession = new Map<string, number>();
 
 const EMPTY_MESSAGES: ChatMessage[] = [];
 const EMPTY_SDK_SESSIONS: SdkSessionInfo[] = [];
-
-function formatResumeSourcePath(path: string): string {
-  const parts = path.split("/").filter(Boolean);
-  if (parts.length === 0) return path;
-  return parts.slice(-2).join("/");
-}
 
 // ─── Message-level grouping ─────────────────────────────────────────────────
 
@@ -859,51 +854,17 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
         className="h-full overflow-y-auto overflow-x-hidden overscroll-y-contain px-4 sm:px-6 py-5 sm:py-8"
       >
         <div className="max-w-3xl mx-auto space-y-5 sm:space-y-7">
-          {canLoadResumeHistory && !resumeHistoryLoaded && (
-            <div className="rounded-xl border border-cc-border bg-cc-card p-3">
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <p className="text-xs font-medium text-cc-fg">
-                    {resumeModeLabel} existing Claude thread
-                  </p>
-                  <p className="text-[11px] text-cc-muted mt-1">
-                    {resumeSourceSessionId}{" "}
-                    {sdkSession?.cwd
-                      ? `· ${formatResumeSourcePath(sdkSession.cwd)}`
-                      : ""}
-                  </p>
-                </div>
-                <button
-                  onClick={() =>
-                    void loadResumeHistoryPage({ preserveScroll: true })
-                  }
-                  disabled={resumeHistoryLoading}
-                  className="shrink-0 inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-cc-fg bg-cc-card border border-cc-border rounded-lg hover:bg-cc-hover transition-colors disabled:opacity-60 disabled:cursor-not-allowed cursor-pointer"
-                >
-                  {resumeHistoryLoading
-                    ? "Loading..."
-                    : "Load previous history"}
-                </button>
-              </div>
-              {resumeHistoryError && (
-                <p className="text-xs text-cc-error mt-2">
-                  {resumeHistoryError}
-                </p>
-              )}
-            </div>
-          )}
-
-          {canLoadResumeHistory && resumeHistoryLoaded && (
-            <div className="flex justify-center">
-              <p className="text-[11px] text-cc-muted">
-                {resumeHistoryHasMore
-                  ? resumeHistoryLoading
-                    ? "Loading older transcript..."
-                    : "Scroll to top to load older transcript"
-                  : "Loaded all available prior transcript"}
-              </p>
-            </div>
-          )}
+          <ResumeIndicator
+            canLoadResumeHistory={canLoadResumeHistory}
+            resumeHistoryLoaded={resumeHistoryLoaded}
+            resumeModeLabel={resumeModeLabel}
+            resumeSourceSessionId={resumeSourceSessionId}
+            sdkSessionCwd={sdkSession?.cwd}
+            resumeHistoryLoading={resumeHistoryLoading}
+            resumeHistoryError={resumeHistoryError}
+            resumeHistoryHasMore={resumeHistoryHasMore}
+            onLoadResumeHistory={() => void loadResumeHistoryPage({ preserveScroll: true })}
+          />
 
           {hasMore && (
             <div className="flex justify-center pb-3">
