@@ -14,6 +14,7 @@ import { formatElapsed, formatTokenCount } from "../utils/format.js";
 import { ToolExecutionBar } from "./ToolExecutionBar.js";
 import { ToolTurnSummary } from "./ToolTurnSummary.js";
 import { EmptyChatState } from "./chat/EmptyChatState.js";
+import { AssistantAvatar } from "./chat/AssistantAvatar.js";
 
 const FEED_PAGE_SIZE = 100;
 const RESUME_HISTORY_PAGE_SIZE = 40;
@@ -562,18 +563,6 @@ function SubagentContainer({ group }: { group: SubagentGroup }) {
             <FeedEntries entries={group.children} />
           </div>
         )}
-      </div>
-    </div>
-  );
-}
-
-function AssistantAvatar() {
-  return (
-    <div className="w-7 h-7 rounded-full avatar-ring flex items-center justify-center shrink-0 mt-0.5">
-      <div className="avatar-inner w-full h-full rounded-full flex items-center justify-center">
-        <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5 text-cc-primary">
-          <path d="M8 2L10.5 6.5L15 8L10.5 9.5L8 14L5.5 9.5L1 8L5.5 6.5L8 2Z" />
-        </svg>
       </div>
     </div>
   );

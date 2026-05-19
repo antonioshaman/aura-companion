@@ -3,6 +3,7 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage, ContentBlock } from "../types.js";
 import { ToolBlock, getToolIcon, getToolLabel, getPreview, ToolIcon } from "./ToolBlock.js";
+import { AssistantAvatar } from "./chat/AssistantAvatar.js";
 
 export function MessageBubble({ message }: { message: ChatMessage }) {
   if (message.role === "system") {
@@ -108,7 +109,7 @@ function AssistantMessage({ message }: { message: ChatMessage }) {
     const isThinkingPhase = message.isStreaming && message.streamingPhase === "thinking";
     return (
       <div className="flex items-start gap-3">
-        <AssistantAvatar />
+        <AssistantAvatar size="sm" />
         <div className="flex-1 min-w-0">
           {isThinkingPhase ? (
             <ThinkingBlock text={message.content} />
@@ -123,7 +124,7 @@ function AssistantMessage({ message }: { message: ChatMessage }) {
 
   return (
     <div className="flex items-start gap-3">
-      <AssistantAvatar />
+      <AssistantAvatar size="sm" />
       <div className="flex-1 min-w-0 space-y-3">
         {grouped.map((group, i) => {
           if (group.kind === "content") {
@@ -160,18 +161,6 @@ function InterruptedBadge() {
         <path d="M7.293 1.293a1 1 0 0 1 1.414 0L15 7.586a1 1 0 0 1 0 1.414l-6.293 6.293a1 1 0 0 1-1.414 0L1 9a1 1 0 0 1 0-1.414L7.293 1.293Zm.707 3.039a.75.75 0 0 0-.75.75v3.5a.75.75 0 1 0 1.5 0v-3.5a.75.75 0 0 0-.75-.75Zm0 6.5a.875.875 0 1 0 0 1.75.875.875 0 0 0 0-1.75Z" />
       </svg>
       <span>Interrupted — CLI disconnected before reply completed</span>
-    </div>
-  );
-}
-
-function AssistantAvatar() {
-  return (
-    <div className="w-6 h-6 rounded-full avatar-ring flex items-center justify-center shrink-0 mt-0.5">
-      <div className="avatar-inner w-full h-full rounded-full flex items-center justify-center">
-        <svg viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3 text-cc-primary">
-          <path d="M8 2L10.5 6.5L15 8L10.5 9.5L8 14L5.5 9.5L1 8L5.5 6.5L8 2Z" />
-        </svg>
-      </div>
     </div>
   );
 }
