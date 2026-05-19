@@ -1,5 +1,7 @@
 # BUG: Council Mode group records not bootstrapped on browser reload — no ☼/☽ glyphs after reload
 
+> **RESOLVED in PR #68** (`feat(council): REST bootstrap for Sidebar glyph after browser reload`, 2026-05-18) — `GET /api/groups` REST endpoint + App.tsx bootstrap `useEffect` chain (`isAuthenticated → fetchGroups → hydrateGroups`). Glyphs now render on browser reload across all Council pair sessions. See PR diff and `CLOSURE-council-mode-v2.md` for the operator-decided path. Note: this BUG doc recommends Path A (enrich `/api/sessions`) but the operator picked **Path B** (dedicated `/api/groups` endpoint with shared `buildBrowserGroupRecord` helper) per `CLOSURE-council-mode-v2.md` — that tradeoff (one new endpoint vs. mutating an existing one) was preferred for shape-isolation between sessions and groups.
+
 **Reported:** 2026-05-17 (operator session, repro on razumai_space_bot pair and brahmanos pair)
 **Severity:** P0 (sibling of `BUG-council-mode-spawn-failure-resume-empty-state.md`, different mechanism)
 **Symptom:** Council Mode pair sessions in the Sidebar do NOT show the ☼/☽ glyph + " · orchestrator" / " · observer" suffix after a browser reload (or sometimes on first creation), even though commit `ec93eab feat(sidebar): council role decoration on session rows` is in production.
