@@ -1550,5 +1550,48 @@ describe("HomePage", () => {
       // But the Claude-only sentence should be absent
       expect(screen.queryByText(/branch from session/i)).not.toBeInTheDocument();
     });
+
+    it("auto-dismisses the tip and sets the persistent flag when cc-sessions-created >= 3", async () => {
+      // A user who has created at least three sessions has clearly onboarded;
+      // the tip should not reappear, and the persistent dismissal flag should
+      // be promoted to "true" so future mounts skip the auto-dismiss branch.
+      localStorage.setItem("cc-sessions-created", "3");
+      render(<HomePage />);
+      await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
+
+      expect(screen.queryByText(/sets where your code lives/)).not.toBeInTheDocument();
+      expect(localStorage.getItem("cc-onboarding-dismissed")).toBe("true");
+    });
+
+    it("still renders the tip when cc-sessions-created is below the threshold", async () => {
+      // Two sessions is not enough to assume the user has onboarded; the tip
+      // must remain visible until either an explicit dismiss OR the third
+      // successful create.
+      localStorage.setItem("cc-sessions-created", "2");
+      render(<HomePage />);
+      await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
+
+      expect(screen.getByText(/sets where your code lives/)).toBeInTheDocument();
+      expect(localStorage.getItem("cc-onboarding-dismissed")).not.toBe("true");
+    });
+
+    it("references controls above (not below) and the icon row, not a non-existent toolbar", async () => {
+      // Regression guard for the wording fix: the legacy copy referenced a
+      // "toolbar" that doesn't exist in the UI and pointed "below" to the
+      // Branch-from-session section that actually renders above the tip.
+      render(<HomePage />);
+      await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
+
+      // The replacement copy must mention "session options row above" and
+      // "Branch from session above" — never the legacy "toolbar" wording or
+      // a "below" directional cue.
+      expect(screen.getByText(/session options row above/)).toBeInTheDocument();
+      // "Branch from session" also renders as the resume-section heading; the
+      // tip-specific copy is uniquely matched by the trailing fork-or-continue
+      // phrase, which exists only inside the OnboardingTip span.
+      expect(screen.getByText(/above lets you fork or continue a previous Claude session/)).toBeInTheDocument();
+      expect(screen.queryByText(/^The toolbar /)).not.toBeInTheDocument();
+      expect(screen.queryByText(/below lets you fork/)).not.toBeInTheDocument();
+    });
   });
 });

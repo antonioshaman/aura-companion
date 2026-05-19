@@ -111,9 +111,18 @@ export function HomePage() {
   const [linearConfigured, setLinearConfigured] = useState(false);
   const [selectedLinearIssue, setSelectedLinearIssue] = useState<LinearIssue | null>(null);
   const [selectedLinearConnectionId, setSelectedLinearConnectionId] = useState<string | null>(null);
-  const [showOnboardingTip, setShowOnboardingTip] = useState(
-    () => localStorage.getItem("cc-onboarding-dismissed") !== "true",
-  );
+  const [showOnboardingTip, setShowOnboardingTip] = useState(() => {
+    if (localStorage.getItem("cc-onboarding-dismissed") === "true") return false;
+    // Auto-dismiss once the user has created enough sessions to demonstrate
+    // they've onboarded. The counter is bumped on each successful session
+    // create below.
+    const created = Number(localStorage.getItem("cc-sessions-created") || "0");
+    if (created >= 3) {
+      localStorage.setItem("cc-onboarding-dismissed", "true");
+      return false;
+    }
+    return true;
+  });
 
   // Council Mode controls — persisted toggle + pairing so the user's last
   // choice survives a page refresh without resurrecting the council session
@@ -702,6 +711,16 @@ export function HomePage() {
 
       // Save cwd to recent dirs
       if (effectiveCwd) addRecentDir(effectiveCwd);
+
+      // Bump the onboarding session-create counter; the OnboardingTip
+      // initializer auto-dismisses once this reaches 3.
+      try {
+        const prevCount = Number(localStorage.getItem("cc-sessions-created") || "0");
+        localStorage.setItem("cc-sessions-created", String(prevCount + 1));
+      } catch {
+        // localStorage may be unavailable (private mode, disabled). Onboarding
+        // auto-dismiss is best-effort — the explicit ✕ still works.
+      }
 
       // Store the permission mode for this session
       useStore.getState().setPreviousPermissionMode(sessionId, mode);
@@ -1531,9 +1550,9 @@ export function HomePage() {
                   <path d="M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM0 8a8 8 0 1116 0A8 8 0 010 8zm6.5-.25A.75.75 0 017.25 7h1a.75.75 0 01.75.75v2.75h.25a.75.75 0 010 1.5h-2a.75.75 0 010-1.5h.25v-2h-.25a.75.75 0 01-.75-.75zM8 6a1 1 0 110-2 1 1 0 010 2z" />
                 </svg>
                 <span className="flex-1">
-                  The toolbar sets where your code lives, which model to use, and how the session runs.
+                  The session options row above sets where your code lives, which model to use, and how the session runs.
                   {backend === "claude" && (
-                    <>{" "}<strong className="text-cc-fg">Branch from session</strong> below lets you fork or continue a previous Claude session.</>
+                    <>{" "}<strong className="text-cc-fg">Branch from session</strong> above lets you fork or continue a previous Claude session.</>
                   )}
                 </span>
                 <button
