@@ -101,6 +101,8 @@ Based on John Carmack's engineering philosophy. A council of domain experts revi
 
 **Council experts include:** Troy Hunt (security), Martin Fowler (refactoring), Kent Beck (testing), Brandur Leach (databases), Simon Willison (LLM pipelines), Karri Saarinen (UI), Vitaly Friedman (UX), plus stack-specific Backend, Realtime, Subprocess, a11y, and Deploy experts.
 
+**v2 expert catalog (22 seats, Phase 3β complete).** A person-named v2 catalog lives on `feat/council-v2-pipeline`: 14 v1-carryover seats plus 8 Phase 3β additions seated as ideological-tension pairs (Fowler ↔ Uncle Bob, Ritchie ↔ Torvalds, Beck ↔ Hickey, Hunt ↔ Willison, Evans ↔ Fowler, Majors ↔ Hashimoto, Sridharan ↔ Majors) so synthesis becomes resolution rather than aggregation. EC-34 codifies the wire-format (`paired_with` + `tension_axis` per meta.yaml). **v1 remains production default** until atomic-swap promotion (Phase 6). See [Expert Catalog v2 Roadmap](docs/reference/expert-catalog-v2-roadmap.mdx) for the full inventory and rationale; opt into v2 explicitly via `-v2` skill variants (`/council-plan-v2`, `/council-review-v2`, etc.).
+
 ### Design & UX
 
 Eighteen skills from [impeccable](https://github.com/pbakaus/impeccable): `/frontend-design`, `/adapt`, `/animate`, `/audit`, `/bolder`, `/clarify`, `/colorize`, `/critique`, `/delight`, `/distill`, `/extract`, `/harden`, `/normalize`, `/onboard`, `/optimize`, `/polish`, `/quieter`, `/teach-impeccable`.

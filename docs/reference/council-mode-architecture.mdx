@@ -178,6 +178,10 @@ Sentinel-before-sweep (per `EC-8`) means the reconciliation marks intentional ki
 
 Council Mode emits no special recording stream — both halves use the standard recorder (`web/server/recorder.ts`) writing to `~/.companion/recordings/`. Each half's recording carries its `sessionGroupId` and `sessionGroupRole` in the header so you can correlate the two streams when reconstructing a session post-hoc. For a disputed finding, the recording is the ground truth: it contains the raw observer JSON-RPC output, the `modifiedFiles` set the observer was given, and the grounding-gate decision.
 
+## Expert catalog evolution
+
+Council Mode's expert catalog itself is evolving. The current production catalog (v1, domain-tagged) is being rebased on real-person surnames (v2) for LLM-dispatch reliability and extended with ideological-tension pairs (Phase 3β). v2 lives on `feat/council-v2-pipeline`; v1 remains production default until atomic-swap promotion (Phase 6). See [Expert Catalog v2 Roadmap](/reference/expert-catalog-v2-roadmap) for the full 22-expert inventory (14 v1-carryover + 8 Phase 3β tension-pair seats), names, lenses, tension-pair rationale, and EC-34 wire-format. Phase 3α/β closed; Phase 3γ (chair-side subset selection) scoped separately.
+
 ## Want to enable it?
 
 For the user-facing tour — when to use Council Mode, the New Session toggle, ObserverPanel states, keyboard shortcuts, troubleshooting — see [Council Mode](/guides/council-mode).

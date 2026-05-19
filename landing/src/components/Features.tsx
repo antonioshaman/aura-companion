@@ -14,6 +14,18 @@ const features = [
     ),
   },
   {
+    title: "Council Mode",
+    description: "Pair an orchestrator with an independent observer in one click. The observer wakes on each checkpoint, reads only the changed surface, and surfaces grounded blockers in your chat.",
+    icon: (
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="9" cy="7" r="3" />
+        <circle cx="17" cy="7" r="3" />
+        <path d="M3 21v-1a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v1" />
+        <path d="M14 21v-1a4 4 0 0 1 4-4h2a4 4 0 0 1 4 4v1" />
+      </svg>
+    ),
+  },
+  {
     title: "MCP Integration",
     description: "Add and manage MCP servers from the UI so sessions can use your custom tools and data sources.",
     icon: (

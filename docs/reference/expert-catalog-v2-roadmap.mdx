@@ -1,0 +1,133 @@
+---
+title: Expert Catalog v2 Roadmap
+description: Person-named expert catalog for Council Mode v2 — 22 experts (14 v1-carryover + 8 Phase 3β additions) seated as ideological-tension pairs
+---
+
+# Expert Catalog v2 Roadmap
+
+This page is the canonical reference for the **v2 expert catalog** for Council Mode. **Phase 3α/β are complete** — all 22 seats live on the `feat/council-v2-pipeline` branch with EC-34 wire-format (`paired_with` + `tension_axis`) codified. **v1 remains the production default** until atomic-swap promotion at the end of Phase 6 (see [council-experts-catalog-v2-expansion.md](https://github.com/antonioshaman/aura-companion/blob/main/specs/council-experts-catalog-v2-expansion.md) spec for full architecture).
+
+For the user-facing Council Mode guide, see [Council Mode](/guides/council-mode). For the wire protocol and state machine, see [Council Mode Architecture](/reference/council-mode-architecture).
+
+## Why a v2 catalog at all
+
+**v1** seated councilors by **domain tag** — `a11y-expert`, `backend-expert`, `frontend-react-expert`, `deploy-devops`, `subprocess-expert`, etc. Two structural problems surfaced over time:
+
+1. **LLM dispatch ambiguity.** Domain names collide with prose-level verbs and noun-classes in user briefs; "deploy this" or "this is a frontend issue" looks identical to LLM routing as the expert-tag itself. Subagent dispatch consequently routes inconsistently.
+2. **Coverage gaps invisible to count.** "14 experts" reads complete; "no observability expert seated" hides until a production incident makes it visible. Expanding domain-coverage by adding tags doesn't surface design tension — it just stacks lenses.
+
+**v2** rebases the catalog on **real-person surnames**: each expert is an actual engineer with a published body of work whose lens we want represented. The rename is operationally driven (LLM dispatch reliability via proper-noun disambiguation; willison REC-4 in Phase 2 council plan output), but it also surfaces design intent — each name carries a recognisable philosophy you can compare against the alternative.
+
+## v1-carryover layer — 14 v2 experts
+
+The Phase 2 atomic catalog refactor (closed 2026-05-16) reduced the v1 17-expert spread to 14 v2 surnames through documented merges (e.g., `subprocess` + `persistence-fs` → `ritchie`; `deploy-docker-gha` + `deploy-vps` → `hashimoto`). The 14 IDs in `~/.claude/skills/_council-experts-v2/` live as both reference docs (`references/quality-<id>.md`) and per-dispatcher prompt files (`<id>/plan.md`, `<id>/review.md`, `<id>/plan-aura.md`, `<id>/review-aura.md`).
+
+| # | Expert ID | Real person | Lens | v1 → v2 transition | Reference doc status |
+|---|---|---|---|---|---|
+| 1 | `fowler` | Martin Fowler | Structural refactoring, evolutionary architecture | (new in v2 — `refactoring` topic absorbed) | Phase 3α N3.04 enriched (87L) |
+| 2 | `beck` | Kent Beck | Test-driven discipline, small safe steps | (new in v2 — `testing` topic absorbed) | Phase 3α N3.05 enriched (134L) |
+| 3 | `hunt` | Troy Hunt | Security hygiene, attack surface, breach forensics | (new in v2 — `security` topic absorbed) | Phase 3α N3.06 pending |
+| 4 | `willison` | Simon Willison | LLM pipeline, prompt engineering, context engineering | (new in v2 — `llm` topic absorbed) | Phase 3α N3.07 pending |
+| 5 | `saarinen` | Karri Saarinen | UI quality, calmness, opinionated polish | renamed from `ui-expert` | Phase 3α₂-B pending |
+| 6 | `friedman` | Vitaly Friedman | UX quality, scanability, decision fatigue reduction | renamed from `ux-expert` | Phase 3α₂-B pending |
+| 7 | `watson` | Léonie Watson | Accessibility — screen-reader, ARIA, WCAG | renamed from `a11y-auditor` | Phase 3α₂-B pending |
+| 8 | `abramov` | Dan Abramov | React internals, state minimisation, server/client boundary | renamed from `frontend-react` | Phase 3α₂-B pending |
+| 9 | `brandur` | Brandur Leach | PostgreSQL operations, migration safety, retry-safe systems | (new in v2 — `postgres` topic absorbed) | Phase 3α₂-C pending |
+| 10 | `durov` | Nikolay Durov | Telegram bot UX, callback-flow ergonomics | renamed from `telegram-expert` | Phase 3α₂-C pending |
+| 11 | `vanrossum` | Guido van Rossum | Python backend, explicit-over-implicit, async IO | (co-tenant on `quality-backend.md`, alongside `dahl`) | Phase 3α₂-C pending |
+| 12 | `dahl` | Ryan Dahl | Bun + Hono + TypeScript + NDJSON/WS protocol | renamed from `bun-hono-ts-backend` | Phase 2b authored (481L), Phase 3α N3.01 §Z append done |
+| 13 | `ritchie` | Dennis Ritchie | Unix discipline — process lifecycle (§A) + filesystem persistence (§B) | merged from `subprocess-lifecycle` + `persistence-fs` | Phase 2b authored (469L), Phase 3α N3.02 §Z append done |
+| 14 | `hashimoto` | Mitchell Hashimoto | DevOps cross-stack — Docker (§V1-V3) + GHA (§V4) + VPS systemd (§V5) | merged from `deploy-docker-gha` + `deploy-vps` | Phase 2b authored (406L), Phase 3α N3.03 §Z append done |
+
+**Carmack chair (John Carmack)** is **not a seated expert.** Carmack's philosophy (simplicity over abstraction, profiling first, anti-bloat, ruthless technical clarity) acts as the synthesis-discipline filter applied by the chair role at dispatch time, not as a voice in the council. This is intentional — the chair arbitrates between seated experts, and seating Carmack would conflate arbitration with advocacy.
+
+### Phase 3α enrichment — closed
+
+The Phase 3α workstream (`feat/council-v2-pipeline`) enriched all 14 reference docs with external-source material — URLs, concepts, tone, anti-patterns — from each expert's published work. Strategy split per `specs/expert-references-enrichment-plan.md`:
+
+- **3 append-existing** (dahl / ritchie / hashimoto): existing 406-481L baselines received `## §Z External-source enrichment` sections.
+- **11 seed-new-file**: the remaining experts received a `quality-<id>.md` authored from scratch with §A / §B / (optional §C) structure populated from `specs/external-knowledge-enrichment-sources.md` dumps.
+
+All sub-phases closed:
+
+| Sub-phase | Commits | Status |
+|---|---|---|
+| **3α₁** (append-existing) | N3.01 dahl / N3.02 ritchie / N3.03 hashimoto | ✅ closed |
+| **3α₂-A** (seed-new domain-neutral) | N3.04 fowler / N3.05 beck / N3.06 hunt / N3.07 willison | ✅ closed |
+| **3α₂-B** (UI cluster) | N3.08 saarinen / N3.09 friedman / N3.10 watson / N3.11 abramov | ✅ closed |
+| **3α₂-C** (language/platform cluster) | N3.12 brandur / N3.13 durov / N3.14 vanrossum | ✅ closed |
+
+The Phase 3α FINAL CLOSURE A/B competitive test compared v1 vs v2 council outputs on a real tech-debt spec to validate that enrichment produces measurably better engineering output, not just structural completeness.
+
+## Phase 3β — 8 seated as ideological-tension pairs
+
+The original Phase 3 expansion plan (Lerdorf for PHP + Colvin for pydantic-ai) was rescoped after a key user insight (`specs/external-knowledge-enrichment-sources.md` Section F): **catalog growth past ~12 seats should add ideological tension, not domain coverage.**
+
+The rationale: a council of 12 domain experts produces parallel non-overlapping findings → synthesis is list-aggregation. A council of paired experts on shared domains, where each pair disagrees on philosophy, produces conflicting findings → synthesis is **resolution**. Carmack-chair arbitrates the tension based on project economic context.
+
+Phase 3β seated 6 new experts as 6 deliberate tension pairs plus 2 language specialists:
+
+| Domain | Pair member A | Pair member B | Tension axis |
+|---|---|---|---|
+| **Structural design** | `fowler` (Martin Fowler) | `unclebob` (Robert C. Martin) | economic-pragmatic ↔ principle-purity (SOLID/Clean Architecture) |
+| **Unix discipline** | `ritchie` (Dennis Ritchie) | `torvalds` (Linus Torvalds) | classic-Unix-purity ↔ Linux-era-pragmatism |
+| **Testing / Simplicity** | `beck` (Kent Beck) | `hickey` (Rich Hickey) | incremental-TDD ↔ fundamental-simplification (functional, immutable thinking) |
+| **Security / Exploration** | `hunt` (Troy Hunt) | `willison` (Simon Willison) | paranoia-defensive ↔ exploration-transparent (LLM tooling, prompt-injection awareness) |
+| **Domain modeling** | `evans` (Eric Evans) | `fowler` (Martin Fowler) | strategic-DDD-modeling ↔ emergent-microservices |
+| **Production reality** | `majors` (Charity Majors) | `hashimoto` (Mitchell Hashimoto) | debugging-in-prod (observability-first) ↔ immutable-prevention (deploy-safe) |
+
+Plus two language specialists that don't have a natural opposite in v1 coverage:
+
+| # | Expert ID | Real person | Lens | Rationale |
+|---|---|---|---|---|
+| 15 | `lerdorf` | Rasmus Lerdorf | PHP, request-lifecycle minimalism, shared-nothing | Closes PHP coverage gap (current catalog covers Python via `vanrossum`, Bun/Node via `dahl`; no PHP voice) |
+| 16 | `colvin` | Samuel Colvin | pydantic-ai, typed LLM agents, schema-first | Schema-strict counterpart to `willison`'s exploration-first stance; structured-output discipline |
+
+And the 6 new pair members:
+
+| # | Expert ID | Real person | Pair partner |
+|---|---|---|---|
+| 17 | `torvalds` | Linus Torvalds | `ritchie` |
+| 18 | `unclebob` | Robert C. Martin | `fowler` |
+| 19 | `evans` | Eric Evans | `fowler` |
+| 20 | `hickey` | Rich Hickey | `beck` |
+| 21 | `majors` | Charity Majors | `hashimoto` |
+| 22 | `sridharan` | Cindy Sridharan | `majors` (paired secondarily for resilience-skepticism ↔ operational-realism) |
+
+**Note:** `fowler` appears in two pairings (with `unclebob` on structural axis, with `evans` on modeling axis). Council seating logic per task: the chair picks **which pairing** is active based on stack-detection signals, not the full catalog. Multi-pairing membership is fine — Fowler's published body of work crosses both axes.
+
+**Anti-pattern boundary (operator-explicit):** the catalog target is **not** "100+ agents". Per user guidance documented in `external-knowledge-enrichment-sources.md`: _"7-15 strong allies + routing + shared memory + human approval + context compression. 10x value vs '159 agents ради агентов' (token furnace, zombie agents, context hell)."_ Phase 3β lands at 22 seats — well within the strong-allies envelope when chair-side stack-detection seats a subset (typically 7-12) per task.
+
+## Phase 3γ — chair-side stack-detection
+
+A separate workstream codifies the chair selecting **which subset** of the 22-expert catalog to seat per task. Inputs at dispatch time:
+
+- Project anchors (`package.json` / `composer.json` / `pyproject.toml` / `Cargo.toml` / etc.) — determines stack
+- Brief content (security-sensitive vs UI-only vs schema-migration) — determines lens emphasis
+- Per-task tension axis selection — chair picks which paired-tension is active for THIS task
+
+Phase 3γ is **not** part of Phase 3α/β implementation work; it's a downstream chair-logic refactor that uses the post-3α/β catalog as input. See `specs/council-experts-catalog-v2-expansion.md` Phase 3 section.
+
+## EC-34 — ratified
+
+Codified in `conventions.md` after Phase 3β closure:
+
+> **EC-34** — Expert seating by ideological tension, not domain coverage. Multi-expert councils at scale (>12 seats) should pair experts on each domain by orthogonal-philosophy axis (purity-vs-pragmatism, principle-vs-economics, paranoia-vs-curiosity). Synthesis becomes resolution, not aggregation. Carmack-chair filter picks based on project economic context. Wire-format: `paired_with` + `tension_axis` fields in each expert's `meta.yaml`; legacy 2-key entries retro-populated.
+
+## v1 → v2 swap timeline
+
+Phase 6 (atomic swap promotion, post-Phase 5) replaces:
+- `~/.claude/skills/_council-experts/` → `_council-experts-v2/` becomes default
+- `~/.claude/skills/council-{plan,review,implement}{,-aura}/` → swap with `-v2` variants
+- v1 directories archived as `_council-experts-v1-archive-<date>/` and held 30 days for rollback
+
+Until that promotion lands, **v1 is the production default**. To opt into v2 explicitly during development, invoke the `-v2` skills directly (`/council-plan-v2`, `/council-plan-aura-v2`, `/council-review-v2`, `/council-review-aura-v2`, `/council-implement-v2`, `/council-implement-aura-v2`).
+
+## See also
+
+- [`specs/council-experts-catalog-v2-expansion.md`](https://github.com/antonioshaman/aura-companion/blob/main/specs/council-experts-catalog-v2-expansion.md) — full architecture spec
+- [`specs/council-mode-bidirectional-pipeline.md`](https://github.com/antonioshaman/aura-companion/blob/main/specs/council-mode-bidirectional-pipeline.md) — orchestrator/observer bidirectional sync (Phase 4-5)
+- [`specs/expert-references-enrichment-plan.md`](https://github.com/antonioshaman/aura-companion/blob/main/specs/expert-references-enrichment-plan.md) — Phase 3α enrichment plan
+- [`specs/external-knowledge-enrichment-sources.md`](https://github.com/antonioshaman/aura-companion/blob/main/specs/external-knowledge-enrichment-sources.md) — canonical user-provided enrichment material
+- [`conventions.md`](https://github.com/antonioshaman/aura-companion/blob/main/conventions.md) — EC-1..EC-35 ratified conventions
+- [Council Mode Architecture](/reference/council-mode-architecture) — wire protocol + state machine
