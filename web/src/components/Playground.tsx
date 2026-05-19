@@ -15,6 +15,7 @@ import { UpdateBanner } from "./UpdateBanner.js";
 import { ClaudeMdEditor } from "./ClaudeMdEditor.js";
 import { ChatView } from "./ChatView.js";
 import { EmptyChatState } from "./chat/EmptyChatState.js";
+import { AssistantAvatar } from "./chat/AssistantAvatar.js";
 import { api } from "../api.js";
 import type {
   PermissionRequest,
@@ -1147,6 +1148,25 @@ export function Playground() {
                   resumeHistoryError="Network failed mid-fetch — try again."
                   onLoadResumeHistory={() => {}}
                 />
+              </div>
+            </Card>
+          </div>
+        </Section>
+
+        {/* ─── Assistant Avatar (shared between MessageFeed + MessageBubble) ─── */}
+        <Section
+          title="Assistant Avatar"
+          description="Shared star-glyph avatar used at the start of each assistant turn. md is the MessageFeed cluster header (28px); sm is the per-bubble glyph in MessageBubble (24px). Both sizes use the same SVG path so the icon stays consistent across consumers."
+        >
+          <div className="flex items-center gap-6 max-w-3xl">
+            <Card label="md (MessageFeed default)">
+              <div className="p-4 flex items-center justify-center">
+                <AssistantAvatar />
+              </div>
+            </Card>
+            <Card label="sm (MessageBubble compact)">
+              <div className="p-4 flex items-center justify-center">
+                <AssistantAvatar size="sm" />
               </div>
             </Card>
           </div>
