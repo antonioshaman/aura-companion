@@ -14,6 +14,7 @@ import { navigateToSession, navigateHome } from "../utils/routing.js";
 import { UpdateBanner } from "./UpdateBanner.js";
 import { ClaudeMdEditor } from "./ClaudeMdEditor.js";
 import { ChatView } from "./ChatView.js";
+import { EmptyChatState } from "./chat/EmptyChatState.js";
 import { api } from "../api.js";
 import type {
   PermissionRequest,
@@ -1090,6 +1091,63 @@ export function Playground() {
             </Card>
             <Card label="System message">
               <MessageBubble message={MSG_SYSTEM} />
+            </Card>
+          </div>
+        </Section>
+
+        {/* ─── Empty Chat State (extracted from MessageFeed) ────── */}
+        <Section
+          title="Empty Chat State"
+          description="Empty-state hero in ChatView when a session has zero merged messages. Two branches: fresh session vs. session with a Claude resume source available."
+        >
+          <div className="space-y-4 max-w-3xl">
+            <Card label="Fresh session (no resume source)">
+              <div className="border border-cc-border rounded-[10px] bg-cc-card h-80 flex">
+                <EmptyChatState
+                  canLoadResumeHistory={false}
+                  resumeModeLabel="Resuming"
+                  resumeSourceSessionId=""
+                  resumeHistoryLoading={false}
+                  resumeHistoryError=""
+                  onLoadResumeHistory={() => {}}
+                />
+              </div>
+            </Card>
+            <Card label="Resume-available — idle CTA">
+              <div className="border border-cc-border rounded-[10px] bg-cc-card h-80 flex">
+                <EmptyChatState
+                  canLoadResumeHistory={true}
+                  resumeModeLabel="Resuming"
+                  resumeSourceSessionId="abc12345-9c80-4f5e-91b3-deadbeef0000"
+                  resumeHistoryLoading={false}
+                  resumeHistoryError=""
+                  onLoadResumeHistory={() => {}}
+                />
+              </div>
+            </Card>
+            <Card label="Resume-available — loading">
+              <div className="border border-cc-border rounded-[10px] bg-cc-card h-80 flex">
+                <EmptyChatState
+                  canLoadResumeHistory={true}
+                  resumeModeLabel="Forking"
+                  resumeSourceSessionId="abc12345-9c80-4f5e-91b3-deadbeef0000"
+                  resumeHistoryLoading={true}
+                  resumeHistoryError=""
+                  onLoadResumeHistory={() => {}}
+                />
+              </div>
+            </Card>
+            <Card label="Resume-available — error surfaced (role=alert)">
+              <div className="border border-cc-border rounded-[10px] bg-cc-card h-80 flex">
+                <EmptyChatState
+                  canLoadResumeHistory={true}
+                  resumeModeLabel="Resuming"
+                  resumeSourceSessionId="abc12345-9c80-4f5e-91b3-deadbeef0000"
+                  resumeHistoryLoading={false}
+                  resumeHistoryError="Network failed mid-fetch — try again."
+                  onLoadResumeHistory={() => {}}
+                />
+              </div>
             </Card>
           </div>
         </Section>

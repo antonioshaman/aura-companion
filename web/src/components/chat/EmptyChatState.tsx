@@ -27,8 +27,11 @@ interface EmptyChatStateProps {
   resumeSourceSessionId: string;
   /** True while the resume-history fetch is in flight. */
   resumeHistoryLoading: boolean;
-  /** Error message from the last resume-history fetch, if any. */
-  resumeHistoryError: string | null;
+  /** Error message from the last resume-history fetch — empty string when no
+   * error. Producer (MessageFeed) initialises with `useState("")` and only
+   * assigns strings; narrowed from `string | null` per observer review of
+   * the extraction commit. */
+  resumeHistoryError: string;
   /** Click handler for the resume-history CTA. */
   onLoadResumeHistory: () => void;
 }

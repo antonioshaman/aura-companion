@@ -21,7 +21,7 @@ describe("EmptyChatState", () => {
     resumeModeLabel: "Resuming",
     resumeSourceSessionId: "",
     resumeHistoryLoading: false,
-    resumeHistoryError: null,
+    resumeHistoryError: "",
     onLoadResumeHistory: vi.fn(),
   };
 
@@ -86,6 +86,22 @@ describe("EmptyChatState", () => {
 
     it("has no a11y violations (resume branch)", async () => {
       const { container } = render(<EmptyChatState {...resumeProps} />);
+      const { axe } = await import("vitest-axe");
+      expect(await axe(container)).toHaveNoViolations();
+    });
+
+    // Observer review (refactor-extract-empty-chat-state) caught the
+    // resume-branch a11y scan running without `resumeHistoryError` set,
+    // so the dynamically-injected `role=alert` region was never validated
+    // by axe. Add a dedicated combo variant covering exactly that surface
+    // so error rendering doesn't regress silently.
+    it("has no a11y violations (resume branch + error state)", async () => {
+      const { container } = render(
+        <EmptyChatState
+          {...resumeProps}
+          resumeHistoryError="Network failed mid-fetch"
+        />,
+      );
       const { axe } = await import("vitest-axe");
       expect(await axe(container)).toHaveNoViolations();
     });
