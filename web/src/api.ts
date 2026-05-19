@@ -1,5 +1,5 @@
-import type { SdkSessionInfo } from "./types.js";
-import type { ContentBlock } from "./types.js";
+import type { SdkSessionInfo, GroupRecord } from "./types.js";
+import type { ContentBlock, BrowserObserverFinding, BrowserObserverDowngrade } from "./types.js";
 import { captureEvent, captureException } from "./analytics.js";
 
 const BASE = "/api";
@@ -868,6 +868,37 @@ export const api = {
     ),
 
   listSessions: () => get<SdkSessionInfo[]>("/sessions"),
+
+  // Council Mode — REST bootstrap of group findings on browser reload /
+  // late connect / reconnect race. Pairs with `group:review` live WS events;
+  // findings dedup by deterministic id so REST + WS converge.
+  // Closes `feedback_aura_observer_panel_no_rest_bootstrap`.
+  fetchGroupFindings: (groupId: string) =>
+    get<{
+      sessionGroupId: string;
+      findings: BrowserObserverFinding[];
+      downgrades: BrowserObserverDowngrade[];
+      reviewCount: number;
+      observerProvider?: string;
+      observerModel?: string;
+    }>(`/groups/${encodeURIComponent(groupId)}/findings`),
+
+  // Council Mode — REST bootstrap of group records on app mount. Closes
+  // `BUG-council-mode-group-rest-bootstrap-gap.md` (PR #68). The browser's
+  // `groupBySessionId` map was previously populated EXCLUSIVELY by the
+  // live `group:created` push; a tab reloading after pair creation landed
+  // without the Sidebar ☼/☽ glyph + role suffix and without ObserverPanel
+  // pair context. The server's `GET /api/groups` snapshots every live
+  // pair through the same `buildBrowserGroupRecord` helper the live push
+  // uses, so REST + WS produce byte-identical wire shapes.
+  //
+  // Idempotent dispatch — `hydrateGroups` on the council slice merges
+  // into the existing `groups` map without overwriting fresher live state
+  // (server REST snapshot is authoritative only for groups the browser
+  // has never seen; live WS state wins for groups already in the store).
+  fetchGroups: () => get<{ groups: GroupRecord[] }>("/groups"),
+
+
   discoverClaudeSessions: (limit = 200) =>
     get<{ sessions: ClaudeDiscoveredSession[] }>(
       `/claude/sessions/discover?limit=${encodeURIComponent(String(limit))}`,

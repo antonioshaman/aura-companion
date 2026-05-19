@@ -130,6 +130,34 @@ export function deriveObserverPanelState(args: {
     };
   }
 
+  // Bidirectional pipeline Story 4.1 — convergence variants slot ABOVE
+  // sleeping (signal-bearing) and BELOW degraded/blocker-found/reconnecting/
+  // reviewing (active concerns dominate convergence reporting). The
+  // spec's "convergence counter freezes during degraded state" semantic
+  // falls out of this ordering with zero extra conditionals: `degraded`
+  // already short-circuited at the top of this function.
+  if (group.convergenceState === "converged"
+    && typeof group.cycleNumber === "number"
+    && typeof group.convergenceThreshold === "number"
+  ) {
+    return {
+      name: "converged",
+      cycleNumber: group.cycleNumber,
+      threshold: group.convergenceThreshold,
+    };
+  }
+  if ((group.convergenceState === "in-progress" || group.convergenceState === "revoked")
+    && typeof group.cycleNumber === "number"
+    && typeof group.convergenceThreshold === "number"
+    && group.cycleNumber > 0
+  ) {
+    return {
+      name: "cycle-progress",
+      cycleNumber: group.cycleNumber,
+      threshold: group.convergenceThreshold,
+    };
+  }
+
   if (typeof group.lastCheckpointAt === "number" && typeof group.lastPhase === "string") {
     return {
       name: "sleeping",

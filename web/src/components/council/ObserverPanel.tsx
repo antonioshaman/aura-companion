@@ -187,6 +187,56 @@ function StatusPill({ state }: { state: ObserverPanelState }) {
         </div>
       );
     }
+    case "cycle-progress": {
+      // Bidirectional pipeline Story 4.1.5: clean-cycle progress badge.
+      // Pill copy "Cycle N/T" — emoji `aria-hidden`, accessible text
+      // carries the same signal so screen readers don't double-read.
+      // role="status" + aria-atomic so each transition is announced
+      // exactly once (WCAG 4.1.3 status messages).
+      const accessibleLabel = `Cycle ${state.cycleNumber} of ${state.threshold}`;
+      return (
+        <div
+          data-testid="status-pill"
+          data-state={state.name}
+          role="status"
+          aria-atomic="true"
+          aria-label={accessibleLabel}
+          className="flex items-center gap-2 text-cc-info"
+        >
+          <span aria-hidden="true">🔄</span>
+          <span className="text-xs font-medium">
+            Cycle {state.cycleNumber}/{state.threshold}
+          </span>
+        </div>
+      );
+    }
+    case "converged": {
+      // Bidirectional pipeline Story 4.1.5: pair has reached threshold.
+      // Emerald-500 token (Tailwind's `emerald-500`) signals "ship-ready".
+      // Click target is the entire pill so an operator can drill into
+      // the final review via the parent ObserverPanel's click handler
+      // (popover wiring deferred — pill itself stays declarative).
+      const accessibleLabel = `Converged — ready to ship after ${state.cycleNumber} clean cycles`;
+      return (
+        <div
+          data-testid="status-pill"
+          data-state={state.name}
+          role="status"
+          aria-atomic="true"
+          aria-label={accessibleLabel}
+          className="flex items-center gap-2 text-emerald-500"
+        >
+          <span aria-hidden="true">✅</span>
+          <span className="text-xs font-medium">
+            Converged — ready to ship
+          </span>
+          <span className="text-[10px] font-mono-code text-cc-muted">·</span>
+          <span className="text-[10px] font-mono-code text-cc-muted">
+            {state.cycleNumber}/{state.threshold}
+          </span>
+        </div>
+      );
+    }
     default: {
       // EC-10: TypeScript exhaustiveness check. Adding a new
       // ObserverPanelState variant without extending this switch is a

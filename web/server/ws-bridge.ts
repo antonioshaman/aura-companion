@@ -10,7 +10,8 @@ import type {
 import type { SessionStore } from "./session-store.js";
 import type { IBackendAdapter } from "./backend-adapter.js";
 import { ClaudeAdapter, type ObserverWakeSendOutcome } from "./claude-adapter.js";
-import { OBSERVER_WAKE_TIMEOUT_MS } from "./council-types.js";
+import type { IdleTimerProbe } from "./idle-timer-manager.js";
+import { buildBrowserGroupRecord } from "./browser-group-record.js";
 import type { RecorderManager } from "./recorder.js";
 import { resolveSessionGitInfo } from "./session-git-info.js";
 import type {
@@ -94,6 +95,29 @@ export class WsBridge {
   private recorder: RecorderManager | null = null;
   private autoNamingAttempted = new Set<string>();
   private userMsgCounter = 0;
+  /**
+   * Cross-tab single-firer observers for user-frame arrivals (Task 11.6).
+   * The bridge routes each browser→server user frame through
+   * `routeBrowserMessage` exactly once regardless of how many tabs are
+   * connected, so a callback registered here fires once per frame — not
+   * per tab. Production wires this to `IdleTimerManager.noteUserMessage`
+   * so the auto-proceed pipeline's turn-token advances on any tab's typing,
+   * not just the originating socket.
+   */
+  private userFrameObservers: Array<(sessionId: string) => void> = [];
+
+  /**
+   * Narrow read-only view of {@link IdleTimerManager} used by the
+   * idle-kill clock split (Task 11.7). The bridge only needs to know
+   * whether a synthetic auto-proceed turn is in flight for a given
+   * session; the full manager surface stays in `SessionOrchestrator`.
+   * Late-injected via {@link setIdleTimerManager} from `index.ts`
+   * (after the manager is constructed) — mirrors the orchestrator's
+   * mutual-cycle pattern. `null` until set, in which case
+   * {@link noteCliActivity} defaults to advancing the clock (safe
+   * pre-Task-11 behaviour).
+   */
+  private idleTimerProbe: IdleTimerProbe | null = null;
   private static readonly GIT_SESSION_KEYS: GitSessionKey[] = [
     "git_branch",
     "is_worktree",
@@ -102,6 +126,86 @@ export class WsBridge {
     "git_ahead",
     "git_behind",
   ];
+
+  /**
+   * Late-inject the idle-timer manager's synthetic-turn probe (Task 11.7).
+   * `index.ts` calls this after constructing the real
+   * {@link IdleTimerManager} so the bridge's activity-tracking sites can
+   * gate on whether the in-flight turn is synthetic (auto-proceed) vs
+   * user-driven. Idempotent; calling with `null` re-arms the safe-default
+   * branch where every CLI activity tick advances `lastCliActivityTs`.
+   */
+  setIdleTimerProbe(probe: IdleTimerProbe | null): void {
+    this.idleTimerProbe = probe;
+  }
+
+  /**
+   * Idle-kill clock activity dispatcher (Task 11.7). Called from every
+   * CLI→browser activity callback. Queries the late-injected idle-timer
+   * probe and routes to {@link noteUserActivity} (advances the clock)
+   * or {@link noteSyntheticActivity} (no-op for the clock) so synthetic
+   * auto-proceed turns don't extend the idle-kill window indefinitely.
+   *
+   * Without this split: a session with auto-proceed iterating every few
+   * minutes would never reach the 24h idle threshold, because each
+   * synthetic-driven CLI response would reset the clock. The split
+   * preserves "user typing keeps session alive" while letting silent
+   * auto-proceed loops time out.
+   */
+  private noteCliActivity(session: Session): void {
+    if (this.idleTimerProbe?.isSyntheticTurnInFlight(session.id)) {
+      this.noteSyntheticActivity(session);
+    } else {
+      this.noteUserActivity(session);
+    }
+  }
+
+  /**
+   * The ONLY production code path that writes `session.lastCliActivityTs`
+   * outside session initialization and {@link startIdleKillWatchdog}'s
+   * fresh-start reset (Task 11.7). The EC-6 static-grep canary in
+   * `ws-bridge.test.ts` asserts this — any other mutation site is a bug.
+   */
+  private noteUserActivity(session: Session): void {
+    session.lastCliActivityTs = Date.now();
+  }
+
+  /**
+   * No-op for the idle-kill clock (Task 11.7). Placeholder for future
+   * synthetic-activity telemetry (per-session synthetic-turn counter,
+   * last-synthetic-ts, etc.) without violating the idle-clock invariant.
+   * Argument is intentionally captured so call sites typecheck identically
+   * to {@link noteUserActivity}.
+   */
+  private noteSyntheticActivity(_session: Session): void {
+    // Intentionally empty — synthetic frames do not advance the
+    // idle-kill clock. See `noteCliActivity` JSDoc for the rationale.
+  }
+
+  /**
+   * Register a callback that fires whenever ANY browser tab sends a
+   * `user_message` frame to ANY session — caller filters by sessionId.
+   *
+   * The bridge's `routeBrowserMessage` is the single dispatch point for
+   * browser frames, so the callback fires once per frame regardless of
+   * tab count. Production caller is `SessionOrchestrator.initialize`
+   * wiring `IdleTimerManager.noteUserMessage(sid)`, which advances the
+   * per-session turn-token (cancels any pending auto-proceed fire — see
+   * `feedback_call_site_presence_not_just_symbol_export`: the manager's
+   * `noteUserMessage` method was tested standalone in Task 11.1 but had
+   * no production caller until this wiring landed in Task 11.6).
+   *
+   * Returns an unsubscribe function for symmetry with `companionBus.on`;
+   * the orchestrator never calls it (DI lifetime = process lifetime), but
+   * tests use it to keep their mock observers isolated.
+   */
+  onUserFrameObserved(callback: (sessionId: string) => void): () => void {
+    this.userFrameObservers.push(callback);
+    return () => {
+      const idx = this.userFrameObservers.indexOf(callback);
+      if (idx >= 0) this.userFrameObservers.splice(idx, 1);
+    };
+  }
 
   /** Set the Linear agent session ID on a Companion session and persist it. */
   setLinearSessionId(sessionId: string, linearSessionId: string): void {
@@ -205,6 +309,24 @@ export class WsBridge {
       return { kind: "unsupported_backend" };
     }
     return session.backendAdapter.sendUserFrameFromServer(content);
+  }
+
+  /**
+   * Task 11.8 — orchestrator-half auto-proceed synthetic frame send.
+   * Mirror of {@link sendObserverWakeFrame} but routes to the
+   * orchestrator-half adapter with recorder origin `server:auto-proceed`.
+   * Production caller is {@link IdleTimerManager}'s `sendSyntheticFrame`
+   * DI seam (wired in `index.ts`). Returns the same outcome shape so
+   * the manager's EC-9 logger can correlate failures across both paths.
+   */
+  sendOrchestratorSyntheticFrame(sessionId: string, content: string): BridgeObserverWakeOutcome {
+    const session = this.sessions.get(sessionId);
+    if (!session) return { kind: "session_unknown" };
+    if (!session.backendAdapter) return { kind: "adapter_missing" };
+    if (!(session.backendAdapter instanceof ClaudeAdapter)) {
+      return { kind: "unsupported_backend" };
+    }
+    return session.backendAdapter.sendOrchestratorSyntheticFrame(content);
   }
 
   /**
@@ -528,8 +650,9 @@ export class WsBridge {
 
     // ── onBrowserMessage — messages from backend → browsers ──────────────
     adapter.onBrowserMessage((msg) => {
-      // Track activity for idle detection
-      session.lastCliActivityTs = Date.now();
+      // Task 11.7 — idle-kill clock split. Synthetic auto-proceed turns
+      // do NOT advance the clock; only user-driven CLI activity does.
+      this.noteCliActivity(session);
       metricsCollector.recordMessageProcessed(msg.type);
 
       // -- session_init: merge into session state, broadcast, persist -----
@@ -887,7 +1010,22 @@ export class WsBridge {
       isNewAdapter = true;
       adapter = new ClaudeAdapter(sessionId, {
         recorder: this.recorder,
-        onActivityUpdate: () => { session.lastCliActivityTs = Date.now(); },
+        // Task 11.7 — same idle-kill split as the `attachBackendAdapter`
+        // path above. Adapter-internal activity ticks (stream chunks etc.)
+        // funnel through the same dispatcher so synthetic turns don't
+        // sneak the clock forward via a parallel mutator.
+        onActivityUpdate: () => { this.noteCliActivity(session); },
+        // Task 11.8 — adapter consults the probe synchronously inside
+        // `handleControlRequest` (denylist gate) and `handleResultMessage`
+        // (sticky-token cleanup). The probe is set once via
+        // `setIdleTimerProbe` (index.ts late-injection); reading here at
+        // construction time would capture null because the manager is
+        // built AFTER the bridge. Pass a closure that re-reads the
+        // current probe on each call.
+        idleTimerProbe: {
+          isSyntheticTurnInFlight: (sid) => this.idleTimerProbe?.isSyntheticTurnInFlight(sid) ?? false,
+          noteTerminalResultFrame: (sid) => { this.idleTimerProbe?.noteTerminalResultFrame(sid); },
+        },
       });
       // Wire up the shared event pipeline via attachBackendAdapter
       // (also broadcasts cli_connected for new adapters)
@@ -1081,13 +1219,29 @@ export class WsBridge {
 
   /** Send a user message into a session programmatically (no browser required).
    *  Used by the cron scheduler and agent executor to send prompts to autonomous sessions. */
-  injectUserMessage(sessionId: string, content: string): void {
+  /**
+   * Server-driven user_message injection. Used by cron-scheduler,
+   * linear-agent-bridge, and the system REST endpoint to programmatically
+   * advance a session as if a user had typed.
+   *
+   * Council Review #12 (EC-16) — `origin` discriminator threaded through
+   * `routeBrowserMessage` so server-driven frames are distinguishable
+   * from real browser-typed user_messages. The userFrameObservers fanout
+   * (currently the idle-timer manager's `noteUserMessage`) skips for
+   * server-origins because automated injection isn't user activity; the
+   * synthetic-turn token must not advance on cron/agent fires.
+   */
+  injectUserMessage(
+    sessionId: string,
+    content: string,
+    origin?: "server:cron" | "server:agent" | "server:rest" | "council:peer",
+  ): void {
     const session = this.sessions.get(sessionId);
     if (!session) {
       console.error(`[ws-bridge] Cannot inject message: session ${sessionId} not found`);
       return;
     }
-    this.routeBrowserMessage(session, { type: "user_message", content });
+    this.routeBrowserMessage(session, { type: "user_message", content }, undefined, origin);
   }
 
   /** Configure MCP servers on a session programmatically (no browser required).
@@ -1122,32 +1276,68 @@ export class WsBridge {
     if (!counterpart) return null;
     const primary = role === "orchestrator" ? session : counterpart;
     const observer = role === "observer" ? session : counterpart;
-    const pairing = `${primary.backendType ?? "claude"}+${observer.backendType ?? "claude"}`;
+    // PR #68: route through the shared `buildBrowserGroupRecord` helper —
+    // same construction site as the live push from `session-orchestrator`
+    // and the REST bootstrap. Status is hardcoded `"active"` because this
+    // synthetic hydration only fires when both halves are registered on
+    // the bridge (and thus by definition the pair is live). The
+    // defensive backend-type fallback is internal to the helper now
+    // (Fowler fix-pass): pass undefined-tolerant values, the helper
+    // applies `DEFAULT_BACKEND_TYPE` for ws-bridge sessions whose
+    // backendType hasn't propagated yet from the spawner.
     return {
       type: "group_created",
-      sessionGroupId: groupId,
-      primarySessionId: primary.id,
-      observerSessionId: observer.id,
-      pairing,
-      wakeTimeoutMs: OBSERVER_WAKE_TIMEOUT_MS,
+      ...buildBrowserGroupRecord({
+        sessionGroupId: groupId,
+        primary: {
+          sessionId: primary.id,
+          backendType: primary.backendType,
+        },
+        observer: {
+          sessionId: observer.id,
+          backendType: observer.backendType,
+        },
+        status: "active",
+      }),
     };
   }
 
-  /** Bootstrap kickoff for sessions that never get browser-driven traffic
-   *  (e.g. Council Mode observers). Sends a bare `initialize` control_request
-   *  on CLI ws_open so the CLI emits its `system` init and reaches "ready"
-   *  state without depending on user input or browser activity. Claude-only. */
+  /**
+   * Bootstrap kickoff for sessions that never get browser-driven traffic
+   * (e.g. Council Mode observers). Sends ONE `initialize` control_request
+   * on CLI ws_open so the CLI emits its `system` init and reaches "ready"
+   * state without depending on user input or browser activity. Claude-only.
+   *
+   * OBS-STOP-1 fix: if `session.pendingSystemPromptInjection` is set
+   * (because `injectSystemPrompt` was called before the WS connected),
+   * include the prompt in the kickoff's `appendSystemPrompt` field and
+   * clear the pending slot. This collapses what was previously a two-
+   * initialize race (bare kickoff at WS open → later second initialize
+   * with prompt, second silently dropped) into one well-formed init.
+   */
   sendInitializeKickoff(sessionId: string): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;
     if (!(session.backendAdapter instanceof ClaudeAdapter)) return;
     const { randomUUID } = require("node:crypto") as typeof import("node:crypto");
+    const pendingPrompt = session.pendingSystemPromptInjection;
+    const request: { subtype: "initialize"; appendSystemPrompt?: string } =
+      pendingPrompt
+        ? { subtype: "initialize", appendSystemPrompt: pendingPrompt }
+        : { subtype: "initialize" };
     const ndjson = JSON.stringify({
       type: "control_request",
       request_id: randomUUID(),
-      request: { subtype: "initialize" },
+      request,
     });
     session.backendAdapter.sendRawNDJSON(ndjson);
+    if (pendingPrompt) {
+      // Clear the pending slot — kickoff just consumed it. A future
+      // `injectSystemPrompt` after this point is a legitimate mid-session
+      // re-init (agent-executor mid-flow) and goes through the existing
+      // direct-send path.
+      session.pendingSystemPromptInjection = null;
+    }
   }
 
   /** Send an initialize control request with context appended to the system prompt.
@@ -1159,15 +1349,29 @@ export class WsBridge {
       console.error(`[ws-bridge] Cannot inject system prompt: session ${sessionId} not found`);
       return;
     }
-    if (session.backendAdapter instanceof ClaudeAdapter) {
-      const { randomUUID } = require("node:crypto") as typeof import("node:crypto");
-      const ndjson = JSON.stringify({
-        type: "control_request",
-        request_id: randomUUID(),
-        request: { subtype: "initialize", appendSystemPrompt },
-      });
-      session.backendAdapter.sendRawNDJSON(ndjson);
+    // OBS-STOP-1 fix: if the adapter is not yet connected, buffer the
+    // prompt for the upcoming kickoff to consume. Previously the guard
+    // `if (backendAdapter instanceof ClaudeAdapter)` silently no-op'd
+    // and the prompt was lost — the session-creation-service.ts:461
+    // path called `injectSystemPrompt` BEFORE the CLI subprocess had
+    // handshaked the WS back, hitting this exact silent-loss path.
+    if (!(session.backendAdapter instanceof ClaudeAdapter)) {
+      session.pendingSystemPromptInjection = appendSystemPrompt;
+      return;
     }
+    // Adapter already connected — direct send. This is the agent-executor
+    // mid-flow path (line 211 of agent-executor.ts), where the prompt
+    // arrives after handleCLIOpen has already fired the kickoff but
+    // before any user_message has been sent. Per the existing JSDoc
+    // contract ("Must be called before the first user message"), the
+    // CLI accepts a second initialize when it carries `appendSystemPrompt`.
+    const { randomUUID } = require("node:crypto") as typeof import("node:crypto");
+    const ndjson = JSON.stringify({
+      type: "control_request",
+      request_id: randomUUID(),
+      request: { subtype: "initialize", appendSystemPrompt },
+    });
+    session.backendAdapter.sendRawNDJSON(ndjson);
   }
 
   handleBrowserClose(ws: ServerWebSocket<SocketData>) {
@@ -1323,6 +1527,7 @@ export class WsBridge {
     session: Session,
     msg: BrowserOutgoingMessage,
     ws?: ServerWebSocket<SocketData>,
+    origin?: "server:cron" | "server:agent" | "server:rest" | "council:peer",
   ) {
     // Bridge-level message types — never forwarded to backend
     if (msg.type === "session_subscribe") {
@@ -1352,6 +1557,53 @@ export class WsBridge {
       return;
     }
 
+    // -- set_permission_mode: observer-guard + EC-9 telemetry chokepoint --
+    // Council Mode (EC-1 server mirror): the observer's permissionMode is
+    // locked at spawn (buildObserverSpawnOverrides). Any runtime
+    // set_permission_mode targeting an observer must be rejected here BEFORE
+    // adapter delivery, regardless of which client crafted the frame.
+    // EC-17 fail-closed: a council session whose role probe is null MUST
+    // reject — silent allow would let a corrupted council session mutate
+    // observer state. `from` snapshot taken before delivery so the
+    // adapter's post-send mutation doesn't collapse the transition.
+    if (msg.type === "set_permission_mode") {
+      const from = session.state.permissionMode;
+      const to = msg.mode;
+      const sessionGroupId = session.state.sessionGroupId;
+      const sessionGroupRole = session.state.sessionGroupRole;
+      if (sessionGroupRole === "observer") {
+        log.warn("ws-bridge", "set_permission_mode rejected on observer", {
+          event: "composer.permission-mode.observer-rejected",
+          sessionId: session.id,
+          sessionGroupId,
+          sessionGroupRole,
+          from,
+          to,
+        });
+        return;
+      }
+      if (sessionGroupId !== undefined && sessionGroupRole === undefined) {
+        log.warn("ws-bridge", "set_permission_mode rejected — role probe null", {
+          event: "composer.permission-mode.role-probe-null",
+          sessionId: session.id,
+          sessionGroupId,
+          from,
+          to,
+        });
+        return;
+      }
+      log.info("ws-bridge", "Composer permission-mode toggled", {
+        event: "composer.permission-mode.toggled",
+        sessionId: session.id,
+        sessionGroupId,
+        sessionGroupRole,
+        from,
+        to,
+        backend: session.backendType,
+      });
+      // fall through to existing adapter delivery
+    }
+
     // -- set_ai_validation: bridge-level, not forwarded to backend --------
     if (msg.type === "set_ai_validation") {
       handleSetAiValidation(session, msg);
@@ -1370,6 +1622,42 @@ export class WsBridge {
     // -- user_message: store in history before delegating to adapter ------
     if (msg.type === "user_message") {
       metricsCollector.recordTurnStarted(session.id);
+      // Council Review #12 (EC-16) — server-driven user_message frames
+      // (cron-scheduler, linear-agent-bridge, REST `/sessions/:id/inject`)
+      // are NOT user activity and MUST NOT advance the synthetic-turn
+      // token via `IdleTimerManager.noteUserMessage`. Skip the
+      // userFrameObservers fanout for any non-browser origin; log
+      // structurally for forensics.
+      // Bidirectional pipeline: `council:peer` frames are inter-half
+      // coordination, not user typing — same skip semantic.
+      const isServerOrigin = origin !== undefined && origin.startsWith("server:");
+      const isCouncilPeer = origin === "council:peer";
+      const skipUserFrameObservers = isServerOrigin || isCouncilPeer;
+      if (skipUserFrameObservers) {
+        log.info("ws-bridge", "non-user user_message injection", {
+          event: "ws-bridge.non-user-user-message",
+          sessionId: session.id,
+          sessionGroupId: session.state.sessionGroupId,
+          origin,
+        });
+      }
+      // Task 11.6 — cross-tab single-firer for IdleTimerManager.noteUserMessage.
+      // Fire BEFORE history append + state-machine transition so the
+      // observer (and downstream auto-proceed turn-token advance) sees the
+      // frame at the same logical point as the session state mutation. A
+      // thrown observer must not corrupt history — guarded per-callback.
+      if (!skipUserFrameObservers) {
+        for (const observer of this.userFrameObservers) {
+          try {
+            observer(session.id);
+          } catch (err) {
+            log.warn("ws-bridge", "userFrameObserver threw", {
+              sessionId: session.id,
+              error: String(err),
+            });
+          }
+        }
+      }
       const ts = Date.now();
       const userMessage: BrowserIncomingMessage = {
         type: "user_message",

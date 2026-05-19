@@ -83,6 +83,53 @@ describe("isToolUseDeniedForSynthetic — Bash allow path", () => {
   });
 });
 
+// Council Review #11 — fail-CLOSED on non-string toolName. Wire boundary
+// (NDJSON from CLI) carries `unknown`; type-narrowing failure must deny,
+// not allow. Pin behaviour.
+describe("isToolUseDeniedForSynthetic — fail-CLOSED on non-string toolName (#11)", () => {
+  it("denies when toolName is a number", () => {
+    expect(isToolUseDeniedForSynthetic(42 as unknown as string, { command: "ls" })).toBe(true);
+  });
+  it("denies when toolName is null", () => {
+    expect(isToolUseDeniedForSynthetic(null as unknown as string, { command: "ls" })).toBe(true);
+  });
+  it("denies when toolName is undefined", () => {
+    expect(isToolUseDeniedForSynthetic(undefined as unknown as string, { command: "ls" })).toBe(true);
+  });
+  it("denies when toolName is an object", () => {
+    expect(isToolUseDeniedForSynthetic({} as unknown as string, { command: "ls" })).toBe(true);
+  });
+});
+
+// Council Review #15 — ZW-class characters embedded in the command must
+// not bypass the literal prefix-match. The 5 chars stripped pre-match
+// are: U+200B ZWSP, U+200C ZWNJ, U+200D ZWJ, U+FEFF ZWNBSP/BOM, U+2060 WJ.
+describe("isToolUseDeniedForSynthetic — ZW-class bypass defence (#15)", () => {
+  it("denies `g<ZWSP>it push` (ZWSP between g and it)", () => {
+    expect(isToolUseDeniedForSynthetic("Bash", { command: "g​it push" })).toBe(true);
+  });
+  it("denies `<ZWSP>git push` (leading ZWSP)", () => {
+    expect(isToolUseDeniedForSynthetic("Bash", { command: "​git push" })).toBe(true);
+  });
+  it("denies `git<ZWJ> push` (ZWJ before space)", () => {
+    expect(isToolUseDeniedForSynthetic("Bash", { command: "git‍ push" })).toBe(true);
+  });
+  it("denies command with BOM prefix", () => {
+    expect(isToolUseDeniedForSynthetic("Bash", { command: "﻿git commit -m x" })).toBe(true);
+  });
+  it("denies command interspersed with all 5 ZW chars", () => {
+    expect(isToolUseDeniedForSynthetic("Bash", {
+      command: "​‌‍git﻿ push⁠ origin",
+    })).toBe(true);
+  });
+  it("ZW chars in middle that would NOT form a denied prefix after strip stay allowed", () => {
+    // `gitpush` (no space) after stripping ZW between git and push is NOT
+    // a denied prefix. Bash wouldn't execute it anyway; we only catch the
+    // shapes that COULD execute as a denied command.
+    expect(isToolUseDeniedForSynthetic("Bash", { command: "git​push" })).toBe(false);
+  });
+});
+
 describe("isToolUseDeniedForSynthetic — malformed / edge-case inputs", () => {
   it("returns false for null toolInput", () => {
     expect(isToolUseDeniedForSynthetic("Bash", null)).toBe(false);
@@ -156,5 +203,23 @@ describe("denialMessageForSynthetic", () => {
     expect(denialMessageForSynthetic("Read", {})).toContain("may not invoke");
     expect(denialMessageForSynthetic("Bash", null as unknown as object)).toContain("may not invoke");
     expect(denialMessageForSynthetic("Bash", {})).toContain("may not invoke");
+  });
+
+  // Council Review #14 — strip backticks from the embedded command head.
+  // The message uses a markdown code-span wrapper; an embedded backtick
+  // would terminate the span early and let the rest render as raw markdown
+  // (potentially as bold/emphasis/link injection on a chat surface that
+  // does post-message rendering).
+  it("strips embedded backticks from the command head (#14)", () => {
+    const msg = denialMessageForSynthetic("Bash", { command: "git push `evil` origin" });
+    expect(msg).not.toContain("`evil`"); // raw backtick gone
+    expect(msg).toContain("‘evil‘"); // replaced with safe look-alike
+    expect(msg).toContain("Engage manually");
+  });
+  it("strips multiple backticks", () => {
+    const msg = denialMessageForSynthetic("Bash", { command: "git push `a` `b` `c`" });
+    // count backticks in message (excluding the wrapper pair around `head`)
+    const backtickCount = (msg.match(/`/g) || []).length;
+    expect(backtickCount).toBe(2); // exactly the wrapping pair from the message template
   });
 });

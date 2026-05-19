@@ -181,6 +181,7 @@ function createMockBridge() {
     attachBackendAdapter: vi.fn(),
     cancelDisconnectTimer: vi.fn(() => false),
     sendObserverWakeFrame: vi.fn(() => ({ kind: "sent" })),
+    onUserFrameObserved: vi.fn(() => () => {}),
   } as any;
 }
 
@@ -320,6 +321,79 @@ describe("SessionOrchestrator", () => {
       companionBus.emit("session:cli-id-received", { sessionId: "s1", cliSessionId: "cli-id-123" });
 
       expect(deps.launcher.setCLISessionId).toHaveBeenCalledWith("s1", "cli-id-123");
+    });
+
+    // CR-7 (council review 2026-05-15-0336 finding #7 / Beck P1.1):
+    // `initialize()` subscribes `wsBridge.onUserFrameObserved` to
+    // `idleTimerManager.noteUserMessage`. Without this test, a future
+    // refactor that deletes the subscription line would still pass every
+    // existing test — the bridge has a stub `onUserFrameObserved: vi.fn(() => () => {})`
+    // and the manager's `noteUserMessage` is also independently tested,
+    // but the WIRING between them was untested. The bug class is
+    // `feedback_call_site_presence_not_just_symbol_export` — every
+    // standalone symbol works, the line connecting them silently breaks
+    // and auto-proceed continues firing under real user activity.
+    it("CR-7: initialize() subscribes onUserFrameObserved → idleTimerManager.noteUserMessage", () => {
+      const noteUserMessage = vi.fn();
+      // Capture the callback the orchestrator registers so we can
+      // invoke it ourselves (the bridge mock won't actually fire it).
+      let captured: ((sid: string) => void) | null = null;
+      (deps.wsBridge as any).onUserFrameObserved = vi.fn((cb: (sid: string) => void) => {
+        captured = cb;
+        return () => {};
+      });
+      // Replace the noop idle-timer manager with a spy-capable stub.
+      orchestrator.setIdleTimerManager({
+        noteUserMessage,
+        // Stub the other methods so the manager interface is satisfied.
+        disposeAll: () => {},
+        getIterationCount: () => 0,
+        isSyntheticTurnInFlight: () => false,
+        noteTerminalResultFrame: () => {},
+        clearPendingSyntheticTurn: () => {},
+        armForSession: () => undefined,
+        cancelForSession: () => undefined,
+        rehydrateFromTrace: () => undefined,
+      } as any);
+
+      orchestrator.initialize();
+
+      // The orchestrator MUST have called onUserFrameObserved during
+      // initialize() — symbol-presence assertion.
+      expect((deps.wsBridge as any).onUserFrameObserved).toHaveBeenCalledTimes(1);
+      expect(captured).not.toBeNull();
+
+      // BEHAVIOURAL — invoking the captured callback must forward to
+      // the manager's noteUserMessage. This is the wiring under test.
+      captured!("sess-from-tab-b");
+      expect(noteUserMessage).toHaveBeenCalledWith("sess-from-tab-b");
+    });
+
+    // CR-7 / Beck P1.2: the new `session:exited` listener (added in PR #54
+    // Task 11.8) calls `idleTimerManager.clearPendingSyntheticTurn` on EVERY
+    // session exit so an orphaned sticky-token from a session that died
+    // mid-synthetic-turn cannot survive across `--resume`. The existing
+    // session:exited listener-count tests assert count ≥ N but do NOT
+    // distinguish handlers — a regression deleting THIS specific listener
+    // keeps the count valid and ships green.
+    it("CR-7: session:exited fires idleTimerManager.clearPendingSyntheticTurn", () => {
+      const clearPendingSyntheticTurn = vi.fn();
+      orchestrator.setIdleTimerManager({
+        noteUserMessage: () => {},
+        clearPendingSyntheticTurn,
+        disposeAll: () => {},
+        getIterationCount: () => 0,
+        isSyntheticTurnInFlight: () => false,
+        noteTerminalResultFrame: () => {},
+        armForSession: () => undefined,
+        cancelForSession: () => undefined,
+        rehydrateFromTrace: () => undefined,
+      } as any);
+
+      orchestrator.initialize();
+      companionBus.emit("session:exited", { sessionId: "s-exited-1", exitCode: 0 });
+
+      expect(clearPendingSyntheticTurn).toHaveBeenCalledWith("s-exited-1");
     });
 
     it("session exit callback notifies agentExecutor", () => {
@@ -3353,6 +3427,171 @@ describe("SessionOrchestrator", () => {
       }
     });
 
+    // Post-grace recovery: when a half re-handshakes AFTER the reconnect
+    // grace window expired and the pair is already settled in `degraded`,
+    // the `session:cli-id-received` handler must emit `half_respawned` so
+    // the state machine flips back to `active` and `dispatchObserverWake`
+    // stops refusing checkpoints.
+    //
+    // Without this branch, the pair was structurally terminal in
+    // production — `transition()` defined the recovery transition, tests
+    // covered the state-machine pure function, but no producer ever
+    // emitted `half_respawned`. Symptom seen on 2026-05-15: pair
+    // `grp_e81a5ef...` sat in degraded for 17+ minutes with both halves
+    // alive (chat working via `isOperable`), while every checkpoint POST
+    // was refused with `reason=group_not_active`.
+    it("post-grace recovery: cli-id-received on a degraded pair fires half_respawned and flips to active", async () => {
+      const fs = await import("node:fs");
+      const os = await import("node:os");
+      const path = await import("node:path");
+      const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "council-recovery-")));
+      try {
+        (deps.launcher.listSessions as any).mockReturnValue([
+          { sessionId: "orch-real", sessionGroupId: "grp_recover", sessionGroupRole: "orchestrator",
+            backendType: "claude", cwd: ws, archived: false, createdAt: 1, state: "running" },
+          { sessionId: "obs-real", sessionGroupId: "grp_recover", sessionGroupRole: "observer",
+            backendType: "claude", cwd: ws, archived: false, createdAt: 2, state: "running" },
+        ]);
+        // initialize() also installs the `session:cli-id-received` handler
+        // we're exercising — without it, the emit below is a no-op.
+        orchestrator.initialize();
+        const obs = orchestrator as unknown as {
+          reconcileCouncilGroups: () => void;
+          stopCouncilWatchers: (id: string) => void;
+          coordinator: {
+            get: (id: string) => { status: string } | undefined;
+            applyEvent: (id: string, event: { type: string; role?: string }) => void;
+          };
+        };
+        obs.reconcileCouncilGroups();
+        // Both-halves-alive reconcile lands in `active`.
+        expect(obs.coordinator.get("grp_recover")?.status).toBe("active");
+
+        // Drive the pair into `degraded` via `half_died` (observer falls
+        // off the bus). The state machine settles immediately — no
+        // reconnect context is armed by this transition.
+        obs.coordinator.applyEvent("grp_recover", { type: "half_died", role: "observer" });
+        expect(obs.coordinator.get("grp_recover")?.status).toBe("degraded");
+
+        // The observer's session reconnects later (e.g. server restart
+        // → --resume → cli handshake). Before this fix, this event was a
+        // silent no-op because `getReconnectContext` returned undefined.
+        companionBus.emit("session:cli-id-received", { sessionId: "obs-real", cliSessionId: "cli-obs-1" });
+
+        // Recovery: state flips back to active. Observer wake gate
+        // (dispatchObserverWake Gate 1) will accept future checkpoints.
+        expect(obs.coordinator.get("grp_recover")?.status).toBe("active");
+
+        obs.stopCouncilWatchers("grp_recover");
+      } finally {
+        fs.rmSync(ws, { recursive: true, force: true });
+      }
+    });
+
+    // Symmetric: the orchestrator half can also flap and recover.
+    it("post-grace recovery: degraded × half_respawned for orchestrator role also flips to active", async () => {
+      const fs = await import("node:fs");
+      const os = await import("node:os");
+      const path = await import("node:path");
+      const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "council-recovery-orch-")));
+      try {
+        (deps.launcher.listSessions as any).mockReturnValue([
+          { sessionId: "orch-r", sessionGroupId: "grp_recover_o", sessionGroupRole: "orchestrator",
+            backendType: "claude", cwd: ws, archived: false, createdAt: 1, state: "running" },
+          { sessionId: "obs-r", sessionGroupId: "grp_recover_o", sessionGroupRole: "observer",
+            backendType: "claude", cwd: ws, archived: false, createdAt: 2, state: "running" },
+        ]);
+        orchestrator.initialize();
+        const obs = orchestrator as unknown as {
+          reconcileCouncilGroups: () => void;
+          stopCouncilWatchers: (id: string) => void;
+          coordinator: {
+            get: (id: string) => { status: string } | undefined;
+            applyEvent: (id: string, event: { type: string; role?: string }) => void;
+          };
+        };
+        obs.reconcileCouncilGroups();
+        obs.coordinator.applyEvent("grp_recover_o", { type: "half_died", role: "orchestrator" });
+        expect(obs.coordinator.get("grp_recover_o")?.status).toBe("degraded");
+
+        companionBus.emit("session:cli-id-received", { sessionId: "orch-r", cliSessionId: "cli-orch-1" });
+        expect(obs.coordinator.get("grp_recover_o")?.status).toBe("active");
+
+        obs.stopCouncilWatchers("grp_recover_o");
+      } finally {
+        fs.rmSync(ws, { recursive: true, force: true });
+      }
+    });
+
+    // Identity boundary: the recovery branch must NOT fire for an
+    // unrelated sessionId that happens to arrive while the pair is
+    // degraded. Only sessionIds tracked in `councilGroupMeta` (i.e. real
+    // halves of the registered pair) are eligible for recovery — otherwise
+    // a stray handshake from another session would be misattributed.
+    it("post-grace recovery: unrelated sessionId does NOT trigger half_respawned", async () => {
+      const fs = await import("node:fs");
+      const os = await import("node:os");
+      const path = await import("node:path");
+      const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "council-recovery-stray-")));
+      try {
+        (deps.launcher.listSessions as any).mockReturnValue([
+          { sessionId: "orch-s", sessionGroupId: "grp_stray", sessionGroupRole: "orchestrator",
+            backendType: "claude", cwd: ws, archived: false, createdAt: 1, state: "running" },
+          { sessionId: "obs-s", sessionGroupId: "grp_stray", sessionGroupRole: "observer",
+            backendType: "claude", cwd: ws, archived: false, createdAt: 2, state: "running" },
+        ]);
+        orchestrator.initialize();
+        const obs = orchestrator as unknown as {
+          reconcileCouncilGroups: () => void;
+          stopCouncilWatchers: (id: string) => void;
+          coordinator: {
+            get: (id: string) => { status: string } | undefined;
+            applyEvent: (id: string, event: { type: string; role?: string }) => void;
+          };
+        };
+        obs.reconcileCouncilGroups();
+        obs.coordinator.applyEvent("grp_stray", { type: "half_died", role: "observer" });
+        expect(obs.coordinator.get("grp_stray")?.status).toBe("degraded");
+
+        // Handshake from an unrelated solo session — must not affect the
+        // council group's state.
+        companionBus.emit("session:cli-id-received", { sessionId: "unrelated-solo", cliSessionId: "cli-other" });
+        expect(obs.coordinator.get("grp_stray")?.status).toBe("degraded");
+
+        obs.stopCouncilWatchers("grp_stray");
+      } finally {
+        fs.rmSync(ws, { recursive: true, force: true });
+      }
+    });
+
+    // EC-6 static-grep canary (per `feedback_call_site_presence_not_just_symbol_export`):
+    // the recovery transition is only reachable if at least one production
+    // (non-test) emit site for `half_respawned` exists. The state machine
+    // shipped the recovery branch + unit tests months ago without a
+    // production emit site — pairs sat in degraded forever. Asserting the
+    // call site is present in production source (not just tests) prevents
+    // a future refactor from silently removing it.
+    it("static canary: half_respawned has at least one production emit site outside tests", async () => {
+      const fs = await import("node:fs");
+      const path = await import("node:path");
+      const root = path.resolve(__dirname);
+      const files = fs.readdirSync(root).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts"));
+      let emitSites = 0;
+      // Match an applyEvent (or transition-builder) carrying `type: "half_respawned"`.
+      // Tolerates whitespace + key ordering shifts; rejects matches inside
+      // strings/comments by requiring `type:` directly before the literal.
+      const pattern = /type\s*:\s*"half_respawned"/;
+      for (const f of files) {
+        const raw = fs.readFileSync(path.join(root, f), "utf-8");
+        const matches = raw.match(new RegExp(pattern, "g")) ?? [];
+        // The state-machine type definition itself uses this literal in the
+        // `GroupEvent` union — exclude the file that defines the type.
+        if (f === "group-state-machine.ts") continue;
+        emitSites += matches.length;
+      }
+      expect(emitSites, "no production emit site for half_respawned — recovery transition is unreachable").toBeGreaterThan(0);
+    });
+
     // Archived half means the group was intentionally torn down. Partial-
     // pair grace MUST NOT apply — that would re-arm a reconnect cycle on
     // a group the user (or shutdown path) had already given up on. Fixed
@@ -3500,6 +3739,311 @@ describe("SessionOrchestrator", () => {
       };
       obs.councilGroupBySessionId.set("orphan_sid", "grp_meta_missing");
       expect(orchestrator.getCouncilGroupBySessionId("orphan_sid")).toBeNull();
+    });
+  });
+
+  // ─── getGroupReviewsForBootstrap ──────────────────────────────────────────
+  //
+  // REST bootstrap that complements the WS `group:review` live path.
+  // Browser council slice was historically populated EXCLUSIVELY from
+  // live events — a tab connecting after the event missed everything.
+  // This method walks `<cwd>/.council/reviews/*-observer.md`, runs the
+  // same grounding validation as the WS pipeline, and returns hydrated
+  // findings with deterministic ids so REST + WS dedupe cleanly.
+  describe("getGroupReviewsForBootstrap", () => {
+    function seedGroup(groupId: string, cwd: string, artifactPaths: string[] = []) {
+      const ws = orchestrator as unknown as {
+        councilWatchers: Map<string, {
+          cwd: string;
+          abort: AbortController;
+          lastCheckpoint: { sequence: number; checkpoint_id: string; phase: string; artifact_paths: string[] } | null;
+          previousCheckpoint: { sequence: number; artifact_paths: string[] } | null;
+        }>;
+        councilGroupMeta: Map<string, { primarySessionId: string; observerSessionId: string; pairing: string; createdAt: number; lastCheckpointReceivedAt: number | null }>;
+      };
+      ws.councilWatchers.set(groupId, {
+        cwd,
+        abort: new AbortController(),
+        lastCheckpoint: { sequence: 0, checkpoint_id: "chk_a", phase: "council-plan", artifact_paths: artifactPaths },
+        previousCheckpoint: null,
+      });
+      ws.councilGroupMeta.set(groupId, {
+        primarySessionId: "sess_orch",
+        observerSessionId: "sess_obs",
+        pairing: "claude+claude",
+        createdAt: Date.now(),
+        lastCheckpointReceivedAt: Date.now() - 100,
+      });
+    }
+
+    // Path 1: meta map miss — group archived or never created. Critical
+    // null-return contract for the REST authorize step in `routes.ts`.
+    it("returns null when the sessionGroupId is not in councilGroupMeta", async () => {
+      const result = await orchestrator.getGroupReviewsForBootstrap("grp_never_created");
+      expect(result).toBeNull();
+    });
+
+    // Path 2: watcher map miss (e.g. between archive sentinel and meta
+    // teardown). Still returns null — REST caller treats as 404, not as
+    // "no findings yet".
+    it("returns null when the watcher entry is gone (mid-teardown race)", async () => {
+      const ws = orchestrator as unknown as {
+        councilGroupMeta: Map<string, { primarySessionId: string; observerSessionId: string; pairing: string; createdAt: number; lastCheckpointReceivedAt: number | null }>;
+      };
+      ws.councilGroupMeta.set("grp_meta_only", {
+        primarySessionId: "p",
+        observerSessionId: "o",
+        pairing: "claude+claude",
+        createdAt: Date.now(),
+        lastCheckpointReceivedAt: null,
+      });
+      const result = await orchestrator.getGroupReviewsForBootstrap("grp_meta_only");
+      expect(result).toBeNull();
+    });
+
+    // Path 3: group is registered, but no reviews/ dir exists yet (group
+    // was just spawned, observer hasn't fired). Browser panel renders
+    // `never-checkpointed-yet`. Returns the shape, not null.
+    it("returns empty findings/downgrades when the reviews dir is absent", async () => {
+      const { mkdtempSync, rmSync, realpathSync } = require("node:fs") as typeof import("node:fs");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      const workspace = realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-bootstrap-")));
+      try {
+        seedGroup("grp_no_reviews", workspace);
+        const result = await orchestrator.getGroupReviewsForBootstrap("grp_no_reviews");
+        expect(result).toEqual({
+          sessionGroupId: "grp_no_reviews",
+          findings: [],
+          downgrades: [],
+          reviewCount: 0,
+        });
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
+    // Path 4: reviews dir exists with real files. Exercises the full
+    // walk + parseObserverReviewPayload + validateObserverFindings +
+    // deterministic ID assignment. Asserts:
+    //   - reviewCount counts only parseable files
+    //   - findings carry stable `fnd_<hex>` ids
+    //   - in-scope STOP survives grounding
+    //   - out-of-scope STOP is downgraded with reason captured in downgrades[]
+    //   - observerProvider/observerModel taken from the first parsed file
+    it("walks review files, returns hydrated findings with deterministic ids and downgrade markers", async () => {
+      const { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } = require("node:fs") as typeof import("node:fs");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      const workspace = realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-bootstrap-walk-")));
+      try {
+        mkdirSync(pathJoin(workspace, "src"), { recursive: true });
+        writeFileSync(pathJoin(workspace, "src/a.ts"), "// in-scope\n");
+        mkdirSync(pathJoin(workspace, ".council", "reviews"), { recursive: true });
+        const reviewBody = {
+          schema_version: 1,
+          checkpoint_id: "chk_a",
+          phase: "council-plan",
+          session_group_id: "grp_walk",
+          reviewed_at: "2026-01-01T00:00:00Z",
+          observer_provider: "claude",
+          observer_model: "claude-opus-4-7",
+          observer_cli_version: "1.0.0",
+          observer_wake_payload_version_echo: 1,
+          findings: [
+            { severity: "STOP", claim: "in scope", evidence_path: "src/a.ts" },
+            { severity: "STOP", claim: "out of scope", evidence_path: "src/missing.ts" },
+          ],
+        };
+        writeFileSync(
+          pathJoin(workspace, ".council", "reviews", "council-plan-claude-observer.md"),
+          JSON.stringify(reviewBody),
+        );
+        // Garbage file under the same dir — must be ignored (filename
+        // pattern is anchored). Without the pattern, a hand-edited note
+        // would crash the bootstrap walk.
+        writeFileSync(
+          pathJoin(workspace, ".council", "reviews", "stray-note.txt"),
+          "not a review",
+        );
+        seedGroup("grp_walk", workspace, ["src/a.ts"]);
+        const result = await orchestrator.getGroupReviewsForBootstrap("grp_walk");
+        expect(result).not.toBeNull();
+        expect(result!.sessionGroupId).toBe("grp_walk");
+        expect(result!.reviewCount).toBe(1);
+        expect(result!.observerProvider).toBe("claude");
+        expect(result!.observerModel).toBe("claude-opus-4-7");
+        expect(result!.findings).toHaveLength(2);
+        const inScope = result!.findings[0]!;
+        const outOfScope = result!.findings[1]!;
+        expect(inScope.id).toMatch(/^fnd_[0-9a-f]+$/);
+        expect(inScope.claim).toBe("in scope");
+        expect(inScope.wasDowngraded).toBeUndefined();
+        expect(outOfScope.id).toMatch(/^fnd_[0-9a-f]+$/);
+        expect(outOfScope.wasDowngraded).toBe(true);
+        expect(outOfScope.downgradeReason).toBeDefined();
+        expect(result!.downgrades).toHaveLength(1);
+        expect(result!.downgrades[0]!.id).toBe(outOfScope.id);
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+  });
+  describe("getAllGroupsForBootstrap", () => {
+    // Helper: seed the coordinator directly via `registerExternalGroup`
+    // so we don't have to drive the full createSession spawn pipeline
+    // (which requires mocking the launcher's full surface). Mirrors the
+    // pattern used by other council tests in this file and by the
+    // `reconcileCouncilGroups()` restart path.
+    function seedCoordGroup(gid: string, orchId: string, obsId: string, status: string = "active", observerBackend: "claude" | "codex" = "claude") {
+      const coord = (orchestrator as unknown as {
+        getOrCreateCoordinatorSync: () => {
+          registerExternalGroup: (r: unknown) => void;
+          applyEvent: (id: string, ev: { type: string; role?: string }) => unknown;
+        };
+      }).getOrCreateCoordinatorSync();
+      coord.registerExternalGroup({
+        sessionGroupId: gid,
+        primary: { sessionId: orchId, backendType: "claude" },
+        observer: { sessionId: obsId, backendType: observerBackend },
+        status: "active",
+        createdAt: Date.now(),
+      });
+      if (status === "degraded") {
+        coord.applyEvent(gid, { type: "half_died", role: "observer" });
+      }
+    }
+
+    it("returns an empty array when no coordinator has been created (no Council Mode usage)", () => {
+      // Fresh orchestrator, no createCouncilGroup invocation — coordinator
+      // is lazily constructed, so the bootstrap method must short-circuit.
+      expect(orchestrator.getAllGroupsForBootstrap()).toEqual([]);
+    });
+
+    it("returns one wire-shape record per active group, with status + pairing label", () => {
+      seedCoordGroup("grp_b1", "orch_b1", "obs_b1", "active", "claude");
+      seedCoordGroup("grp_b2", "orch_b2", "obs_b2", "active", "codex");
+      const out = orchestrator.getAllGroupsForBootstrap();
+      expect(out).toHaveLength(2);
+      // Order is not guaranteed (Map iteration order is insertion order in
+      // practice, but the wire contract does not pin it). Index by group id.
+      const byId = new Map(out.map((g) => [g.sessionGroupId, g]));
+      expect(byId.get("grp_b1")).toEqual({
+        sessionGroupId: "grp_b1",
+        primarySessionId: "orch_b1",
+        observerSessionId: "obs_b1",
+        pairing: "claude+claude",
+        status: "active",
+        wakeTimeoutMs: expect.any(Number),
+      });
+      expect(byId.get("grp_b2")).toEqual({
+        sessionGroupId: "grp_b2",
+        primarySessionId: "orch_b2",
+        observerSessionId: "obs_b2",
+        pairing: "claude+codex",
+        status: "active",
+        wakeTimeoutMs: expect.any(Number),
+      });
+    });
+
+    // Symmetry with the live `group:created` push: the panel-state deriver
+    // bounds the `reviewing` interval by `lastCheckpointAt + wakeTimeoutMs`.
+    // REST-bootstrapped groups must receive the same constant or the deriver
+    // would silently fall back to a frontend default — diverging behaviour.
+    it("populates wakeTimeoutMs with the same constant the group_created push uses", async () => {
+      const { OBSERVER_WAKE_TIMEOUT_MS } = await import("./council-types.js");
+      seedCoordGroup("grp_wt", "orch_wt", "obs_wt", "active", "claude");
+      const out = orchestrator.getAllGroupsForBootstrap();
+      expect(out[0]?.wakeTimeoutMs).toBe(OBSERVER_WAKE_TIMEOUT_MS);
+    });
+
+    // Reload during degraded pair MUST surface the true status. Without
+    // this, the panel header pill would render "active" against a dead
+    // half — the bootstrap path would silently mask the very condition
+    // the operator needs to see.
+    it("preserves degraded status across bootstrap (does not flatten to active)", () => {
+      seedCoordGroup("grp_d1", "orch_d1", "obs_d1", "degraded", "claude");
+      const out = orchestrator.getAllGroupsForBootstrap();
+      expect(out).toHaveLength(1);
+      expect(out[0]?.status).toBe("degraded");
+    });
+
+    // Archived groups are torn down — they must not appear in the Sidebar.
+    // The orchestrator filters at this boundary (the coordinator returns
+    // every record including archived; the visibility policy belongs here).
+    it("filters out archived groups from the bootstrap response", () => {
+      const coord = (orchestrator as unknown as {
+        getOrCreateCoordinatorSync: () => {
+          registerExternalGroup: (r: unknown) => void;
+          applyEvent: (id: string, ev: { type: string }) => unknown;
+        };
+      }).getOrCreateCoordinatorSync();
+      coord.registerExternalGroup({
+        sessionGroupId: "grp_arch",
+        primary: { sessionId: "orch_arch", backendType: "claude" },
+        observer: { sessionId: "obs_arch", backendType: "claude" },
+        status: "active",
+        createdAt: Date.now(),
+      });
+      coord.applyEvent("grp_arch", { type: "user_archived" });
+      // Also seed one healthy group so we can verify selective filtering,
+      // not blanket emptiness from a coordinator-wide bug.
+      seedCoordGroup("grp_live", "orch_live", "obs_live", "active", "claude");
+      const out = orchestrator.getAllGroupsForBootstrap();
+      expect(out).toHaveLength(1);
+      expect(out[0]?.sessionGroupId).toBe("grp_live");
+    });
+
+    // PR #68 PICKUP §"shared mapper" invariant. The live `group_created`
+    // push and the REST `getAllGroupsForBootstrap` snapshot MUST produce
+    // byte-identical wire fields for the same coordinator state — that is
+    // why both routes through the shared `buildBrowserGroupRecord` helper.
+    // This test exercises both paths against the same seed and asserts
+    // the five shared fields are equal field-by-field. A future refactor
+    // that re-inlines one of the producers would diverge on at least one
+    // field and trip this canary.
+    it("cross-site parity: push fanout and getAllGroupsForBootstrap emit identical wire fields for the same coordinator state", () => {
+      orchestrator.initialize();
+      // Seed the launcher's session map so the push listener can resolve
+      // backendType for the pairing label — matches the coordinator's
+      // record so the parity assertion is over the helper's output, not a
+      // launcher/coordinator divergence.
+      vi.mocked(deps.launcher.getSession).mockImplementation((id: string) => {
+        if (id === "orch_parity") return { sessionId: "orch_parity", state: "running", cwd: "/w", createdAt: 0, backendType: "claude" } as any;
+        if (id === "obs_parity") return { sessionId: "obs_parity", state: "running", cwd: "/w", createdAt: 0, backendType: "codex" } as any;
+        return undefined;
+      });
+      const coord = (orchestrator as unknown as {
+        getOrCreateCoordinatorSync: () => { registerExternalGroup: (r: unknown) => void };
+      }).getOrCreateCoordinatorSync();
+      coord.registerExternalGroup({
+        sessionGroupId: "grp_parity",
+        primary: { sessionId: "orch_parity", backendType: "claude" },
+        observer: { sessionId: "obs_parity", backendType: "codex" },
+        status: "active",
+        createdAt: Date.now(),
+      });
+
+      // Path 1 — live push: emit the bus event, capture broadcastToGroup args.
+      companionBus.emit("group:created", {
+        sessionGroupId: "grp_parity",
+        primarySessionId: "orch_parity",
+        observerSessionId: "obs_parity",
+      });
+      const pushCalls = vi.mocked(deps.wsBridge.broadcastToGroup).mock.calls;
+      const pushMsg = pushCalls.find((c: unknown[]) => (c[1] as { sessionGroupId?: string }).sessionGroupId === "grp_parity")?.[1] as Record<string, unknown> | undefined;
+      expect(pushMsg).toBeDefined();
+
+      // Path 2 — REST bootstrap.
+      const boot = orchestrator.getAllGroupsForBootstrap().find((g) => g.sessionGroupId === "grp_parity");
+      expect(boot).toBeDefined();
+
+      // Shared field parity — the five fields produced by the helper
+      // MUST be byte-identical. `type` is push-only ("group_created"),
+      // so it's excluded from the comparison.
+      for (const field of ["sessionGroupId", "primarySessionId", "observerSessionId", "pairing", "status", "wakeTimeoutMs"] as const) {
+        expect(boot![field]).toEqual(pushMsg![field]);
+      }
     });
   });
 });

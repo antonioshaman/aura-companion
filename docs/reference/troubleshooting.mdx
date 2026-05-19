@@ -29,7 +29,7 @@ which codex
 
 ```bash
 lsof -i :3456
-the-companion --port 8080
+aura-companion --port 8080
 ```
 
 ## Authentication errors
@@ -45,7 +45,7 @@ cd web && bun run generate-token --force
 Or set explicitly:
 
 ```bash
-COMPANION_AUTH_TOKEN="my-token" the-companion
+COMPANION_AUTH_TOKEN="my-token" aura-companion
 ```
 
 ## CLI disconnects immediately
@@ -57,7 +57,7 @@ COMPANION_AUTH_TOKEN="my-token" the-companion
 - Working directory doesn't exist
 - Incompatible CLI version
 
-Check server logs: `the-companion logs`
+Check server logs: `aura-companion logs`
 
 ## Docker not detected
 
@@ -105,7 +105,7 @@ Check server logs: `the-companion logs`
 - Check that the CLI is still installed and on `PATH`
 - Verify your authentication is still valid
 - Check that the working directory still exists
-- View server logs for relaunch errors: `the-companion logs`
+- View server logs for relaunch errors: `aura-companion logs`
 
 ## Browser WebSocket not connecting
 
@@ -122,7 +122,7 @@ Check server logs: `the-companion logs`
 When running as a background service:
 
 ```bash
-the-companion logs
+aura-companion logs
 ```
 
 When running in foreground, logs print to stdout. Check the session files directly at `$TMPDIR/vibe-sessions/` for raw state inspection.
@@ -173,7 +173,7 @@ sed -n '5p' ~/.companion/recordings/SESSION_*.jsonl | python3 -m json.tool
 Recording is enabled by default. Disable it with:
 
 ```bash
-COMPANION_RECORD=0 the-companion
+COMPANION_RECORD=0 aura-companion
 ```
 
 ### Per-session control

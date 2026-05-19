@@ -444,6 +444,62 @@ export function createRoutes(
     });
   });
 
+  // ─── Council Mode — REST bootstrap of group findings ──────────────────────
+  //
+  // Closes `feedback_aura_observer_panel_no_rest_bootstrap` — historically
+  // the browser's ObserverPanel populated findings EXCLUSIVELY from live
+  // `group:review` WS events. A tab connecting / reloading AFTER the event
+  // had no way to discover the findings — UI stuck on "Awaiting first
+  // checkpoint" even with review files on disk.
+  //
+  // This route re-reads all review files for the group, runs the same
+  // grounding validation the WS path applies, and returns hydrated
+  // `BrowserObserverFinding[]` with deterministic ids — so REST-bootstrapped
+  // findings dedup against WS-arrived findings by id (no double-render).
+  //
+  // Returns 404 when the group is unknown (already archived OR never
+  // existed). Empty findings + reviewCount=0 is a legitimate state for a
+  // pair that hasn't produced reviews yet.
+  api.get("/groups/:groupId/findings", async (c) => {
+    const groupId = c.req.param("groupId");
+    if (!groupId || typeof groupId !== "string" || groupId.length === 0) {
+      return respondError(c, 400, "bad_request", {
+        module: "council.findings",
+        detail: { reason: "groupId required" },
+      });
+    }
+    const result = await orchestrator.getGroupReviewsForBootstrap(groupId);
+    if (!result) {
+      return respondError(c, 404, "not_found", {
+        module: "council.findings",
+        detail: { groupId, reason: "group not known to orchestrator" },
+      });
+    }
+    return c.json(result);
+  });
+
+  // ─── Council Mode — REST bootstrap of group records ──────────────────────
+  //
+  // Closes `BUG-council-mode-group-rest-bootstrap-gap.md` (PR #68). The
+  // browser's `groupBySessionId` map is populated EXCLUSIVELY by the live
+  // `group:created` push, so a tab reloading after pair creation lands
+  // without the Sidebar ☼/☽ glyph + role suffix and without ObserverPanel
+  // pair context.
+  //
+  // This route snapshots every live group the orchestrator's coordinator
+  // currently tracks, in the same wire shape (via `buildBrowserGroupRecord`)
+  // that the live push uses. Archived groups are filtered server-side
+  // (visibility policy at the orchestrator boundary). Empty array when no
+  // Council Mode pairs are alive — a legitimate state at server cold-start.
+  //
+  // Symmetric to `GET /api/groups/:groupId/findings` above (PR #61's
+  // ObserverPanel bootstrap), which solved the same class of problem for
+  // findings.
+  api.get("/groups", (c) => {
+    const groups = orchestrator.getAllGroupsForBootstrap();
+    return c.json({ groups });
+  });
+
   api.get("/sessions", (c) => {
     const sessions = launcher.listSessions();
     const names = sessionNames.getAllNames();

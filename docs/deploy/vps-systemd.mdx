@@ -1,0 +1,141 @@
+---
+title: Deploy with systemd on a VPS
+description: Minimal systemd unit for running Aura Companion on a public-IP Linux server
+---
+
+# Deploy with systemd on a VPS
+
+This guide covers the simplest production setup: one Linux VPS, public IP, systemd-managed Aura Companion, no Tailscale required. For a Tailscale-fronted private-network recipe, see [Deploy on a Cloud VM](/deploy/cloud-vm).
+
+## What you get
+
+- Aura Companion running as a non-root systemd service
+- Auto-restart on crash and on reboot
+- Logs in the system journal (`journalctl -u aura-companion`)
+- Restarts that don't kill long-lived agent subprocesses (they reconnect)
+
+## Prerequisites
+
+- A Linux VPS (Ubuntu 24.04 LTS recommended) with root or sudo access
+- A public IP or stable hostname the browser can reach
+- Bun (`curl -fsSL https://bun.sh/install | bash`)
+- Claude Code CLI and/or Codex CLI installed and authenticated (`claude` / `codex login`)
+- Git
+
+## 1. Create a service user
+
+Run Aura Companion under a dedicated unprivileged user — never as root.
+
+```bash
+sudo useradd -m -s /bin/bash auracomp
+sudo -u auracomp -i bash -c 'curl -fsSL https://bun.sh/install | bash'
+```
+
+Make sure the agent CLIs are reachable from this user — either install them globally as root (`/usr/bin/claude`, `/usr/bin/codex`), or as `auracomp` and put them on the service's `PATH`. Authenticate each CLI **as auracomp** so the credentials land in `/home/auracomp/.claude/` and `/home/auracomp/.codex/`.
+
+## 2. Clone the repo
+
+```bash
+sudo mkdir -p /srv/aura-companion
+sudo chown auracomp:auracomp /srv/aura-companion
+sudo -u auracomp git clone https://github.com/antonioshaman/aura-companion.git /srv/aura-companion
+cd /srv/aura-companion/web
+sudo -u auracomp bash -lc 'bun install && bun run build'
+```
+
+## 3. Write the systemd unit
+
+Create `/etc/systemd/system/aura-companion.service`:
+
+```ini
+[Unit]
+Description=Aura Companion
+After=network.target
+
+[Service]
+Type=simple
+User=auracomp
+Group=auracomp
+WorkingDirectory=/srv/aura-companion/web
+Environment="PATH=/home/auracomp/.bun/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="NODE_ENV=production"
+Environment="HOME=/home/auracomp"
+ExecStart=/home/auracomp/.bun/bin/bun server/index.ts
+Restart=always
+RestartSec=5
+KillMode=process
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+```
+
+`KillMode=process` is important: on restart, only the bun parent receives `SIGTERM`. The long-lived `claude` / `codex` child subprocesses survive and reconnect to the new bun over the local WebSocket — no work lost.
+
+## 4. Configure the Origin allowlist
+
+This step is required for any deploy reached over a non-loopback origin (public IP, LAN, reverse-proxy domain). Without it, the browser WS upgrade is rejected and the UI surfaces a misleading `Connection timeout` after `Session started`.
+
+Create a drop-in override at `/etc/systemd/system/aura-companion.service.d/override.conf`:
+
+```ini
+[Service]
+# Required for non-loopback access. Comma-separated for multiple origins.
+# Match scheme + host + port exactly, no trailing slash.
+Environment="COMPANION_ALLOWED_ORIGIN=http://192.168.0.1:3456"
+
+# Optional — restrict which workspace directories the UI can browse.
+Environment="COMPANION_FS_ALLOWED_BASES=/srv"
+Environment="COMPANION_FS_DEFAULT_PATH=/srv"
+```
+
+Replace `http://192.168.0.1:3456` with your actual origin. For HTTPS behind a reverse proxy, use the public URL the browser sees, for example `https://aura.example.com`.
+
+## 5. Enable and start
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now aura-companion
+sudo systemctl status aura-companion
+```
+
+Tail the logs:
+
+```bash
+sudo journalctl -u aura-companion -f
+```
+
+Open the browser to your configured origin — e.g. `http://192.168.0.1:3456`. You should see the home page.
+
+## 6. Verify the Origin allowlist works
+
+In the periodic `[diagnostics]` log line, look for `browsers=N` where `N >= 1` after you open the UI. If you stay on `browsers=0` and see `⚠ Broadcasting * to 0 browsers`, the Origin header from your browser is not in the allowlist — confirm with:
+
+```bash
+sudo systemctl show aura-companion -p Environment | tr ' ' '\n' | grep COMPANION_ALLOWED_ORIGIN
+```
+
+The value must exactly match the `scheme://host:port` your browser shows in the address bar.
+
+## 7. Updates
+
+```bash
+cd /srv/aura-companion
+sudo -u auracomp git pull
+cd web
+sudo -u auracomp bash -lc 'bun install && bun run build'
+sudo systemctl restart aura-companion
+```
+
+## Optional: reverse proxy with HTTPS
+
+For a TLS-fronted public deploy, put Caddy or nginx in front of `:3456` and set `COMPANION_ALLOWED_ORIGIN` to the public HTTPS origin instead of the IP-and-port. Don't forget to forward the `Upgrade` and `Connection` headers — WebSockets won't survive without them. Caddy does this by default; nginx requires explicit `proxy_set_header Upgrade $http_upgrade;` and `proxy_set_header Connection "upgrade";` directives on the relevant `location` block.
+
+## Troubleshooting
+
+- **`Connection timeout` after `Session started`** — Origin allowlist rejection. See step 4 + step 6.
+- **Service won't start, port 3456 already in use** — find the stale process with `sudo ss -tlnp | grep :3456` and stop it.
+- **Agent subprocess can't write to a directory** — check that `auracomp` owns or has ACL on the project directory you opened a session in.
+- **`claude` or `codex` not found at spawn time** — the systemd unit's `PATH` doesn't include them. Add their install dir to the unit's `Environment="PATH=…"`.
+- **Updates blow away your override** — keep edits in `/etc/systemd/system/aura-companion.service.d/override.conf`, never in the main `.service` file. `git pull` only touches files under `/srv/aura-companion`; systemd files are out of scope.

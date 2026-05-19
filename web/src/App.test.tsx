@@ -69,6 +69,10 @@ const { mockStoreState, mockGetState } = vi.hoisted(() => {
     setGroupStatus: vi.fn(),
     recordCheckpoint: vi.fn(),
     appendObserverReview: vi.fn(),
+    // PR #68: App.tsx bootstrap useEffect dispatches `hydrateGroups` after
+    // fetchGroups resolves. Spy-able so the end-to-end test can assert the
+    // chain `auth-flip → fetchGroups → hydrateGroups` actually fires.
+    hydrateGroups: vi.fn(),
   };
   mockGetState.mockReturnValue(mockStoreState);
   return { mockStoreState, mockGetState };
@@ -93,6 +97,9 @@ vi.mock("./api.js", () => ({
     getChangedFiles: vi.fn().mockResolvedValue({ files: [] }),
     checkForUpdate: vi.fn().mockResolvedValue(null),
     getSettings: vi.fn().mockResolvedValue({ publicUrl: "" }),
+    // PR #68: App.tsx fires fetchGroups() on auth flip. Mocked to a
+    // resolved-empty shape so authenticated tests don't hit `undefined`.
+    fetchGroups: vi.fn().mockResolvedValue({ groups: [] }),
   },
 }));
 
@@ -193,6 +200,7 @@ vi.mock("./components/AgentsPage.js", () => ({
 
 // ─── Import SUT after mocks ─────────────────────────────────────
 import App from "./App.js";
+import { api } from "./api.js";
 import { parseHash } from "./utils/routing.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────
@@ -396,6 +404,52 @@ describe("App", () => {
       render(<App />);
 
       expect(mockStoreState.setDockerUpdateDialogOpen).not.toHaveBeenCalled();
+    });
+  });
+
+  // PR #68 fix-pass — Council finding 2 (beck): the bootstrap chain
+  // `isAuthenticated → useEffect → api.fetchGroups → useStore.getState().hydrateGroups`
+  // motivated the entire PR; every individual link is covered by unit /
+  // integration tests but the bridging useEffect itself had no end-to-end
+  // assertion. Close that reachability gap so a future refactor that drops
+  // the useEffect or breaks any link of the chain trips this test.
+  describe("Council Mode group bootstrap (PR #68)", () => {
+    it("on authenticated render, calls api.fetchGroups exactly once", async () => {
+      setStoreValues({ isAuthenticated: true });
+      render(<App />);
+      await waitFor(() => {
+        expect(api.fetchGroups).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it("dispatches hydrateGroups with the resolved REST payload", async () => {
+      // Stub `api.fetchGroups` to return a single group; assert hydrateGroups
+      // receives that exact payload. This is the end-to-end wiring test —
+      // a future refactor that drops the `.then(({groups}) => hydrate(groups))`
+      // glue would trip here.
+      const wireGroups = [
+        {
+          sessionGroupId: "grp_app_test",
+          primarySessionId: "orch_app",
+          observerSessionId: "obs_app",
+          pairing: "claude+claude",
+          status: "active",
+          wakeTimeoutMs: 90_000,
+        },
+      ];
+      (api.fetchGroups as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ groups: wireGroups });
+      setStoreValues({ isAuthenticated: true });
+      render(<App />);
+      await waitFor(() => {
+        expect(mockStoreState.hydrateGroups).toHaveBeenCalledWith(wireGroups);
+      });
+    });
+
+    it("does NOT call api.fetchGroups before auth — the effect respects the auth gate", () => {
+      setStoreValues({ isAuthenticated: false });
+      render(<App />);
+      // The effect guards on isAuthenticated; before the flip it must not fire.
+      expect(api.fetchGroups).not.toHaveBeenCalled();
     });
   });
 

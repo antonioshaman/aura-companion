@@ -138,15 +138,57 @@ const idleTimerManager = new IdleTimerManager({
     if (!result.ok) return { ok: false, error: result.error };
     return { ok: true };
   },
-  sendSyntheticFrame: () => {
-    // PLAN Task 11 wires the real `synthetic: true` recorder envelope +
-    // `ClaudeAdapter.send` pass-through. Until that ships, the fire path
-    // is unreachable in production (no caller emits the
-    // `orchestrator_turn_idle` event through the state machine yet), so
-    // returning a structured failure is safe; if a future change reaches
-    // here unexpectedly, the EC-9 `idle-timer.fire-failed` log line
-    // surfaces it loudly.
-    return { ok: false, error: "synthetic-send-not-wired-task-11" };
+  sendSyntheticFrame: (sessionId, body) => {
+    // Task 11.8 wiring — replaces the prior stub
+    // `{ok:false, error:"synthetic-send-not-wired-task-11"}` with the
+    // real bridge call. The bridge resolves the orchestrator-half adapter
+    // and routes through `sendOrchestratorSyntheticFrame` (recorder
+    // origin `server:auto-proceed`).
+    const outcome = wsBridge.sendOrchestratorSyntheticFrame(sessionId, body);
+    if (outcome.kind === "sent") return { ok: true };
+    // CR-4 (council review 2026-05-15-0336 finding #4) — exhaustive
+    // switch + `never` tripwire. The previous shape (cascade if/else
+    // with terminal fall-through to `outcome.kind`) silently swallowed
+    // any future BridgeObserverWakeOutcome variant as a bare kind
+    // string. Sister consumer at `session-orchestrator.ts:1808` already
+    // uses this discipline; the auto-proceed path here had drifted off
+    // it. When PR #52's outbound FIFO lands and adds `{kind:"queued"}`
+    // (or any future variant), the typecheck breaks here for human
+    // attention instead of stringifying. Per EC-15 (codified in
+    // conventions.md from this review).
+    let errorDetail: string;
+    switch (outcome.kind) {
+      case "session_unknown":
+        errorDetail = "session_unknown";
+        break;
+      case "adapter_missing":
+        errorDetail = "adapter_missing";
+        break;
+      case "unsupported_backend":
+        errorDetail = "unsupported_backend";
+        break;
+      case "socket_disconnected":
+        errorDetail = "socket_disconnected";
+        break;
+      case "busy":
+        errorDetail = "busy";
+        break;
+      case "backpressure":
+        errorDetail = `backpressure(buffered=${outcome.bufferedAmount})`;
+        break;
+      case "failed":
+        errorDetail = `failed(${outcome.error})`;
+        break;
+      default: {
+        // Exhaustiveness tripwire — if BridgeObserverWakeOutcome widens
+        // with a new variant and this switch isn't updated, the next
+        // line fails to compile.
+        const _exhaustive: never = outcome;
+        void _exhaustive;
+        errorDetail = "unknown";
+      }
+    }
+    return { ok: false, error: errorDetail };
   },
   logEvent: (entry) => {
     appLog.info("idle-timer-manager", entry.event, entry as unknown as Record<string, unknown>);
@@ -154,6 +196,15 @@ const idleTimerManager = new IdleTimerManager({
 });
 
 orchestrator.setIdleTimerManager(idleTimerManager);
+// Task 11.7 — narrow-surface late-injection: the bridge needs to know
+// whether the in-flight turn is synthetic so its CLI-activity callbacks
+// can skip the idle-kill clock update. Mirrors the orchestrator's
+// mutual-cycle pattern (manager constructed after bridge + orchestrator,
+// then injected back).
+wsBridge.setIdleTimerProbe({
+  isSyntheticTurnInFlight: (sid) => idleTimerManager.isSyntheticTurnInFlight(sid),
+  noteTerminalResultFrame: (sid) => idleTimerManager.noteTerminalResultFrame(sid),
+});
 
 // ── Cloud relay connection (for receiving webhooks behind a firewall) ────────
 // The relay forwards platform webhooks (e.g. GitHub, Slack) to the Companion

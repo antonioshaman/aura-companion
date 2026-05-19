@@ -12,6 +12,7 @@
 import { randomUUID } from "node:crypto";
 import type { ServerWebSocket } from "bun";
 import type { IBackendAdapter } from "./backend-adapter.js";
+import type { IdleTimerProbe } from "./idle-timer-manager.js";
 import type {
   BrowserIncomingMessage,
   BrowserOutgoingMessage,
@@ -48,6 +49,7 @@ import { parseNDJSON, isDuplicateCLIMessage } from "./ws-bridge-cli-ingest.js";
 import type { CLIDedupState } from "./ws-bridge-cli-ingest.js";
 import { reportProtocolDrift } from "./protocol-monitor.js";
 import { companionBus } from "./event-bus.js";
+import { isToolUseDeniedForSynthetic, denialMessageForSynthetic } from "./auto-proceed-permissions.js";
 
 // --- Constants ----------------------------------------------------------------
 
@@ -138,6 +140,18 @@ export class ClaudeAdapter implements IBackendAdapter {
 
   // Callback to update session.lastCliActivityTs from the bridge
   private onActivityUpdate: (() => void) | null;
+
+  // Task 11.8 — narrow probe into IdleTimerManager. The adapter uses it
+  // for two synchronous decisions:
+  //   1. `can_use_tool` denylist gate — when an auto-proceed synthetic
+  //      turn is in flight, dangerous tools (`Bash:git push`, network
+  //      operations, etc.) are denied at the adapter without ever
+  //      surfacing a permission UI to the user.
+  //   2. `result`-frame terminator — clears the pending-synthetic-turn
+  //      sticky token so the next idle re-armament starts clean.
+  // Null in unit tests that don't exercise auto-proceed (default-safe:
+  // gate falls open, terminator no-ops).
+  private idleTimerProbe: IdleTimerProbe | null;
 
   private protocolDriftSeen = new Set<string>();
   private parseErrorSeen = new Set<string>();
@@ -235,11 +249,13 @@ export class ClaudeAdapter implements IBackendAdapter {
     opts?: {
       recorder?: RecorderManager | null;
       onActivityUpdate?: () => void;
+      idleTimerProbe?: IdleTimerProbe | null;
     },
   ) {
     this.sessionId = sessionId;
     this.recorder = opts?.recorder ?? null;
     this.onActivityUpdate = opts?.onActivityUpdate ?? null;
+    this.idleTimerProbe = opts?.idleTimerProbe ?? null;
   }
 
   // -- WebSocket lifecycle ----------------------------------------------------
@@ -292,6 +308,14 @@ export class ClaudeAdapter implements IBackendAdapter {
     // Mirror reset for the orchestrator-half. See `observerTurnState`
     // comment immediately above; same socket-bound semantics.
     this.orchestratorTurnState = { kind: "awaiting-input", blockedByStop: false };
+    // Council Review #13 — mid-flap cleanup: clear pendingControlRequests
+    // so unresolved Promise resolvers from the now-dead socket don't leak
+    // into the next attach. `disconnect()` already clears this (line 283);
+    // detachWebSocket is the WS-close-event path that bypassed it. Without
+    // this, a flap with in-flight control requests can wedge memory plus
+    // leave the next attach's caller waiting on a resolver that will
+    // never fire.
+    this.pendingControlRequests.clear();
     this.disconnectCb?.();
   }
 
@@ -891,6 +915,14 @@ export class ClaudeAdapter implements IBackendAdapter {
         sessionId: this.sessionId,
         blockedByStop: false,
       });
+      // Task 11.8 — clear the pending-synthetic-turn sticky token on
+      // the happy-path turn-completion edge. `noteTerminalResultFrame`
+      // is idempotent on never-armed sessions, so calling it for every
+      // result-frame is safe (the manager owns the predicate). Without
+      // this, a successful synthetic turn would leave the sticky token
+      // set forever, and the next can_use_tool check would still treat
+      // the session as auto-proceed-driven.
+      this.idleTimerProbe?.noteTerminalResultFrame(this.sessionId);
     }
     this.browserMessageCb?.({
       type: "result",
@@ -910,6 +942,49 @@ export class ClaudeAdapter implements IBackendAdapter {
 
   private handleControlRequest(msg: CLIControlRequestMessage): void {
     if (msg.request.subtype === "can_use_tool") {
+      // Task 11.8 — auto-proceed denylist gate. When a synthetic turn is
+      // in flight and the requested tool is in the denylist (Bash:git push,
+      // git commit, gh pr create, gh pr merge — publish-to-others ops),
+      // respond directly with `behavior: "deny"` and do NOT surface the
+      // permission request to the user's browser. This prevents an
+      // unattended auto-proceed loop from triggering publish operations
+      // that would have required explicit user approval.
+      //
+      // CR-1 fix (fail-CLOSED on probe-null): the previous predicate
+      // `this.idleTimerProbe?.isSyntheticTurnInFlight(...)` optional-
+      // chained to `undefined` when the probe was null and the entire
+      // denylist branch was skipped — fail-OPEN. Three council reviewers
+      // (Willison × Hunt × Subprocess) converged on the same DI-ordering
+      // risk. The fix: if the probe is null but the tool itself is in
+      // the denylist, deny REGARDLESS of in-flight state (defence-in-
+      // depth over availability — the synthetic-turn case is unattended
+      // and a malformed/missing probe should not auto-allow). Per
+      // `feedback_multi_expert_convergence_promotion` this is structural
+      // truth, not paranoia.
+      //
+      // Honest scope: the denylist is a defence-in-depth string-match
+      // filter and CANNOT catch shell-escapes (`bash -c '...'`, command
+      // substitution, chained operators), nor non-string tool_name from
+      // protocol drift (covered separately in auto-proceed-permissions.ts).
+      const toolDenylisted = isToolUseDeniedForSynthetic(msg.request.tool_name, msg.request.input);
+      const probeReportsInFlight = this.idleTimerProbe?.isSyntheticTurnInFlight(this.sessionId);
+      const probeMissing = this.idleTimerProbe === null;
+      if (toolDenylisted && (probeReportsInFlight || probeMissing)) {
+        const denyNdjson = JSON.stringify({
+          type: "control_response",
+          response: {
+            subtype: "success",
+            request_id: msg.request_id,
+            response: {
+              behavior: "deny",
+              message: denialMessageForSynthetic(msg.request.tool_name, msg.request.input),
+            },
+          },
+        });
+        this.sendToBackend(denyNdjson);
+        return;
+      }
+
       const perm: PermissionRequest = {
         request_id: msg.request_id,
         tool_name: msg.request.tool_name,
@@ -1104,6 +1179,87 @@ export class ClaudeAdapter implements IBackendAdapter {
    * browser-side path also passes `""` by default. The observer's CLI
    * binds session via socket identity, not via the field.
    */
+  /**
+   * Task 11.8 — auto-proceed synthetic frame send. Mirror of
+   * {@link sendUserFrameFromServer} (observer-wake path) but addressed
+   * to the ORCHESTRATOR half, with recorder origin `server:auto-proceed`
+   * so replays can distinguish auto-proceed-driven turns from
+   * council-wake-driven ones and from browser-relayed user frames.
+   *
+   * Honest scope: this is a direct send, not routed through an outbound
+   * FIFO queue. PR #52 (Task 11.1+11.2) adds `enqueueOutboundFrame` with
+   * kind-aware overflow policy; once merged, this method should route
+   * through it (kind: "synthetic"). Until then, behaviour matches
+   * `sendUserFrameFromServer` (transport + backpressure gates only).
+   *
+   * The gate stack does NOT consult observer turn-state — synthetic is
+   * an orchestrator-side concern and orchestrator turn-state is the
+   * caller's responsibility (`IdleTimerManager.fire` already checks).
+   */
+  sendOrchestratorSyntheticFrame(content: string): ObserverWakeSendOutcome {
+    this.onActivityUpdate?.();
+
+    // CR-2 fix: orchestrator turn-state gate. The previous shape
+    // explicitly handwaved the check to the caller (IdleTimerManager.fire)
+    // running in a different stack — a TOCTOU window where a real user
+    // could flip orchestratorTurnState to `in-flight` via
+    // handleOutgoingUserMessage between the manager's read and this
+    // adapter's send. The CLI would then have two `user` frames pending
+    // against one orchestrator slot; the second result-frame to arrive
+    // would fire the in-flight → awaiting-input transition prematurely,
+    // clear the synthetic sticky token, and the genuine user's later
+    // result would find state already `awaiting-input` and silently
+    // drop both the bus event AND cleanup. Carmack: the check and the
+    // act must be the same act. Mirrors `sendUserFrameFromServer` Gate 1.
+    if (this.orchestratorTurnState.kind === "in-flight") {
+      return { kind: "busy" };
+    }
+
+    if (!this.cliSocket) {
+      return { kind: "socket_disconnected" };
+    }
+    if (this.cliSocket.readyState !== 1) {
+      return { kind: "socket_disconnected" };
+    }
+
+    const buffered = this.cliSocket.getBufferedAmount();
+    if (buffered > OBSERVER_WAKE_BACKPRESSURE_THRESHOLD_BYTES) {
+      return { kind: "backpressure", bufferedAmount: buffered };
+    }
+
+    const frame = JSON.stringify({
+      type: "user",
+      message: { role: "user", content: [{ type: "text", text: content }] },
+      parent_tool_use_id: null,
+      session_id: "",
+    });
+    if (frame.includes("\n")) {
+      return {
+        kind: "failed",
+        error: "NDJSON line-discipline violated: frame contains embedded newline",
+      };
+    }
+
+    try {
+      // Record BEFORE send so a crash-during-send leaves a forensic
+      // trail. `origin: "server:auto-proceed"` distinguishes this from
+      // browser-relayed user frames AND from council-wake frames in
+      // replay — see RecorderManager's RecordingOrigin union.
+      this.recorder?.record(
+        this.sessionId, "out", frame, "cli", "claude", "", "server:auto-proceed",
+      );
+      this.cliSocket.send(frame + "\n");
+    } catch (err) {
+      return {
+        kind: "failed",
+        error: err instanceof Error ? err.message : String(err),
+      };
+    }
+
+    this.orchestratorTurnState = { kind: "in-flight" };
+    return { kind: "sent" };
+  }
+
   sendUserFrameFromServer(content: string): ObserverWakeSendOutcome {
     // Council Review 2026-05-13 Subprocess #15: register idle-kill
     // activity unconditionally, BEFORE the gates. A wake-dispatch

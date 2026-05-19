@@ -657,4 +657,60 @@ describe("SessionItem", () => {
     // And the chip suppression still applies.
     expect(screen.queryByTestId("council-session-badge")).not.toBeInTheDocument();
   });
+
+  // --- Council role decoration (2026-05-15 Item 17) ---
+  // ☼ orchestrator / ☽ observer glyph + " · {role}" suffix. The glyph is
+  // aria-hidden; the suffix is the accessible text so screen readers don't
+  // double-announce. Tests pin both the visible string and the a11y shape.
+
+  it("renders the ☼ glyph and ' · orchestrator' suffix when councilRole is orchestrator", () => {
+    render(<SessionItem {...buildProps({ councilRole: "orchestrator" })} />);
+    const glyph = screen.getByTestId("council-role-glyph");
+    expect(glyph.textContent).toBe("☼");
+    expect(glyph).toHaveAttribute("aria-hidden", "true");
+    const suffix = screen.getByTestId("council-role-suffix");
+    expect(suffix.textContent).toBe(" · orchestrator");
+  });
+
+  it("renders the ☽ glyph and ' · observer' suffix when councilRole is observer", () => {
+    render(<SessionItem {...buildProps({ councilRole: "observer" })} />);
+    const glyph = screen.getByTestId("council-role-glyph");
+    expect(glyph.textContent).toBe("☽");
+    expect(glyph).toHaveAttribute("aria-hidden", "true");
+    const suffix = screen.getByTestId("council-role-suffix");
+    expect(suffix.textContent).toBe(" · observer");
+  });
+
+  it("does NOT render the glyph or suffix when councilRole is undefined (solo session)", () => {
+    // Solo (non-council) sessions must not show role decoration — the data
+    // shape allows undefined and the renderer must guard against it.
+    render(<SessionItem {...buildProps()} />);
+    expect(screen.queryByTestId("council-role-glyph")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("council-role-suffix")).not.toBeInTheDocument();
+  });
+
+  it("passes axe a11y checks with the role glyph + suffix rendered (orchestrator)", async () => {
+    // The glyph carries no semantic info (aria-hidden); accessible name is
+    // the suffix text. axe must not flag the decoration as inaccessible.
+    const { axe } = await import("vitest-axe");
+    const { container } = render(<SessionItem {...buildProps({ councilRole: "orchestrator" })} />);
+    const results = await axe(container);
+    expect(results).toHaveNoViolations();
+  });
+
+  it("passes axe a11y checks with the role glyph + suffix rendered (observer)", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(<SessionItem {...buildProps({ councilRole: "observer" })} />);
+    const results = await axe(container);
+    expect(results).toHaveNoViolations();
+  });
+
+  it("preserves rename interaction (double-click) when council role is rendered", () => {
+    // Interactive behaviour regression: adding decoration around the label
+    // span must not break the rename-on-doubleclick contract Sidebar relies on.
+    const onStartRename = vi.fn();
+    render(<SessionItem {...buildProps({ councilRole: "orchestrator", onStartRename })} />);
+    fireEvent.doubleClick(screen.getByRole("button", { name: /claude-sonnet-4-6/i }));
+    expect(onStartRename).toHaveBeenCalledWith("session-1", "claude-sonnet-4-6");
+  });
 });

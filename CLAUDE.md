@@ -87,7 +87,7 @@ Browser (React) ←→ WebSocket ←→ Hono Server (Bun) ←→ WebSocket (NDJS
     - `atomic-write.ts` — `writeAtomicJson` (tmp+rename+fsync) for council artifact emission.
     - `checkpoint-watcher.ts` / `review-watcher.ts` — Filesystem watchers on `.council/checkpoints/` and `.council/reviews/`. Atomic-write contract + debounce + LRU dedup + `onDropped("superseded")` log for EC-4 compliance.
     - `council-types.ts` — `CheckpointPayload` + `ObserverReviewPayload` schemas. Both writer and reader live in one file (AP-3). `isBoundedToken` / `isBoundedText` / `isIsoTimestamp` validators per semantic category.
-    - `observer-prompt.ts` — Loads `.council/prompts/observer-system.md` at observer spawn; pure `buildObserverContextManifest` partitions `(current, previous)` checkpoints into `{delta, carried, dropped}` so observer reads delta-not-cumulative.
+    - `observer-prompt.ts` — Loads `.council/prompts/observer-system.md` at observer spawn via `resolveObserverSystemPrompt(workspacePath)`. When the workspace file is absent (ENOENT only — EACCES/EISDIR/ELOOP still throw), falls back to the BUNDLED artifact in `observer-prompt-bundled.ts` (auto-generated from the repo's canonical `.council/prompts/observer-system.md` by `scripts/build-observer-prompt-bundle.ts`; CI canary `bun run build-observer-prompt-bundle && git diff --exit-code` enforces sync). Provenance is stamped on `SdkSessionInfo.observerPromptSource: "workspace" | "bundled"` and surfaced via a WARN log `council.observer-prompt.bundled-fallback` when fallback fires. Pure `buildObserverContextManifest` partitions `(current, previous)` checkpoints into `{delta, carried, dropped}` so observer reads delta-not-cumulative.
     - `observer-attribution.ts` — `wrapObserverFindingForInjection` (structured envelope + text-form for chat); `formatObserverInvocationLog` (EC-9 structured log entry with `promptSha256` + STOP counts + latency).
     - `observer-grounding.ts` — STOP-only grounding gate: STOPs whose `evidence_path` isn't in modifiedFiles OR missing on disk → downgrade to NOTE. EC-7 idiom: integrated wrapper does realpath + bounds-check; pure `checkStopGrounding` takes injected predicate.
     - `observer-permissions.ts` — Observer tool allow/deny lists. Module-load canary asserts disjoint. Applied at spawn via `applyCouncilObserverSpawnConfig`.
@@ -156,7 +156,7 @@ Each entry captures:
 A user-opt-in flag on the New Session form (`councilMode: "council"` + `councilPairing: "claude+claude" | "claude+codex"`) spawns two linked CLI sessions sharing one workspace — an **orchestrator** that the user drives via the main chat surface, and an **observer** that wakes on filesystem checkpoint sentinels, reads a manifest of paths, emits a structured review file, and the server fans grounded findings back into the orchestrator's UI as `BlockerBanner` + side-panel `ObserverPanel`.
 
 **Cross-process protocol** lives entirely on the filesystem under `<workspace>/.council/`:
-- `.council/prompts/observer-system.md` — versioned (`<!-- observer-system-prompt v1 -->`) CLI-agnostic role definition. Loaded at observer spawn time; hash stamped on `SdkSessionInfo.observerPromptSha256`.
+- `.council/prompts/observer-system.md` — versioned (`<!-- observer-system-prompt v1 -->`) CLI-agnostic role definition. Loaded at observer spawn time; hash stamped on `SdkSessionInfo.observerPromptSha256`. **OPTIONAL per-workspace override** — if absent, the bundled fallback (`observer-prompt-bundled.ts`, generated from this repo's canonical artifact) is used and `SdkSessionInfo.observerPromptSource` reflects `"bundled"` vs `"workspace"`. Malformed-but-present STILL throws — the explicit-intent contract is preserved at the loader layer.
 - `.council/checkpoints/<phase>.json` — written by the orchestrator via `writeAtomicJson` after each Carmack-Council phase. Schema: `CheckpointPayload` in `council-types.ts`. Producer-side REST: `POST /api/sessions/:id/council/checkpoint` with the JSON payload as the body — server validates via `parseCheckpointPayload`, cross-checks `session_group_id` against the caller's actual group (orchestrator-half only), then atomically writes into the workspace's `.council/checkpoints/` directory.
 - `.council/reviews/<phase>-<provider>-observer.md` — written by the observer (content is JSON despite `.md` extension). Filename MUST carry the `<provider>` segment (`claude` | `codex`) so the `claude+codex` pairing produces two distinct review files per checkpoint rather than colliding under the watcher's debounce window.
 
@@ -293,6 +293,16 @@ The knowledge base grows organically. Over time:
 - Low-confidence entries that get re-confirmed → get bumped to high confidence
 - Stale entries (fixed bugs, reversed decisions) → get pruned during `/self-reflect`
 - Cross-cutting patterns → may spawn new skills
+
+## Production deployment
+
+For self-hosting on a Linux VPS or any non-loopback origin, two things matter beyond the dev setup:
+
+1. **Run under a systemd unit with `KillMode=process`** — see [`docs/deploy/vps-systemd.mdx`](docs/deploy/vps-systemd.mdx) for a minimal recipe. `KillMode=process` ensures that when the bun parent is restarted, the long-lived `claude` / `codex` child subprocesses survive and reconnect over the local WebSocket; without it every restart kills in-flight agent work.
+
+2. **Set `COMPANION_ALLOWED_ORIGIN`** to the exact origin (`scheme://host:port`, no trailing slash) the browser will use. Localhost dev origins (`http://localhost:5173`, `http://localhost:5174`) are always allowed; everything else — public IP, LAN host, tailscale `*.ts.net`, reverse-proxy domain — must appear in the comma-separated value, or the WS upgrade is rejected and the UI surfaces `Connection timeout` after `Session started`. The gate is enforced in `web/server/middleware/origin-allowlist.ts` and applied to `/ws/browser`, `/ws/terminal`, `/ws/novnc`. CLI subprocess WS (`/ws/cli/:id`) is exempt because it always comes from loopback.
+
+If a user reports timeouts at the last step of session creation while earlier steps (`Environment resolved` / `Fetch complete` / `Session started`) report green, the first canary is the producer-side fanout count in periodic `[diagnostics]` log lines: `browsers=0` with active sessions means the Origin allowlist is rejecting the UI, not a subprocess problem.
 
 ## Cursor Cloud specific instructions
 

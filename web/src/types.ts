@@ -149,6 +149,20 @@ export interface GroupRecord {
    * with an empty/omitted superseded list.
    */
   recentlySupersededCheckpointIds?: string[];
+
+  /**
+   * Bidirectional pipeline Story 4.1 — server-authoritative convergence
+   * state. The frontend NEVER derives these locally; the server publishes
+   * them via `group_convergence` wire frames. Absent until the first
+   * review processed.
+   *
+   *   - `cycleNumber`           clean-cycle counter (0..threshold)
+   *   - `convergenceThreshold`  pair-level threshold (default 3, range 2-5)
+   *   - `convergenceState`      `"in-progress" | "converged" | "revoked"`
+   */
+  cycleNumber?: number;
+  convergenceThreshold?: number;
+  convergenceState?: "in-progress" | "converged" | "revoked";
 }
 
 /**
@@ -189,6 +203,8 @@ export type ObserverPanelStateName =
   | "reviewing"
   | "reviewing-stalled"
   | "queued-dropped"
+  | "cycle-progress"
+  | "converged"
   | "blocker-found"
   | "degraded";
 
@@ -212,6 +228,20 @@ export type ObserverPanelState =
   | { name: "reviewing"; reviewingSince: number; phase: string; expiresAt: number }
   | { name: "reviewing-stalled"; reviewingSince: number; phase: string; expiredAt: number }
   | { name: "queued-dropped"; lastCheckpointAt: number; lastPhase: string; droppedCheckpointIds: readonly string[] }
+  /**
+   * Bidirectional pipeline Story 4.1 — clean-cycle progress.
+   * Server-authoritative: `cycleNumber` + `threshold` arrive on each
+   * `group_convergence` frame; the pill renders `🔄 Cycle N/T`. Slots
+   * BELOW `blocker-found`/`reconnecting`/`reviewing` so a live STOP
+   * or active review still wins priority.
+   */
+  | { name: "cycle-progress"; cycleNumber: number; threshold: number }
+  /**
+   * Bidirectional pipeline Story 4.1 — pair has converged. Pill renders
+   * `✅ Converged — ready to ship` (emerald-500 token). Slots BELOW
+   * `degraded` so a half going dead immediately re-asserts the warning.
+   */
+  | { name: "converged"; cycleNumber: number; threshold: number }
   | { name: "blocker-found"; unresolvedStops: number; lastBlockerAt: number }
   | { name: "degraded"; deadRole: SessionRole };
 
