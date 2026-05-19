@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.5.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.4.0...aura-companion-v1.5.0) (2026-05-19)
+
+
+### Features
+
+* **council:** Phase 3α + 3α' — v2 catalog enrichment + 4-spec A/B acceptance test ([#65](https://github.com/antonioshaman/aura-companion/issues/65)) ([d2324e9](https://github.com/antonioshaman/aura-companion/commit/d2324e9bb4cbfbb502733c2440cf502d38b42078))
+* **council:** REST bootstrap for Sidebar glyph after browser reload (PR [#68](https://github.com/antonioshaman/aura-companion/issues/68)) ([#68](https://github.com/antonioshaman/aura-companion/issues/68)) ([20291d7](https://github.com/antonioshaman/aura-companion/commit/20291d75d003b5889ee8489eb76ba43c0fde7ec5))
+
 ## [1.4.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.3.2...aura-companion-v1.4.0) (2026-05-15)
 
 
