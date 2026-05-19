@@ -16,6 +16,7 @@ import { ClaudeMdEditor } from "./ClaudeMdEditor.js";
 import { ChatView } from "./ChatView.js";
 import { EmptyChatState } from "./chat/EmptyChatState.js";
 import { AssistantAvatar } from "./chat/AssistantAvatar.js";
+import { ResumeIndicator } from "./chat/ResumeIndicator.js";
 import { api } from "../api.js";
 import type {
   PermissionRequest,
@@ -1149,6 +1150,90 @@ export function Playground() {
                   onLoadResumeHistory={() => {}}
                 />
               </div>
+            </Card>
+          </div>
+        </Section>
+
+        {/* ─── Resume Indicator (extracted from MessageFeed) ─────── */}
+        <Section
+          title="Resume Indicator"
+          description="Banner that lives at the top of the message feed when the session was started by resuming/forking an existing Claude thread. Two mutually-exclusive variants — CTA card before any Load, compact progress text after."
+        >
+          <div className="space-y-4 max-w-3xl">
+            <Card label="CTA — idle (Resuming)">
+              <ResumeIndicator
+                canLoadResumeHistory={true}
+                resumeHistoryLoaded={false}
+                resumeModeLabel="Resuming"
+                resumeSourceSessionId="abc12345-9c80-4f5e-91b3-deadbeef0000"
+                sdkSessionCwd="/Users/skolte/Dev/aura-companion"
+                resumeHistoryLoading={false}
+                resumeHistoryError=""
+                resumeHistoryHasMore={false}
+                onLoadResumeHistory={() => {}}
+              />
+            </Card>
+            <Card label="CTA — loading (Forking)">
+              <ResumeIndicator
+                canLoadResumeHistory={true}
+                resumeHistoryLoaded={false}
+                resumeModeLabel="Forking"
+                resumeSourceSessionId="abc12345-9c80-4f5e-91b3-deadbeef0000"
+                sdkSessionCwd="/Users/skolte/Dev/aura-companion"
+                resumeHistoryLoading={true}
+                resumeHistoryError=""
+                resumeHistoryHasMore={false}
+                onLoadResumeHistory={() => {}}
+              />
+            </Card>
+            <Card label="CTA — error surfaced (role=alert)">
+              <ResumeIndicator
+                canLoadResumeHistory={true}
+                resumeHistoryLoaded={false}
+                resumeModeLabel="Resuming"
+                resumeSourceSessionId="abc12345-9c80-4f5e-91b3-deadbeef0000"
+                sdkSessionCwd="/Users/skolte/Dev/aura-companion"
+                resumeHistoryLoading={false}
+                resumeHistoryError="Network failed mid-fetch — try again."
+                resumeHistoryHasMore={false}
+                onLoadResumeHistory={() => {}}
+              />
+            </Card>
+            <Card label="Progress — more pageable, idle">
+              <ResumeIndicator
+                canLoadResumeHistory={true}
+                resumeHistoryLoaded={true}
+                resumeModeLabel="Resuming"
+                resumeSourceSessionId="abc12345-9c80-4f5e-91b3-deadbeef0000"
+                resumeHistoryLoading={false}
+                resumeHistoryError=""
+                resumeHistoryHasMore={true}
+                onLoadResumeHistory={() => {}}
+              />
+            </Card>
+            <Card label="Progress — loading older">
+              <ResumeIndicator
+                canLoadResumeHistory={true}
+                resumeHistoryLoaded={true}
+                resumeModeLabel="Resuming"
+                resumeSourceSessionId="abc12345-9c80-4f5e-91b3-deadbeef0000"
+                resumeHistoryLoading={true}
+                resumeHistoryError=""
+                resumeHistoryHasMore={true}
+                onLoadResumeHistory={() => {}}
+              />
+            </Card>
+            <Card label="Progress — exhausted">
+              <ResumeIndicator
+                canLoadResumeHistory={true}
+                resumeHistoryLoaded={true}
+                resumeModeLabel="Resuming"
+                resumeSourceSessionId="abc12345-9c80-4f5e-91b3-deadbeef0000"
+                resumeHistoryLoading={false}
+                resumeHistoryError=""
+                resumeHistoryHasMore={false}
+                onLoadResumeHistory={() => {}}
+              />
             </Card>
           </div>
         </Section>
