@@ -3741,4 +3741,309 @@ describe("SessionOrchestrator", () => {
       expect(orchestrator.getCouncilGroupBySessionId("orphan_sid")).toBeNull();
     });
   });
+
+  // ─── getGroupReviewsForBootstrap ──────────────────────────────────────────
+  //
+  // REST bootstrap that complements the WS `group:review` live path.
+  // Browser council slice was historically populated EXCLUSIVELY from
+  // live events — a tab connecting after the event missed everything.
+  // This method walks `<cwd>/.council/reviews/*-observer.md`, runs the
+  // same grounding validation as the WS pipeline, and returns hydrated
+  // findings with deterministic ids so REST + WS dedupe cleanly.
+  describe("getGroupReviewsForBootstrap", () => {
+    function seedGroup(groupId: string, cwd: string, artifactPaths: string[] = []) {
+      const ws = orchestrator as unknown as {
+        councilWatchers: Map<string, {
+          cwd: string;
+          abort: AbortController;
+          lastCheckpoint: { sequence: number; checkpoint_id: string; phase: string; artifact_paths: string[] } | null;
+          previousCheckpoint: { sequence: number; artifact_paths: string[] } | null;
+        }>;
+        councilGroupMeta: Map<string, { primarySessionId: string; observerSessionId: string; pairing: string; createdAt: number; lastCheckpointReceivedAt: number | null }>;
+      };
+      ws.councilWatchers.set(groupId, {
+        cwd,
+        abort: new AbortController(),
+        lastCheckpoint: { sequence: 0, checkpoint_id: "chk_a", phase: "council-plan", artifact_paths: artifactPaths },
+        previousCheckpoint: null,
+      });
+      ws.councilGroupMeta.set(groupId, {
+        primarySessionId: "sess_orch",
+        observerSessionId: "sess_obs",
+        pairing: "claude+claude",
+        createdAt: Date.now(),
+        lastCheckpointReceivedAt: Date.now() - 100,
+      });
+    }
+
+    // Path 1: meta map miss — group archived or never created. Critical
+    // null-return contract for the REST authorize step in `routes.ts`.
+    it("returns null when the sessionGroupId is not in councilGroupMeta", async () => {
+      const result = await orchestrator.getGroupReviewsForBootstrap("grp_never_created");
+      expect(result).toBeNull();
+    });
+
+    // Path 2: watcher map miss (e.g. between archive sentinel and meta
+    // teardown). Still returns null — REST caller treats as 404, not as
+    // "no findings yet".
+    it("returns null when the watcher entry is gone (mid-teardown race)", async () => {
+      const ws = orchestrator as unknown as {
+        councilGroupMeta: Map<string, { primarySessionId: string; observerSessionId: string; pairing: string; createdAt: number; lastCheckpointReceivedAt: number | null }>;
+      };
+      ws.councilGroupMeta.set("grp_meta_only", {
+        primarySessionId: "p",
+        observerSessionId: "o",
+        pairing: "claude+claude",
+        createdAt: Date.now(),
+        lastCheckpointReceivedAt: null,
+      });
+      const result = await orchestrator.getGroupReviewsForBootstrap("grp_meta_only");
+      expect(result).toBeNull();
+    });
+
+    // Path 3: group is registered, but no reviews/ dir exists yet (group
+    // was just spawned, observer hasn't fired). Browser panel renders
+    // `never-checkpointed-yet`. Returns the shape, not null.
+    it("returns empty findings/downgrades when the reviews dir is absent", async () => {
+      const { mkdtempSync, rmSync, realpathSync } = require("node:fs") as typeof import("node:fs");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      const workspace = realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-bootstrap-")));
+      try {
+        seedGroup("grp_no_reviews", workspace);
+        const result = await orchestrator.getGroupReviewsForBootstrap("grp_no_reviews");
+        expect(result).toEqual({
+          sessionGroupId: "grp_no_reviews",
+          findings: [],
+          downgrades: [],
+          reviewCount: 0,
+        });
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
+    // Path 4: reviews dir exists with real files. Exercises the full
+    // walk + parseObserverReviewPayload + validateObserverFindings +
+    // deterministic ID assignment. Asserts:
+    //   - reviewCount counts only parseable files
+    //   - findings carry stable `fnd_<hex>` ids
+    //   - in-scope STOP survives grounding
+    //   - out-of-scope STOP is downgraded with reason captured in downgrades[]
+    //   - observerProvider/observerModel taken from the first parsed file
+    it("walks review files, returns hydrated findings with deterministic ids and downgrade markers", async () => {
+      const { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } = require("node:fs") as typeof import("node:fs");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      const workspace = realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-bootstrap-walk-")));
+      try {
+        mkdirSync(pathJoin(workspace, "src"), { recursive: true });
+        writeFileSync(pathJoin(workspace, "src/a.ts"), "// in-scope\n");
+        mkdirSync(pathJoin(workspace, ".council", "reviews"), { recursive: true });
+        const reviewBody = {
+          schema_version: 1,
+          checkpoint_id: "chk_a",
+          phase: "council-plan",
+          session_group_id: "grp_walk",
+          reviewed_at: "2026-01-01T00:00:00Z",
+          observer_provider: "claude",
+          observer_model: "claude-opus-4-7",
+          observer_cli_version: "1.0.0",
+          observer_wake_payload_version_echo: 1,
+          findings: [
+            { severity: "STOP", claim: "in scope", evidence_path: "src/a.ts" },
+            { severity: "STOP", claim: "out of scope", evidence_path: "src/missing.ts" },
+          ],
+        };
+        writeFileSync(
+          pathJoin(workspace, ".council", "reviews", "council-plan-claude-observer.md"),
+          JSON.stringify(reviewBody),
+        );
+        // Garbage file under the same dir — must be ignored (filename
+        // pattern is anchored). Without the pattern, a hand-edited note
+        // would crash the bootstrap walk.
+        writeFileSync(
+          pathJoin(workspace, ".council", "reviews", "stray-note.txt"),
+          "not a review",
+        );
+        seedGroup("grp_walk", workspace, ["src/a.ts"]);
+        const result = await orchestrator.getGroupReviewsForBootstrap("grp_walk");
+        expect(result).not.toBeNull();
+        expect(result!.sessionGroupId).toBe("grp_walk");
+        expect(result!.reviewCount).toBe(1);
+        expect(result!.observerProvider).toBe("claude");
+        expect(result!.observerModel).toBe("claude-opus-4-7");
+        expect(result!.findings).toHaveLength(2);
+        const inScope = result!.findings[0]!;
+        const outOfScope = result!.findings[1]!;
+        expect(inScope.id).toMatch(/^fnd_[0-9a-f]+$/);
+        expect(inScope.claim).toBe("in scope");
+        expect(inScope.wasDowngraded).toBeUndefined();
+        expect(outOfScope.id).toMatch(/^fnd_[0-9a-f]+$/);
+        expect(outOfScope.wasDowngraded).toBe(true);
+        expect(outOfScope.downgradeReason).toBeDefined();
+        expect(result!.downgrades).toHaveLength(1);
+        expect(result!.downgrades[0]!.id).toBe(outOfScope.id);
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+  });
+  describe("getAllGroupsForBootstrap", () => {
+    // Helper: seed the coordinator directly via `registerExternalGroup`
+    // so we don't have to drive the full createSession spawn pipeline
+    // (which requires mocking the launcher's full surface). Mirrors the
+    // pattern used by other council tests in this file and by the
+    // `reconcileCouncilGroups()` restart path.
+    function seedCoordGroup(gid: string, orchId: string, obsId: string, status: string = "active", observerBackend: "claude" | "codex" = "claude") {
+      const coord = (orchestrator as unknown as {
+        getOrCreateCoordinatorSync: () => {
+          registerExternalGroup: (r: unknown) => void;
+          applyEvent: (id: string, ev: { type: string; role?: string }) => unknown;
+        };
+      }).getOrCreateCoordinatorSync();
+      coord.registerExternalGroup({
+        sessionGroupId: gid,
+        primary: { sessionId: orchId, backendType: "claude" },
+        observer: { sessionId: obsId, backendType: observerBackend },
+        status: "active",
+        createdAt: Date.now(),
+      });
+      if (status === "degraded") {
+        coord.applyEvent(gid, { type: "half_died", role: "observer" });
+      }
+    }
+
+    it("returns an empty array when no coordinator has been created (no Council Mode usage)", () => {
+      // Fresh orchestrator, no createCouncilGroup invocation — coordinator
+      // is lazily constructed, so the bootstrap method must short-circuit.
+      expect(orchestrator.getAllGroupsForBootstrap()).toEqual([]);
+    });
+
+    it("returns one wire-shape record per active group, with status + pairing label", () => {
+      seedCoordGroup("grp_b1", "orch_b1", "obs_b1", "active", "claude");
+      seedCoordGroup("grp_b2", "orch_b2", "obs_b2", "active", "codex");
+      const out = orchestrator.getAllGroupsForBootstrap();
+      expect(out).toHaveLength(2);
+      // Order is not guaranteed (Map iteration order is insertion order in
+      // practice, but the wire contract does not pin it). Index by group id.
+      const byId = new Map(out.map((g) => [g.sessionGroupId, g]));
+      expect(byId.get("grp_b1")).toEqual({
+        sessionGroupId: "grp_b1",
+        primarySessionId: "orch_b1",
+        observerSessionId: "obs_b1",
+        pairing: "claude+claude",
+        status: "active",
+        wakeTimeoutMs: expect.any(Number),
+      });
+      expect(byId.get("grp_b2")).toEqual({
+        sessionGroupId: "grp_b2",
+        primarySessionId: "orch_b2",
+        observerSessionId: "obs_b2",
+        pairing: "claude+codex",
+        status: "active",
+        wakeTimeoutMs: expect.any(Number),
+      });
+    });
+
+    // Symmetry with the live `group:created` push: the panel-state deriver
+    // bounds the `reviewing` interval by `lastCheckpointAt + wakeTimeoutMs`.
+    // REST-bootstrapped groups must receive the same constant or the deriver
+    // would silently fall back to a frontend default — diverging behaviour.
+    it("populates wakeTimeoutMs with the same constant the group_created push uses", async () => {
+      const { OBSERVER_WAKE_TIMEOUT_MS } = await import("./council-types.js");
+      seedCoordGroup("grp_wt", "orch_wt", "obs_wt", "active", "claude");
+      const out = orchestrator.getAllGroupsForBootstrap();
+      expect(out[0]?.wakeTimeoutMs).toBe(OBSERVER_WAKE_TIMEOUT_MS);
+    });
+
+    // Reload during degraded pair MUST surface the true status. Without
+    // this, the panel header pill would render "active" against a dead
+    // half — the bootstrap path would silently mask the very condition
+    // the operator needs to see.
+    it("preserves degraded status across bootstrap (does not flatten to active)", () => {
+      seedCoordGroup("grp_d1", "orch_d1", "obs_d1", "degraded", "claude");
+      const out = orchestrator.getAllGroupsForBootstrap();
+      expect(out).toHaveLength(1);
+      expect(out[0]?.status).toBe("degraded");
+    });
+
+    // Archived groups are torn down — they must not appear in the Sidebar.
+    // The orchestrator filters at this boundary (the coordinator returns
+    // every record including archived; the visibility policy belongs here).
+    it("filters out archived groups from the bootstrap response", () => {
+      const coord = (orchestrator as unknown as {
+        getOrCreateCoordinatorSync: () => {
+          registerExternalGroup: (r: unknown) => void;
+          applyEvent: (id: string, ev: { type: string }) => unknown;
+        };
+      }).getOrCreateCoordinatorSync();
+      coord.registerExternalGroup({
+        sessionGroupId: "grp_arch",
+        primary: { sessionId: "orch_arch", backendType: "claude" },
+        observer: { sessionId: "obs_arch", backendType: "claude" },
+        status: "active",
+        createdAt: Date.now(),
+      });
+      coord.applyEvent("grp_arch", { type: "user_archived" });
+      // Also seed one healthy group so we can verify selective filtering,
+      // not blanket emptiness from a coordinator-wide bug.
+      seedCoordGroup("grp_live", "orch_live", "obs_live", "active", "claude");
+      const out = orchestrator.getAllGroupsForBootstrap();
+      expect(out).toHaveLength(1);
+      expect(out[0]?.sessionGroupId).toBe("grp_live");
+    });
+
+    // PR #68 PICKUP §"shared mapper" invariant. The live `group_created`
+    // push and the REST `getAllGroupsForBootstrap` snapshot MUST produce
+    // byte-identical wire fields for the same coordinator state — that is
+    // why both routes through the shared `buildBrowserGroupRecord` helper.
+    // This test exercises both paths against the same seed and asserts
+    // the five shared fields are equal field-by-field. A future refactor
+    // that re-inlines one of the producers would diverge on at least one
+    // field and trip this canary.
+    it("cross-site parity: push fanout and getAllGroupsForBootstrap emit identical wire fields for the same coordinator state", () => {
+      orchestrator.initialize();
+      // Seed the launcher's session map so the push listener can resolve
+      // backendType for the pairing label — matches the coordinator's
+      // record so the parity assertion is over the helper's output, not a
+      // launcher/coordinator divergence.
+      vi.mocked(deps.launcher.getSession).mockImplementation((id: string) => {
+        if (id === "orch_parity") return { sessionId: "orch_parity", state: "running", cwd: "/w", createdAt: 0, backendType: "claude" } as any;
+        if (id === "obs_parity") return { sessionId: "obs_parity", state: "running", cwd: "/w", createdAt: 0, backendType: "codex" } as any;
+        return undefined;
+      });
+      const coord = (orchestrator as unknown as {
+        getOrCreateCoordinatorSync: () => { registerExternalGroup: (r: unknown) => void };
+      }).getOrCreateCoordinatorSync();
+      coord.registerExternalGroup({
+        sessionGroupId: "grp_parity",
+        primary: { sessionId: "orch_parity", backendType: "claude" },
+        observer: { sessionId: "obs_parity", backendType: "codex" },
+        status: "active",
+        createdAt: Date.now(),
+      });
+
+      // Path 1 — live push: emit the bus event, capture broadcastToGroup args.
+      companionBus.emit("group:created", {
+        sessionGroupId: "grp_parity",
+        primarySessionId: "orch_parity",
+        observerSessionId: "obs_parity",
+      });
+      const pushCalls = vi.mocked(deps.wsBridge.broadcastToGroup).mock.calls;
+      const pushMsg = pushCalls.find((c: unknown[]) => (c[1] as { sessionGroupId?: string }).sessionGroupId === "grp_parity")?.[1] as Record<string, unknown> | undefined;
+      expect(pushMsg).toBeDefined();
+
+      // Path 2 — REST bootstrap.
+      const boot = orchestrator.getAllGroupsForBootstrap().find((g) => g.sessionGroupId === "grp_parity");
+      expect(boot).toBeDefined();
+
+      // Shared field parity — the five fields produced by the helper
+      // MUST be byte-identical. `type` is push-only ("group_created"),
+      // so it's excluded from the comparison.
+      for (const field of ["sessionGroupId", "primarySessionId", "observerSessionId", "pairing", "status", "wakeTimeoutMs"] as const) {
+        expect(boot![field]).toEqual(pushMsg![field]);
+      }
+    });
+  });
 });

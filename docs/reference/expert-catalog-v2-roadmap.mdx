@@ -1,11 +1,11 @@
 ---
 title: Expert Catalog v2 Roadmap
-description: Person-named expert catalog for Council Mode v2 — 14 current experts + 8 Phase 3β candidates organized as ideological-tension pairs
+description: Person-named expert catalog for Council Mode v2 — 22 experts (14 v1-carryover + 8 Phase 3β additions) seated as ideological-tension pairs
 ---
 
 # Expert Catalog v2 Roadmap
 
-This page is the canonical reference for the **v2 expert catalog** being developed for Council Mode. **v2 is in active development** on the `feat/council-v2-pipeline` branch; **v1 remains the production default** until atomic-swap promotion at the end of Phase 6 (see [council-experts-catalog-v2-expansion.md](https://github.com/antonioshaman/aura-companion/blob/main/specs/council-experts-catalog-v2-expansion.md) spec for full architecture).
+This page is the canonical reference for the **v2 expert catalog** for Council Mode. **Phase 3α/β are complete** — all 22 seats live on the `feat/council-v2-pipeline` branch with EC-34 wire-format (`paired_with` + `tension_axis`) codified. **v1 remains the production default** until atomic-swap promotion at the end of Phase 6 (see [council-experts-catalog-v2-expansion.md](https://github.com/antonioshaman/aura-companion/blob/main/specs/council-experts-catalog-v2-expansion.md) spec for full architecture).
 
 For the user-facing Council Mode guide, see [Council Mode](/guides/council-mode). For the wire protocol and state machine, see [Council Mode Architecture](/reference/council-mode-architecture).
 
@@ -18,7 +18,7 @@ For the user-facing Council Mode guide, see [Council Mode](/guides/council-mode)
 
 **v2** rebases the catalog on **real-person surnames**: each expert is an actual engineer with a published body of work whose lens we want represented. The rename is operationally driven (LLM dispatch reliability via proper-noun disambiguation; willison REC-4 in Phase 2 council plan output), but it also surfaces design intent — each name carries a recognisable philosophy you can compare against the alternative.
 
-## Current state — 14 v2 experts
+## v1-carryover layer — 14 v2 experts
 
 The Phase 2 atomic catalog refactor (closed 2026-05-16) reduced the v1 17-expert spread to 14 v2 surnames through documented merges (e.g., `subprocess` + `persistence-fs` → `ritchie`; `deploy-docker-gha` + `deploy-vps` → `hashimoto`). The 14 IDs in `~/.claude/skills/_council-experts-v2/` live as both reference docs (`references/quality-<id>.md`) and per-dispatcher prompt files (`<id>/plan.md`, `<id>/review.md`, `<id>/plan-aura.md`, `<id>/review-aura.md`).
 
@@ -41,32 +41,31 @@ The Phase 2 atomic catalog refactor (closed 2026-05-16) reduced the v1 17-expert
 
 **Carmack chair (John Carmack)** is **not a seated expert.** Carmack's philosophy (simplicity over abstraction, profiling first, anti-bloat, ruthless technical clarity) acts as the synthesis-discipline filter applied by the chair role at dispatch time, not as a voice in the council. This is intentional — the chair arbitrates between seated experts, and seating Carmack would conflate arbitration with advocacy.
 
-### Phase 3α enrichment status
+### Phase 3α enrichment — closed
 
-The Phase 3α workstream (`feat/council-v2-pipeline`, 2026-05-16) is enriching all 14 reference docs with external-source material — URLs, concepts, tone, anti-patterns — from each expert's published work. Strategy split per `specs/expert-references-enrichment-plan.md`:
+The Phase 3α workstream (`feat/council-v2-pipeline`) enriched all 14 reference docs with external-source material — URLs, concepts, tone, anti-patterns — from each expert's published work. Strategy split per `specs/expert-references-enrichment-plan.md`:
 
-- **3 append-existing** (dahl / ritchie / hashimoto): existing 406-481L baselines get `## §Z External-source enrichment` section appended.
-- **11 seed-new-file**: the remaining experts get a `quality-<id>.md` authored from scratch with §A / §B / (optional §C) structure populated from `specs/external-knowledge-enrichment-sources.md` dumps.
+- **3 append-existing** (dahl / ritchie / hashimoto): existing 406-481L baselines received `## §Z External-source enrichment` sections.
+- **11 seed-new-file**: the remaining experts received a `quality-<id>.md` authored from scratch with §A / §B / (optional §C) structure populated from `specs/external-knowledge-enrichment-sources.md` dumps.
 
-Progress as of 2026-05-16:
+All sub-phases closed:
 
 | Sub-phase | Commits | Status |
 |---|---|---|
-| **3α₁** (append-existing) | N3.01 dahl / N3.02 ritchie / N3.03 hashimoto | ✅ closed (HANDOFF `e9d7755`) |
-| **3α₂-A.1** (seed-new domain-neutral, first half) | N3.04 fowler / N3.05 beck | ✅ closed (HANDOFF `9c65baf`) |
-| **3α₂-A.2** (seed-new domain-neutral, second half) | N3.06 hunt / N3.07 willison | 🔄 in progress |
-| **3α₂-B** (UI cluster) | N3.08 saarinen / N3.09 friedman / N3.10 watson / N3.11 abramov | ⏳ pending |
-| **3α₂-C** (language/platform cluster) | N3.12 brandur / N3.13 durov / N3.14 vanrossum | ⏳ pending |
+| **3α₁** (append-existing) | N3.01 dahl / N3.02 ritchie / N3.03 hashimoto | ✅ closed |
+| **3α₂-A** (seed-new domain-neutral) | N3.04 fowler / N3.05 beck / N3.06 hunt / N3.07 willison | ✅ closed |
+| **3α₂-B** (UI cluster) | N3.08 saarinen / N3.09 friedman / N3.10 watson / N3.11 abramov | ✅ closed |
+| **3α₂-C** (language/platform cluster) | N3.12 brandur / N3.13 durov / N3.14 vanrossum | ✅ closed |
 
-After N3.14, a Phase 3α FINAL CLOSURE A/B competitive test (specified in `/tmp/phase-3-α-closure-handoff-directive.md`) compares v1 vs v2 council outputs on a real tech-debt spec to validate that enrichment produces measurably better engineering output, not just structural completeness.
+The Phase 3α FINAL CLOSURE A/B competitive test compared v1 vs v2 council outputs on a real tech-debt spec to validate that enrichment produces measurably better engineering output, not just structural completeness.
 
-## Phase 3β — 8 candidates as ideological-tension pairs
+## Phase 3β — 8 seated as ideological-tension pairs
 
 The original Phase 3 expansion plan (Lerdorf for PHP + Colvin for pydantic-ai) was rescoped after a key user insight (`specs/external-knowledge-enrichment-sources.md` Section F): **catalog growth past ~12 seats should add ideological tension, not domain coverage.**
 
 The rationale: a council of 12 domain experts produces parallel non-overlapping findings → synthesis is list-aggregation. A council of paired experts on shared domains, where each pair disagrees on philosophy, produces conflicting findings → synthesis is **resolution**. Carmack-chair arbitrates the tension based on project economic context.
 
-Phase 3β seats 6 new experts as 6 deliberate tension pairs plus 2 language specialists:
+Phase 3β seated 6 new experts as 6 deliberate tension pairs plus 2 language specialists:
 
 | Domain | Pair member A | Pair member B | Tension axis |
 |---|---|---|---|
@@ -109,13 +108,11 @@ A separate workstream codifies the chair selecting **which subset** of the 22-ex
 
 Phase 3γ is **not** part of Phase 3α/β implementation work; it's a downstream chair-logic refactor that uses the post-3α/β catalog as input. See `specs/council-experts-catalog-v2-expansion.md` Phase 3 section.
 
-## EC-34 — codification candidate
+## EC-34 — ratified
 
-Section F insight is a codification candidate for `conventions.md` after EC-30..EC-33:
+Codified in `conventions.md` after Phase 3β closure:
 
-> **EC-34** — Expert seating by ideological tension, not domain coverage. Multi-expert councils at scale (>12 seats) should pair experts on each domain by orthogonal-philosophy axis (purity-vs-pragmatism, principle-vs-economics, paranoia-vs-curiosity). Synthesis becomes resolution, не aggregation. Carmack-chair filter picks based on project economic context.
-
-This will land formally after Phase 3α closure if the A/B competitive test validates the design.
+> **EC-34** — Expert seating by ideological tension, not domain coverage. Multi-expert councils at scale (>12 seats) should pair experts on each domain by orthogonal-philosophy axis (purity-vs-pragmatism, principle-vs-economics, paranoia-vs-curiosity). Synthesis becomes resolution, not aggregation. Carmack-chair filter picks based on project economic context. Wire-format: `paired_with` + `tension_axis` fields in each expert's `meta.yaml`; legacy 2-key entries retro-populated.
 
 ## v1 → v2 swap timeline
 
@@ -132,5 +129,5 @@ Until that promotion lands, **v1 is the production default**. To opt into v2 exp
 - [`specs/council-mode-bidirectional-pipeline.md`](https://github.com/antonioshaman/aura-companion/blob/main/specs/council-mode-bidirectional-pipeline.md) — orchestrator/observer bidirectional sync (Phase 4-5)
 - [`specs/expert-references-enrichment-plan.md`](https://github.com/antonioshaman/aura-companion/blob/main/specs/expert-references-enrichment-plan.md) — Phase 3α enrichment plan
 - [`specs/external-knowledge-enrichment-sources.md`](https://github.com/antonioshaman/aura-companion/blob/main/specs/external-knowledge-enrichment-sources.md) — canonical user-provided enrichment material
-- [`conventions.md`](https://github.com/antonioshaman/aura-companion/blob/main/conventions.md) — EC-1..EC-33 ratified conventions
+- [`conventions.md`](https://github.com/antonioshaman/aura-companion/blob/main/conventions.md) — EC-1..EC-35 ratified conventions
 - [Council Mode Architecture](/reference/council-mode-architecture) — wire protocol + state machine

@@ -11,7 +11,7 @@ Aura Companion runs locally by default, but you can deploy it on a remote server
 
 | Scenario | Recommended approach |
 |---|---|
-| Solo developer, single machine | [Local install](/get-started/installation) with `bunx the-companion` |
+| Solo developer, single machine | [Local install](/get-started/installation) with `bunx aura-companion` |
 | Always-on server in the cloud | Cloud VM with Tailscale (this guide) |
 | Isolated per-project environments | [Docker sessions](/guides/docker-and-environments) on any host |
 | Team sharing a single instance | Remote deploy with Tailscale ACLs for access control |
@@ -223,11 +223,11 @@ fi
 export PATH=\$HOME/.bun/bin:\$PATH
 
 # Install Aura Companion globally
-bun install -g the-companion
+bun install -g aura-companion
 
 # Register as a systemd service and start
-the-companion install
-the-companion start
+aura-companion install
+aura-companion start
 "'
 ```
 
@@ -240,11 +240,26 @@ gcloud compute ssh "$INSTANCE" \
   --tunnel-through-iap \
   --command 'bash -lc "
 export PATH=\$HOME/.bun/bin:\$PATH
-the-companion status
+aura-companion status
 "'
 ```
 
 ### 7. Connect with Tailscale
+
+<Warning>
+Before bringing Tailscale up, allowlist the tailnet hostname in Aura Companion. Without `COMPANION_ALLOWED_ORIGIN` set, the server rejects every browser WebSocket upgrade from `*.ts.net` and the UI surfaces `Connection timeout` after `Session started`. See [Origin allowlist](/get-started/installation#remote-access--origin-allowlist-required-for-non-loopback) for the full explanation.
+
+```bash
+# On the VM, before step 7
+sudo systemctl edit aura-companion
+# Drop-in editor opens — paste:
+# [Service]
+# Environment="COMPANION_ALLOWED_ORIGIN=https://companion.<your-tailnet>.ts.net"
+sudo systemctl restart aura-companion
+```
+
+Replace `<your-tailnet>` with your actual tailnet name (visible at `tailscale status`).
+</Warning>
 
 Tailscale creates a secure mesh network between your devices.
 
@@ -289,10 +304,10 @@ Run `sudo tailscale status` on the VM to see the full hostname and confirm the n
 
 | Command | What it does |
 |---|---|
-| `the-companion status` | Check if the service is running |
-| `the-companion logs` | Tail recent logs |
-| `the-companion restart` | Restart the server |
-| `the-companion stop` | Stop the server |
+| `aura-companion status` | Check if the service is running |
+| `aura-companion logs` | Tail recent logs |
+| `aura-companion restart` | Restart the server |
+| `aura-companion stop` | Stop the server |
 
 ### Tailscale commands
 
@@ -352,7 +367,7 @@ sudo apt-get install -y unzip
 
 - Confirm the Claude Code CLI is authenticated: SSH in and run `claude` once
 - Check that your API key or subscription is valid
-- Review server logs: `the-companion logs`
+- Review server logs: `aura-companion logs`
 
 ## Security considerations
 

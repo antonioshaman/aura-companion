@@ -355,6 +355,7 @@ function createMockOrchestrator() {
     clearAutoRelaunchCount: vi.fn(),
     getSession: vi.fn(),
     getCouncilGroupBySessionId: vi.fn(() => null),
+    getAllGroupsForBootstrap: vi.fn(() => [] as Array<{ sessionGroupId: string }>),
   } as any;
 }
 
@@ -632,6 +633,73 @@ describe("POST /api/sessions/create — Council Mode branch", () => {
     expect(res.status).toBe(400);
     const json = await res.json();
     expect(json.error).toMatch(/unsupported pairing/);
+  });
+});
+
+// ─── Council Mode — group REST bootstrap (PR #68) ─────────────────────────
+//
+// Closes `BUG-council-mode-group-rest-bootstrap-gap.md`. Browser app-mount
+// fetches this endpoint to repopulate `groupBySessionId` so the Sidebar
+// glyph + role suffix renders correctly even when the original
+// `group:created` push was lost across reload.
+describe("GET /api/groups", () => {
+  it("returns the empty groups array when the orchestrator has no live council pairs", async () => {
+    // Default mock: getAllGroupsForBootstrap returns []. Tests the
+    // server-cold-start path where no Council Mode pair has ever been
+    // created (coordinator is null inside the orchestrator).
+    const res = await app.request("/api/groups", { method: "GET" });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toEqual({ groups: [] });
+    expect(orchestrator.getAllGroupsForBootstrap).toHaveBeenCalledTimes(1);
+  });
+
+  it("wraps the orchestrator's group snapshot under a `groups` key with the wire shape intact", async () => {
+    // Mirror the BrowserGroupRecord wire shape produced by
+    // `buildBrowserGroupRecord`. The route's only job is to forward the
+    // orchestrator's snapshot unchanged under a `groups` key — symmetric
+    // to `GET /api/groups/:groupId/findings` (PR #61).
+    const wire = [
+      {
+        sessionGroupId: "grp_r1",
+        primarySessionId: "orch_r1",
+        observerSessionId: "obs_r1",
+        pairing: "claude+claude",
+        status: "active",
+        wakeTimeoutMs: 90_000,
+      },
+      {
+        sessionGroupId: "grp_r2",
+        primarySessionId: "orch_r2",
+        observerSessionId: "obs_r2",
+        pairing: "claude+codex",
+        status: "degraded",
+        wakeTimeoutMs: 90_000,
+      },
+    ];
+    orchestrator.getAllGroupsForBootstrap.mockReturnValue(wire);
+
+    const res = await app.request("/api/groups", { method: "GET" });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toEqual({ groups: wire });
+  });
+
+  // The route delegates filtering policy to the orchestrator
+  // (`getAllGroupsForBootstrap` filters archived). This test pins the
+  // boundary: the route does NOT add its own filter — if a test feeds it
+  // an archived record, that record passes through. The protection lives
+  // ONE level deeper. Catches a future refactor that double-filters or
+  // shifts policy to this layer (which would diverge from where the unit
+  // tests on `getAllGroupsForBootstrap` actually assert behaviour).
+  it("forwards the orchestrator's snapshot verbatim — does not add a second visibility filter at the route layer", async () => {
+    const wire = [
+      { sessionGroupId: "grp_x", primarySessionId: "o", observerSessionId: "v", pairing: "claude+claude", status: "archived", wakeTimeoutMs: 90_000 },
+    ];
+    orchestrator.getAllGroupsForBootstrap.mockReturnValue(wire);
+    const res = await app.request("/api/groups", { method: "GET" });
+    const json = await res.json();
+    expect(json.groups).toEqual(wire);
   });
 });
 

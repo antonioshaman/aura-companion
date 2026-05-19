@@ -1,4 +1,4 @@
-import type { SdkSessionInfo } from "./types.js";
+import type { SdkSessionInfo, GroupRecord } from "./types.js";
 import type { ContentBlock, BrowserObserverFinding, BrowserObserverDowngrade } from "./types.js";
 import { captureEvent, captureException } from "./analytics.js";
 
@@ -882,6 +882,21 @@ export const api = {
       observerProvider?: string;
       observerModel?: string;
     }>(`/groups/${encodeURIComponent(groupId)}/findings`),
+
+  // Council Mode — REST bootstrap of group records on app mount. Closes
+  // `BUG-council-mode-group-rest-bootstrap-gap.md` (PR #68). The browser's
+  // `groupBySessionId` map was previously populated EXCLUSIVELY by the
+  // live `group:created` push; a tab reloading after pair creation landed
+  // without the Sidebar ☼/☽ glyph + role suffix and without ObserverPanel
+  // pair context. The server's `GET /api/groups` snapshots every live
+  // pair through the same `buildBrowserGroupRecord` helper the live push
+  // uses, so REST + WS produce byte-identical wire shapes.
+  //
+  // Idempotent dispatch — `hydrateGroups` on the council slice merges
+  // into the existing `groups` map without overwriting fresher live state
+  // (server REST snapshot is authoritative only for groups the browser
+  // has never seen; live WS state wins for groups already in the store).
+  fetchGroups: () => get<{ groups: GroupRecord[] }>("/groups"),
 
 
   discoverClaudeSessions: (limit = 200) =>

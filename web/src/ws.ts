@@ -4,10 +4,20 @@ import { generateUniqueSessionName } from "./utils/names.js";
 import { playNotificationSound } from "./utils/notification-sound.js";
 import { getPreview } from "./components/ToolBlock.js";
 import type { ToolActivityEntry } from "./store/tasks-slice.js";
+import { api } from "./api.js";
 
 const WS_RECONNECT_DELAY_MS = 2000;
 const sockets = new Map<string, WebSocket>();
 const reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+/**
+ * Tracks sessionIds that are mid-reconnect. Set on `ws.onclose`,
+ * cleared on the replacement socket's `ws.onopen`. Required because
+ * `scheduleReconnect`'s timer-callback deletes the timer from
+ * `reconnectTimers` BEFORE invoking `connectSession`, so by the time
+ * the new socket's `onopen` runs, the timer map says "no reconnect" —
+ * which would silently suppress the post-reconnect group refetch.
+ */
+const reconnectingSessions = new Set<string>();
 const lastSeqBySession = new Map<string, number>();
 const taskCounters = new Map<string, number>();
 const streamingPhaseBySession = new Map<string, "thinking" | "text">();
@@ -15,6 +25,40 @@ const streamingDraftMessageIdBySession = new Map<string, string>();
 const pendingOutgoingBySession = new Map<string, BrowserOutgoingMessage[]>();
 /** Track processed tool_use IDs to prevent duplicate task creation */
 const processedToolUseIds = new Map<string, Set<string>>();
+
+/**
+ * PR #68 friedman fix-pass — when ANY session WebSocket reconnects (a
+ * strong correlated signal that the network blipped), refire the
+ * Council Mode group bootstrap. The App.tsx mount-effect `fetchGroups`
+ * call may have failed in the same blip; without a recovery path the
+ * Sidebar's ☼/☽ glyphs stay absent forever for active idle pairs that
+ * produce no future `group:*` events.
+ *
+ * Debounced via a module-level pending-timer slot so a multi-session
+ * connect-storm (page returns from background, several pairs all
+ * reconnect at once) fires ONE refetch, not N. `hydrateGroups` is
+ * idempotent (live WS still wins for already-present groups) so even
+ * without dedup this would be safe — the dedup is a polish move.
+ */
+let pendingGroupRefetchTimer: ReturnType<typeof setTimeout> | null = null;
+const GROUP_REFETCH_DEBOUNCE_MS = 250;
+
+function scheduleGroupRefetchAfterReconnect(): void {
+  if (pendingGroupRefetchTimer !== null) return;
+  pendingGroupRefetchTimer = setTimeout(() => {
+    pendingGroupRefetchTimer = null;
+    api.fetchGroups().then(({ groups }) => {
+      useStore.getState().hydrateGroups(groups);
+    }).catch((err) => {
+      // Best-effort recovery; the next reconnect will try again.
+      // Structured log for forensic grep.
+      console.warn("[ws] post-reconnect fetchGroups bootstrap failed", {
+        event: "council.bootstrap.fetch_failed_post_reconnect",
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+  }, GROUP_REFETCH_DEBOUNCE_MS);
+}
 
 function isSocketUsable(ws: WebSocket | undefined): boolean {
   return !!ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING);
@@ -1182,7 +1226,25 @@ function handleParsedMessage(
         sessionGroupId: data.sessionGroupId,
         primarySessionId: data.primarySessionId,
         observerSessionId: data.observerSessionId,
-        status: "active",
+        // PR #68: server now publishes the live coordinator status via
+        // the shared `buildBrowserGroupRecord` helper. Both the live push
+        // and the REST bootstrap (`GET /api/groups`) go through this
+        // variant, so a reload mid-`degraded` or mid-`reconnecting` pair
+        // hydrates with the true status instead of the legacy hardcoded
+        // `"active"`.
+        //
+        // The `?? "active"` fallback is a LEGACY-REPLAY SAFETY NET — NOT
+        // dead code. The session event buffer is persisted to disk
+        // (`session-store.ts:39 — eventBuffer?: BufferedBrowserEvent[]`)
+        // and rehydrated on server restart. A pre-PR-#68 server that
+        // buffered a `group_created` frame, then upgrades onto this PR,
+        // will replay that legacy frame (no `status` field) to a
+        // reconnecting browser inside an `event_replay` envelope. The
+        // wire variant is correspondingly optional on `status` to keep
+        // the type contract truthful across the upgrade window. Future
+        // cleanup MUST NOT delete this fallback while persisted event
+        // buffers from older server versions might still exist.
+        status: data.status ?? "active",
         pairing: data.pairing,
         // Task 9: server-published wake-to-review timeout. The panel-
         // state deriver (Task 11) bounds the `reviewing` interval by
@@ -1281,6 +1343,19 @@ function handleParsedMessage(
       break;
     }
 
+    case "group_convergence": {
+      // Bidirectional pipeline Story 4.1 — server-authoritative convergence
+      // state. Frontend stores cycleNumber / threshold / convergenceState
+      // on the GroupRecord; ObserverPanel + Sidebar badges read off it.
+      store.applyConvergence({
+        sessionGroupId: data.sessionGroupId,
+        cycleNumber: data.cycleNumber,
+        convergenceThreshold: data.convergenceThreshold,
+        convergenceState: data.convergenceState,
+      });
+      break;
+    }
+
     default: {
       console.debug("[ws] Unhandled message type:", (data as { type: string }).type);
       break;
@@ -1308,12 +1383,24 @@ export function connectSession(sessionId: string) {
     const lastSeq = getLastSeq(sessionId);
     ws.send(JSON.stringify({ type: "session_subscribe", last_seq: lastSeq }));
     flushQueuedOutgoing(sessionId, ws);
-    // Clear any reconnect timer
+    // Clear any reconnect timer (defensive — usually already cleared by
+    // the timer-callback itself before it called connectSession).
     const timer = reconnectTimers.get(sessionId);
     if (timer) {
       clearTimeout(timer);
       reconnectTimers.delete(sessionId);
     }
+    // If this session was mid-reconnect (flag set in onclose), schedule
+    // a Council Mode group refetch — closes PR #68 friedman finding
+    // (silent fetchGroups failure on initial mount has no user-
+    // discoverable recovery; pair the refetch with every WS reconnect,
+    // the strongest correlated signal that the original bootstrap may
+    // have failed in the same network blip). Using a dedicated Set
+    // rather than `reconnectTimers.has` because the timer is deleted
+    // before connectSession runs — see reconnectingSessions JSDoc.
+    const wasReconnect = reconnectingSessions.has(sessionId);
+    reconnectingSessions.delete(sessionId);
+    if (wasReconnect) scheduleGroupRefetchAfterReconnect();
   };
 
   ws.onmessage = (event) => handleMessage(sessionId, event);
@@ -1323,6 +1410,12 @@ export function connectSession(sessionId: string) {
     if (sockets.get(sessionId) !== ws) return;
     sockets.delete(sessionId);
     useStore.getState().setConnectionStatus(sessionId, "disconnected");
+    // Mark this session as mid-reconnect BEFORE scheduling the timer.
+    // The replacement socket's onopen reads this flag (and clears it)
+    // to decide whether to fire the post-reconnect group refetch. We
+    // can't rely on `reconnectTimers.has` for that decision because the
+    // timer-callback deletes itself before invoking connectSession.
+    reconnectingSessions.add(sessionId);
     scheduleReconnect(sessionId);
   };
 
@@ -1352,6 +1445,7 @@ export function disconnectSession(sessionId: string) {
     clearTimeout(timer);
     reconnectTimers.delete(sessionId);
   }
+  reconnectingSessions.delete(sessionId);
   const ws = sockets.get(sessionId);
   if (ws) {
     ws.close();

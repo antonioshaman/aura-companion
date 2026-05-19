@@ -33,6 +33,7 @@
       {
         "group": "Deploy",
         "pages": [
+          "deploy/vps-systemd",
           "deploy/cloud-vm"
         ]
       },

@@ -1,7 +1,12 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { useStore } from "../store.js";
 import { createClientMessageId, sendToSession } from "../ws.js";
-import { CLAUDE_MODES, CODEX_MODES } from "../utils/backends.js";
+import {
+  CLAUDE_MODES,
+  CODEX_MODES,
+  detectInteractiveDiscoverySkill,
+  pickRestoreMode,
+} from "../utils/backends.js";
 import { api, type SavedPrompt } from "../api.js";
 import type { ModeOption } from "../utils/backends.js";
 import { ModelSwitcher } from "./ModelSwitcher.js";
@@ -34,7 +39,11 @@ export function Composer({ sessionId }: { sessionId: string }) {
   const pendingSelectionRef = useRef<number | null>(null);
   const cliConnected = useStore((s) => s.cliConnected);
   const sessionData = useStore((s) => s.sessions.get(sessionId));
-  const previousMode = useStore((s) => s.previousPermissionMode.get(sessionId) || "acceptEdits");
+  // Raw selector — return "" when the map entry is absent so pickRestoreMode
+  // can detect the "no prior mode" case and apply the backend-aware default.
+  // Previously this defaulted to "acceptEdits" (a Claude-shaped value) which
+  // masked the Codex empty-previous case from the fallback logic at toggleMode.
+  const previousMode = useStore((s) => s.previousPermissionMode.get(sessionId) ?? "");
 
   const isConnected = cliConnected.get(sessionId) ?? false;
   const currentMode = sessionData?.permissionMode || "acceptEdits";
@@ -42,6 +51,12 @@ export function Composer({ sessionId }: { sessionId: string }) {
   const isCodex = sessionData?.backend_type === "codex";
   const modes: ModeOption[] = isCodex ? CODEX_MODES : CLAUDE_MODES;
   const modeLabel = modes.find((m) => m.value === currentMode)?.label?.toLowerCase() || currentMode;
+
+  // Derived (ephemeral, NOT stored): which discovery-skill the user is
+  // currently typing, if any. Drives BOTH the refuse-affordance render
+  // AND the handleSend early-return — single source of truth.
+  const matchedDiscoverySkill = detectInteractiveDiscoverySkill(text);
+  const refuseDispatch = isPlan && matchedDiscoverySkill !== null;
 
   const mention = useMentionMenu({
     text,
@@ -135,6 +150,13 @@ export function Composer({ sessionId }: { sessionId: string }) {
   function handleSend() {
     const msg = text.trim();
     if (!msg || !isConnected) return;
+    // Refuse-and-affordance: plan-mode collides with interactive-discovery
+    // skills that wait on typed user input. The affordance is rendered
+    // above the textarea on every keystroke that matches; this early-return
+    // is the second half of the same gate, branching off the same derived
+    // value so the two cannot drift. Send remains enabled so the click
+    // still surfaces the explanation (Friedman P5).
+    if (refuseDispatch) return;
     const clientMsgId = createClientMessageId();
 
     sendToSession(sessionId, {
@@ -299,7 +321,21 @@ export function Composer({ sessionId }: { sessionId: string }) {
       sendToSession(sessionId, { type: "set_permission_mode", mode: "plan" });
       store.updateSession(sessionId, { permissionMode: "plan" });
     } else {
-      const restoreMode = previousMode || (isCodex ? "bypassPermissions" : "acceptEdits");
+      const restoreMode = pickRestoreMode(previousMode, isCodex);
+      // Codex empty-previous fallback fired — silent privilege upgrade canary.
+      // Server cannot reliably distinguish user-explicit `default` from
+      // auto-fallback, so this WARN stays client-side. Server-side
+      // `composer.permission-mode.toggled` (ws-bridge) gives the
+      // observable transition; this WARN gives the client-side intent.
+      if (previousMode === "" && isCodex) {
+        console.warn("composer.toggle.codex-fallback-default", {
+          event: "composer.toggle.codex-fallback-default",
+          sessionId,
+          previousMode: null,
+          chosenMode: "default",
+          backend: "codex",
+        });
+      }
       sendToSession(sessionId, { type: "set_permission_mode", mode: restoreMode });
       store.updateSession(sessionId, { permissionMode: restoreMode });
     }
@@ -609,6 +645,34 @@ export function Composer({ sessionId }: { sessionId: string }) {
               </svg>
             </button>
           </div>
+
+          {/* Plan-mode + discovery-skill refuse affordance.
+              Yellow warning token (NOT destructive red — wrong tool selected,
+              not "you broke something"). Rendered on every keystroke that
+              matches, so the user sees the rule before pressing Send.
+              Send remains enabled; clicking it early-returns via refuseDispatch. */}
+          {refuseDispatch && (
+            <div
+              role="alert"
+              data-testid="composer-plan-mode-affordance"
+              className="mx-3 mt-2 mb-1 sm:mx-3 sm:mt-2 px-3 py-2 rounded-md border border-cc-warning/40 bg-cc-warning/8 text-[12px] text-cc-fg flex items-start gap-2"
+            >
+              <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5 mt-0.5 shrink-0 text-cc-warning" aria-hidden="true">
+                <path d="M8 1.5L0.5 14.5h15L8 1.5zm0 5v4M8 12v.5" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" fill="none" />
+              </svg>
+              <div className="flex-1">
+                <span>Plan mode disables discovery questions. </span>
+                <button
+                  type="button"
+                  onClick={toggleMode}
+                  className="underline text-cc-primary hover:text-cc-primary-hover cursor-pointer font-medium"
+                >
+                  Switch to agent mode
+                </button>
+                <span> to continue.</span>
+              </div>
+            </div>
+          )}
 
           {/* Textarea row */}
           <div className="px-3 sm:px-3 pt-1 sm:pt-2.5">

@@ -92,7 +92,10 @@ export type RecordingOrigin =
   // by a human at a browser tab.
   | "server:cron"
   | "server:agent"
-  | "server:rest";
+  | "server:rest"
+  // Bidirectional pipeline — inter-half coordination frames synthesised by the
+  // peer-routing helper. Same userFrameObservers-skip semantic as server: origins.
+  | "council:peer";
 
 export interface RecordingEntry {
   ts: number;

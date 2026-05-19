@@ -294,6 +294,16 @@ The knowledge base grows organically. Over time:
 - Stale entries (fixed bugs, reversed decisions) → get pruned during `/self-reflect`
 - Cross-cutting patterns → may spawn new skills
 
+## Production deployment
+
+For self-hosting on a Linux VPS or any non-loopback origin, two things matter beyond the dev setup:
+
+1. **Run under a systemd unit with `KillMode=process`** — see [`docs/deploy/vps-systemd.mdx`](docs/deploy/vps-systemd.mdx) for a minimal recipe. `KillMode=process` ensures that when the bun parent is restarted, the long-lived `claude` / `codex` child subprocesses survive and reconnect over the local WebSocket; without it every restart kills in-flight agent work.
+
+2. **Set `COMPANION_ALLOWED_ORIGIN`** to the exact origin (`scheme://host:port`, no trailing slash) the browser will use. Localhost dev origins (`http://localhost:5173`, `http://localhost:5174`) are always allowed; everything else — public IP, LAN host, tailscale `*.ts.net`, reverse-proxy domain — must appear in the comma-separated value, or the WS upgrade is rejected and the UI surfaces `Connection timeout` after `Session started`. The gate is enforced in `web/server/middleware/origin-allowlist.ts` and applied to `/ws/browser`, `/ws/terminal`, `/ws/novnc`. CLI subprocess WS (`/ws/cli/:id`) is exempt because it always comes from loopback.
+
+If a user reports timeouts at the last step of session creation while earlier steps (`Environment resolved` / `Fetch complete` / `Session started`) report green, the first canary is the producer-side fanout count in periodic `[diagnostics]` log lines: `browsers=0` with active sessions means the Origin allowlist is rejecting the UI, not a subprocess problem.
+
 ## Cursor Cloud specific instructions
 
 ### Services

@@ -96,6 +96,12 @@ export interface GroupRecord {
   observer: GroupMember;
   status: GroupStatus;
   createdAt: number;
+  /** Bidirectional pipeline Story 4.1: clean-cycle counter, server-authoritative.
+   *  Absent on solo (non-Council) sessions and on freshly-created pairs that
+   *  have not yet had any review processed. */
+  cycleNumber?: number;
+  convergenceThreshold?: number;
+  convergenceState?: "in-progress" | "converged" | "revoked";
 }
 
 export interface SessionGroupCoordinatorDeps {
@@ -478,6 +484,23 @@ export class SessionGroupCoordinator {
    *  `shutdownAllGroups` (PLAN Task 11). Snapshot at call time. */
   listGroupIds(): string[] {
     return Array.from(this.groups.keys());
+  }
+
+  /**
+   * Snapshot of all GroupRecords currently tracked by this coordinator.
+   * Each call returns a fresh array so the caller can iterate without
+   * observing later mutations. Used by REST bootstrap
+   * ({@link SessionOrchestrator.getAllGroupsForBootstrap}) so a browser
+   * connecting / reloading AFTER the `group:created` event was emitted can
+   * still discover live pairs and render the Sidebar glyph + ObserverPanel
+   * pair context.
+   *
+   * Returns `archived` groups too — the caller decides whether to filter
+   * them out. The coordinator is the lifecycle authority; consumers express
+   * their own visibility policy.
+   */
+  listAll(): GroupRecord[] {
+    return Array.from(this.groups.values());
   }
 
   /**
