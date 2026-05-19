@@ -189,6 +189,76 @@ describe("ObserverPanel — state pills (5 explicit states)", () => {
     expect(screen.getByTestId("status-pill")).toHaveAttribute("data-state", "degraded");
     expect(screen.getByTestId("degraded-banner")).toBeInTheDocument();
   });
+
+  // Bidirectional pipeline Story 4.1.5 — convergence pill variants.
+  // Each variant gets one named test asserting the data-state attribute,
+  // accessible label, and color token. Axe scan is the global mandate
+  // (CLAUDE.md) — kept brief here since the surrounding tests in this
+  // describe block already lock the broader a11y posture.
+
+  it("renders cycle-progress pill with 🔄 Cycle N/T copy and aria-label", async () => {
+    seedGroup();
+    act(() => {
+      useStore.getState().applyConvergence({
+        sessionGroupId: GROUP.sessionGroupId,
+        cycleNumber: 2,
+        convergenceThreshold: 3,
+        convergenceState: "in-progress",
+      });
+    });
+    const { container } = render(<ObserverPanel sessionId={SESSION} />);
+    const pill = screen.getByTestId("status-pill");
+    expect(pill).toHaveAttribute("data-state", "cycle-progress");
+    expect(pill).toHaveAttribute("role", "status");
+    expect(pill).toHaveAttribute("aria-atomic", "true");
+    // Accessible name carries the readable "Cycle 2 of 3" form — emoji is
+    // aria-hidden so AT doesn't double-read.
+    expect(pill).toHaveAttribute("aria-label", "Cycle 2 of 3");
+    expect(pill).toHaveTextContent(/Cycle 2\/3/);
+    const emoji = pill.querySelector("span[aria-hidden=\"true\"]");
+    expect(emoji).not.toBeNull();
+    const { axe } = await import("vitest-axe");
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("renders converged pill with ✅ ready-to-ship copy + emerald token", async () => {
+    seedGroup();
+    act(() => {
+      useStore.getState().applyConvergence({
+        sessionGroupId: GROUP.sessionGroupId,
+        cycleNumber: 3,
+        convergenceThreshold: 3,
+        convergenceState: "converged",
+      });
+    });
+    const { container } = render(<ObserverPanel sessionId={SESSION} />);
+    const pill = screen.getByTestId("status-pill");
+    expect(pill).toHaveAttribute("data-state", "converged");
+    expect(pill).toHaveAttribute("role", "status");
+    expect(pill).toHaveAttribute("aria-label", "Converged — ready to ship after 3 clean cycles");
+    expect(pill).toHaveTextContent(/Converged — ready to ship/);
+    // Emerald token signals "ship-ready" per Story 4.1.5
+    expect(pill.className).toContain("text-emerald-500");
+    const { axe } = await import("vitest-axe");
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("degraded short-circuits over converged (Story 4.1.5 freeze precedence in UI)", () => {
+    seedGroup();
+    act(() => {
+      useStore.getState().applyConvergence({
+        sessionGroupId: GROUP.sessionGroupId,
+        cycleNumber: 3,
+        convergenceThreshold: 3,
+        convergenceState: "converged",
+      });
+      useStore.getState().setGroupStatus(GROUP.sessionGroupId, "degraded", { deadRole: "observer" });
+    });
+    render(<ObserverPanel sessionId={SESSION} onRespawnHalf={vi.fn()} />);
+    // Degraded MUST win — the convergence counter freezes (does not
+    // advance during degraded state) and the warning takes the pill.
+    expect(screen.getByTestId("status-pill")).toHaveAttribute("data-state", "degraded");
+  });
 });
 
 describe("ObserverPanel — collapse / expand", () => {

@@ -15,12 +15,32 @@ import type { SessionGroupCoordinator } from "./session-group-coordinator.js";
  * Returns a summary the shutdown caller can log before exit.
  */
 
+/**
+ * Narrow surface for the optional idle-timer drain step. Mirrors the
+ * shape of {@link IdleTimerManager.disposeAll}; takes `void` (every armed
+ * timer is cancelled in one pass — no per-session loop). Caller passes
+ * either the real manager or any object satisfying this method.
+ */
+export interface IdleTimerDrainer {
+  disposeAll(): void;
+}
+
 export interface ShutdownOptions {
   /** Total budget for the shutdown. Groups not archived within this window
    *  are counted as `timed_out`; caller decides whether to SIGKILL on top. */
   timeoutMs: number;
   /** Optional clock for tests. Defaults to Date.now. */
   now?: () => number;
+  /**
+   * PLAN-aura-orchestrator-idle-auto-proceed Task 9: cancel every armed
+   * idle timer BEFORE kill propagation. EC-2 invariant extends naturally
+   * — timers cleared before kills fire to the CLI children, so a fire
+   * callback racing the kill cannot land an `attempted-send-to-dying-CLI`
+   * EC-9 log entry that confuses the shutdown summary. Optional so legacy
+   * call sites and unit tests that don't exercise auto-proceed are not
+   * forced to thread a stub.
+   */
+  idleTimerManager?: IdleTimerDrainer;
 }
 
 export interface ShutdownSummary {
@@ -38,6 +58,28 @@ export async function shutdownAllGroups(
 ): Promise<ShutdownSummary> {
   const now = opts.now ?? Date.now;
   const start = now();
+
+  // PLAN Task 9: dispose all auto-proceed idle timers FIRST, BEFORE any
+  // kill propagation. EC-2 invariant — cancelling here ensures a pending
+  // fire callback cannot land mid-archive and emit a confused
+  // `synthetic-frame-to-dying-CLI` log line. Synchronous: `disposeAll`
+  // walks the manager's in-memory map and calls `cancel()` on each timer
+  // handle. Idempotent — safe to call when the manager holds zero armed
+  // timers, and safe to call when the same shutdown loop fires twice
+  // (e.g. SIGTERM followed by SIGINT).
+  if (opts.idleTimerManager) {
+    try {
+      opts.idleTimerManager.disposeAll();
+    } catch (err) {
+      // `disposeAll` is documented as not-throwing, but a future change
+      // that adds I/O (flush trace, etc.) could surface here. Swallow +
+      // continue so the shutdown loop still reaps every group; the
+      // coordinator's `cancelAllReconnectTimers` already runs in
+      // `gracefulShutdown` ahead of this — the kill cascade is still
+      // bounded by `timeoutMs` regardless.
+      console.warn("[group-shutdown] idleTimerManager.disposeAll failed:", err);
+    }
+  }
 
   if (groupIds.length === 0) {
     return { total: 0, archived: 0, failed: 0, timedOut: 0, durationMs: 0 };

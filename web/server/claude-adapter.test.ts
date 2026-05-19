@@ -397,6 +397,28 @@ describe("Connection lifecycle", () => {
     expect(disconnectCb).toHaveBeenCalledOnce();
   });
 
+  // Council Review #13 — mid-flap cleanup: detachWebSocket clears
+  // pendingControlRequests so the unresolved Promise resolvers from the
+  // now-dead socket don't leak into the next attach. `disconnect()`
+  // already clears this; detachWebSocket was the WS-close-event path
+  // that bypassed it.
+  it("detachWebSocket clears pendingControlRequests (#13 mid-flap cleanup)", () => {
+    const ws = createMockSocket("sess-1");
+    adapter.attachWebSocket(ws);
+    // Plant a fake pending request via the private map. Mirrors what
+    // sendControlRequest does on the path between request-out and
+    // response-in.
+    const pendingMap = (adapter as unknown as {
+      pendingControlRequests: Map<string, { subtype: string; resolve: (r: unknown) => void }>;
+    }).pendingControlRequests;
+    pendingMap.set("test-req-1", { subtype: "set_permission_mode", resolve: () => {} });
+    pendingMap.set("test-req-2", { subtype: "interrupt", resolve: () => {} });
+    expect(pendingMap.size).toBe(2);
+
+    adapter.detachWebSocket(ws);
+    expect(pendingMap.size).toBe(0);
+  });
+
   it("detachWebSocket with a stale socket (different ws) does nothing", () => {
     // If a new WebSocket replaced an old one, closing the old one should
     // NOT clear the current connection or trigger the disconnect callback.
@@ -1475,5 +1497,390 @@ describe("sendUserFrameFromServer (Council Mode auto-wake)", () => {
     const ws2 = createMockSocket("sess-wake-1");
     adapter.attachWebSocket(ws2);
     expect(adapter.getObserverTurnState()).toBe("idle");
+  });
+});
+
+// ─── orchestratorTurnState + orchestrator:turn-done event ──────────────────
+//
+// PLAN-aura-orchestrator-idle-auto-proceed Task 4. The orchestrator-half
+// turn-state mirrors the observer's discipline (socket-bound, reset on
+// attach/detach, single transition per turn) but tracks the user-driven
+// cycle instead of the server-driven wake cycle. The discriminated-union
+// shape carries `blockedByStop` so the JS-3 axis ("STOP pauses timer")
+// lives in the type system rather than as a sibling boolean a refactor
+// can silently drop.
+describe("orchestratorTurnState — discriminated union + event emit", () => {
+  let adapter: ClaudeAdapter;
+
+  beforeEach(async () => {
+    adapter = new ClaudeAdapter("sess-orch-1");
+  });
+
+  it("initial state is awaiting-input with blockedByStop=false (no in-flight at construction)", () => {
+    // Construction-time invariant: no turn has been driven yet, so the
+    // state machine starts in `awaiting-input`. The default
+    // `blockedByStop` of false matches "no STOPs known to the adapter"
+    // — the council slice will mutate via setter if/when a STOP appears.
+    expect(adapter.getOrchestratorTurnState()).toEqual({
+      kind: "awaiting-input",
+      blockedByStop: false,
+    });
+  });
+
+  it("user_message send flips state to in-flight", () => {
+    // The in-flight transition is driven by the outgoing-user-message
+    // path. Provenance (real user vs synthetic auto-proceed frame) is
+    // intentionally NOT distinguished at this seam — both produce the
+    // same NDJSON shape on-wire and the CLI's perception of "a turn
+    // is now running" is identical.
+    const ws = createMockSocket("sess-orch-1");
+    adapter.attachWebSocket(ws);
+    const ok = adapter.send({ type: "user_message", content: "hi" } as never);
+    expect(ok).toBe(true);
+    expect(adapter.getOrchestratorTurnState()).toEqual({ kind: "in-flight" });
+  });
+
+  it("result frame after in-flight emits orchestrator:turn-done and flips to awaiting-input", async () => {
+    const { companionBus } = await import("./event-bus.js");
+    const ws = createMockSocket("sess-orch-1");
+    adapter.attachWebSocket(ws);
+    adapter.send({ type: "user_message", content: "hi" } as never);
+    const events: Array<{ sessionId: string; blockedByStop: boolean }> = [];
+    const off = companionBus.on("orchestrator:turn-done", (e) => {
+      events.push(e);
+    });
+    try {
+      adapter.handleRawMessage(makeResultMsg());
+    } finally {
+      off();
+    }
+    expect(events).toEqual([{ sessionId: "sess-orch-1", blockedByStop: false }]);
+    expect(adapter.getOrchestratorTurnState()).toEqual({
+      kind: "awaiting-input",
+      blockedByStop: false,
+    });
+  });
+
+  it("result frame WITHOUT a prior in-flight does NOT emit (no double-fire on replay)", async () => {
+    // Restart-replay can deliver a `result` for a session that the
+    // adapter already considers awaiting-input. Emitting in that case
+    // would over-count iteration counters in the downstream
+    // idle-timer-manager. The transition guard fires only on the
+    // in-flight → awaiting-input edge.
+    const { companionBus } = await import("./event-bus.js");
+    const ws = createMockSocket("sess-orch-1");
+    adapter.attachWebSocket(ws);
+    // Skip the user_message send — go straight to result.
+    const events: unknown[] = [];
+    const off = companionBus.on("orchestrator:turn-done", (e) => {
+      events.push(e);
+    });
+    try {
+      adapter.handleRawMessage(makeResultMsg());
+    } finally {
+      off();
+    }
+    expect(events).toEqual([]);
+  });
+
+  it("attachWebSocket resets to awaiting-input (fresh socket = no in-flight turn)", () => {
+    const ws1 = createMockSocket("sess-orch-1");
+    adapter.attachWebSocket(ws1);
+    adapter.send({ type: "user_message", content: "hi" } as never);
+    expect(adapter.getOrchestratorTurnState()).toEqual({ kind: "in-flight" });
+    // A new socket attaches before the old detach fires — late-detach
+    // race guard. Same defence as the observer-side test on line ~1468.
+    const ws2 = createMockSocket("sess-orch-1");
+    adapter.attachWebSocket(ws2);
+    expect(adapter.getOrchestratorTurnState()).toEqual({
+      kind: "awaiting-input",
+      blockedByStop: false,
+    });
+  });
+
+  it("detachWebSocket resets to awaiting-input even mid-turn", () => {
+    const ws = createMockSocket("sess-orch-1");
+    adapter.attachWebSocket(ws);
+    adapter.send({ type: "user_message", content: "hi" } as never);
+    expect(adapter.getOrchestratorTurnState()).toEqual({ kind: "in-flight" });
+    adapter.detachWebSocket(ws);
+    expect(adapter.getOrchestratorTurnState()).toEqual({
+      kind: "awaiting-input",
+      blockedByStop: false,
+    });
+  });
+
+  it("setOrchestratorBlockedByStop flips the axis when awaiting-input", () => {
+    expect(adapter.getOrchestratorTurnState()).toEqual({
+      kind: "awaiting-input",
+      blockedByStop: false,
+    });
+    adapter.setOrchestratorBlockedByStop(true);
+    expect(adapter.getOrchestratorTurnState()).toEqual({
+      kind: "awaiting-input",
+      blockedByStop: true,
+    });
+    adapter.setOrchestratorBlockedByStop(false);
+    expect(adapter.getOrchestratorTurnState()).toEqual({
+      kind: "awaiting-input",
+      blockedByStop: false,
+    });
+  });
+
+  it("setOrchestratorBlockedByStop is a no-op while in-flight (axis is only meaningful when awaiting)", () => {
+    // The JS-3 axis describes "this awaiting-input is paused because a
+    // STOP must be resolved first". It is semantically meaningless
+    // while a turn is in flight — no idle-driven action can fire
+    // there. The setter ignores calls in that state so a forgetful
+    // caller can't corrupt the union by storing blockedByStop
+    // alongside an in-flight kind.
+    const ws = createMockSocket("sess-orch-1");
+    adapter.attachWebSocket(ws);
+    adapter.send({ type: "user_message", content: "hi" } as never);
+    expect(adapter.getOrchestratorTurnState()).toEqual({ kind: "in-flight" });
+    adapter.setOrchestratorBlockedByStop(true);
+    expect(adapter.getOrchestratorTurnState()).toEqual({ kind: "in-flight" });
+  });
+
+  it("getOrchestratorTurnState returns a fresh copy (caller mutation cannot leak back)", () => {
+    // Defensive accessor — a caller stashing the returned object and
+    // mutating `blockedByStop` must NOT alter the adapter's internal
+    // state. Closes the "I held a reference and changed it" footgun.
+    const snapshot = adapter.getOrchestratorTurnState();
+    if (snapshot.kind === "awaiting-input") {
+      (snapshot as { blockedByStop: boolean }).blockedByStop = true;
+    }
+    // The next read still shows the original value.
+    expect(adapter.getOrchestratorTurnState()).toEqual({
+      kind: "awaiting-input",
+      blockedByStop: false,
+    });
+  });
+});
+
+// Task 11.8 — auto-proceed wire-up: denylist gate on `can_use_tool`
+// (deny dangerous tools during synthetic turns without surfacing the
+// permission UI) + result-frame sticky-token cleanup.
+describe("auto-proceed denylist gate (Task 11.8)", () => {
+  it("can_use_tool for a denylisted tool during synthetic turn is denied at the adapter (browser never sees the request)", () => {
+    const browserMessageCb = vi.fn();
+    const isSyntheticTurnInFlight = vi.fn(() => true);
+    const noteTerminalResultFrame = vi.fn();
+    const adapter = new ClaudeAdapter("sess-11-8-1", {
+      idleTimerProbe: { isSyntheticTurnInFlight, noteTerminalResultFrame },
+    });
+    adapter.onBrowserMessage(browserMessageCb);
+    const ws = createMockSocket("sess-11-8-1");
+    adapter.attachWebSocket(ws);
+
+    // Bash with `git push` — in the denylist (see auto-proceed-permissions.ts).
+    adapter.handleRawMessage(JSON.stringify({
+      type: "control_request",
+      request_id: "req-deny-1",
+      request: {
+        subtype: "can_use_tool",
+        tool_name: "Bash",
+        input: { command: "git push origin main" },
+        description: "Push to remote",
+        tool_use_id: "tu-deny-1",
+      },
+    }));
+
+    // Browser-side permission UI must NOT fire — the gate short-circuited.
+    expect(browserMessageCb).not.toHaveBeenCalledWith(expect.objectContaining({ type: "permission_request" }));
+
+    // CLI got a deny control_response directly.
+    expect(ws.send).toHaveBeenCalled();
+    const sent = JSON.parse((ws.send.mock.calls[0][0] as string).replace(/\n$/, ""));
+    expect(sent.type).toBe("control_response");
+    expect(sent.response.subtype).toBe("success");
+    expect(sent.response.response.behavior).toBe("deny");
+    expect(sent.response.response.message).toMatch(/auto-proceed/i);
+
+    expect(isSyntheticTurnInFlight).toHaveBeenCalledWith("sess-11-8-1");
+  });
+
+  it("can_use_tool for a denylisted tool when NO synthetic turn is in flight passes through to browser (user decides)", () => {
+    const browserMessageCb = vi.fn();
+    const adapter = new ClaudeAdapter("sess-11-8-2", {
+      idleTimerProbe: {
+        isSyntheticTurnInFlight: () => false,
+        noteTerminalResultFrame: () => {},
+      },
+    });
+    adapter.onBrowserMessage(browserMessageCb);
+    adapter.attachWebSocket(createMockSocket("sess-11-8-2"));
+
+    // Same denylisted command — but NOT in a synthetic turn.
+    adapter.handleRawMessage(JSON.stringify({
+      type: "control_request",
+      request_id: "req-allow-1",
+      request: {
+        subtype: "can_use_tool",
+        tool_name: "Bash",
+        input: { command: "git push origin main" },
+        description: "Push to remote",
+        tool_use_id: "tu-allow-1",
+      },
+    }));
+
+    // Browser DOES see the permission request — user decides interactively.
+    expect(browserMessageCb).toHaveBeenCalledWith(expect.objectContaining({ type: "permission_request" }));
+  });
+
+  it("can_use_tool for an ALLOWED tool during synthetic turn passes through to browser", () => {
+    const browserMessageCb = vi.fn();
+    const adapter = new ClaudeAdapter("sess-11-8-3", {
+      idleTimerProbe: {
+        isSyntheticTurnInFlight: () => true,
+        noteTerminalResultFrame: () => {},
+      },
+    });
+    adapter.onBrowserMessage(browserMessageCb);
+    adapter.attachWebSocket(createMockSocket("sess-11-8-3"));
+
+    // Read is not denylisted — should flow through to browser even mid-synthetic.
+    adapter.handleRawMessage(JSON.stringify({
+      type: "control_request",
+      request_id: "req-allow-read",
+      request: {
+        subtype: "can_use_tool",
+        tool_name: "Read",
+        input: { file_path: "/tmp/foo.txt" },
+        description: "Read a file",
+        tool_use_id: "tu-allow-read",
+      },
+    }));
+
+    expect(browserMessageCb).toHaveBeenCalledWith(expect.objectContaining({ type: "permission_request" }));
+  });
+
+  it("CR-1 fix: no probe configured → DENYLISTED tool fails CLOSED at the adapter (defence-in-depth)", () => {
+    // CR-1 (council review 2026-05-15-0336 finding #1, 3-expert convergence
+    // Willison × Hunt × Subprocess): the previous shape fell OPEN on
+    // `idleTimerProbe === null` because the optional-chain in the gate
+    // predicate short-circuited the entire denylist branch. Now the gate
+    // denies a denylisted tool REGARDLESS of probe presence — defence-
+    // in-depth over availability. A future DI ordering change that ships
+    // a session without a probe no longer silently re-opens the gate.
+    const browserMessageCb = vi.fn();
+    const ws = createMockSocket("sess-11-8-4");
+    const adapter = new ClaudeAdapter("sess-11-8-4");
+    adapter.onBrowserMessage(browserMessageCb);
+    adapter.attachWebSocket(ws);
+
+    adapter.handleRawMessage(JSON.stringify({
+      type: "control_request",
+      request_id: "req-default",
+      request: {
+        subtype: "can_use_tool",
+        tool_name: "Bash",
+        input: { command: "git push origin main" },
+        description: "Push to remote",
+        tool_use_id: "tu-default",
+      },
+    }));
+
+    // Browser-side permission UI does NOT fire — the gate short-circuited
+    // even without a probe, because the tool IS denylisted.
+    expect(browserMessageCb).not.toHaveBeenCalledWith(expect.objectContaining({ type: "permission_request" }));
+    // CLI got a deny control_response directly.
+    expect(ws.send).toHaveBeenCalled();
+    const sent = JSON.parse((ws.send.mock.calls[0][0] as string).replace(/\n$/, ""));
+    expect(sent.response.response.behavior).toBe("deny");
+  });
+
+  it("no probe configured + NON-denylisted tool → gate falls open (safe default for ordinary tools)", () => {
+    // The fail-closed promise covers ONLY the denylist; non-denylisted
+    // tools still flow through to the browser permission UI when no
+    // probe is present, preserving the existing user-permission contract.
+    const browserMessageCb = vi.fn();
+    const adapter = new ClaudeAdapter("sess-11-8-4b");
+    adapter.onBrowserMessage(browserMessageCb);
+    adapter.attachWebSocket(createMockSocket("sess-11-8-4b"));
+
+    adapter.handleRawMessage(JSON.stringify({
+      type: "control_request",
+      request_id: "req-ordinary",
+      request: {
+        subtype: "can_use_tool",
+        tool_name: "Read",
+        input: { file_path: "/tmp/foo.txt" },
+        description: "Read a file",
+        tool_use_id: "tu-ordinary",
+      },
+    }));
+
+    expect(browserMessageCb).toHaveBeenCalledWith(expect.objectContaining({ type: "permission_request" }));
+  });
+});
+
+describe("result-frame sticky-token cleanup (Task 11.8)", () => {
+  it("handleResultMessage calls noteTerminalResultFrame when transitioning in-flight → awaiting-input", () => {
+    const noteTerminalResultFrame = vi.fn();
+    const adapter = new ClaudeAdapter("sess-11-8-rf", {
+      idleTimerProbe: {
+        isSyntheticTurnInFlight: () => false,
+        noteTerminalResultFrame,
+      },
+    });
+    adapter.onBrowserMessage(vi.fn());
+    adapter.attachWebSocket(createMockSocket("sess-11-8-rf"));
+
+    // Need to flip orchestrator turn-state to in-flight first — only then
+    // does handleResultMessage call noteTerminalResultFrame (guards against
+    // double-fire on CLI reattach replay). The outbound `user_message`
+    // path through `adapter.send` is what flips orchestratorTurnState in
+    // production.
+    adapter.send({ type: "user_message", content: "hi" });
+    expect(adapter.getOrchestratorTurnState()).toEqual({ kind: "in-flight" });
+
+    adapter.handleRawMessage(JSON.stringify({
+      type: "result",
+      subtype: "success",
+      duration_ms: 1,
+      duration_api_ms: 1,
+      is_error: false,
+      num_turns: 1,
+      result: "ok",
+      session_id: "cli-1",
+      total_cost_usd: 0,
+      uuid: "uuid-result",
+    }));
+
+    expect(noteTerminalResultFrame).toHaveBeenCalledWith("sess-11-8-rf");
+    // State transitioned back.
+    expect(adapter.getOrchestratorTurnState()).toEqual({ kind: "awaiting-input", blockedByStop: false });
+  });
+
+  it("handleResultMessage does NOT call noteTerminalResultFrame when already awaiting-input (replay defence)", () => {
+    const noteTerminalResultFrame = vi.fn();
+    const adapter = new ClaudeAdapter("sess-11-8-rf-2", {
+      idleTimerProbe: {
+        isSyntheticTurnInFlight: () => false,
+        noteTerminalResultFrame,
+      },
+    });
+    adapter.onBrowserMessage(vi.fn());
+    adapter.attachWebSocket(createMockSocket("sess-11-8-rf-2"));
+
+    // Default state is awaiting-input — feed result without prior in-flight.
+    adapter.handleRawMessage(JSON.stringify({
+      type: "result",
+      subtype: "success",
+      duration_ms: 1,
+      duration_api_ms: 1,
+      is_error: false,
+      num_turns: 1,
+      result: "ok",
+      session_id: "cli-2",
+      total_cost_usd: 0,
+      uuid: "uuid-result-2",
+    }));
+
+    // Cleanup fires ONLY on the in-flight → awaiting-input transition
+    // (per the guard in handleResultMessage). A no-op result on
+    // already-awaiting state is the replay-defence case.
+    expect(noteTerminalResultFrame).not.toHaveBeenCalled();
   });
 });

@@ -222,7 +222,11 @@ export function registerSystemRoutes(
     if (typeof body.content !== "string" || !body.content.trim()) {
       return c.json({ error: "content is required" }, 400);
     }
-    deps.wsBridge.injectUserMessage(id, body.content);
+    // Council Review #12 (EC-16) — explicit "server:rest" origin so the
+    // bridge's userFrameObservers skip this frame (REST-driven turns
+    // aren't user activity at the frontend; downstream auto-proceed
+    // token must not advance on programmatic injection).
+    deps.wsBridge.injectUserMessage(id, body.content, "server:rest");
     return c.json({ ok: true, sessionId: id });
   });
 }

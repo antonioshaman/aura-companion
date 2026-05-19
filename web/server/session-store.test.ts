@@ -1,13 +1,25 @@
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, readdirSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { SessionStore, type PersistedSession } from "./session-store.js";
+import {
+  SessionStore,
+  migrateLegacyTmpdirSessions,
+  migratePersistedSession,
+  CURRENT_SESSION_SCHEMA_VERSION,
+  type PersistedSession,
+} from "./session-store.js";
 
 let tempDir: string;
 let store: SessionStore;
 
 function makeSession(id: string, overrides: Partial<PersistedSession> = {}): PersistedSession {
   return {
+    // PLAN Task 12 (i) — factory now stamps the current schema version
+    // so round-trip equality tests (`expect(loaded).toEqual(session)`)
+    // continue to pass after `saveSync` started stamping the field on
+    // disk. Tests asserting the load-side migration path override via
+    // explicit `schemaVersion: undefined` in `overrides`.
+    schemaVersion: CURRENT_SESSION_SCHEMA_VERSION,
     id,
     state: {
       session_id: id,
@@ -286,5 +298,240 @@ describe("saveLauncher / loadLauncher", () => {
   it("returns null when no launcher file exists", () => {
     const loaded = store.loadLauncher();
     expect(loaded).toBeNull();
+  });
+});
+
+// ─── migrateLegacyTmpdirSessions (PLAN Task 12-iii) ───────────────────────
+
+describe("migrateLegacyTmpdirSessions", () => {
+  let legacyDir: string;
+  let newDir: string;
+  let logs: { warn: string[]; info: string[] };
+  let logger: { warn: (msg: string) => void; info: (msg: string) => void };
+
+  beforeEach(() => {
+    legacyDir = mkdtempSync(join(tmpdir(), "migrate-legacy-"));
+    newDir = mkdtempSync(join(tmpdir(), "migrate-new-"));
+    // The migration tests use an empty target dir to exercise the
+    // happy-path copy. `mkdtempSync` creates the dir; remove it so the
+    // populated-target guard tests are deterministic.
+    rmSync(newDir, { recursive: true, force: true });
+    logs = { warn: [], info: [] };
+    logger = {
+      warn: (msg) => logs.warn.push(msg),
+      info: (msg) => logs.info.push(msg),
+    };
+  });
+
+  afterEach(() => {
+    rmSync(legacyDir, { recursive: true, force: true });
+    rmSync(newDir, { recursive: true, force: true });
+  });
+
+  function writeSessionJson(dir: string, id: string): void {
+    writeFileSync(join(dir, `${id}.json`), JSON.stringify({ id, messageHistory: [] }), "utf-8");
+  }
+
+  it("skips with no_source when the legacy directory does not exist", () => {
+    // Fresh install path — no `$TMPDIR/vibe-sessions/` ever existed,
+    // migration must be a silent no-op so the boot log isn't polluted.
+    rmSync(legacyDir, { recursive: true, force: true });
+    const outcome = migrateLegacyTmpdirSessions(legacyDir, newDir, logger);
+    expect(outcome.ran).toBe(false);
+    expect(outcome.skippedReason).toBe("no_source");
+    expect(outcome.copied).toBe(0);
+    expect(existsSync(newDir)).toBe(false);
+  });
+
+  it("skips with no_source when legacy directory exists but is empty", () => {
+    // `/tmp/vibe-sessions/` may be created by another version then
+    // emptied; we must not flag a zero-file copy as a real migration.
+    const outcome = migrateLegacyTmpdirSessions(legacyDir, newDir, logger);
+    expect(outcome.ran).toBe(false);
+    expect(outcome.skippedReason).toBe("no_source");
+  });
+
+  it("copies session JSONs from legacy to new directory", () => {
+    writeSessionJson(legacyDir, "session-A");
+    writeSessionJson(legacyDir, "session-B");
+    const outcome = migrateLegacyTmpdirSessions(legacyDir, newDir, logger);
+
+    expect(outcome.ran).toBe(true);
+    expect(outcome.copied).toBe(2);
+    expect(outcome.failed).toBe(0);
+    expect(outcome.launcherCopied).toBe(false);
+    expect(outcome.skippedReason).toBeUndefined();
+
+    expect(existsSync(join(newDir, "session-A.json"))).toBe(true);
+    expect(existsSync(join(newDir, "session-B.json"))).toBe(true);
+    // Source preserved for rollback.
+    expect(existsSync(join(legacyDir, "session-A.json"))).toBe(true);
+    expect(existsSync(join(legacyDir, "session-B.json"))).toBe(true);
+  });
+
+  it("flags the launcher.json sidecar separately so it doesn't inflate the session count", () => {
+    // launcher.json carries the CLI PID map, not a session — counting it
+    // as a session would inflate the migration log and hide a zero-session
+    // case where only the sidecar is present.
+    writeSessionJson(legacyDir, "session-1");
+    writeFileSync(join(legacyDir, "launcher.json"), JSON.stringify({ pids: [1234] }), "utf-8");
+    const outcome = migrateLegacyTmpdirSessions(legacyDir, newDir, logger);
+
+    expect(outcome.copied).toBe(1);
+    expect(outcome.launcherCopied).toBe(true);
+    expect(existsSync(join(newDir, "launcher.json"))).toBe(true);
+  });
+
+  it("skips with target_already_populated when new directory already has session JSONs", () => {
+    // Idempotency — re-running migration after first successful copy
+    // must not overwrite live state in the new dir with stale tmpdir
+    // copies.
+    writeSessionJson(legacyDir, "session-1");
+    mkdirSync(newDir, { recursive: true });
+    writeSessionJson(newDir, "session-1");
+    const outcome = migrateLegacyTmpdirSessions(legacyDir, newDir, logger);
+    expect(outcome.ran).toBe(false);
+    expect(outcome.skippedReason).toBe("target_already_populated");
+    // Target preserved — not clobbered.
+    expect(existsSync(join(newDir, "session-1.json"))).toBe(true);
+  });
+
+  it("treats a target containing ONLY launcher.json as still empty (migrates real sessions in)", () => {
+    // Rare but legal interleaving: launcher.json may be written by
+    // another process before the first session is persisted. Empty
+    // sessions + launcher.json present must still allow migration in.
+    writeSessionJson(legacyDir, "session-X");
+    mkdirSync(newDir, { recursive: true });
+    writeFileSync(join(newDir, "launcher.json"), JSON.stringify({}), "utf-8");
+    const outcome = migrateLegacyTmpdirSessions(legacyDir, newDir, logger);
+    expect(outcome.ran).toBe(true);
+    expect(outcome.copied).toBe(1);
+  });
+
+  it("never deletes source files (rollback contract)", () => {
+    writeSessionJson(legacyDir, "session-keep");
+    migrateLegacyTmpdirSessions(legacyDir, newDir, logger);
+    // Source must remain readable after migration so rolling back to
+    // the pre-Task-12 binary continues to find the data.
+    const remaining = readdirSync(legacyDir);
+    expect(remaining).toContain("session-keep.json");
+  });
+
+  it("ignores non-JSON files in source (defensive)", () => {
+    // Stray text files in `$TMPDIR/vibe-sessions/` (editor lockfiles,
+    // tmp scratch) must not abort migration or get carried into the new
+    // dir.
+    writeSessionJson(legacyDir, "real");
+    writeFileSync(join(legacyDir, "scratch.tmp"), "garbage", "utf-8");
+    const outcome = migrateLegacyTmpdirSessions(legacyDir, newDir, logger);
+    expect(outcome.copied).toBe(1);
+    expect(existsSync(join(newDir, "scratch.tmp"))).toBe(false);
+  });
+});
+
+// ─── schemaVersion + migratePersistedSession (PLAN Task 12-i) ─────────────
+
+describe("schemaVersion", () => {
+  it("saveSync stamps the current schemaVersion on every write", () => {
+    // Even when caller passes a record without the field, the on-disk
+    // write must always carry the current version so subsequent loads
+    // need no migration step.
+    const session = makeSession("stamp-test", { schemaVersion: undefined });
+    expect(session.schemaVersion).toBeUndefined();
+    store.saveSync(session);
+
+    const raw = readFileSync(join(tempDir, "stamp-test.json"), "utf-8");
+    const parsed = JSON.parse(raw);
+    expect(parsed.schemaVersion).toBe(CURRENT_SESSION_SCHEMA_VERSION);
+  });
+
+  it("load() backfills schemaVersion on records that lack the field (v0)", () => {
+    // Simulate a pre-Task-12 record on disk — handwritten JSON without
+    // the field. Loader must migrate to v1 in-memory so all downstream
+    // code can rely on `.schemaVersion` being populated.
+    const legacyRecord = {
+      id: "legacy-1",
+      state: { session_id: "legacy-1", model: "claude", cwd: "/", tools: [], permissionMode: "default", claude_code_version: "1.0", mcp_servers: [], agents: [], slash_commands: [], skills: [], total_cost_usd: 0, num_turns: 0, context_used_percent: 0, is_compacting: false, git_branch: "", is_worktree: false, is_containerized: false, repo_root: "", git_ahead: 0, git_behind: 0, total_lines_added: 0, total_lines_removed: 0 },
+      messageHistory: [],
+      pendingMessages: [],
+      pendingPermissions: [],
+    };
+    writeFileSync(join(tempDir, "legacy-1.json"), JSON.stringify(legacyRecord), "utf-8");
+
+    const loaded = store.load("legacy-1");
+    expect(loaded).not.toBeNull();
+    expect(loaded!.schemaVersion).toBe(CURRENT_SESSION_SCHEMA_VERSION);
+  });
+
+  it("loadAll() skips records from a future schema version", () => {
+    // Forward-version sentinel — a v2 record on disk must be skipped by
+    // a v1 binary rather than half-parsed. This is the protection that
+    // makes the field worthwhile: silent acceptance with wrong defaults
+    // is the failure mode `schemaVersion` exists to prevent.
+    const futureRecord = {
+      id: "future-1",
+      schemaVersion: CURRENT_SESSION_SCHEMA_VERSION + 1,
+      state: { session_id: "future-1", model: "claude", cwd: "/", tools: [], permissionMode: "default", claude_code_version: "1.0", mcp_servers: [], agents: [], slash_commands: [], skills: [], total_cost_usd: 0, num_turns: 0, context_used_percent: 0, is_compacting: false, git_branch: "", is_worktree: false, is_containerized: false, repo_root: "", git_ahead: 0, git_behind: 0, total_lines_added: 0, total_lines_removed: 0 },
+      messageHistory: [],
+      pendingMessages: [],
+      pendingPermissions: [],
+    };
+    writeFileSync(join(tempDir, "future-1.json"), JSON.stringify(futureRecord), "utf-8");
+    writeFileSync(join(tempDir, "current-1.json"), JSON.stringify({ ...futureRecord, id: "current-1", schemaVersion: CURRENT_SESSION_SCHEMA_VERSION }), "utf-8");
+
+    const all = store.loadAll();
+    expect(all.map((s) => s.id)).toEqual(["current-1"]);
+    expect(store.load("future-1")).toBeNull();
+  });
+});
+
+describe("migratePersistedSession", () => {
+  it("returns input unchanged when schemaVersion is already current", () => {
+    // Idempotency — re-running migration on a record already at the
+    // current version must not mutate it (object identity preserved so
+    // the common-path load doesn't pay an allocation per session).
+    const session: PersistedSession = {
+      schemaVersion: CURRENT_SESSION_SCHEMA_VERSION,
+      id: "idempo",
+      state: { session_id: "idempo" } as never,
+      messageHistory: [],
+      pendingMessages: [],
+      pendingPermissions: [],
+    };
+    const result = migratePersistedSession(session);
+    expect(result).toBe(session);
+  });
+
+  it("fills in schemaVersion on records without the field (v0 → v1)", () => {
+    const legacy: PersistedSession = {
+      id: "v0",
+      state: { session_id: "v0" } as never,
+      messageHistory: [],
+      pendingMessages: [],
+      pendingPermissions: [],
+    };
+    const result = migratePersistedSession(legacy);
+    expect(result).not.toBeNull();
+    expect(result!.schemaVersion).toBe(CURRENT_SESSION_SCHEMA_VERSION);
+    // Original record not mutated — migration returns a new object so
+    // the caller decides whether to write the migrated form back.
+    expect(legacy.schemaVersion).toBeUndefined();
+  });
+
+  it("returns null for records from a future schema version + logs the rejection", () => {
+    const future: PersistedSession = {
+      schemaVersion: CURRENT_SESSION_SCHEMA_VERSION + 5,
+      id: "future",
+      state: { session_id: "future" } as never,
+      messageHistory: [],
+      pendingMessages: [],
+      pendingPermissions: [],
+    };
+    const warnings: string[] = [];
+    const result = migratePersistedSession(future, { warn: (msg) => warnings.push(msg) });
+    expect(result).toBeNull();
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("future");
+    expect(warnings[0]).toContain(String(CURRENT_SESSION_SCHEMA_VERSION + 5));
   });
 });

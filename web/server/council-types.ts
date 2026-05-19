@@ -414,3 +414,52 @@ export function parseObserverReviewPayload(
     ...(wakeEcho !== undefined ? { observer_wake_payload_version_echo: wakeEcho } : {}),
   };
 }
+
+// ─── Peer-message formatter (bidirectional pipeline) ────────────────────────
+//
+// Story 2.3: peer findings cross-injected as inline user_messages tagged
+// `[from-<role>: <severity>]`. Co-located with checkpoint/review schemas
+// per AP-3 (one cross-process contract per file). Capped at 1 KiB so a
+// pathological finding doesn't flood the orchestrator's chat thread —
+// overflow truncates and emits a workspace-relative pointer to the
+// originating review file so the chat is the index, not the archive.
+
+export const PEER_MESSAGE_MAX_BYTES = 1024;
+const PEER_TRUNCATION_MARKER = "… [truncated; full text:";
+
+export type PeerMessageSourceRole = "orchestrator" | "observer";
+
+export interface FormatPeerMessageInput {
+  sourceRole: PeerMessageSourceRole;
+  severity: CouncilFindingSeverity;
+  body: string;
+  reviewPath: string;
+}
+
+/**
+ * Build the inline peer-message body that the bidirectional pipeline
+ * injects into the counterpart half's chat thread with
+ * `origin: "council:peer"`. Caller is responsible for the `injectUserMessage`
+ * call; this returns only the formatted string.
+ */
+export function formatPeerMessage(input: FormatPeerMessageInput): string {
+  const prefix = `[from-${input.sourceRole}: ${input.severity}] `;
+  const trailer = ` ${PEER_TRUNCATION_MARKER} ${input.reviewPath}]`;
+  const full = prefix + input.body;
+  if (Buffer.byteLength(full, "utf8") <= PEER_MESSAGE_MAX_BYTES) {
+    return full;
+  }
+  const reservedBytes = Buffer.byteLength(prefix + trailer, "utf8");
+  const bodyBudget = Math.max(0, PEER_MESSAGE_MAX_BYTES - reservedBytes);
+  // Byte-safe truncation: walk chars until we'd exceed budget. Avoids
+  // splitting multi-byte UTF-8 sequences.
+  let acc = "";
+  let used = 0;
+  for (const ch of input.body) {
+    const chBytes = Buffer.byteLength(ch, "utf8");
+    if (used + chBytes > bodyBudget) break;
+    acc += ch;
+    used += chBytes;
+  }
+  return prefix + acc + trailer;
+}

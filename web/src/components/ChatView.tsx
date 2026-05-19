@@ -73,6 +73,14 @@ export function ChatView({ sessionId }: { sessionId: string }) {
 
   const showCliBanner = connStatus === "connected" && !cliConnected;
 
+  // Council Mode: observer half has its permission-mode locked at spawn
+  // (EC-1, applyCouncilObserverSpawnConfig). Mounting Composer under the
+  // observer would expose a toggle that the server-side gate (ws-bridge)
+  // rejects anyway — better not to render it. Strict equality so non-council
+  // sessions (role === undefined) keep their Composer.
+  const isObserver =
+    useStore((s) => s.sessions.get(sessionId)?.sessionGroupRole) === "observer";
+
   return (
     <div className="flex flex-col h-full min-h-0">
       {/* CLI disconnected / reconnecting / error banner */}
@@ -152,8 +160,11 @@ export function ChatView({ sessionId }: { sessionId: string }) {
         </div>
       ) : null}
 
-      {/* Composer */}
-      <Composer sessionId={sessionId} />
+      {/* Composer — suppressed for the observer half of a Council pair.
+          The toggle's set_permission_mode would be rejected server-side
+          (ws-bridge observer-guard) and the observer has no user-driven
+          chat input by design. */}
+      {!isObserver && <Composer sessionId={sessionId} />}
     </div>
   );
 }

@@ -10,8 +10,12 @@ interface ProjectGroupProps {
   sessionNames: Map<string, string>;
   pendingPermissions: Map<string, Map<string, unknown>>;
   recentlyRenamed: Set<string>;
-  /** Optional callback for per-session Council badge/unread data. */
-  getCouncilInfo?: (sessionId: string) => { pairing?: string; unreadStops?: number };
+  /** Optional callback for per-session Council badge/unread data + role.
+   *  `role` drives the ☼/☽ glyph + " · orchestrator"/" · observer" suffix
+   *  in `SessionItem`. Forgot to plumb it through here originally (PR #68
+   *  fix); the bug surfaced as "glyph absent for active session pairs"
+   *  even when the group record was present in the store. */
+  getCouncilInfo?: (sessionId: string) => { pairing?: string; unreadStops?: number; role?: "orchestrator" | "observer" };
   onSelect: (id: string) => void;
   onStartRename: (id: string, currentName: string) => void;
   onArchive: (e: React.MouseEvent, id: string) => void;
@@ -116,6 +120,7 @@ export function ProjectGroup({
                 isRecentlyRenamed={recentlyRenamed.has(s.id)}
                 councilPairing={council.pairing}
                 councilUnreadStops={council.unreadStops}
+                councilRole={council.role}
                 onSelect={onSelect}
                 onStartRename={onStartRename}
                 onArchive={onArchive}

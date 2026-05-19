@@ -2,7 +2,12 @@
 import { describe, it, expect } from "vitest";
 import { render, screen } from "@testing-library/react";
 import "@testing-library/jest-dom";
-import { ProviderBadges, parsePairing, isHomogeneousPairing } from "./ProviderBadges.js";
+import {
+  ProviderBadges,
+  parsePairing,
+  isHomogeneousPairing,
+  pairHalvesAfterBackendCollapse,
+} from "./ProviderBadges.js";
 
 // ── parsePairing (Beck F4: both branches) ──────────────────────────────────
 
@@ -55,6 +60,66 @@ describe("isHomogeneousPairing", () => {
     ["empty right", "claude+"],
   ])("returns false for malformed input (%s) — callers fall back to ProviderBadges' own neutral chips", (_label, raw) => {
     expect(isHomogeneousPairing(raw)).toBe(false);
+  });
+});
+
+// ── pairHalvesAfterBackendCollapse (Sidebar suppression beyond homogeneous) ──
+//
+// Extension of `isHomogeneousPairing` for the asymmetric case: in SessionItem
+// the BackendBadge already shows the orchestrator backend ("CC" / "CX"), so
+// rendering ANY pair-half whose provider equals the backend is pure
+// duplication. This helper returns the pair halves that should still be
+// rendered after that collapse, in orchestrator-then-observer order.
+//
+// Truth table covered:
+//   ("claude+claude", "claude") → []           # PR #27 homogeneous case
+//   ("claude+codex",  "claude") → ["codex"]    # NEW: redundant claude half dropped
+//   ("claude+codex",  "codex")  → ["claude"]   # NEW: redundant codex half dropped
+//   ("codex+codex",   "codex")  → []           # symmetric homogeneous on codex backend
+//   malformed                    → []           # SessionItem renders nothing — same as homogeneous
+
+describe("pairHalvesAfterBackendCollapse", () => {
+  it("returns [] for homogeneous pair on matching backend (PR #27 case)", () => {
+    expect(pairHalvesAfterBackendCollapse("claude+claude", "claude")).toEqual([]);
+    expect(pairHalvesAfterBackendCollapse("codex+codex", "codex")).toEqual([]);
+  });
+
+  it("drops the half whose provider duplicates the backend (asymmetric pair)", () => {
+    // Backend=claude already shows "CC" — the CLAUDE pair-half adds no signal.
+    expect(pairHalvesAfterBackendCollapse("claude+codex", "claude")).toEqual(["codex"]);
+    // Backend=codex already shows "CX" — the CODEX pair-half adds no signal.
+    expect(pairHalvesAfterBackendCollapse("claude+codex", "codex")).toEqual(["claude"]);
+  });
+
+  it("preserves orchestrator-then-observer order when the backend matches the OBSERVER half", () => {
+    // Hypothetical `codex+claude` pair on a Codex backend — observer ("claude")
+    // is what remains. Order is preserved because the helper filters; the
+    // caller can rely on index 0 being the surviving half regardless of which
+    // pair position it occupied.
+    expect(pairHalvesAfterBackendCollapse("codex+claude", "codex")).toEqual(["claude"]);
+  });
+
+  it("normalises pair halves to lowercase (matches parsePairing)", () => {
+    expect(pairHalvesAfterBackendCollapse("Claude+CODEX", "claude")).toEqual(["codex"]);
+  });
+
+  it.each([
+    ["empty", ""],
+    ["single half", "claude"],
+    ["three parts", "claude+codex+extra"],
+    ["empty left", "+codex"],
+    ["empty right", "claude+"],
+  ])("returns [] for malformed input (%s) — SessionItem renders nothing", (_label, raw) => {
+    expect(pairHalvesAfterBackendCollapse(raw, "claude")).toEqual([]);
+  });
+
+  it("returns both halves when neither matches the backend (defensive — impossible today, future-proof)", () => {
+    // Today server-side validation only permits backends `claude` / `codex`
+    // and pairings whose halves come from the same set, so this branch is
+    // structurally unreachable. The test exists so the helper's contract
+    // stays sound if a new backend or pairing type is added.
+    const halves = pairHalvesAfterBackendCollapse("claude+codex", "unknown" as "claude");
+    expect(halves).toEqual(["claude", "codex"]);
   });
 });
 

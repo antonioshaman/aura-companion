@@ -8,6 +8,7 @@ import type { ContainerConfig, ContainerInfo } from "./container-manager.js";
 import { containerManager } from "./container-manager.js";
 import { imagePullManager } from "./image-pull-manager.js";
 import * as envManager from "./env-manager.js";
+import { ConvergenceTracker } from "./convergence-tracker.js";
 import * as sandboxManager from "./sandbox-manager.js";
 import * as gitUtils from "./git-utils.js";
 import * as sessionNames from "./session-names.js";
@@ -27,9 +28,14 @@ import { SessionGroupCoordinator } from "./session-group-coordinator.js";
 import { isSupportedPairing as _isSupportedPairing } from "./backend-provider.js";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { mkdirSync, readdirSync, readFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, existsSync } from "node:fs";
+import { IdleTimerManager } from "./idle-timer-manager.js";
+import {
+  buildNoopIdleTimerManager,
+  runAutoProceedBootReconcile,
+} from "./auto-proceed-orchestrator-bindings.js";
 import type { CheckpointPayload, ObserverReviewPayload } from "./council-types.js";
-import { OBSERVER_WAKE_PAYLOAD_VERSION, OBSERVER_WAKE_TIMEOUT_MS, parseCheckpointPayload } from "./council-types.js";
+import { OBSERVER_WAKE_PAYLOAD_VERSION, parseCheckpointPayload, parseObserverReviewPayload } from "./council-types.js";
 import { watchCheckpoints } from "./checkpoint-watcher.js";
 import { watchReviews } from "./review-watcher.js";
 import { validateObserverFindings } from "./observer-grounding.js";
@@ -42,9 +48,11 @@ import {
 } from "./council-wake-sentinel.js";
 import { formatObserverInvocationLog } from "./observer-attribution.js";
 import type {
+  BrowserGroupRecord,
   BrowserObserverDowngrade,
   BrowserObserverFinding,
 } from "./session-types.js";
+import { buildBrowserGroupRecord } from "./browser-group-record.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -102,6 +110,15 @@ export interface SessionOrchestratorDeps {
     unwatch(sessionId: string): void;
   };
   agentExecutor: AgentExecutor;
+  /**
+   * Auto-proceed idle-timer manager (PLAN Task 7+9). Optional with a
+   * disposable null-object default so tests and existing callers that
+   * don't exercise auto-proceed don't need to thread a stub through.
+   * Production wires the real {@link IdleTimerManager} in `index.ts`;
+   * the orchestrator owns the rehydrate-on-boot + dispose-on-shutdown
+   * ladder.
+   */
+  idleTimerManager?: IdleTimerManager;
 }
 
 export interface CreateSessionRequest {
@@ -130,6 +147,16 @@ export interface CreateSessionRequest {
   // route; the coordinator generates them server-side.
   sessionGroupId?: string;
   sessionGroupRole?: import("./session-types.js").SessionGroupRole;
+  /**
+   * Auto-proceed (idle-timeout) opt-in. Already-parsed-and-validated by
+   * the boundary parser in `routes.ts` (Task 10 — see
+   * `auto-proceed-config-validator.ts`). The orchestrator receives the
+   * fully-clamped value or `undefined`; never raw user input. Tri-state
+   * collapse at the boundary: `false | null | undefined | absent` all
+   * arrive here as `undefined`, so a `presence check` on this field is
+   * the canonical "is auto-proceed enabled for this session" test.
+   */
+  autoProceedOnIdle?: { readonly idleMs: number; readonly maxIterations: number };
 }
 
 /** Public Council Mode pair-create request. The coordinator validates the
@@ -232,8 +259,7 @@ interface CouncilWatcherEntry {
  *     - `observer_unknown` — no observer half mapped for this group
  *     - `group_not_active` — group status is pairing/degraded/reconnecting/archived
  *     - `adapter_missing` — session exists but its backend adapter is null (transient)
- *     - `unsupported_backend` — adapter implements neither ClaudeAdapter nor
- *       CodexAdapter (defensive branch for a future mock/null adapter)
+ *     - `unsupported_backend` — adapter is not ClaudeAdapter (Codex pairing not yet wired)
  *     - `socket_disconnected` — observer cliSocket null or not OPEN
  *     - `backpressure` — observer socket's bufferedAmount exceeds threshold
  *     - `observer_busy` — observer turn-state is in-flight (queue in Task 4)
@@ -262,6 +288,18 @@ interface CouncilGroupMeta {
   pairing: string;
   /** Sha256 of the observer prompt artifact at spawn time, captured for invocation-log forensic re-run. */
   observerPromptSha256?: string;
+  /**
+   * Provenance of the observer prompt at spawn time (workspace vs bundled).
+   * Council Review 2026-05-15-1015 CR-1: the path-shaped label was dropped
+   * from log egress because it disclosed operator topology on every
+   * invocation (multi-expert convergence — Hunt P1, Fowler P2, Backend P2-5).
+   * Source discriminator + sha256 carry sufficient forensic-replay value;
+   * label stays in-memory only on the SdkSessionInfo's artifact.
+   */
+  observerPromptSource?: "workspace" | "bundled";
+  /** Schema version parsed from the observer prompt's header at spawn time
+   *  (CR-13, forward-compat for v2 migration). */
+  observerPromptVersion?: number;
   /** Wallclock (ms) when the group was created — used to compute invocation latency. */
   createdAt: number;
   /** Wallclock (ms) when the most recent checkpoint reached this orchestrator — used to compute observer wake-to-emit latency. */
@@ -343,6 +381,26 @@ export class SessionOrchestrator {
   private worktreeTracker: WorktreeTracker;
   private prPoller: SessionOrchestratorDeps["prPoller"];
   private agentExecutor: AgentExecutor;
+  /**
+   * Auto-proceed idle-timer manager (PLAN Task 7+9). Lifecycle:
+   *  - Boot reconcile: in {@link initialize}, after `reconcileCouncilGroups`,
+   *    scan each active group's `.council/state/` for trace JSON and
+   *    rehydrate the per-session iteration counter via `manager.rehydrate`.
+   *  - SIGTERM drain: `disposeAll()` is the FIRST step in `group-shutdown.ts`,
+   *    called BEFORE kill propagation (EC-2 extends naturally — timers
+   *    cleared before kills fire to children).
+   * Null-object when DI omits it so test paths and existing tests don't
+   * crash; production always wires the real manager from `index.ts`.
+   */
+  private idleTimerManager: IdleTimerManager;
+
+  /**
+   * Bidirectional pipeline Story 4.1: convergence tracker folds the
+   * `group:review` stream into a per-group clean-cycle counter. Lazy-
+   * initialised in {@link initialize} after `wireGroupListeners` so the
+   * `group:convergence` listener is armed before the tracker can emit.
+   */
+  private convergenceTracker: ConvergenceTracker | null = null;
 
   // Auto-relaunch state
   private relaunchingSet = new Set<string>();
@@ -404,6 +462,34 @@ export class SessionOrchestrator {
     this.worktreeTracker = deps.worktreeTracker;
     this.prPoller = deps.prPoller;
     this.agentExecutor = deps.agentExecutor;
+    // Null-object default when DI omits the manager. Disposing a null
+    // manager is a no-op; rehydrate is a no-op; arm/cancel/note are no-ops.
+    // Production wires the real manager from `index.ts` so the boot
+    // reconcile path actually rehydrates traces.
+    this.idleTimerManager = deps.idleTimerManager ?? buildNoopIdleTimerManager();
+  }
+
+  /**
+   * Accessor for the gracefulShutdown SIGTERM-drain path in `index.ts`.
+   * Returns the manager so `shutdownAllGroups` can call `disposeAll()`
+   * BEFORE the kill propagation. EC-2 invariant — cancel timers before
+   * kills fire to children.
+   */
+  getIdleTimerManager(): IdleTimerManager {
+    return this.idleTimerManager;
+  }
+
+  /**
+   * Late-injection seam for the idle-timer manager. Necessary because
+   * the production wiring is mutually circular — the manager's
+   * `getSession` / `getGroupStatus` closures reference the orchestrator
+   * (for the coordinator + ws-bridge lookups). `index.ts` constructs the
+   * orchestrator first with the noop default, then builds the real
+   * manager closing over the orchestrator reference, then calls this
+   * setter BEFORE `initialize()` runs the boot reconcile.
+   */
+  setIdleTimerManager(manager: IdleTimerManager): void {
+    this.idleTimerManager = manager;
   }
 
   // ── Initialization (event wiring) ──────────────────────────────────────────
@@ -415,6 +501,35 @@ export class SessionOrchestrator {
     // When the CLI reports its internal session_id, store it for --resume
     companionBus.on("session:cli-id-received", ({ sessionId, cliSessionId }) => {
       this.launcher.setCLISessionId(sessionId, cliSessionId);
+    });
+
+    // Task 11.6 — cross-tab single-firer wiring for the auto-proceed
+    // turn-token. The bridge fires `onUserFrameObserved` once per
+    // browser→server `user_message` frame regardless of tab count.
+    // Forwarding to `idleTimerManager.noteUserMessage` advances the
+    // per-session monotonic turn-token, which cancels any pending
+    // synthetic-fire and invalidates an in-flight fire callback (the
+    // re-read inside `fire()` is the actual single-firer gate; this
+    // wiring is the observability path that drives it).
+    //
+    // Production caller for `IdleTimerManager.noteUserMessage` — closes
+    // the call-site gap from Task 11.1 foundation work where the method
+    // shipped with unit tests but no production wiring.
+    this.wsBridge.onUserFrameObserved((sessionId) => {
+      this.idleTimerManager.noteUserMessage(sessionId);
+    });
+
+    // Task 11.8 — clear the pending-synthetic-turn sticky token on every
+    // session exit. Without this, a session that died mid-synthetic-turn
+    // (CLI crash before result-frame, container teardown, manual kill)
+    // would leave the sticky token armed in the manager; if the same
+    // sessionId were later re-used (--resume), the next can_use_tool
+    // check would falsely treat the resumed session as auto-proceed-
+    // driven. `clearPendingSyntheticTurn` is idempotent on never-armed
+    // sessions, so firing it on every exit is safe regardless of
+    // whether auto-proceed was actually in play.
+    companionBus.on("session:exited", ({ sessionId }) => {
+      this.idleTimerManager.clearPendingSyntheticTurn(sessionId);
     });
 
     // Council Mode auto-wake (Task 4 drain hook): when the observer
@@ -463,17 +578,60 @@ export class SessionOrchestrator {
       try {
         const coord = this.coordinator;
         if (!coord) return;
-        // Find the group this sessionId belongs to via meta cache.
+        // Find the group this sessionId belongs to via meta cache. Capture
+        // the role too — the post-grace recovery branch below needs it to
+        // build a typed `half_respawned` event, and recomputing it from the
+        // GroupRecord would be a second lookup with no extra safety.
         let foundGroupId: string | null = null;
+        let foundRole: SessionGroupRole | null = null;
         for (const [groupId, meta] of this.councilGroupMeta) {
-          if (meta.primarySessionId === sessionId || meta.observerSessionId === sessionId) {
+          if (meta.primarySessionId === sessionId) {
             foundGroupId = groupId;
+            foundRole = "orchestrator";
+            break;
+          }
+          if (meta.observerSessionId === sessionId) {
+            foundGroupId = groupId;
+            foundRole = "observer";
             break;
           }
         }
-        if (!foundGroupId) return;
+        if (!foundGroupId || !foundRole) return;
         const ctx = coord.getReconnectContext(foundGroupId);
-        if (!ctx) return; // No reconnect armed for this group — normal handshake, nothing to do.
+        if (!ctx) {
+          // No reconnect armed. Two sub-cases:
+          //
+          // 1) Normal handshake on an active pair (orchestrator/observer
+          //    came up cleanly without a prior `half_died` event in flight)
+          //    — nothing to do.
+          //
+          // 2) **Post-grace recovery**: the half flapped earlier, the
+          //    reconnect grace window expired without a re-handshake, the
+          //    state machine settled in `degraded`, and the half is only
+          //    now coming back through `--resume`. `getReconnectContext`
+          //    returns undefined because the grace timer was cleaned up at
+          //    expiry, so the earlier handler shape silently dropped the
+          //    handshake. `degraded × half_respawned → active` exists in
+          //    the state machine; emit it here so the pair recovers.
+          //
+          // Without this branch, a settled `degraded` pair was structurally
+          // terminal in production — `dispatchObserverWake` Gate 1 refused
+          // every checkpoint with `reason=group_not_active`, while chat
+          // (which is `isOperable` in degraded) kept working. Users saw a
+          // working pair that silently never produced observer reviews.
+          const groupRecord = coord.get(foundGroupId);
+          if (groupRecord?.status === "degraded") {
+            coord.applyEvent(foundGroupId, { type: "half_respawned", role: foundRole });
+            // Council Mode auto-wake: drain any checkpoint that arrived
+            // while the pair was stuck in degraded. Mirrors the symmetric
+            // drain on `reconnect_ok` below — without this, the first
+            // post-recovery checkpoint sits on disk until the next POST.
+            if (foundRole === "observer") {
+              this.drainPendingObserverWake(foundGroupId);
+            }
+          }
+          return;
+        }
         if (ctx.snapshotSessionId !== sessionId) {
           // Identity mismatch: the handshake came from a session we did NOT
           // snapshot as the dead half. Possible causes: a follow-up
@@ -647,6 +805,18 @@ export class SessionOrchestrator {
     // separated from the solo-session lifecycle wiring above.
     this.wireGroupListeners();
 
+    // Bidirectional pipeline Story 4.1 — convergence tracker. Attached
+    // AFTER wireGroupListeners so the `group:convergence` listener is
+    // armed first; any review processed between attach and first emit
+    // is fanned to browsers without race.
+    this.convergenceTracker = new ConvergenceTracker({
+      isFrozen: (sessionGroupId: string) => {
+        const status = this.coordinator?.get(sessionGroupId)?.status;
+        return status === "degraded" || status === "reconnecting";
+      },
+    });
+    this.convergenceTracker.attach();
+
     // Council Mode group reconciliation. Pairs created in a previous server
     // uptime are restored from launcher state (which itself hydrates from
     // session-store on startup). Without this, --resume brings back the
@@ -664,8 +834,47 @@ export class SessionOrchestrator {
     // are armed for any wake we dispatch here.
     this.scanForMissedObserverWakes();
 
+    // PLAN-aura-orchestrator-idle-auto-proceed Task 9: rehydrate the idle
+    // timer manager's per-session iteration counters from on-disk traces.
+    // Must run AFTER `reconcileCouncilGroups` (which populates
+    // `councilGroupMeta` with orchestrator sessionId + workspace cwd) so
+    // each trace maps to a known orchestrator-half. Idempotent — safe to
+    // call multiple times; re-rehydrating with the same trace produces
+    // the same in-memory state.
+    this.rehydrateAutoProceedTraces();
+
     // Reconnection watchdog for stale sessions after server restart
     this.startReconnectionWatchdog();
+  }
+
+  /**
+   * PLAN-aura-orchestrator-idle-auto-proceed Task 9: boot reconcile.
+   *
+   * Walks each active council group's `.council/state/` directory looking
+   * for `<group-id>-auto-proceed-trace.json` files. For each parseable
+   * trace whose `sessionGroupId` matches a reconciled group, calls
+   * {@link IdleTimerManager.rehydrate} with the orchestrator-half session
+   * id so the in-memory iteration counter resumes from disk rather than
+   * starting at zero.
+   *
+   * Logic lives in the dependency-injected
+   * {@link reconcileAutoProceedTraces} reducer so the unit test exercises
+   * the real filesystem + real manager without standing up the
+   * orchestrator's full event-bus harness. This method is just the
+   * concrete-bindings adapter.
+   *
+   * Idempotency: re-running with no on-disk changes is a no-op. Errors
+   * are caught + logged inside the reducer; this method never throws so
+   * `initialize()` always completes.
+   */
+  private rehydrateAutoProceedTraces(): void {
+    runAutoProceedBootReconcile(
+      this.councilGroupMeta,
+      this.councilWatchers,
+      this.idleTimerManager,
+      (entry) =>
+        log.info("session-orchestrator", "auto-proceed reconcile", entry as unknown as Record<string, unknown>),
+    );
   }
 
   /**
@@ -883,6 +1092,7 @@ export class SessionOrchestrator {
         observerSessionId,
         pairing,
         observerPromptSha256: observer?.observerPromptSha256,
+        observerPromptSource: observer?.observerPromptSource,
         createdAt: (orchestrator ?? observer)?.createdAt ?? Date.now(),
         lastCheckpointReceivedAt: null,
       });
@@ -982,19 +1192,31 @@ export class SessionOrchestrator {
     companionBus.on("group:created", ({ sessionGroupId, primarySessionId, observerSessionId }) => {
       const primary = this.launcher.getSession(primarySessionId);
       const observer = this.launcher.getSession(observerSessionId);
-      const pairing = `${primary?.backendType ?? "claude"}+${observer?.backendType ?? "claude"}`;
+      // PR #68: route the wire-shape assembly through the shared helper
+      // (`buildBrowserGroupRecord`). Same helper drives `getAllGroupsForBootstrap`
+      // and `ws-bridge.deriveGroupCreatedForBrowser` — pairing label,
+      // wakeTimeoutMs, and field ordering cannot drift across the three
+      // construction sites. Launcher is the canonical source for the
+      // post-spawn backend type; pass undefined-tolerant values straight
+      // through — the helper applies its internal `DEFAULT_BACKEND_TYPE`
+      // fallback for launcher-propagation-lag (Fowler fix-pass).
+      // Status is hardcoded `"active"` because this listener only fires
+      // on a transition that leaves the group active.
+      const wire = buildBrowserGroupRecord({
+        sessionGroupId,
+        primary: {
+          sessionId: primarySessionId,
+          backendType: primary?.backendType,
+        },
+        observer: {
+          sessionId: observerSessionId,
+          backendType: observer?.backendType,
+        },
+        status: "active",
+      });
       this.wsBridge.broadcastToGroup([primarySessionId, observerSessionId], {
         type: "group_created",
-        sessionGroupId,
-        primarySessionId,
-        observerSessionId,
-        pairing,
-        // Task 9: publish the wake-to-review timeout so the frontend
-        // panel-state deriver bounds the `reviewing` interval. Mirrors
-        // {@link OBSERVER_WAKE_TIMEOUT_MS} from this module — kept
-        // as a single constant the server owns; the frontend never
-        // hardcodes its own copy.
-        wakeTimeoutMs: OBSERVER_WAKE_TIMEOUT_MS,
+        ...wire,
       });
     });
     companionBus.on("group:exited", ({ sessionGroupId, reason }) => {
@@ -1090,6 +1312,37 @@ export class SessionOrchestrator {
         observerProvider,
         timestamp: Date.now(),
         ...(superseded.length > 0 ? { supersededCheckpointIds: superseded } : {}),
+      });
+    });
+
+    // Bidirectional pipeline Story 4.1 — convergence-tracker fanout.
+    // The tracker is wired in initialize(); here we forward its bus
+    // emissions to the browsers in the same group as a `group_update`
+    // payload carrying the new convergence fields. Frontend reads
+    // them off `GroupRecord` (server-authoritative; no client-side
+    // counter).
+    companionBus.on("group:convergence", ({ sessionGroupId, transition, cycleNumber, convergenceThreshold }) => {
+      const convergenceState: "in-progress" | "converged" | "revoked" =
+        transition === "converged"
+          ? "converged"
+          : transition === "revoked"
+            ? "revoked"
+            : "in-progress";
+      this.wsBridge.broadcastToGroup(this.getGroupMemberIds(sessionGroupId), {
+        type: "group_convergence",
+        sessionGroupId,
+        transition,
+        cycleNumber,
+        convergenceThreshold,
+        convergenceState,
+        timestamp: Date.now(),
+      });
+      log.info("session-orchestrator", "convergence transition", {
+        event: "council.convergence.transition",
+        sessionGroupId,
+        transition,
+        cycleNumber,
+        convergenceThreshold,
       });
     });
 
@@ -1260,6 +1513,14 @@ export class SessionOrchestrator {
       },
       kill: async (sessionId) => {
         await this.killSession(sessionId);
+      },
+      // PLAN Task 8: route applyEvent's auto-proceed idle-timer descriptors
+      // into the real IdleTimerManager. AP-2 — the state machine is the
+      // sole mutator; this seam is the enactor that drains its effects.
+      idleTimerEnactor: {
+        arm: (sessionId, options) => this.idleTimerManager.arm(sessionId, options),
+        cancel: (sessionId) => this.idleTimerManager.cancel(sessionId),
+        noteUserMessage: (sessionId) => this.idleTimerManager.noteUserMessage(sessionId),
       },
     });
     return this.coordinator;
@@ -1930,6 +2191,8 @@ export class SessionOrchestrator {
             observerModel: payload.observer_model,
             observerCliVersion: payload.observer_cli_version,
             promptSha256: meta.observerPromptSha256 ?? "",
+            observerPromptSource: meta.observerPromptSource,
+            observerPromptVersion: meta.observerPromptVersion,
           }),
         });
       }
@@ -2021,9 +2284,21 @@ export class SessionOrchestrator {
 
     const coordinator = this.getOrCreateCoordinatorSync();
 
+    // Council Plan Bug B Review P1 #2 — refuse to default to
+    // `process.cwd()` here. Council Mode requires an explicit workspace
+    // cwd so the observer prompt resolution gets a real workspace path
+    // (not the server's `/app` under Docker). Without this throw, the
+    // upstream `process.cwd()` default silently triggered the bundled-
+    // fallback path with `reason: "ENOENT"` — the distinct
+    // `no-workspace-cwd` branch was structurally unreachable.
+    if (!req.base.cwd || typeof req.base.cwd !== "string" || req.base.cwd.length === 0) {
+      throw new Error(
+        "createCouncilGroup: explicit cwd is required for Council Mode session creation; refusing to fall back to process.cwd()",
+      );
+    }
     try {
       const group = await coordinator.createGroup({
-        cwd: req.base.cwd ?? process.cwd(),
+        cwd: req.base.cwd,
         primary: parsed.primary,
         observer: parsed.observer,
         model: req.base.model,
@@ -2046,6 +2321,8 @@ export class SessionOrchestrator {
         observerSessionId: group.observer.sessionId,
         pairing: pairingLabel,
         observerPromptSha256: observerInfo.observerPromptSha256,
+        observerPromptSource: observerInfo.observerPromptSource,
+        observerPromptVersion: observerInfo.observerPromptVersion,
         createdAt: Date.now(),
         lastCheckpointReceivedAt: null,
       });
@@ -2488,42 +2765,110 @@ export class SessionOrchestrator {
 
   // ── Archive ────────────────────────────────────────────────────────────────
 
-  async archiveSession(sessionId: string, options?: ArchiveSessionOptions): Promise<ArchiveSessionResult> {
-    let linearTransitionResult: ArchiveSessionResult["linearTransition"];
-    const linearTransition = options?.linearTransition;
-
-    if (linearTransition && linearTransition !== "none") {
-      const linkedIssue = sessionLinearIssues.getLinearIssue(sessionId);
-      if (linkedIssue) {
-        const resolved = resolveApiKey(linkedIssue.connectionId);
-        if (resolved) {
-          const { apiKey: linearApiKey, connectionId: resolvedConnId } = resolved;
-          const settings = getSettings();
-          const conn = resolvedConnId !== "legacy" ? getConnection(resolvedConnId) : null;
-          let targetStateId = "";
-
-          if (linearTransition === "backlog" && linkedIssue.teamId) {
-            const teams = await fetchLinearTeamStates(linearApiKey);
-            const team = teams.find((t) => t.id === linkedIssue.teamId);
-            const backlogState = team?.states.find((s) => s.type === "backlog");
-            if (backlogState) targetStateId = backlogState.id;
-          } else if (linearTransition === "configured") {
-            const archiveStateId = conn ? conn.archiveTransitionStateId : settings.linearArchiveTransitionStateId;
-            targetStateId = archiveStateId.trim();
-          }
-
-          if (targetStateId) {
-            try {
-              linearTransitionResult = await transitionLinearIssue(linkedIssue.id, targetStateId, linearApiKey, resolvedConnId);
-            } catch {
-              linearTransitionResult = { ok: false, error: "Transition failed unexpectedly" };
-            }
-          } else {
-            linearTransitionResult = { ok: true, skipped: true };
-          }
-        }
-      }
+  /**
+   * Linear-issue transition helper extracted so archiveSession can apply it
+   * exactly once per archive — both on the single-session path and on the
+   * council-pair path (which must not double-transition the orchestrator's
+   * linked issue if the user clicked the observer-half by accident; the
+   * observer half has no linked issue and this returns undefined harmlessly).
+   */
+  private async maybeTransitionLinearForArchive(
+    sessionId: string,
+    linearTransition: ArchiveSessionOptions["linearTransition"],
+  ): Promise<ArchiveSessionResult["linearTransition"]> {
+    if (!linearTransition || linearTransition === "none") return undefined;
+    const linkedIssue = sessionLinearIssues.getLinearIssue(sessionId);
+    if (!linkedIssue) return undefined;
+    const resolved = resolveApiKey(linkedIssue.connectionId);
+    if (!resolved) return undefined;
+    const { apiKey: linearApiKey, connectionId: resolvedConnId } = resolved;
+    const settings = getSettings();
+    const conn = resolvedConnId !== "legacy" ? getConnection(resolvedConnId) : null;
+    let targetStateId = "";
+    if (linearTransition === "backlog" && linkedIssue.teamId) {
+      const teams = await fetchLinearTeamStates(linearApiKey);
+      const team = teams.find((t) => t.id === linkedIssue.teamId);
+      const backlogState = team?.states.find((s) => s.type === "backlog");
+      if (backlogState) targetStateId = backlogState.id;
+    } else if (linearTransition === "configured") {
+      const archiveStateId = conn ? conn.archiveTransitionStateId : settings.linearArchiveTransitionStateId;
+      targetStateId = archiveStateId.trim();
     }
+    if (!targetStateId) return { ok: true, skipped: true };
+    try {
+      return await transitionLinearIssue(linkedIssue.id, targetStateId, linearApiKey, resolvedConnId);
+    } catch {
+      return { ok: false, error: "Transition failed unexpectedly" };
+    }
+  }
+
+  async archiveSession(sessionId: string, options?: ArchiveSessionOptions): Promise<ArchiveSessionResult> {
+    // EC-2: when the clicked session is part of an active council group,
+    // route the kill through `coordinator.archiveGroup` so BOTH halves'
+    // ids land in `intentionalKills` BEFORE either `launcher.kill` runs
+    // and the `group:exited` bus event fires via the same `applyEvent`
+    // channel as every other lifecycle transition (AP-2). Before this
+    // branch, `archiveSession` was group-blind and the surviving half
+    // kept self-polling indefinitely (P1 reported 2026-05-14).
+    const coord = this.coordinator;
+    const group = coord?.findBySessionId(sessionId);
+    if (coord && group && group.status !== "archived") {
+      const linearTransitionResult = await this.maybeTransitionLinearForArchive(
+        sessionId,
+        options?.linearTransition,
+      );
+
+      // EC-2 ordering: mark BOTH halves intentional BEFORE archiveGroup
+      // calls deps.kill on either. Without this, the dead half's
+      // `session:exited` handler would enter the `reconnecting → degraded`
+      // ladder instead of the absorbing intentional-kill path.
+      this.intentionalKills.add(group.primary.sessionId);
+      this.intentionalKills.add(group.observer.sessionId);
+
+      this.cancelKeepaliveTimer(group.primary.sessionId);
+      this.cancelKeepaliveTimer(group.observer.sessionId);
+      this.wsBridge.cancelDisconnectTimer(group.primary.sessionId);
+      this.wsBridge.cancelDisconnectTimer(group.observer.sessionId);
+      this.prPoller.unwatch(group.primary.sessionId);
+      this.prPoller.unwatch(group.observer.sessionId);
+
+      // CR-5 fix: clear the pending-synthetic-turn sticky token BEFORE
+      // archiveGroup's awaited kills. Previously the clear ran AFTER the
+      // await — current behaviour was safe ONLY because archiveGroup's
+      // kills synchronously fire `session:exited` → listener clears. A
+      // future async-kill refactor (deferring `deps.kill` to setImmediate
+      // for re-entry hygiene) inverts the safety: the explicit clear at
+      // step 3 would then race the eventual exit-emit, leaving a window
+      // where the sticky token survives the archive. Move BEFORE await
+      // so it's unconditionally before any kill — listener handles late
+      // edge cases as belt-and-braces, not as the primary defence.
+      // Idempotent on never-armed sessions.
+      this.idleTimerManager.clearPendingSyntheticTurn(group.primary.sessionId);
+
+      await coord.archiveGroup(group.sessionGroupId);
+
+      // Worktree cleanup runs ONCE — council pairs share one workspace;
+      // calling cleanupWorktree per-half would double-attempt the same
+      // directory removal (second call is a no-op today, but relying on
+      // that is fragile). Use the orchestrator half's id because the
+      // worktree is provisioned against that side at createCouncilGroup.
+      const worktreeResult = this.cleanupWorktree(group.primary.sessionId, options?.force);
+
+      containerManager.removeContainer(group.primary.sessionId);
+      containerManager.removeContainer(group.observer.sessionId);
+      this.launcher.setArchived(group.primary.sessionId, true);
+      this.launcher.setArchived(group.observer.sessionId, true);
+      this.sessionStore.setArchived(group.primary.sessionId, true);
+      this.sessionStore.setArchived(group.observer.sessionId, true);
+
+      return { ok: true, worktree: worktreeResult, linearTransition: linearTransitionResult };
+    }
+
+    // ── Single-session path (non-council or already-archived group) ─────────
+    const linearTransitionResult = await this.maybeTransitionLinearForArchive(
+      sessionId,
+      options?.linearTransition,
+    );
 
     this.intentionalKills.add(sessionId);
     this.cancelKeepaliveTimer(sessionId);
@@ -2609,6 +2954,157 @@ export class SessionOrchestrator {
     return { sessionGroupId, role };
   }
 
+  /**
+   * REST bootstrap for Council Mode group records — return every live
+   * group the coordinator currently tracks, in the same wire shape the
+   * `group_created` push event uses. Used by the browser on app mount /
+   * reload to repopulate `groupBySessionId` so the Sidebar glyph + role
+   * suffix render correctly even when the original `group_created` event
+   * arrived while no browser was connected.
+   *
+   * Closes the bootstrap gap described in
+   * `BUG-council-mode-group-rest-bootstrap-gap.md` — historically the
+   * browser's group store was populated EXCLUSIVELY by the live
+   * `group:created` push, so a reload after pair creation left the
+   * Sidebar without the ☼/☽ decoration and the ObserverPanel without
+   * pair context.
+   *
+   * Returns an empty array when no coordinator exists yet (no Council
+   * Mode usage this server uptime). Archived groups are filtered out —
+   * they should not appear in the Sidebar list of active pairs.
+   */
+  getAllGroupsForBootstrap(): BrowserGroupRecord[] {
+    if (!this.coordinator) return [];
+    const records = this.coordinator.listAll();
+    const out: BrowserGroupRecord[] = [];
+    for (const g of records) {
+      if (g.status === "archived") continue;
+      // Shared helper — same construction site as the live push and the
+      // ws-bridge synthetic hydration. Pairing label + wakeTimeoutMs +
+      // field ordering cannot drift across the three producers because
+      // there is only one assembly site.
+      out.push(buildBrowserGroupRecord({
+        sessionGroupId: g.sessionGroupId,
+        primary: g.primary,
+        observer: g.observer,
+        status: g.status,
+      }));
+    }
+    return out;
+  }
+
+  /**
+   * REST bootstrap for the ObserverPanel — read all review files for a council
+   * group from disk, parse them, run the same grounding validation the WS
+   * pipeline uses, and return hydrated findings the browser can populate
+   * immediately on reconnect / page reload.
+   *
+   * Closes `feedback_aura_observer_panel_no_rest_bootstrap` — historically the
+   * browser council slice was populated EXCLUSIVELY from live `group:review`
+   * WS events; a tab connecting after the event missed everything. This
+   * method is the deterministic bootstrap that complements the WS live path.
+   *
+   * Returns null when:
+   *   - the group is unknown to this orchestrator (already archived, never created)
+   *   - the workspace cwd cannot be read
+   * Returns `{findings: [], reviewCount: 0}` when the group is known but has no
+   * review files yet (panel renders `never-checkpointed-yet`).
+   */
+  async getGroupReviewsForBootstrap(sessionGroupId: string): Promise<{
+    sessionGroupId: string;
+    findings: BrowserObserverFinding[];
+    downgrades: BrowserObserverDowngrade[];
+    reviewCount: number;
+    observerProvider?: string;
+    observerModel?: string;
+  } | null> {
+    const meta = this.councilGroupMeta.get(sessionGroupId);
+    if (!meta) return null;
+    const watcher = this.councilWatchers.get(sessionGroupId);
+    if (!watcher) return null;
+    const reviewsDir = join(watcher.cwd, ".council", "reviews");
+    if (!existsSync(reviewsDir)) {
+      return { sessionGroupId, findings: [], downgrades: [], reviewCount: 0 };
+    }
+    // Pinned filename shape from review-watcher: `<phase>-<provider>-observer.md`.
+    // Duplicated here intentionally — extracting to a shared constant would
+    // touch review-watcher (out of scope for this fix); revisit per EC-20.
+    const filenamePattern = /^[A-Za-z0-9_-][A-Za-z0-9_.\-]{0,63}-(claude|codex)-observer\.md$/;
+    const allFindings: BrowserObserverFinding[] = [];
+    const allDowngrades: BrowserObserverDowngrade[] = [];
+    let observerProvider: string | undefined;
+    let observerModel: string | undefined;
+    let reviewCount = 0;
+    let entries: string[] = [];
+    try {
+      entries = readdirSync(reviewsDir).filter((f) => filenamePattern.test(f));
+    } catch (err) {
+      log.warn("session-orchestrator", "getGroupReviewsForBootstrap: readdir failed", {
+        sessionGroupId,
+        reviewsDir,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return { sessionGroupId, findings: [], downgrades: [], reviewCount: 0 };
+    }
+    for (const file of entries) {
+      const filePath = join(reviewsDir, file);
+      let raw: string;
+      try {
+        raw = readFileSync(filePath, "utf-8");
+      } catch {
+        continue;
+      }
+      const payload = parseObserverReviewPayload(raw);
+      if (!payload) continue;
+      reviewCount++;
+      observerProvider = observerProvider ?? payload.observer_provider;
+      observerModel = observerModel ?? payload.observer_model;
+      // Apply same grounding validation as the WS path so REST-bootstrapped
+      // findings match WS-arrived findings byte-for-byte after deterministic
+      // ID dedup. Re-use `validateObserverFindings` from observer-grounding.
+      const manifest = buildObserverContextManifest({
+        current: watcher.lastCheckpoint ?? { artifact_paths: [] },
+        previous: watcher.previousCheckpoint ?? undefined,
+      });
+      const modifiedFiles = new Set(manifest.delta.length > 0
+        ? manifest.delta
+        : (watcher.lastCheckpoint?.artifact_paths ?? []));
+      const result = validateObserverFindings(payload, { workspaceRoot: watcher.cwd, modifiedFiles });
+      result.findings.forEach((f, idx) => {
+        const id = deterministicFindingId({
+          sessionGroupId,
+          checkpointId: payload.checkpoint_id,
+          observerProvider: payload.observer_provider,
+          findingIndex: idx,
+          evidencePath: f.evidence_path,
+          claim: f.claim,
+        });
+        const downgrade = result.downgrades.find((d) => d.index === idx);
+        const out: BrowserObserverFinding = {
+          id,
+          severity: f.severity,
+          claim: f.claim,
+          evidence_path: f.evidence_path,
+          ...(f.evidence_lines !== undefined ? { evidence_lines: f.evidence_lines } : {}),
+          ...(f.confidence !== undefined ? { confidence: f.confidence } : {}),
+          ...(downgrade ? { wasDowngraded: true, downgradeReason: downgrade.reason } : {}),
+        };
+        allFindings.push(out);
+        if (downgrade) {
+          allDowngrades.push({ id, reason: downgrade.reason });
+        }
+      });
+    }
+    return {
+      sessionGroupId,
+      findings: allFindings,
+      downgrades: allDowngrades,
+      reviewCount,
+      ...(observerProvider !== undefined && { observerProvider }),
+      ...(observerModel !== undefined && { observerModel }),
+    };
+  }
+
   // ── Cleanup ────────────────────────────────────────────────────────────────
 
   shutdown(): void {
@@ -2679,26 +3175,47 @@ export class SessionOrchestrator {
       if (session?.stateMachine) {
         session.stateMachine.transition("starting", "relaunch_initiated");
       }
+      // Council Review 2026-05-15-1015 CR-12 (Subprocess P2): mark this
+      // session intentional BEFORE the launcher's SIGTERM on the old proc.
+      // Without this, the old proc's `session:exited` event arms the
+      // council reconnect timer (45s grace), then the new proc's spawn
+      // clears it — producing a transient `reconnecting → active` UI
+      // flicker on every relaunch. Marking intentional first short-circuits
+      // the listener at session-orchestrator.ts:1333. ALWAYS clear in the
+      // finally — failure paths must not leave the mark in place because
+      // `scheduleProactiveRelaunch` reads `intentionalKills` to skip
+      // proactive recovery and a stale mark would lock keepalive out.
+      this.intentionalKills.add(sessionId);
       try {
         const result = await this.launcher.relaunch(sessionId);
         if (!result.ok && result.error) {
           this.wsBridge.broadcastToSession(sessionId, { type: "error", message: result.error });
-          // PLAN Task 5: deterministic spawn failure — let council reconnect
-          // listeners short-circuit immediately. `ok=false` without `error`
-          // is the "spawn happened but maybe needs another attempt" branch;
-          // we keep that silent so the retry budget isn't burned.
-          companionBus.emit("session:relaunch-failed", { sessionId, reason: result.error });
+          // Council Review 2026-05-15-1015 CR-2 + CR-17: errors the
+          // launcher emitted on the typed channel itself — skip the
+          // duplicate orchestrator emit + rollback the retry counter
+          // (deterministic, retrying cannot fix). Includes:
+          // - `observer spawn config load failed` (CR-2)
+          // - `observer-prompt-source-drift-refused:` (CR-17 — workspace
+          //   ↔ bundled boundary requires operator ack via group restart)
+          const isLauncherEmittedFailure =
+            result.error.startsWith("observer spawn config load failed") ||
+            result.error.startsWith("observer-prompt-source-drift-refused:");
+          if (isLauncherEmittedFailure) {
+            this.autoRelaunchCounts.set(sessionId, count);
+          } else {
+            companionBus.emit("session:relaunch-failed", { sessionId, reason: result.error });
+          }
         } else if (result.ok) {
           metricsCollector.recordRelaunchSucceeded();
           this.autoRelaunchCounts.delete(sessionId);
           this.relaunchExhaustedNotified.delete(sessionId);
-          // Clear intentionalKills so future crashes can use proactive keepalive.
-          // After a successful relaunch, the session is alive again — any prior
-          // idle-kill intent no longer applies.
-          this.intentionalKills.delete(sessionId);
         }
         // ok=false without error: keep count to preserve the retry budget
       } finally {
+        // CR-12: clean up the intentional mark in ALL paths (success,
+        // failure, throw). Leaving it set on failure would block the
+        // next `scheduleProactiveRelaunch` indefinitely.
+        this.intentionalKills.delete(sessionId);
         setTimeout(() => this.relaunchingSet.delete(sessionId), RELAUNCH_COOLDOWN_MS);
       }
     } else {

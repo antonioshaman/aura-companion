@@ -226,14 +226,17 @@ describe("execution", () => {
       }),
     );
 
-    // Verify prompt was injected with cron prefix
+    // Verify prompt was injected with cron prefix + server:cron origin
+    // (Council Review #12 — EC-16 server-driven origin tagging).
     expect(bridge.injectUserMessage).toHaveBeenCalledWith(
       expect.stringMatching(/^mock-session-/),
       expect.stringContaining("[cron:run-me Run Me]"),
+      "server:cron",
     );
     expect(bridge.injectUserMessage).toHaveBeenCalledWith(
       expect.any(String),
       expect.stringContaining("Check PRs"),
+      "server:cron",
     );
 
     // Verify job tracking was updated

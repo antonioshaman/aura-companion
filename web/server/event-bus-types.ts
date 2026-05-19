@@ -24,6 +24,19 @@ export interface CompanionEventMap {
    * `reconnecting` listeners short-circuit to `reconnect_failed` rather
    * than wait out the full grace window for an outcome already decided
    * (PLAN Task 5, Subprocess council recommendation).
+   *
+   * **CONTRACT: relaunch-only.** This channel fires from:
+   *   - `cli-launcher.ts:relaunch()` — on observer-prompt-config throw,
+   *     workspace↔bundled drift refusal (CR-17), or spawn failure.
+   *   - `session-orchestrator.ts:handleAutoRelaunch()` — on retry-budget
+   *     exhaustion OR launcher failures the launcher didn't already emit.
+   *
+   * Cold-start (`cli-launcher.ts:launch()`) does NOT emit on this channel
+   * — failures surface as REST 503 via the orchestrator's spawn rollback.
+   * Council Review 2026-05-15-1015 CR-8: a static-grep canary in
+   * `cli-launcher.test.ts` asserts emit-site confinement; a future
+   * refactor that fires this channel from `launch()` or any other site
+   * will trip the canary so we re-examine the contract.
    */
   "session:relaunch-failed": { sessionId: string; reason: string };
 
@@ -134,6 +147,38 @@ export interface CompanionEventMap {
     sessionId: string;
   };
 
+  /**
+   * Orchestrator finished a turn — the per-session turn-state machine
+   * just transitioned from `{kind:"in-flight"}` to `{kind:"awaiting-input"}`.
+   * Fired by the Claude adapter on every `result` NDJSON frame that
+   * follows a `user_message` send (the in-flight → awaiting-input
+   * transition); never fires on a session that is still in `awaiting-input`
+   * (e.g. between attach and first send).
+   *
+   * Emitted by the adapter unconditionally for every session — the
+   * downstream filter (idle-timer-manager from Task 7 of the auto-
+   * proceed plan) checks `sessionGroupRole === "orchestrator"` + group
+   * status `=== "active"` + reconnect-grace clear before acting. This
+   * mirrors the `observer:turn-done` shape so the per-half plumbing
+   * stays symmetric.
+   *
+   * `blockedByStop` is the JS-3 axis: when an unresolved STOP finding
+   * exists in the orchestrator's council group, downstream consumers
+   * MUST pause any idle-driven action (auto-proceed timer arming). The
+   * field lives in the type system so a forgetful consumer can't
+   * silently drop it. The adapter itself does NOT know about STOPs —
+   * the council slice / observer pipeline owns that knowledge and may
+   * either mutate the adapter's state via a setter (Task 8 surface) or
+   * compute its own boolean from the event-bus signal stream. Both
+   * approaches keep `blockedByStop` accurate; foundation PR emits
+   * `false` only — Task 8 wires the STOP coupling.
+   */
+  "orchestrator:turn-done": {
+    /** Companion sessionId of the orchestrator-half (NOT cliSessionId). */
+    sessionId: string;
+    blockedByStop: boolean;
+  };
+
   /** Observer review processed end-to-end: parsed from the review file,
    *  validated for grounding, findings hydrated with server-assigned ids,
    *  ready for browser fanout. Subscribers transform the payload into
@@ -148,5 +193,24 @@ export interface CompanionEventMap {
     downgrades: import("./session-types.js").BrowserObserverDowngrade[];
     observerModel: string;
     observerProvider: string;
+  };
+
+  /**
+   * Bidirectional pipeline — convergence-tracker state change.
+   * Fired by `convergence-tracker.ts` after each `group:review` is folded
+   * into the per-group clean-cycle counter. Three discrete transitions:
+   *
+   *   - `cycle-progress`   →  counter incremented (still below threshold)
+   *   - `converged`        →  counter reached threshold; UI flips badge to ✅
+   *   - `revoked`          →  a STOP arrived after convergence; counter back to 0
+   *
+   * Subscribers fan out to browsers as `group_update` payloads carrying
+   * the new `cycleNumber` + `convergenceState` fields on `GroupRecord`.
+   */
+  "group:convergence": {
+    sessionGroupId: string;
+    transition: "cycle-progress" | "converged" | "revoked";
+    cycleNumber: number;
+    convergenceThreshold: number;
   };
 }

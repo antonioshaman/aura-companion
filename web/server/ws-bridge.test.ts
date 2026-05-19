@@ -1137,6 +1137,8 @@ describe("Browser handlers", () => {
       primarySessionId: "g_orch",
       observerSessionId: "g_obs",
       pairing: "claude+claude",
+      // PR #68: status is now part of the wire variant — see session-types.ts.
+      status: "active",
       wakeTimeoutMs: 90_000,
     });
 
@@ -2333,6 +2335,141 @@ describe("Browser message routing", () => {
     bridge.handleBrowserMessage(browser, JSON.stringify(payload));
     expect(cli.send).toHaveBeenCalledTimes(1);
   });
+
+  // ─── Council Mode: observer-guard + EC-9 telemetry for set_permission_mode ─
+  // These tests anchor the EC-1 server mirror. Without the gate at
+  // routeBrowserMessage, a buggy/hostile client holding a valid token and
+  // an observer sessionId could mutate the observer's permissionMode at
+  // runtime — breaking the spawn-only enforcement promise.
+  // Per EC-22: typed log emit paths require behavioural assertions, not
+  // just typecheck.
+
+  describe("set_permission_mode observer-guard + telemetry", () => {
+    it("rejects set_permission_mode targeted at an observer session — no adapter forward + structured WARN", async () => {
+      // Spy log.warn so we can inspect the structured payload shape.
+      const logModule = await import("./logger.js");
+      const warnSpy = vi.spyOn(logModule.log, "warn");
+      const session = bridge.getSession("s1")!;
+      session.state.sessionGroupId = "grp-1";
+      session.state.sessionGroupRole = "observer";
+      cli.send.mockClear();
+
+      bridge.handleBrowserMessage(browser, JSON.stringify({
+        type: "set_permission_mode",
+        mode: "plan",
+      }));
+
+      // Adapter MUST NOT be forwarded the frame — observer perm-mode is
+      // spawn-locked per EC-1.
+      expect(cli.send).not.toHaveBeenCalled();
+      // Structured WARN fired with the expected event + context fields.
+      expect(warnSpy).toHaveBeenCalledWith(
+        "ws-bridge",
+        expect.stringContaining("observer"),
+        expect.objectContaining({
+          event: "composer.permission-mode.observer-rejected",
+          sessionId: "s1",
+          sessionGroupId: "grp-1",
+          sessionGroupRole: "observer",
+          to: "plan",
+        }),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it("rejects set_permission_mode when sessionGroupId is present but role probe is null (EC-17 fail-closed)", async () => {
+      // Corrupted council session: id known but role somehow lost. Must
+      // reject to preserve EC-1 — silent allow would mutate a possibly-
+      // observer session whose role we cannot prove.
+      const logModule = await import("./logger.js");
+      const warnSpy = vi.spyOn(logModule.log, "warn");
+      const session = bridge.getSession("s1")!;
+      session.state.sessionGroupId = "grp-corrupt";
+      session.state.sessionGroupRole = undefined;
+      cli.send.mockClear();
+
+      bridge.handleBrowserMessage(browser, JSON.stringify({
+        type: "set_permission_mode",
+        mode: "plan",
+      }));
+
+      expect(cli.send).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalledWith(
+        "ws-bridge",
+        expect.stringContaining("role probe null"),
+        expect.objectContaining({
+          event: "composer.permission-mode.role-probe-null",
+          sessionId: "s1",
+          sessionGroupId: "grp-corrupt",
+        }),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it("forwards set_permission_mode for orchestrator sessions and emits INFO telemetry", async () => {
+      const logModule = await import("./logger.js");
+      const infoSpy = vi.spyOn(logModule.log, "info");
+      const session = bridge.getSession("s1")!;
+      session.state.sessionGroupId = "grp-2";
+      session.state.sessionGroupRole = "orchestrator";
+      // Pre-set the "from" mode so we can assert the snapshot semantics.
+      session.state.permissionMode = "acceptEdits";
+      cli.send.mockClear();
+
+      bridge.handleBrowserMessage(browser, JSON.stringify({
+        type: "set_permission_mode",
+        mode: "plan",
+      }));
+
+      // Adapter IS forwarded the frame (existing CLI delivery path).
+      expect(cli.send).toHaveBeenCalledTimes(1);
+      // EC-9 structured INFO log fired with from/to snapshot and role.
+      expect(infoSpy).toHaveBeenCalledWith(
+        "ws-bridge",
+        expect.stringContaining("permission-mode toggled"),
+        expect.objectContaining({
+          event: "composer.permission-mode.toggled",
+          sessionId: "s1",
+          sessionGroupId: "grp-2",
+          sessionGroupRole: "orchestrator",
+          from: "acceptEdits",
+          to: "plan",
+        }),
+      );
+      infoSpy.mockRestore();
+    });
+
+    it("forwards set_permission_mode for solo (non-council) sessions — undefined role does NOT collapse to observer", async () => {
+      // Negative-control on the strict-equality gate. The vast majority of
+      // sessions are non-council and must keep their toggle.
+      const logModule = await import("./logger.js");
+      const infoSpy = vi.spyOn(logModule.log, "info");
+      const session = bridge.getSession("s1")!;
+      // sessionGroupId + sessionGroupRole left undefined (the default).
+      session.state.permissionMode = "default";
+      cli.send.mockClear();
+
+      bridge.handleBrowserMessage(browser, JSON.stringify({
+        type: "set_permission_mode",
+        mode: "plan",
+      }));
+
+      expect(cli.send).toHaveBeenCalledTimes(1);
+      expect(infoSpy).toHaveBeenCalledWith(
+        "ws-bridge",
+        expect.any(String),
+        expect.objectContaining({
+          event: "composer.permission-mode.toggled",
+          sessionId: "s1",
+          sessionGroupId: undefined,
+          sessionGroupRole: undefined,
+          from: "default",
+          to: "plan",
+        }),
+      );
+      infoSpy.mockRestore();
+    });
+  });
 });
 
 // ─── Persistence ─────────────────────────────────────────────────────────────
@@ -2765,6 +2902,376 @@ describe("Multiple browser sockets", () => {
     expect(session.browserSockets.has(browser1)).toBe(true);
     expect(session.browserSockets.has(browser3)).toBe(true);
     expect(session.browserSockets.size).toBe(2);
+  });
+});
+
+// Task 11.7 — idle-kill clock split. Synthetic auto-proceed turns must
+// NOT advance `lastCliActivityTs`; only user-driven CLI activity does.
+// Without this split a session under auto-proceed would never reach the
+// idle-kill threshold and run forever.
+describe("noteCliActivity dispatcher (Task 11.7 — idle-kill clock split)", () => {
+  it("advances lastCliActivityTs when no synthetic turn is in flight (user activity)", async () => {
+    const cli = makeCliSocket("s-clock-1");
+    const browser = makeBrowserSocket("s-clock-1");
+    bridge.handleCLIOpen(cli, "s-clock-1");
+    bridge.handleBrowserOpen(browser, "s-clock-1");
+
+    // No probe injected → safe-default branch (treats everything as user).
+    const session = bridge.getSession("s-clock-1")!;
+    const before = session.lastCliActivityTs;
+    await new Promise((r) => setTimeout(r, 5));
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "tool_progress",
+      tool_use_id: "tu-1",
+      tool_name: "Bash",
+      parent_tool_use_id: null,
+      elapsed_time_seconds: 1,
+      uuid: "uuid-clock-1",
+      session_id: "s-clock-1",
+    }));
+    expect(session.lastCliActivityTs).toBeGreaterThan(before);
+  });
+
+  it("does NOT advance lastCliActivityTs when synthetic turn is in flight (auto-proceed activity)", async () => {
+    const cli = makeCliSocket("s-clock-2");
+    const browser = makeBrowserSocket("s-clock-2");
+    bridge.handleCLIOpen(cli, "s-clock-2");
+    bridge.handleBrowserOpen(browser, "s-clock-2");
+
+    // Inject a probe that reports synthetic-in-flight for this session.
+    bridge.setIdleTimerProbe({
+      isSyntheticTurnInFlight: (sid) => sid === "s-clock-2",
+      noteTerminalResultFrame: () => {},
+    });
+
+    const session = bridge.getSession("s-clock-2")!;
+    const before = session.lastCliActivityTs;
+    await new Promise((r) => setTimeout(r, 5));
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "tool_progress",
+      tool_use_id: "tu-2",
+      tool_name: "Bash",
+      parent_tool_use_id: null,
+      elapsed_time_seconds: 1,
+      uuid: "uuid-clock-2",
+      session_id: "s-clock-2",
+    }));
+    expect(session.lastCliActivityTs).toBe(before);
+  });
+
+  it("100 synthetic-driven CLI frames in sequence do not advance the clock", async () => {
+    const cli = makeCliSocket("s-clock-3");
+    const browser = makeBrowserSocket("s-clock-3");
+    bridge.handleCLIOpen(cli, "s-clock-3");
+    bridge.handleBrowserOpen(browser, "s-clock-3");
+
+    bridge.setIdleTimerProbe({
+      isSyntheticTurnInFlight: () => true,
+      noteTerminalResultFrame: () => {},
+    });
+
+    const session = bridge.getSession("s-clock-3")!;
+    const before = session.lastCliActivityTs;
+    for (let i = 0; i < 100; i++) {
+      await bridge.handleCLIMessage(cli, JSON.stringify({
+        type: "tool_progress",
+        tool_use_id: `tu-burst-${i}`,
+        tool_name: "Bash",
+        parent_tool_use_id: null,
+        elapsed_time_seconds: 1,
+        uuid: `uuid-burst-${i}`,
+        session_id: "s-clock-3",
+      }));
+    }
+    // Clock untouched across 100 synthetic-driven CLI ticks.
+    expect(session.lastCliActivityTs).toBe(before);
+  });
+
+  it("a user frame DOES advance the clock even if the prior synthetic burst did not", async () => {
+    const cli = makeCliSocket("s-clock-4");
+    const browser = makeBrowserSocket("s-clock-4");
+    bridge.handleCLIOpen(cli, "s-clock-4");
+    bridge.handleBrowserOpen(browser, "s-clock-4");
+
+    // Step 1: synthetic phase — clock locked.
+    bridge.setIdleTimerProbe({ isSyntheticTurnInFlight: () => true, noteTerminalResultFrame: () => {} });
+    const session = bridge.getSession("s-clock-4")!;
+    const initial = session.lastCliActivityTs;
+    await new Promise((r) => setTimeout(r, 5));
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "tool_progress",
+      tool_use_id: "tu-syn",
+      tool_name: "Bash",
+      parent_tool_use_id: null,
+      elapsed_time_seconds: 1,
+      uuid: "uuid-syn",
+      session_id: "s-clock-4",
+    }));
+    expect(session.lastCliActivityTs).toBe(initial);
+
+    // Step 2: user types — synthetic turn implicitly cleared, probe flips.
+    bridge.setIdleTimerProbe({ isSyntheticTurnInFlight: () => false, noteTerminalResultFrame: () => {} });
+    await new Promise((r) => setTimeout(r, 5));
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "tool_progress",
+      tool_use_id: "tu-user",
+      tool_name: "Bash",
+      parent_tool_use_id: null,
+      elapsed_time_seconds: 1,
+      uuid: "uuid-user",
+      session_id: "s-clock-4",
+    }));
+    expect(session.lastCliActivityTs).toBeGreaterThan(initial);
+  });
+
+  // EC-6 static-grep canary (per `feedback_call_site_presence_not_just_symbol_export`
+  // + `feedback_static_grep_canary_regex_over_substring`). The clock-split
+  // invariant lives in the dispatcher; any direct `session.lastCliActivityTs =`
+  // assignment outside the two sanctioned locations is a regression risk:
+  //   1. `noteUserActivity(session)` — the canonical write path
+  //   2. `startIdleKillWatchdog(sessionId)` — fresh-start reset on watchdog arm
+  //
+  // Regex extracts the function body using `\bnoteUserActivity\s*\([^)]*\)\s*[:;a-zA-Z {]*\{` and
+  // `\bstartIdleKillWatchdog\s*\([^)]*\)\s*[:;a-zA-Z {]*\{` as anchors, then
+  // brace-counts until the matching `}`. Survives refactors that rename the
+  // parameter, change the access modifier (`private` ↔ public), or add a
+  // return-type annotation, because the anchor is the function NAME not
+  // surrounding text.
+  it("EC-6 canary: session.lastCliActivityTs = is mutated ONLY in noteUserActivity or startIdleKillWatchdog bodies", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const file = path.join(__dirname, "ws-bridge.ts");
+    const src = fs.readFileSync(file, "utf-8");
+
+    function extractFunctionBody(anchor: RegExp): string | null {
+      const match = anchor.exec(src);
+      if (!match) return null;
+      const openIdx = src.indexOf("{", match.index);
+      if (openIdx < 0) return null;
+      let depth = 1;
+      for (let i = openIdx + 1; i < src.length; i++) {
+        if (src[i] === "{") depth++;
+        else if (src[i] === "}") {
+          depth--;
+          if (depth === 0) return src.slice(openIdx, i + 1);
+        }
+      }
+      return null;
+    }
+
+    const noteUserActivityBody = extractFunctionBody(/\bnoteUserActivity\s*\([^)]*\)\s*:?\s*[a-zA-Z]*\s*\{/);
+    const startWatchdogBody = extractFunctionBody(/\bstartIdleKillWatchdog\s*\([^)]*\)\s*\{/);
+    expect(noteUserActivityBody, "noteUserActivity body must be locatable").not.toBeNull();
+    expect(startWatchdogBody, "startIdleKillWatchdog body must be locatable").not.toBeNull();
+
+    const allowedSpans: string[] = [noteUserActivityBody!, startWatchdogBody!];
+
+    // Find every `session.lastCliActivityTs = ` mutation in the file.
+    const mutationPattern = /session\.lastCliActivityTs\s*=/g;
+    const offendingExcerpts: string[] = [];
+    let m: RegExpExecArray | null;
+    while ((m = mutationPattern.exec(src)) !== null) {
+      const inAllowed = allowedSpans.some((body) => {
+        const bodyStartInFile = src.indexOf(body);
+        return m!.index >= bodyStartInFile && m!.index < bodyStartInFile + body.length;
+      });
+      if (!inAllowed) {
+        // Capture ~80 chars of context for the failure message.
+        const ctx = src.slice(Math.max(0, m.index - 40), m.index + 80);
+        offendingExcerpts.push(`@${m.index}: ${ctx.replace(/\s+/g, " ")}`);
+      }
+    }
+    expect(
+      offendingExcerpts,
+      `Forbidden mutation site(s) of session.lastCliActivityTs outside noteUserActivity / startIdleKillWatchdog:\n${offendingExcerpts.join("\n")}`,
+    ).toEqual([]);
+  });
+});
+
+// Task 11.6 — cross-tab single-firer for user-frame observation. The
+// bridge fires the registered callback ONCE per user_message frame
+// regardless of how many browser tabs are connected to the session;
+// production wires this to `IdleTimerManager.noteUserMessage` to advance
+// the per-session turn-token (cancels pending auto-proceed fires).
+describe("onUserFrameObserved (Task 11.6)", () => {
+  it("fires the registered callback exactly once per user_message frame, regardless of tab count", () => {
+    const cli = makeCliSocket("s-uf-1");
+    const browser1 = makeBrowserSocket("s-uf-1");
+    const browser2 = makeBrowserSocket("s-uf-1");
+    const browser3 = makeBrowserSocket("s-uf-1");
+    bridge.handleCLIOpen(cli, "s-uf-1");
+    bridge.handleBrowserOpen(browser1, "s-uf-1");
+    bridge.handleBrowserOpen(browser2, "s-uf-1");
+    bridge.handleBrowserOpen(browser3, "s-uf-1");
+
+    const observed: string[] = [];
+    bridge.onUserFrameObserved((sid) => observed.push(sid));
+
+    // Frame from tab B — only this tab sent it, but the bridge dispatches
+    // through `routeBrowserMessage` once, so the observer must fire once.
+    bridge.handleBrowserMessage(browser2, JSON.stringify({ type: "user_message", content: "hello from tab B" }));
+
+    expect(observed).toEqual(["s-uf-1"]);
+  });
+
+  it("fires for each separate user_message frame (N frames → N callbacks)", () => {
+    const cli = makeCliSocket("s-uf-2");
+    const browser = makeBrowserSocket("s-uf-2");
+    bridge.handleCLIOpen(cli, "s-uf-2");
+    bridge.handleBrowserOpen(browser, "s-uf-2");
+
+    const observed: string[] = [];
+    bridge.onUserFrameObserved((sid) => observed.push(sid));
+
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "one" }));
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "two" }));
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "three" }));
+
+    expect(observed).toEqual(["s-uf-2", "s-uf-2", "s-uf-2"]);
+  });
+
+  it("does NOT fire for non-user_message frames (permission_response, interrupt, etc.)", () => {
+    const cli = makeCliSocket("s-uf-3");
+    const browser = makeBrowserSocket("s-uf-3");
+    bridge.handleCLIOpen(cli, "s-uf-3");
+    bridge.handleBrowserOpen(browser, "s-uf-3");
+
+    const observed: string[] = [];
+    bridge.onUserFrameObserved((sid) => observed.push(sid));
+
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "interrupt" }));
+    bridge.handleBrowserMessage(browser, JSON.stringify({
+      type: "permission_response",
+      request_id: "req-1",
+      behavior: "allow",
+    }));
+
+    expect(observed).toEqual([]);
+  });
+
+  it("supports multiple observers; all fire on a single user_message frame", () => {
+    const cli = makeCliSocket("s-uf-4");
+    const browser = makeBrowserSocket("s-uf-4");
+    bridge.handleCLIOpen(cli, "s-uf-4");
+    bridge.handleBrowserOpen(browser, "s-uf-4");
+
+    const a: string[] = [];
+    const b: string[] = [];
+    bridge.onUserFrameObserved((sid) => a.push(sid));
+    bridge.onUserFrameObserved((sid) => b.push(sid));
+
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "x" }));
+
+    expect(a).toEqual(["s-uf-4"]);
+    expect(b).toEqual(["s-uf-4"]);
+  });
+
+  it("returned unsubscribe function removes the observer (no-fire after unsub)", () => {
+    const cli = makeCliSocket("s-uf-5");
+    const browser = makeBrowserSocket("s-uf-5");
+    bridge.handleCLIOpen(cli, "s-uf-5");
+    bridge.handleBrowserOpen(browser, "s-uf-5");
+
+    const observed: string[] = [];
+    const unsub = bridge.onUserFrameObserved((sid) => observed.push(sid));
+
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "before" }));
+    expect(observed).toEqual(["s-uf-5"]);
+
+    unsub();
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "after" }));
+    expect(observed).toEqual(["s-uf-5"]); // unchanged
+  });
+
+  it("isolates observer errors (one throws, others still fire, history append continues)", () => {
+    const cli = makeCliSocket("s-uf-6");
+    const browser = makeBrowserSocket("s-uf-6");
+    bridge.handleCLIOpen(cli, "s-uf-6");
+    bridge.handleBrowserOpen(browser, "s-uf-6");
+
+    const ok: string[] = [];
+    bridge.onUserFrameObserved(() => { throw new Error("observer-A failed"); });
+    bridge.onUserFrameObserved((sid) => ok.push(sid));
+
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "x" }));
+
+    // The thrown observer must NOT block subsequent observers or
+    // the user-frame's history-append (downstream of the loop).
+    expect(ok).toEqual(["s-uf-6"]);
+    const session = bridge.getSession("s-uf-6")!;
+    expect(session.messageHistory.some((m) => m.type === "user_message")).toBe(true);
+  });
+
+  // Council Review #12 (EC-16) — server-driven user_message injection
+  // MUST skip the userFrameObservers fanout. Cron / agent / REST origins
+  // are not user activity; advancing the synthetic-turn token on them
+  // would race the legitimate user-typed-frame stickiness.
+  it("does NOT fire observers when injectUserMessage carries a server: origin (#12 EC-16)", () => {
+    const cli = makeCliSocket("s-uf-server-1");
+    const browser = makeBrowserSocket("s-uf-server-1");
+    bridge.handleCLIOpen(cli, "s-uf-server-1");
+    bridge.handleBrowserOpen(browser, "s-uf-server-1");
+
+    const observed: string[] = [];
+    bridge.onUserFrameObserved((sid) => observed.push(sid));
+
+    bridge.injectUserMessage("s-uf-server-1", "cron prompt", "server:cron");
+    bridge.injectUserMessage("s-uf-server-1", "agent prompt", "server:agent");
+    bridge.injectUserMessage("s-uf-server-1", "rest prompt", "server:rest");
+
+    // Zero observer fires across all three server-origin injections.
+    expect(observed).toEqual([]);
+
+    // History append still happens (forensic record is preserved).
+    const session = bridge.getSession("s-uf-server-1")!;
+    const userMessages = session.messageHistory.filter((m) => m.type === "user_message");
+    expect(userMessages.length).toBe(3);
+  });
+
+  it("DOES fire observers when injectUserMessage has no origin (legacy / browser-equivalent path)", () => {
+    const cli = makeCliSocket("s-uf-server-2");
+    const browser = makeBrowserSocket("s-uf-server-2");
+    bridge.handleCLIOpen(cli, "s-uf-server-2");
+    bridge.handleBrowserOpen(browser, "s-uf-server-2");
+
+    const observed: string[] = [];
+    bridge.onUserFrameObserved((sid) => observed.push(sid));
+
+    // No origin argument — backwards-compat with callers predating EC-16.
+    bridge.injectUserMessage("s-uf-server-2", "untagged");
+
+    expect(observed).toEqual(["s-uf-server-2"]);
+  });
+
+  // Bidirectional pipeline Story 2.3 — peer messages crossing between
+  // orchestrator and observer halves carry `origin: "council:peer"` and
+  // MUST share the same userFrameObservers-skip semantic as `server:`
+  // origins. A peer ping is inter-half coordination, not user typing —
+  // the synthetic-turn token cannot advance on it (would race the
+  // legitimate user-typed-frame stickiness, exact symptom EC-16 closed).
+  //
+  // Verifier guards against feedback_verify_test_bodies_not_just_names:
+  // assert exact zero fire across all three peer injections, AND
+  // history append still succeeds (forensic preserved for the operator
+  // to see the pair conversation per Story 2.3 visibility AC).
+  it("does NOT fire observers when injectUserMessage carries origin council:peer (bidir pipeline)", () => {
+    const cli = makeCliSocket("s-uf-peer-1");
+    const browser = makeBrowserSocket("s-uf-peer-1");
+    bridge.handleCLIOpen(cli, "s-uf-peer-1");
+    bridge.handleBrowserOpen(browser, "s-uf-peer-1");
+
+    const observed: string[] = [];
+    bridge.onUserFrameObserved((sid) => observed.push(sid));
+
+    bridge.injectUserMessage("s-uf-peer-1", "[from-observer: STOP] auth bypass at routes.ts:84", "council:peer");
+    bridge.injectUserMessage("s-uf-peer-1", "[from-observer: WARN] missing test on extracted helper", "council:peer");
+    bridge.injectUserMessage("s-uf-peer-1", "[from-orchestrator: INFO] advancing to task 4", "council:peer");
+
+    expect(observed).toEqual([]);
+
+    const session = bridge.getSession("s-uf-peer-1")!;
+    const userMessages = session.messageHistory.filter((m) => m.type === "user_message");
+    expect(userMessages.length).toBe(3);
   });
 });
 
@@ -4900,5 +5407,101 @@ describe("Browser heartbeat", () => {
     vi.advanceTimersByTime(60_000);
 
     expect(browser.send.mock.calls.length).toBe(sentAfterFirstTick);
+  });
+});
+
+// ─── flushInterruptedStreamsForShutdown (PLAN Task 12-v) ──────────────────
+
+describe("flushInterruptedStreamsForShutdown", () => {
+  it("synthesises interrupted assistant frames for every session with in-flight text", () => {
+    // Multi-session shutdown scenario: two concurrent sessions, both
+    // mid-stream. SIGTERM arrives. Each must get its own interrupted
+    // bubble appended to history so the next mount renders the cut
+    // explicitly rather than silently losing the partial reply.
+    const sessionA = bridge.getOrCreateSession("shutdown-A");
+    const sessionB = bridge.getOrCreateSession("shutdown-B");
+
+    sessionA.streamingAssistant = {
+      id: "msg-a",
+      text: "Partial answer from session A.",
+      parentToolUseId: null,
+      model: "claude-sonnet-4-6",
+      startedAt: Date.now(),
+    };
+    sessionB.streamingAssistant = {
+      id: "msg-b",
+      text: "Another partial answer from session B.",
+      parentToolUseId: null,
+      model: "claude-sonnet-4-6",
+      startedAt: Date.now(),
+    };
+
+    const count = bridge.flushInterruptedStreamsForShutdown();
+    expect(count).toBe(2);
+
+    // History grew by exactly one interrupted assistant frame per session.
+    const aHistory = sessionA.messageHistory;
+    const bHistory = sessionB.messageHistory;
+    const aLast = aHistory[aHistory.length - 1];
+    const bLast = bHistory[bHistory.length - 1];
+    expect(aLast.type).toBe("assistant");
+    expect(bLast.type).toBe("assistant");
+    if (aLast.type === "assistant") expect(aLast.streamStatus).toBe("interrupted");
+    if (bLast.type === "assistant") expect(bLast.streamStatus).toBe("interrupted");
+
+    // Both trackers cleared — post-shutdown invariant.
+    expect(sessionA.streamingAssistant).toBeNull();
+    expect(sessionB.streamingAssistant).toBeNull();
+  });
+
+  it("clears empty-text trackers without synthesising a bubble", () => {
+    // A session that just received `message_start` but no deltas before
+    // shutdown should NOT get a fabricated empty bubble — but the
+    // tracker still needs clearing so the post-shutdown invariant holds.
+    const session = bridge.getOrCreateSession("shutdown-empty");
+    session.streamingAssistant = {
+      id: "msg-empty",
+      text: "",
+      parentToolUseId: null,
+      startedAt: Date.now(),
+    };
+
+    const count = bridge.flushInterruptedStreamsForShutdown();
+    expect(count).toBe(0);
+    expect(session.streamingAssistant).toBeNull();
+    // No new history entries from a zero-text flush.
+    expect(session.messageHistory).toHaveLength(0);
+  });
+
+  it("is a no-op when no sessions have in-flight streams", () => {
+    // Quiet shutdown — no streaming activity at all. Must report 0 and
+    // not mutate any session history.
+    bridge.getOrCreateSession("quiet-1");
+    bridge.getOrCreateSession("quiet-2");
+    const count = bridge.flushInterruptedStreamsForShutdown();
+    expect(count).toBe(0);
+  });
+
+  it("is idempotent on repeated invocation", () => {
+    // Re-running shutdown flush (e.g. SIGTERM after SIGINT during cleanup)
+    // must not double-synthesise an interrupted bubble or undo the
+    // tracker clear.
+    const session = bridge.getOrCreateSession("idempo");
+    session.streamingAssistant = {
+      id: "msg-idempo",
+      text: "Some partial.",
+      parentToolUseId: null,
+      startedAt: Date.now(),
+    };
+
+    const first = bridge.flushInterruptedStreamsForShutdown();
+    const second = bridge.flushInterruptedStreamsForShutdown();
+    expect(first).toBe(1);
+    expect(second).toBe(0);
+    // Exactly one interrupted frame in history — not two.
+    const interruptedFrames = session.messageHistory.filter(
+      (m) => m.type === "assistant" && m.streamStatus === "interrupted",
+    );
+    expect(interruptedFrames).toHaveLength(1);
   });
 });

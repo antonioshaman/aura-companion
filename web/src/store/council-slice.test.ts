@@ -200,6 +200,190 @@ describe("upsertGroup / removeGroup", () => {
   });
 });
 
+// ── hydrateGroups (PR #68 REST bootstrap) ────────────────────────────────────
+//
+// `hydrateGroups` is the dispatch site for the REST `/api/groups` bootstrap
+// (`api.fetchGroups()` → this action). It MUST be idempotent against
+// concurrent / subsequent live `group:created` WS events for the same
+// sessionGroupId — otherwise the live state's mutable runtime fields
+// (lastCheckpointAt, observerReviewing, etc.) would be clobbered each
+// time the REST snapshot lands.
+describe("hydrateGroups", () => {
+  it("inserts groups not already in the store, with full reverse-index population", () => {
+    useStore.getState().hydrateGroups([
+      group({ sessionGroupId: "grp_a", primarySessionId: "orch_a", observerSessionId: "obs_a" }),
+      group({ sessionGroupId: "grp_b", primarySessionId: "orch_b", observerSessionId: "obs_b", pairing: "claude+codex" }),
+    ]);
+    const s = useStore.getState();
+    expect(s.groups.get("grp_a")?.pairing).toBe("claude+claude");
+    expect(s.groups.get("grp_b")?.pairing).toBe("claude+codex");
+    expect(s.groupBySessionId.get("orch_a")).toBe("grp_a");
+    expect(s.groupBySessionId.get("obs_a")).toBe("grp_a");
+    expect(s.groupBySessionId.get("orch_b")).toBe("grp_b");
+    expect(s.groupBySessionId.get("obs_b")).toBe("grp_b");
+  });
+
+  it("initializes empty findings + downgrades buckets per hydrated group", () => {
+    useStore.getState().hydrateGroups([
+      group({ sessionGroupId: "grp_h1", primarySessionId: "p", observerSessionId: "o" }),
+    ]);
+    expect(useStore.getState().findings.get("grp_h1")).toEqual([]);
+    expect(useStore.getState().groundingDowngrades.get("grp_h1")).toEqual([]);
+  });
+
+  // Load-bearing idempotency contract — the REST bootstrap fires once on
+  // mount, possibly AFTER the live `group:created` push already populated
+  // the store with runtime state. If hydrate overwrote, lastCheckpointAt /
+  // observerReviewing / recentlySupersededCheckpointIds / convergenceState
+  // would visibly regress on every mount-effect re-run.
+  it("does NOT overwrite groups already in the store — live WS wins", () => {
+    // Live event populated the store first.
+    useStore.getState().upsertGroup(group({
+      sessionGroupId: "grp_live",
+      primarySessionId: "orch_live",
+      observerSessionId: "obs_live",
+    }));
+    // Simulate a runtime field that REST does not carry — set via
+    // recordCheckpoint (the WS dispatch path).
+    useStore.getState().recordCheckpoint({
+      sessionGroupId: "grp_live",
+      checkpointId: "chk_x",
+      phase: "council-plan",
+      sequence: 5,
+      timestamp: 1_700_000_000_000,
+    });
+    expect(useStore.getState().groups.get("grp_live")?.lastCheckpointAt).toBe(1_700_000_000_000);
+    expect(useStore.getState().groups.get("grp_live")?.observerReviewing).toBe(true);
+
+    // REST snapshot arrives — without lastCheckpointAt / observerReviewing
+    // fields. Hydrate MUST not erase the runtime state.
+    useStore.getState().hydrateGroups([
+      group({
+        sessionGroupId: "grp_live",
+        primarySessionId: "orch_live",
+        observerSessionId: "obs_live",
+      }),
+    ]);
+    const after = useStore.getState().groups.get("grp_live");
+    expect(after?.lastCheckpointAt).toBe(1_700_000_000_000);
+    expect(after?.observerReviewing).toBe(true);
+    expect(after?.lastCheckpointSeq).toBe(5);
+  });
+
+  it("preserves findings already accumulated for a group present at hydrate time", () => {
+    useStore.getState().upsertGroup(group({ sessionGroupId: "grp_live_f" }));
+    useStore.getState().appendObserverReview({
+      sessionGroupId: "grp_live_f",
+      checkpointId: "chk_1",
+      phase: "p",
+      findings: [wireFinding({ id: "f_keep" })],
+      downgrades: [],
+      observerModel: "m",
+      observerProvider: "claude",
+      timestamp: 1_000,
+    });
+    useStore.getState().hydrateGroups([group({ sessionGroupId: "grp_live_f" })]);
+    expect(useStore.getState().findings.get("grp_live_f")?.[0]?.id).toBe("f_keep");
+  });
+
+  it("empty input is a true no-op (no spurious re-render — same map references)", () => {
+    useStore.getState().upsertGroup(group({ sessionGroupId: "grp_ref" }));
+    const before = useStore.getState();
+    useStore.getState().hydrateGroups([]);
+    const after = useStore.getState();
+    expect(after.groups).toBe(before.groups);
+    expect(after.groupBySessionId).toBe(before.groupBySessionId);
+    expect(after.findings).toBe(before.findings);
+    expect(after.groundingDowngrades).toBe(before.groundingDowngrades);
+  });
+
+  it("input where every group is already present is a true no-op (same map references)", () => {
+    useStore.getState().upsertGroup(group({ sessionGroupId: "grp_dup" }));
+    const before = useStore.getState();
+    useStore.getState().hydrateGroups([group({ sessionGroupId: "grp_dup" })]);
+    const after = useStore.getState();
+    expect(after.groups).toBe(before.groups);
+    expect(after.groupBySessionId).toBe(before.groupBySessionId);
+  });
+
+  it("mixed input — partial insert + partial skip — mutates only the new entries", () => {
+    useStore.getState().upsertGroup(group({ sessionGroupId: "grp_existing", primarySessionId: "p_ex", observerSessionId: "o_ex" }));
+    useStore.getState().hydrateGroups([
+      group({ sessionGroupId: "grp_existing", primarySessionId: "p_ex", observerSessionId: "o_ex" }),
+      group({ sessionGroupId: "grp_new", primarySessionId: "p_new", observerSessionId: "o_new" }),
+    ]);
+    const s = useStore.getState();
+    expect(s.groups.has("grp_existing")).toBe(true);
+    expect(s.groups.has("grp_new")).toBe(true);
+    expect(s.groupBySessionId.get("p_new")).toBe("grp_new");
+    expect(s.groupBySessionId.get("p_ex")).toBe("grp_existing");
+  });
+
+  // PICKUP §2.3 hydrate→WS sequence contract. The realistic mount flow:
+  //   1. App.tsx fires `fetchGroups()` → `hydrateGroups([...])` (REST).
+  //   2. A live `group_created` push arrives shortly after for the same
+  //      pair (server emits it on bus when a tab that was in a closed-WS
+  //      state reconnects, or when the group reconnects via the recovery
+  //      path).
+  // The WS dispatch path in `ws.ts` calls `upsertGroup`, which always
+  // overwrites by Map semantics. The contract under test: the second
+  // arrival MUST NOT produce a double-insert (groups.size stays 1), MUST
+  // NOT swap the role mapping in `groupBySessionId`, and MUST NOT split
+  // the pair across two records. The REST and WS wire shapes are
+  // produced by the same `buildBrowserGroupRecord` helper (PR #68 C1.1),
+  // so they agree on the primary/observer assignment; this test pins
+  // that contract at the store layer so a future regression that
+  // accidentally diverged the two assembly paths would surface here.
+  it("hydrate then live group_created for the same sessionGroupId — no double-insert, no role swap, reverse-index intact", () => {
+    const groupId = "grp_seq";
+    const primaryId = "orch_seq";
+    const observerId = "obs_seq";
+
+    // 1. REST bootstrap lands first.
+    useStore.getState().hydrateGroups([
+      group({
+        sessionGroupId: groupId,
+        primarySessionId: primaryId,
+        observerSessionId: observerId,
+        pairing: "claude+codex",
+      }),
+    ]);
+    {
+      const s = useStore.getState();
+      expect(s.groups.size).toBe(1);
+      expect(s.groupBySessionId.get(primaryId)).toBe(groupId);
+      expect(s.groupBySessionId.get(observerId)).toBe(groupId);
+    }
+
+    // 2. Subsequent live `group_created` arrives for the same pair —
+    //    `ws.ts` dispatches `upsertGroup`. Both REST and WS go through
+    //    `buildBrowserGroupRecord` server-side so the role assignment is
+    //    structurally identical.
+    useStore.getState().upsertGroup(
+      group({
+        sessionGroupId: groupId,
+        primarySessionId: primaryId,
+        observerSessionId: observerId,
+        pairing: "claude+codex",
+      }),
+    );
+
+    // 3. Invariants AFTER the WS arrival:
+    //    - groups.size remains 1 (no double-insert from sequencing)
+    //    - primary/observer role mapping unchanged (no role swap)
+    //    - groupBySessionId has exactly 2 entries (one per half), both
+    //      resolving to the same sessionGroupId
+    const s = useStore.getState();
+    expect(s.groups.size).toBe(1);
+    const stored = s.groups.get(groupId);
+    expect(stored?.primarySessionId).toBe(primaryId);
+    expect(stored?.observerSessionId).toBe(observerId);
+    expect(s.groupBySessionId.size).toBe(2);
+    expect(s.groupBySessionId.get(primaryId)).toBe(groupId);
+    expect(s.groupBySessionId.get(observerId)).toBe(groupId);
+  });
+});
+
 // ── recordCheckpoint ────────────────────────────────────────────────────────
 
 describe("recordCheckpoint", () => {

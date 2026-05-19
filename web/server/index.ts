@@ -15,7 +15,7 @@ import { cacheControlMiddleware } from "./cache-headers.js";
 import { createRoutes } from "./routes.js";
 import { CliLauncher } from "./cli-launcher.js";
 import { WsBridge } from "./ws-bridge.js";
-import { SessionStore } from "./session-store.js";
+import { SessionStore, migrateLegacyTmpdirSessions } from "./session-store.js";
 import { WorktreeTracker } from "./worktree-tracker.js";
 import { containerManager } from "./container-manager.js";
 import { join } from "node:path";
@@ -27,6 +27,10 @@ import { initLogFile, closeLogFile } from "./logger.js";
 import { CronScheduler } from "./cron-scheduler.js";
 import { AgentExecutor } from "./agent-executor.js";
 import { SessionOrchestrator } from "./session-orchestrator.js";
+import { IdleTimerManager } from "./idle-timer-manager.js";
+import { SystemClock } from "./clock-source.js";
+import { writeAutoProceedTrace, appendAfkSummary } from "./auto-proceed-state.js";
+import { log as appLog } from "./logger.js";
 import { migrateCronJobsToAgents } from "./agent-cron-migrator.js";
 import { migrateLinearCredentialsToAgents } from "./linear-credential-migration.js";
 import { authenticateManagedWebSocket } from "./ws-auth.js";
@@ -52,6 +56,14 @@ import { DEFAULT_PORT_DEV, DEFAULT_PORT_PROD } from "./constants.js";
 const defaultPort = process.env.NODE_ENV === "production" ? DEFAULT_PORT_PROD : DEFAULT_PORT_DEV;
 const port = Number(process.env.PORT) || defaultPort;
 const host = process.env.HOST || "0.0.0.0";
+// PLAN Task 12 (iii) — migrate legacy `$TMPDIR/vibe-sessions/` data into
+// the new `~/.companion/sessions/` durable location BEFORE the store
+// claims the target dir. Skipped (no-op) when COMPANION_SESSION_DIR
+// overrides the default — operators with an explicit path opt out of
+// the auto-migration by definition.
+if (!process.env.COMPANION_SESSION_DIR) {
+  migrateLegacyTmpdirSessions();
+}
 const sessionStore = new SessionStore(process.env.COMPANION_SESSION_DIR);
 const wsBridge = new WsBridge();
 const launcher = new CliLauncher(port);
@@ -65,9 +77,133 @@ const cronScheduler = new CronScheduler(launcher, wsBridge);
 const agentExecutor = new AgentExecutor(launcher, wsBridge);
 const linearAgentBridge = new LinearAgentBridge(agentExecutor, wsBridge);
 
+// PLAN-aura-orchestrator-idle-auto-proceed Task 9: construct orchestrator
+// FIRST (without the manager), then build the real {@link IdleTimerManager}
+// whose `getSession` / `getGroupStatus` closures reference the orchestrator,
+// then inject the manager via `setIdleTimerManager()` BEFORE `initialize()`
+// runs the boot reconcile. The two have a mutual reference cycle — manager
+// reads orchestrator's coordinator + ws-bridge state, orchestrator's
+// rehydrate path calls into manager — and late-injection is the cleanest
+// pattern for that without sacrificing type safety (a generic `Lazy<T>` or
+// proxy would push the cycle off the type system and onto runtime checks).
 const orchestrator = new SessionOrchestrator({
   launcher, wsBridge, sessionStore, worktreeTracker,
   prPoller, agentExecutor,
+});
+
+const idleTimerManager = new IdleTimerManager({
+  clock: SystemClock,
+  getSession: (sessionId) => {
+    const info = launcher.getSession(sessionId);
+    if (!info || info.archived) return null;
+    // Adapter-side orchestratorTurnState lives on the ClaudeAdapter (Task 4).
+    // For sessions without a connected adapter or non-Claude backend, expose
+    // a safe default — the manager's gate stack treats `in-flight` as a
+    // skip reason which prevents accidental firing during transient states.
+    const session = wsBridge.getSession(sessionId);
+    const adapter = session?.backendAdapter;
+    // Narrow without importing ClaudeAdapter here to avoid a cycle; the
+    // structural cast below mirrors `wsBridge.sendObserverWakeFrame`'s
+    // instance-check pattern.
+    const turnState =
+      (adapter as unknown as {
+        orchestratorTurnState?:
+          | { kind: "in-flight" }
+          | { kind: "awaiting-input"; blockedByStop: boolean };
+      })?.orchestratorTurnState ?? { kind: "in-flight" as const };
+    return {
+      sessionId: info.sessionId,
+      sessionGroupId: info.sessionGroupId ?? null,
+      sessionGroupRole: info.sessionGroupRole ?? null,
+      state: session ? "connected" : "exited",
+      orchestratorTurnState: turnState,
+      workspaceRoot: info.cwd,
+      reconnectGraceActive: false,
+      councilPhase: "council-implement",
+    };
+  },
+  getGroupStatus: (sessionGroupId): "pairing" | "active" | "degraded" | "archived" | "reconnecting" | "unknown" => {
+    const coord = orchestrator.getCouncilCoordinator();
+    if (!coord) return "unknown";
+    const group = coord.get(sessionGroupId);
+    return group?.status ?? "unknown";
+  },
+  persistTrace: (workspaceRoot, groupId, trace) => {
+    const result = writeAutoProceedTrace(workspaceRoot, groupId, trace);
+    if (!result.ok) return { ok: false, error: result.error };
+    return { ok: true };
+  },
+  appendSummary: (workspaceRoot, groupId, entry) => {
+    const result = appendAfkSummary(workspaceRoot, groupId, entry);
+    if (!result.ok) return { ok: false, error: result.error };
+    return { ok: true };
+  },
+  sendSyntheticFrame: (sessionId, body) => {
+    // Task 11.8 wiring — replaces the prior stub
+    // `{ok:false, error:"synthetic-send-not-wired-task-11"}` with the
+    // real bridge call. The bridge resolves the orchestrator-half adapter
+    // and routes through `sendOrchestratorSyntheticFrame` (recorder
+    // origin `server:auto-proceed`).
+    const outcome = wsBridge.sendOrchestratorSyntheticFrame(sessionId, body);
+    if (outcome.kind === "sent") return { ok: true };
+    // CR-4 (council review 2026-05-15-0336 finding #4) — exhaustive
+    // switch + `never` tripwire. The previous shape (cascade if/else
+    // with terminal fall-through to `outcome.kind`) silently swallowed
+    // any future BridgeObserverWakeOutcome variant as a bare kind
+    // string. Sister consumer at `session-orchestrator.ts:1808` already
+    // uses this discipline; the auto-proceed path here had drifted off
+    // it. When PR #52's outbound FIFO lands and adds `{kind:"queued"}`
+    // (or any future variant), the typecheck breaks here for human
+    // attention instead of stringifying. Per EC-15 (codified in
+    // conventions.md from this review).
+    let errorDetail: string;
+    switch (outcome.kind) {
+      case "session_unknown":
+        errorDetail = "session_unknown";
+        break;
+      case "adapter_missing":
+        errorDetail = "adapter_missing";
+        break;
+      case "unsupported_backend":
+        errorDetail = "unsupported_backend";
+        break;
+      case "socket_disconnected":
+        errorDetail = "socket_disconnected";
+        break;
+      case "busy":
+        errorDetail = "busy";
+        break;
+      case "backpressure":
+        errorDetail = `backpressure(buffered=${outcome.bufferedAmount})`;
+        break;
+      case "failed":
+        errorDetail = `failed(${outcome.error})`;
+        break;
+      default: {
+        // Exhaustiveness tripwire — if BridgeObserverWakeOutcome widens
+        // with a new variant and this switch isn't updated, the next
+        // line fails to compile.
+        const _exhaustive: never = outcome;
+        void _exhaustive;
+        errorDetail = "unknown";
+      }
+    }
+    return { ok: false, error: errorDetail };
+  },
+  logEvent: (entry) => {
+    appLog.info("idle-timer-manager", entry.event, entry as unknown as Record<string, unknown>);
+  },
+});
+
+orchestrator.setIdleTimerManager(idleTimerManager);
+// Task 11.7 — narrow-surface late-injection: the bridge needs to know
+// whether the in-flight turn is synthetic so its CLI-activity callbacks
+// can skip the idle-kill clock update. Mirrors the orchestrator's
+// mutual-cycle pattern (manager constructed after bridge + orchestrator,
+// then injected back).
+wsBridge.setIdleTimerProbe({
+  isSyntheticTurnInFlight: (sid) => idleTimerManager.isSyntheticTurnInFlight(sid),
+  noteTerminalResultFrame: (sid) => idleTimerManager.noteTerminalResultFrame(sid),
 });
 
 // ── Cloud relay connection (for receiving webhooks behind a firewall) ────────
@@ -473,13 +609,34 @@ async function gracefulShutdown() {
     if (coordinator) {
       coordinator.cancelAllReconnectTimers();
     }
+    // PLAN Task 12 (v) — synthesise interrupted bubbles for any session
+    // whose CLI was mid-stream when the signal arrived. Done BEFORE the
+    // session-store flush so the synthesised frames land in the same
+    // atomic final write rather than being lost between the two calls.
+    const interruptedCount = wsBridge.flushInterruptedStreamsForShutdown();
+    if (interruptedCount > 0) {
+      console.log(`[server] Flushed ${interruptedCount} interrupted stream(s) on shutdown`);
+    }
     wsBridge.flushSessionStorePendingSync();
     if (coordinator) {
       const { shutdownAllGroups } = await import("./group-shutdown.js");
       const groupIds = coordinator.listGroupIds();
       if (groupIds.length > 0) {
-        const summary = await shutdownAllGroups(coordinator, groupIds, { timeoutMs: 8_000 });
+        // PLAN Task 9: pass the idle-timer manager so `shutdownAllGroups`
+        // cancels every armed timer BEFORE kill propagation. Always set,
+        // even when zero groups exist — disposeAll is idempotent and the
+        // cost is one Map iteration over an empty state.
+        const summary = await shutdownAllGroups(coordinator, groupIds, {
+          timeoutMs: 8_000,
+          idleTimerManager: orchestrator.getIdleTimerManager(),
+        });
         console.log(`[server] Council shutdown summary:`, summary);
+      } else {
+        // Even with no live groups, the manager may hold rehydrated
+        // counters and could be re-armed in-flight via a `session:cli-id-received`
+        // race during shutdown. Best-effort dispose so the SIGTERM exit
+        // path never leaves a fire callback pending.
+        orchestrator.getIdleTimerManager().disposeAll();
       }
     }
   } catch (err) {

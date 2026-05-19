@@ -254,6 +254,100 @@ describe("deriveObserverPanelState", () => {
     });
     expect(out).toEqual({ name: "never-checkpointed-yet" });
   });
+
+  // ── Bidirectional pipeline Story 4.1.5 — convergence variants ───────────
+  // The deriver MUST honor the priority ladder spelled out in the spec:
+  //   degraded > blocker-found > reconnecting > reviewing >
+  //     queued-dropped > converged > cycle-progress > sleeping
+  // Each test below exercises ONE priority boundary so a future variant
+  // landing without ladder discipline shows up with one named failure.
+
+  it("emits converged variant with cycleNumber+threshold when state is converged", () => {
+    const out = deriveObserverPanelState({
+      group: group({
+        cycleNumber: 3,
+        convergenceThreshold: 3,
+        convergenceState: "converged",
+      }),
+      findings: [],
+      dismissedStopIds: new Set(),
+    });
+    expect(out).toEqual({ name: "converged", cycleNumber: 3, threshold: 3 });
+  });
+
+  it("emits cycle-progress when in-progress with counter > 0", () => {
+    const out = deriveObserverPanelState({
+      group: group({
+        cycleNumber: 2,
+        convergenceThreshold: 3,
+        convergenceState: "in-progress",
+      }),
+      findings: [],
+      dismissedStopIds: new Set(),
+    });
+    expect(out).toEqual({ name: "cycle-progress", cycleNumber: 2, threshold: 3 });
+  });
+
+  it("emits cycle-progress when state is revoked with counter > 0", () => {
+    // revoked + counter > 0 shouldn't realistically happen (revoke resets
+    // to 0) but the deriver remains robust if the server-published shape
+    // ever carries a non-zero counter alongside `revoked`.
+    const out = deriveObserverPanelState({
+      group: group({
+        cycleNumber: 1,
+        convergenceThreshold: 3,
+        convergenceState: "revoked",
+      }),
+      findings: [],
+      dismissedStopIds: new Set(),
+    });
+    expect(out).toEqual({ name: "cycle-progress", cycleNumber: 1, threshold: 3 });
+  });
+
+  it("does NOT emit cycle-progress when counter is 0 (avoids visual noise)", () => {
+    // Fall through to sleeping (with checkpoint) or never-checkpointed.
+    const out = deriveObserverPanelState({
+      group: group({
+        cycleNumber: 0,
+        convergenceThreshold: 3,
+        convergenceState: "in-progress",
+        lastCheckpointAt: 1_000,
+        lastPhase: "council-plan",
+      }),
+      findings: [],
+      dismissedStopIds: new Set(),
+    });
+    expect(out).toEqual({ name: "sleeping", lastCheckpointAt: 1_000, lastPhase: "council-plan" });
+  });
+
+  it("degraded short-circuits ABOVE converged (Story 4.1.5 freeze precedence)", () => {
+    const out = deriveObserverPanelState({
+      group: group({
+        status: "degraded",
+        deadRole: "observer",
+        cycleNumber: 3,
+        convergenceThreshold: 3,
+        convergenceState: "converged",
+      }),
+      findings: [],
+      dismissedStopIds: new Set(),
+    });
+    expect(out).toEqual({ name: "degraded", deadRole: "observer" });
+  });
+
+  it("a live STOP beats converged in priority", () => {
+    const live = finding({ id: "x", severity: "STOP", receivedAt: 5_000 });
+    const out = deriveObserverPanelState({
+      group: group({
+        cycleNumber: 3,
+        convergenceThreshold: 3,
+        convergenceState: "converged",
+      }),
+      findings: [live],
+      dismissedStopIds: new Set(),
+    });
+    expect(out?.name).toBe("blocker-found");
+  });
 });
 
 // ── countUnresolvedStopsAcrossGroups ───────────────────────────────────────

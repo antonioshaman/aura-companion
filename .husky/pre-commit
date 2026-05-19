@@ -1,1 +1,1 @@
-cd web && bun run typecheck && bun run test -- --coverage
+cd web && bun run typecheck && bun run test -- --coverage && bun run build-observer-prompt-bundle && git diff --exit-code -- server/observer-prompt-bundled.ts

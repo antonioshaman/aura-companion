@@ -71,11 +71,31 @@ export type RecordingLifecycleEvent =
  *   relayed from a browser-originated message via the adapter's
  *   `send()` method.
  * - `"server:council-wake"` — frame synthesised by the server's
- *   Council Mode auto-wake dispatcher (Story 2 AC#1). Inbound frames
- *   (`dir: "in"`) never carry an origin — provenance is implicit from
- *   the CLI subprocess.
+ *   Council Mode auto-wake dispatcher (Story 2 AC#1).
+ * - `"server:auto-proceed"` — frame synthesised by the orchestrator-side
+ *   auto-proceed pipeline (PLAN-aura-orchestrator-idle-auto-proceed
+ *   Task 11) on idle-timeout. Distinguishes the auto-proceed synthetic
+ *   from the observer-wake synthetic in replay/forensic analysis so
+ *   incident triage can tell "idle nudge fired" apart from "observer
+ *   was woken".
+ *
+ * Inbound frames (`dir: "in"`) never carry an origin — provenance is
+ * implicit from the CLI subprocess.
  */
-export type RecordingOrigin = "browser" | "server:council-wake";
+export type RecordingOrigin =
+  | "browser"
+  | "server:council-wake"
+  | "server:auto-proceed"
+  // Council Review #12 (EC-16) — server-driven `injectUserMessage` paths.
+  // Added so the bridge can discriminate provenance on inbound-shaped
+  // user_message frames that were synthesised by server code, not typed
+  // by a human at a browser tab.
+  | "server:cron"
+  | "server:agent"
+  | "server:rest"
+  // Bidirectional pipeline — inter-half coordination frames synthesised by the
+  // peer-routing helper. Same userFrameObservers-skip semantic as server: origins.
+  | "council:peer";
 
 export interface RecordingEntry {
   ts: number;

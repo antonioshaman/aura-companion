@@ -531,6 +531,84 @@ describe("SessionItem", () => {
     expect(screen.getByTestId("council-session-badge")).toBeInTheDocument();
   });
 
+  // --- Sidebar chip redundancy full suppression (TASK extends PR #27) ---
+  //
+  // The BackendBadge to the left of the chip cluster already shows the
+  // orchestrator backend (CC / CX). Rendering a pair-half with the SAME
+  // provider letters is pure visual duplication. The new helper
+  // `pairHalvesAfterBackendCollapse` drops that redundant half so the
+  // asymmetric `claude+codex` case renders a SINGLE chip carrying the
+  // new-information half.
+
+  it("renders a SINGLE chip (codex only) for claude+codex pair on Claude backend", () => {
+    // backend=claude → CC badge already conveys claude → drop the CLAUDE
+    // half of the pair → render just the CODEX chip. No "+" separator.
+    render(
+      <SessionItem
+        {...buildProps({
+          session: makeSession({ backendType: "claude" }),
+          councilPairing: "claude+codex",
+        })}
+      />,
+    );
+    const badge = screen.getByTestId("council-session-badge");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveTextContent(/codex/i);
+    // Anti-assertion: no CLAUDE chip text inside the badge wrapper, and no
+    // visible "+" separator (the latter is only present in two-chip
+    // ProviderBadges rendering).
+    expect(badge).not.toHaveTextContent(/claude/i);
+    expect(badge.textContent).not.toContain("+");
+  });
+
+  it("renders a SINGLE chip (claude only) for claude+codex pair on Codex backend", () => {
+    // Mirror case: backend=codex → CX badge already conveys codex → drop
+    // the CODEX half → render just the CLAUDE chip.
+    render(
+      <SessionItem
+        {...buildProps({
+          session: makeSession({ backendType: "codex" }),
+          councilPairing: "claude+codex",
+        })}
+      />,
+    );
+    const badge = screen.getByTestId("council-session-badge");
+    expect(badge).toBeInTheDocument();
+    expect(badge).toHaveTextContent(/claude/i);
+    expect(badge).not.toHaveTextContent(/codex/i);
+    expect(badge.textContent).not.toContain("+");
+  });
+
+  it("still hides the chip cluster entirely for homogeneous pair on matching backend (PR #27 regression invariant)", () => {
+    // The PR #27 behaviour ("hides ProviderBadges for homogeneous council
+    // pair") must stay green — the new helper is a superset, not a
+    // replacement. claude+claude on a Claude backend → both halves match
+    // the backend → halves.length === 0 → render nothing.
+    render(
+      <SessionItem
+        {...buildProps({
+          session: makeSession({ backendType: "claude" }),
+          councilPairing: "claude+claude",
+        })}
+      />,
+    );
+    expect(screen.queryByTestId("council-session-badge")).not.toBeInTheDocument();
+  });
+
+  it("hides the chip cluster for homogeneous codex pair on Codex backend (symmetric to claude+claude case)", () => {
+    // Same logic on the Codex side — guards against a partial implementation
+    // that only handles the claude+claude path.
+    render(
+      <SessionItem
+        {...buildProps({
+          session: makeSession({ backendType: "codex" }),
+          councilPairing: "codex+codex",
+        })}
+      />,
+    );
+    expect(screen.queryByTestId("council-session-badge")).not.toBeInTheDocument();
+  });
+
   it("renders name on row 1 above the metadata row (chip cluster + cwd)", () => {
     // Structural guard for the two-row layout (UX feedback May 2026). Pre-fix
     // the chip cluster was a direct child of the outer button's flex row,
@@ -578,5 +656,61 @@ describe("SessionItem", () => {
     expect(screen.getByTestId("council-unread-count")).toHaveTextContent("3");
     // And the chip suppression still applies.
     expect(screen.queryByTestId("council-session-badge")).not.toBeInTheDocument();
+  });
+
+  // --- Council role decoration (2026-05-15 Item 17) ---
+  // ☼ orchestrator / ☽ observer glyph + " · {role}" suffix. The glyph is
+  // aria-hidden; the suffix is the accessible text so screen readers don't
+  // double-announce. Tests pin both the visible string and the a11y shape.
+
+  it("renders the ☼ glyph and ' · orchestrator' suffix when councilRole is orchestrator", () => {
+    render(<SessionItem {...buildProps({ councilRole: "orchestrator" })} />);
+    const glyph = screen.getByTestId("council-role-glyph");
+    expect(glyph.textContent).toBe("☼");
+    expect(glyph).toHaveAttribute("aria-hidden", "true");
+    const suffix = screen.getByTestId("council-role-suffix");
+    expect(suffix.textContent).toBe(" · orchestrator");
+  });
+
+  it("renders the ☽ glyph and ' · observer' suffix when councilRole is observer", () => {
+    render(<SessionItem {...buildProps({ councilRole: "observer" })} />);
+    const glyph = screen.getByTestId("council-role-glyph");
+    expect(glyph.textContent).toBe("☽");
+    expect(glyph).toHaveAttribute("aria-hidden", "true");
+    const suffix = screen.getByTestId("council-role-suffix");
+    expect(suffix.textContent).toBe(" · observer");
+  });
+
+  it("does NOT render the glyph or suffix when councilRole is undefined (solo session)", () => {
+    // Solo (non-council) sessions must not show role decoration — the data
+    // shape allows undefined and the renderer must guard against it.
+    render(<SessionItem {...buildProps()} />);
+    expect(screen.queryByTestId("council-role-glyph")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("council-role-suffix")).not.toBeInTheDocument();
+  });
+
+  it("passes axe a11y checks with the role glyph + suffix rendered (orchestrator)", async () => {
+    // The glyph carries no semantic info (aria-hidden); accessible name is
+    // the suffix text. axe must not flag the decoration as inaccessible.
+    const { axe } = await import("vitest-axe");
+    const { container } = render(<SessionItem {...buildProps({ councilRole: "orchestrator" })} />);
+    const results = await axe(container);
+    expect(results).toHaveNoViolations();
+  });
+
+  it("passes axe a11y checks with the role glyph + suffix rendered (observer)", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(<SessionItem {...buildProps({ councilRole: "observer" })} />);
+    const results = await axe(container);
+    expect(results).toHaveNoViolations();
+  });
+
+  it("preserves rename interaction (double-click) when council role is rendered", () => {
+    // Interactive behaviour regression: adding decoration around the label
+    // span must not break the rename-on-doubleclick contract Sidebar relies on.
+    const onStartRename = vi.fn();
+    render(<SessionItem {...buildProps({ councilRole: "orchestrator", onStartRename })} />);
+    fireEvent.doubleClick(screen.getByRole("button", { name: /claude-sonnet-4-6/i }));
+    expect(onStartRename).toHaveBeenCalledWith("session-1", "claude-sonnet-4-6");
   });
 });

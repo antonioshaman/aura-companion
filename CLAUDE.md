@@ -87,7 +87,7 @@ Browser (React) ←→ WebSocket ←→ Hono Server (Bun) ←→ WebSocket (NDJS
     - `atomic-write.ts` — `writeAtomicJson` (tmp+rename+fsync) for council artifact emission.
     - `checkpoint-watcher.ts` / `review-watcher.ts` — Filesystem watchers on `.council/checkpoints/` and `.council/reviews/`. Atomic-write contract + debounce + LRU dedup + `onDropped("superseded")` log for EC-4 compliance.
     - `council-types.ts` — `CheckpointPayload` + `ObserverReviewPayload` schemas. Both writer and reader live in one file (AP-3). `isBoundedToken` / `isBoundedText` / `isIsoTimestamp` validators per semantic category.
-    - `observer-prompt.ts` — Loads `.council/prompts/observer-system.md` at observer spawn; pure `buildObserverContextManifest` partitions `(current, previous)` checkpoints into `{delta, carried, dropped}` so observer reads delta-not-cumulative.
+    - `observer-prompt.ts` — Loads `.council/prompts/observer-system.md` at observer spawn via `resolveObserverSystemPrompt(workspacePath)`. When the workspace file is absent (ENOENT only — EACCES/EISDIR/ELOOP still throw), falls back to the BUNDLED artifact in `observer-prompt-bundled.ts` (auto-generated from the repo's canonical `.council/prompts/observer-system.md` by `scripts/build-observer-prompt-bundle.ts`; CI canary `bun run build-observer-prompt-bundle && git diff --exit-code` enforces sync). Provenance is stamped on `SdkSessionInfo.observerPromptSource: "workspace" | "bundled"` and surfaced via a WARN log `council.observer-prompt.bundled-fallback` when fallback fires. Pure `buildObserverContextManifest` partitions `(current, previous)` checkpoints into `{delta, carried, dropped}` so observer reads delta-not-cumulative.
     - `observer-attribution.ts` — `wrapObserverFindingForInjection` (structured envelope + text-form for chat); `formatObserverInvocationLog` (EC-9 structured log entry with `promptSha256` + STOP counts + latency).
     - `observer-grounding.ts` — STOP-only grounding gate: STOPs whose `evidence_path` isn't in modifiedFiles OR missing on disk → downgrade to NOTE. EC-7 idiom: integrated wrapper does realpath + bounds-check; pure `checkStopGrounding` takes injected predicate.
     - `observer-permissions.ts` — Observer tool allow/deny lists. Module-load canary asserts disjoint. Applied at spawn via `applyCouncilObserverSpawnConfig`.
@@ -142,6 +142,7 @@ Each entry captures:
 - `dir`: `"in"` (received by server) or `"out"` (sent by server)
 - `ch`: `"cli"` (Claude Code / Codex process) or `"browser"` (frontend WebSocket)
 - `raw`: the exact original string — never re-serialized, preserving the true protocol payload
+- `origin` (optional, on `"out"` frames only): provenance of the send. One of `"browser"` (default; field usually omitted on-disk to keep entry size minimal — browser-relayed sends are the common case), `"server:council-wake"` (synthesised by the Council Mode auto-wake dispatcher), or `"server:auto-proceed"` (synthesised by the orchestrator-idle auto-proceed pipeline on idle-timeout). Inbound (`"in"`) frames never carry `origin` — provenance is implicit from the CLI subprocess.
 
 **REST API**:
 - `GET /api/recordings` — list all recording files with metadata
@@ -155,7 +156,7 @@ Each entry captures:
 A user-opt-in flag on the New Session form (`councilMode: "council"` + `councilPairing: "claude+claude" | "claude+codex"`) spawns two linked CLI sessions sharing one workspace — an **orchestrator** that the user drives via the main chat surface, and an **observer** that wakes on filesystem checkpoint sentinels, reads a manifest of paths, emits a structured review file, and the server fans grounded findings back into the orchestrator's UI as `BlockerBanner` + side-panel `ObserverPanel`.
 
 **Cross-process protocol** lives entirely on the filesystem under `<workspace>/.council/`:
-- `.council/prompts/observer-system.md` — versioned (`<!-- observer-system-prompt v1 -->`) CLI-agnostic role definition. Loaded at observer spawn time; hash stamped on `SdkSessionInfo.observerPromptSha256`.
+- `.council/prompts/observer-system.md` — versioned (`<!-- observer-system-prompt v1 -->`) CLI-agnostic role definition. Loaded at observer spawn time; hash stamped on `SdkSessionInfo.observerPromptSha256`. **OPTIONAL per-workspace override** — if absent, the bundled fallback (`observer-prompt-bundled.ts`, generated from this repo's canonical artifact) is used and `SdkSessionInfo.observerPromptSource` reflects `"bundled"` vs `"workspace"`. Malformed-but-present STILL throws — the explicit-intent contract is preserved at the loader layer.
 - `.council/checkpoints/<phase>.json` — written by the orchestrator via `writeAtomicJson` after each Carmack-Council phase. Schema: `CheckpointPayload` in `council-types.ts`. Producer-side REST: `POST /api/sessions/:id/council/checkpoint` with the JSON payload as the body — server validates via `parseCheckpointPayload`, cross-checks `session_group_id` against the caller's actual group (orchestrator-half only), then atomically writes into the workspace's `.council/checkpoints/` directory.
 - `.council/reviews/<phase>-<provider>-observer.md` — written by the observer (content is JSON despite `.md` extension). Filename MUST carry the `<provider>` segment (`claude` | `codex`) so the `claude+codex` pairing produces two distinct review files per checkpoint rather than colliding under the watcher's debounce window.
 
@@ -189,6 +190,7 @@ A user-opt-in flag on the New Session form (`councilMode: "council"` + `councilP
 - `EC-7` Filesystem-access predicates inline path resolution OR are exposed only via resolving wrapper.
 - `EC-8` Reconciliation actions require sentinel-before-sweep helpers.
 - `EC-9` Group-lifecycle log lines must be structured JSON with `event` + `sessionGroupId` + (where applicable) `sessionId` + `role`.
+- `EC-13` Observer failsafe: server schedules a 5-min recurring tick per observer that scans `.council/checkpoints/` and synthesises a wake for any unprocessed checkpoint. The observer's system prompt (`.council/prompts/observer-system.md` → `Failsafe` section) documents the matching observer-side behaviour. Pair with `scanForMissedObserverWakes` reconcile on init.
 
 Full conventions list in `conventions.md`. Council review artefacts (per-expert findings + synthesised `FINAL-REVIEW.md`) in `.council/review-output/<TIMESTAMP>/`.
 

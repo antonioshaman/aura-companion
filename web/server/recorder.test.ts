@@ -175,6 +175,71 @@ describe("SessionRecorder", () => {
     // lineCount doesn't change after close
     expect(rec.lineCount).toBe(6);
   });
+
+  // CR-6 (council review 2026-05-15-0336 finding #6 / Willison W-P1-2):
+  // The `RecordingOrigin` union is the load-bearing forensic discriminant
+  // for distinguishing browser-relayed frames from server-synthesised
+  // wake / auto-proceed frames in replay tooling. Before this PR the
+  // discriminant shipped without any test exercising it through the
+  // replay loader — a future PR refactoring recorder.ts (e.g. compact
+  // origin into a single-byte flag for disk-size) would still pass the
+  // existing tests while replay tools silently misclassify auto-proceed
+  // turns as browser-relayed → incident response writes the wrong
+  // post-mortem.
+  it("CR-6: records `server:auto-proceed` and `server:council-wake` origin values and loadRecording round-trips them", async () => {
+    const { loadRecording } = await import("./replay.js");
+    const rec = new SessionRecorder("sess-origin", "claude", "/cwd", tempDir);
+    // Three frames: browser (origin omitted = default), council-wake,
+    // auto-proceed. Exercises every member of the RecordingOrigin union.
+    rec.record("in", "frame-browser", "browser");
+    rec.record("out", "frame-wake", "cli", "server:council-wake");
+    rec.record("out", "frame-auto-proceed", "cli", "server:auto-proceed");
+    rec.close();
+
+    const recording = loadRecording(rec.filePath);
+    expect(recording.entries.length).toBe(3);
+    // The browser entry omits `origin` (writer side optimisation per
+    // recorder.ts:298-305 — default is implicit). Replay tools treat
+    // absent origin as "browser-relayed".
+    expect(recording.entries[0].origin).toBeUndefined();
+    expect(recording.entries[1].origin).toBe("server:council-wake");
+    expect(recording.entries[2].origin).toBe("server:auto-proceed");
+  });
+
+  it("CR-6: a mixed-origin recording can be filtered by origin via the replay loader", async () => {
+    const { loadRecording } = await import("./replay.js");
+    const rec = new SessionRecorder("sess-mix", "claude", "/cwd", tempDir);
+    rec.record("in", "user-typed", "browser");
+    rec.record("out", "wake-1", "cli", "server:council-wake");
+    rec.record("out", "auto-1", "cli", "server:auto-proceed");
+    rec.record("out", "auto-2", "cli", "server:auto-proceed");
+    rec.record("in", "another-user", "browser");
+    rec.close();
+
+    const recording = loadRecording(rec.filePath);
+    const autoProceedFrames = recording.entries.filter(
+      (e) => e.origin === "server:auto-proceed",
+    );
+    const wakeFrames = recording.entries.filter(
+      (e) => e.origin === "server:council-wake",
+    );
+    const userFrames = recording.entries.filter((e) => e.origin === undefined);
+
+    // Partition is total: 2 + 1 + 2 = 5 entries, every entry belongs to
+    // exactly one origin class.
+    expect(autoProceedFrames.length).toBe(2);
+    expect(wakeFrames.length).toBe(1);
+    expect(userFrames.length).toBe(2);
+    expect(autoProceedFrames.length + wakeFrames.length + userFrames.length).toBe(
+      recording.entries.length,
+    );
+
+    // Provenance preserved on the auto-proceed frames specifically — this
+    // is the forensic-trail claim of the PR description that nothing else
+    // tested.
+    expect(autoProceedFrames[0].raw).toBe("auto-1");
+    expect(autoProceedFrames[1].raw).toBe("auto-2");
+  });
 });
 
 // ─── RecorderManager ─────────────────────────────────────────────────────────
