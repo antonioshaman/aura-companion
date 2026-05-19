@@ -827,7 +827,13 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
 
   useEffect(() => {
     if (isNearBottom.current) {
-      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+      // `block: "nearest"` confines the scroll to the inner overflow-y-auto
+      // container — default `block: "start"` cascades through every
+      // scrollable ancestor, including the App root (`fixed inset-0 flex`,
+      // overflow:hidden but with scrollHeight > clientHeight when the
+      // ObserverPanel mounts under a Council pair), which scrolls the
+      // entire app off-screen.
+      bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
     }
   }, [messages]);
 

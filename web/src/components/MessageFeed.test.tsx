@@ -184,6 +184,64 @@ describe("MessageFeed - formatTokens via stats bar", () => {
 
 // ─── Empty state ─────────────────────────────────────────────────────────────
 
+// ─── scrollIntoView block:"nearest" regression ──────────────────────────────
+// Regression test for the "council pair layout-shift / screen-jump" bug
+// (see specs/council-pair-layout-stability.md). When a Council Mode pair
+// is active and the ObserverPanel mounts, the App root's flex row can
+// have scrollHeight > clientHeight. The auto-follow useEffect calls
+// `bottomRef.current.scrollIntoView({ behavior: "smooth" })` on every
+// new message during streaming. Default `block: "start"` cascades the
+// scroll up through every scrollable ancestor INCLUDING the App root
+// (overflow:hidden does NOT prevent programmatic scrolls), which pushes
+// TopBar / "+" new-session button off the top of the viewport, leaving
+// a gray "dead band" at the bottom up to ~60% of the viewport height.
+//
+// The fix passes `block: "nearest"` so the scroll is confined to the
+// inner overflow-y-auto container that actually owns the message list.
+// If a future edit drops the option, this test fails and recurrence is
+// caught before merge.
+describe("MessageFeed - scrollIntoView confines to nearest scrollable (council pair recurrence guard)", () => {
+  it("auto-follow scrollIntoView is called with block:\"nearest\" so it cannot cascade to the App root", () => {
+    const sid = "test-scroll-cascade-guard";
+    const scrollIntoViewSpy = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoViewSpy;
+
+    setStoreMessages(sid, [
+      makeMessage({ id: "u1", role: "user", content: "first" }),
+      makeMessage({ id: "a1", role: "assistant", content: "second" }),
+    ]);
+    const { rerender } = render(<MessageFeed sessionId={sid} />);
+
+    // Add a message — useEffect on [messages] fires the auto-follow call.
+    setStoreMessages(sid, [
+      makeMessage({ id: "u1", role: "user", content: "first" }),
+      makeMessage({ id: "a1", role: "assistant", content: "second" }),
+      makeMessage({ id: "a2", role: "assistant", content: "third (new)" }),
+    ]);
+    rerender(<MessageFeed sessionId={sid} />);
+
+    // Find any scrollIntoView call that came from the auto-follow path.
+    // We accept any call whose options carry block:"nearest" — that's the
+    // contract we are guarding. The slash-menu and mention-menu effects
+    // already use block:"nearest" by hand-coded literal, so the assertion
+    // also covers them defensively.
+    const callsWithNearest = scrollIntoViewSpy.mock.calls.filter((args) => {
+      const opts = args[0];
+      return opts && typeof opts === "object" && opts.block === "nearest";
+    });
+    const callsWithoutNearest = scrollIntoViewSpy.mock.calls.filter((args) => {
+      const opts = args[0];
+      // A call with no options object, OR with explicit block other than
+      // "nearest", is a regression: it cascades to ancestor scroll containers
+      // including the App root and reproduces the council-pair screen-jump.
+      return !opts || (typeof opts === "object" && opts.block !== "nearest");
+    });
+
+    expect(callsWithNearest.length).toBeGreaterThan(0);
+    expect(callsWithoutNearest.length).toBe(0);
+  });
+});
+
 describe("MessageFeed - empty state", () => {
   it("shows empty state when no messages and no streaming", () => {
     const sid = "test-empty";
