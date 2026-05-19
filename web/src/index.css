@@ -362,14 +362,8 @@
   }
 }
 
-/* Lock html/body so iOS PWA doesn't rubber-band the whole page.
-   min-height on html compensates for the upward shift caused by
-   apple-mobile-web-app-status-bar-style: black-translucent — iOS moves
-   the document up behind the status bar, creating an equal gap at the
-   bottom where the html background shows through. Adding the status bar
-   height back fills that gap. */
+/* Lock html/body so iOS PWA doesn't rubber-band the whole page. */
 html {
-  min-height: calc(100% + env(safe-area-inset-top));
   overflow: hidden;
   overscroll-behavior: none;
 }
@@ -377,6 +371,25 @@ body {
   height: 100%;
   overflow: hidden;
   overscroll-behavior: none;
+}
+
+/* iOS standalone PWA only: compensate for the upward shift caused by
+   apple-mobile-web-app-status-bar-style: black-translucent. iOS moves
+   the document up behind the status bar, creating an equal gap at the
+   bottom where the html background shows through. Adding the status bar
+   height back fills that gap.
+
+   Gated on display-mode: standalone so that browsers with non-zero
+   env(safe-area-inset-top) outside iOS PWA standalone (notably macOS
+   Chrome with viewport-fit=cover under some window-decoration configs)
+   don't inherit the workaround and end up rendering html TALLER than
+   the viewport — which causes a dead band below the Composer because
+   `fixed inset-0` lays out against a containing block that overflows
+   the visible viewport area. */
+@media (display-mode: standalone) {
+  html {
+    min-height: calc(100% + env(safe-area-inset-top));
+  }
 }
 
 /* Eliminate 300ms tap delay on interactive elements */

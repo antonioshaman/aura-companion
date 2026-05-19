@@ -522,9 +522,11 @@ describe("HomePage", () => {
     render(<HomePage />);
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
 
-    // Both backends should be visible
-    const claudeButton = screen.getByRole("button", { name: "Claude" });
-    const codexButton = screen.getByRole("button", { name: "Codex" });
+    // Both backends should be visible. findByRole awaits the async getBackends
+    // resolution — getByRole here race-flaked when the promise settled after
+    // placeholder mount but before the backend-toggle subtree (CI #76802539602).
+    const claudeButton = await screen.findByRole("button", { name: "Claude" });
+    const codexButton = await screen.findByRole("button", { name: "Codex" });
     expect(claudeButton).toBeInTheDocument();
     expect(codexButton).toBeInTheDocument();
 
