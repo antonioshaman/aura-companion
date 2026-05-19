@@ -401,6 +401,27 @@ export type BrowserIncomingMessageBase =
     /** Server-validated pairing label, e.g. "claude+claude" or "claude+codex". */
     pairing: string;
     /**
+     * PR #68: server emits the live coordinator status so REST bootstrap
+     * (`GET /api/groups`) and the live push share one wire shape via the
+     * `buildBrowserGroupRecord` helper. The push path always emits
+     * `"active"` (the variant fires only on a transition that leaves the
+     * group active); REST bootstrap may emit `"degraded"` or
+     * `"reconnecting"` when the user reloads mid-state.
+     *
+     * **Optional on the wire** — mirrors the Task 9 precedent that made
+     * `wakeTimeoutMs` optional. The persistent event buffer
+     * (`session-store.ts:39 — eventBuffer?: BufferedBrowserEvent[]`) survives
+     * a server restart, so a pre-PR-#68 server that buffered a `group_created`
+     * frame, then upgrades onto this PR, will replay that legacy frame to a
+     * reconnecting browser inside an `event_replay` envelope WITHOUT the
+     * `status` field. Making the field optional keeps the type contract
+     * truthful across the upgrade window; the client falls back to
+     * `"active"` (the only sensible default for a `group_created` push) for
+     * such legacy frames. New emits always carry `status` because they
+     * route through `buildBrowserGroupRecord`.
+     */
+    status?: "pairing" | "active" | "degraded" | "archived" | "reconnecting";
+    /**
      * Task 9: server-published auto-wake-to-review timeout in
      * milliseconds. Frontend uses this to bound the `reviewing` panel
      * state — past this deadline without an `observer_review` arrival,
@@ -484,6 +505,29 @@ export type BrowserIncomingMessageBase =
      * were dropped — keeps the on-wire payload minimal in the happy path.
      */
     supersededCheckpointIds?: string[];
+  }
+  | {
+    /**
+     * Bidirectional pipeline Story 4.1 — convergence-tracker state update.
+     * Server-authoritative; frontend never derives its own counter.
+     *
+     * `transition` discriminates which kind of change happened:
+     *   - `cycle-progress`  counter changed (may be increment or reset)
+     *   - `converged`       threshold reached; UI flips ☼ row to ✅ badge
+     *   - `revoked`         STOP arrived post-convergence; back to in-progress
+     *
+     * `cycleNumber` / `convergenceThreshold` / `convergenceState` carry
+     * the full server-side state so the frontend can render without
+     * tracking prior values. Cumulative absolute values, not deltas.
+     */
+    type: "group_convergence";
+    sessionGroupId: string;
+    transition: "cycle-progress" | "converged" | "revoked";
+    cycleNumber: number;
+    convergenceThreshold: number;
+    convergenceState: "in-progress" | "converged" | "revoked";
+    /** Wallclock (ms) the server processed the transition. */
+    timestamp: number;
   };
 
 /**
@@ -509,6 +553,42 @@ export interface BrowserObserverDowngrade {
   /** Finding id (correlates with `findings[].id` when downgraded entry kept in stream). */
   id: string;
   reason: "evidence_not_in_modified_set" | "evidence_missing_on_disk" | "wake_version_mismatch";
+}
+
+/**
+ * Council Mode group — browser wire shape. The subset of the coordinator's
+ * `GroupRecord` the browser needs to render the Sidebar glyph + ObserverPanel
+ * pair context. Returned by:
+ *
+ *   1. The REST bootstrap endpoint `GET /api/groups` (PR #68 — close the
+ *      bootstrap gap where `group:created` events are lost on reload).
+ *   2. The producer-side mapper inside `SessionOrchestrator` that the
+ *      `group:created` listener can also use, so the wire shape and the
+ *      bootstrap shape stay in lockstep (AP-3: writer + reader schemas
+ *      co-located in one file).
+ *
+ * `status` is INCLUDED here (unlike the original `group_created` wire
+ * variant which implicitly meant "active") because a browser reloading
+ * mid-degraded or mid-reconnecting pair MUST receive the true status —
+ * otherwise the panel renders a stale "active" pill against a dead half.
+ *
+ * `wakeTimeoutMs` mirrors the server's {@link OBSERVER_WAKE_TIMEOUT_MS}
+ * constant so the panel-state deriver bounds the `reviewing` interval
+ * identically whether the group surfaced via REST bootstrap or the live
+ * `group_created` push.
+ */
+export interface BrowserGroupRecord {
+  sessionGroupId: string;
+  primarySessionId: string;
+  observerSessionId: string;
+  /** Server-validated pairing label, e.g. "claude+claude" / "claude+codex". */
+  pairing: string;
+  /** Live coordinator status — see `GroupStatus` in `group-state-machine.ts`. */
+  status: "pairing" | "active" | "degraded" | "archived" | "reconnecting";
+  /** Optional: which half died (populated only when status === "degraded"). */
+  deadRole?: SessionGroupRole;
+  /** Task 9 — server-published wake-to-review bound; see `group_created`. */
+  wakeTimeoutMs?: number;
 }
 
 export type BrowserIncomingMessage = BrowserIncomingMessageBase & { seq?: number };

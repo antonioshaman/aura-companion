@@ -154,6 +154,52 @@ describe("SessionGroupCoordinator.applyEvent / lookup", () => {
   });
 });
 
+// PR #68 — bootstrap-fix gap closure: REST endpoint `GET /api/groups`
+// returns every live group so a browser reloading AFTER the original
+// `group:created` push can still hydrate `groupBySessionId` and render
+// the Sidebar glyph. `listAll` is the snapshot primitive the orchestrator
+// wraps for that endpoint; the invariants enforced here are:
+//   - returns a FRESH array per call (subsequent createGroup must not
+//     retroactively appear inside an array the caller already iterated)
+//   - returns every coordinator-tracked group regardless of status (the
+//     orchestrator filters `archived` itself; the coordinator is the
+//     lifecycle authority, not the visibility policy)
+//   - the array preserves identity of the underlying GroupRecord objects
+//     (no defensive deep-clone — Map's value contract holds)
+describe("SessionGroupCoordinator.listAll", () => {
+  it("returns an empty array before any group has been created", () => {
+    expect(coord.listAll()).toEqual([]);
+  });
+
+  it("returns every live group, one entry per createGroup call", async () => {
+    const a = await coord.createGroup({ cwd: "/a", primary: "claude", observer: "claude" });
+    const b = await coord.createGroup({ cwd: "/b", primary: "claude", observer: "codex" });
+    const all = coord.listAll();
+    expect(all).toHaveLength(2);
+    const ids = all.map((g) => g.sessionGroupId).sort();
+    expect(ids).toEqual([a.sessionGroupId, b.sessionGroupId].sort());
+  });
+
+  it("includes degraded groups (status filter is the caller's policy, not the coordinator's)", async () => {
+    const g = await coord.createGroup({ cwd: "/w", primary: "claude", observer: "claude" });
+    coord.applyEvent(g.sessionGroupId, { type: "half_died", role: "observer" });
+    const all = coord.listAll();
+    expect(all).toHaveLength(1);
+    expect(all[0]?.status).toBe("degraded");
+  });
+
+  it("returns a fresh array snapshot — subsequent createGroup does not retroactively appear", async () => {
+    await coord.createGroup({ cwd: "/a", primary: "claude", observer: "claude" });
+    const snapshot = coord.listAll();
+    expect(snapshot).toHaveLength(1);
+    await coord.createGroup({ cwd: "/b", primary: "claude", observer: "claude" });
+    // The snapshot the caller is iterating MUST NOT mutate underneath them.
+    expect(snapshot).toHaveLength(1);
+    // A fresh listAll() of course sees both.
+    expect(coord.listAll()).toHaveLength(2);
+  });
+});
+
 describe("SessionGroupCoordinator.archiveGroup", () => {
   it("transitions to archived and kills both halves", async () => {
     const g = await coord.createGroup({ cwd: "/work", primary: "claude", observer: "claude" });

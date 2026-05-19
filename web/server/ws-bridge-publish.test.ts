@@ -224,6 +224,8 @@ describe("broadcastToBrowsers — council wire variants seq coverage", () => {
       primarySessionId: "sess_orch",
       observerSessionId: "sess_obs",
       pairing: "claude+claude",
+      // PR #68: status field added to the wire variant.
+      status: "active",
     },
     {
       type: "group_exited",

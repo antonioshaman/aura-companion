@@ -4,6 +4,8 @@ import {
   COUNCIL_SCHEMA_VERSION,
   MAX_ARTIFACT_PATHS,
   MAX_FINDINGS_PER_REVIEW,
+  PEER_MESSAGE_MAX_BYTES,
+  formatPeerMessage,
   isBoundedText,
   isBoundedToken,
   isIsoTimestamp,
@@ -397,5 +399,77 @@ describe("isIsoTimestamp", () => {
     ["empty", ""],
   ])("rejects: %s", (_label, v) => {
     expect(isIsoTimestamp(v)).toBe(false);
+  });
+});
+
+// ─── Peer-message formatter (bidirectional pipeline Story 2.3) ──────────────
+
+describe("formatPeerMessage", () => {
+  it("renders the [from-<role>: <severity>] tag verbatim for the AT to read", () => {
+    const out = formatPeerMessage({
+      sourceRole: "observer",
+      severity: "STOP",
+      body: "auth bypass at web/server/routes.ts:84",
+      reviewPath: ".council/reviews/council-implement-claude-observer.md",
+    });
+    expect(out.startsWith("[from-observer: STOP] ")).toBe(true);
+    expect(out).toContain("auth bypass at web/server/routes.ts:84");
+  });
+
+  it("renders orchestrator-tagged messages (bidirectional)", () => {
+    const out = formatPeerMessage({
+      sourceRole: "orchestrator",
+      severity: "INFO",
+      body: "advancing to task 4",
+      reviewPath: ".council/reviews/council-plan-claude-observer.md",
+    });
+    expect(out.startsWith("[from-orchestrator: INFO] ")).toBe(true);
+  });
+
+  it("does NOT truncate a 1023-byte body (boundary below cap)", () => {
+    // Body sized so prefix+body fits under PEER_MESSAGE_MAX_BYTES (1024).
+    const prefix = "[from-observer: WARN] ";
+    const headroom = PEER_MESSAGE_MAX_BYTES - Buffer.byteLength(prefix, "utf8");
+    const body = "a".repeat(headroom);
+    const out = formatPeerMessage({
+      sourceRole: "observer",
+      severity: "WARN",
+      body,
+      reviewPath: ".council/reviews/x.md",
+    });
+    expect(Buffer.byteLength(out, "utf8")).toBeLessThanOrEqual(PEER_MESSAGE_MAX_BYTES);
+    expect(out).not.toContain("truncated; full text:");
+    expect(out.endsWith("a")).toBe(true);
+  });
+
+  it("truncates a 2048-byte body and appends audit-trail link", () => {
+    const body = "x".repeat(2048);
+    const reviewPath = ".council/reviews/council-implement-claude-observer.md";
+    const out = formatPeerMessage({
+      sourceRole: "observer",
+      severity: "STOP",
+      body,
+      reviewPath,
+    });
+    expect(Buffer.byteLength(out, "utf8")).toBeLessThanOrEqual(PEER_MESSAGE_MAX_BYTES);
+    expect(out).toContain("truncated; full text:");
+    expect(out).toContain(reviewPath);
+    expect(out.startsWith("[from-observer: STOP] ")).toBe(true);
+  });
+
+  it("byte-safe truncation does not split multi-byte UTF-8 sequences", () => {
+    // 4-byte rocket per code point; 600 rockets = 2400 bytes
+    const body = "🚀".repeat(600);
+    const out = formatPeerMessage({
+      sourceRole: "observer",
+      severity: "NOTE",
+      body,
+      reviewPath: ".council/reviews/x.md",
+    });
+    expect(Buffer.byteLength(out, "utf8")).toBeLessThanOrEqual(PEER_MESSAGE_MAX_BYTES);
+    // Output must remain valid UTF-8 — Buffer.from + back-string round-trips clean
+    expect(Buffer.from(out, "utf8").toString("utf8")).toBe(out);
+    // Truncation marker still present
+    expect(out).toContain("truncated; full text:");
   });
 });

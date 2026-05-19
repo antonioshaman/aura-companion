@@ -1137,6 +1137,8 @@ describe("Browser handlers", () => {
       primarySessionId: "g_orch",
       observerSessionId: "g_obs",
       pairing: "claude+claude",
+      // PR #68: status is now part of the wire variant — see session-types.ts.
+      status: "active",
       wakeTimeoutMs: 90_000,
     });
 
@@ -2333,6 +2335,141 @@ describe("Browser message routing", () => {
     bridge.handleBrowserMessage(browser, JSON.stringify(payload));
     expect(cli.send).toHaveBeenCalledTimes(1);
   });
+
+  // ─── Council Mode: observer-guard + EC-9 telemetry for set_permission_mode ─
+  // These tests anchor the EC-1 server mirror. Without the gate at
+  // routeBrowserMessage, a buggy/hostile client holding a valid token and
+  // an observer sessionId could mutate the observer's permissionMode at
+  // runtime — breaking the spawn-only enforcement promise.
+  // Per EC-22: typed log emit paths require behavioural assertions, not
+  // just typecheck.
+
+  describe("set_permission_mode observer-guard + telemetry", () => {
+    it("rejects set_permission_mode targeted at an observer session — no adapter forward + structured WARN", async () => {
+      // Spy log.warn so we can inspect the structured payload shape.
+      const logModule = await import("./logger.js");
+      const warnSpy = vi.spyOn(logModule.log, "warn");
+      const session = bridge.getSession("s1")!;
+      session.state.sessionGroupId = "grp-1";
+      session.state.sessionGroupRole = "observer";
+      cli.send.mockClear();
+
+      bridge.handleBrowserMessage(browser, JSON.stringify({
+        type: "set_permission_mode",
+        mode: "plan",
+      }));
+
+      // Adapter MUST NOT be forwarded the frame — observer perm-mode is
+      // spawn-locked per EC-1.
+      expect(cli.send).not.toHaveBeenCalled();
+      // Structured WARN fired with the expected event + context fields.
+      expect(warnSpy).toHaveBeenCalledWith(
+        "ws-bridge",
+        expect.stringContaining("observer"),
+        expect.objectContaining({
+          event: "composer.permission-mode.observer-rejected",
+          sessionId: "s1",
+          sessionGroupId: "grp-1",
+          sessionGroupRole: "observer",
+          to: "plan",
+        }),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it("rejects set_permission_mode when sessionGroupId is present but role probe is null (EC-17 fail-closed)", async () => {
+      // Corrupted council session: id known but role somehow lost. Must
+      // reject to preserve EC-1 — silent allow would mutate a possibly-
+      // observer session whose role we cannot prove.
+      const logModule = await import("./logger.js");
+      const warnSpy = vi.spyOn(logModule.log, "warn");
+      const session = bridge.getSession("s1")!;
+      session.state.sessionGroupId = "grp-corrupt";
+      session.state.sessionGroupRole = undefined;
+      cli.send.mockClear();
+
+      bridge.handleBrowserMessage(browser, JSON.stringify({
+        type: "set_permission_mode",
+        mode: "plan",
+      }));
+
+      expect(cli.send).not.toHaveBeenCalled();
+      expect(warnSpy).toHaveBeenCalledWith(
+        "ws-bridge",
+        expect.stringContaining("role probe null"),
+        expect.objectContaining({
+          event: "composer.permission-mode.role-probe-null",
+          sessionId: "s1",
+          sessionGroupId: "grp-corrupt",
+        }),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it("forwards set_permission_mode for orchestrator sessions and emits INFO telemetry", async () => {
+      const logModule = await import("./logger.js");
+      const infoSpy = vi.spyOn(logModule.log, "info");
+      const session = bridge.getSession("s1")!;
+      session.state.sessionGroupId = "grp-2";
+      session.state.sessionGroupRole = "orchestrator";
+      // Pre-set the "from" mode so we can assert the snapshot semantics.
+      session.state.permissionMode = "acceptEdits";
+      cli.send.mockClear();
+
+      bridge.handleBrowserMessage(browser, JSON.stringify({
+        type: "set_permission_mode",
+        mode: "plan",
+      }));
+
+      // Adapter IS forwarded the frame (existing CLI delivery path).
+      expect(cli.send).toHaveBeenCalledTimes(1);
+      // EC-9 structured INFO log fired with from/to snapshot and role.
+      expect(infoSpy).toHaveBeenCalledWith(
+        "ws-bridge",
+        expect.stringContaining("permission-mode toggled"),
+        expect.objectContaining({
+          event: "composer.permission-mode.toggled",
+          sessionId: "s1",
+          sessionGroupId: "grp-2",
+          sessionGroupRole: "orchestrator",
+          from: "acceptEdits",
+          to: "plan",
+        }),
+      );
+      infoSpy.mockRestore();
+    });
+
+    it("forwards set_permission_mode for solo (non-council) sessions — undefined role does NOT collapse to observer", async () => {
+      // Negative-control on the strict-equality gate. The vast majority of
+      // sessions are non-council and must keep their toggle.
+      const logModule = await import("./logger.js");
+      const infoSpy = vi.spyOn(logModule.log, "info");
+      const session = bridge.getSession("s1")!;
+      // sessionGroupId + sessionGroupRole left undefined (the default).
+      session.state.permissionMode = "default";
+      cli.send.mockClear();
+
+      bridge.handleBrowserMessage(browser, JSON.stringify({
+        type: "set_permission_mode",
+        mode: "plan",
+      }));
+
+      expect(cli.send).toHaveBeenCalledTimes(1);
+      expect(infoSpy).toHaveBeenCalledWith(
+        "ws-bridge",
+        expect.any(String),
+        expect.objectContaining({
+          event: "composer.permission-mode.toggled",
+          sessionId: "s1",
+          sessionGroupId: undefined,
+          sessionGroupRole: undefined,
+          from: "default",
+          to: "plan",
+        }),
+      );
+      infoSpy.mockRestore();
+    });
+  });
 });
 
 // ─── Persistence ─────────────────────────────────────────────────────────────
@@ -3104,6 +3241,37 @@ describe("onUserFrameObserved (Task 11.6)", () => {
     bridge.injectUserMessage("s-uf-server-2", "untagged");
 
     expect(observed).toEqual(["s-uf-server-2"]);
+  });
+
+  // Bidirectional pipeline Story 2.3 — peer messages crossing between
+  // orchestrator and observer halves carry `origin: "council:peer"` and
+  // MUST share the same userFrameObservers-skip semantic as `server:`
+  // origins. A peer ping is inter-half coordination, not user typing —
+  // the synthetic-turn token cannot advance on it (would race the
+  // legitimate user-typed-frame stickiness, exact symptom EC-16 closed).
+  //
+  // Verifier guards against feedback_verify_test_bodies_not_just_names:
+  // assert exact zero fire across all three peer injections, AND
+  // history append still succeeds (forensic preserved for the operator
+  // to see the pair conversation per Story 2.3 visibility AC).
+  it("does NOT fire observers when injectUserMessage carries origin council:peer (bidir pipeline)", () => {
+    const cli = makeCliSocket("s-uf-peer-1");
+    const browser = makeBrowserSocket("s-uf-peer-1");
+    bridge.handleCLIOpen(cli, "s-uf-peer-1");
+    bridge.handleBrowserOpen(browser, "s-uf-peer-1");
+
+    const observed: string[] = [];
+    bridge.onUserFrameObserved((sid) => observed.push(sid));
+
+    bridge.injectUserMessage("s-uf-peer-1", "[from-observer: STOP] auth bypass at routes.ts:84", "council:peer");
+    bridge.injectUserMessage("s-uf-peer-1", "[from-observer: WARN] missing test on extracted helper", "council:peer");
+    bridge.injectUserMessage("s-uf-peer-1", "[from-orchestrator: INFO] advancing to task 4", "council:peer");
+
+    expect(observed).toEqual([]);
+
+    const session = bridge.getSession("s-uf-peer-1")!;
+    const userMessages = session.messageHistory.filter((m) => m.type === "user_message");
+    expect(userMessages.length).toBe(3);
   });
 });
 

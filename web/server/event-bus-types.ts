@@ -194,4 +194,23 @@ export interface CompanionEventMap {
     observerModel: string;
     observerProvider: string;
   };
+
+  /**
+   * Bidirectional pipeline — convergence-tracker state change.
+   * Fired by `convergence-tracker.ts` after each `group:review` is folded
+   * into the per-group clean-cycle counter. Three discrete transitions:
+   *
+   *   - `cycle-progress`   →  counter incremented (still below threshold)
+   *   - `converged`        →  counter reached threshold; UI flips badge to ✅
+   *   - `revoked`          →  a STOP arrived after convergence; counter back to 0
+   *
+   * Subscribers fan out to browsers as `group_update` payloads carrying
+   * the new `cycleNumber` + `convergenceState` fields on `GroupRecord`.
+   */
+  "group:convergence": {
+    sessionGroupId: string;
+    transition: "cycle-progress" | "converged" | "revoked";
+    cycleNumber: number;
+    convergenceThreshold: number;
+  };
 }

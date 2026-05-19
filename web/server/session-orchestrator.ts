@@ -8,6 +8,7 @@ import type { ContainerConfig, ContainerInfo } from "./container-manager.js";
 import { containerManager } from "./container-manager.js";
 import { imagePullManager } from "./image-pull-manager.js";
 import * as envManager from "./env-manager.js";
+import { ConvergenceTracker } from "./convergence-tracker.js";
 import * as sandboxManager from "./sandbox-manager.js";
 import * as gitUtils from "./git-utils.js";
 import * as sessionNames from "./session-names.js";
@@ -34,7 +35,7 @@ import {
   runAutoProceedBootReconcile,
 } from "./auto-proceed-orchestrator-bindings.js";
 import type { CheckpointPayload, ObserverReviewPayload } from "./council-types.js";
-import { OBSERVER_WAKE_PAYLOAD_VERSION, OBSERVER_WAKE_TIMEOUT_MS, parseCheckpointPayload, parseObserverReviewPayload } from "./council-types.js";
+import { OBSERVER_WAKE_PAYLOAD_VERSION, parseCheckpointPayload, parseObserverReviewPayload } from "./council-types.js";
 import { watchCheckpoints } from "./checkpoint-watcher.js";
 import { watchReviews } from "./review-watcher.js";
 import { validateObserverFindings } from "./observer-grounding.js";
@@ -47,9 +48,11 @@ import {
 } from "./council-wake-sentinel.js";
 import { formatObserverInvocationLog } from "./observer-attribution.js";
 import type {
+  BrowserGroupRecord,
   BrowserObserverDowngrade,
   BrowserObserverFinding,
 } from "./session-types.js";
+import { buildBrowserGroupRecord } from "./browser-group-record.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -390,6 +393,14 @@ export class SessionOrchestrator {
    * crash; production always wires the real manager from `index.ts`.
    */
   private idleTimerManager: IdleTimerManager;
+
+  /**
+   * Bidirectional pipeline Story 4.1: convergence tracker folds the
+   * `group:review` stream into a per-group clean-cycle counter. Lazy-
+   * initialised in {@link initialize} after `wireGroupListeners` so the
+   * `group:convergence` listener is armed before the tracker can emit.
+   */
+  private convergenceTracker: ConvergenceTracker | null = null;
 
   // Auto-relaunch state
   private relaunchingSet = new Set<string>();
@@ -794,6 +805,18 @@ export class SessionOrchestrator {
     // separated from the solo-session lifecycle wiring above.
     this.wireGroupListeners();
 
+    // Bidirectional pipeline Story 4.1 — convergence tracker. Attached
+    // AFTER wireGroupListeners so the `group:convergence` listener is
+    // armed first; any review processed between attach and first emit
+    // is fanned to browsers without race.
+    this.convergenceTracker = new ConvergenceTracker({
+      isFrozen: (sessionGroupId: string) => {
+        const status = this.coordinator?.get(sessionGroupId)?.status;
+        return status === "degraded" || status === "reconnecting";
+      },
+    });
+    this.convergenceTracker.attach();
+
     // Council Mode group reconciliation. Pairs created in a previous server
     // uptime are restored from launcher state (which itself hydrates from
     // session-store on startup). Without this, --resume brings back the
@@ -1169,19 +1192,31 @@ export class SessionOrchestrator {
     companionBus.on("group:created", ({ sessionGroupId, primarySessionId, observerSessionId }) => {
       const primary = this.launcher.getSession(primarySessionId);
       const observer = this.launcher.getSession(observerSessionId);
-      const pairing = `${primary?.backendType ?? "claude"}+${observer?.backendType ?? "claude"}`;
+      // PR #68: route the wire-shape assembly through the shared helper
+      // (`buildBrowserGroupRecord`). Same helper drives `getAllGroupsForBootstrap`
+      // and `ws-bridge.deriveGroupCreatedForBrowser` — pairing label,
+      // wakeTimeoutMs, and field ordering cannot drift across the three
+      // construction sites. Launcher is the canonical source for the
+      // post-spawn backend type; pass undefined-tolerant values straight
+      // through — the helper applies its internal `DEFAULT_BACKEND_TYPE`
+      // fallback for launcher-propagation-lag (Fowler fix-pass).
+      // Status is hardcoded `"active"` because this listener only fires
+      // on a transition that leaves the group active.
+      const wire = buildBrowserGroupRecord({
+        sessionGroupId,
+        primary: {
+          sessionId: primarySessionId,
+          backendType: primary?.backendType,
+        },
+        observer: {
+          sessionId: observerSessionId,
+          backendType: observer?.backendType,
+        },
+        status: "active",
+      });
       this.wsBridge.broadcastToGroup([primarySessionId, observerSessionId], {
         type: "group_created",
-        sessionGroupId,
-        primarySessionId,
-        observerSessionId,
-        pairing,
-        // Task 9: publish the wake-to-review timeout so the frontend
-        // panel-state deriver bounds the `reviewing` interval. Mirrors
-        // {@link OBSERVER_WAKE_TIMEOUT_MS} from this module — kept
-        // as a single constant the server owns; the frontend never
-        // hardcodes its own copy.
-        wakeTimeoutMs: OBSERVER_WAKE_TIMEOUT_MS,
+        ...wire,
       });
     });
     companionBus.on("group:exited", ({ sessionGroupId, reason }) => {
@@ -1277,6 +1312,37 @@ export class SessionOrchestrator {
         observerProvider,
         timestamp: Date.now(),
         ...(superseded.length > 0 ? { supersededCheckpointIds: superseded } : {}),
+      });
+    });
+
+    // Bidirectional pipeline Story 4.1 — convergence-tracker fanout.
+    // The tracker is wired in initialize(); here we forward its bus
+    // emissions to the browsers in the same group as a `group_update`
+    // payload carrying the new convergence fields. Frontend reads
+    // them off `GroupRecord` (server-authoritative; no client-side
+    // counter).
+    companionBus.on("group:convergence", ({ sessionGroupId, transition, cycleNumber, convergenceThreshold }) => {
+      const convergenceState: "in-progress" | "converged" | "revoked" =
+        transition === "converged"
+          ? "converged"
+          : transition === "revoked"
+            ? "revoked"
+            : "in-progress";
+      this.wsBridge.broadcastToGroup(this.getGroupMemberIds(sessionGroupId), {
+        type: "group_convergence",
+        sessionGroupId,
+        transition,
+        cycleNumber,
+        convergenceThreshold,
+        convergenceState,
+        timestamp: Date.now(),
+      });
+      log.info("session-orchestrator", "convergence transition", {
+        event: "council.convergence.transition",
+        sessionGroupId,
+        transition,
+        cycleNumber,
+        convergenceThreshold,
       });
     });
 
@@ -2886,6 +2952,45 @@ export class SessionOrchestrator {
     const role: "orchestrator" | "observer" =
       meta.primarySessionId === sessionId ? "orchestrator" : "observer";
     return { sessionGroupId, role };
+  }
+
+  /**
+   * REST bootstrap for Council Mode group records — return every live
+   * group the coordinator currently tracks, in the same wire shape the
+   * `group_created` push event uses. Used by the browser on app mount /
+   * reload to repopulate `groupBySessionId` so the Sidebar glyph + role
+   * suffix render correctly even when the original `group_created` event
+   * arrived while no browser was connected.
+   *
+   * Closes the bootstrap gap described in
+   * `BUG-council-mode-group-rest-bootstrap-gap.md` — historically the
+   * browser's group store was populated EXCLUSIVELY by the live
+   * `group:created` push, so a reload after pair creation left the
+   * Sidebar without the ☼/☽ decoration and the ObserverPanel without
+   * pair context.
+   *
+   * Returns an empty array when no coordinator exists yet (no Council
+   * Mode usage this server uptime). Archived groups are filtered out —
+   * they should not appear in the Sidebar list of active pairs.
+   */
+  getAllGroupsForBootstrap(): BrowserGroupRecord[] {
+    if (!this.coordinator) return [];
+    const records = this.coordinator.listAll();
+    const out: BrowserGroupRecord[] = [];
+    for (const g of records) {
+      if (g.status === "archived") continue;
+      // Shared helper — same construction site as the live push and the
+      // ws-bridge synthetic hydration. Pairing label + wakeTimeoutMs +
+      // field ordering cannot drift across the three producers because
+      // there is only one assembly site.
+      out.push(buildBrowserGroupRecord({
+        sessionGroupId: g.sessionGroupId,
+        primary: g.primary,
+        observer: g.observer,
+        status: g.status,
+      }));
+    }
+    return out;
   }
 
   /**
