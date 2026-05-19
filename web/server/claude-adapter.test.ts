@@ -1658,6 +1658,163 @@ describe("orchestratorTurnState — discriminated union + event emit", () => {
   });
 });
 
+// ── PLAN Task 11.1 + 11.2 — outbound FIFO queue + asymmetric overflow ────────
+//
+// Verifies the per-session outbound FIFO + the asymmetric overflow policy
+// (synthetic refuses at saturation; user evicts oldest synthetic; user-at-
+// saturation-with-no-synthetic refuses with a distinct error for the bridge
+// to surface protocol.frame_dropped upstream).
+
+describe("ClaudeAdapter outbound FIFO queue (PLAN Task 11.1)", () => {
+  it("admits frames up to the bounded depth", () => {
+    const ws = createMockSocket("sess-1");
+    adapter.attachWebSocket(ws);
+    // Admit exactly the depth limit (16) — each should succeed.
+    for (let i = 0; i < 16; i++) {
+      const outcome = adapter.enqueueOutboundFrame("user", `frame-${i}`);
+      expect(outcome.ok).toBe(true);
+    }
+    // Note: depth observed mid-admission depends on Promise-microtask
+    // drain timing. The invariant is that all 16 calls return ok:true.
+  });
+
+  it("preserves admission order through the Promise chain (FIFO)", async () => {
+    const ws = createMockSocket("sess-1");
+    adapter.attachWebSocket(ws);
+    // Enqueue three frames in known order.
+    adapter.enqueueOutboundFrame("user", "A");
+    adapter.enqueueOutboundFrame("user", "B");
+    adapter.enqueueOutboundFrame("user", "C");
+    // Drain the chain — every callback has run, every entry was sent
+    // (or no-op'd if evicted; none here).
+    await adapter.drainOutboundQueueForTest();
+    // Each send adds a "\n" suffix in sendRaw; strip for comparison.
+    const sent = ws.send.mock.calls.map((args: unknown[]) =>
+      String(args[0]).replace(/\n$/, ""),
+    );
+    expect(sent).toEqual(["A", "B", "C"]);
+  });
+
+  it("queue empties after the chain drains", async () => {
+    const ws = createMockSocket("sess-1");
+    adapter.attachWebSocket(ws);
+    adapter.enqueueOutboundFrame("user", "X");
+    adapter.enqueueOutboundFrame("synthetic", "Y");
+    expect(adapter.getOutboundQueueDepth()).toBeGreaterThan(0);
+    await adapter.drainOutboundQueueForTest();
+    expect(adapter.getOutboundQueueDepth()).toBe(0);
+  });
+});
+
+describe("ClaudeAdapter outbound queue asymmetric overflow (PLAN Task 11.2)", () => {
+  it("REFUSES synthetic at saturation (depth == 16 already)", () => {
+    // Fill the queue with synthetics — depth limit is the boundary.
+    for (let i = 0; i < 16; i++) {
+      expect(adapter.enqueueOutboundFrame("synthetic", `syn-${i}`).ok).toBe(true);
+    }
+    const refused = adapter.enqueueOutboundFrame("synthetic", "syn-overflow");
+    expect(refused).toEqual({ ok: false, error: "queue-full" });
+  });
+
+  it("EVICTS oldest synthetic when user frame arrives at saturation", async () => {
+    // 16 synthetics queued, then a user frame arrives. Oldest synthetic
+    // should be marked evicted; user frame should admit.
+    const ws = createMockSocket("sess-1");
+    adapter.attachWebSocket(ws);
+    for (let i = 0; i < 16; i++) {
+      expect(adapter.enqueueOutboundFrame("synthetic", `syn-${i}`).ok).toBe(true);
+    }
+    const userAdmit = adapter.enqueueOutboundFrame("user", "user-1");
+    expect(userAdmit).toEqual({ ok: true });
+    // After drain, syn-0 (oldest) is evicted; syn-1..syn-15 + user-1 sent.
+    await adapter.drainOutboundQueueForTest();
+    const sent = ws.send.mock.calls.map((args: unknown[]) =>
+      String(args[0]).replace(/\n$/, ""),
+    );
+    expect(sent).not.toContain("syn-0"); // evicted oldest synthetic
+    expect(sent).toContain("syn-1"); // next-oldest survived
+    expect(sent).toContain("syn-15"); // newest synthetic survived
+    expect(sent).toContain("user-1"); // user admitted
+    // Order check: user-1 is LAST (admitted last), syn-1 is FIRST among
+    // sends (now-oldest after eviction).
+    expect(sent[0]).toBe("syn-1");
+    expect(sent[sent.length - 1]).toBe("user-1");
+  });
+
+  it("REFUSES user at saturation when NO synthetic is evictable", () => {
+    // 16 user frames queued → no synthetic to evict → distinct error
+    // code so the bridge can surface protocol.frame_dropped upstream.
+    for (let i = 0; i < 16; i++) {
+      expect(adapter.enqueueOutboundFrame("user", `usr-${i}`).ok).toBe(true);
+    }
+    const refused = adapter.enqueueOutboundFrame("user", "usr-overflow");
+    expect(refused).toEqual({ ok: false, error: "queue-full-no-evictable" });
+  });
+
+  it("eviction targets the OLDEST synthetic among mixed kinds", async () => {
+    const ws = createMockSocket("sess-1");
+    adapter.attachWebSocket(ws);
+    // Alternating user/synthetic such that we know which synthetics
+    // are oldest by index. Fill to 16: [u0, s1, u2, s3, ..., u14, s15].
+    for (let i = 0; i < 16; i++) {
+      const kind = i % 2 === 0 ? "user" : "synthetic";
+      expect(adapter.enqueueOutboundFrame(kind, `${kind}-${i}`).ok).toBe(true);
+    }
+    // 17th admission as user — should evict s1 (oldest synthetic at idx 1).
+    expect(adapter.enqueueOutboundFrame("user", "user-new").ok).toBe(true);
+    await adapter.drainOutboundQueueForTest();
+    const sent = ws.send.mock.calls.map((args: unknown[]) =>
+      String(args[0]).replace(/\n$/, ""),
+    );
+    expect(sent).not.toContain("synthetic-1");
+    expect(sent).toContain("synthetic-3"); // next-oldest synthetic still there
+    expect(sent).toContain("user-0");
+    expect(sent).toContain("user-new");
+  });
+
+  it("evicted entry's chain callback no-ops and does NOT send", async () => {
+    const ws = createMockSocket("sess-1");
+    adapter.attachWebSocket(ws);
+    // Single synthetic enqueued, then queue saturated with user frames,
+    // then ONE more user frame → evicts the synthetic via age-zero scan.
+    // Wait — synthetic isn't oldest if it's enqueued FIRST. Re-arrange.
+    // Actually: enqueue 1 synthetic first, then 15 users, then 1 more
+    // user → triggers eviction of the synthetic. Confirm not sent.
+    adapter.enqueueOutboundFrame("synthetic", "syn-doomed");
+    for (let i = 0; i < 15; i++) {
+      adapter.enqueueOutboundFrame("user", `u${i}`);
+    }
+    // At this point queue depth = 16 (1 syn + 15 users). Admit user → evict syn.
+    expect(adapter.enqueueOutboundFrame("user", "u-trigger").ok).toBe(true);
+    await adapter.drainOutboundQueueForTest();
+    const sent = ws.send.mock.calls.map((args: unknown[]) =>
+      String(args[0]).replace(/\n$/, ""),
+    );
+    expect(sent).not.toContain("syn-doomed");
+    expect(sent).toContain("u-trigger");
+    expect(sent.length).toBe(16); // 15 users + the trigger user; syn evicted
+  });
+
+  it("queue overflow is reported per-kind in the discriminated error code", () => {
+    // synthetic-saturated-with-all-synthetics → "queue-full"
+    for (let i = 0; i < 16; i++) {
+      adapter.enqueueOutboundFrame("synthetic", `s${i}`);
+    }
+    const result = adapter.enqueueOutboundFrame("synthetic", "extra");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toBe("queue-full");
+  });
+
+  it("queue overflow with all-user is reported as queue-full-no-evictable", () => {
+    for (let i = 0; i < 16; i++) {
+      adapter.enqueueOutboundFrame("user", `u${i}`);
+    }
+    const result = adapter.enqueueOutboundFrame("user", "extra");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toBe("queue-full-no-evictable");
+  });
+});
+
 // Task 11.8 — auto-proceed wire-up: denylist gate on `can_use_tool`
 // (deny dangerous tools during synthetic turns without surfacing the
 // permission UI) + result-frame sticky-token cleanup.

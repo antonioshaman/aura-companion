@@ -91,6 +91,25 @@ export type ObserverWakeSendOutcome =
   | { kind: "backpressure"; bufferedAmount: number }
   | { kind: "failed"; error: string };
 
+/**
+ * One entry in the per-adapter outbound FIFO queue (PLAN Task 11.1).
+ * `evicted` is mutated when an asymmetric-overflow eviction removes the
+ * entry mid-flight; the scheduled Promise-chain callback then no-ops
+ * rather than sending. Exposed at module scope so tests can construct
+ * matchers on the same shape.
+ */
+export interface ClaudeAdapterOutboundEntry {
+  kind: "user" | "synthetic";
+  payload: string;
+  enqueuedAt: number;
+  evicted: boolean;
+}
+
+/** Outcome of {@link ClaudeAdapter.enqueueOutboundFrame}. */
+export type ClaudeAdapterEnqueueOutcome =
+  | { ok: true }
+  | { ok: false; error: "queue-full" | "queue-full-no-evictable" };
+
 // --- Claude Code Adapter ------------------------------------------------------
 
 export class ClaudeAdapter implements IBackendAdapter {
@@ -184,6 +203,46 @@ export class ClaudeAdapter implements IBackendAdapter {
   private orchestratorTurnState:
     | { kind: "in-flight" }
     | { kind: "awaiting-input"; blockedByStop: boolean } = { kind: "awaiting-input", blockedByStop: false };
+
+  /**
+   * PLAN-aura-orchestrator-idle-auto-proceed Task 11.1 + 11.2 —
+   * per-session outbound FIFO queue + asymmetric overflow policy.
+   *
+   * The queue serialises outbound `user` / `synthetic` NDJSON frames so
+   * concurrent producers (browser-relayed user message + auto-proceed
+   * synthetic, or two near-simultaneous browser tabs) can never invert
+   * order at the wire. Promise-chain ordering is the serialization
+   * primitive — each enqueue appends a `.then()` to `outboundChain`
+   * which sends the entry's payload via {@link sendRaw} when scheduled.
+   *
+   * Bounded depth = **16** with the rationale: 4 concurrent browser
+   * tabs × 4 in-flight messages × 2x headroom. The literal `16` is
+   * the load-bearing magic number — a future refactor that wants to
+   * change it must update the rationale comment so a grep audit
+   * surfaces drift between value + justification.
+   *
+   * Asymmetric overflow policy:
+   *  - **Synthetic enqueue at depth ≥ 16:** REFUSE → return
+   *    `{ok:false, error:"queue-full"}`. Trace counter does NOT advance.
+   *    Rationale: an auto-proceed nudge that can't fit isn't urgent;
+   *    the next idle-timer cycle will retry on fresh state.
+   *  - **User-frame enqueue at depth ≥ 16:** evict the OLDEST synthetic
+   *    entry (newest-to-oldest scan via `findIndex` over `kind ===
+   *    "synthetic"`) and admit the user frame. If NO synthetic is
+   *    queued at saturation → refuse with `queue-full-no-evictable`
+   *    so the caller (bridge) can surface `protocol.frame_dropped` to
+   *    the originating browser socket via the existing wire variant.
+   *    User-typed messages must NEVER be silently lost — refusing
+   *    explicitly is the right boundary.
+   *
+   * Existing `sendUserFrameFromServer` (observer-wake) and `sendToBackend`
+   * (browser → CLI) paths are unchanged in this PR. The wire-up that
+   * actually routes synthetic / user frames through this queue lands
+   * in Task 11.8 (FIFO queue is foundation; wire-up is integration).
+   */
+  private static readonly OUTBOUND_QUEUE_MAX_DEPTH = 16;
+  private outboundQueue: ClaudeAdapterOutboundEntry[] = [];
+  private outboundChain: Promise<void> = Promise.resolve();
 
   constructor(
     sessionId: string,
@@ -1348,6 +1407,113 @@ export class ClaudeAdapter implements IBackendAdapter {
       return;
     }
     this.sendRaw(ndjson);
+  }
+
+  /**
+   * PLAN Task 11.1 + 11.2 — enqueue an outbound NDJSON frame on the
+   * per-session FIFO queue. See class-level outbound-queue docstring
+   * for full semantics. Returns the admission outcome; the caller
+   * (currently test surface only; Task 11.8 will wire production
+   * callers) does NOT await the send — Promise-chain serialization
+   * means the entry is sent in admission order whenever the previous
+   * entry's send completes.
+   *
+   * Public for test access. Production wire-up in Task 11.8 will
+   * funnel auto-proceed synthetic frames + (optionally) browser
+   * user frames through this seam.
+   */
+  enqueueOutboundFrame(
+    kind: "user" | "synthetic",
+    payload: string,
+  ): ClaudeAdapterEnqueueOutcome {
+    // Bounded depth — see class-level docstring for the 16 rationale
+    // (4 tabs × 4 in-flight × 2x headroom). DO NOT change the literal
+    // without updating the rationale comment in the same diff.
+    if (this.outboundQueue.length >= ClaudeAdapter.OUTBOUND_QUEUE_MAX_DEPTH) {
+      if (kind === "synthetic") {
+        console.warn(
+          `[claude-adapter] outbound queue saturated (${this.outboundQueue.length}/${ClaudeAdapter.OUTBOUND_QUEUE_MAX_DEPTH}); refusing synthetic frame for session ${this.sessionId}`,
+        );
+        return { ok: false, error: "queue-full" };
+      }
+      // Asymmetric overflow: user frame at saturation evicts the OLDEST
+      // synthetic. `findIndex` returns index 0 first → oldest synthetic
+      // by enqueue order. Mark evicted so the chain callback no-ops,
+      // and remove from queue immediately to make room for the user.
+      const oldestSyntheticIdx = this.outboundQueue.findIndex(
+        (e) => e.kind === "synthetic" && !e.evicted,
+      );
+      if (oldestSyntheticIdx < 0) {
+        // Saturated with only user frames — load-shed the new admission
+        // explicitly. The caller (bridge) surfaces protocol.frame_dropped
+        // to the originating browser socket per Task 11.2 contract.
+        console.warn(
+          `[claude-adapter] outbound queue saturated with no synthetic to evict; refusing user frame for session ${this.sessionId}`,
+        );
+        return { ok: false, error: "queue-full-no-evictable" };
+      }
+      const evictedEntry = this.outboundQueue[oldestSyntheticIdx];
+      if (evictedEntry) evictedEntry.evicted = true;
+      this.outboundQueue.splice(oldestSyntheticIdx, 1);
+    }
+
+    const entry: ClaudeAdapterOutboundEntry = {
+      kind,
+      payload,
+      enqueuedAt: Date.now(),
+      evicted: false,
+    };
+    this.outboundQueue.push(entry);
+
+    // Promise-chain serialization. Each entry binds its callback by
+    // closure-captured reference (NOT by queue head shift) so an
+    // eviction that splices a middle entry doesn't cause the callback
+    // to send the wrong payload. Evicted entries no-op on schedule.
+    this.outboundChain = this.outboundChain.then(async () => {
+      if (entry.evicted) return;
+      const queueIdx = this.outboundQueue.indexOf(entry);
+      if (queueIdx >= 0) this.outboundQueue.splice(queueIdx, 1);
+      try {
+        this.sendRaw(entry.payload);
+      } catch (err) {
+        console.error(
+          `[claude-adapter] outbound chain send failed for session ${this.sessionId}:`,
+          err,
+        );
+      }
+    });
+
+    return { ok: true };
+  }
+
+  /**
+   * Test-only forensic accessor — returns the current count of
+   * non-evicted entries in the outbound FIFO queue.
+   */
+  getOutboundQueueDepth(): number {
+    return this.outboundQueue.filter((e) => !e.evicted).length;
+  }
+
+  /**
+   * Test-only: returns a snapshot of the outbound queue's entry kinds
+   * in admission order. Use sparingly — exposes internal state for
+   * assertion only.
+   */
+  getOutboundQueueKinds(): Array<"user" | "synthetic"> {
+    return this.outboundQueue
+      .filter((e) => !e.evicted)
+      .map((e) => e.kind);
+  }
+
+  /**
+   * Test-only: awaits the current outbound chain. Returns when every
+   * already-enqueued send has been scheduled + completed (or no-op'd
+   * if evicted). Production callers don't await — the chain is fire-
+   * and-forget by design. Tests use this to deterministically advance
+   * past the Promise microtask boundary.
+   */
+  drainOutboundQueueForTest(): Promise<void> {
+    return this.outboundChain;
   }
 
   /**
