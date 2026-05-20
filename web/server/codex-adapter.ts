@@ -483,7 +483,7 @@ export class CodexAdapter implements IBackendAdapter {
   private pendingApprovals = new Map<string, number>(); // request_id -> JSON-RPC id
 
   // Track request types that need different response formats
-  private pendingUserInputQuestionIds = new Map<string, string[]>(); // request_id -> ordered Codex question IDs
+  private pendingUserInputQuestions = new Map<string, Array<{ id: string; question: string }>>(); // request_id -> ordered (Codex question ID, question text)
   private pendingReviewDecisions = new Set<string>(); // request_ids that need ReviewDecision format
   private pendingExitPlanModeRequests = new Set<string>(); // request_ids for ExitPlanMode approvals
   private pendingDynamicToolCalls = new Map<string, {
@@ -627,7 +627,7 @@ export class CodexAdapter implements IBackendAdapter {
       this.emit({ type: "permission_cancelled", request_id: requestId });
     }
     this.pendingApprovals.clear();
-    this.pendingUserInputQuestionIds.clear();
+    this.pendingUserInputQuestions.clear();
     this.pendingReviewDecisions.clear();
 
     // If an agentMessage was actively streaming, emit a synthetic
@@ -750,7 +750,7 @@ export class CodexAdapter implements IBackendAdapter {
       this.emit({ type: "permission_cancelled", request_id: requestId });
     }
     this.pendingApprovals.clear();
-    this.pendingUserInputQuestionIds.clear();
+    this.pendingUserInputQuestions.clear();
     this.pendingReviewDecisions.clear();
     this.emittedToolUseIds.clear();
     this.commandStartTimes.clear();
@@ -1322,9 +1322,9 @@ export class CodexAdapter implements IBackendAdapter {
       this.pendingApprovals.delete(msg.request_id);
 
       // User input requests (item/tool/requestUserInput) need ToolRequestUserInputResponse
-      const questionIds = this.pendingUserInputQuestionIds.get(msg.request_id);
-      if (questionIds) {
-        this.pendingUserInputQuestionIds.delete(msg.request_id);
+      const pendingQuestions = this.pendingUserInputQuestions.get(msg.request_id);
+      if (pendingQuestions) {
+        this.pendingUserInputQuestions.delete(msg.request_id);
 
         if (msg.behavior === "deny") {
           // Respond with empty answers on deny
@@ -1332,13 +1332,14 @@ export class CodexAdapter implements IBackendAdapter {
           return;
         }
 
-        // Convert browser answers (keyed by index "0","1",...) to Codex format (keyed by question ID)
+        // Browser keys answers by `question.question` text (matches Claude SDK contract);
+        // remap to Codex question IDs.
         const browserAnswers = msg.updated_input?.answers as Record<string, string> || {};
         const codexAnswers: Record<string, { answers: string[] }> = {};
-        for (let i = 0; i < questionIds.length; i++) {
-          const answer = browserAnswers[String(i)];
+        for (const { id, question } of pendingQuestions) {
+          const answer = browserAnswers[question];
           if (answer !== undefined) {
-            codexAnswers[questionIds[i]] = { answers: [answer] };
+            codexAnswers[id] = { answers: [answer] };
           }
         }
 
@@ -1921,8 +1922,12 @@ export class CodexAdapter implements IBackendAdapter {
       options: Array<{ label: string; description: string }> | null;
     }> || [];
 
-    // Store question IDs so we can map browser indices back to Codex IDs in the response
-    this.pendingUserInputQuestionIds.set(requestId, questions.map((q) => q.id));
+    // Store (id, question text) pairs so we can map browser question-text-keyed
+    // answers back to Codex question IDs in the response.
+    this.pendingUserInputQuestions.set(
+      requestId,
+      questions.map((q) => ({ id: q.id, question: q.question })),
+    );
 
     // Convert to our AskUserQuestion format (matches AskUserQuestionDisplay component)
     const perm: PermissionRequest = {

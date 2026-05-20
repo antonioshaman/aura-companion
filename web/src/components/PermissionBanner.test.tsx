@@ -431,9 +431,11 @@ describe("AskUserQuestionDisplay", () => {
       request_id: "req-ask-1",
       behavior: "allow",
     }));
-    // The updated_input spreads permission.input and adds { answers: { "0": "Red" } }
+    // The updated_input spreads permission.input and adds answers keyed by
+    // the full `question.question` text (matches Claude Code SDK contract;
+    // it looks up `answers[question.question]`, not by index/header).
     const call = mockSendToSession.mock.calls[0][1];
-    expect(call.updated_input.answers).toEqual({ "0": "Red" });
+    expect(call.updated_input.answers).toEqual({ "Which color?": "Red" });
   });
 
   it("renders fallback for simple question string", () => {
@@ -487,7 +489,7 @@ describe("AskUserQuestionDisplay", () => {
     fireEvent.click(screen.getByText("Submit answers"));
 
     const payload = mockSendToSession.mock.calls[0][1];
-    expect(payload.updated_input.answers).toEqual({ "1": "Custom response" });
+    expect(payload.updated_input.answers).toEqual({ "Add context": "Custom response" });
   });
 
   it("shows Enter hint for single-question custom Other input", () => {
@@ -540,7 +542,50 @@ describe("AskUserQuestionDisplay", () => {
     fireEvent.click(screen.getByText("Submit answers"));
 
     const payload = mockSendToSession.mock.calls[0][1];
-    expect(payload.updated_input.answers).toEqual({ "0": "Keep" });
+    expect(payload.updated_input.answers).toEqual({ "Primary": "Keep" });
+  });
+
+  it("keys multi-question Submit answers by full question text (Claude SDK contract)", () => {
+    // Regression guard for the bug where the browser shipped `answers: {"0": ...}`
+    // (numeric index). Claude Code SDK's AskUserQuestion looks up
+    // answers[question.question] — with index keys it sees "(no option selected)"
+    // for every question and emits "User has answered your questions: ." with
+    // an empty payload. Keys must be the verbatim `question.question` text.
+    const perm = makePermission({
+      request_id: "req-ask-keying",
+      tool_name: "AskUserQuestion",
+      input: {
+        questions: [
+          {
+            header: "Tenancy",
+            question: "Multi-tenant с первого дня или single-tenant сначала?",
+            options: [
+              { label: "Single → multi", description: "Recommended" },
+              { label: "Multi-tenant сразу", description: "Heavier upfront" },
+            ],
+          },
+          {
+            header: "Stock",
+            question: "Источник истины по остаткам?",
+            options: [
+              { label: "warehouse_bot", description: "Direct" },
+              { label: "Отдельная shop-БД", description: "Synced" },
+            ],
+          },
+        ],
+      },
+    });
+    render(<PermissionBanner permission={perm} sessionId="s1" />);
+
+    fireEvent.click(screen.getByText("Single → multi"));
+    fireEvent.click(screen.getByText("warehouse_bot"));
+    fireEvent.click(screen.getByText("Submit answers"));
+
+    const payload = mockSendToSession.mock.calls[0][1];
+    expect(payload.updated_input.answers).toEqual({
+      "Multi-tenant с первого дня или single-tenant сначала?": "Single → multi",
+      "Источник истины по остаткам?": "warehouse_bot",
+    });
   });
 });
 

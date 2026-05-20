@@ -2137,12 +2137,13 @@ describe("CodexAdapter", () => {
     };
     expect(permReq).toBeDefined();
 
-    // Send answer back via permission_response
+    // Send answer back via permission_response — browser keys by question text
+    // (matches Claude SDK contract; codex-adapter remaps text → questionId).
     adapter.sendBrowserMessage({
       type: "permission_response",
       request_id: permReq.request.request_id,
       behavior: "allow",
-      updated_input: { answers: { "0": "Yes", "1": "No" } },
+      updated_input: { answers: { "Pick one": "Yes", "Pick another": "No" } },
     });
     await new Promise((r) => setTimeout(r, 50));
 
