@@ -425,4 +425,43 @@ describe("Connection and session status", () => {
     useStore.getState().setSessionStatus("s1", null);
     expect(useStore.getState().sessionStatus.get("s1")).toBeNull();
   });
+
+  // ─── Continue-in-new-session pickup drafts ───────────────────────────────
+  // The Sidebar "Continue in new session" action stores a pickup prompt
+  // keyed by the newly-created sessionId; Composer reads it on mount via
+  // consumePickupDraft and pre-fills the textarea. The atomic read-and-
+  // clear pattern matters — re-renders or remounts must NOT re-apply the
+  // draft (would silently overwrite user-edited text).
+
+  it("setPickupDraft: stores a draft keyed by sessionId", () => {
+    useStore.getState().setPickupDraft("new-session-123", "Pickup: read handoff.md");
+    expect(useStore.getState().pickupDrafts.get("new-session-123")).toBe("Pickup: read handoff.md");
+  });
+
+  it("consumePickupDraft: returns the draft AND clears it (single-fire)", () => {
+    useStore.getState().setPickupDraft("s-x", "first draft");
+
+    const first = useStore.getState().consumePickupDraft("s-x");
+    expect(first).toBe("first draft");
+    expect(useStore.getState().pickupDrafts.has("s-x")).toBe(false);
+
+    // Second consume on the same sessionId must return undefined — no
+    // re-application after the initial mount-time read.
+    const second = useStore.getState().consumePickupDraft("s-x");
+    expect(second).toBeUndefined();
+  });
+
+  it("consumePickupDraft: returns undefined when no draft pending (default path)", () => {
+    const result = useStore.getState().consumePickupDraft("never-set");
+    expect(result).toBeUndefined();
+  });
+
+  it("setPickupDraft: per-session isolation — consume on A doesn't clear B", () => {
+    useStore.getState().setPickupDraft("a", "draft-a");
+    useStore.getState().setPickupDraft("b", "draft-b");
+
+    useStore.getState().consumePickupDraft("a");
+    expect(useStore.getState().pickupDrafts.has("a")).toBe(false);
+    expect(useStore.getState().pickupDrafts.get("b")).toBe("draft-b");
+  });
 });

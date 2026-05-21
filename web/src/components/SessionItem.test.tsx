@@ -713,4 +713,45 @@ describe("SessionItem", () => {
     fireEvent.doubleClick(screen.getByRole("button", { name: /claude-sonnet-4-6/i }));
     expect(onStartRename).toHaveBeenCalledWith("session-1", "claude-sonnet-4-6");
   });
+
+  // ─── Continue-in-new-session menu item ───────────────────────────────────
+
+  it("shows 'Continue in new session' menu item when onContinueInNew is provided", () => {
+    // The action is additive — present only for active (non-archived)
+    // sessions when the parent wires up a handler. Playground / test
+    // harnesses that don't wire it must not see a no-op button (which
+    // would invite mis-clicks during exploratory UI work).
+    const onContinueInNew = vi.fn();
+    render(<SessionItem {...buildProps({ onContinueInNew })} />);
+    // Open the kebab menu
+    fireEvent.click(screen.getByLabelText("Session actions"));
+    expect(screen.getByText("Continue in new session")).toBeInTheDocument();
+  });
+
+  it("hides 'Continue in new session' when onContinueInNew is omitted (backwards-compat)", () => {
+    // Playground / read-only renders pass no handler; the row must NOT
+    // render the action at all in that case.
+    render(<SessionItem {...buildProps({ onContinueInNew: undefined })} />);
+    fireEvent.click(screen.getByLabelText("Session actions"));
+    expect(screen.queryByText("Continue in new session")).not.toBeInTheDocument();
+  });
+
+  it("hides 'Continue in new session' on archived sessions (recovery only makes sense for live ones)", () => {
+    // Archived sessions can't be wedged on a live API — re-spawning from
+    // an archived handoff is a different (manual) workflow, so the action
+    // is suppressed in the archived menu to avoid implying it's safe.
+    const onContinueInNew = vi.fn();
+    render(<SessionItem {...buildProps({ isArchived: true, onContinueInNew })} />);
+    fireEvent.click(screen.getByLabelText("Session actions"));
+    expect(screen.queryByText("Continue in new session")).not.toBeInTheDocument();
+  });
+
+  it("invokes onContinueInNew with the session id when the menu item is clicked", () => {
+    const onContinueInNew = vi.fn();
+    render(<SessionItem {...buildProps({ onContinueInNew })} />);
+    fireEvent.click(screen.getByLabelText("Session actions"));
+    fireEvent.click(screen.getByText("Continue in new session"));
+    expect(onContinueInNew).toHaveBeenCalledTimes(1);
+    expect(onContinueInNew.mock.calls[0][1]).toBe("session-1");
+  });
 });

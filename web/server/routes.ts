@@ -5,6 +5,8 @@ import { execSync } from "node:child_process";
 import { resolveBinary } from "./path-resolver.js";
 import { writeAtomicJson } from "./atomic-write.js";
 import { parseCheckpointPayload } from "./council-types.js";
+import { extractHandoff, buildPickupDraft } from "./handoff-extractor.js";
+import { writeFileSync } from "node:fs";
 import { log } from "./logger.js";
 import { respondError } from "./respond-error.js";
 import { join, dirname } from "node:path";
@@ -528,6 +530,75 @@ export function createRoutes(
     const session = launcher.getSession(id);
     if (!session) return c.json({ error: "Session not found" }, 404);
     return c.json(session);
+  });
+
+  // Continue-in-new-session: extracts a text-only handoff from the prior
+  // session's messageHistory (stripping images), writes it as a file in the
+  // workspace, and spawns a fresh session in the same cwd / pairing. The
+  // browser receives the new sessionId + the handoff filename + a draft
+  // pickup prompt so it can switch and pre-populate the composer.
+  //
+  // Why a server endpoint (vs client-side): the messageHistory on disk
+  // contains base64 image payloads we deliberately do NOT want to round-trip
+  // through the browser — that's exactly the data we're recovering from.
+  // Server reads in-memory state and produces a stripped artifact in one hop.
+  api.post("/sessions/:id/continue-in-new", async (c) => {
+    const id = c.req.param("id");
+    const launcherSession = launcher.getSession(id);
+    if (!launcherSession) return c.json({ error: "Session not found" }, 404);
+
+    const bridgeSession = wsBridge.getSession(id);
+    if (!bridgeSession) return c.json({ error: "Session state not loaded" }, 409);
+
+    const cwd = bridgeSession.state.cwd || launcherSession.cwd;
+    if (!cwd) return c.json({ error: "Session has no cwd — cannot write handoff" }, 422);
+
+    const reasonRaw = await c.req.json().catch(() => ({}));
+    const reason = typeof reasonRaw?.reason === "string" ? reasonRaw.reason : undefined;
+
+    const { markdown, meta } = extractHandoff({
+      sessionId: id,
+      messageHistory: bridgeSession.messageHistory,
+      cwd,
+      backend: bridgeSession.backendType,
+      reason,
+    });
+
+    // Filename uses dot-prefix so it's hidden from casual `ls` and most
+    // editors' file pickers; timestamp ensures multiple recoveries in the
+    // same workspace don't collide.
+    const ts = new Date().toISOString().replace(/[:.]/g, "-").replace("T", "T").slice(0, 19);
+    const filename = `.aura-handoff-${ts}.md`;
+    const handoffPath = join(cwd, filename);
+    try {
+      writeFileSync(handoffPath, markdown, { encoding: "utf8", mode: 0o644 });
+    } catch (err) {
+      log.error("routes", "Failed to write handoff file", { sessionId: id, cwd, err: String(err) });
+      return c.json({ error: `Cannot write handoff file: ${String(err)}` }, 500);
+    }
+
+    // Always spawn a SOLO session in the same cwd. If the source was a
+    // Council pair, the user can manually create a new pair from the New
+    // Session form — the handoff file is the durable recovery artifact, and
+    // a council-pair spawn-on-recovery would silently bind the new
+    // orchestrator+observer to an unintended pairing for callers who haven't
+    // opted in. The handoff file remains readable from either pair half.
+    const createResult = await orchestrator.createSession({
+      cwd,
+      backendType: launcherSession.backendType,
+      model: launcherSession.model,
+    } as Parameters<typeof orchestrator.createSession>[0]);
+    if (!createResult.ok) {
+      return c.json({ error: `Handoff written but session create failed: ${createResult.error}` }, createResult.status as any);
+    }
+
+    return c.json({
+      newSessionId: createResult.session.sessionId,
+      handoffPath,
+      handoffFilename: filename,
+      handoffMeta: meta,
+      draft: buildPickupDraft(filename),
+    });
   });
 
   api.get("/claude/sessions/discover", (c) => {

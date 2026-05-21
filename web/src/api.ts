@@ -923,6 +923,27 @@ export const api = {
   archiveSession: (sessionId: string, opts?: { force?: boolean; linearTransition?: "none" | "backlog" | "configured" }) =>
     post(`/sessions/${encodeURIComponent(sessionId)}/archive`, opts),
 
+  // Continue-in-new-session: server extracts a text-only handoff from the
+  // prior session's messageHistory (stripping images that wedged the API),
+  // writes it as `.aura-handoff-<ts>.md` in the workspace, spawns a fresh
+  // solo session in the same cwd, and returns both ids + a draft pickup
+  // prompt for the composer.
+  continueInNewSession: (sessionId: string, opts?: { reason?: string }) =>
+    post<{
+      newSessionId: string;
+      handoffPath: string;
+      handoffFilename: string;
+      handoffMeta: {
+        sessionId: string;
+        cwd?: string;
+        backend?: string;
+        totalMessages: number;
+        userTurns: number;
+        hasImageError: boolean;
+      };
+      draft: string;
+    }>(`/sessions/${encodeURIComponent(sessionId)}/continue-in-new`, opts),
+
   getArchiveInfo: (sessionId: string) =>
     get<ArchiveInfo>(`/sessions/${encodeURIComponent(sessionId)}/archive-info`),
 

@@ -24,6 +24,12 @@ interface SessionItemProps {
   onArchive: (e: React.MouseEvent, id: string) => void;
   onUnarchive: (e: React.MouseEvent, id: string) => void;
   onDelete: (e: React.MouseEvent, id: string) => void;
+  /**
+   * Optional so Playground mocks / existing call sites without the handler
+   * compile unchanged. When omitted the menu item is hidden — the action is
+   * purely additive and has no off-by-default UI footprint.
+   */
+  onContinueInNew?: (e: React.MouseEvent, id: string) => void;
   onClearRecentlyRenamed: (id: string) => void;
   editingSessionId: string | null;
   editingName: string;
@@ -101,6 +107,7 @@ export function SessionItem({
   onArchive,
   onUnarchive,
   onDelete,
+  onContinueInNew,
   onClearRecentlyRenamed,
   editingSessionId,
   editingName,
@@ -433,17 +440,33 @@ export function SessionItem({
               </button>
             </>
           ) : (
-            <button
-              role="menuitem"
-              tabIndex={-1}
-              onClick={(e) => handleMenuAction(() => onArchive(e, s.id))}
-              className="w-full px-3 py-1.5 text-[12px] text-left text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer flex items-center gap-2"
-            >
-              <svg viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3 text-cc-muted">
-                <path d="M2 4a1 1 0 011-1h10a1 1 0 011 1v1H2V4zm1 2h10v6a1 1 0 01-1 1H4a1 1 0 01-1-1V6zm3 2a.5.5 0 000 1h4a.5.5 0 000-1H6z" />
-              </svg>
-              Archive
-            </button>
+            <>
+              {onContinueInNew && (
+                <button
+                  role="menuitem"
+                  tabIndex={-1}
+                  onClick={(e) => handleMenuAction(() => onContinueInNew(e, s.id))}
+                  title="Spawn a fresh session in the same workspace, prefilled with a text-only handoff from this conversation. Recovers wedged sessions (e.g. Anthropic 2000px image limit)."
+                  className="w-full px-3 py-1.5 text-[12px] text-left text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer flex items-center gap-2"
+                >
+                  <svg viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3 text-cc-muted">
+                    <path d="M8 1a.5.5 0 01.5.5V3h2.5a1.5 1.5 0 011.5 1.5v8A1.5 1.5 0 0111 14H5a1.5 1.5 0 01-1.5-1.5v-8A1.5 1.5 0 015 3h2.5V1.5A.5.5 0 018 1zm-3 3a.5.5 0 00-.5.5v8a.5.5 0 00.5.5h6a.5.5 0 00.5-.5v-8a.5.5 0 00-.5-.5H5zM4 7.5A.5.5 0 014.5 7h7a.5.5 0 010 1h-7A.5.5 0 014 7.5zm0 2.5a.5.5 0 01.5-.5h7a.5.5 0 010 1h-7A.5.5 0 014 10z" />
+                  </svg>
+                  Continue in new session
+                </button>
+              )}
+              <button
+                role="menuitem"
+                tabIndex={-1}
+                onClick={(e) => handleMenuAction(() => onArchive(e, s.id))}
+                className="w-full px-3 py-1.5 text-[12px] text-left text-cc-fg hover:bg-cc-hover transition-colors cursor-pointer flex items-center gap-2"
+              >
+                <svg viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3 text-cc-muted">
+                  <path d="M2 4a1 1 0 011-1h10a1 1 0 011 1v1H2V4zm1 2h10v6a1 1 0 01-1 1H4a1 1 0 01-1-1V6zm3 2a.5.5 0 000 1h4a.5.5 0 000-1H6z" />
+                </svg>
+                Archive
+              </button>
+            </>
           )}
         </div>
       )}
