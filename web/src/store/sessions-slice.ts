@@ -43,6 +43,16 @@ export interface SessionsSlice {
   linkedLinearIssues: Map<string, LinearIssue>;
   mcpServers: Map<string, McpServerDetail[]>;
   collapsedProjects: Set<string>;
+  /**
+   * Per-session one-shot pickup drafts. Populated when a user clicks
+   * "Continue in new session" on a wedged session — the server returns a
+   * pickup prompt that asks the new agent to read the handoff file. The
+   * Composer reads + consumes the draft on mount (single-fire) so the
+   * textarea is pre-populated; the user can edit before submit.
+   * Not persisted — purely transient handoff between Sidebar action and
+   * Composer mount within the same tab session.
+   */
+  pickupDrafts: Map<string, string>;
 
   setCurrentSession: (id: string | null) => void;
   addSession: (session: SessionState) => void;
@@ -63,6 +73,10 @@ export interface SessionsSlice {
   setMcpServers: (sessionId: string, servers: McpServerDetail[]) => void;
   toggleProjectCollapse: (projectKey: string) => void;
   setSessionAiValidation: (sessionId: string, settings: { aiValidationEnabled?: boolean | null; aiValidationAutoApprove?: boolean | null; aiValidationAutoDeny?: boolean | null }) => void;
+  /** Store a pickup draft for a future-mounted Composer (continue-in-new flow). */
+  setPickupDraft: (sessionId: string, text: string) => void;
+  /** Read + clear the pickup draft atomically. Returns undefined if none pending. */
+  consumePickupDraft: (sessionId: string) => string | undefined;
 }
 
 export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> = (set) => ({
@@ -80,6 +94,7 @@ export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> 
   linkedLinearIssues: new Map(),
   mcpServers: new Map(),
   collapsedProjects: getInitialCollapsedProjects(),
+  pickupDrafts: new Map(),
 
   setCurrentSession: (id) => {
     if (id) {
@@ -304,4 +319,27 @@ export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> 
       sessions.set(sessionId, { ...existing, ...settings });
       return { sessions };
     }),
+
+  setPickupDraft: (sessionId, text) =>
+    set((s) => {
+      const pickupDrafts = new Map(s.pickupDrafts);
+      pickupDrafts.set(sessionId, text);
+      return { pickupDrafts };
+    }),
+
+  // Atomic read-and-clear. Returns the draft if one was pending, otherwise
+  // undefined. Used by Composer on mount to single-fire pre-populate without
+  // re-applying on re-render or surviving an unmount/remount cycle.
+  consumePickupDraft: (sessionId) => {
+    let consumed: string | undefined;
+    set((s) => {
+      const existing = s.pickupDrafts.get(sessionId);
+      if (existing === undefined) return {};
+      consumed = existing;
+      const pickupDrafts = new Map(s.pickupDrafts);
+      pickupDrafts.delete(sessionId);
+      return { pickupDrafts };
+    });
+    return consumed;
+  },
 });

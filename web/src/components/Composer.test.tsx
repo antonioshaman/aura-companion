@@ -115,6 +115,10 @@ function setupMockStore(overrides: {
     setSdkSessions: vi.fn(),
     promptSuggestions: new Map<string, string[]>(),
     clearPromptSuggestions: mockClearPromptSuggestions,
+    // Continue-in-new-session pickup-draft hook: Composer reads this on
+    // mount via useEffect. Returning undefined keeps existing tests inert
+    // (no draft to consume → no text prefill).
+    consumePickupDraft: vi.fn(() => undefined),
   };
 }
 

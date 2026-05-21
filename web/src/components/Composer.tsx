@@ -39,6 +39,16 @@ export function Composer({ sessionId }: { sessionId: string }) {
   const pendingSelectionRef = useRef<number | null>(null);
   const cliConnected = useStore((s) => s.cliConnected);
   const sessionData = useStore((s) => s.sessions.get(sessionId));
+  const consumePickupDraft = useStore((s) => s.consumePickupDraft);
+
+  // Single-fire: if a pickup draft was queued for this session by the
+  // Continue-in-new-session flow, install it as the initial composer text
+  // and clear the store entry. Re-renders won't re-apply (consume is
+  // atomic) and a remount on a different session won't carry it over.
+  useEffect(() => {
+    const draft = consumePickupDraft(sessionId);
+    if (draft) setText(draft);
+  }, [sessionId, consumePickupDraft]);
   // Raw selector — return "" when the map entry is absent so pickRestoreMode
   // can detect the "no prior mode" case and apply the backend-aware default.
   // Previously this defaulted to "acceptEdits" (a Claude-shaped value) which

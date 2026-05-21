@@ -470,6 +470,28 @@ export function Sidebar() {
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [confirmDeleteId, confirmDeleteAll, cancelDelete, cancelDeleteAll]);
 
+  // Continue-in-new-session: spawn a fresh session in the same workspace
+  // with a text-only handoff file written to cwd, then navigate the user to
+  // the new session with the pickup-prompt draft pre-loaded in the composer.
+  // Designed to recover from wedged sessions (e.g. >2000px image in history
+  // that trips Anthropic's many-image API limit) without losing context.
+  const handleContinueInNew = useCallback(async (e: React.MouseEvent, sessionId: string) => {
+    e.stopPropagation();
+    try {
+      const result = await api.continueInNewSession(sessionId);
+      useStore.getState().setPickupDraft(result.newSessionId, result.draft);
+      navigateToSession(result.newSessionId);
+      if (window.innerWidth < 768) {
+        useStore.getState().setSidebarOpen(false);
+      }
+    } catch (err) {
+      // Surface failure without crashing the sidebar. The handoff endpoint
+      // can fail if the session has no cwd or filesystem write is denied;
+      // either case warrants a console signal rather than silent no-op.
+      console.error("Continue-in-new-session failed", err);
+    }
+  }, []);
+
   const handleArchiveSession = useCallback(async (e: React.MouseEvent, sessionId: string) => {
     e.stopPropagation();
     const sdkInfo = sdkSessions.find((s) => s.sessionId === sessionId);
@@ -641,6 +663,7 @@ export function Sidebar() {
     onArchive: handleArchiveSession,
     onUnarchive: handleUnarchiveSession,
     onDelete: handleDeleteSession,
+    onContinueInNew: handleContinueInNew,
     onClearRecentlyRenamed: clearRecentlyRenamed,
     editingSessionId,
     editingName,
