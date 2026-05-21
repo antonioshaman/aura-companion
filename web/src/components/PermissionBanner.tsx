@@ -260,6 +260,24 @@ function AskUserQuestionDisplay({
   const [customText, setCustomText] = useState<Record<string, string>>({});
   const [showCustom, setShowCustom] = useState<Record<string, boolean>>({});
 
+  // Claude Code SDK's AskUserQuestion result schema keys `answers` by the full
+  // `question.question` text — not numeric index, not `header`. Verified from
+  // CLI binary `mapToolResultToToolResultBlockParam`. Internal state stays
+  // index-keyed for UI simplicity; emitted payload is remapped via answerKey().
+  function answerKey(questionIdx: number): string {
+    const q = questions[questionIdx] as Record<string, unknown> | undefined;
+    const text = typeof q?.question === "string" ? q.question : "";
+    return text || String(questionIdx);
+  }
+
+  function emitPayload(byIdx: Record<string, string>): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const [idx, val] of Object.entries(byIdx)) {
+      out[answerKey(Number(idx))] = val;
+    }
+    return out;
+  }
+
   function handleOptionClick(questionIdx: number, label: string) {
     const key = String(questionIdx);
     setSelections((prev) => ({ ...prev, [key]: label }));
@@ -267,7 +285,7 @@ function AskUserQuestionDisplay({
 
     // Auto-submit if single question
     if (questions.length <= 1) {
-      onSelect({ [key]: label });
+      onSelect({ [answerKey(questionIdx)]: label });
     }
   }
 
@@ -278,7 +296,7 @@ function AskUserQuestionDisplay({
     setSelections((prev) => ({ ...prev, [key]: text }));
 
     if (questions.length <= 1) {
-      onSelect({ [key]: text });
+      onSelect({ [answerKey(questionIdx)]: text });
     }
   }
 
@@ -318,7 +336,7 @@ function AskUserQuestionDisplay({
   }
 
   function handleSubmitAll() {
-    onSelect(selections);
+    onSelect(emitPayload(selections));
   }
 
   if (questions.length === 0) {
