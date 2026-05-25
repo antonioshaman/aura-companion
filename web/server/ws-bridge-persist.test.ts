@@ -4,7 +4,9 @@ import {
   appendHistory,
   persistSession,
   serializeForStore,
+  trimArchivedSessionState,
   MESSAGE_HISTORY_LIMIT,
+  ARCHIVED_HISTORY_RETENTION,
 } from "./ws-bridge-persist.js";
 import type { Session } from "./ws-bridge-types.js";
 import type { BrowserIncomingMessage } from "./session-types.js";
@@ -292,5 +294,88 @@ describe("serializeForStore", () => {
     const second = JSON.stringify(serializeForStore(session));
 
     expect(first).toBe(second);
+  });
+});
+
+// ─── trimArchivedSessionState ─────────────────────────────────────────────────
+
+describe("trimArchivedSessionState", () => {
+  it("trims messageHistory to the last ARCHIVED_HISTORY_RETENTION entries", () => {
+    const session = makeSession();
+    // Simulate the upper bound: a session that hit MESSAGE_HISTORY_LIMIT
+    // while active, now being archived.
+    for (let i = 0; i < MESSAGE_HISTORY_LIMIT; i++) {
+      session.messageHistory.push(makeAssistantMsg(`m${i}`));
+    }
+    expect(session.messageHistory).toHaveLength(MESSAGE_HISTORY_LIMIT);
+
+    trimArchivedSessionState(session);
+
+    expect(session.messageHistory).toHaveLength(ARCHIVED_HISTORY_RETENTION);
+    // Retained slice is the tail — most recent context survives for unarchive.
+    const firstRetainedIdx = MESSAGE_HISTORY_LIMIT - ARCHIVED_HISTORY_RETENTION;
+    expect((session.messageHistory[0] as any).message.id).toBe(`m${firstRetainedIdx}`);
+    expect((session.messageHistory[ARCHIVED_HISTORY_RETENTION - 1] as any).message.id).toBe(
+      `m${MESSAGE_HISTORY_LIMIT - 1}`,
+    );
+  });
+
+  it("leaves messageHistory untouched when already under retention", () => {
+    const session = makeSession();
+    for (let i = 0; i < 5; i++) {
+      session.messageHistory.push(makeAssistantMsg(`m${i}`));
+    }
+
+    trimArchivedSessionState(session);
+
+    expect(session.messageHistory).toHaveLength(5);
+    expect((session.messageHistory[0] as any).message.id).toBe("m0");
+  });
+
+  it("clears eventBuffer entirely (transient resync buffer is zero-value once archived)", () => {
+    const session = makeSession({
+      eventBuffer: [
+        { seq: 1, message: { type: "cli_connected" } },
+        { seq: 2, message: { type: "cli_disconnected" } },
+      ],
+    });
+
+    trimArchivedSessionState(session);
+
+    expect(session.eventBuffer).toEqual([]);
+  });
+
+  it("is idempotent — second call on an already-trimmed session is a no-op", () => {
+    const session = makeSession();
+    for (let i = 0; i < MESSAGE_HISTORY_LIMIT; i++) {
+      session.messageHistory.push(makeAssistantMsg(`m${i}`));
+    }
+
+    trimArchivedSessionState(session);
+    const afterFirst = session.messageHistory.length;
+    trimArchivedSessionState(session);
+    const afterSecond = session.messageHistory.length;
+
+    expect(afterFirst).toBe(ARCHIVED_HISTORY_RETENTION);
+    expect(afterSecond).toBe(ARCHIVED_HISTORY_RETENTION);
+  });
+
+  it("accepts a custom retention bound", () => {
+    const session = makeSession();
+    for (let i = 0; i < 50; i++) {
+      session.messageHistory.push(makeAssistantMsg(`m${i}`));
+    }
+
+    trimArchivedSessionState(session, 10);
+
+    expect(session.messageHistory).toHaveLength(10);
+    expect((session.messageHistory[0] as any).message.id).toBe("m40");
+  });
+
+  it("exports ARCHIVED_HISTORY_RETENTION constant", () => {
+    expect(ARCHIVED_HISTORY_RETENTION).toBe(100);
+    // Lower bound assertion — keep the retention well below MESSAGE_HISTORY_LIMIT
+    // so the eviction has meaningful effect.
+    expect(ARCHIVED_HISTORY_RETENTION).toBeLessThan(MESSAGE_HISTORY_LIMIT);
   });
 });

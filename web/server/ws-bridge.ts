@@ -35,6 +35,7 @@ import {
   appendHistory as appendHistoryFn,
   persistSession as persistSessionFn,
   serializeForStore,
+  trimArchivedSessionState,
 } from "./ws-bridge-persist.js";
 import {
   broadcastToBrowsers as broadcastToBrowsersFn,
@@ -381,6 +382,15 @@ export class WsBridge {
         stateMachine: new SessionStateMachine(p.id, "terminated"),
       };
       session.state.backend_type = session.backendType;
+      // Archived sessions sit in the in-memory Map until server restart but
+      // are not driving any live UI; trim their messageHistory + eventBuffer
+      // to bounded retention so a long-uptime host with many archived
+      // sessions does not accumulate them. On-disk state is untouched —
+      // unarchive flow + raw protocol recordings remain the durable
+      // sources of truth.
+      if (p.archived) {
+        trimArchivedSessionState(session);
+      }
       // Resolve git info for restored sessions (may have been persisted without it)
       resolveSessionGitInfo(session.id, session.state);
       this.sessions.set(p.id, session);
@@ -572,6 +582,20 @@ export class WsBridge {
     this.sessions.delete(sessionId);
     this.autoNamingAttempted.delete(sessionId);
     this.store?.remove(sessionId);
+  }
+
+  /**
+   * Trim an archived session's in-memory messageHistory + eventBuffer to
+   * bounded retention. The session row stays in the Map (so unarchive
+   * remains a flag flip with no disk reload), but its memory footprint
+   * drops from up to MESSAGE_HISTORY_LIMIT + EVENT_BUFFER_LIMIT entries
+   * to ARCHIVED_HISTORY_RETENTION + 0. On-disk persisted state is left
+   * untouched. No-op if the session is unknown.
+   */
+  trimArchivedSessionMemory(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    trimArchivedSessionState(session);
   }
 
   /** Wire state machine transition listener to broadcast phase changes. */
