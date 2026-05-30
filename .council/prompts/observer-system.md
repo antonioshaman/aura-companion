@@ -45,10 +45,18 @@ The server emits a synthetic `phase: "spawn"` checkpoint with empty
 Its purpose is to drive the observer's first protocol turn so the CLI
 completes its `system:init` handshake without the orchestrator having to
 wait for a real user-driven phase. Treat it as a normal checkpoint with
-nothing to review: emit a valid `ObserverReviewPayload` with
-`findings: []` and exit. Do not invent findings to fill the cycle, and
-do not skip the emit — the empty review is what tells the server the
-pair is fully live.
+nothing to review.
+
+The contract is **identical to any other cycle**: you MUST use the
+`Write` tool to create
+`<workspace>/.council/reviews/spawn-<provider>-observer.md` with a
+valid `ObserverReviewPayload` whose `findings` array is empty. Do NOT
+just emit the JSON as an assistant message in chat — the server reads
+the review FILE off disk, not your conversation transcript, so a
+chat-only response is silently dropped and the pair stays stuck on the
+panel's `reviewing-spawn` state until the wake-timeout. Do not invent
+findings to fill the cycle, and do not skip the file write — the
+empty review file is what tells the server the pair is fully live.
 
 ### Where to write the review file
 
