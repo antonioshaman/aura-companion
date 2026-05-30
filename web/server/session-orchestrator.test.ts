@@ -3224,6 +3224,136 @@ describe("SessionOrchestrator", () => {
     });
   });
 
+  // ── emitSpawnCheckpoint — spawn-time handshake driver ──────────────────
+  //
+  // The Claude `--print --input-format stream-json -p` CLI does not emit
+  // `system:init` until it receives its first user_message — so an observer
+  // freshly spawned for a Council Mode pair sits at `control_response:
+  // initialize` indefinitely, with `cliSessionId=null`, and the UI panel
+  // hangs on `never-checkpointed-yet`. `createCouncilGroup` calls
+  // `emitSpawnCheckpoint` immediately after `startCouncilWatchers` so the
+  // watcher → wake → observer path runs once on spawn, driving the
+  // handshake to completion deterministically.
+  //
+  // This describe block validates the WRITER side directly (the watcher's
+  // event-driven wake is exercised by checkpoint-watcher tests). The
+  // emitted artifact must (a) be a valid CheckpointPayload that round-
+  // trips through `parseCheckpointPayload`, (b) carry empty
+  // `artifact_paths` so the observer's review naturally collapses to
+  // `findings: []`, and (c) land at `<cwd>/.council/checkpoints/spawn.json`.
+  describe("emitSpawnCheckpoint", () => {
+    it("writes a valid empty-manifest CheckpointPayload under .council/checkpoints/spawn.json", async () => {
+      const fs = await import("node:fs");
+      const os = await import("node:os");
+      const path = await import("node:path");
+      const { parseCheckpointPayload, COUNCIL_SCHEMA_VERSION } = await import("./council-types.js");
+      const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "council-spawn-")));
+      try {
+        const obs = orchestrator as unknown as {
+          emitSpawnCheckpoint: (g: string, cwd: string) => void;
+        };
+        // The checkpoint dir must already exist (startCouncilWatchers normally
+        // mkdir-p's it before this call lands in production). Create it
+        // manually here to match production ordering.
+        fs.mkdirSync(path.join(ws, ".council", "checkpoints"), { recursive: true });
+        obs.emitSpawnCheckpoint("grp_spawn1", ws);
+        const target = path.join(ws, ".council", "checkpoints", "spawn.json");
+        expect(fs.existsSync(target)).toBe(true);
+        const parsed = parseCheckpointPayload(fs.readFileSync(target, "utf8"));
+        expect(parsed).not.toBeNull();
+        expect(parsed?.schema_version).toBe(COUNCIL_SCHEMA_VERSION);
+        expect(parsed?.phase).toBe("spawn");
+        expect(parsed?.sequence).toBe(0);
+        expect(parsed?.session_group_id).toBe("grp_spawn1");
+        expect(parsed?.checkpoint_id).toBe("spawn-grp_spawn1");
+        // Empty manifest — the whole point. A non-empty artifact_paths here
+        // would cause the observer to invent reviews of arbitrary spawn-time
+        // workspace files, which is exactly the misfire this design avoids.
+        expect(parsed?.artifact_paths).toEqual([]);
+        // emitted_at must be a parseable ISO timestamp (validator already
+        // checked the regex, but assert wall-clock plausibility too — a
+        // bug in the date construction would otherwise pass schema).
+        expect(Date.parse(parsed?.emitted_at ?? "")).not.toBeNaN();
+      } finally {
+        fs.rmSync(ws, { recursive: true, force: true });
+      }
+    });
+
+    it("scheduleSpawnCheckpointWhenObserverReady defers emit until backendAdapter is attached", async () => {
+      const fs = await import("node:fs");
+      const os = await import("node:os");
+      const path = await import("node:path");
+      const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "council-spawn-defer-")));
+      try {
+        // Closes the bug observed in production: emitting the spawn
+        // checkpoint immediately after `companionBus.emit("group:created")`
+        // races against the observer CLI's WebSocket handshake; the file
+        // lands but `dispatchObserverWake` returns `adapter_missing`
+        // because `wsBridge.sessions.get(observerId).backendAdapter` is
+        // still null. The deferred poll fixes this — and this test gates
+        // it: simulate the bridge having NO adapter at first, then attach
+        // one mid-poll, and assert the spawn checkpoint lands only after.
+        const obs = orchestrator as unknown as {
+          scheduleSpawnCheckpointWhenObserverReady: (g: string, oid: string, cwd: string) => Promise<void>;
+          wsBridge: { getSession: (id: string) => { backendAdapter: unknown } | undefined };
+        };
+        const observerId = "observer-spawn-defer-1";
+        const originalGetSession = obs.wsBridge.getSession.bind(obs.wsBridge);
+        let returnAdapter = false;
+        obs.wsBridge.getSession = (id: string) => {
+          if (id === observerId) {
+            return { backendAdapter: returnAdapter ? {} : null } as { backendAdapter: unknown };
+          }
+          return originalGetSession(id);
+        };
+        fs.mkdirSync(path.join(ws, ".council", "checkpoints"), { recursive: true });
+        const target = path.join(ws, ".council", "checkpoints", "spawn.json");
+        // Kick off the poll. It should not write the file yet because the
+        // adapter is still null.
+        const promise = obs.scheduleSpawnCheckpointWhenObserverReady("grp_defer_1", observerId, ws);
+        // Give the poll one tick to spin — file MUST NOT exist while
+        // backendAdapter is null. 100ms is well under POLL_INTERVAL_MS=250.
+        await new Promise((r) => setTimeout(r, 100));
+        expect(fs.existsSync(target)).toBe(false);
+        // Now flip the adapter to "attached" — the next poll tick will see
+        // it and emit.
+        returnAdapter = true;
+        await promise;
+        expect(fs.existsSync(target)).toBe(true);
+      } finally {
+        fs.rmSync(ws, { recursive: true, force: true });
+      }
+    });
+
+    it("does not throw when the write fails — failure is logged, not propagated", async () => {
+      const fs = await import("node:fs");
+      const os = await import("node:os");
+      const path = await import("node:path");
+      // Force writeAtomicJson to fail by pointing `workspaceCwd` at a path
+      // that is itself a regular file. `mkdirSync(dir, { recursive: true })`
+      // inside writeAtomicJson then throws ENOTDIR (cannot create a child
+      // dir under a file). emitSpawnCheckpoint must swallow that error so
+      // a permission glitch or filesystem corner case at spawn time does
+      // not cascade into a failed createCouncilGroup — the pair is still
+      // functional; the first user-driven checkpoint will wake the observer
+      // normally.
+      const tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "council-spawn-fail-")));
+      const fakeWs = path.join(tmpDir, "not-a-dir");
+      fs.writeFileSync(fakeWs, "regular file, not a directory");
+      try {
+        const obs = orchestrator as unknown as {
+          emitSpawnCheckpoint: (g: string, cwd: string) => void;
+        };
+        expect(() => obs.emitSpawnCheckpoint("grp_spawn_fail", fakeWs)).not.toThrow();
+        // Verify nothing got written under the fake-ws "directory" by
+        // proxy of the fake-ws still being the same regular file untouched.
+        expect(fs.statSync(fakeWs).isFile()).toBe(true);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+  });
+
   // ── reconcileCouncilGroups — startup recovery ──────────────────────────
   //
   // After a server restart, --resume brings back CLI processes from
