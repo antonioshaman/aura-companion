@@ -35,7 +35,8 @@ import {
   runAutoProceedBootReconcile,
 } from "./auto-proceed-orchestrator-bindings.js";
 import type { CheckpointPayload, ObserverReviewPayload } from "./council-types.js";
-import { OBSERVER_WAKE_PAYLOAD_VERSION, parseCheckpointPayload, parseObserverReviewPayload } from "./council-types.js";
+import { COUNCIL_SCHEMA_VERSION, OBSERVER_WAKE_PAYLOAD_VERSION, parseCheckpointPayload, parseObserverReviewPayload } from "./council-types.js";
+import { writeAtomicJson } from "./atomic-write.js";
 import { watchCheckpoints } from "./checkpoint-watcher.js";
 import { watchReviews } from "./review-watcher.js";
 import { validateObserverFindings } from "./observer-grounding.js";
@@ -1611,6 +1612,49 @@ export class SessionOrchestrator {
   }
 
   /**
+   * Emit a synthetic `phase: "spawn"` checkpoint at group creation so the
+   * observer's first protocol turn happens deterministically, without
+   * waiting for a user-driven phase. The Claude `--print --input-format
+   * stream-json -p` CLI does not emit `system:init` until it receives its
+   * first user message — until then `cliSessionId` stays null, the panel
+   * derives `never-checkpointed-yet`, and the pair appears stuck even
+   * though both halves are live. Routing a real checkpoint through the
+   * normal watcher → wake pipeline solves the handshake gap for free and
+   * doubles as a per-spawn smoke test of the full council pipeline.
+   *
+   * Failure here is non-fatal: the pair is still functional, the next
+   * user-driven checkpoint will wake the observer normally. We log and
+   * move on.
+   */
+  private emitSpawnCheckpoint(sessionGroupId: string, workspaceCwd: string): void {
+    const payload: CheckpointPayload = {
+      schema_version: COUNCIL_SCHEMA_VERSION,
+      checkpoint_id: `spawn-${sessionGroupId}`,
+      phase: "spawn",
+      sequence: 0,
+      session_group_id: sessionGroupId,
+      emitted_at: new Date().toISOString(),
+      artifact_paths: [],
+    };
+    const target = join(workspaceCwd, ".council", "checkpoints", `${payload.phase}.json`);
+    try {
+      writeAtomicJson(target, payload);
+      log.info("session-orchestrator", "council.spawn_checkpoint.emitted", {
+        event: "council.spawn_checkpoint.emitted",
+        sessionGroupId,
+        target,
+      });
+    } catch (err) {
+      log.warn("session-orchestrator", "council.spawn_checkpoint.failed", {
+        event: "council.spawn_checkpoint.failed",
+        sessionGroupId,
+        target,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
    * Council Review 2026-05-13-0150 Backend #4: tear down ALL council-
    * group tracking state atomically — meta + reverse-index. Single
    * helper so any future per-session archive/delete path that bypasses
@@ -2345,6 +2389,17 @@ export class SessionOrchestrator {
         primarySessionId: group.primary.sessionId,
         observerSessionId: group.observer.sessionId,
       });
+      // Spawn-ack checkpoint — synthetic `phase: "spawn"` with empty
+      // artifact_paths, written immediately after both halves are live
+      // so the observer's first protocol turn happens deterministically
+      // at spawn time instead of waiting for a real user-driven phase.
+      // Without this, the observer sits at `control_response:initialize`
+      // with `cliSessionId=null` indefinitely (CLI awaits stdin), and
+      // the UI panel hangs on `never-checkpointed-yet`. The empty
+      // manifest produces a `findings: []` review (per the observer
+      // prompt's spawn-ack section), confirming the full pipeline is
+      // wired and populating `cliSessionId` on the observer half.
+      this.emitSpawnCheckpoint(group.sessionGroupId, primaryInfo.cwd);
       return { ok: true, sessionGroupId: group.sessionGroupId, primary: primaryInfo, observer: observerInfo };
     } catch (err) {
       if (spawnContext.spawnErrors.primary) return { ok: false, ...spawnContext.spawnErrors.primary };
