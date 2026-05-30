@@ -3279,6 +3279,52 @@ describe("SessionOrchestrator", () => {
       }
     });
 
+    it("scheduleSpawnCheckpointWhenObserverReady defers emit until backendAdapter is attached", async () => {
+      const fs = await import("node:fs");
+      const os = await import("node:os");
+      const path = await import("node:path");
+      const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "council-spawn-defer-")));
+      try {
+        // Closes the bug observed in production: emitting the spawn
+        // checkpoint immediately after `companionBus.emit("group:created")`
+        // races against the observer CLI's WebSocket handshake; the file
+        // lands but `dispatchObserverWake` returns `adapter_missing`
+        // because `wsBridge.sessions.get(observerId).backendAdapter` is
+        // still null. The deferred poll fixes this — and this test gates
+        // it: simulate the bridge having NO adapter at first, then attach
+        // one mid-poll, and assert the spawn checkpoint lands only after.
+        const obs = orchestrator as unknown as {
+          scheduleSpawnCheckpointWhenObserverReady: (g: string, oid: string, cwd: string) => Promise<void>;
+          wsBridge: { getSession: (id: string) => { backendAdapter: unknown } | undefined };
+        };
+        const observerId = "observer-spawn-defer-1";
+        const originalGetSession = obs.wsBridge.getSession.bind(obs.wsBridge);
+        let returnAdapter = false;
+        obs.wsBridge.getSession = (id: string) => {
+          if (id === observerId) {
+            return { backendAdapter: returnAdapter ? {} : null } as { backendAdapter: unknown };
+          }
+          return originalGetSession(id);
+        };
+        fs.mkdirSync(path.join(ws, ".council", "checkpoints"), { recursive: true });
+        const target = path.join(ws, ".council", "checkpoints", "spawn.json");
+        // Kick off the poll. It should not write the file yet because the
+        // adapter is still null.
+        const promise = obs.scheduleSpawnCheckpointWhenObserverReady("grp_defer_1", observerId, ws);
+        // Give the poll one tick to spin — file MUST NOT exist while
+        // backendAdapter is null. 100ms is well under POLL_INTERVAL_MS=250.
+        await new Promise((r) => setTimeout(r, 100));
+        expect(fs.existsSync(target)).toBe(false);
+        // Now flip the adapter to "attached" — the next poll tick will see
+        // it and emit.
+        returnAdapter = true;
+        await promise;
+        expect(fs.existsSync(target)).toBe(true);
+      } finally {
+        fs.rmSync(ws, { recursive: true, force: true });
+      }
+    });
+
     it("does not throw when the write fails — failure is logged, not propagated", async () => {
       const fs = await import("node:fs");
       const os = await import("node:os");
