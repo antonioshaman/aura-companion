@@ -629,6 +629,33 @@ describe("detectStack — Phase A: enumeration-failure surfacing", () => {
     }
   });
 
+  it("B1 regression: canonical Aura layout (web/package.json) produces exactly ONE MarkerCheck per Aura marker name (no double-count, no missing)", () => {
+    // Phase B retired the `prefix === ""` sentinel + post-collection dedupe.
+    // Before B1: probePackageJson at prefix="" AND probePackageJson at
+    // prefix="web" both read web/package.json — two identical MarkerChecks
+    // collapsed by the dedupe step. After B1: only the subdir probe at
+    // prefix="web" runs. This test locks the invariant "one disk file →
+    // one MarkerCheck per marker name" — fires red on BOTH (a) dedupe
+    // accidentally re-added without the sentinel, and (b) someone re-adding
+    // a second probe of web/package.json elsewhere in the dispatcher.
+    const w = newWorkspace();
+    writeAuraPackageNameOnly(w);
+    const r = detectStack(w);
+
+    const auraNameChecks = r.checked.filter(
+      (c) => c.path === "web/package.json" && c.name === MARKER_NAMES.AURA_PACKAGE_NAME,
+    );
+    const auraHonoChecks = r.checked.filter(
+      (c) => c.path === "web/package.json" && c.name === MARKER_NAMES.AURA_PACKAGE_HONO,
+    );
+    expect(auraNameChecks).toHaveLength(1);
+    expect(auraHonoChecks).toHaveLength(1);
+    // Detector still produces the right kind — the test is about cardinality,
+    // not the high-level decision, but if the underlying behaviour broke too
+    // we want a clear failure signal.
+    expect(r.kind).toBe("aura");
+  });
+
   it("A4 (canary): enumeration code emits a (lstat) synthetic for the read_error branch", () => {
     // Static-grep canary backing A4 — if the surfacing logic is removed in
     // a future refactor, this test goes red even when the chmod-based test
