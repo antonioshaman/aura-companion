@@ -81,7 +81,7 @@ const SIZE_CAP = {
 // FILE CONTENT (see `feedback never echoes raw file content` test) — but
 // path bytes including directory NAMES do appear. Keep dir-name disclosure
 // in mind when changing what enumeration surfaces.
-const SKIP_SUBDIRS = new Set<string>([
+export const SKIP_SUBDIRS = new Set<string>([
   "node_modules",
   ".git",
   ".husky",

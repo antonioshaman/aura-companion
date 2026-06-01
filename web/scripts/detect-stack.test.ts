@@ -26,6 +26,7 @@ import {
   OVERRIDE_VALUES,
   REFUSAL_HEADLINES,
   MAX_CANDIDATE_SUBDIRS,
+  SKIP_SUBDIRS,
 } from "./detect-stack.js";
 
 const workspaces: string[] = [];
@@ -162,14 +163,52 @@ describe("detectStack — Refusal (AC-3.x)", () => {
     expect(text).toContain("/council-plan-aura");
     expect(text).toContain("/council-plan ");
   });
-  it("AC-3.2: refusal stays scanable (compact structure)", () => {
-    const w = newWorkspace();
-    const r = detectStack(w);
-    const text = renderRefusal(r);
-    // 6 markers + structural lines + override footer = ~16 lines. Hard
-    // upper bound 18 keeps AC-3.2's 10-second read budget achievable.
-    expect(text.split("\n").length).toBeLessThanOrEqual(18);
-  });
+  // C1 (Phase C): AC-3.2 line cap parametrised across ALL 4 refusal branches.
+  // Pre-Phase-C the test only covered the unknown_empty case (newWorkspace()
+  // with no markers). All four refusal branches — unknown / ambiguous /
+  // override_malformed / override_conflict — share the 18-line budget contract
+  // (AC-3.2's 10-second-read budget). Each was previously implicit. Now they
+  // are tested explicitly via describe.each — any one branch slipping past
+  // 18 lines goes red.
+  describe.each([
+    {
+      branch: "unknown_empty",
+      setup: (_w: string) => {
+        // Empty workspace — unknown, no markers.
+      },
+    },
+    {
+      branch: "ambiguous_full",
+      setup: (w: string) => {
+        writeAuraPackageNameOnly(w);
+        writePythonPyproject(w);
+      },
+    },
+    {
+      branch: "override_malformed_full",
+      setup: (w: string) => {
+        writeAuraPackageNameOnly(w);
+        writeFileSync(join(w, ".council-stack-override"), "");
+      },
+    },
+    {
+      branch: "override_conflict_full",
+      setup: (w: string) => {
+        writePythonPyproject(w);
+        writeFileSync(join(w, ".council-stack-override"), "aura\n");
+      },
+    },
+  ])(
+    "AC-3.2: refusal stays scanable (compact structure) — $branch",
+    ({ setup }) => {
+      it("renders ≤ 18 lines", () => {
+        const w = newWorkspace();
+        setup(w);
+        const text = renderRefusal(detectStack(w));
+        expect(text.split("\n").length).toBeLessThanOrEqual(18);
+      });
+    },
+  );
   it("AC-3.2: refusal has no first-person, no apology, no hedge", () => {
     const w = newWorkspace();
     writeAuraPackageNameOnly(w);
@@ -379,22 +418,62 @@ describe("detectStack — monorepo depth-1 subdir scan", () => {
     );
     expect(detectStack(w).kind).toBe("python");
   });
-  it("SPECIFICITY: bare subdir named 'bot' without aiogram in any requirements.txt → unknown", () => {
-    // The directory name `bot/` is NEVER a stack signal on its own.
+  // C3 (Phase C): SPECIFICITY-guard tests previously only covered the negative
+  // side ("bare subdir name → unknown"). A pre-Phase-2-depth-2 detector would
+  // ALSO pass those tests (root-only mode doesn't look into `bot/` either).
+  // Pair each negative with its positive twin via it.each so the contrast IS
+  // the test — `bot/` alone → unknown; `bot/requirements.txt` with `^aiogram`
+  // → python. Removing the depth-2 scan breaks the positive case immediately.
+  it.each([
+    {
+      name: "SPECIFICITY twin: bot/ alone (no requirements.txt) → unknown",
+      setup: (w: string) => {
+        mkdirSync(join(w, "bot"), { recursive: true });
+      },
+      expectedKind: "unknown" as const,
+    },
+    {
+      name: "SPECIFICITY twin: bot/requirements.txt without aiogram → unknown",
+      setup: (w: string) => {
+        mkdirSync(join(w, "bot"), { recursive: true });
+        writeFileSync(join(w, "bot", "requirements.txt"), "requests\nflask\n");
+      },
+      expectedKind: "unknown" as const,
+    },
+    {
+      name: "SPECIFICITY twin: bot/requirements.txt with ^aiogram → python",
+      setup: (w: string) => {
+        mkdirSync(join(w, "bot"), { recursive: true });
+        writeFileSync(join(w, "bot", "requirements.txt"), "aiogram==3.7\n");
+      },
+      expectedKind: "python" as const,
+    },
+    {
+      name: "SPECIFICITY twin: webapp/package.json with name=marketing-site (no hono) → unknown",
+      setup: (w: string) => {
+        mkdirSync(join(w, "webapp"), { recursive: true });
+        writeFileSync(
+          join(w, "webapp", "package.json"),
+          JSON.stringify({ name: "marketing-site", dependencies: { react: "^19" } }),
+        );
+      },
+      expectedKind: "unknown" as const,
+    },
+    {
+      name: "SPECIFICITY twin: webapp/package.json with name=aura-companion → aura",
+      setup: (w: string) => {
+        mkdirSync(join(w, "webapp"), { recursive: true });
+        writeFileSync(
+          join(w, "webapp", "package.json"),
+          JSON.stringify({ name: "aura-companion" }),
+        );
+      },
+      expectedKind: "aura" as const,
+    },
+  ])("$name", ({ setup, expectedKind }) => {
     const w = newWorkspace();
-    mkdirSync(join(w, "bot"), { recursive: true });
-    writeFileSync(join(w, "bot", "requirements.txt"), "requests\nflask\n");
-    expect(detectStack(w).kind).toBe("unknown");
-  });
-  it("SPECIFICITY: subdir package.json with name='something-else' and no hono → unknown", () => {
-    // The mere presence of a subdir package.json is NEVER a stack signal.
-    const w = newWorkspace();
-    mkdirSync(join(w, "webapp"), { recursive: true });
-    writeFileSync(
-      join(w, "webapp", "package.json"),
-      JSON.stringify({ name: "marketing-site", dependencies: { react: "^19" } }),
-    );
-    expect(detectStack(w).kind).toBe("unknown");
+    setup(w);
+    expect(detectStack(w).kind).toBe(expectedKind);
   });
   it("monorepo with BOTH Aura and Python signals in sibling subdirs → ambiguous (never silent)", () => {
     const w = newWorkspace();
@@ -412,25 +491,30 @@ describe("detectStack — monorepo depth-1 subdir scan", () => {
     expect(text).toContain("webapp/package.json");
     expect(text).toContain("bot/requirements.txt");
   });
-  it("SKIP_SUBDIRS: aura marker inside node_modules is ignored", () => {
-    const w = newWorkspace();
-    mkdirSync(join(w, "node_modules", "fake-pkg"), { recursive: true });
-    writeFileSync(
-      join(w, "node_modules", "package.json"),
-      JSON.stringify({ name: "aura-companion" }),
-    );
-    expect(detectStack(w).kind).toBe("unknown");
-  });
-  it("SKIP_SUBDIRS: aura marker inside dist/ is ignored", () => {
-    const w = newWorkspace();
-    mkdirSync(join(w, "dist"), { recursive: true });
-    writeFileSync(
-      join(w, "dist", "package.json"),
-      JSON.stringify({ name: "aura-companion" }),
-    );
-    expect(detectStack(w).kind).toBe("unknown");
-  });
-  it("SKIP_SUBDIRS: aura marker inside hidden dir (.local) is ignored", () => {
+  // C4 (Phase C): pre-Phase-C this section had 3 hand-picked SKIP_SUBDIRS
+  // samples out of 23 entries — node_modules, dist/, .local. The first two
+  // exercise the set-membership branch; .local exercises the structurally
+  // DIFFERENT hidden-dir branch (`name.startsWith(".")`). Phase C parametrises
+  // the set-membership branch over the FULL SKIP_SUBDIRS set so removing any
+  // single entry from the set goes red. The hidden-dir branch stays as one
+  // explicit test with the rename suggested by the handoff.
+  it.each(Array.from(SKIP_SUBDIRS))(
+    "SKIP_SUBDIRS: aura marker inside %s is ignored",
+    (dir) => {
+      const w = newWorkspace();
+      mkdirSync(join(w, dir), { recursive: true });
+      writeFileSync(
+        join(w, dir, "package.json"),
+        JSON.stringify({ name: "aura-companion" }),
+      );
+      expect(detectStack(w).kind).toBe("unknown");
+    },
+  );
+  it("hidden-dir scan rule (name.startsWith('.')): aura marker inside arbitrary hidden dir is ignored", () => {
+    // Structurally different from the set-membership above — the hidden-dir
+    // gate fires on any name starting with ".", not on SKIP_SUBDIRS membership.
+    // Using ".local" (NOT in SKIP_SUBDIRS) proves the hidden-dir rule alone
+    // does the work — independent guarantee from the set-membership tests.
     const w = newWorkspace();
     mkdirSync(join(w, ".local"), { recursive: true });
     writeFileSync(
@@ -496,6 +580,24 @@ describe("detectStack — override-conflict (ask-first)", () => {
     expect(text).toContain("correct or delete .council-stack-override");
     // First-person discipline preserved.
     expect(text).not.toMatch(/\b(I|sorry|unfortunately|I'm)\b/);
+  });
+
+  it("C2 canary: .council-stack-override file content never leaks into refusal", () => {
+    // Defence-in-depth canary for a future "show what was in the override file"
+    // refactor. Today the parser only consumes `.trim()` of the whole content,
+    // so multi-line content lands in the malformed branch (not override_conflict)
+    // — but the asserted contract is independent of which refusal branch fires:
+    // NO substring of the override file's content should ever appear in the
+    // user-facing refusal text. Symmetric with the existing
+    // SUPER_SECRET_PASTED_TOKEN canary on web/package.json (line ~248).
+    const w = newWorkspace();
+    writePythonPyproject(w);
+    writeFileSync(
+      join(w, ".council-stack-override"),
+      "aura\nSECRET_LEAK_CANARY_42\n",
+    );
+    const text = renderRefusal(detectStack(w));
+    expect(text).not.toContain("SECRET_LEAK_CANARY_42");
   });
 });
 
