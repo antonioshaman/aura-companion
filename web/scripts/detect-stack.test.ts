@@ -582,21 +582,32 @@ describe("detectStack — override-conflict (ask-first)", () => {
     expect(text).not.toMatch(/\b(I|sorry|unfortunately|I'm)\b/);
   });
 
-  it("C2 canary: .council-stack-override file content never leaks into refusal", () => {
-    // Defence-in-depth canary for a future "show what was in the override file"
-    // refactor. Today the parser only consumes `.trim()` of the whole content,
-    // so multi-line content lands in the malformed branch (not override_conflict)
-    // — but the asserted contract is independent of which refusal branch fires:
-    // NO substring of the override file's content should ever appear in the
-    // user-facing refusal text. Symmetric with the existing
-    // SUPER_SECRET_PASTED_TOKEN canary on web/package.json (line ~248).
+  it("C2 canary: override_conflict refusal never leaks sibling override-file content", () => {
+    // Defence-in-depth canary asserting NO substring of any
+    // `.council-stack-override*` file in the workspace appears in the rendered
+    // refusal. Today the override parser does `.trim()` on the whole content,
+    // so multi-line content lands in the malformed branch (not the
+    // override_conflict branch this test wants to exercise). Construction:
+    //   - .council-stack-override = "aura\n"  → parses cleanly, triggers
+    //     override_conflict against the python pyproject
+    //   - .council-stack-override.bak = sidecar carrying the secret canary.
+    //     If a future refactor globs config files or dumps workspace metadata
+    //     for diagnostic context, this content COULD leak through. Today
+    //     nothing reads it, the assertion is vacuous — that is exactly the
+    //     point of a defence-in-depth canary. Sibling pattern to the
+    //     SUPER_SECRET_PASTED_TOKEN canary on web/package.json (line ~244).
     const w = newWorkspace();
     writePythonPyproject(w);
+    writeFileSync(join(w, ".council-stack-override"), "aura\n");
     writeFileSync(
-      join(w, ".council-stack-override"),
-      "aura\nSECRET_LEAK_CANARY_42\n",
+      join(w, ".council-stack-override.bak"),
+      "SECRET_LEAK_CANARY_42\n",
     );
-    const text = renderRefusal(detectStack(w));
+    const r = detectStack(w);
+    // Proof we're in the intended branch — otherwise the canary's coverage
+    // claim ("override_conflict refusal never leaks") would not hold.
+    expect(r.kind).toBe("override_conflict");
+    const text = renderRefusal(r);
     expect(text).not.toContain("SECRET_LEAK_CANARY_42");
   });
 });

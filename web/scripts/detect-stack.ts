@@ -7,10 +7,15 @@
 // the Python council, refuse loudly on ambiguity, or refuse loudly on unknown.
 //
 // Convention notes (conventions.md):
-// - EC-7 (filesystem-access predicates inline path resolution OR exposed via
-//   a resolving wrapper): every marker access goes through `resolveMarker`,
-//   which realpath-resolves the workspace root once and bounds-checks every
-//   marker path, refusing symlink leaves outright.
+// - EC-7 / EC-36 (filesystem-access predicates inline path resolution OR are
+//   exposed only via a resolving wrapper): the per-marker probes all go
+//   through `resolveMarker`, which realpath-resolves the workspace root once
+//   and bounds-checks every marker path, refusing symlink leaves outright.
+//   `enumerateCandidatePrefixes` is the EC-36 option (b) exception: it
+//   inlines the equivalent discipline at the access site and documents each
+//   present + intentionally-omitted check in its function header — wrapping
+//   it through `resolveMarker` would silently drop A4-class lstat failures
+//   via the wrapper's `existsSync`-first fallback.
 // - No silent fallback (spec AC-3.3): every failure mode becomes a structured
 //   result — never crashes the caller, never silently downgrades "malformed"
 //   to "absent".
