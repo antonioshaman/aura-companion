@@ -291,3 +291,23 @@ These must be followed — flag violations as findings.
 **Principle:** `references/quality-llm.md` → P3 (rule-first / model-second — empirical claims are rule-shaped, not LLM-judgement-shaped); `references/quality-testing.md` → mutation-resistance (the artefact must mutation-test against the running system on every re-read); sibling memories `feedback_trust_diff_not_prose`, `feedback_validator_self_grep_format_variations`, `feedback_runtime_check_applies_symmetrically`.
 
 ---
+
+### AP-15: `web/scripts/detect-stack.ts` is canonical; council router SKILL.md are mirror artifacts
+
+**Pattern:** Phase 0 stack-detection logic for `/council-plan`, `/council-implement`, `/council-review` lives canonically in `web/scripts/detect-stack.ts` (exported `detectStack(workspaceRoot)` + `renderRefusal(result)` + closed-list constants `MARKER_NAMES` / `OVERRIDE_VALUES` / `REFUSAL_HEADLINES`). The three router `SKILL.md` files at `~/.claude/skills/{council-plan,council-implement,council-review}/SKILL.md` are MIRROR artifacts whose drift is enforced by `web/scripts/detect-stack.skill-mirror.test.ts` (asserts each SKILL.md cites every MARKER_NAME + REFUSAL_HEADLINE + OVERRIDE_VALUE verbatim AND that `-aura` / `-copilot` variants do NOT contain a Phase 0 section). The `.council-stack-override` file is the user-facing escape hatch, NOT a workaround for missing detection — when adding monorepo layouts or new markers, extend the detector in `detect-stack.ts` first, then update SKILL.md to mirror new constants. There is NO SKILL.md include mechanism in the Claude Code harness; the canary IS the drift discipline. Forking a SKILL.md to insert "shared" Phase 0 content is the wrong move per `feedback_skill_fork_dont_replace.md`.
+
+**Origin:** Council Review 2026-06-01-2026 (Hunt + Persistence convergence on EC-7 boundary; also `fact-005` in `.agents/knowledge/codebase-facts.jsonl`).
+
+**Rationale:** Future sessions extending Phase 0 (e.g. adding a new stack, new marker, new override value) need to know which file is authoritative — editing SKILL.md without editing detect-stack.ts produces a green mirror canary but broken runtime; editing detect-stack.ts without editing SKILL.md turns the canary red. Both must move together.
+
+---
+
+### EC-36: Every filesystem-access predicate in `detect-stack.ts` must inline full path-resolution discipline OR route through `resolveMarker`
+
+**Convention:** Any code path in `web/scripts/detect-stack.ts` that performs filesystem access (`existsSync` / `readFileSync` / `readdirSync` / `lstatSync` / `statSync`) MUST EITHER (a) route through the canonical `resolveMarker(rootResolved, relPath)` wrapper, which performs `..`/`/`-prefix reject + `existsSync` + `lstatSync` symlink reject + `realpathSync` + workspace-bounds check (`startsWith(rootResolved + sep)`); OR (b) inline the complete equivalent discipline at the access site AND document the equivalence in a comment that explicitly names which checks are present. Partial discipline ("we do lstat-reject but skip realpath because depth-1 entries can't escape") is forbidden because the convention floor declared in the file header says "every marker access goes through `resolveMarker`" — duplicating the wrapper inline silently violates this invariant when readers trust the header. New filesystem-access sites (e.g. `enumerateCandidatePrefixes` added 2026-06-01) MUST either be folded into `resolveMarker` or extend it. Documentation MUST NOT lie about what defences are present (the inline comment "Defensive realpath bounds check" is forbidden when no `realpathSync` is called).
+
+**Origin:** Council Review 2026-06-01-2026, Finding 1 (Hunt × Persistence convergence). Crystallises and tightens the project's pre-existing `EC-7` (filesystem-access predicates inline path resolution OR exposed only via resolving wrapper) for the specific `detect-stack.ts` boundary.
+
+**Principle:** `references/security.md` → Principle 2 (Automate defences — make the wrong thing impossible); `references/quality-persistence.md` → Principle 6 (validate at the boundary). Sibling memory `feedback_call_site_presence_not_just_symbol_export` (the existence of `resolveMarker` doesn't prove every site calls it — grep call sites in addition to the symbol). Convention floor for `detect-stack.ts` specifically; ratifies EC-7 for this file going forward.
+
+---
