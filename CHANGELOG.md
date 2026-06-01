@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.6.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.5.0...aura-companion-v1.6.0) (2026-06-01)
+
+
+### Features
+
+* **chat:** Continue in new session — text-only handoff from a wedged conversation ([#84](https://github.com/antonioshaman/aura-companion/issues/84)) ([3412955](https://github.com/antonioshaman/aura-companion/commit/34129558f50549cfde4491a1f5cd42ecb293212e))
+* **council:** auto-emit spawn-ack checkpoint at pair creation ([#85](https://github.com/antonioshaman/aura-companion/issues/85)) ([221d30b](https://github.com/antonioshaman/aura-companion/commit/221d30b805c88dbd9b6e2608f31d1c30720ec53e))
+* **council:** auto-proceed Task 11.1+11.2 — outbound FIFO queue + asymmetric overflow ([#52](https://github.com/antonioshaman/aura-companion/issues/52)) ([de2ac98](https://github.com/antonioshaman/aura-companion/commit/de2ac985b2bf366b3294e2f7730b0bf73a9ba1c8))
+
+
+### Bug Fixes
+
+* **chat:** auto-downscale images &gt;1900px before upload (Anthropic 2000px limit) ([#83](https://github.com/antonioshaman/aura-companion/issues/83)) ([1cfa5a9](https://github.com/antonioshaman/aura-companion/commit/1cfa5a9aed8f71d749da02cf3fddc6e26fdb21d6))
+* **chat:** scope MessageFeed scrollIntoView to nearest scrollable ([#81](https://github.com/antonioshaman/aura-companion/issues/81)) ([29fdee8](https://github.com/antonioshaman/aura-companion/commit/29fdee8cd4253f43bf5d77a267262c4a30a08ce4))
+* **council-router:** detect-stack.ts P2/P3 council-review follow-ups (Phase A+B+C) ([#87](https://github.com/antonioshaman/aura-companion/issues/87)) ([926df1a](https://github.com/antonioshaman/aura-companion/commit/926df1a2b51f192d7f801c7e25b0af3009f07c95))
+* **onboarding:** correct tip wording + auto-dismiss after 3 sessions ([#78](https://github.com/antonioshaman/aura-companion/issues/78)) ([bd7a6cf](https://github.com/antonioshaman/aura-companion/commit/bd7a6cfebec849a82659d9f0a27811b5378ccca1))
+* **ui:** gate iOS standalone PWA html height workaround + de-flake HomePage backend toggle test ([#76](https://github.com/antonioshaman/aura-companion/issues/76)) ([fac1d63](https://github.com/antonioshaman/aura-companion/commit/fac1d6340eab63b11eaeb9ca59f85b98ac958dc0))
+
+
+### Code Refactoring
+
+* **chat:** extract ResumeIndicator — resume-history banner with CTA + progress variants ([#80](https://github.com/antonioshaman/aura-companion/issues/80)) ([f62f062](https://github.com/antonioshaman/aura-companion/commit/f62f062ab56584cc8d350a1b874793db4e4d9649))
+* **chat:** extract shared AssistantAvatar — dedupe MessageFeed + MessageBubble ([#79](https://github.com/antonioshaman/aura-companion/issues/79)) ([b9c3a83](https://github.com/antonioshaman/aura-companion/commit/b9c3a83ac98d2fd332206dcf0f3d5c3d5870b573))
+
 ## [1.5.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.4.0...aura-companion-v1.5.0) (2026-05-19)
 
 
