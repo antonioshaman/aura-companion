@@ -23,6 +23,7 @@
 import {
   existsSync,
   lstatSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   statSync,
@@ -52,6 +53,8 @@ export const REFUSAL_HEADLINES = {
   ambiguous: "Stack detection: both Aura and Python markers present.",
   override_malformed:
     "Stack detection: .council-stack-override is malformed.",
+  override_conflict:
+    "Stack detection: .council-stack-override conflicts with auto-detected markers.",
 } as const;
 
 // Size caps per marker (bytes). Plan §3.
@@ -61,6 +64,41 @@ const SIZE_CAP = {
   REQUIREMENTS: 64 * 1024,
   OVERRIDE: 1024,
 } as const;
+
+// Depth-1 subdir scan (monorepo support, council-stack-autodetect-monorepo spec).
+// SPECIFICITY INVARIANT: this widens the SEARCH SCOPE (where we look) without
+// loosening individual marker semantics. `web/package.json:name=aura-companion`
+// is still matched only by literal `name === "aura-companion"`; aiogram is
+// still matched only by literal substring / `^aiogram\b` line — never by
+// directory naming heuristics (`bot/` ≠ Python signal on its own) or partial
+// substrings. The skip-list excludes dirs that produce false positives or
+// blow the per-call budget.
+const SKIP_SUBDIRS = new Set<string>([
+  "node_modules",
+  ".git",
+  ".husky",
+  ".venv",
+  "venv",
+  ".env",
+  "env",
+  "dist",
+  "build",
+  "out",
+  "target",
+  ".next",
+  ".turbo",
+  ".cache",
+  "__pycache__",
+  ".pytest_cache",
+  ".mypy_cache",
+  ".ruff_cache",
+  ".vscode",
+  ".idea",
+  ".council",
+  ".agents",
+  ".learnings",
+]);
+const MAX_CANDIDATE_SUBDIRS = 64;
 
 // =============================================================================
 // Result shape
@@ -185,12 +223,51 @@ function isDirectory(absolute: string): boolean {
   }
 }
 
+// Enumerate depth-1 subdirs of the workspace root as relative prefixes to scan.
+// The empty string "" is always the first candidate (workspace root itself,
+// preserves canonical root-only detection for AC-1/AC-2). Hidden dirs and
+// SKIP_SUBDIRS members are excluded; symlinks are excluded (EC-7); count is
+// capped at MAX_CANDIDATE_SUBDIRS to bound the per-call probe budget.
+function enumerateCandidatePrefixes(rootResolved: string): string[] {
+  const prefixes: string[] = [""];
+  let entries;
+  try {
+    entries = readdirSync(rootResolved, { withFileTypes: true });
+  } catch {
+    return prefixes;
+  }
+  let scanned = 0;
+  for (const entry of entries) {
+    if (scanned >= MAX_CANDIDATE_SUBDIRS) break;
+    const name = entry.name;
+    if (name.startsWith(".")) continue;
+    if (SKIP_SUBDIRS.has(name)) continue;
+    if (!entry.isDirectory()) continue; // also rejects symlinks (isDirectory false on dirent symlinks)
+    // Defensive realpath bounds check — never traverse outside workspace.
+    const candidate = join(rootResolved, name);
+    let lst;
+    try {
+      lst = lstatSync(candidate);
+    } catch {
+      continue;
+    }
+    if (lst.isSymbolicLink()) continue;
+    prefixes.push(name);
+    scanned += 1;
+  }
+  return prefixes;
+}
+
 // =============================================================================
 // Individual marker probes
 // =============================================================================
 
-function probePackageJson(rootResolved: string): MarkerCheck[] {
-  const r = resolveMarker(rootResolved, "web/package.json");
+// prefix === "" → canonical root layout (web/package.json).
+// prefix === "<dir>" → monorepo layout (<dir>/package.json).
+// The marker NAME identifier stays canonical regardless of where matched.
+function probePackageJson(rootResolved: string, prefix: string): MarkerCheck[] {
+  const relPath = prefix === "" ? "web/package.json" : `${prefix}/package.json`;
+  const r = resolveMarker(rootResolved, relPath);
   const both = (
     present: boolean,
     parsed: boolean,
@@ -200,7 +277,7 @@ function probePackageJson(rootResolved: string): MarkerCheck[] {
   ): MarkerCheck[] => [
     {
       name: MARKER_NAMES.AURA_PACKAGE_NAME,
-      path: "web/package.json",
+      path: relPath,
       present,
       parsed,
       matched: matchedName ? [MARKER_NAMES.AURA_PACKAGE_NAME] : [],
@@ -208,7 +285,7 @@ function probePackageJson(rootResolved: string): MarkerCheck[] {
     },
     {
       name: MARKER_NAMES.AURA_PACKAGE_HONO,
-      path: "web/package.json",
+      path: relPath,
       present,
       parsed,
       matched: matchedHono ? [MARKER_NAMES.AURA_PACKAGE_HONO] : [],
@@ -235,12 +312,13 @@ function probePackageJson(rootResolved: string): MarkerCheck[] {
   return both(true, true, nameMatched, honoMatched);
 }
 
-function probeWsBridge(rootResolved: string): MarkerCheck {
-  const r = resolveMarker(rootResolved, "web/server/ws-bridge.ts");
+function probeWsBridge(rootResolved: string, prefix: string): MarkerCheck {
+  const relPath = prefix === "" ? "web/server/ws-bridge.ts" : `${prefix}/server/ws-bridge.ts`;
+  const r = resolveMarker(rootResolved, relPath);
   if (!r.ok) {
     return {
       name: MARKER_NAMES.AURA_WS_BRIDGE,
-      path: "web/server/ws-bridge.ts",
+      path: relPath,
       present: true,
       parsed: false,
       matched: [],
@@ -250,19 +328,20 @@ function probeWsBridge(rootResolved: string): MarkerCheck {
   const present = existsSync(r.absolute);
   return {
     name: MARKER_NAMES.AURA_WS_BRIDGE,
-    path: "web/server/ws-bridge.ts",
+    path: relPath,
     present,
     parsed: present,
     matched: present ? [MARKER_NAMES.AURA_WS_BRIDGE] : [],
   };
 }
 
-function probePyproject(rootResolved: string): MarkerCheck {
-  const r = resolveMarker(rootResolved, "pyproject.toml");
+function probePyproject(rootResolved: string, prefix: string): MarkerCheck {
+  const relPath = prefix === "" ? "pyproject.toml" : `${prefix}/pyproject.toml`;
+  const r = resolveMarker(rootResolved, relPath);
   if (!r.ok) {
     return {
       name: MARKER_NAMES.PYTHON_PYPROJECT_AIOGRAM,
-      path: "pyproject.toml",
+      path: relPath,
       present: true,
       parsed: false,
       matched: [],
@@ -272,7 +351,7 @@ function probePyproject(rootResolved: string): MarkerCheck {
   if (!existsSync(r.absolute)) {
     return {
       name: MARKER_NAMES.PYTHON_PYPROJECT_AIOGRAM,
-      path: "pyproject.toml",
+      path: relPath,
       present: false,
       parsed: false,
       matched: [],
@@ -282,7 +361,7 @@ function probePyproject(rootResolved: string): MarkerCheck {
   if (!read.ok) {
     return {
       name: MARKER_NAMES.PYTHON_PYPROJECT_AIOGRAM,
-      path: "pyproject.toml",
+      path: relPath,
       present: true,
       parsed: false,
       matched: [],
@@ -292,17 +371,23 @@ function probePyproject(rootResolved: string): MarkerCheck {
   const matched = read.text.includes("aiogram");
   return {
     name: MARKER_NAMES.PYTHON_PYPROJECT_AIOGRAM,
-    path: "pyproject.toml",
+    path: relPath,
     present: true,
     parsed: true,
     matched: matched ? [MARKER_NAMES.PYTHON_PYPROJECT_AIOGRAM] : [],
   };
 }
 
-function probeRequirementsAndBot(rootResolved: string): MarkerCheck {
-  const reqRes = resolveMarker(rootResolved, "requirements.txt");
-  const botRes = resolveMarker(rootResolved, "bot");
-  const path = "requirements.txt + bot/";
+// At root (prefix === ""): requires BOTH requirements.txt with ^aiogram AND a
+// bot/ directory at workspace root (existing AC-2.2, backward compatible).
+// At depth-1 subdir (prefix === "<dir>"): only requires <dir>/requirements.txt
+// with ^aiogram. SPECIFICITY: the subdir being project-shaped (owning its own
+// requirements.txt) replaces the bot/ co-requirement — directory naming is
+// never relied on for stack signal.
+function probeRequirementsAndBot(rootResolved: string, prefix: string): MarkerCheck {
+  const reqRelPath = prefix === "" ? "requirements.txt" : `${prefix}/requirements.txt`;
+  const reqRes = resolveMarker(rootResolved, reqRelPath);
+  const path = prefix === "" ? "requirements.txt + bot/" : `${prefix}/requirements.txt`;
   if (!reqRes.ok) {
     return {
       name: MARKER_NAMES.PYTHON_REQS_AIOGRAM,
@@ -313,23 +398,27 @@ function probeRequirementsAndBot(rootResolved: string): MarkerCheck {
       reason: reqRes.reason,
     };
   }
-  if (!botRes.ok) {
-    return {
-      name: MARKER_NAMES.PYTHON_REQS_AIOGRAM,
-      path,
-      present: true,
-      parsed: false,
-      matched: [],
-      reason: botRes.reason,
-    };
-  }
   const reqPresent = existsSync(reqRes.absolute);
-  const botPresent = isDirectory(botRes.absolute);
+  let botPresent = true;
+  if (prefix === "") {
+    const botRes = resolveMarker(rootResolved, "bot");
+    if (!botRes.ok) {
+      return {
+        name: MARKER_NAMES.PYTHON_REQS_AIOGRAM,
+        path,
+        present: true,
+        parsed: false,
+        matched: [],
+        reason: botRes.reason,
+      };
+    }
+    botPresent = isDirectory(botRes.absolute);
+  }
   if (!reqPresent || !botPresent) {
     return {
       name: MARKER_NAMES.PYTHON_REQS_AIOGRAM,
       path,
-      present: reqPresent || botPresent,
+      present: reqPresent || (prefix === "" && botPresent),
       parsed: false,
       matched: [],
     };
@@ -434,15 +523,32 @@ export function detectStack(workspaceRoot: string): DetectionResult {
 
   const override = readOverride(rootResolved);
 
-  // Always probe all markers — the user sees the full enumeration in
-  // `checked` even when override decides the kind (plan §4: override does
-  // not silence the marker enumeration).
-  const checked: MarkerCheck[] = [
-    ...probePackageJson(rootResolved),
-    probeWsBridge(rootResolved),
-    probePyproject(rootResolved),
-    probeRequirementsAndBot(rootResolved),
-  ];
+  // Always probe all markers across workspace root + depth-1 subdirs — the user
+  // sees the full enumeration in `checked` even when override decides the kind
+  // (plan §4: override does not silence the marker enumeration). Per spec
+  // council-stack-autodetect-monorepo §2a, depth=2 widens the SEARCH SCOPE
+  // without loosening individual marker semantics.
+  const prefixes = enumerateCandidatePrefixes(rootResolved);
+  const accumulated: MarkerCheck[] = [];
+  for (const prefix of prefixes) {
+    accumulated.push(...probePackageJson(rootResolved, prefix));
+    accumulated.push(probeWsBridge(rootResolved, prefix));
+    accumulated.push(probePyproject(rootResolved, prefix));
+    accumulated.push(probeRequirementsAndBot(rootResolved, prefix));
+  }
+  // Dedupe by (name, path) — when "web" is itself a depth-1 candidate the
+  // canonical Aura paths (web/package.json, web/server/ws-bridge.ts) get
+  // probed twice (once via prefix="", once via prefix="web") and land here as
+  // identical MarkerChecks. Drop the duplicates so later filters that count
+  // by path (AC-3.3, refusal renderer) see one entry per real disk file.
+  const seenKey = new Set<string>();
+  const checked: MarkerCheck[] = [];
+  for (const c of accumulated) {
+    const key = c.name + "\0" + c.path;
+    if (seenKey.has(key)) continue;
+    seenKey.add(key);
+    checked.push(c);
+  }
 
   if (override.value !== null) {
     // Ask-First override-conflict gate (spec §⚠️): if the override disagrees with
@@ -558,18 +664,36 @@ function dedupedMarkerList(checked: MarkerCheck[]): string[] {
 }
 
 export function renderRefusal(result: DetectionResult): string {
-  if (result.kind !== "unknown" && result.kind !== "ambiguous") {
+  if (
+    result.kind !== "unknown" &&
+    result.kind !== "ambiguous" &&
+    result.kind !== "override_conflict"
+  ) {
     return "";
   }
   let headline: string;
   if (result.overrideMalformed) {
     headline = REFUSAL_HEADLINES.override_malformed;
+  } else if (result.kind === "override_conflict") {
+    headline = REFUSAL_HEADLINES.override_conflict;
   } else if (result.kind === "ambiguous") {
     headline = REFUSAL_HEADLINES.ambiguous;
   } else {
     headline = REFUSAL_HEADLINES.unknown;
   }
   const lines: string[] = [headline, ""];
+  if (result.kind === "override_conflict") {
+    // Surface the disagreement explicitly — ask-first per spec AC-conflict.
+    const asserted = result.overrideConflictAsserted ?? "?";
+    const detected = result.overrideConflictAutoDetected ?? "?";
+    lines.push(
+      `.council-stack-override asserts: ${asserted}`,
+    );
+    lines.push(
+      `Auto-detected from markers: ${detected}`,
+    );
+    lines.push("");
+  }
   lines.push("Checked for:");
   for (const name of dedupedMarkerList(result.checked)) {
     lines.push("  - " + name);
@@ -592,6 +716,11 @@ export function renderRefusal(result: DetectionResult): string {
     }
   }
   lines.push("");
-  for (const f of OVERRIDE_FOOTER) lines.push(f);
+  if (result.kind === "override_conflict") {
+    lines.push("To resolve:");
+    lines.push("  - correct or delete .council-stack-override, then re-run");
+  } else {
+    for (const f of OVERRIDE_FOOTER) lines.push(f);
+  }
   return lines.join("\n");
 }
