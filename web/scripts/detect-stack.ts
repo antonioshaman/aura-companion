@@ -73,6 +73,14 @@ const SIZE_CAP = {
 // directory naming heuristics (`bot/` ≠ Python signal on its own) or partial
 // substrings. The skip-list excludes dirs that produce false positives or
 // blow the per-call budget.
+//
+// DISCLOSURE SURFACE: depth-1 subdir names that pass the filter appear in the
+// refusal output (via probed marker paths like `<subdir>/package.json`). Users
+// who paste a refusal into a public bug report leak the names of any
+// project-shaped subdir at the workspace root. Refusal text never echoes
+// FILE CONTENT (see `feedback never echoes raw file content` test) — but
+// path bytes including directory NAMES do appear. Keep dir-name disclosure
+// in mind when changing what enumeration surfaces.
 const SKIP_SUBDIRS = new Set<string>([
   "node_modules",
   ".git",
@@ -98,7 +106,7 @@ const SKIP_SUBDIRS = new Set<string>([
   ".agents",
   ".learnings",
 ]);
-const MAX_CANDIDATE_SUBDIRS = 64;
+export const MAX_CANDIDATE_SUBDIRS = 64;
 
 // =============================================================================
 // Result shape
@@ -137,6 +145,13 @@ export interface DetectionResult {
   overrideConflictAutoDetected?: "aura" | "python" | "ambiguous";
   /** When kind === "override_conflict": the override-asserted value. */
   overrideConflictAsserted?: "aura" | "python";
+  /**
+   * True when the depth-1 subdir enumeration was capped at
+   * {@link MAX_CANDIDATE_SUBDIRS} before all eligible subdirs were visited.
+   * Surfaced in {@link renderRefusal} so users with very wide monorepo roots
+   * see that the scan was incomplete — silent miss would mask the cap.
+   */
+  scanTruncated: boolean;
 }
 
 // =============================================================================
@@ -223,39 +238,130 @@ function isDirectory(absolute: string): boolean {
   }
 }
 
+/**
+ * Result of depth-1 subdir enumeration.
+ *
+ * - `prefixes` — the workspace-root marker ("") followed by accepted subdir
+ *   names. Order is `readdirSync` order with `""` prepended.
+ * - `enumeration` — synthetic MarkerChecks surfacing enumeration-level
+ *   failures (`readdirSync` throw, per-entry `lstat` throw). Empty on the
+ *   happy path. Distinct from per-marker probe failures so the refusal
+ *   renderer can attribute them to the directory scan.
+ * - `truncated` — true when {@link MAX_CANDIDATE_SUBDIRS} cap was hit
+ *   before all eligible entries were visited.
+ */
+interface EnumerationResult {
+  prefixes: string[];
+  enumeration: MarkerCheck[];
+  truncated: boolean;
+}
+
 // Enumerate depth-1 subdirs of the workspace root as relative prefixes to scan.
 // The empty string "" is always the first candidate (workspace root itself,
 // preserves canonical root-only detection for AC-1/AC-2). Hidden dirs and
-// SKIP_SUBDIRS members are excluded; symlinks are excluded (EC-7); count is
-// capped at MAX_CANDIDATE_SUBDIRS to bound the per-call probe budget.
-function enumerateCandidatePrefixes(rootResolved: string): string[] {
+// SKIP_SUBDIRS members are excluded; symlinks are silently excluded; count
+// is capped at MAX_CANDIDATE_SUBDIRS to bound the per-call probe budget —
+// overflow surfaces via `truncated`.
+//
+// EC-36 compliance: this function does NOT route through `resolveMarker`
+// even though `resolveMarker` is the canonical EC-7 wrapper for the rest
+// of this file. The reason is intentional and load-bearing: `resolveMarker`
+// uses `existsSync` first and swallows the EACCES/EIO/ENOENT class of
+// errors as "absent" (returns `{ok: true}` with a path that doesn't
+// resolve). That swallow is correct for per-marker probes — they already
+// run an `existsSync` after — but it would silently drop A4-class
+// per-entry lstat failures here. Instead we INLINE the complete equivalent
+// discipline at the access site and name each present check explicitly,
+// per EC-36 option (b):
+//   (1) `name` comes from readdirSync's Dirent.name — Node guarantees it's
+//       a single basename with no path separators, so `join(rootResolved,
+//       name)` cannot escape rootResolved. No `..`/`/` reject needed at
+//       this site (paranoia handled by readdir's API contract).
+//   (2) `lstatSync` (not `statSync`) — does NOT follow symlinks.
+//   (3) `lst.isSymbolicLink()` — silently rejects symlinks (EC-7 boundary
+//       refusal, equivalent to resolveMarker's `symlink` reason).
+//   (4) `lst.isDirectory()` — rejects files / sockets / pipes. Replaces
+//       the old `entry.isDirectory()` check whose Dirent-type cache is
+//       unreliable on `DT_UNKNOWN` filesystems (see Finding 12).
+//   (5) `realpathSync` intentionally OMITTED — depth-1 candidates whose
+//       lstat is non-symlink are by construction inside rootResolved;
+//       no realpath traversal can change that. The bounds check that
+//       resolveMarker performs (`real.startsWith(rootResolved + sep)`)
+//       would be a tautology here.
+//   (6) lstat catch surfaces as `read_error` (no silent fallback) —
+//       distinguishes this site from resolveMarker's existsSync-swallow.
+//
+// Failures (readdirSync throw, per-entry lstat throw) surface as synthetic
+// MarkerChecks on `enumeration` rather than silent skips, so the user sees
+// "the scan tried but couldn't read this" in the refusal output. The
+// no-silent-fallback invariant (file header) applies to enumeration as well
+// as to per-marker probes.
+function enumerateCandidatePrefixes(rootResolved: string): EnumerationResult {
   const prefixes: string[] = [""];
+  const enumeration: MarkerCheck[] = [];
   let entries;
   try {
     entries = readdirSync(rootResolved, { withFileTypes: true });
-  } catch {
-    return prefixes;
+  } catch (err) {
+    // A3 / no-silent-fallback: readdirSync failure (EACCES, EIO, ENOENT,
+    // ENOTDIR) becomes a synthetic enumeration-level MarkerCheck surfaced in
+    // the refusal under "Found at workspace root:". Stderr log carries the
+    // underlying error message for operator debugging — wire body never does
+    // (Hunt P3: no path bytes / errno text in user-facing output beyond the
+    // structured `reason`).
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(
+      `[detect-stack] readdirSync failed on workspace root: ${message}`,
+    );
+    enumeration.push({
+      name: "<workspace>/ (directory scan)",
+      path: "",
+      present: true,
+      parsed: false,
+      matched: [],
+      reason: "read_error",
+    });
+    return { prefixes, enumeration, truncated: false };
   }
   let scanned = 0;
+  let truncated = false;
   for (const entry of entries) {
-    if (scanned >= MAX_CANDIDATE_SUBDIRS) break;
+    if (scanned >= MAX_CANDIDATE_SUBDIRS) {
+      truncated = true;
+      break;
+    }
     const name = entry.name;
     if (name.startsWith(".")) continue;
     if (SKIP_SUBDIRS.has(name)) continue;
-    if (!entry.isDirectory()) continue; // also rejects symlinks (isDirectory false on dirent symlinks)
-    // Defensive realpath bounds check — never traverse outside workspace.
+    // Inline EC-36(b) discipline — see function header for the enumerated
+    // checks. We do not pre-filter by `entry.isDirectory()` because the
+    // Dirent-type cache is unreliable on DT_UNKNOWN filesystems (Finding 12);
+    // the authoritative type comes from lstat below.
     const candidate = join(rootResolved, name);
     let lst;
     try {
       lst = lstatSync(candidate);
     } catch {
+      // A4 / no-silent-fallback: per-entry lstat failure (EACCES on parent,
+      // ENOENT race after readdir, EIO) becomes a synthetic MarkerCheck for
+      // that prefix. Distinguishable from the silent symlink reject below
+      // because failures and intentional refusals are different categories.
+      enumeration.push({
+        name: `<workspace>/${name} (lstat)`,
+        path: name,
+        present: true,
+        parsed: false,
+        matched: [],
+        reason: "read_error",
+      });
       continue;
     }
-    if (lst.isSymbolicLink()) continue;
+    if (lst.isSymbolicLink()) continue; // EC-7 silent symlink reject.
+    if (!lst.isDirectory()) continue; // not a directory — not a candidate.
     prefixes.push(name);
     scanned += 1;
   }
-  return prefixes;
+  return { prefixes, enumeration, truncated };
 }
 
 // =============================================================================
@@ -518,6 +624,7 @@ export function detectStack(workspaceRoot: string): DetectionResult {
       overrideUsed: false,
       overridePath: null,
       overrideMalformed: false,
+      scanTruncated: false,
     };
   }
 
@@ -528,8 +635,13 @@ export function detectStack(workspaceRoot: string): DetectionResult {
   // (plan §4: override does not silence the marker enumeration). Per spec
   // council-stack-autodetect-monorepo §2a, depth=2 widens the SEARCH SCOPE
   // without loosening individual marker semantics.
-  const prefixes = enumerateCandidatePrefixes(rootResolved);
-  const accumulated: MarkerCheck[] = [];
+  const { prefixes, enumeration, truncated } =
+    enumerateCandidatePrefixes(rootResolved);
+  // Enumeration-level synthetic MarkerChecks (readdir / per-entry lstat
+  // failures) prepended so the refusal renderer surfaces them at the top of
+  // "Found at workspace root:" — they describe failures of the scan itself,
+  // not of individual marker probes.
+  const accumulated: MarkerCheck[] = [...enumeration];
   for (const prefix of prefixes) {
     accumulated.push(...probePackageJson(rootResolved, prefix));
     accumulated.push(probeWsBridge(rootResolved, prefix));
@@ -584,6 +696,7 @@ export function detectStack(workspaceRoot: string): DetectionResult {
         overrideMalformed: false,
         overrideConflictAutoDetected: override.value === "aura" ? "python" : "aura",
         overrideConflictAsserted: override.value,
+        scanTruncated: truncated,
       };
     }
     return {
@@ -592,6 +705,7 @@ export function detectStack(workspaceRoot: string): DetectionResult {
       overrideUsed: true,
       overridePath: override.absolutePath,
       overrideMalformed: false,
+      scanTruncated: truncated,
     };
   }
 
@@ -602,6 +716,7 @@ export function detectStack(workspaceRoot: string): DetectionResult {
       overrideUsed: false,
       overridePath: override.absolutePath,
       overrideMalformed: true,
+      scanTruncated: truncated,
     };
   }
 
@@ -633,6 +748,7 @@ export function detectStack(workspaceRoot: string): DetectionResult {
     overrideUsed: false,
     overridePath: null,
     overrideMalformed: false,
+    scanTruncated: truncated,
   };
 }
 
@@ -714,6 +830,13 @@ export function renderRefusal(result: DetectionResult): string {
     if (result.overrideMalformed) {
       lines.push("  - .council-stack-override (malformed)");
     }
+  }
+  if (result.scanTruncated) {
+    // A2: surface the silent cap so users with very wide monorepo roots see
+    // the scan was incomplete. Brief — preserves the AC-3.2 line budget.
+    lines.push(
+      `  (scan capped at ${MAX_CANDIDATE_SUBDIRS} subdirs; later entries skipped)`,
+    );
   }
   lines.push("");
   if (result.kind === "override_conflict") {

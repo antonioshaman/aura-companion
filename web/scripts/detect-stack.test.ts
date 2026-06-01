@@ -7,8 +7,9 @@
 // refusal IS the user-facing artefact AC-3.1/3.2 govern, so the test
 // suite verifies its body, not only the discriminated-union tag.
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   rmSync,
@@ -24,6 +25,7 @@ import {
   MARKER_NAMES,
   OVERRIDE_VALUES,
   REFUSAL_HEADLINES,
+  MAX_CANDIDATE_SUBDIRS,
 } from "./detect-stack.js";
 
 const workspaces: string[] = [];
@@ -496,3 +498,154 @@ describe("detectStack — override-conflict (ask-first)", () => {
     expect(text).not.toMatch(/\b(I|sorry|unfortunately|I'm)\b/);
   });
 });
+
+// --- Phase A: silent-failure surfacing in depth-1 enumeration --------------
+//
+// These tests lock the no-silent-fallback invariant declared in
+// detect-stack.ts's file header for the enumeration layer specifically:
+//   - readdirSync failure on the workspace root must surface a synthetic
+//     MarkerCheck so the user sees "the scan tried but couldn't read the
+//     workspace root" instead of an empty refusal.
+//   - per-entry lstatSync failure on a candidate subdir must surface the
+//     same way.
+//   - the MAX_CANDIDATE_SUBDIRS cap is not a silent miss — the detector
+//     reports `scanTruncated: true` AND the refusal renderer surfaces a
+//     one-line note.
+//
+// Restores parity with the per-marker probes, which have always returned
+// `reason: "read_error"` on probe-side failure (AC-3.3 / "never silent
+// fallback"). Pre-2026-06-01 the enumeration layer was the exception.
+
+describe("detectStack — Phase A: enumeration-failure surfacing", () => {
+  it("A2: scan capped at MAX_CANDIDATE_SUBDIRS sets scanTruncated and surfaces the cap in the refusal", () => {
+    // Mint MAX_CANDIDATE_SUBDIRS + 1 sibling subdirs; place the canonical
+    // Aura marker in the OVERFLOW subdir (one past the cap), and assert the
+    // detector both (a) reports scanTruncated=true and (b) surfaces a brief
+    // note in the rendered refusal. The cap is BEHAVIOURAL — we're not
+    // promising the marker WILL be found past the cap; we are promising the
+    // truncation is not silent.
+    const w = newWorkspace();
+    // Use zero-padded names so readdirSync order (which on most FSes is
+    // creation/insertion order or alphabetical) places `overflow` AFTER the
+    // first MAX_CANDIDATE_SUBDIRS filler entries. `zzz-overflow` sorts last
+    // alphabetically regardless of FS-specific ordering.
+    for (let i = 0; i < MAX_CANDIDATE_SUBDIRS; i++) {
+      mkdirSync(join(w, `subdir-${String(i).padStart(3, "0")}`));
+    }
+    // The overflow subdir carries an Aura marker — proves whether the cap
+    // would silently miss it under the previous behaviour.
+    mkdirSync(join(w, "zzz-overflow"));
+    writeFileSync(
+      join(w, "zzz-overflow", "package.json"),
+      JSON.stringify({ name: "aura-companion" }),
+    );
+
+    const r = detectStack(w);
+    // The cap fired — scanTruncated must reflect that.
+    expect(r.scanTruncated).toBe(true);
+    // Refusal carries the truncation note. The exact wording is internal —
+    // we assert the structural pieces (subdir count + the verb "capped").
+    // detectStack returns kind="unknown" here because the overflow marker
+    // was skipped; the refusal renderer therefore runs.
+    expect(r.kind).toBe("unknown");
+    const text = renderRefusal(r);
+    expect(text).toContain(`capped at ${MAX_CANDIDATE_SUBDIRS} subdirs`);
+  });
+
+  it("A2: happy-path scan under the cap leaves scanTruncated false (no spurious note in refusal)", () => {
+    const w = newWorkspace();
+    mkdirSync(join(w, "apps"));
+    const r = detectStack(w);
+    expect(r.scanTruncated).toBe(false);
+    const text = renderRefusal(r);
+    expect(text).not.toContain("capped at");
+  });
+
+  it("A3: readdirSync failure on workspace root surfaces a synthetic <workspace>/ (directory scan) MarkerCheck", () => {
+    // Trigger readdirSync ENOTDIR by making `workspace` itself a file rather
+    // than a directory. realpathSync(workspace) still succeeds (file exists),
+    // so detectStack reaches enumerateCandidatePrefixes — which then fails
+    // on readdirSync. The pre-Phase-A behaviour silently returned the
+    // root-only prefix; the post-Phase-A contract surfaces the failure.
+    const w = newWorkspace();
+    rmSync(w, { recursive: true, force: true });
+    writeFileSync(w, "this path is a file, not a directory");
+    // Suppress the expected stderr noise from detect-stack's error log.
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const r = detectStack(w);
+      const scan = r.checked.find(
+        (c) => c.name === "<workspace>/ (directory scan)",
+      );
+      expect(scan, "synthetic scan-failure check must appear").toBeDefined();
+      expect(scan!.reason).toBe("read_error");
+      expect(scan!.present).toBe(true);
+      expect(scan!.parsed).toBe(false);
+      // The failure must also surface in the rendered refusal under
+      // "Found at workspace root:" — that is the user-facing artefact.
+      const text = renderRefusal(r);
+      expect(text).toContain("<workspace>/ (directory scan)");
+      expect(text).toContain("(read_error)");
+    } finally {
+      errSpy.mockRestore();
+    }
+  });
+
+  it("A4: per-entry lstat failure on a depth-1 candidate surfaces a synthetic <workspace>/<name> (lstat) MarkerCheck (non-root only)", () => {
+    // Per-entry lstat failure is hard to trigger atomically without mocking.
+    // The natural Linux DAC trigger: chmod the workspace to 0o400 (read but
+    // NOT exec). readdirSync requires R on the dir and still succeeds; lstat
+    // on each child entry needs X (search) on the parent and therefore fails
+    // EACCES. Root bypasses DAC, so under root we soft-skip with a structural
+    // assertion that the synthetic-name path is at least reachable.
+    const uid = process.getuid?.();
+    if (uid === 0 || uid === undefined) {
+      // Soft-skip — execution environment can't honour chmod denial.
+      // Hard-asserting non-empty checked enumeration so the symbol path
+      // is at least reached (catches "test silently never ran" drift).
+      const w = newWorkspace();
+      mkdirSync(join(w, "any"));
+      const r = detectStack(w);
+      expect(r.checked.length).toBeGreaterThan(0);
+      return;
+    }
+    const w = newWorkspace();
+    mkdirSync(join(w, "broken"));
+    // chmod 0o400 on workspace: readable (readdir works) but not searchable
+    // (lstat on entries fails EACCES). Cleanup restores 0o755 so afterEach
+    // rmSync can recurse in.
+    chmodSync(w, 0o400);
+    try {
+      const r = detectStack(w);
+      const lstatCheck = r.checked.find(
+        (c) => c.name === "<workspace>/broken (lstat)",
+      );
+      expect(lstatCheck, "synthetic lstat-failure check must appear").toBeDefined();
+      expect(lstatCheck!.reason).toBe("read_error");
+      expect(lstatCheck!.present).toBe(true);
+      expect(lstatCheck!.parsed).toBe(false);
+    } finally {
+      chmodSync(w, 0o755);
+    }
+  });
+
+  it("A4 (canary): enumeration code emits a (lstat) synthetic for the read_error branch", () => {
+    // Static-grep canary backing A4 — if the surfacing logic is removed in
+    // a future refactor, this test goes red even when the chmod-based test
+    // above is soft-skipped under root. Read the source, assert the literal
+    // synthetic-name template appears inside enumerateCandidatePrefixes.
+    // Sibling pattern of EC-19 (regex-anchored canary) — kept structural,
+    // not literal-substring, to survive cosmetic renames.
+    const sourcePath = new URL("./detect-stack.ts", import.meta.url).pathname;
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const src = require("node:fs").readFileSync(sourcePath, "utf8") as string;
+    // The synthetic name pattern uses a template literal embedding the
+    // candidate name and the literal " (lstat)" suffix. Regex tolerates
+    // arbitrary whitespace and the JS template-literal syntax.
+    const re = /name:\s*`<workspace>\/\$\{name\}\s*\(lstat\)`/;
+    expect(re.test(src), "enumerateCandidatePrefixes must emit a (lstat) synthetic on read_error").toBe(true);
+  });
+});
+
+// Silence unused-import lint for `vi` when only canary tests reference it.
+void vi;
