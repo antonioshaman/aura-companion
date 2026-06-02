@@ -182,6 +182,7 @@ function createMockBridge() {
     cancelDisconnectTimer: vi.fn(() => false),
     sendObserverWakeFrame: vi.fn(() => ({ kind: "sent" })),
     onUserFrameObserved: vi.fn(() => () => {}),
+    trimArchivedSessionMemory: vi.fn(),
   } as any;
 }
 
@@ -1171,6 +1172,10 @@ describe("SessionOrchestrator", () => {
       expect(deps.prPoller.unwatch).toHaveBeenCalledWith("s1");
       expect(deps.launcher.setArchived).toHaveBeenCalledWith("s1", true);
       expect(deps.sessionStore.setArchived).toHaveBeenCalledWith("s1", true);
+      // Memory eviction: archived sessions get their in-memory messageHistory +
+      // eventBuffer trimmed so a long-uptime host with many archived sessions
+      // does not accumulate them.
+      expect(deps.wsBridge.trimArchivedSessionMemory).toHaveBeenCalledWith("s1");
     });
 
     it("performs Linear transition when linearTransition=backlog", async () => {

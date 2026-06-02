@@ -9,6 +9,45 @@ import type { SessionStore, PersistedSession } from "./session-store.js";
 export const MESSAGE_HISTORY_LIMIT = 2000;
 
 /**
+ * In-memory retention for archived sessions.
+ *
+ * Active sessions retain up to MESSAGE_HISTORY_LIMIT messages so the user
+ * can scroll back through a long conversation without hitting the cap.
+ * Archived sessions, however, sit in the in-memory `sessions` Map until
+ * server restart and accumulate across the box's uptime — on a long-uptime
+ * host with many archived sessions this is the dominant contribution to
+ * the bun parent's RSS (observed 75,921 totalHistoryMessages across ~38
+ * sessions on a 58-day-uptime box, vs the 10 active × 2000 = 20,000
+ * upper bound that would apply if archived state were not retained).
+ *
+ * On archive (and on restore-from-disk for any session already flagged
+ * archived), trim the in-memory copy to the last ARCHIVED_HISTORY_RETENTION
+ * messages. The on-disk persisted state is untouched — unarchive can
+ * lazily rehydrate if a deeper scroll-back is ever wired up, and raw
+ * protocol recordings under `~/.companion/recordings/` are the durable
+ * source of truth either way.
+ */
+export const ARCHIVED_HISTORY_RETENTION = 100;
+
+/**
+ * Trim an archived session's in-memory state to bounded retention.
+ * Mutates the session in place. eventBuffer is cleared entirely — it
+ * is a transient replay buffer for live browser resync, not authoritative
+ * state, and is zero-value once the session is archived.
+ */
+export function trimArchivedSessionState(
+  session: Session,
+  retention: number = ARCHIVED_HISTORY_RETENTION,
+): void {
+  if (session.messageHistory.length > retention) {
+    session.messageHistory.splice(0, session.messageHistory.length - retention);
+  }
+  if (session.eventBuffer.length > 0) {
+    session.eventBuffer = [];
+  }
+}
+
+/**
  * Append a message to session history with cap enforcement, then persist to disk.
  * Consolidates the common appendHistory + persistSession pattern into one call,
  * eliminating the risk of appending without persisting.

@@ -2967,6 +2967,8 @@ export class SessionOrchestrator {
       this.launcher.setArchived(group.observer.sessionId, true);
       this.sessionStore.setArchived(group.primary.sessionId, true);
       this.sessionStore.setArchived(group.observer.sessionId, true);
+      this.wsBridge.trimArchivedSessionMemory(group.primary.sessionId);
+      this.wsBridge.trimArchivedSessionMemory(group.observer.sessionId);
 
       return { ok: true, worktree: worktreeResult, linearTransition: linearTransitionResult };
     }
@@ -2987,6 +2989,7 @@ export class SessionOrchestrator {
     const worktreeResult = this.cleanupWorktree(sessionId, options?.force);
     this.launcher.setArchived(sessionId, true);
     this.sessionStore.setArchived(sessionId, true);
+    this.wsBridge.trimArchivedSessionMemory(sessionId);
 
     return { ok: true, worktree: worktreeResult, linearTransition: linearTransitionResult };
   }

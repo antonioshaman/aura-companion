@@ -2654,6 +2654,145 @@ describe("Persistence", () => {
   });
 });
 
+// ─── Archived session memory eviction ─────────────────────────────────────────
+
+describe("Archived session memory eviction", () => {
+  // Memory leak fix: archived sessions remained in the in-memory `sessions`
+  // Map carrying full messageHistory (capped at MESSAGE_HISTORY_LIMIT=2000)
+  // and eventBuffer (capped at EVENT_BUFFER_LIMIT=600). On a long-uptime
+  // host this dominated the bun parent's RSS — observed 75,921 totalHistory
+  // across ~38 sessions where active should have been ≤ 10×2000 = 20,000.
+  //
+  // Fix: on archive (and on restore-from-disk for already-archived rows),
+  // trim the in-memory copy to ARCHIVED_HISTORY_RETENTION=100 and clear
+  // eventBuffer. On-disk state is preserved; raw protocol recordings remain
+  // the durable source of truth for deep history.
+
+  function makeAssistantHistoryEntry(idx: number) {
+    return {
+      type: "assistant" as const,
+      message: {
+        id: `m${idx}`,
+        type: "message",
+        role: "assistant",
+        model: "claude",
+        content: [],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      },
+      parent_tool_use_id: null,
+      timestamp: 1000 + idx,
+    };
+  }
+
+  function makeDefaultStateBlob(id: string, numTurns = 0) {
+    return {
+      session_id: id,
+      model: "claude-sonnet-4-6",
+      cwd: "/saved",
+      tools: [],
+      permissionMode: "default" as const,
+      claude_code_version: "1.0",
+      mcp_servers: [],
+      agents: [],
+      slash_commands: [],
+      skills: [],
+      total_cost_usd: 0,
+      num_turns: numTurns,
+      context_used_percent: 0,
+      is_compacting: false,
+      git_branch: "",
+      is_worktree: false,
+      is_containerized: false,
+      repo_root: "",
+      git_ahead: 0,
+      git_behind: 0,
+      total_lines_added: 0,
+      total_lines_removed: 0,
+    };
+  }
+
+  it("trimArchivedSessionMemory: trims a live in-memory session's history and clears eventBuffer", () => {
+    const session = bridge.getOrCreateSession("s1");
+    for (let i = 0; i < 500; i++) {
+      session.messageHistory.push(makeAssistantHistoryEntry(i) as any);
+    }
+    session.eventBuffer = [
+      { seq: 1, message: { type: "cli_connected" } } as any,
+      { seq: 2, message: { type: "cli_disconnected" } } as any,
+    ];
+
+    bridge.trimArchivedSessionMemory("s1");
+
+    expect(session.messageHistory).toHaveLength(100);
+    // Retained slice is the most-recent tail.
+    expect((session.messageHistory[0] as any).message.id).toBe("m400");
+    expect((session.messageHistory[99] as any).message.id).toBe("m499");
+    expect(session.eventBuffer).toEqual([]);
+  });
+
+  it("trimArchivedSessionMemory: no-op when session id is unknown", () => {
+    // Should not throw on missing session.
+    expect(() => bridge.trimArchivedSessionMemory("nonexistent")).not.toThrow();
+  });
+
+  it("trimArchivedSessionMemory: no-op when history is already under retention", () => {
+    const session = bridge.getOrCreateSession("s2");
+    for (let i = 0; i < 50; i++) {
+      session.messageHistory.push(makeAssistantHistoryEntry(i) as any);
+    }
+
+    bridge.trimArchivedSessionMemory("s2");
+
+    expect(session.messageHistory).toHaveLength(50);
+    expect((session.messageHistory[0] as any).message.id).toBe("m0");
+  });
+
+  it("restoreFromDisk: trims archived sessions on load (active sessions unaffected)", () => {
+    // An archived session persisted with a deep history.
+    const archivedHistory = [];
+    for (let i = 0; i < 500; i++) archivedHistory.push(makeAssistantHistoryEntry(i));
+    store.saveSync({
+      id: "archived-deep",
+      state: makeDefaultStateBlob("archived-deep", 5),
+      messageHistory: archivedHistory as any,
+      pendingMessages: [],
+      pendingPermissions: [],
+      eventBuffer: [
+        { seq: 1, message: { type: "cli_connected" } } as any,
+      ],
+      archived: true,
+    });
+
+    // An active session persisted with the same depth — must remain intact.
+    const activeHistory = [];
+    for (let i = 0; i < 500; i++) activeHistory.push(makeAssistantHistoryEntry(i));
+    store.saveSync({
+      id: "active-deep",
+      state: makeDefaultStateBlob("active-deep", 5),
+      messageHistory: activeHistory as any,
+      pendingMessages: [],
+      pendingPermissions: [],
+      eventBuffer: [
+        { seq: 1, message: { type: "cli_connected" } } as any,
+      ],
+      archived: false,
+    });
+
+    const count = bridge.restoreFromDisk();
+    expect(count).toBe(2);
+
+    const archived = bridge.getSession("archived-deep")!;
+    expect(archived.messageHistory).toHaveLength(100);
+    expect((archived.messageHistory[0] as any).message.id).toBe("m400");
+    expect(archived.eventBuffer).toEqual([]);
+
+    const active = bridge.getSession("active-deep")!;
+    expect(active.messageHistory).toHaveLength(500);
+    expect(active.eventBuffer).toHaveLength(1);
+  });
+});
+
 // ─── auth_status message routing ──────────────────────────────────────────────
 
 describe("auth_status message routing", () => {
