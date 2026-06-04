@@ -49,11 +49,23 @@ export function toModelOptions(models: BackendModelInfo[]): ModelOption[] {
 
 // ─── Static fallbacks ────────────────────────────────────────────────────────
 
+// Static fallback list used when the dynamic Anthropic /v1/models fetch
+// is unavailable (no API key configured, or upstream unreachable). Order
+// matters: [0] is the default model picked by `pickSessionDefaultModel`.
+//
+// The block between the AUTO-GENERATED sentinels is rewritten by
+// `web/scripts/sync-claude-models.ts` (invoked by
+// `.github/workflows/sync-claude-models.yml` on a daily schedule). Edit
+// the script's selection logic instead of editing the literals here —
+// the next workflow run would otherwise revert manual edits.
+// Source of truth: https://docs.anthropic.com/en/docs/about-claude/models/overview
+// AUTO-GENERATED:CLAUDE-MODELS-START
 export const CLAUDE_MODELS: ModelOption[] = [
-  { value: "claude-opus-4-7", label: "Opus 4.7", icon: "" },
+  { value: "claude-opus-4-8", label: "Opus 4.8", icon: "" },
   { value: "claude-sonnet-4-6", label: "Sonnet 4.6", icon: "" },
   { value: "claude-haiku-4-5-20251001", label: "Haiku 4.5", icon: "" },
 ];
+// AUTO-GENERATED:CLAUDE-MODELS-END
 
 export const CODEX_MODELS: ModelOption[] = [
   { value: "gpt-5.3-codex", label: "GPT-5.3 Codex", icon: "\u2733" },
