@@ -45,6 +45,7 @@ import { registerLinearConnectionRoutes } from "./routes/linear-connection-route
 import { getConnection, resolveApiKey } from "./linear-connections.js";
 import { registerLinearOAuthConnectionRoutes } from "./routes/linear-oauth-connection-routes.js";
 import { getSettings } from "./settings-manager.js";
+import { getAnthropicModels } from "./anthropic-models-cache.js";
 import { discoverClaudeSessions } from "./claude-session-discovery.js";
 import { getClaudeSessionHistoryPage } from "./claude-session-history.js";
 import { verifyToken, getToken, regenerateToken, getAllAddresses } from "./auth-manager.js";
@@ -1525,7 +1526,7 @@ export function createRoutes(
     return c.json(backends);
   });
 
-  api.get("/backends/:id/models", (c) => {
+  api.get("/backends/:id/models", async (c) => {
     const backendId = c.req.param("id");
 
     if (backendId === "codex") {
@@ -1560,7 +1561,43 @@ export function createRoutes(
       }
     }
 
-    // Claude models are hardcoded on the frontend
+    if (backendId === "claude") {
+      // Dynamic Claude model list via Anthropic /v1/models — mirror of
+      // existing Codex pattern. PLAN-aura-dynamic-model-list Task 6.
+      //
+      // Outcome mapping (Backend R2 — server is the honest broker):
+      //   ok                    → 200 (cache or fresh fetch)
+      //   no-key                → 404 (EC-17 fail-CLOSED; frontend stays
+      //                          on static fallback)
+      //   upstream-auth         → 502 upstream_unauthorized (NOT 401 —
+      //                          would trigger Aura's own re-auth flow)
+      //   upstream-unavailable  → 502 upstream_unavailable (cache served
+      //                          stale via orchestrator if any was
+      //                          available; only land here on hard fail)
+      //
+      // Hunt R2: 502 body is a fixed enum — never upstream JSON, never
+      // upstream status text, never the originating URL. Structured logs
+      // for forensic triage are emitted INSIDE the cache module (Tasks 4/5).
+      //
+      // Hunt R4: this handler accepts NO query-string escape hatches
+      // (`?refresh=1`, `?nocache=1`, `?force=1`). Cache TTL is server-owned;
+      // refresh trigger lives at app-mount + Settings save (frontend).
+      const settings = getSettings();
+      const result = await getAnthropicModels(settings.anthropicApiKey);
+      switch (result.kind) {
+        case "ok":
+          return c.json(result.models);
+        case "no-key":
+          return c.json({ error: "no_key_configured" }, 404);
+        case "upstream-auth":
+          return c.json({ error: "upstream_unauthorized" }, 502);
+        case "upstream-unavailable":
+          return c.json({ error: "upstream_unavailable" }, 502);
+      }
+    }
+
+    // Unknown backendId — preserve prior contract (404 with frontend
+    // defaults hint, matching the original Claude-branch shape).
     return c.json({ error: "Use frontend defaults for this backend" }, 404);
   });
 

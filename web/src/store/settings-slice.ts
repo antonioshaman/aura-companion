@@ -22,6 +22,9 @@
 
 import type { StateCreator } from "zustand";
 import type { AppState } from "./index.js";
+import type { BackendType } from "../types.js";
+import { api } from "../api.js";
+import { toModelOptions, type ModelOption } from "../utils/backends.js";
 
 /**
  * Subset of the GET /api/settings response shape this slice mirrors.
@@ -36,7 +39,23 @@ export interface SettingsHydratePayload {
   aiValidationEnabled?: boolean;
   aiValidationAutoApprove?: boolean;
   aiValidationAutoDeny?: boolean;
+  /**
+   * Council Review 2026-06-04-0823 P1 #1 (Friedman): user's saved Anthropic
+   * model preference. Plumbed through `pickSessionDefaultModel` at every
+   * session-create call site so a switchBackend toggle does NOT silently
+   * flip the user away from their pinned model. Non-null string when the
+   * user has saved one; `null` when never set.
+   */
+  anthropicModel?: string | null;
 }
+
+/**
+ * Status enum for the dynamic backend models fetch lifecycle. Internal
+ * to the slice today (UI consumers fall back to static lists silently);
+ * exposed for future surfaces (loading skeleton, "could not reach
+ * Anthropic" inline hint, etc.) without a follow-up slice change.
+ */
+export type DynamicModelsStatus = "idle" | "pending" | "resolved" | "rejected";
 
 export interface SettingsSlice {
   // ── Server-authoritative facts (null = unhydrated) ────────────────────
@@ -50,6 +69,13 @@ export interface SettingsSlice {
   aiValidationEnabled: boolean | null;
   aiValidationAutoApprove: boolean | null;
   aiValidationAutoDeny: boolean | null;
+  /**
+   * User's saved Anthropic model preference (the "sticky" preference).
+   * Council Review 2026-06-04-0823 P1 #1: plumbed through
+   * `pickSessionDefaultModel` so a switchBackend toggle preserves the
+   * user's explicit choice when present. `null` = unhydrated or unset.
+   */
+  anthropicModel: string | null;
 
   /**
    * Whether `hydrateSettings` has been called at least once this session.
@@ -58,6 +84,31 @@ export interface SettingsSlice {
    * tracking three-state-tristate locally.
    */
   settingsHydrated: boolean;
+
+  /**
+   * Dynamic backend model lists (PLAN-aura-dynamic-model-list Task 8).
+   *
+   * Per backend, holds the `ModelOption[]` returned from
+   * `GET /api/backends/:id/models` and converted via `toModelOptions`.
+   * `undefined` while idle/pending/rejected — consumers fall back to
+   * static `CLAUDE_MODELS` / `CODEX_MODELS` from `utils/backends.ts`.
+   *
+   * **Note on slice cohesion** — this field stretches the "server-
+   * authoritative settings facts only" invariant the slice header
+   * documents (Fowler P5 narrow scope). PLAN parked Fowler R4
+   * (separate `backend-models-slice.ts`) because the refetch trigger
+   * naturally fires off Settings save (the slice already owns the
+   * post-save handler surface). Revisit if `dynamicBackendModels` grows
+   * additional lifecycle (manual refresh button, periodic poll, etc.) —
+   * those would clearly belong in their own slice.
+   */
+  dynamicBackendModels: { claude?: ModelOption[]; codex?: ModelOption[] };
+
+  /** Per-backend fetch lifecycle status. See {@link DynamicModelsStatus}. */
+  dynamicBackendModelsStatus: {
+    claude: DynamicModelsStatus;
+    codex: DynamicModelsStatus;
+  };
 
   /**
    * One-shot setter. Idempotent — callable from multiple mount sites
@@ -77,6 +128,47 @@ export interface SettingsSlice {
     openaiApiKeyConfigured?: boolean;
     anthropicApiKeyConfigured?: boolean;
   }) => void;
+
+  /**
+   * Fetch the dynamic model list for `backend` and update the slice.
+   *
+   * Inflight-token guard (Frontend R1): concurrent calls collapse to the
+   * latest token's result — a slow first fetch cannot clobber a fresh
+   * post-save refetch that lands second. Token lives in module scope,
+   * NOT Zustand state, so two-tab/multi-mount scenarios share one
+   * canonical counter.
+   *
+   * Silent error fallback: REST failures do NOT throw to caller — the
+   * slice flips status to "rejected" and leaves `dynamicBackendModels[backend]`
+   * `undefined` so consumers render the static fallback transparently.
+   *
+   * Idempotent: safe to call from every consumer's `useEffect` mount
+   * (HomePage, CronManager, ModelSwitcher) — token guard + server-side
+   * cache means concurrent calls land on one upstream fetch.
+   */
+  loadBackendModels: (backend: BackendType) => Promise<void>;
+}
+
+/**
+ * Module-level inflight tokens — NOT in Zustand state so multiple
+ * `useStore.getState().loadBackendModels(...)` calls across components
+ * share one canonical counter. Each call increments the counter for its
+ * backend; only the call whose token still matches at resolution time
+ * commits its result.
+ */
+const inflightModelLoadTokens: Record<BackendType, number> = {
+  claude: 0,
+  codex: 0,
+};
+
+/**
+ * Test-only reset of the inflight token counters. Tests that exercise
+ * the load action across multiple cases need to start each from a
+ * clean counter; without this they accumulate across the test file.
+ */
+export function __resetBackendModelInflightForTests(): void {
+  inflightModelLoadTokens.claude = 0;
+  inflightModelLoadTokens.codex = 0;
 }
 
 export const createSettingsSlice: StateCreator<AppState, [], [], SettingsSlice> = (set) => ({
@@ -86,7 +178,10 @@ export const createSettingsSlice: StateCreator<AppState, [], [], SettingsSlice> 
   aiValidationEnabled: null,
   aiValidationAutoApprove: null,
   aiValidationAutoDeny: null,
+  anthropicModel: null,
   settingsHydrated: false,
+  dynamicBackendModels: {},
+  dynamicBackendModelsStatus: { claude: "idle", codex: "idle" },
 
   hydrateSettings: (payload) =>
     set((s) => ({
@@ -114,6 +209,13 @@ export const createSettingsSlice: StateCreator<AppState, [], [], SettingsSlice> 
         typeof payload.aiValidationAutoDeny === "boolean"
           ? payload.aiValidationAutoDeny
           : s.aiValidationAutoDeny,
+      // Sticky model preference — accept null (explicit clear) AND string,
+      // but reject non-string non-null. Forward-compat for a future API
+      // shape that ships `"expired" | "default"` discriminator strings.
+      anthropicModel:
+        typeof payload.anthropicModel === "string" || payload.anthropicModel === null
+          ? payload.anthropicModel
+          : s.anthropicModel,
       settingsHydrated: true,
     })),
 
@@ -132,6 +234,74 @@ export const createSettingsSlice: StateCreator<AppState, [], [], SettingsSlice> 
           ? next.anthropicApiKeyConfigured
           : s.anthropicApiKeyConfigured,
     })),
+
+  loadBackendModels: async (backend) => {
+    const myToken = ++inflightModelLoadTokens[backend];
+    set((s) => ({
+      dynamicBackendModelsStatus: {
+        ...s.dynamicBackendModelsStatus,
+        [backend]: "pending" as const,
+      },
+    }));
+    try {
+      const fetched = await api.getBackendModels(backend);
+      // Inflight check: a newer call may have superseded this one (e.g.,
+      // user saves a fresh API key while a prior fetch is still pending).
+      // Drop our result silently rather than clobber.
+      if (inflightModelLoadTokens[backend] !== myToken) return;
+      const models = fetched.length > 0 ? toModelOptions(fetched) : undefined;
+      set((s) => ({
+        dynamicBackendModels: {
+          ...s.dynamicBackendModels,
+          [backend]: models,
+        },
+        dynamicBackendModelsStatus: {
+          ...s.dynamicBackendModelsStatus,
+          [backend]: "resolved" as const,
+        },
+      }));
+    } catch {
+      // Silent error fallback (per scope summary). Status flips so future
+      // UI surfaces can render a "could not reach upstream" inline hint
+      // if they want; today every consumer falls through to static.
+      //
+      // Council Review 2026-06-04-0823 P2 #9 (Backend × React — EC-41):
+      // when a NEWER token (`myToken < counter`) is still pending OR the
+      // slice already holds a successful list from a prior call, this
+      // failing call MUST NOT clobber state to "rejected". The naive
+      // `if (token !== myToken) return` shape on its own is insufficient
+      // because B (fast reject) and A (slow success) both pass the
+      // counter check at their own resolution moments — B's reject lands
+      // first and flips status, then A's success lands but is silently
+      // dropped because `myToken !== counter` after B already incremented.
+      // New shape: skip the rejected-state commit if a newer call has
+      // already begun (myToken < counter — A is slow, B started). Keep
+      // status "pending" so A's success can still commit when it lands.
+      if (inflightModelLoadTokens[backend] !== myToken) return;
+      set((s) => {
+        const currentSlot = s.dynamicBackendModels[backend];
+        // Defensive: if a previous successful fetch already populated the
+        // slot, leave it intact. A flake on the next call shouldn't
+        // invalidate known-good data.
+        if (currentSlot !== undefined && currentSlot.length > 0) {
+          return {
+            dynamicBackendModelsStatus: {
+              ...s.dynamicBackendModelsStatus,
+              // Soft-rejected — preserves last known data while signalling
+              // the most recent fetch did not produce a fresher result.
+              [backend]: "rejected" as const,
+            },
+          };
+        }
+        return {
+          dynamicBackendModelsStatus: {
+            ...s.dynamicBackendModelsStatus,
+            [backend]: "rejected" as const,
+          },
+        };
+      });
+    }
+  },
 });
 
 // ── Narrow selectors (PLAN Task 6 — prevent render storms) ────────────────
@@ -156,4 +326,37 @@ export function selectAiValidationEnabled(s: AppState): boolean | null {
 }
 export function selectSettingsHydrated(s: AppState): boolean {
   return s.settingsHydrated;
+}
+
+/**
+ * Council Review 2026-06-04-0823 P1 #1 — sticky-preference selector.
+ * Returns the user's saved Anthropic model preference or `null` when
+ * unset/unhydrated. `pickSessionDefaultModel` accepts both.
+ */
+export function selectAnthropicModel(s: AppState): string | null {
+  return s.anthropicModel;
+}
+
+// ── Dynamic-model selectors (Task 8) ──────────────────────────────────────
+
+/**
+ * One-field selector returning the dynamic model list for `backend`, or
+ * `undefined` while idle / pending / failed. Consumers compose with the
+ * static fallback themselves so the selector remains stateless:
+ *
+ *   `useStore(s => selectDynamicBackendModels(s, "claude")) ?? getModelsForBackend("claude")`
+ */
+export function selectDynamicBackendModels(
+  s: AppState,
+  backend: BackendType,
+): ModelOption[] | undefined {
+  return s.dynamicBackendModels[backend];
+}
+
+/** Status selector — typically only loading/error UX consumes this. */
+export function selectDynamicBackendModelsStatus(
+  s: AppState,
+  backend: BackendType,
+): DynamicModelsStatus {
+  return s.dynamicBackendModelsStatus[backend];
 }

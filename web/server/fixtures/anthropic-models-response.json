@@ -1,0 +1,39 @@
+{
+  "data": [
+    {
+      "type": "model",
+      "id": "claude-opus-4-8-20260415",
+      "display_name": "Claude Opus 4.8",
+      "created_at": "2026-04-15T00:00:00Z"
+    },
+    {
+      "type": "model",
+      "id": "claude-opus-4-7",
+      "display_name": "Claude Opus 4.7",
+      "created_at": "2026-01-15T00:00:00Z"
+    },
+    {
+      "type": "model",
+      "id": "claude-sonnet-4-6",
+      "display_name": "Claude Sonnet 4.6",
+      "created_at": "2025-10-01T00:00:00Z"
+    },
+    {
+      "type": "model",
+      "id": "claude-haiku-4-5-20251001",
+      "display_name": "Claude Haiku 4.5",
+      "created_at": "2025-10-01T00:00:00Z"
+    },
+    {
+      "type": "model_snapshot",
+      "id": "claude-opus-4-7-snapshot-20260103",
+      "display_name": "Snapshot — must be dropped by parser (non-model type)"
+    },
+    {
+      "type": "model",
+      "id": "gpt-4o",
+      "display_name": "Non-Claude id — must be dropped by parser (regex reject)"
+    }
+  ],
+  "has_more": false
+}

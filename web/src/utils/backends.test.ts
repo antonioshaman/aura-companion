@@ -56,13 +56,33 @@ describe("toModelOptions", () => {
     expect(options[0].icon).toBe("\u26A1"); // ⚡
   });
 
-  it("uses fallback icon for generic model slugs", () => {
+  it("returns empty icon for generic non-tier slugs (Council Review 2026-06-04-0823 P1 #7)", () => {
+    // Prior shape returned a position-dependent geometric fallback rotated
+    // by `index % 4` which silently flipped icons for the same slug across
+    // response reorders. New shape: empty icon for unrecognised slugs —
+    // honest about the lack of tier semantics, stable identity invariant.
     const options = toModelOptions([
       { value: "gpt-5.2", label: "GPT-5.2", description: "" },
     ]);
-    // Should use one of the fallback icons
-    expect(options[0].icon).toBeTruthy();
-    expect(options[0].icon.length).toBeGreaterThan(0);
+    expect(options[0].icon).toBe("");
+  });
+
+  it("icon assignment is stable across response reorder (Council P1 #7 regression pin)", () => {
+    // Same slug at different array positions MUST produce identical icon.
+    const a = toModelOptions([
+      { value: "gpt-5.2", label: "GPT-5.2", description: "" },
+      { value: "gpt-5.2-codex", label: "Codex", description: "" },
+    ]);
+    const b = toModelOptions([
+      { value: "gpt-5.2-codex", label: "Codex", description: "" },
+      { value: "gpt-5.2", label: "GPT-5.2", description: "" },
+    ]);
+    const aGeneric = a.find((m) => m.value === "gpt-5.2")!;
+    const bGeneric = b.find((m) => m.value === "gpt-5.2")!;
+    expect(aGeneric.icon).toBe(bGeneric.icon);
+    const aCodex = a.find((m) => m.value === "gpt-5.2-codex")!;
+    const bCodex = b.find((m) => m.value === "gpt-5.2-codex")!;
+    expect(aCodex.icon).toBe(bCodex.icon);
   });
 
   it("uses value as label when label is empty", () => {
@@ -271,5 +291,83 @@ describe("INTERACTIVE_DISCOVERY_SKILLS", () => {
     expect(INTERACTIVE_DISCOVERY_SKILLS).toContain("council-plan-aura");
     expect(INTERACTIVE_DISCOVERY_SKILLS).toContain("spec-writer");
     expect(INTERACTIVE_DISCOVERY_SKILLS).toContain("plan-feature");
+  });
+});
+
+// ── PLAN-aura-dynamic-model-list Task 15 — pickSessionDefaultModel ─────────
+
+import { pickSessionDefaultModel } from "./backends.js";
+
+describe("pickSessionDefaultModel", () => {
+  const dynamicClaude = [
+    { value: "claude-opus-4-8", label: "Opus 4.8", icon: "" },
+    { value: "claude-opus-4-7", label: "Opus 4.7", icon: "" },
+    { value: "claude-sonnet-4-6", label: "Sonnet 4.6", icon: "" },
+  ];
+
+  it("returns the static default when neither dynamic nor sticky is provided", () => {
+    expect(pickSessionDefaultModel("claude")).toBe(CLAUDE_MODELS[0].value);
+    expect(pickSessionDefaultModel("codex")).toBe(CODEX_MODELS[0].value);
+  });
+
+  it("returns dynamic[0].value when a dynamic list is provided and sticky is empty", () => {
+    expect(pickSessionDefaultModel("claude", dynamicClaude)).toBe(
+      "claude-opus-4-8",
+    );
+  });
+
+  it("returns the sticky preference even when it IS in the dynamic list (Frontend R1)", () => {
+    // User's saved preference wins — never silent-flip to dynamic[0] just
+    // because Anthropic publishes a newer model.
+    expect(
+      pickSessionDefaultModel("claude", dynamicClaude, "claude-opus-4-7"),
+    ).toBe("claude-opus-4-7");
+  });
+
+  it("returns the sticky preference EVEN WHEN it's not in the dynamic list (Friedman R2)", () => {
+    // User's saved choice was deprecated upstream — preserve it. The
+    // ModelSwitcher's existing fallback path renders it as a custom entry.
+    expect(
+      pickSessionDefaultModel("claude", dynamicClaude, "claude-opus-4-5"),
+    ).toBe("claude-opus-4-5");
+  });
+
+  it("treats empty-string sticky as absent (falls through to dynamic[0])", () => {
+    expect(pickSessionDefaultModel("claude", dynamicClaude, "")).toBe(
+      "claude-opus-4-8",
+    );
+  });
+
+  it("treats null/undefined sticky as absent", () => {
+    expect(pickSessionDefaultModel("claude", dynamicClaude, null)).toBe(
+      "claude-opus-4-8",
+    );
+    expect(pickSessionDefaultModel("claude", dynamicClaude, undefined)).toBe(
+      "claude-opus-4-8",
+    );
+  });
+
+  it("returns static default when dynamic is empty array and sticky absent", () => {
+    expect(pickSessionDefaultModel("claude", [])).toBe(CLAUDE_MODELS[0].value);
+  });
+});
+
+// ── PLAN Task 13 — pickIcon claude-* returns empty (Saarinen R1) ──────────
+
+describe("toModelOptions — Claude entries are icon-less (Task 13)", () => {
+  it("assigns empty icon to claude-* slugs (Saarinen R1)", () => {
+    const options = toModelOptions([
+      { value: "claude-opus-4-8", label: "Opus 4.8", description: "" },
+      { value: "claude-sonnet-4-6", label: "Sonnet 4.6", description: "" },
+    ]);
+    expect(options[0].icon).toBe("");
+    expect(options[1].icon).toBe("");
+  });
+
+  it("still assigns geometric icons to non-claude- slugs (preserves Codex behaviour)", () => {
+    const options = toModelOptions([
+      { value: "gpt-5.2-codex", label: "GPT-5.2", description: "" },
+    ]);
+    expect(options[0].icon).not.toBe("");
   });
 });

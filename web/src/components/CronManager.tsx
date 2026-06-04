@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
 import { api, type CronJobInfo } from "../api.js";
-import { getModelsForBackend, getDefaultModel, toModelOptions, type ModelOption } from "../utils/backends.js";
+import { useStore } from "../store.js";
+import { getModelsForBackend, getDefaultModel, pickSessionDefaultModel } from "../utils/backends.js";
 import { FolderPicker } from "./FolderPicker.js";
 import { timeAgo } from "../utils/time-ago.js";
 import { useClickOutside } from "../utils/use-click-outside.js";
@@ -693,32 +694,26 @@ function JobForm({
     onChange({ ...form, ...partial });
 
   // ─── Dynamic model fetching (same pattern as HomePage) ──────────
-  const [dynamicModels, setDynamicModels] = useState<ModelOption[] | null>(null);
+  // PLAN-aura-dynamic-model-list Task 10: lifted to settings-slice.
+  const dynamicModels = useStore((s) => s.dynamicBackendModels[form.backendType]);
+  const loadBackendModels = useStore((s) => s.loadBackendModels);
   const [showModelDropdown, setShowModelDropdown] = useState(false);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
   const [showFolderPicker, setShowFolderPicker] = useState(false);
   const [showBackendDropdown, setShowBackendDropdown] = useState(false);
   const backendDropdownRef = useRef<HTMLDivElement>(null);
 
-  const models = dynamicModels || getModelsForBackend(form.backendType);
+  const models = dynamicModels ?? getModelsForBackend(form.backendType);
   const selectedModel = models.find((m) => m.value === form.model) || models[0];
 
-  // Fetch dynamic models when backend changes
+  // PLAN-aura-dynamic-model-list Task 10: trigger dynamic-model fetch for
+  // the form's current backend. The slice action is idempotent — concurrent
+  // mount calls (HomePage + CronManager + ModelSwitcher) collapse server-
+  // side. Previous gate (`backend !== "codex"`) is dropped; Claude reaches
+  // the live endpoint too.
   useEffect(() => {
-    setDynamicModels(null);
-    if (form.backendType !== "codex") return;
-    api.getBackendModels(form.backendType).then((fetched) => {
-      if (fetched.length > 0) {
-        const options = toModelOptions(fetched);
-        setDynamicModels(options);
-        if (!options.some((m) => m.value === form.model)) {
-          update({ model: options[0].value });
-        }
-      }
-    }).catch(() => {
-      // Fall back to hardcoded models silently
-    });
-  }, [form.backendType]); // eslint-disable-line react-hooks/exhaustive-deps
+    void loadBackendModels(form.backendType);
+  }, [form.backendType, loadBackendModels]);
 
   // Set default model if empty
   useEffect(() => {
@@ -851,7 +846,20 @@ function JobForm({
                 <button
                   key={opt.value}
                   onClick={() => {
-                    update({ backendType: opt.value, model: getDefaultModel(opt.value) });
+                    update({
+                      backendType: opt.value,
+                      // Council Review 2026-06-04-0823 P1 #1: pass sticky
+                      // `anthropicModel` from slice so user choice survives
+                      // a backend toggle. Codex has no analogous preference.
+                      model: (() => {
+                        const snap = useStore.getState();
+                        return pickSessionDefaultModel(
+                          opt.value,
+                          snap.dynamicBackendModels[opt.value],
+                          opt.value === "claude" ? snap.anthropicModel : null,
+                        );
+                      })(),
+                    });
                     setShowBackendDropdown(false);
                   }}
                   className={`w-full px-3 py-2.5 min-h-[44px] text-xs text-left hover:bg-cc-hover transition-colors cursor-pointer ${

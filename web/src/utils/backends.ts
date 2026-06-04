@@ -20,12 +20,22 @@ const MODEL_ICONS: Record<string, string> = {
   "mini": "\u26A1",     // ⚡ for mini/fast
 };
 
-function pickIcon(slug: string, index: number): string {
+function pickIcon(slug: string, _index: number): string {
+  // PLAN-aura-dynamic-model-list Task 13 / Saarinen R1: Claude column
+  // stays intentionally icon-less. The geometric fallback set would read
+  // as noise when Claude entries grow from 3 to 5-7 items — version
+  // number IS the differentiator. Codex tier markers remain.
+  if (slug.startsWith("claude-")) return "";
   for (const [key, icon] of Object.entries(MODEL_ICONS)) {
     if (slug.includes(key)) return icon;
   }
-  const fallback = ["\u25C6", "\u25CF", "\u25D5", "\u2726"]; // ◆ ● ◕ ✦
-  return fallback[index % fallback.length];
+  // Council Review 2026-06-04-0823 P1 #7 (React/Web UI) — position-dependent
+  // fallback `fallback[index % 4]` was a silent stable-identity regression:
+  // if the upstream cache reordered Codex entries, `gpt-5.2` could flip
+  // glyphs for the same slug across refreshes. Icon is supposed to be a
+  // type marker, not a position marker. Drop the fallback (return "")
+  // — more honest about the lack of tier semantics for unrecognised slugs.
+  return "";
 }
 
 /** Convert server model info to frontend ModelOption with icons. */
@@ -149,6 +159,43 @@ export function getAgentModesForBackend(backend: BackendType): ModeOption[] {
 
 export function getDefaultModel(backend: BackendType): string {
   return backend === "codex" ? CODEX_MODELS[0].value : CLAUDE_MODELS[0].value;
+}
+
+/**
+ * Pick the default model for a NEW session, respecting user preference and
+ * the dynamically-fetched list when available.
+ *
+ * PLAN-aura-dynamic-model-list Task 9. Precedence (highest first):
+ *
+ *  1. `stickyPreference` — the user's explicit `anthropicModel` from
+ *     settings. Wins UNCONDITIONALLY, even when the preference is no
+ *     longer in the dynamic list (model deprecated upstream). Frontend
+ *     R1 + Friedman R2: silent default-flip from "user's preferred
+ *     Sonnet" to "newest Opus" betrays the trust the preference encodes.
+ *     ModelSwitcher's existing fallback path (`ModelSwitcher.tsx:29-30`)
+ *     renders the value as a custom entry — preference flows through.
+ *  2. `dynamic[0].value` — first item of the live list (sorted server-
+ *     side: opus > sonnet > haiku, then created_at desc). This is the
+ *     "newest Opus" case when the user has no saved preference.
+ *  3. `getDefaultModel(backend)` — static fallback (zero-config path).
+ *
+ * NOTE on signature discipline (Fowler R3): `getDefaultModel` is NOT
+ * widened — its job is "the static default for this backend". The new
+ * helper composes with it rather than threading optional args through
+ * every caller of `getDefaultModel`.
+ */
+export function pickSessionDefaultModel(
+  backend: BackendType,
+  dynamic?: readonly ModelOption[] | undefined,
+  stickyPreference?: string | null | undefined,
+): string {
+  if (typeof stickyPreference === "string" && stickyPreference.length > 0) {
+    return stickyPreference;
+  }
+  if (dynamic !== undefined && dynamic.length > 0) {
+    return dynamic[0]!.value;
+  }
+  return getDefaultModel(backend);
 }
 
 export function getDefaultMode(backend: BackendType): string {

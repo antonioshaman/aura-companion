@@ -1,4 +1,4 @@
-import { closeSync, constants as fsConstants, fsyncSync, mkdirSync, openSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, constants as fsConstants, fsyncSync, mkdirSync, openSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { COUNCIL_ARTIFACT_MAX_BYTES } from "./council-types.js";
@@ -22,7 +22,28 @@ import { COUNCIL_ARTIFACT_MAX_BYTES } from "./council-types.js";
  */
 export function writeAtomicJson(target: string, payload: unknown): void {
   const dir = dirname(target);
-  mkdirSync(dir, { recursive: true });
+  // Council Review 2026-06-04-0823 P2 #8 (Persistence × Hunt — closes
+  // PLAN-aura-dynamic-model-list Task 4's explicit "parent dir 0o700"
+  // requirement that the implementation log claimed but dropped):
+  // mkdirSync's mode is umask-masked, so even passing `mode: 0o700` here
+  // typically lands at `0o700 & ~umask` ≈ `0o700` on most systems but
+  // 0o755 if umask is restrictive. Chmod after creation is the deterministic
+  // path. Same side-channel (filename + mtime metadata leakage on
+  // multi-UID hosts) applies to every writer using this helper —
+  // council artifacts, env profiles, settings.json — so closing it at
+  // the wrapper is the AP-14 single-assembly-site fix.
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  try {
+    // chmod-after-mkdir is necessary because mkdir's mode is umask-masked.
+    // Best-effort: a recursive parent (e.g., COMPANION_HOME) may already
+    // exist with broader perms set by a different writer; tightening it
+    // here is correct. If chmod fails (e.g., not owner of an existing
+    // parent), the atomic write itself still proceeds — file mode 0o600
+    // remains enforced by the O_CREAT below.
+    chmodSync(dir, 0o700);
+  } catch {
+    /* best-effort — file 0o600 is the primary defence */
+  }
 
   const json = JSON.stringify(payload);
   // Byte-count via Buffer — JS string `.length` is UTF-16 code units and
