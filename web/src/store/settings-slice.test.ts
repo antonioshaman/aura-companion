@@ -32,6 +32,7 @@ beforeEach(() => {
     aiValidationEnabled: null,
     aiValidationAutoApprove: null,
     aiValidationAutoDeny: null,
+    anthropicModel: null,
     settingsHydrated: false,
     dynamicBackendModels: {},
     dynamicBackendModelsStatus: { claude: "idle", codex: "idle" },
@@ -257,5 +258,58 @@ describe("settings-slice — loadBackendModels (inflight-token guard)", () => {
     const s = useStore.getState();
     expect(s.dynamicBackendModels.claude?.[0]?.value).toBe("claude-opus-4-8");
     expect(s.dynamicBackendModels.codex?.[0]?.value).toBe("gpt-5");
+  });
+});
+
+// ── Council Review 2026-06-04-0823 P1 #1 — sticky anthropicModel ──────────
+
+describe("settings-slice — anthropicModel sticky-preference hydration", () => {
+  it("hydrates anthropicModel string from payload", () => {
+    useStore.getState().hydrateSettings({ anthropicModel: "claude-opus-4-7" });
+    expect(useStore.getState().anthropicModel).toBe("claude-opus-4-7");
+  });
+
+  it("hydrates anthropicModel: null (explicit clear)", () => {
+    useStore.getState().hydrateSettings({ anthropicModel: "claude-opus-4-7" });
+    useStore.getState().hydrateSettings({ anthropicModel: null });
+    expect(useStore.getState().anthropicModel).toBeNull();
+  });
+
+  it("preserves prior value when payload omits anthropicModel", () => {
+    useStore.getState().hydrateSettings({ anthropicModel: "claude-sonnet-4-6" });
+    useStore.getState().hydrateSettings({ anthropicApiKeyConfigured: true });
+    expect(useStore.getState().anthropicModel).toBe("claude-sonnet-4-6");
+  });
+
+  it("rejects non-string non-null values (forward-compat for future discriminator strings)", () => {
+    useStore.getState().hydrateSettings({ anthropicModel: "claude-opus-4-7" });
+    useStore.getState().hydrateSettings({
+      anthropicModel: 42 as unknown as string,
+    });
+    // Prior value preserved.
+    expect(useStore.getState().anthropicModel).toBe("claude-opus-4-7");
+  });
+});
+
+// ── Council Review 2026-06-04-0823 P2 #9 — inflight reject doesn't clobber ──
+
+describe("settings-slice — loadBackendModels reject-after-success protection (Council P2 #9, EC-41)", () => {
+  it("rejecting after a prior successful fetch preserves dynamicBackendModels.claude data", async () => {
+    // Sequence: success seeds the slot → fail → data should NOT be wiped.
+    mockGetBackendModels.mockResolvedValueOnce([
+      { value: "claude-opus-4-8", label: "Opus 4.8", description: "" },
+    ]);
+    await useStore.getState().loadBackendModels("claude");
+    expect(useStore.getState().dynamicBackendModels.claude).toHaveLength(1);
+
+    mockGetBackendModels.mockRejectedValueOnce(new Error("transient blip"));
+    await useStore.getState().loadBackendModels("claude");
+
+    const s = useStore.getState();
+    // Data preserved (not wiped on flake) — last-known-good beats null.
+    expect(s.dynamicBackendModels.claude).toHaveLength(1);
+    expect(s.dynamicBackendModels.claude?.[0]?.value).toBe("claude-opus-4-8");
+    // Status reflects the most-recent fetch outcome ("soft-rejected").
+    expect(s.dynamicBackendModelsStatus.claude).toBe("rejected");
   });
 });

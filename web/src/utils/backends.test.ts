@@ -56,13 +56,33 @@ describe("toModelOptions", () => {
     expect(options[0].icon).toBe("\u26A1"); // ⚡
   });
 
-  it("uses fallback icon for generic model slugs", () => {
+  it("returns empty icon for generic non-tier slugs (Council Review 2026-06-04-0823 P1 #7)", () => {
+    // Prior shape returned a position-dependent geometric fallback rotated
+    // by `index % 4` which silently flipped icons for the same slug across
+    // response reorders. New shape: empty icon for unrecognised slugs —
+    // honest about the lack of tier semantics, stable identity invariant.
     const options = toModelOptions([
       { value: "gpt-5.2", label: "GPT-5.2", description: "" },
     ]);
-    // Should use one of the fallback icons
-    expect(options[0].icon).toBeTruthy();
-    expect(options[0].icon.length).toBeGreaterThan(0);
+    expect(options[0].icon).toBe("");
+  });
+
+  it("icon assignment is stable across response reorder (Council P1 #7 regression pin)", () => {
+    // Same slug at different array positions MUST produce identical icon.
+    const a = toModelOptions([
+      { value: "gpt-5.2", label: "GPT-5.2", description: "" },
+      { value: "gpt-5.2-codex", label: "Codex", description: "" },
+    ]);
+    const b = toModelOptions([
+      { value: "gpt-5.2-codex", label: "Codex", description: "" },
+      { value: "gpt-5.2", label: "GPT-5.2", description: "" },
+    ]);
+    const aGeneric = a.find((m) => m.value === "gpt-5.2")!;
+    const bGeneric = b.find((m) => m.value === "gpt-5.2")!;
+    expect(aGeneric.icon).toBe(bGeneric.icon);
+    const aCodex = a.find((m) => m.value === "gpt-5.2-codex")!;
+    const bCodex = b.find((m) => m.value === "gpt-5.2-codex")!;
+    expect(aCodex.icon).toBe(bCodex.icon);
   });
 
   it("uses value as label when label is empty", () => {

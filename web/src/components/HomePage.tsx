@@ -247,10 +247,17 @@ export function HomePage() {
     setBackend(newBackend);
     localStorage.setItem("cc-backend", newBackend);
     // PLAN Task 10 + 9: pick the new-backend default from the dynamic
-    // list when available (sliced by backend), static otherwise. The
-    // store-backed dynamic list survives the switch (no manual clear).
-    const dynamicForNew = useStore.getState().dynamicBackendModels[newBackend];
-    setModel(pickSessionDefaultModel(newBackend, dynamicForNew));
+    // list when available (sliced by backend), static otherwise.
+    //
+    // Council Review 2026-06-04-0823 P1 #1: the sticky `anthropicModel`
+    // preference (claude-side only — Codex has no analogous saved
+    // preference today) is now read from settings-slice and passed as
+    // the third arg. Preserves user choice across backend toggles — the
+    // exact regression the PLAN watchpoint demanded a test for.
+    const storeSnapshot = useStore.getState();
+    const dynamicForNew = storeSnapshot.dynamicBackendModels[newBackend];
+    const stickyForNew = newBackend === "claude" ? storeSnapshot.anthropicModel : null;
+    setModel(pickSessionDefaultModel(newBackend, dynamicForNew, stickyForNew));
     setMode(getDefaultMode(newBackend));
     if (newBackend !== "claude") {
       setShowBranchingControls(false);

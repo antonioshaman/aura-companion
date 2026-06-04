@@ -1,0 +1,36 @@
+{
+  "data": [
+    {
+      "type": "model",
+      "id": "claude-opus-4-7",
+      "display_name": "Claude Opus 4.7 (valid baseline)",
+      "created_at": "2026-01-15T00:00:00Z"
+    },
+    {
+      "type": "model",
+      "id": "claude-opus-evil",
+      "display_name": "Trojan-Source ‮rightToLeftOverride hidden ‬"
+    },
+    {
+      "type": "model",
+      "id": "claude-opus-tab",
+      "display_name": "Display\twith\ttab\tcontrol\tchars"
+    },
+    {
+      "type": "model",
+      "id": "claude-opus-c1",
+      "display_name": "Display with  C1 control char"
+    },
+    {
+      "type": "model",
+      "id": "claude-opus-toolong-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "display_name": "Id over 128 chars must drop"
+    },
+    {
+      "type": "model",
+      "id": "claude-opus-shortish",
+      "display_name": "Has a very-long display_name padded out with filler bytes to exceed the bounded length cap of 256 characters and trigger the isBoundedSafeString rejection on the display_name path specifically while keeping the id within the legal length cap so the rejection reason can be attributed to display_name length rather than id length. Should be dropped."
+    }
+  ],
+  "has_more": false
+}

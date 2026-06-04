@@ -572,6 +572,48 @@ export type AnthropicFetchOutcome =
     };
 
 /**
+ * Module-scope flag — set once when the runtime is observed to lack
+ * `AbortSignal.any`. Prevents the warn from spamming the log on every
+ * subsequent fetch call. Reset by the test-reset helpers below.
+ */
+let signalCoalesceDegradeLogged = false;
+
+/**
+ * Resolve a coalesced AbortSignal from timeout + caller. Returns one signal
+ * that aborts on EITHER source. Council Review 2026-06-04-0823 P2 #11 —
+ * when `AbortSignal.any` is unavailable, fail-towards-parent: drop the
+ * timeout coalescing but PRESERVE caller-abort (parent signal alone), and
+ * log once-per-process so the degraded state is operator-visible.
+ */
+function resolveCoalescedSignal(
+  timeoutSignal: AbortSignal,
+  parentSignal: AbortSignal,
+): AbortSignal {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const any = (AbortSignal as any).any;
+  if (typeof any === "function") {
+    return any.call(AbortSignal, [timeoutSignal, parentSignal]) as AbortSignal;
+  }
+  if (!signalCoalesceDegradeLogged) {
+    signalCoalesceDegradeLogged = true;
+    log.warn("anthropic-models-cache", "signal-coalesce-degraded", {
+      event: "anthropic-models.signal-coalesce-degraded",
+      reason: "AbortSignal.any unavailable at runtime — parent signal preserved, timeout coalescing disabled",
+    });
+  }
+  return parentSignal;
+}
+
+/**
+ * Test-only reset of the degrade-warn flag. Companion to other __resetForTests
+ * helpers. Ensures tests that simulate `AbortSignal.any` absence see the
+ * warn fire on first call regardless of suite ordering.
+ */
+export function __resetSignalCoalesceFlagForTests(): void {
+  signalCoalesceDegradeLogged = false;
+}
+
+/**
  * Fetch `/v1/models` from Anthropic with strict resource discipline:
  *
  * - **Timeout via AbortController** ({@link FETCH_TIMEOUT_MS}, 5s). Bun's
@@ -609,10 +651,19 @@ export async function fetchAnthropicModelsRaw(
   const timeoutHandle = setTimeout(() => timeoutController.abort(), FETCH_TIMEOUT_MS);
   // Use type assertion below for `AbortSignal.any` — supported in Bun + Node 20+
   // but the TS lib may not yet declare it; pre-resolve to a single signal here.
+  //
+  // Council Review 2026-06-04-0823 P2 #11 (Backend-TS): the prior `?? timeoutController.signal`
+  // silent demote dropped the parent signal entirely if `AbortSignal.any` was
+  // undefined at runtime — a runtime downgrade or polyfill regression turned
+  // parent-cancel into a 5s upstream tail per cancelled request. New shape:
+  // - When `parentSignal` is supplied AND `AbortSignal.any` is unavailable, log
+  //   a structured warn ONCE per process (gated via the module-scope
+  //   `signalCoalesceDegradeLogged` flag) and fall through to the parent
+  //   signal alone (so caller-abort still works, timeout is sacrificed).
+  // - Production Bun 1.0+ and Node 20.3+ have `AbortSignal.any` — this branch
+  //   is dormant and the warn never fires.
   const signal: AbortSignal = deps?.parentSignal
-    ? // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      ((AbortSignal as any).any?.([timeoutController.signal, deps.parentSignal]) ??
-        timeoutController.signal)
+    ? resolveCoalescedSignal(timeoutController.signal, deps.parentSignal)
     : timeoutController.signal;
 
   let response: Response | undefined;
@@ -759,7 +810,15 @@ export function isCacheRecordValid(
   if (!Array.isArray(r.models)) return false;
   // Atomic 3-check — all gates evaluated as part of "is it a hit?"
   if (r.key_fingerprint !== currentFingerprint) return false;
-  if (now - r.fetched_at > ttlMs) return false;
+  // Council Review 2026-06-04-0823 P2 #10 (Persistence — EC-38):
+  // Wall-clock can jump backward (NTP correction, VM resume from snapshot,
+  // suspended laptop wake). Bare `(now - past) > ttlMs` evaluates false on
+  // negative LHS → cache appears fresh until wall-clock advances past
+  // `fetched_at + ttlMs` again, which on a week-suspended laptop is forever.
+  // Clamp at zero so negative skew is treated as zero-age (still bounded by
+  // ttlMs going forward). Tolerance-detect-and-refetch would be more
+  // conservative; clamp is simpler and sufficient for a metadata cache.
+  if (Math.max(0, now - r.fetched_at) > ttlMs) return false;
   return true;
 }
 

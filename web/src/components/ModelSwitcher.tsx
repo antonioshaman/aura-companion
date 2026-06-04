@@ -52,6 +52,22 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
   const dynamicModels = useStore((s) => s.dynamicBackendModels[backendType]);
   const models = dynamicModels ?? getModelsForBackend(backendType);
 
+  // Council Review 2026-06-04-0823 P2 #13 (React/Web UI): the slice JSDoc
+  // names ModelSwitcher as one of the concurrent mount callers of
+  // `loadBackendModels`, but the prior implementation never fired it.
+  // Today this happens to work because every path to a ModelSwitcher goes
+  // through HomePage first (HomePage mounts → fetches → slice populated).
+  // But "Continue in new session" (commit 3412955) bypasses HomePage, and
+  // a server-restart-restored session also re-mounts ModelSwitcher without
+  // an intervening HomePage mount. Fire it idempotently here so every
+  // path to ModelSwitcher honours the slice's documented contract. The
+  // slice action's inflight-token guard + server-side single-flight cache
+  // make the cost zero when other callers already populated the slice.
+  const loadBackendModels = useStore((s) => s.loadBackendModels);
+  useEffect(() => {
+    void loadBackendModels(backendType);
+  }, [backendType, loadBackendModels]);
+
   // Friedman R3: per-key-status. Distinguish "no key configured" (show
   // footnote nudging Settings) from "key set but fetch failed" (silent —
   // user already opted in; noise would violate scope).
@@ -104,11 +120,23 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
   );
 
   // Close on click outside
+  //
+  // Council Review 2026-06-04-0823 P1 #2 (a11y, EC-39): the prior shape
+  // closed the dropdown without restoring focus to the trigger, asymmetric
+  // with the Escape handler that DOES restore. Mirror `CouncilToggle.tsx`'s
+  // precedent: rAF-defer the focus call AND gate it on the previous focused
+  // element being inside the listbox so a pointer-click on another
+  // focusable element doesn't yank focus from where the user clicked.
   useEffect(() => {
     if (!open) return;
     const onClick = (e: MouseEvent) => {
       if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        const focusWasInsideListbox =
+          listboxRef.current?.contains(document.activeElement) ?? false;
         setOpen(false);
+        if (focusWasInsideListbox) {
+          requestAnimationFrame(() => triggerRef.current?.focus());
+        }
       }
     };
     document.addEventListener("mousedown", onClick);
@@ -120,13 +148,35 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
   // the listbox. Arrow Up/Down move the roving descendant; Home/End jump
   // to bounds; Enter/Space commits; Escape closes + returns focus to
   // trigger. Click also commits (handleSelect above).
+  //
+  // Council Review 2026-06-04-0823 P1 #3 (a11y): two corrections from
+  // the prior shape —
+  // (a) `queueMicrotask(focus)` was non-deterministic under React 19
+  //     StrictMode (double-invoke → cleanup-then-stale-ref → silently
+  //     swallowed focus) AND not test-verified. Switch to
+  //     `requestAnimationFrame` to defer past React's commit phase, in
+  //     line with the codebase precedent at `CouncilToggle.tsx`.
+  // (b) Removed `models` from the dep array — the prior dep made this
+  //     effect re-fire AND reset activeIndex on every dynamic-list
+  //     refresh while the dropdown was open, snapping the keyboard
+  //     cursor away from where the user was navigating (Friedman P2 #5
+  //     bounded by the activeIndex reset; clamping to bounds is now the
+  //     responsibility of the keydown handler, which is already
+  //     defended by `Math.min(...)` / `Math.max(...)`).
+  // Open-transition tracker `wasOpenRef` ensures the focus/reset fires
+  // ONLY on the false→true edge of `open`, not on every render while open.
+  const wasOpenRef = useRef(false);
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      wasOpenRef.current = false;
+      return;
+    }
+    if (wasOpenRef.current) return;
+    wasOpenRef.current = true;
     // Init active index to selected (fallback to 0 if not found).
     const selected = models.findIndex((m) => m.value === currentModel);
     setActiveIndex(selected >= 0 ? selected : 0);
-    // Defer focus to next tick so the listbox is mounted.
-    queueMicrotask(() => {
+    requestAnimationFrame(() => {
       listboxRef.current?.focus();
     });
   }, [open, models, currentModel]);
@@ -205,12 +255,19 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
       </button>
 
       {open && (
+        // Council Review 2026-06-04-0823 P2 #12 (Friedman × a11y): the
+        // no-key footnote previously lived INSIDE the role="listbox" div
+        // — screen readers iterated it as a phantom option. Restructure:
+        // wrapper holds the listbox + sibling footnote so the footnote is
+        // outside the listbox's option iteration. Wrapper handles the
+        // overlay positioning + clip; listbox owns its own focus ring.
+        <div className="absolute right-0 bottom-full mb-1 z-50 min-w-[180px] max-w-[280px] rounded-lg border border-cc-separator bg-cc-bg shadow-lg overflow-hidden">
         <div
           ref={listboxRef}
           tabIndex={0}
-          // PLAN Task 13 / Saarinen R1: dropdown width clamp.
+          // PLAN Task 13 / Saarinen R1: dropdown width clamp inherited from wrapper.
           // PLAN Task 12 / a11y R3: max-h + overflow-y for grown lists.
-          className="absolute right-0 bottom-full mb-1 z-50 min-w-[180px] max-w-[280px] max-h-[24rem] overflow-y-auto rounded-lg border border-cc-separator bg-cc-bg shadow-lg focus:outline-none focus:ring-1 focus:ring-cc-primary/40"
+          className="max-h-[24rem] overflow-y-auto focus:outline-none focus:ring-1 focus:ring-cc-primary/40"
           role="listbox"
           aria-label="Select model"
           aria-activedescendant={`${idPrefix}-option-${activeIndex}`}
@@ -255,16 +312,27 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
               </div>
             );
           })}
-          {/* PLAN Task 14 / Friedman R3 — discoverability footnote when
-             the rendered list IS the static fallback AND the user has no
-             API key. Connects the gated capability ("more models") to the
-             unlocking action (Settings → key). Silent when key is set
-             but upstream failed (scope decision). */}
-          {showNoKeyHint && (
-            <div className="px-3 py-2 border-t border-cc-separator text-[11px] text-cc-muted">
-              Add an API key in Settings to see more models.
-            </div>
-          )}
+        </div>
+        {/* PLAN Task 14 / Friedman R3 — discoverability footnote when
+           the rendered list IS the static fallback AND the user has no
+           API key. Connects the gated capability ("more models") to the
+           unlocking action (Settings → key). Silent when key is set
+           but upstream failed (scope decision).
+
+           Council Review 2026-06-04-0823 P2 #12 (Friedman): rendered as
+           an actual link to `#/settings` so the path is one-click from
+           the dropdown. `onClick` closes the dropdown so the navigation
+           is clean. Sits as a SIBLING of the listbox div (not a child) so
+           SR doesn't iterate it as a phantom option. */}
+        {showNoKeyHint && (
+          <a
+            href="#/settings"
+            onClick={() => setOpen(false)}
+            className="block px-3 py-2 border-t border-cc-separator text-[11px] text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors"
+          >
+            Add an API key in Settings to see more models.
+          </a>
+        )}
         </div>
       )}
     </div>

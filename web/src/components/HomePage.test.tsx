@@ -990,6 +990,15 @@ describe("HomePage", () => {
       expect(screen.getByText("GPT Custom")).toBeInTheDocument();
     });
 
+    // Council Review 2026-06-04-0823 P1 #6 (Beck) — lifecycle pin restored:
+    // the rewritten test was missing the consumer-contract assertion that
+    // HomePage actually invokes loadBackendModels on mount + backend-switch.
+    // A regression that drops the useEffect (e.g., refactor lifting load to
+    // a global App effect) would pass with the slice pre-warmed without this.
+    await waitFor(() => {
+      expect(mockStoreState.loadBackendModels).toHaveBeenCalledWith("codex");
+    });
+
     // Cleanup — keep test isolation
     mockStoreState.dynamicBackendModels = {};
   });

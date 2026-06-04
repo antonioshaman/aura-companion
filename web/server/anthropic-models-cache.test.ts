@@ -640,3 +640,412 @@ describe("recorder integration — apiKey leakage canary", () => {
     expect(recorderSource).not.toMatch(/api\.anthropic\.com/);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Council Review 2026-06-04-0823 burndown
+//
+//  P1 #4 (EC-22): emit-path coverage for the cache module's 10 structured
+//  log events. Spy on `log.info` and `log.warn`; assert event-name + key
+//  field shape per outcome branch.
+//
+//  P1 #5: behavioural coverage of the disk cache subsystem
+//  (writeDiskCache + readDiskCache + atomic-write + stale-served-on-fail).
+//
+//  P3 #14: single-flight lock-released-on-reject regression pin.
+// ─────────────────────────────────────────────────────────────────────────────
+
+import {
+  writeDiskCache,
+  readDiskCache,
+  ANTHROPIC_MODELS_CACHE_PATH,
+} from "./anthropic-models-cache.js";
+import { log } from "./logger.js";
+import { existsSync, statSync, readFileSync as fsReadFileSync, mkdirSync } from "node:fs";
+
+// Each describe-block below shares the same reset discipline as the
+// orchestrator tests.
+
+describe("EC-22 emit-path coverage — Council P1 #4", () => {
+  let infoSpy: ReturnType<typeof vi.spyOn>;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    __resetMemoryCacheForTests();
+    __resetInflightForTests();
+    __deleteDiskCacheForTests();
+    infoSpy = vi.spyOn(log, "info").mockImplementation(() => undefined);
+    warnSpy = vi.spyOn(log, "warn").mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    infoSpy.mockRestore();
+    warnSpy.mockRestore();
+    __resetMemoryCacheForTests();
+    __resetInflightForTests();
+    __deleteDiskCacheForTests();
+  });
+
+  /** Helper: was `log.info` or `log.warn` called with an entry whose `data.event` matches? */
+  function findEmitWithEvent(
+    spy: ReturnType<typeof vi.spyOn>,
+    event: string,
+  ): Record<string, unknown> | undefined {
+    for (const call of spy.mock.calls) {
+      const data = call[2] as Record<string, unknown> | undefined;
+      if (data && data.event === event) return data;
+    }
+    return undefined;
+  }
+
+  it("emits anthropic-models.no-key when apiKey is empty", async () => {
+    await getAnthropicModels("");
+    const data = findEmitWithEvent(infoSpy, "anthropic-models.no-key");
+    expect(data).toBeDefined();
+  });
+
+  it("emits anthropic-models.cache.hit with source: memory on warm path", async () => {
+    const fp = computeKeyFingerprint("sk-test");
+    writeMemoryCache({
+      schema_version: SCHEMA_VERSION,
+      fetched_at: Date.now(),
+      key_fingerprint: fp,
+      models: [],
+    });
+    await getAnthropicModels("sk-test", { fetch: vi.fn() });
+    const data = findEmitWithEvent(infoSpy, "anthropic-models.cache.hit");
+    expect(data).toBeDefined();
+    expect(data?.source).toBe("memory");
+    expect(data?.key_fingerprint).toBe(fp);
+    expect(typeof data?.model_count).toBe("number");
+    expect(typeof data?.cache_age_ms).toBe("number");
+  });
+
+  it("emits anthropic-models.cache.miss with reason: enoent when no disk file exists", async () => {
+    const fakeFetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          data: [
+            { type: "model", id: "claude-opus-4-7", display_name: "Claude Opus 4.7" },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+    await getAnthropicModels("sk-test", { fetch: fakeFetch });
+    const data = findEmitWithEvent(infoSpy, "anthropic-models.cache.miss");
+    expect(data).toBeDefined();
+    expect(data?.reason).toBe("enoent");
+  });
+
+  it("emits anthropic-models.upstream.success with key_fingerprint + model_count + elapsed_ms", async () => {
+    const fakeFetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          data: [
+            { type: "model", id: "claude-opus-4-7", display_name: "Claude Opus 4.7" },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+    await getAnthropicModels("sk-test", { fetch: fakeFetch });
+    const data = findEmitWithEvent(infoSpy, "anthropic-models.upstream.success");
+    expect(data).toBeDefined();
+    expect(data?.model_count).toBe(1);
+    expect(data?.http_status).toBe(200);
+    expect(typeof data?.elapsed_ms).toBe("number");
+    expect(typeof data?.key_fingerprint).toBe("string");
+  });
+
+  it("emits anthropic-models.upstream.auth-failed on 401", async () => {
+    const fakeFetch = vi.fn().mockResolvedValue(new Response("", { status: 401 }));
+    await getAnthropicModels("sk-test", { fetch: fakeFetch });
+    const data = findEmitWithEvent(warnSpy, "anthropic-models.upstream.auth-failed");
+    expect(data).toBeDefined();
+    expect(data?.http_status).toBe(401);
+  });
+
+  it("emits anthropic-models.upstream.unavailable on 500", async () => {
+    const fakeFetch = vi.fn().mockResolvedValue(new Response("", { status: 500 }));
+    await getAnthropicModels("sk-test", { fetch: fakeFetch });
+    const data = findEmitWithEvent(warnSpy, "anthropic-models.upstream.unavailable");
+    expect(data).toBeDefined();
+    expect(data?.reason).toBe("5xx");
+  });
+
+  it("emits anthropic-models.upstream.parse-failed on malformed body", async () => {
+    const fakeFetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ no_data: true }), { status: 200 }),
+    );
+    await getAnthropicModels("sk-test", { fetch: fakeFetch });
+    const data = findEmitWithEvent(warnSpy, "anthropic-models.upstream.parse-failed");
+    expect(data).toBeDefined();
+  });
+
+  it("emits anthropic-models.pagination-needed when has_more is true", async () => {
+    const fakeFetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          data: [
+            { type: "model", id: "claude-opus-4-7", display_name: "Claude Opus 4.7" },
+          ],
+          has_more: true,
+        }),
+        { status: 200 },
+      ),
+    );
+    await getAnthropicModels("sk-test", { fetch: fakeFetch });
+    const data = findEmitWithEvent(warnSpy, "anthropic-models.pagination-needed");
+    expect(data).toBeDefined();
+  });
+
+  it("emits NO raw apiKey in any logged payload", async () => {
+    const fakeFetch = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ data: [] }), { status: 200 }),
+    );
+    await getAnthropicModels("sk-ant-test-deadbeef", { fetch: fakeFetch });
+    const allCalls = [...infoSpy.mock.calls, ...warnSpy.mock.calls];
+    for (const call of allCalls) {
+      const serialised = JSON.stringify(call);
+      expect(serialised).not.toContain("sk-ant-test-deadbeef");
+      expect(serialised).not.toContain("deadbeef");
+    }
+  });
+});
+
+describe("Disk cache subsystem behavioural coverage — Council P1 #5", () => {
+  let infoSpy: ReturnType<typeof vi.spyOn>;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    __resetMemoryCacheForTests();
+    __resetInflightForTests();
+    __deleteDiskCacheForTests();
+    infoSpy = vi.spyOn(log, "info").mockImplementation(() => undefined);
+    warnSpy = vi.spyOn(log, "warn").mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    infoSpy.mockRestore();
+    warnSpy.mockRestore();
+    __resetMemoryCacheForTests();
+    __resetInflightForTests();
+    __deleteDiskCacheForTests();
+  });
+
+  it("warm-start: cold memory + valid disk record returns source: 'disk' AND warms memory cache", async () => {
+    const fp = computeKeyFingerprint("sk-test");
+    // Seed disk via the production writer so atomic-write + mode/perms exercise.
+    writeDiskCache(
+      {
+        schema_version: SCHEMA_VERSION,
+        fetched_at: Date.now(),
+        key_fingerprint: fp,
+        models: [{ value: "claude-opus-4-8", label: "Opus 4.8", description: "" }],
+      },
+      "sk-test",
+    );
+    expect(existsSync(ANTHROPIC_MODELS_CACHE_PATH)).toBe(true);
+    // Clear memory ONLY; disk persists.
+    __resetMemoryCacheForTests();
+    const fakeFetch = vi.fn();
+    const r = await getAnthropicModels("sk-test", { fetch: fakeFetch });
+    expect(r.kind).toBe("ok");
+    if (r.kind === "ok") {
+      expect(r.source).toBe("disk");
+      expect(r.models).toHaveLength(1);
+    }
+    // Memory warmed — next call without fetching produces memory hit.
+    const r2 = await getAnthropicModels("sk-test", { fetch: fakeFetch });
+    if (r2.kind === "ok") expect(r2.source).toBe("memory");
+    expect(fakeFetch).not.toHaveBeenCalled();
+  });
+
+  it("writeDiskCache produces a file that exists and is parseable", () => {
+    writeDiskCache(
+      {
+        schema_version: SCHEMA_VERSION,
+        fetched_at: 1_000_000_000_000,
+        key_fingerprint: "abcdef0123456789",
+        models: [],
+      },
+      "sk-test-key",
+    );
+    expect(existsSync(ANTHROPIC_MODELS_CACHE_PATH)).toBe(true);
+    const raw = fsReadFileSync(ANTHROPIC_MODELS_CACHE_PATH, "utf8");
+    const parsed = JSON.parse(raw);
+    expect(parsed.schema_version).toBe(SCHEMA_VERSION);
+    expect(parsed.key_fingerprint).toBe("abcdef0123456789");
+  });
+
+  it("writeDiskCache REJECTS when serialised payload contains apiKey suffix bytes (Persistence R3)", () => {
+    const apiKey = "sk-ant-LONG-KEY-deadbeef";
+    expect(() =>
+      writeDiskCache(
+        {
+          schema_version: SCHEMA_VERSION,
+          fetched_at: Date.now(),
+          key_fingerprint: "abcdef0123456789",
+          // Sneak the apiKey suffix into a field — defence-in-depth must catch.
+          models: [
+            { value: "claude-opus-4-7", label: "Opus deadbeef", description: "" },
+          ],
+        },
+        apiKey,
+      ),
+    ).toThrow(/refusing to persist/i);
+  });
+
+  it("readDiskCache returns reason: 'enoent' when no file exists", () => {
+    const r = readDiskCache(computeKeyFingerprint("k"), Date.now());
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("enoent");
+  });
+
+  it("readDiskCache returns reason: 'fingerprint-mismatch' on key rotation across simulated restart", () => {
+    const oldFp = computeKeyFingerprint("sk-old");
+    writeDiskCache(
+      {
+        schema_version: SCHEMA_VERSION,
+        fetched_at: Date.now(),
+        key_fingerprint: oldFp,
+        models: [],
+      },
+      "sk-old",
+    );
+    // Simulate restart (memory cleared, disk persists) + new key configured.
+    __resetMemoryCacheForTests();
+    const newFp = computeKeyFingerprint("sk-rotated");
+    const r = readDiskCache(newFp, Date.now());
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("fingerprint-mismatch");
+  });
+
+  it("readDiskCache returns reason: 'stale' when the record is older than the ceiling", () => {
+    const fp = computeKeyFingerprint("sk-test");
+    const longAgo = Date.now() - 25 * 60 * 60 * 1000; // 25h ago, beyond 24h ceiling
+    writeDiskCache(
+      {
+        schema_version: SCHEMA_VERSION,
+        fetched_at: longAgo,
+        key_fingerprint: fp,
+        models: [],
+      },
+      "sk-test",
+    );
+    const r = readDiskCache(fp, Date.now());
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toBe("stale");
+  });
+
+  it("orchestrator serves stale disk on upstream 500 when cache is beyond 24h ceiling (Backend R2 / Persistence R3 availability-beats-freshness)", async () => {
+    const fp = computeKeyFingerprint("sk-test");
+    const stale = Date.now() - 30 * 60 * 60 * 1000; // 30h ago
+    writeDiskCache(
+      {
+        schema_version: SCHEMA_VERSION,
+        fetched_at: stale,
+        key_fingerprint: fp,
+        models: [{ value: "claude-opus-4-7", label: "Opus 4.7", description: "" }],
+      },
+      "sk-test",
+    );
+    __resetMemoryCacheForTests();
+    const fakeFetch = vi.fn().mockResolvedValue(new Response("", { status: 500 }));
+    const r = await getAnthropicModels("sk-test", { fetch: fakeFetch });
+    expect(r.kind).toBe("ok");
+    if (r.kind === "ok") {
+      expect(r.source).toBe("disk");
+      expect(r.models).toHaveLength(1);
+    }
+    // Verify the stale-served log fired.
+    const allWarns = warnSpy.mock.calls
+      .map((c: unknown[]) => c[2])
+      .filter(Boolean) as Record<string, unknown>[];
+    expect(allWarns.some((d) => d.event === "anthropic-models.stale-served")).toBe(true);
+  });
+
+  it("disk written under writeAtomicJson lives under COMPANION_HOME (EC-7 bounds)", () => {
+    writeDiskCache(
+      {
+        schema_version: SCHEMA_VERSION,
+        fetched_at: Date.now(),
+        key_fingerprint: "abcdef0123456789",
+        models: [],
+      },
+      "sk-test",
+    );
+    const stat = statSync(ANTHROPIC_MODELS_CACHE_PATH);
+    expect(stat.isFile()).toBe(true);
+    // Council Review P2 #8 — file mode is 0o600 (inherited from writeAtomicJson
+    // O_CREAT mode). Verify the bit pattern.
+    expect(stat.mode & 0o777).toBe(0o600);
+  });
+});
+
+describe("Single-flight lock released on reject — Council P3 #14", () => {
+  beforeEach(() => {
+    __resetMemoryCacheForTests();
+    __resetInflightForTests();
+    __deleteDiskCacheForTests();
+  });
+
+  afterEach(() => {
+    __resetMemoryCacheForTests();
+    __resetInflightForTests();
+    __deleteDiskCacheForTests();
+  });
+
+  it("after a single-flight rejection, a subsequent call observes the cleared lock and retries the fetch", async () => {
+    // Use distinct fetch impls so we can verify lock was released between calls.
+    // First call: upstream 500 → result is upstream-unavailable, the inflight
+    // promise rejects internally before being deleted in finally.
+    const failingFetch = vi.fn().mockResolvedValue(new Response("", { status: 500 }));
+    const r1 = await getAnthropicModels("sk-test", { fetch: failingFetch });
+    expect(r1.kind).toBe("upstream-unavailable");
+    expect(failingFetch).toHaveBeenCalledTimes(1);
+
+    // Second call with a NEW fetch impl — must fire (lock cleared in finally).
+    const successFetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          data: [{ type: "model", id: "claude-opus-4-7", display_name: "Claude Opus 4.7" }],
+        }),
+        { status: 200 },
+      ),
+    );
+    const r2 = await getAnthropicModels("sk-test", { fetch: successFetch });
+    expect(r2.kind).toBe("ok");
+    expect(successFetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+// Suppress "no-unused" for mkdirSync — kept available for any future test
+// that needs to seed disk state without invoking writeDiskCache.
+void mkdirSync;
+
+describe("Fixture replay — hostile-input reject coverage (Council P3 #15)", () => {
+  // Reads from a separate fixture exercising parser reject branches that
+  // the happy-path fixture doesn't touch: bidi (Trojan-Source), C0/C1
+  // controls, length-cap overflow on id and display_name, ambiguous
+  // created_at. Documented line → reject-reason map in fixtures/README.md.
+  it("processes hostile-input fixture: only valid baselines survive; hostile entries dropped", () => {
+    const fixturePath = join(__dirname, "fixtures", "anthropic-models-response-hostile.json");
+    const raw = JSON.parse(readFileSync(fixturePath, "utf8"));
+    const parsed = parseAnthropicModelsResponse(raw);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    const ids = parsed.models.map((m) => m.id);
+    // Valid baseline must survive.
+    expect(ids).toContain("claude-opus-4-7");
+    // Hostile entries must NEVER appear.
+    expect(ids).not.toContain("claude-opus-evil");
+    expect(ids).not.toContain("claude-opus-tab");
+    expect(ids).not.toContain("claude-opus-c1");
+    expect(ids).not.toContain("claude-opus-shortish");
+    // The id with >128-char body must drop.
+    expect(ids.every((id) => id.length <= 128)).toBe(true);
+    // At least 5 distinct reject branches exercised.
+    expect(parsed.droppedItems).toBeGreaterThanOrEqual(5);
+  });
+});

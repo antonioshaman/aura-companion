@@ -20,7 +20,7 @@ const MODEL_ICONS: Record<string, string> = {
   "mini": "\u26A1",     // ⚡ for mini/fast
 };
 
-function pickIcon(slug: string, index: number): string {
+function pickIcon(slug: string, _index: number): string {
   // PLAN-aura-dynamic-model-list Task 13 / Saarinen R1: Claude column
   // stays intentionally icon-less. The geometric fallback set would read
   // as noise when Claude entries grow from 3 to 5-7 items — version
@@ -29,8 +29,13 @@ function pickIcon(slug: string, index: number): string {
   for (const [key, icon] of Object.entries(MODEL_ICONS)) {
     if (slug.includes(key)) return icon;
   }
-  const fallback = ["\u25C6", "\u25CF", "\u25D5", "\u2726"]; // ◆ ● ◕ ✦
-  return fallback[index % fallback.length];
+  // Council Review 2026-06-04-0823 P1 #7 (React/Web UI) — position-dependent
+  // fallback `fallback[index % 4]` was a silent stable-identity regression:
+  // if the upstream cache reordered Codex entries, `gpt-5.2` could flip
+  // glyphs for the same slug across refreshes. Icon is supposed to be a
+  // type marker, not a position marker. Drop the fallback (return "")
+  // — more honest about the lack of tier semantics for unrecognised slugs.
+  return "";
 }
 
 /** Convert server model info to frontend ModelOption with icons. */

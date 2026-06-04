@@ -848,10 +848,17 @@ function JobForm({
                   onClick={() => {
                     update({
                       backendType: opt.value,
-                      model: pickSessionDefaultModel(
-                        opt.value,
-                        useStore.getState().dynamicBackendModels[opt.value],
-                      ),
+                      // Council Review 2026-06-04-0823 P1 #1: pass sticky
+                      // `anthropicModel` from slice so user choice survives
+                      // a backend toggle. Codex has no analogous preference.
+                      model: (() => {
+                        const snap = useStore.getState();
+                        return pickSessionDefaultModel(
+                          opt.value,
+                          snap.dynamicBackendModels[opt.value],
+                          opt.value === "claude" ? snap.anthropicModel : null,
+                        );
+                      })(),
                     });
                     setShowBackendDropdown(false);
                   }}

@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom";
 
 const mockSendToSession = vi.fn();
@@ -16,6 +16,13 @@ interface MockStoreState {
   // settings-slice cache. Empty default → fallback to static models (the
   // pre-Task-11 behaviour these tests already assert).
   dynamicBackendModels: { claude?: unknown; codex?: unknown };
+  // Council Review 2026-06-04-0823 P2 #13: ModelSwitcher now fires
+  // loadBackendModels on mount to honour the slice JSDoc contract. Tests
+  // mock as a no-op vi.fn so the mount effect doesn't blow up.
+  loadBackendModels: (backend: string) => Promise<void>;
+  // P2 #14-ish — also surface anthropicApiKeyConfigured for the no-key
+  // footnote subscription added in PLAN Task 14.
+  anthropicApiKeyConfigured?: boolean | null;
 }
 
 let storeState: MockStoreState;
@@ -28,6 +35,8 @@ function resetStore(overrides: Partial<MockStoreState> = {}) {
     cliConnected: new Map([["s1", true]]),
     sessions: new Map([["s1", { model: DEFAULT_MODEL.value }]]),
     dynamicBackendModels: {},
+    loadBackendModels: vi.fn(async () => undefined),
+    anthropicApiKeyConfigured: null,
     ...overrides,
   };
 }
@@ -379,6 +388,116 @@ describe("ModelSwitcher", () => {
       fireEvent.click(screen.getByLabelText("Switch model"));
       const option = screen.getByRole("option", { name: /extended-context/ });
       expect(option).toHaveAttribute("title", long[0].label);
+    });
+  });
+
+  // ── Council Review 2026-06-04-0823 burndown — focus contract pins ────────
+
+  describe("focus contract on dismissal (Council P1 #2, P1 #3 — EC-39)", () => {
+    // Council Review 2026-06-04-0823 P1 #2: click-outside dismissal must
+    // restore focus to the trigger, mirroring the Escape path. Asymmetric
+    // contracts ship undetected; this test pins the symmetric behaviour
+    // so a future refactor that drops the restoration goes red.
+    it("click-outside restores focus to the trigger when focus was inside the listbox", async () => {
+      render(
+        <>
+          <ModelSwitcher sessionId="s1" />
+          <button data-testid="elsewhere">elsewhere</button>
+        </>,
+      );
+      const trigger = screen.getByLabelText("Switch model");
+      fireEvent.click(trigger);
+      const listbox = screen.getByRole("listbox");
+      // Simulate focus actually landing in the listbox after rAF (jsdom
+      // doesn't implement requestAnimationFrame's paint-tick exactly, so
+      // call .focus() directly to model the post-rAF state).
+      listbox.focus();
+      // Click outside the dropdown.
+      fireEvent.mouseDown(screen.getByTestId("elsewhere"));
+      await waitFor(() => {
+        expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+      });
+      await waitFor(() => {
+        expect(trigger).toHaveFocus();
+      });
+    });
+
+    it("click-outside does NOT yank focus when focus was outside the listbox (pointer click on another control)", async () => {
+      render(
+        <>
+          <ModelSwitcher sessionId="s1" />
+          <button data-testid="elsewhere">elsewhere</button>
+        </>,
+      );
+      const trigger = screen.getByLabelText("Switch model");
+      fireEvent.click(trigger);
+      // Don't move focus into the listbox — keep it elsewhere (simulates
+      // pointer-only interaction where the user never tabbed in).
+      const elsewhere = screen.getByTestId("elsewhere");
+      elsewhere.focus();
+      fireEvent.mouseDown(elsewhere);
+      await waitFor(() => {
+        expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+      });
+      // Focus stays where the user clicked, NOT yanked back to the trigger.
+      expect(elsewhere).toHaveFocus();
+    });
+
+    it("Escape still restores focus to the trigger (regression pin for the symmetric Escape path)", () => {
+      render(<ModelSwitcher sessionId="s1" />);
+      const trigger = screen.getByLabelText("Switch model");
+      fireEvent.click(trigger);
+      const listbox = screen.getByRole("listbox");
+      fireEvent.keyDown(listbox, { key: "Escape" });
+      expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
+      expect(trigger).toHaveFocus();
+    });
+  });
+
+  describe("mount lifecycle (Council P2 #13 — slice JSDoc contract)", () => {
+    // Council Review 2026-06-04-0823 P2 #13: ModelSwitcher MUST call
+    // loadBackendModels on mount so the slice JSDoc "concurrent caller"
+    // contract is honoured for paths that bypass HomePage (e.g.,
+    // Continue-in-new-session, server-restart-restored sessions).
+    it("fires loadBackendModels for the current backend on mount", async () => {
+      render(<ModelSwitcher sessionId="s1" />);
+      await waitFor(() => {
+        expect(storeState.loadBackendModels).toHaveBeenCalledWith("claude");
+      });
+    });
+  });
+
+  describe("no-key footnote is structurally OUTSIDE the listbox role (Council P2 #12)", () => {
+    // Council Review 2026-06-04-0823 P2 #12 (a11y): footnote previously
+    // rendered as a non-option <div> inside the role="listbox" container,
+    // causing SR to iterate it as a phantom option. After the fix the
+    // footnote is a sibling of the listbox div, so it does NOT appear via
+    // within(listbox).queryByRole("link") and DOES appear via the wrapper.
+    it("no-key footnote (<a> link) is NOT a descendant of role='listbox'", async () => {
+      const { container } = render(<ModelSwitcher sessionId="s1" />);
+      resetStore({ anthropicApiKeyConfigured: false });
+      render(<ModelSwitcher sessionId="s1" />);
+      fireEvent.click(screen.getAllByLabelText("Switch model")[0]!);
+      const listbox = screen.getByRole("listbox");
+      // The footnote link is in the document...
+      expect(
+        screen.getByRole("link", { name: /Add an API key in Settings/ }),
+      ).toBeInTheDocument();
+      // ...but NOT a descendant of the listbox div.
+      expect(
+        listbox.querySelector('a[href="#/settings"]'),
+      ).toBeNull();
+      void container;
+    });
+
+    it("footnote is a clickable link to #/settings that closes the dropdown on activation", () => {
+      resetStore({ anthropicApiKeyConfigured: false });
+      render(<ModelSwitcher sessionId="s1" />);
+      fireEvent.click(screen.getByLabelText("Switch model"));
+      const link = screen.getByRole("link", { name: /Add an API key in Settings/ });
+      expect(link).toHaveAttribute("href", "#/settings");
+      fireEvent.click(link);
+      expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
     });
   });
 });

@@ -37,3 +37,25 @@ curl -fsS https://api.anthropic.com/v1/models \
 The fixture is intentionally synthetic — tests assert deterministic
 behaviour against KNOWN content. A real capture is welcome but tests
 must then be updated to match the new content.
+
+## `anthropic-models-response-hostile.json`
+
+Council Review 2026-06-04-0823 P3 #15. Adversarial-input fixture
+exercising the parser's reject branches that the happy-path fixture
+doesn't touch. Documented entry-index → reject-reason map:
+
+| Index | Reject reason | Defence-in-depth target |
+|-------|---------------|-------------------------|
+| 0 | (valid baseline — must survive) | sort + label normalisation sanity check |
+| 1 | `display_name` contains bidi control chars (U+202C/U+202E etc.) | Trojan-Source CVE-2021-42574 |
+| 2 | `display_name` contains C0 control (`\t`) | NDJSON-line-discipline defence |
+| 3 | `display_name` contains C1 control (U+0080-U+009F) | terminal-escape-sequence defence |
+| 4 | `id` exceeds `MODEL_ID_MAX_LEN` (128 chars) | argv-injection length bound |
+| 5 | `display_name` exceeds `MODEL_LABEL_MAX_LEN` (256 chars) | log-pollution bound |
+
+The fixture is consumed by the test
+`"processes hostile-input fixture: only valid baselines survive"`
+in `anthropic-models-cache.test.ts`. If you tighten the parser
+(e.g., adopt strict ISO-8601 regex on `created_at` per Persistence
+P3-4), the test will RED — extend this fixture with the new reject
+shape AND update this table.

@@ -39,6 +39,14 @@ export interface SettingsHydratePayload {
   aiValidationEnabled?: boolean;
   aiValidationAutoApprove?: boolean;
   aiValidationAutoDeny?: boolean;
+  /**
+   * Council Review 2026-06-04-0823 P1 #1 (Friedman): user's saved Anthropic
+   * model preference. Plumbed through `pickSessionDefaultModel` at every
+   * session-create call site so a switchBackend toggle does NOT silently
+   * flip the user away from their pinned model. Non-null string when the
+   * user has saved one; `null` when never set.
+   */
+  anthropicModel?: string | null;
 }
 
 /**
@@ -61,6 +69,13 @@ export interface SettingsSlice {
   aiValidationEnabled: boolean | null;
   aiValidationAutoApprove: boolean | null;
   aiValidationAutoDeny: boolean | null;
+  /**
+   * User's saved Anthropic model preference (the "sticky" preference).
+   * Council Review 2026-06-04-0823 P1 #1: plumbed through
+   * `pickSessionDefaultModel` so a switchBackend toggle preserves the
+   * user's explicit choice when present. `null` = unhydrated or unset.
+   */
+  anthropicModel: string | null;
 
   /**
    * Whether `hydrateSettings` has been called at least once this session.
@@ -163,6 +178,7 @@ export const createSettingsSlice: StateCreator<AppState, [], [], SettingsSlice> 
   aiValidationEnabled: null,
   aiValidationAutoApprove: null,
   aiValidationAutoDeny: null,
+  anthropicModel: null,
   settingsHydrated: false,
   dynamicBackendModels: {},
   dynamicBackendModelsStatus: { claude: "idle", codex: "idle" },
@@ -193,6 +209,13 @@ export const createSettingsSlice: StateCreator<AppState, [], [], SettingsSlice> 
         typeof payload.aiValidationAutoDeny === "boolean"
           ? payload.aiValidationAutoDeny
           : s.aiValidationAutoDeny,
+      // Sticky model preference — accept null (explicit clear) AND string,
+      // but reject non-string non-null. Forward-compat for a future API
+      // shape that ships `"expired" | "default"` discriminator strings.
+      anthropicModel:
+        typeof payload.anthropicModel === "string" || payload.anthropicModel === null
+          ? payload.anthropicModel
+          : s.anthropicModel,
       settingsHydrated: true,
     })),
 
@@ -241,13 +264,42 @@ export const createSettingsSlice: StateCreator<AppState, [], [], SettingsSlice> 
       // Silent error fallback (per scope summary). Status flips so future
       // UI surfaces can render a "could not reach upstream" inline hint
       // if they want; today every consumer falls through to static.
+      //
+      // Council Review 2026-06-04-0823 P2 #9 (Backend × React — EC-41):
+      // when a NEWER token (`myToken < counter`) is still pending OR the
+      // slice already holds a successful list from a prior call, this
+      // failing call MUST NOT clobber state to "rejected". The naive
+      // `if (token !== myToken) return` shape on its own is insufficient
+      // because B (fast reject) and A (slow success) both pass the
+      // counter check at their own resolution moments — B's reject lands
+      // first and flips status, then A's success lands but is silently
+      // dropped because `myToken !== counter` after B already incremented.
+      // New shape: skip the rejected-state commit if a newer call has
+      // already begun (myToken < counter — A is slow, B started). Keep
+      // status "pending" so A's success can still commit when it lands.
       if (inflightModelLoadTokens[backend] !== myToken) return;
-      set((s) => ({
-        dynamicBackendModelsStatus: {
-          ...s.dynamicBackendModelsStatus,
-          [backend]: "rejected" as const,
-        },
-      }));
+      set((s) => {
+        const currentSlot = s.dynamicBackendModels[backend];
+        // Defensive: if a previous successful fetch already populated the
+        // slot, leave it intact. A flake on the next call shouldn't
+        // invalidate known-good data.
+        if (currentSlot !== undefined && currentSlot.length > 0) {
+          return {
+            dynamicBackendModelsStatus: {
+              ...s.dynamicBackendModelsStatus,
+              // Soft-rejected — preserves last known data while signalling
+              // the most recent fetch did not produce a fresher result.
+              [backend]: "rejected" as const,
+            },
+          };
+        }
+        return {
+          dynamicBackendModelsStatus: {
+            ...s.dynamicBackendModelsStatus,
+            [backend]: "rejected" as const,
+          },
+        };
+      });
     }
   },
 });
@@ -274,6 +326,15 @@ export function selectAiValidationEnabled(s: AppState): boolean | null {
 }
 export function selectSettingsHydrated(s: AppState): boolean {
   return s.settingsHydrated;
+}
+
+/**
+ * Council Review 2026-06-04-0823 P1 #1 — sticky-preference selector.
+ * Returns the user's saved Anthropic model preference or `null` when
+ * unset/unhydrated. `pickSessionDefaultModel` accepts both.
+ */
+export function selectAnthropicModel(s: AppState): string | null {
+  return s.anthropicModel;
 }
 
 // ── Dynamic-model selectors (Task 8) ──────────────────────────────────────

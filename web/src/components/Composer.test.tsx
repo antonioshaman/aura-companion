@@ -124,6 +124,10 @@ function setupMockStore(overrides: {
     // preserve pre-Task-11 behaviour (static fallback).
     dynamicBackendModels: {} as { claude?: unknown; codex?: unknown },
     anthropicApiKeyConfigured: null,
+    // Council Review 2026-06-04-0823 P2 #13 — ModelSwitcher now fires
+    // loadBackendModels on mount. Composer's child ModelSwitcher would
+    // crash without this mock.
+    loadBackendModels: vi.fn(async () => undefined),
   };
 }
 

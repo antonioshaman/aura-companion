@@ -311,3 +311,63 @@ These must be followed — flag violations as findings.
 **Principle:** `references/security.md` → Principle 2 (Automate defences — make the wrong thing impossible); `references/quality-persistence.md` → Principle 6 (validate at the boundary). Sibling memory `feedback_call_site_presence_not_just_symbol_export` (the existence of `resolveMarker` doesn't prove every site calls it — grep call sites in addition to the symbol). Convention floor for `detect-stack.ts` specifically; ratifies EC-7 for this file going forward.
 
 ---
+
+---
+
+### EC-37: PLAN "Risks & Watchpoints" items demand BOTH a behavioural test AND a `git grep` of production call sites before claiming addressed
+
+**Convention:** Every item enumerated in a `/council-plan-aura` output's "Risks & Watchpoints" section that names a contract, invariant, or wired behaviour MUST be verified at `/council-implement-aura` close time via (a) a behavioural test that exercises the contract (typecheck-pin is insufficient — string `event` names, signature-widened optional args, and JSDoc claims are not type-system-enforced), AND (b) a `git grep` of the production call sites that demonstrates the contract is wired beyond unit tests. The implementation log MUST cite the test ID and grep output for each watchpoint item it claims addressed. Symbol export + helper existence + isolated unit test ≠ wired-in-production. Reference symptoms from Council Review 2026-06-04-0823: sticky-`anthropicModel` preserved as PLAN watchpoint, `pickSessionDefaultModel` helper added, tests assert the contract, but `HomePage.tsx:253` and `CronManager.tsx:850-856` call sites omit the third argument — contract unenforced in production despite plan + helper + tests being green. Three of seven P1 findings in that review (sticky preference, EC-22 emit-path coverage, HomePage lifecycle assertion) share this exact failure shape.
+
+**Origin:** Friedman × Beck × React/Web UI — Council Review 2026-06-04-0823 (P1 findings #1, #4, #5, #6 convergence)
+
+**Principle:** `references/quality-testing.md` → "Specific" desideratum + Mutation resistance; `references/quality-ux.md` → P9 (trust through reasoning visibility); sibling memories `feedback_call_site_presence_not_just_symbol_export` (universal) + `feedback_council_documented_contract_canary` (JSDoc-only contracts are doku-not-enforcement) + `feedback_verify_test_bodies_not_just_names`
+
+---
+
+### EC-38: Cache predicates and timeout decisions over `Date.now()` MUST clamp negative-skew via `Math.max(0, now - past)` OR detect anomaly and force-refresh
+
+**Convention:** Any predicate of the shape `(now - pastTimestamp) > thresholdMs` where both `now` and `pastTimestamp` derive from `Date.now()` (wall-clock) MUST defend against host clock jumping backward (NTP correction after drift, manual `date -s`, VM resume from snapshot, developer laptop sleeping with NTP off then waking). Two acceptable shapes: (a) clamp at zero — `Math.max(0, now - pastTimestamp) > thresholdMs` so negative skew is treated as zero-age (still bounded by threshold going forward), OR (b) detect anomaly — `if (now < pastTimestamp - SKEW_TOLERANCE_MS) treatAsMissAndForceRefresh()`. The clamp form is simpler; the tolerance form is more conservative for security-sensitive predicates. Document the choice in the predicate comment. Bare `(now - past) > ttlMs` silently fails-OPEN on negative skew — the cache appears fresh until wall-clock advances past `pastTimestamp + ttlMs` again, which on a week-suspended laptop is forever. Reference: `anthropic-models-cache.ts:762` `isCacheRecordValid` shipped without the clamp; same shape lurks anywhere `idle-timer`, `session-grace`, or `recording-rotation` uses `Date.now()` deltas.
+
+**Origin:** Persistence-FS × Carmack — Council Review 2026-06-04-0823 (P2-10)
+
+**Principle:** `references/quality-persistence.md` → P7 (Clock not monotonic — replay determinism / TTL correctness); sibling memory `feedback_wallclock_anchored_derivation` (universal — wall-clock anchored derivation requires explicit anomaly handling)
+
+---
+
+### EC-39: Dropdown / overlay / dialog dismissal MUST restore focus to the trigger on EVERY dismissal path (Escape AND click-outside AND any future programmatic close)
+
+**Convention:** Any component that mounts a transient overlay (dropdown, dialog, popover, sheet, menu, listbox panel) — i.e., owns an `open: boolean` state with multiple dismissal paths — MUST restore keyboard focus to the trigger element on EVERY close path, not just the Escape path. Acceptable shapes: (a) close path wraps `requestAnimationFrame(() => triggerRef.current?.focus())` gated on `document.activeElement` being inside the overlay container (so pointer-click on a different focusable element doesn't yank focus from where the user clicked), OR (b) a shared `useOverlayDismissal` hook owning the focus contract for every dismissal path. Asymmetric paths — Escape restores focus, click-outside doesn't — silently violate WCAG 2.4.3 (Focus Order) and the APG dialog/listbox dismissal contract. Reference precedent that DID get it right: `CouncilToggle.tsx:189,211` wraps close in `requestAnimationFrame(() => triggerRef.current?.focus())`. Reference precedent that DROPPED it: `ModelSwitcher.tsx:107-116` click-outside calls only `setOpen(false)` — same component, same overlay, two dismissal paths, two different focus outcomes. Tests MUST cover focus-restore on EVERY dismissal path (not just Escape), using `await waitFor(() => expect(triggerRef).toHaveFocus())`.
+
+**Origin:** a11y Auditor × React/Web UI — Council Review 2026-06-04-0823 (P1 #2)
+
+**Principle:** `references/quality-a11y.md` → P4 (focus management on dynamic UI); WCAG 2.4.3 Focus Order; sibling pattern: `CouncilToggle.tsx` overlay-dismissal contract
+
+---
+
+### EC-40: Test-only escape hatches MUST use static `import` of `node:fs` (or peer modules), NOT inline `require()` + `eslint-disable`
+
+**Convention:** Helpers marked test-only via the `__` prefix convention (`__resetMemoryCacheForTests`, `__deleteDiskCacheForTests`, `__seedForTests`) MUST use static ESM `import` statements at the top of the file for any `node:fs`, `node:crypto`, or sibling-module functions they need. The inline `// eslint-disable-next-line @typescript-eslint/no-require-imports` + `require("node:fs") as typeof import("node:fs")` pattern is forbidden because (a) it suggests the import is "dangerous" without actually preventing production callers from invoking the test helper, (b) Bun's bundler tree-shakes unused ESM imports correctly so the "production bloat" justification is empty, AND (c) it establishes a precedent — the next test helper added to the file copies the pattern, normalising bypass of the module's defensive write-side checks (`writeAtomicJson` atomic-write + bounds-check discipline). The `__` prefix already signals test-only intent; the import shape doesn't add to that signal. Reference: `anthropic-models-cache.ts:984-998` `__deleteDiskCacheForTests` shipped with the require + eslint-disable pair — Persistence reviewer noted the natural next step ("let me add `__seedDiskCacheForTests` while we're at it") bypasses `writeAtomicJson` entirely. The first one is fine in isolation; the second crosses a line.
+
+**Origin:** Backend-TS × Persistence-FS — Council Review 2026-06-04-0823 (P3-BT-1, P2-6)
+
+**Principle:** `references/quality-backend.md` → P5 (Resource lifecycle hygiene); `references/quality-persistence.md` → P6 (Validate at the boundary — same boundary discipline applies to test escape hatches)
+
+---
+
+### EC-41: Inflight-token guards over async results MUST prefer SUCCESS commit when a newer token is still pending; rejecting may NOT clobber a slower successful result
+
+**Convention:** Any module-scope or slice-scope counter that arbitrates "the latest call wins" over concurrent async operations (`Map<key, number>` token pattern; `AbortController` cancellation; promise-result-discrimination after-the-fact) MUST defend against the race where an EARLIER-resolving REJECTION (network blip on call B, token 2) clobbers a LATER-resolving SUCCESS (slow but valid response on call A, token 1). Two acceptable shapes: (a) "rejection is not result" — when commit-check fires and the current token still matches but the outcome is rejection, do NOT mutate state to "rejected" if any other call is still pending; keep "pending" status until the latest token resolves, OR (b) "highest-tokened success wins on tie-break" — track the highest tokened result and prefer success when timestamps match. The naive shape (`if (token === myToken) commit; else discard`) leaks the contract — "latest call wins" silently means "latest-RESOLVING call wins regardless of correctness." UI ends in `status: "rejected"` with `dynamicBackendModels[backend] === undefined` after a single concurrent reject inverts a successful concurrent fetch — visible to users as "static fallback indefinitely until manual reload" on flaky networks. Reference: `settings-slice.ts:144-240` `loadBackendModels` shipped with the naive shape; symptom visible on any concurrent post-Settings-save refetch + transient blip. Minimum acceptable defence: a comment documenting the trade-off so the next reader knows the contract is "latest-resolving-wins" and not "latest-wins."
+
+**Origin:** Backend-TS × React/Web UI — Council Review 2026-06-04-0823 (P2-BT-2, P2-9)
+
+**Principle:** `references/quality-backend.md` → P7 (Async correctness — latency-induced ordering inversions); `references/quality-frontend.md` → P2 (eliminate state that can be derived — when status derives from "latest call," derive correctly)
+
+---
+
+### AP-16: `anthropic-models-cache.ts` 1221-LOC single-file is structurally justified by AP-3 co-location
+
+**Pattern:** The 1221-LOC line count of `web/server/anthropic-models-cache.ts` is intentional and follows the AP-3 writer-reader-parser-in-one-file precedent (`council-types.ts`, `observer-prompt.ts`). The file co-locates: (a) the discriminated-union `AnthropicModelsResult` + `CachedModelsRecord` schemas, (b) `parseAnthropicModelsResponse` + `parseAndPrepareAnthropicModels` parsers, (c) `fetchAnthropicModelsRaw` HTTPS boundary, (d) `readMemoryCache` / `writeMemoryCache` / `readDiskCache` / `writeDiskCache` persistence primitives, (e) `getAnthropicModels` orchestrator with single-flight Promise lock, (f) structured-log emission per branch, (g) test-only escape hatches (`__resetMemoryCacheForTests` etc.). Extracting any of these to a sibling module would re-introduce the writer/reader schema-drift footgun that AP-3 was specifically codified to close. Code review should not re-flag the file size as a structural concern UNLESS a new concern is added that has a different reason-to-change (e.g., a generic `BackendModelCache<T>` interface across Claude + Codex + a third backend would justify extraction — see PLAN Risks & Watchpoints "Fowler stretch — Codex symmetric move" parked discussion). Until then, size is correct; cohesion is the load-bearing axis.
+
+**Origin:** Fowler — Council Review 2026-06-04-0823 (returned 0 P1 / 0 P2 / 3 P3 — explicit structural sign-off)
+
+**Rationale:** Multi-file decomposition of a tightly-coupled writer+reader+parser+orchestrator surface re-introduces the exact drift the AP-3 floor was codified to prevent; the line count is a derived metric, the cohesion is the structural metric.
