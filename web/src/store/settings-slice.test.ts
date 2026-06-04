@@ -292,10 +292,18 @@ describe("settings-slice — anthropicModel sticky-preference hydration", () => 
 });
 
 // ── Council Review 2026-06-04-0823 P2 #9 — inflight reject doesn't clobber ──
+//
+// PR #91 burndown Task 3 (Council Review 2026-06-04-1826 P1 #4): EC-44
+// widens DynamicModelsStatus to discriminate soft-reject from hard-reject
+// at the type level; EC-42 demands the test go RED if the if/else collapses
+// to a single branch. Two tests pin the two literal status values; collapsing
+// both branches to `"rejected"` makes the soft-reject test fail, and removing
+// the soft-reject preservation entirely (always writing
+// `dynamicBackendModels[backend] = undefined`) also fails the data assertion.
 
-describe("settings-slice — loadBackendModels reject-after-success protection (Council P2 #9, EC-41)", () => {
-  it("rejecting after a prior successful fetch preserves dynamicBackendModels.claude data", async () => {
-    // Sequence: success seeds the slot → fail → data should NOT be wiped.
+describe("settings-slice — loadBackendModels reject-after-success protection (Council P2 #9, EC-41, EC-44)", () => {
+  it("soft-reject after a prior successful fetch preserves data AND sets status to 'rejected-stale'", async () => {
+    // Sequence: success seeds the slot → fail → soft-reject branch fires.
     mockGetBackendModels.mockResolvedValueOnce([
       { value: "claude-opus-4-8", label: "Opus 4.8", description: "" },
     ]);
@@ -309,7 +317,21 @@ describe("settings-slice — loadBackendModels reject-after-success protection (
     // Data preserved (not wiped on flake) — last-known-good beats null.
     expect(s.dynamicBackendModels.claude).toHaveLength(1);
     expect(s.dynamicBackendModels.claude?.[0]?.value).toBe("claude-opus-4-8");
-    // Status reflects the most-recent fetch outcome ("soft-rejected").
+    // EC-44 + EC-42 mutation-resistance: collapsing the if/else makes
+    // status equal `"rejected"` and this assertion goes RED.
+    expect(s.dynamicBackendModelsStatus.claude).toBe("rejected-stale");
+  });
+
+  it("hard-reject without prior success sets status to 'rejected' (NOT 'rejected-stale')", async () => {
+    // Hard-reject branch — slot is undefined (idle), reject preserves
+    // that AND sets status to literal `"rejected"`. EC-42 mutation-
+    // resistance: if the soft-reject literal `"rejected-stale"` leaks
+    // into this branch, the status assertion fails.
+    mockGetBackendModels.mockRejectedValueOnce(new Error("cold-start fail"));
+    await useStore.getState().loadBackendModels("claude");
+
+    const s = useStore.getState();
+    expect(s.dynamicBackendModels.claude).toBeUndefined();
     expect(s.dynamicBackendModelsStatus.claude).toBe("rejected");
   });
 });

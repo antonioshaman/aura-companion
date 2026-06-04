@@ -838,7 +838,11 @@ export function readMemoryCache(
 ): CachedModelsRecord | null {
   const record = memoryCache.get(fingerprint);
   if (record === undefined) return null;
-  if (now - record.fetched_at > IN_MEMORY_TTL_MS) {
+  // EC-38: clamp negative skew (Math.max(0, ...)) so a backwards-jumping
+  // wall clock doesn't make the record appear infinitely fresh. Symmetric
+  // with `isCacheRecordValid` per EC-43 — PR #91 burndown Task 5 closes
+  // Council Review 2026-06-04-1826 P2 #7.
+  if (Math.max(0, now - record.fetched_at) > IN_MEMORY_TTL_MS) {
     memoryCache.delete(fingerprint);
     return null;
   }

@@ -31,6 +31,7 @@ import {
   __resetMemoryCacheForTests,
   __resetInflightForTests,
   __deleteDiskCacheForTests,
+  __resetSignalCoalesceFlagForTests,
   SCHEMA_VERSION,
   KEY_FINGERPRINT_HEX_LEN,
   IN_MEMORY_TTL_MS,
@@ -496,12 +497,14 @@ describe("getAnthropicModels orchestrator", () => {
     __resetMemoryCacheForTests();
     __resetInflightForTests();
     __deleteDiskCacheForTests();
+    __resetSignalCoalesceFlagForTests();
   });
 
   afterEach(() => {
     __resetMemoryCacheForTests();
     __resetInflightForTests();
     __deleteDiskCacheForTests();
+    __resetSignalCoalesceFlagForTests();
   });
 
   it("returns no-key when apiKey is empty", async () => {
@@ -539,6 +542,41 @@ describe("getAnthropicModels orchestrator", () => {
     writeMemoryCache(expired);
     const probeNow = Date.now();
     expect(readMemoryCache(fp, probeNow)).toBeNull();
+  });
+
+  it("EC-38 — negative wall-clock skew does NOT make the record appear infinitely fresh (clamp at zero)", async () => {
+    // PR #91 burndown Task 5 closes Council Review 2026-06-04-1826 P2 #7
+    // (symmetric-path-missing-transformation): `readMemoryCache` MUST
+    // clamp the (now - fetched_at) delta to zero, like `isCacheRecordValid`.
+    // Mutation-resistance (EC-42): if the `Math.max(0, ...)` clamp is
+    // removed, this test passes because negative delta is < TTL by
+    // arithmetic — so we verify the EVICTION path instead: the record
+    // is present (within TTL by clamp), then we probe with a forward-
+    // jumped clock to confirm the clamp doesn't AMPLIFY freshness.
+    //
+    // Concrete: fetched_at is from the future (system clock just got
+    // pushed backward). The record SHOULD be honoured as fresh (clamp
+    // to 0 → delta 0 < TTL). Without clamp, delta is HUGE NEGATIVE,
+    // (-N) > TTL is FALSE, so the record returns BUT this is fail-open
+    // — every cached record stays "fresh" forever once clock skews
+    // backwards. The clamp ensures the predicate keeps the right
+    // direction: fresh records stay fresh; the eviction path is
+    // governed by `now > fetched_at + TTL` only.
+    const fp = computeKeyFingerprint("sk-test");
+    const futureFetchedAt = Date.now() + 60_000; // 1 min in future (skew)
+    const futureRecord: CachedModelsRecord = {
+      schema_version: SCHEMA_VERSION,
+      fetched_at: futureFetchedAt,
+      key_fingerprint: fp,
+      models: [],
+    };
+    writeMemoryCache(futureRecord);
+    const probeNow = Date.now();
+    // With clamp: max(0, probeNow - futureFetchedAt) = max(0, -60000) = 0,
+    // which is <= TTL → record returned (treated as fresh; no panic).
+    const r = readMemoryCache(fp, probeNow);
+    expect(r).not.toBeNull();
+    expect(r?.key_fingerprint).toBe(fp);
   });
 
   it("maps fetch 401 to upstream-auth", async () => {
@@ -673,6 +711,7 @@ describe("EC-22 emit-path coverage — Council P1 #4", () => {
     __resetMemoryCacheForTests();
     __resetInflightForTests();
     __deleteDiskCacheForTests();
+    __resetSignalCoalesceFlagForTests();
     infoSpy = vi.spyOn(log, "info").mockImplementation(() => undefined);
     warnSpy = vi.spyOn(log, "warn").mockImplementation(() => undefined);
   });
@@ -683,6 +722,7 @@ describe("EC-22 emit-path coverage — Council P1 #4", () => {
     __resetMemoryCacheForTests();
     __resetInflightForTests();
     __deleteDiskCacheForTests();
+    __resetSignalCoalesceFlagForTests();
   });
 
   /** Helper: was `log.info` or `log.warn` called with an entry whose `data.event` matches? */
@@ -821,6 +861,7 @@ describe("Disk cache subsystem behavioural coverage — Council P1 #5", () => {
     __resetMemoryCacheForTests();
     __resetInflightForTests();
     __deleteDiskCacheForTests();
+    __resetSignalCoalesceFlagForTests();
     infoSpy = vi.spyOn(log, "info").mockImplementation(() => undefined);
     warnSpy = vi.spyOn(log, "warn").mockImplementation(() => undefined);
   });
@@ -831,6 +872,7 @@ describe("Disk cache subsystem behavioural coverage — Council P1 #5", () => {
     __resetMemoryCacheForTests();
     __resetInflightForTests();
     __deleteDiskCacheForTests();
+    __resetSignalCoalesceFlagForTests();
   });
 
   it("warm-start: cold memory + valid disk record returns source: 'disk' AND warms memory cache", async () => {
@@ -988,12 +1030,14 @@ describe("Single-flight lock released on reject — Council P3 #14", () => {
     __resetMemoryCacheForTests();
     __resetInflightForTests();
     __deleteDiskCacheForTests();
+    __resetSignalCoalesceFlagForTests();
   });
 
   afterEach(() => {
     __resetMemoryCacheForTests();
     __resetInflightForTests();
     __deleteDiskCacheForTests();
+    __resetSignalCoalesceFlagForTests();
   });
 
   it("after a single-flight rejection, a subsequent call observes the cleared lock and retries the fetch", async () => {
@@ -1023,6 +1067,107 @@ describe("Single-flight lock released on reject — Council P3 #14", () => {
 // Suppress "no-unused" for mkdirSync — kept available for any future test
 // that needs to seed disk state without invoking writeDiskCache.
 void mkdirSync;
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  PR #91 burndown Task 4 — Council Review 2026-06-04-1826 P2 #10
+//
+//  `signalCoalesceDegradeLogged` module-scope flag (convention AP-17):
+//   - exercised via signal-coalesce-degraded emit-path test (EC-22),
+//   - bounded by a once-per-process flag whose reset helper
+//     `__resetSignalCoalesceFlagForTests` MUST be wired into beforeEach of
+//     every orchestrator-suite that COULD inadvertently trigger it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("EC-22 + AP-17 — signal-coalesce-degraded once-per-process emit-path", () => {
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  const originalAny = (AbortSignal as unknown as { any?: unknown }).any;
+
+  beforeEach(() => {
+    __resetSignalCoalesceFlagForTests();
+    warnSpy = vi.spyOn(log, "warn").mockImplementation(() => undefined);
+    // Simulate runtime where `AbortSignal.any` is unavailable (older Node,
+    // polyfill regression). The cache module's `resolveCoalescedSignal`
+    // fail-towards-parent path then becomes reachable.
+    Object.defineProperty(AbortSignal, "any", {
+      value: undefined,
+      configurable: true,
+      writable: true,
+    });
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+    __resetSignalCoalesceFlagForTests();
+    if (typeof originalAny === "function") {
+      Object.defineProperty(AbortSignal, "any", {
+        value: originalAny,
+        configurable: true,
+        writable: true,
+      });
+    }
+  });
+
+  /** Same find-helper signature as the EC-22 orchestrator block above. */
+  function findEmitWithEvent(
+    spy: ReturnType<typeof vi.spyOn>,
+    event: string,
+  ): Record<string, unknown> | undefined {
+    for (const call of spy.mock.calls) {
+      const data = call[2] as Record<string, unknown> | undefined;
+      if (data && data.event === event) return data;
+    }
+    return undefined;
+  }
+
+  it("emits anthropic-models.signal-coalesce-degraded when AbortSignal.any is unavailable AND parentSignal is provided", async () => {
+    // Mutation-resistance (EC-42): if the warn-emit at
+    // anthropic-models-cache.ts:599 is removed, this test goes RED.
+    const fakeFetch = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ data: [] }), { status: 200 }));
+    const ac = new AbortController();
+    await fetchAnthropicModelsRaw("sk-test", {
+      fetch: fakeFetch,
+      parentSignal: ac.signal,
+    });
+
+    const data = findEmitWithEvent(warnSpy, "anthropic-models.signal-coalesce-degraded");
+    expect(data).toBeDefined();
+    expect(typeof data?.reason).toBe("string");
+  });
+
+  it("does NOT emit signal-coalesce-degraded twice in the same process (once-per-process flag honoured)", async () => {
+    const fakeFetch = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ data: [] }), { status: 200 }));
+    const ac = new AbortController();
+    await fetchAnthropicModelsRaw("sk-test", {
+      fetch: fakeFetch,
+      parentSignal: ac.signal,
+    });
+    // Clear spy calls; flag remains true → next call MUST NOT re-emit.
+    warnSpy.mockClear();
+    await fetchAnthropicModelsRaw("sk-test", {
+      fetch: fakeFetch,
+      parentSignal: ac.signal,
+    });
+
+    const data = findEmitWithEvent(warnSpy, "anthropic-models.signal-coalesce-degraded");
+    expect(data).toBeUndefined();
+  });
+
+  it("does NOT emit when parentSignal is omitted (degrade path is parent-signal-gated)", async () => {
+    // Even with `AbortSignal.any` absent, the warn must not fire if no
+    // caller-side abort is provided — there's nothing to coalesce.
+    const fakeFetch = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ data: [] }), { status: 200 }));
+    await fetchAnthropicModelsRaw("sk-test", { fetch: fakeFetch });
+
+    const data = findEmitWithEvent(warnSpy, "anthropic-models.signal-coalesce-degraded");
+    expect(data).toBeUndefined();
+  });
+});
 
 describe("Fixture replay — hostile-input reject coverage (Council P3 #15)", () => {
   // Reads from a separate fixture exercising parser reject branches that

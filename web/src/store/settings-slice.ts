@@ -55,7 +55,28 @@ export interface SettingsHydratePayload {
  * exposed for future surfaces (loading skeleton, "could not reach
  * Anthropic" inline hint, etc.) without a follow-up slice change.
  */
-export type DynamicModelsStatus = "idle" | "pending" | "resolved" | "rejected";
+/**
+ * Per-backend fetch lifecycle status. PR #91 burndown Task 2 — convention
+ * EC-44: when a code change introduces a semantically distinct state that
+ * previously was implicit, widen the union, don't overload an existing
+ * variant with a sentinel-data-shape. `"rejected"` and `"rejected-stale"`
+ * are now distinguishable from the status field alone — no need to combine
+ * with `dynamicBackendModels[backend] !== undefined` at the call site.
+ *
+ *  - `idle` — never fetched (default).
+ *  - `pending` — fetch in flight.
+ *  - `resolved` — last fetch succeeded; `dynamicBackendModels[backend]` populated.
+ *  - `rejected` — last fetch failed AND no prior successful result is held
+ *    (`dynamicBackendModels[backend]` is `undefined`). Hard reject.
+ *  - `rejected-stale` — last fetch failed BUT prior successful result is
+ *    preserved in `dynamicBackendModels[backend]`. Soft reject.
+ */
+export type DynamicModelsStatus =
+  | "idle"
+  | "pending"
+  | "resolved"
+  | "rejected"
+  | "rejected-stale";
 
 export interface SettingsSlice {
   // ── Server-authoritative facts (null = unhydrated) ────────────────────
@@ -280,19 +301,21 @@ export const createSettingsSlice: StateCreator<AppState, [], [], SettingsSlice> 
       if (inflightModelLoadTokens[backend] !== myToken) return;
       set((s) => {
         const currentSlot = s.dynamicBackendModels[backend];
-        // Defensive: if a previous successful fetch already populated the
-        // slot, leave it intact. A flake on the next call shouldn't
-        // invalidate known-good data.
+        // PR #91 burndown Task 2 (EC-44): the two branches now mutate
+        // genuinely-different literal status values, replacing the
+        // prior overload-via-JSDoc shape. EC-42 mutation-resistance:
+        // collapsing the if/else makes one of the two re-write tests
+        // go RED.
         if (currentSlot !== undefined && currentSlot.length > 0) {
+          // Soft-reject — last known data preserved.
           return {
             dynamicBackendModelsStatus: {
               ...s.dynamicBackendModelsStatus,
-              // Soft-rejected — preserves last known data while signalling
-              // the most recent fetch did not produce a fresher result.
-              [backend]: "rejected" as const,
+              [backend]: "rejected-stale" as const,
             },
           };
         }
+        // Hard-reject — no prior data; slot stays undefined.
         return {
           dynamicBackendModelsStatus: {
             ...s.dynamicBackendModelsStatus,

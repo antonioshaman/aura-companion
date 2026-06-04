@@ -95,10 +95,24 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
     return set;
   }, [dynamicModels, models]);
 
-  // Find the matching model option, or build a fallback for custom models
+  // Find the matching model option, or build a fallback for custom models.
+  // PR #91 burndown Task 10 (Council Review 2026-06-04-1826 P2 #9): when
+  // sticky-preference preserves a model Anthropic has since deprecated
+  // (e.g., `claude-opus-4-6` not in dynamic list), the trigger previously
+  // rendered "Opus 4.6 ?" — the `?` glyph with no tooltip. Now: drop the
+  // glyph (empty string matches the Claude column convention) and surface
+  // the why-am-I-seeing-this-name explanation via the trigger's `title`
+  // attribute below.
   const currentOption: ModelOption | null =
     models.find((m) => m.value === currentModel) ||
-    (currentModel ? { value: currentModel, label: currentModel, icon: "?" } : null);
+    (currentModel ? { value: currentModel, label: currentModel, icon: "" } : null);
+
+  // Sticky-stale heuristic: the fallback (currentModel not found in
+  // available list) means the saved preference refers to a model we can
+  // no longer offer. Used to switch the trigger's tooltip from
+  // "Current model: X" to a why-explanation.
+  const isStickyStale =
+    currentOption !== null && !models.some((m) => m.value === currentModel);
 
   const handleSelect = useCallback(
     (model: string) => {
@@ -181,6 +195,22 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
     });
   }, [open, models, currentModel]);
 
+  // PR #91 burndown Task 12 (Council Review 2026-06-04-1826 P3 #13):
+  // when `loadBackendModels` resolves WHILE the dropdown is open and
+  // the new list has FEWER items than the prior `activeIndex`, the
+  // keydown handler's `handleSelect(models[activeIndex]!)` would read
+  // `undefined`. Clamp activeIndex to `[0, models.length - 1]` reactively
+  // — deps on `models.length` (NOT `models` identity) so the prior open-
+  // edge "don't reset on every refresh" contract is preserved.
+  useEffect(() => {
+    if (models.length === 0) {
+      if (activeIndex !== 0) setActiveIndex(0);
+      return;
+    }
+    const max = models.length - 1;
+    if (activeIndex > max) setActiveIndex(max);
+  }, [models.length, activeIndex]);
+
   // Scroll the active option into view on each activeIndex change
   // (a11y R3 + WCAG 2.4.11 Focus Not Obscured). `block: "nearest"`
   // prevents the page-jump trap when the listbox is in a scroll container.
@@ -242,14 +272,23 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
             ? "text-cc-fg bg-cc-active"
             : "text-cc-muted hover:text-cc-fg hover:bg-cc-hover"
         }`}
-        title={`Current model: ${currentOption.label}`}
+        title={
+          isStickyStale
+            ? `Model "${currentModel}" not in current available list — preserved from your saved preference`
+            : `Current model: ${currentOption.label}`
+        }
         aria-label="Switch model"
         aria-expanded={open}
         aria-haspopup="listbox"
       >
         {currentOption.icon && <span className="text-[13px] leading-none">{currentOption.icon}</span>}
         <span className="max-w-[14rem] truncate">{currentOption.label}</span>
-        <svg viewBox="0 0 12 12" fill="currentColor" className="w-2.5 h-2.5 opacity-50">
+        <svg
+          viewBox="0 0 12 12"
+          fill="currentColor"
+          className="w-2.5 h-2.5 opacity-50"
+          aria-hidden="true"
+        >
           <path d="M6 8L1.5 3.5h9L6 8z" />
         </svg>
       </button>
@@ -261,13 +300,23 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
         // wrapper holds the listbox + sibling footnote so the footnote is
         // outside the listbox's option iteration. Wrapper handles the
         // overlay positioning + clip; listbox owns its own focus ring.
-        <div className="absolute right-0 bottom-full mb-1 z-50 min-w-[180px] max-w-[280px] rounded-lg border border-cc-separator bg-cc-bg shadow-lg overflow-hidden">
+        // PR #91 burndown Task 11 (Council Review 2026-06-04-1826 P2 #11):
+        // codebase overlay convention is `bg-cc-card border-cc-border
+        // rounded-[10px]` (see CouncilToggle, Composer, LinearAgentEditor,
+        // Playground). Brings the dropdown into visual consistency with
+        // peer overlays — in dark mode `bg-cc-card` carries elevation
+        // beyond the `bg-cc-bg` chat surface.
+        <div className="absolute right-0 bottom-full mb-1 z-50 min-w-[180px] max-w-[280px] rounded-[10px] border border-cc-border bg-cc-card shadow-lg overflow-hidden">
         <div
           ref={listboxRef}
           tabIndex={0}
           // PLAN Task 13 / Saarinen R1: dropdown width clamp inherited from wrapper.
           // PLAN Task 12 / a11y R3: max-h + overflow-y for grown lists.
-          className="max-h-[24rem] overflow-y-auto focus:outline-none focus:ring-1 focus:ring-cc-primary/40"
+          // PR #91 burndown Task 8 (Council Review 2026-06-04-1826 P2 #5):
+          // dropped `/40` opacity from the focus-ring to satisfy WCAG 2.4.11
+          // (Focus Appearance AA — 3:1 contrast). Full-opacity `cc-primary`
+          // over `cc-bg` measures ≥3:1; `cc-primary/40` measured 1.5:1.
+          className="max-h-[24rem] overflow-y-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cc-primary"
           role="listbox"
           aria-label="Select model"
           aria-activedescendant={`${idPrefix}-option-${activeIndex}`}
@@ -305,7 +354,12 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
                   </span>
                 )}
                 {isSelected && (
-                  <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5 text-cc-primary shrink-0">
+                  <svg
+                    viewBox="0 0 16 16"
+                    fill="currentColor"
+                    className="w-3.5 h-3.5 text-cc-primary shrink-0"
+                    aria-hidden="true"
+                  >
                     <path d="M13.78 4.22a.75.75 0 010 1.06l-7.25 7.25a.75.75 0 01-1.06 0L2.22 9.28a.75.75 0 011.06-1.06L6 10.94l6.72-6.72a.75.75 0 011.06 0z" />
                   </svg>
                 )}
@@ -325,10 +379,19 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
            is clean. Sits as a SIBLING of the listbox div (not a child) so
            SR doesn't iterate it as a phantom option. */}
         {showNoKeyHint && (
+          // PR #91 burndown Task 9 + Task 13 (Council Review 2026-06-04-1826
+          // P2 #8 + P3 #14):
+          //  - `border-t-2` (was `border-t`) visually separates the footer
+          //    region from the listbox so it doesn't read as a 4th option.
+          //  - `underline decoration-dotted` makes the link affordance
+          //    visible at rest, satisfying WCAG 1.4.1 (Use of Color).
+          //  - Hover differentiates from option-row by transitioning to
+          //    `decoration-solid` (not `bg-cc-hover` — that's the option
+          //    row's hover token and visually collapsed the two surfaces).
           <a
             href="#/settings"
             onClick={() => setOpen(false)}
-            className="block px-3 py-2 border-t border-cc-separator text-[11px] text-cc-muted hover:text-cc-fg hover:bg-cc-hover transition-colors"
+            className="block px-3 py-2 border-t-2 border-cc-separator text-[11px] text-cc-muted underline decoration-dotted decoration-cc-muted/60 transition-colors hover:text-cc-fg hover:decoration-solid hover:decoration-cc-fg"
           >
             Add an API key in Settings to see more models.
           </a>
