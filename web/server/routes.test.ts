@@ -74,6 +74,15 @@ vi.mock("./session-names.js", () => ({
   _resetForTest: vi.fn(),
 }));
 
+// PLAN-aura-dynamic-model-list Task 7: mock the cache module so route tests
+// drive HTTP-status-mapping behaviour without hitting api.anthropic.com.
+// Default return is `no-key` (matches the default empty-anthropicApiKey
+// settings mock); per-test `mockResolvedValueOnce` overrides for happy-path
+// and error cases.
+vi.mock("./anthropic-models-cache.js", () => ({
+  getAnthropicModels: vi.fn(async () => ({ kind: "no-key" as const })),
+}));
+
 vi.mock("./settings-manager.js", () => ({
   DEFAULT_ANTHROPIC_MODEL: "claude-sonnet-4-6",
   getSettings: vi.fn(() => ({
@@ -280,6 +289,7 @@ import * as promptManager from "./prompt-manager.js";
 import * as gitUtils from "./git-utils.js";
 import * as sessionNames from "./session-names.js";
 import * as settingsManager from "./settings-manager.js";
+import * as anthropicModelsCache from "./anthropic-models-cache.js";
 import * as linearProjectManager from "./linear-project-manager.js";
 import { resolveApiKey } from "./linear-connections.js";
 import { containerManager } from "./container-manager.js";
@@ -3775,10 +3785,71 @@ describe("GET /api/backends/:id/models", () => {
     expect(json.error).toContain("Failed to parse");
   });
 
-  it("returns 404 for claude backend (uses frontend defaults)", async () => {
+  it("returns 404 with no_key_configured body when anthropicApiKey is empty (claude branch — EC-17 fail-CLOSED)", async () => {
+    // Default settings mock returns anthropicApiKey: "" → cache mock returns
+    // {kind: "no-key"} → handler maps to 404 with fixed-enum body.
     const res = await app.request("/api/backends/claude/models", { method: "GET" });
 
     expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: "no_key_configured" });
+  });
+
+  it("returns 200 with sorted models when anthropicApiKey is configured (claude branch — happy path)", async () => {
+    // Override the cache mock for THIS test only: simulate a successful
+    // resolution that returns the cached/fetched model list.
+    vi.mocked(anthropicModelsCache.getAnthropicModels).mockResolvedValueOnce({
+      kind: "ok",
+      source: "network",
+      fetched_at: 1_000_000_000_000,
+      models: [
+        { value: "claude-opus-4-8", label: "Opus 4.8", description: "Claude Opus 4.8" },
+        { value: "claude-sonnet-4-6", label: "Sonnet 4.6", description: "Claude Sonnet 4.6" },
+      ],
+    });
+
+    const res = await app.request("/api/backends/claude/models", { method: "GET" });
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body).toEqual([
+      { value: "claude-opus-4-8", label: "Opus 4.8", description: "Claude Opus 4.8" },
+      { value: "claude-sonnet-4-6", label: "Sonnet 4.6", description: "Claude Sonnet 4.6" },
+    ]);
+  });
+
+  it("returns 502 upstream_unauthorized when Anthropic rejects the API key (claude branch — server is honest broker)", async () => {
+    // Backend R2: bad upstream key surfaces as 502 server-side, NOT 401
+    // (which would trigger Aura's bearer-auth re-flow on the browser).
+    vi.mocked(anthropicModelsCache.getAnthropicModels).mockResolvedValueOnce({
+      kind: "upstream-auth",
+      httpStatus: 401,
+    });
+
+    const res = await app.request("/api/backends/claude/models", { method: "GET" });
+
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({ error: "upstream_unauthorized" });
+  });
+
+  it("returns 502 upstream_unavailable when Anthropic is unreachable AND no cache (claude branch)", async () => {
+    vi.mocked(anthropicModelsCache.getAnthropicModels).mockResolvedValueOnce({
+      kind: "upstream-unavailable",
+      reason: "5xx",
+    });
+
+    const res = await app.request("/api/backends/claude/models", { method: "GET" });
+
+    expect(res.status).toBe(502);
+    expect(await res.json()).toEqual({ error: "upstream_unavailable" });
+  });
+
+  it("preserves the original 404 fallback for unknown backendId", async () => {
+    // Non-codex, non-claude → original frontend-defaults hint.
+    const res = await app.request("/api/backends/foobar/models", { method: "GET" });
+
+    expect(res.status).toBe(404);
+    const body = await res.json();
+    expect(body.error).toContain("frontend defaults");
   });
 });
 

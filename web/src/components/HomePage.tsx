@@ -17,7 +17,7 @@ import { disconnectSession } from "../ws.js";
 import { generateUniqueSessionName } from "../utils/names.js";
 import { getRecentDirs, addRecentDir } from "../utils/recent-dirs.js";
 import { navigateToSession } from "../utils/routing.js";
-import { getModelsForBackend, getModesForBackend, getDefaultModel, getDefaultMode, toModelOptions, type ModelOption } from "../utils/backends.js";
+import { getModelsForBackend, getModesForBackend, getDefaultModel, getDefaultMode, pickSessionDefaultModel } from "../utils/backends.js";
 import type { BackendType } from "../types.js";
 import { EnvManager } from "./EnvManager.js";
 import { FolderPicker } from "./FolderPicker.js";
@@ -107,7 +107,12 @@ export function HomePage() {
   const [images, setImages] = useState<ImageAttachment[]>([]);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
-  const [dynamicModels, setDynamicModels] = useState<ModelOption[] | null>(null);
+  // PLAN-aura-dynamic-model-list Task 10: dynamic models lifted from
+  // local React state to settings-slice. `dynamicModelsForBackend` reads
+  // the slice's per-backend cache; `undefined` (idle / failed / no key)
+  // → silent fallback to static `getModelsForBackend(backend)` below.
+  const dynamicModelsForBackend = useStore((s) => s.dynamicBackendModels[backend]);
+  const loadBackendModels = useStore((s) => s.loadBackendModels);
   const [linearConfigured, setLinearConfigured] = useState(false);
   const [selectedLinearIssue, setSelectedLinearIssue] = useState<LinearIssue | null>(null);
   const [selectedLinearConnectionId, setSelectedLinearConnectionId] = useState<string | null>(null);
@@ -141,7 +146,7 @@ export function HomePage() {
     [backends],
   );
 
-  const MODELS = dynamicModels || getModelsForBackend(backend);
+  const MODELS = dynamicModelsForBackend ?? getModelsForBackend(backend);
   const MODES = getModesForBackend(backend);
 
   // Environment state
@@ -241,8 +246,11 @@ export function HomePage() {
   function switchBackend(newBackend: BackendType) {
     setBackend(newBackend);
     localStorage.setItem("cc-backend", newBackend);
-    setDynamicModels(null);
-    setModel(getDefaultModel(newBackend));
+    // PLAN Task 10 + 9: pick the new-backend default from the dynamic
+    // list when available (sliced by backend), static otherwise. The
+    // store-backed dynamic list survives the switch (no manual clear).
+    const dynamicForNew = useStore.getState().dynamicBackendModels[newBackend];
+    setModel(pickSessionDefaultModel(newBackend, dynamicForNew));
     setMode(getDefaultMode(newBackend));
     if (newBackend !== "claude") {
       setShowBranchingControls(false);
@@ -255,25 +263,14 @@ export function HomePage() {
     }
   }
 
-  // Fetch dynamic models for the selected backend
+  // PLAN-aura-dynamic-model-list Task 10: trigger dynamic-model fetch
+  // for the current backend. The slice action is idempotent — concurrent
+  // mount calls (HomePage + CronManager + ModelSwitcher) collapse server-
+  // side. The previous gate (`backend !== "codex"`) is dropped — Claude
+  // now reaches the new server endpoint as well.
   useEffect(() => {
-    if (backend !== "codex") {
-      setDynamicModels(null);
-      return;
-    }
-    api.getBackendModels(backend).then((models) => {
-      if (models.length > 0) {
-        const options = toModelOptions(models);
-        setDynamicModels(options);
-        // If current model isn't in the list, switch to first
-        if (!options.some((m) => m.value === model)) {
-          setModel(options[0].value);
-        }
-      }
-    }).catch(() => {
-      // Fall back to hardcoded models silently
-    });
-  }, [backend]); // eslint-disable-line react-hooks/exhaustive-deps
+    void loadBackendModels(backend);
+  }, [backend, loadBackendModels]);
 
   // When sandbox is enabled, check the-companion:latest image status
   useEffect(() => {

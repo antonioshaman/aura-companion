@@ -119,6 +119,11 @@ function setupMockStore(overrides: {
     // mount via useEffect. Returning undefined keeps existing tests inert
     // (no draft to consume → no text prefill).
     consumePickupDraft: vi.fn(() => undefined),
+    // PLAN-aura-dynamic-model-list Task 11/14 — ModelSwitcher (rendered
+    // by Composer) subscribes to these slice fields. Empty defaults
+    // preserve pre-Task-11 behaviour (static fallback).
+    dynamicBackendModels: {} as { claude?: unknown; codex?: unknown },
+    anthropicApiKeyConfigured: null,
   };
 }
 

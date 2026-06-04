@@ -34,8 +34,17 @@ const { mockApi, createSessionStreamMock, mockStoreState, mockStoreGetState } = 
   mockStoreState: {
     setCurrentSession: vi.fn(),
     currentSessionId: null as string | null,
+    // PLAN-aura-dynamic-model-list Task 10 — HomePage subscribes to
+    // settings-slice's dynamic model cache and dispatches the load action
+    // on mount. Tests don't exercise the lifecycle so the mock holds the
+    // idle shape — selectors return `undefined` (silent fallback to
+    // static models).
+    dynamicBackendModels: {} as { claude?: unknown; codex?: unknown },
+    loadBackendModels: vi.fn(async () => undefined),
   },
-  mockStoreGetState: vi.fn(() => ({})),
+  mockStoreGetState: vi.fn(() => ({
+    dynamicBackendModels: {} as { claude?: unknown; codex?: unknown },
+  })),
 }));
 
 vi.mock("../api.js", () => ({
@@ -105,6 +114,10 @@ function buildStoreMock(overrides: Record<string, unknown> = {}) {
     setLinkedLinearIssue: vi.fn(),
     setCreationError: vi.fn(),
     clearCreationError: vi.fn(),
+    // PLAN-aura-dynamic-model-list Task 10 — switchBackend reads this
+    // via useStore.getState() to compute the new-backend default model.
+    // Empty map means no dynamic list → fall back to static defaults.
+    dynamicBackendModels: {} as { claude?: unknown; codex?: unknown },
     ...overrides,
   };
 }
@@ -952,25 +965,33 @@ describe("HomePage", () => {
 
   // ─── Dynamic model fetching for codex ───────────────────────────────────────
 
-  it("fetches dynamic models for codex backend", async () => {
-    // When the codex backend is selected, dynamic models should be fetched
-    // from the API and used instead of the hardcoded fallback.
+  it("renders dynamic models from the settings-slice when the slice is populated", async () => {
+    // PLAN-aura-dynamic-model-list Task 10: model fetching is now owned by
+    // the settings-slice (`loadBackendModels` action). HomePage subscribes
+    // to `dynamicBackendModels[backend]` and renders whatever the slice
+    // contains, falling back to the static list when undefined.
+    // The actual fetch lifecycle (tokens, REST call, error → static) is
+    // covered by the settings-slice tests; here we assert the consumer
+    // contract: when the slice has a list, HomePage uses it.
     localStorage.setItem("cc-backend", "codex");
     mockApi.getBackends.mockResolvedValue([
       { id: "claude", name: "Claude", available: true },
       { id: "codex", name: "Codex", available: true },
     ]);
-    mockApi.getBackendModels.mockResolvedValue([
-      { value: "gpt-custom", label: "GPT Custom" },
-    ]);
+    mockStoreState.dynamicBackendModels = {
+      codex: [{ value: "gpt-custom", label: "GPT Custom", icon: "" }],
+    };
 
     render(<HomePage />);
     await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
 
-    // The dynamically fetched model should appear
+    // The dynamic model should appear in the dropdown
     await waitFor(() => {
       expect(screen.getByText("GPT Custom")).toBeInTheDocument();
     });
+
+    // Cleanup — keep test isolation
+    mockStoreState.dynamicBackendModels = {};
   });
 
   // ─── Resume candidates error handling ───────────────────────────────────────

@@ -73,6 +73,11 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
   // the test mock upgraded to support Zustand-style subscriptions.
   const hydrateSettingsSlice = useStore((s) => s.hydrateSettings);
   const setProviderConfiguredSlice = useStore((s) => s.setProviderConfigured);
+  // PLAN-aura-dynamic-model-list Task 8: re-fetch the dynamic Claude
+  // model list after a successful Anthropic API key save. The store
+  // action is idempotent + inflight-token-guarded so the trigger is safe
+  // to fire alongside any other consumer's mount-time fetch.
+  const loadBackendModelsSlice = useStore((s) => s.loadBackendModels);
   const [providerSaving, setProviderSaving] = useState(false);
   const [providerSaved, setProviderSaved] = useState(false);
   const [providerError, setProviderError] = useState("");
@@ -193,6 +198,13 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
       setAnthropicApiKey("");
       setSaved(true);
       setTimeout(() => setSaved(false), 1800);
+      // PLAN Task 8: refetch dynamic Claude models after a key was
+      // submitted. Skip when `nextKey` is empty (user only changed the
+      // model preference without rotating the key) — the existing cache
+      // is still valid under the same fingerprint.
+      if (nextKey && typeof loadBackendModelsSlice === "function") {
+        void loadBackendModelsSlice("claude");
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

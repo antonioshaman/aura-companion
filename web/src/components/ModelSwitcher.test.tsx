@@ -12,6 +12,10 @@ interface MockStoreState {
   sdkSessions: { sessionId: string; model?: string; backendType?: string; cwd: string }[];
   cliConnected: Map<string, boolean>;
   sessions: Map<string, { model?: string; backend_type?: string }>;
+  // PLAN-aura-dynamic-model-list Task 11: ModelSwitcher subscribes to the
+  // settings-slice cache. Empty default → fallback to static models (the
+  // pre-Task-11 behaviour these tests already assert).
+  dynamicBackendModels: { claude?: unknown; codex?: unknown };
 }
 
 let storeState: MockStoreState;
@@ -23,6 +27,7 @@ function resetStore(overrides: Partial<MockStoreState> = {}) {
     ],
     cliConnected: new Map([["s1", true]]),
     sessions: new Map([["s1", { model: DEFAULT_MODEL.value }]]),
+    dynamicBackendModels: {},
     ...overrides,
   };
 }
@@ -114,12 +119,16 @@ describe("ModelSwitcher", () => {
     expect(mockSetSdkSessions).not.toHaveBeenCalled();
   });
 
-  it("closes dropdown on Escape key", () => {
+  it("closes dropdown on Escape key (APG listbox keyboard model)", () => {
+    // PLAN-aura-dynamic-model-list Task 12 / a11y R1: Escape now lives on
+    // the listbox's own keyDown handler (APG-conformant). The dropdown
+    // listbox autofocuses on open, so a key press lands there naturally.
     render(<ModelSwitcher sessionId="s1" />);
     fireEvent.click(screen.getByLabelText("Switch model"));
-    expect(screen.getByRole("listbox")).toBeInTheDocument();
+    const listbox = screen.getByRole("listbox");
+    expect(listbox).toBeInTheDocument();
 
-    fireEvent.keyDown(window, { key: "Escape" });
+    fireEvent.keyDown(listbox, { key: "Escape" });
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
   });
 
@@ -187,5 +196,189 @@ describe("ModelSwitcher", () => {
     fireEvent.click(screen.getByLabelText("Switch model"));
     const results = await axe(container);
     expect(results).toHaveNoViolations();
+  });
+
+  // ── PLAN-aura-dynamic-model-list Task 15 — dynamic-list path ────────────
+
+  describe("with dynamic models from settings-slice (Tasks 11, 13, 14)", () => {
+    const dynamicClaude = [
+      { value: "claude-opus-4-8", label: "Opus 4.8", icon: "" },
+      { value: "claude-opus-4-7", label: "Opus 4.7", icon: "" },
+      { value: "claude-sonnet-4-6", label: "Sonnet 4.6", icon: "" },
+      { value: "claude-haiku-4-5-20251001", label: "Haiku 4.5", icon: "" },
+    ];
+
+    it("renders the dynamic list from the slice when present (replaces static)", () => {
+      resetStore({ dynamicBackendModels: { claude: dynamicClaude } });
+      render(<ModelSwitcher sessionId="s1" />);
+      fireEvent.click(screen.getByLabelText("Switch model"));
+      // All 4 dynamic models render
+      expect(screen.getByRole("option", { name: /Opus 4\.8/ })).toBeInTheDocument();
+      expect(screen.getByRole("option", { name: /Opus 4\.7/ })).toBeInTheDocument();
+      expect(screen.getByRole("option", { name: /Sonnet 4\.6/ })).toBeInTheDocument();
+      expect(screen.getByRole("option", { name: /Haiku 4\.5/ })).toBeInTheDocument();
+    });
+
+    it("marks the newest model per tier with a 'Latest' badge (Friedman R1)", () => {
+      resetStore({ dynamicBackendModels: { claude: dynamicClaude } });
+      render(<ModelSwitcher sessionId="s1" />);
+      fireEvent.click(screen.getByLabelText("Switch model"));
+      // Exactly 3 "Latest" badges (one per tier: opus, sonnet, haiku).
+      // Opus 4.7 must NOT carry the badge (4.8 is newer in tier).
+      const badges = screen.getAllByText("Latest");
+      expect(badges).toHaveLength(3);
+    });
+
+    it("passes axe checks with dynamic list rendered (Task 15 a11y mandate)", async () => {
+      resetStore({ dynamicBackendModels: { claude: dynamicClaude } });
+      const { axe } = await import("vitest-axe");
+      const { container } = render(<ModelSwitcher sessionId="s1" />);
+      fireEvent.click(screen.getByLabelText("Switch model"));
+      const results = await axe(container);
+      expect(results).toHaveNoViolations();
+    });
+
+    it("does NOT render the no-key footnote when dynamic list is present", () => {
+      resetStore({ dynamicBackendModels: { claude: dynamicClaude } });
+      render(<ModelSwitcher sessionId="s1" />);
+      fireEvent.click(screen.getByLabelText("Switch model"));
+      expect(screen.queryByText(/Add an API key in Settings/)).not.toBeInTheDocument();
+    });
+  });
+
+  // ── PLAN Task 14 — discoverability no-key footnote ──────────────────────
+
+  describe("no-key footnote (Friedman R3)", () => {
+    it("renders the Settings hint when fallback list is shown AND no key configured", () => {
+      // Static list + anthropicApiKeyConfigured: false → footnote visible.
+      resetStore({ anthropicApiKeyConfigured: false } as Partial<MockStoreState>);
+      render(<ModelSwitcher sessionId="s1" />);
+      fireEvent.click(screen.getByLabelText("Switch model"));
+      expect(screen.getByText(/Add an API key in Settings/)).toBeInTheDocument();
+    });
+
+    it("does NOT render the hint when anthropicApiKeyConfigured is null (unhydrated)", () => {
+      // Avoid flashing the hint before the slice has hydrated from /api/settings.
+      resetStore({ anthropicApiKeyConfigured: null } as Partial<MockStoreState>);
+      render(<ModelSwitcher sessionId="s1" />);
+      fireEvent.click(screen.getByLabelText("Switch model"));
+      expect(screen.queryByText(/Add an API key in Settings/)).not.toBeInTheDocument();
+    });
+
+    it("does NOT render the hint when key IS configured (silent fallback on upstream error)", () => {
+      // Per scope: key set but fetch failed → silent fallback. Footnote
+      // would confuse — the user opted in already.
+      resetStore({ anthropicApiKeyConfigured: true } as Partial<MockStoreState>);
+      render(<ModelSwitcher sessionId="s1" />);
+      fireEvent.click(screen.getByLabelText("Switch model"));
+      expect(screen.queryByText(/Add an API key in Settings/)).not.toBeInTheDocument();
+    });
+  });
+
+  // ── PLAN Task 12 — APG listbox keyboard model ───────────────────────────
+
+  describe("APG listbox keyboard model (a11y R1)", () => {
+    const longClaude = [
+      { value: "claude-opus-4-8", label: "Opus 4.8", icon: "" },
+      { value: "claude-opus-4-7", label: "Opus 4.7", icon: "" },
+      { value: "claude-sonnet-4-6", label: "Sonnet 4.6", icon: "" },
+      { value: "claude-haiku-4-5-20251001", label: "Haiku 4.5", icon: "" },
+    ];
+
+    it("opens with aria-activedescendant on the currently-selected option", () => {
+      resetStore({ dynamicBackendModels: { claude: longClaude } });
+      render(<ModelSwitcher sessionId="s1" />);
+      fireEvent.click(screen.getByLabelText("Switch model"));
+      const listbox = screen.getByRole("listbox");
+      // currentModel === CLAUDE_MODELS[0].value (claude-opus-4-7) which is
+      // index 1 in `longClaude`.
+      const expectedSelectedIndex = longClaude.findIndex(
+        (m) => m.value === DEFAULT_MODEL.value,
+      );
+      const activeId = listbox.getAttribute("aria-activedescendant");
+      expect(activeId).toContain(`-option-${expectedSelectedIndex >= 0 ? expectedSelectedIndex : 0}`);
+    });
+
+    it("ArrowDown advances aria-activedescendant within bounds", () => {
+      resetStore({ dynamicBackendModels: { claude: longClaude } });
+      render(<ModelSwitcher sessionId="s1" />);
+      fireEvent.click(screen.getByLabelText("Switch model"));
+      const listbox = screen.getByRole("listbox");
+      const initial = listbox.getAttribute("aria-activedescendant");
+      fireEvent.keyDown(listbox, { key: "ArrowDown" });
+      const afterDown = listbox.getAttribute("aria-activedescendant");
+      expect(afterDown).not.toBe(initial);
+    });
+
+    it("Home jumps to the first option", () => {
+      resetStore({ dynamicBackendModels: { claude: longClaude } });
+      render(<ModelSwitcher sessionId="s1" />);
+      fireEvent.click(screen.getByLabelText("Switch model"));
+      const listbox = screen.getByRole("listbox");
+      fireEvent.keyDown(listbox, { key: "End" });
+      fireEvent.keyDown(listbox, { key: "Home" });
+      const activeId = listbox.getAttribute("aria-activedescendant");
+      expect(activeId).toMatch(/-option-0$/);
+    });
+
+    it("End jumps to the last option", () => {
+      resetStore({ dynamicBackendModels: { claude: longClaude } });
+      render(<ModelSwitcher sessionId="s1" />);
+      fireEvent.click(screen.getByLabelText("Switch model"));
+      const listbox = screen.getByRole("listbox");
+      fireEvent.keyDown(listbox, { key: "End" });
+      const activeId = listbox.getAttribute("aria-activedescendant");
+      expect(activeId).toMatch(new RegExp(`-option-${longClaude.length - 1}$`));
+    });
+
+    it("Enter on a different option commits the selection (sends set_model)", () => {
+      resetStore({ dynamicBackendModels: { claude: longClaude } });
+      render(<ModelSwitcher sessionId="s1" />);
+      fireEvent.click(screen.getByLabelText("Switch model"));
+      const listbox = screen.getByRole("listbox");
+      fireEvent.keyDown(listbox, { key: "End" }); // jump to last (Haiku)
+      fireEvent.keyDown(listbox, { key: "Enter" });
+      expect(mockSendToSession).toHaveBeenCalledWith("s1", {
+        type: "set_model",
+        model: "claude-haiku-4-5-20251001",
+      });
+    });
+  });
+
+  // ── PLAN Task 12 — verify-by-absence (a11y R4) ──────────────────────────
+
+  describe("verify-by-absence: no aria-live on the listbox root (a11y R4)", () => {
+    // Future-contributor canary: a refactor that wraps the listbox in
+    // `aria-live="polite"` to announce "new models" would announce the
+    // whole list every cache refresh. Verified by absence — keeps the
+    // floor.
+    it("listbox container does NOT carry aria-live or role='status'", () => {
+      render(<ModelSwitcher sessionId="s1" />);
+      fireEvent.click(screen.getByLabelText("Switch model"));
+      const listbox = screen.getByRole("listbox");
+      expect(listbox).not.toHaveAttribute("aria-live");
+      expect(listbox.getAttribute("role")).toBe("listbox");
+      expect(listbox.getAttribute("role")).not.toBe("status");
+      expect(listbox.getAttribute("role")).not.toBe("log");
+    });
+  });
+
+  // ── PLAN Task 12 — truncated long label remains announceable (a11y R2) ──
+
+  describe("long-label accessibility (a11y R2)", () => {
+    it("option carries title attribute equal to its full label", () => {
+      const long = [
+        {
+          value: "claude-opus-4-8-20260415",
+          label: "Claude Opus 4.8 (2026-04-15 snapshot — extended-context)",
+          icon: "",
+        },
+      ];
+      resetStore({ dynamicBackendModels: { claude: long } });
+      render(<ModelSwitcher sessionId="s1" />);
+      fireEvent.click(screen.getByLabelText("Switch model"));
+      const option = screen.getByRole("option", { name: /extended-context/ });
+      expect(option).toHaveAttribute("title", long[0].label);
+    });
   });
 });

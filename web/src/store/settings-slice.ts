@@ -22,6 +22,9 @@
 
 import type { StateCreator } from "zustand";
 import type { AppState } from "./index.js";
+import type { BackendType } from "../types.js";
+import { api } from "../api.js";
+import { toModelOptions, type ModelOption } from "../utils/backends.js";
 
 /**
  * Subset of the GET /api/settings response shape this slice mirrors.
@@ -37,6 +40,14 @@ export interface SettingsHydratePayload {
   aiValidationAutoApprove?: boolean;
   aiValidationAutoDeny?: boolean;
 }
+
+/**
+ * Status enum for the dynamic backend models fetch lifecycle. Internal
+ * to the slice today (UI consumers fall back to static lists silently);
+ * exposed for future surfaces (loading skeleton, "could not reach
+ * Anthropic" inline hint, etc.) without a follow-up slice change.
+ */
+export type DynamicModelsStatus = "idle" | "pending" | "resolved" | "rejected";
 
 export interface SettingsSlice {
   // ── Server-authoritative facts (null = unhydrated) ────────────────────
@@ -60,6 +71,31 @@ export interface SettingsSlice {
   settingsHydrated: boolean;
 
   /**
+   * Dynamic backend model lists (PLAN-aura-dynamic-model-list Task 8).
+   *
+   * Per backend, holds the `ModelOption[]` returned from
+   * `GET /api/backends/:id/models` and converted via `toModelOptions`.
+   * `undefined` while idle/pending/rejected — consumers fall back to
+   * static `CLAUDE_MODELS` / `CODEX_MODELS` from `utils/backends.ts`.
+   *
+   * **Note on slice cohesion** — this field stretches the "server-
+   * authoritative settings facts only" invariant the slice header
+   * documents (Fowler P5 narrow scope). PLAN parked Fowler R4
+   * (separate `backend-models-slice.ts`) because the refetch trigger
+   * naturally fires off Settings save (the slice already owns the
+   * post-save handler surface). Revisit if `dynamicBackendModels` grows
+   * additional lifecycle (manual refresh button, periodic poll, etc.) —
+   * those would clearly belong in their own slice.
+   */
+  dynamicBackendModels: { claude?: ModelOption[]; codex?: ModelOption[] };
+
+  /** Per-backend fetch lifecycle status. See {@link DynamicModelsStatus}. */
+  dynamicBackendModelsStatus: {
+    claude: DynamicModelsStatus;
+    codex: DynamicModelsStatus;
+  };
+
+  /**
    * One-shot setter. Idempotent — callable from multiple mount sites
    * (SettingsPage's initial fetch, the New Session modal's pairing
    * availability gate) without re-hitting the API; the latest payload
@@ -77,6 +113,47 @@ export interface SettingsSlice {
     openaiApiKeyConfigured?: boolean;
     anthropicApiKeyConfigured?: boolean;
   }) => void;
+
+  /**
+   * Fetch the dynamic model list for `backend` and update the slice.
+   *
+   * Inflight-token guard (Frontend R1): concurrent calls collapse to the
+   * latest token's result — a slow first fetch cannot clobber a fresh
+   * post-save refetch that lands second. Token lives in module scope,
+   * NOT Zustand state, so two-tab/multi-mount scenarios share one
+   * canonical counter.
+   *
+   * Silent error fallback: REST failures do NOT throw to caller — the
+   * slice flips status to "rejected" and leaves `dynamicBackendModels[backend]`
+   * `undefined` so consumers render the static fallback transparently.
+   *
+   * Idempotent: safe to call from every consumer's `useEffect` mount
+   * (HomePage, CronManager, ModelSwitcher) — token guard + server-side
+   * cache means concurrent calls land on one upstream fetch.
+   */
+  loadBackendModels: (backend: BackendType) => Promise<void>;
+}
+
+/**
+ * Module-level inflight tokens — NOT in Zustand state so multiple
+ * `useStore.getState().loadBackendModels(...)` calls across components
+ * share one canonical counter. Each call increments the counter for its
+ * backend; only the call whose token still matches at resolution time
+ * commits its result.
+ */
+const inflightModelLoadTokens: Record<BackendType, number> = {
+  claude: 0,
+  codex: 0,
+};
+
+/**
+ * Test-only reset of the inflight token counters. Tests that exercise
+ * the load action across multiple cases need to start each from a
+ * clean counter; without this they accumulate across the test file.
+ */
+export function __resetBackendModelInflightForTests(): void {
+  inflightModelLoadTokens.claude = 0;
+  inflightModelLoadTokens.codex = 0;
 }
 
 export const createSettingsSlice: StateCreator<AppState, [], [], SettingsSlice> = (set) => ({
@@ -87,6 +164,8 @@ export const createSettingsSlice: StateCreator<AppState, [], [], SettingsSlice> 
   aiValidationAutoApprove: null,
   aiValidationAutoDeny: null,
   settingsHydrated: false,
+  dynamicBackendModels: {},
+  dynamicBackendModelsStatus: { claude: "idle", codex: "idle" },
 
   hydrateSettings: (payload) =>
     set((s) => ({
@@ -132,6 +211,45 @@ export const createSettingsSlice: StateCreator<AppState, [], [], SettingsSlice> 
           ? next.anthropicApiKeyConfigured
           : s.anthropicApiKeyConfigured,
     })),
+
+  loadBackendModels: async (backend) => {
+    const myToken = ++inflightModelLoadTokens[backend];
+    set((s) => ({
+      dynamicBackendModelsStatus: {
+        ...s.dynamicBackendModelsStatus,
+        [backend]: "pending" as const,
+      },
+    }));
+    try {
+      const fetched = await api.getBackendModels(backend);
+      // Inflight check: a newer call may have superseded this one (e.g.,
+      // user saves a fresh API key while a prior fetch is still pending).
+      // Drop our result silently rather than clobber.
+      if (inflightModelLoadTokens[backend] !== myToken) return;
+      const models = fetched.length > 0 ? toModelOptions(fetched) : undefined;
+      set((s) => ({
+        dynamicBackendModels: {
+          ...s.dynamicBackendModels,
+          [backend]: models,
+        },
+        dynamicBackendModelsStatus: {
+          ...s.dynamicBackendModelsStatus,
+          [backend]: "resolved" as const,
+        },
+      }));
+    } catch {
+      // Silent error fallback (per scope summary). Status flips so future
+      // UI surfaces can render a "could not reach upstream" inline hint
+      // if they want; today every consumer falls through to static.
+      if (inflightModelLoadTokens[backend] !== myToken) return;
+      set((s) => ({
+        dynamicBackendModelsStatus: {
+          ...s.dynamicBackendModelsStatus,
+          [backend]: "rejected" as const,
+        },
+      }));
+    }
+  },
 });
 
 // ── Narrow selectors (PLAN Task 6 — prevent render storms) ────────────────
@@ -156,4 +274,28 @@ export function selectAiValidationEnabled(s: AppState): boolean | null {
 }
 export function selectSettingsHydrated(s: AppState): boolean {
   return s.settingsHydrated;
+}
+
+// ── Dynamic-model selectors (Task 8) ──────────────────────────────────────
+
+/**
+ * One-field selector returning the dynamic model list for `backend`, or
+ * `undefined` while idle / pending / failed. Consumers compose with the
+ * static fallback themselves so the selector remains stateless:
+ *
+ *   `useStore(s => selectDynamicBackendModels(s, "claude")) ?? getModelsForBackend("claude")`
+ */
+export function selectDynamicBackendModels(
+  s: AppState,
+  backend: BackendType,
+): ModelOption[] | undefined {
+  return s.dynamicBackendModels[backend];
+}
+
+/** Status selector — typically only loading/error UX consumes this. */
+export function selectDynamicBackendModelsStatus(
+  s: AppState,
+  backend: BackendType,
+): DynamicModelsStatus {
+  return s.dynamicBackendModelsStatus[backend];
 }
