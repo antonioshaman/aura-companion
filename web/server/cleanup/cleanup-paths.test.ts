@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync, readdirSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -52,14 +52,16 @@ describe("resolveCleanupPath — happy path", () => {
   // absolute path with symlinks collapsed.
   it("returns root/relPath for a simple relative path under an existing root", () => {
     const got = resolveCleanupPath(tmpRoot, `${ARCHIVED_SESSIONS_SUBDIR}/sess123${EVICTING_SENTINEL_SUFFIX}`);
-    expect(got).toBe(join(tmpRoot, ARCHIVED_SESSIONS_SUBDIR, `sess123${EVICTING_SENTINEL_SUFFIX}`));
+    // resolveCleanupPath realpaths the deepest existing ancestor, so compare
+    // against the realpath'd root (macOS /var → /private/var portability).
+    expect(got).toBe(join(realpathSync(tmpRoot), ARCHIVED_SESSIONS_SUBDIR, `sess123${EVICTING_SENTINEL_SUFFIX}`));
   });
 
   // Nested relPath under a multi-level sub-directory: must compose
   // correctly without re-checking each intermediate.
   it("resolves a 2-segment relPath even when sub-dirs don't yet exist", () => {
     const got = resolveCleanupPath(tmpRoot, `${REAPING_SENTINEL_SUBDIR}/12345.json`);
-    expect(got).toBe(join(tmpRoot, REAPING_SENTINEL_SUBDIR, "12345.json"));
+    expect(got).toBe(join(realpathSync(tmpRoot), REAPING_SENTINEL_SUBDIR, "12345.json"));
   });
 });
 
@@ -114,7 +116,7 @@ describe("resolveCleanupPath — symlink resolution within bounds", () => {
     symlinkSync(join(tmpRoot, "real-archive"), join(tmpRoot, ARCHIVED_SESSIONS_SUBDIR));
     const got = resolveCleanupPath(tmpRoot, `${ARCHIVED_SESSIONS_SUBDIR}/sess1${EVICTING_SENTINEL_SUFFIX}`);
     // The symlink resolves to real-archive, which is still inside tmpRoot.
-    expect(got.startsWith(tmpRoot + sep)).toBe(true);
+    expect(got.startsWith(realpathSync(tmpRoot) + sep)).toBe(true);
   });
 });
 

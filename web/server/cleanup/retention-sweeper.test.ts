@@ -313,7 +313,7 @@ describe("active recording paths skip (Persistence R6)", () => {
     });
 
     const summary = await sweepRetention(cfg, buildRoots(), {
-      getActiveRecordingPaths: () => new Set([liveFile]),
+      getActiveRecordingPaths: () => new Set([realpathSync(liveFile)]),
     });
     const tier = summary.tiers.find((t) => t.tier === "recordings-soft")!;
     expect(tier.skippedActive).toBe(1);
@@ -343,7 +343,7 @@ describe("active recording paths skip (Persistence R6)", () => {
     });
 
     const summary = await sweepRetention(cfg, buildRoots(), {
-      getActiveLogPaths: () => new Set([liveLog]),
+      getActiveLogPaths: () => new Set([realpathSync(liveLog)]),
     });
     const tier = summary.tiers.find((t) => t.tier === "logs")!;
     expect(tier.skippedActive).toBe(1);

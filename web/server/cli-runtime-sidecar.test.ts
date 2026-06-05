@@ -17,7 +17,7 @@
 //     payload throws BEFORE touching the disk.
 
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -43,7 +43,9 @@ afterEach(() => {
 describe("sidecarPath — EC-7 routing through resolveCleanupPath", () => {
   it("resolves to <root>/<sessionId>.runtime.json", () => {
     const path = sidecarPath(tmpRoot, "sess_abc123");
-    expect(path).toBe(join(tmpRoot, `sess_abc123${SIDECAR_FILE_SUFFIX}`));
+    // sidecarPath routes through resolveCleanupPath, which realpaths the root
+    // (macOS /var → /private/var portability).
+    expect(path).toBe(join(realpathSync(tmpRoot), `sess_abc123${SIDECAR_FILE_SUFFIX}`));
   });
 
   it("rejects empty sessionId", () => {

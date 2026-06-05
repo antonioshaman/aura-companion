@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { buildCliFailedFrame } from "./cli-failed-frame.js";
+import type { CliFailedReason } from "./cli-failed-frame.js";
 
 // AURA-LOCAL — PLAN T10 test suite. Three concerns:
 //   1. Shape — every reason produces a frame with the correct
@@ -52,6 +53,23 @@ describe("buildCliFailedFrame — shape", () => {
       details: { lastErrorSha256: sha },
     });
     expect(frame.details?.lastErrorSha256).toBe(sha);
+  });
+});
+
+describe("buildCliFailedFrame — exhaustiveness tripwire", () => {
+  // EC-37 defence-in-depth: the `const _: never = reason;` default
+  // branch must throw rather than silently emit a malformed frame if
+  // an unrecognised reason reaches the builder at runtime (e.g. a
+  // stale buffered value that bypassed the type system). Mirrors the
+  // sibling guard in cli-failed-copy.test.ts.
+  it("throws for an unknown reason at runtime", () => {
+    expect(() =>
+      buildCliFailedFrame(
+        "not_a_real_reason" as unknown as CliFailedReason,
+        "sess_bad",
+        { seq: 1, drainedCount: 0, firedAt: 0 },
+      ),
+    ).toThrow(/unhandled reason/);
   });
 });
 

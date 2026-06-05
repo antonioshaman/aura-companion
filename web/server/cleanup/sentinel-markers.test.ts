@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -48,7 +48,9 @@ describe("evicting marker — write + delete + EC-8 sentinel-before-sweep", () =
     const payload = { sessionId, startedAt: 1_700_000_000_000, targetDir: "ignored-for-path" };
     const target = writeEvictingMarker(tmpRoot, sessionId, payload);
 
-    expect(target).toBe(join(tmpRoot, ARCHIVED_SESSIONS_SUBDIR, `${sessionId}${EVICTING_SENTINEL_SUFFIX}`));
+    // Markers route through resolveCleanupPath, which realpaths the root
+    // (macOS /var → /private/var portability).
+    expect(target).toBe(join(realpathSync(tmpRoot), ARCHIVED_SESSIONS_SUBDIR, `${sessionId}${EVICTING_SENTINEL_SUFFIX}`));
     expect(existsSync(target)).toBe(true);
     const parsed = JSON.parse(readFileSync(target, "utf8"));
     expect(parsed).toEqual(payload);
@@ -88,7 +90,7 @@ describe("reaping marker — pid-validated", () => {
     const payload = { pid, decisionTs: 1_700_000_000_000, reason: "not_in_session_map" };
     const target = writeReapingMarker(tmpRoot, pid, payload);
 
-    expect(target).toBe(join(tmpRoot, REAPING_SENTINEL_SUBDIR, `${pid}.json`));
+    expect(target).toBe(join(realpathSync(tmpRoot), REAPING_SENTINEL_SUBDIR, `${pid}.json`));
     expect(existsSync(target)).toBe(true);
     const parsed = JSON.parse(readFileSync(target, "utf8"));
     expect(parsed).toEqual(payload);
@@ -120,7 +122,7 @@ describe("sweep-in-progress marker — tier-identified", () => {
     const payload = { tier, startedAt: 1_700_000_000_000 };
     const target = writeSweepInProgressMarker(tmpRoot, tier, payload);
 
-    expect(target).toBe(join(tmpRoot, `${tier}${SWEEP_IN_PROGRESS_SUFFIX}`));
+    expect(target).toBe(join(realpathSync(tmpRoot), `${tier}${SWEEP_IN_PROGRESS_SUFFIX}`));
     expect(existsSync(target)).toBe(true);
     expect(JSON.parse(readFileSync(target, "utf8"))).toEqual(payload);
   });
