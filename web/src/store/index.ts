@@ -9,6 +9,7 @@ import { createTerminalSlice, type TerminalSlice, getInitialQuickTerminalPlaceme
 import { createUpdatesSlice, type UpdatesSlice } from "./updates-slice.js";
 import { createCouncilSlice, type CouncilSlice } from "./council-slice.js";
 import { createSettingsSlice, type SettingsSlice } from "./settings-slice.js";
+import { createCliStatusSlice, type CliStatusSlice } from "./cli-status-slice.js";
 
 export type AppState = AuthSlice &
   SessionsSlice &
@@ -19,7 +20,8 @@ export type AppState = AuthSlice &
   TerminalSlice &
   UpdatesSlice &
   CouncilSlice &
-  SettingsSlice & {
+  SettingsSlice &
+  CliStatusSlice & {
     reset: () => void;
   };
 
@@ -34,6 +36,7 @@ export const useStore = create<AppState>((...args) => ({
   ...createUpdatesSlice(...args),
   ...createCouncilSlice(...args),
   ...createSettingsSlice(...args),
+  ...createCliStatusSlice(...args),
 
   reset: () => {
     const [set] = args;
@@ -91,6 +94,8 @@ export const useStore = create<AppState>((...args) => ({
       findings: new Map(),
       groundingDowngrades: new Map(),
       dismissedStopIds: new Set(),
+      // CLI terminal failures — reset to empty on hard store reset.
+      cliFailures: new Map(),
     });
   },
 }));

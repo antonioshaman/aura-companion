@@ -128,6 +128,10 @@ function setupMockStore(overrides: {
     // loadBackendModels on mount. Composer's child ModelSwitcher would
     // crash without this mock.
     loadBackendModels: vi.fn(async () => undefined),
+    // PLAN T12 (Phase G) - cli-status-slice default: no terminal
+    // failure recorded. Specific tests below override this for the
+    // composer-disable / submit-gate canaries.
+    cliFailures: new Map(),
   };
 }
 
@@ -1067,5 +1071,113 @@ describe("Composer Codex plan→agent restore fallback", () => {
       expect.any(Object),
     );
     warnSpy.mockRestore();
+  });
+});
+
+
+// ─── PLAN T12 (Phase G) - cli-failed gate ─────────────────────────────
+//
+// Mandatory canaries from the master HANDOFF:
+//   - aria-disabled="true" appears on textarea when cliFailures has entry
+//   - submit handler early-returns (no sendToSession call) when cliFailed,
+//     covering BOTH click on send button AND Cmd/Ctrl+Enter keyboard path
+//   - mutation-resistant per EC-42
+//   - onTextChange callback fires when text changes (carries draft up to
+//     ChatView for the "Start new session with this draft" affordance).
+
+import type { CliFailure } from "../store/cli-status-slice.js";
+
+function withCliFailure(failure: Partial<CliFailure> = {}) {
+  setupMockStore();
+  const cliFailures = new Map<string, CliFailure>();
+  cliFailures.set("s1", {
+    reason: "relaunch_exhausted",
+    drainedCount: 0,
+    subprocessAlive: false,
+    firedAt: 1_000,
+    ...failure,
+  });
+  (mockStoreState as { cliFailures: Map<string, CliFailure> }).cliFailures = cliFailures;
+}
+
+describe("Composer cli-failed gate (Phase G)", () => {
+  it("textarea carries aria-disabled=true when cliFailures has an entry for this session", () => {
+    withCliFailure();
+    const { container } = render(<Composer sessionId="s1" />);
+    const textarea = container.querySelector("textarea")!;
+    expect(textarea.getAttribute("aria-disabled")).toBe("true");
+  });
+
+  it("textarea carries aria-describedby pointing at the banner id when cliFailed", () => {
+    withCliFailure();
+    const { container } = render(<Composer sessionId="s1" />);
+    const textarea = container.querySelector("textarea")!;
+    expect(textarea.getAttribute("aria-describedby")).toBe("cli-failed-banner-s1");
+  });
+
+  it("does NOT carry aria-disabled when cliFailures has no entry (default state)", () => {
+    setupMockStore();
+    const { container } = render(<Composer sessionId="s1" />);
+    const textarea = container.querySelector("textarea")!;
+    expect(textarea.getAttribute("aria-disabled")).toBeNull();
+    expect(textarea.getAttribute("aria-describedby")).toBeNull();
+  });
+
+  // EC-42 mutation-resistant: reverting `if (cliFailed) return;` would
+  // cause sendToSession to be called - test fails.
+  it("handleSend (Enter key) does NOT call sendToSession when cliFailed", () => {
+    withCliFailure();
+    const { container } = render(<Composer sessionId="s1" />);
+    const textarea = container.querySelector("textarea")!;
+    fireEvent.change(textarea, { target: { value: "hello" } });
+    fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+    expect(mockSendToSession).not.toHaveBeenCalled();
+    expect(mockAppendMessage).not.toHaveBeenCalled();
+  });
+
+  // Cmd/Ctrl+Enter keyboard path - gates the meta/ctrl variants in case
+  // a future change adds a bespoke Cmd+Enter handler.
+  it("handleSend (Cmd+Enter keyboard path) does NOT call sendToSession when cliFailed", () => {
+    withCliFailure();
+    const { container } = render(<Composer sessionId="s1" />);
+    const textarea = container.querySelector("textarea")!;
+    fireEvent.change(textarea, { target: { value: "hello" } });
+    fireEvent.keyDown(textarea, { key: "Enter", metaKey: true });
+    fireEvent.keyDown(textarea, { key: "Enter", ctrlKey: true });
+    expect(mockSendToSession).not.toHaveBeenCalled();
+  });
+
+  it("handleSend (send button click) does NOT call sendToSession when cliFailed", () => {
+    withCliFailure();
+    const { container } = render(<Composer sessionId="s1" />);
+    const textarea = container.querySelector("textarea")!;
+    fireEvent.change(textarea, { target: { value: "hello" } });
+    const sendBtn = screen.getAllByTitle("Send message")[0];
+    fireEvent.click(sendBtn);
+    expect(mockSendToSession).not.toHaveBeenCalled();
+  });
+
+  // Friedman R4 - input stays TYPEABLE even when cliFailed. The disable
+  // is aria-disabled (assistive-tech hint), not the native `disabled`
+  // attribute (which would prevent focus + typing). Native disabled is
+  // reserved for the "isConnected=false" case.
+  it("textarea remains typeable (no native disabled attr) when cliFailed but isConnected (Friedman R4)", () => {
+    withCliFailure();
+    const { container } = render(<Composer sessionId="s1" />);
+    const textarea = container.querySelector("textarea")!;
+    expect(textarea.hasAttribute("disabled")).toBe(false);
+  });
+
+  // onTextChange callback exposes composer text up to ChatView so
+  // CliFailedBanner can stash it for the next session.
+  it("calls onTextChange with the current composer text whenever it changes", async () => {
+    setupMockStore();
+    const onTextChange = vi.fn();
+    const { container } = render(<Composer sessionId="s1" onTextChange={onTextChange} />);
+    const textarea = container.querySelector("textarea")!;
+    // First call fires on mount with the empty initial state.
+    await waitFor(() => expect(onTextChange).toHaveBeenCalledWith(""));
+    fireEvent.change(textarea, { target: { value: "draft text" } });
+    await waitFor(() => expect(onTextChange).toHaveBeenLastCalledWith("draft text"));
   });
 });

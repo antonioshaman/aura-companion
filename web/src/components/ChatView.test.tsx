@@ -46,6 +46,15 @@ vi.mock("./PermissionBanner.js", () => ({
   PermissionBanner: () => <div data-testid="permission-banner" />,
 }));
 
+// PLAN T12 (Phase G) - mock CliFailedBanner so the priority chain
+// test can assert which banner occupies the slot without rendering
+// the full component implementation.
+vi.mock("./CliFailedBanner.js", () => ({
+  CliFailedBanner: ({ failure }: { failure: { reason: string } }) => (
+    <div data-testid="cli-failed-banner" data-reason={failure.reason} />
+  ),
+}));
+
 vi.mock("./AiValidationBadge.js", () => ({
   AiValidationBadge: () => <div data-testid="ai-validation-badge" />,
 }));
@@ -59,6 +68,7 @@ function setupStore(overrides: {
   hasPendingPerms?: boolean;
   hasAiResolved?: boolean;
   sessionGroupRole?: "orchestrator" | "observer";
+  cliFailureReason?: "relaunch_exhausted" | "container_missing" | "container_stopped" | "binary_missing" | "browser_closed_no_reconnect";
 } = {}) {
   const {
     connectionStatus = "connected",
@@ -67,6 +77,7 @@ function setupStore(overrides: {
     hasPendingPerms = false,
     hasAiResolved = false,
     sessionGroupRole,
+    cliFailureReason,
   } = overrides;
 
   const connMap = new Map<string, string>();
@@ -111,6 +122,13 @@ function setupStore(overrides: {
     findings: new Map(),
     dismissedStopIds: new Set(),
     dismissStop: vi.fn(),
+    // PLAN T12 (Phase G) - cli-status-slice state + draft-stash actions
+    // that the cli-failed primary action wires.
+    cliFailures: cliFailureReason
+      ? new Map([["s1", { reason: cliFailureReason, drainedCount: 0, subprocessAlive: false, firedAt: 1_000 }]])
+      : new Map(),
+    setPendingDraftForNextSession: vi.fn(),
+    newSession: vi.fn(),
   };
 }
 
@@ -276,5 +294,31 @@ describe("ChatView", () => {
     setupStore({ sessionGroupRole: undefined });
     render(<ChatView sessionId="s1" />);
     expect(screen.getByTestId("composer")).toBeTruthy();
+  });
+
+  // ─── PLAN T12 (Phase G) — banner priority chain ─────────────────────
+  //
+  // Priority ladder: permission > cliFailed > blocker. Only ONE banner
+  // occupies the slot at a time. Mutation-resistant: reordering the
+  // chain or dropping the cliFailed branch flips these.
+
+  it("renders CliFailedBanner when cliFailures.has(sessionId) and no permissions pending", () => {
+    setupStore({ cliFailureReason: "relaunch_exhausted" });
+    render(<ChatView sessionId="s1" />);
+    expect(screen.getByTestId("cli-failed-banner")).toBeTruthy();
+    expect(screen.queryByTestId("permission-banner")).toBeNull();
+  });
+
+  it("permission banner WINS over cliFailed when both are present (Friedman R8 stacking)", () => {
+    setupStore({ cliFailureReason: "relaunch_exhausted", hasPendingPerms: true });
+    render(<ChatView sessionId="s1" />);
+    expect(screen.getByTestId("permission-banner")).toBeTruthy();
+    expect(screen.queryByTestId("cli-failed-banner")).toBeNull();
+  });
+
+  it("does NOT render CliFailedBanner when cliFailures is empty (default state)", () => {
+    setupStore();
+    render(<ChatView sessionId="s1" />);
+    expect(screen.queryByTestId("cli-failed-banner")).toBeNull();
   });
 });

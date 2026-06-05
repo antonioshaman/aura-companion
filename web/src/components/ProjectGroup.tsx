@@ -16,6 +16,8 @@ interface ProjectGroupProps {
    *  fix); the bug surfaced as "glyph absent for active session pairs"
    *  even when the group record was present in the store. */
   getCouncilInfo?: (sessionId: string) => { pairing?: string; unreadStops?: number; role?: "orchestrator" | "observer" };
+  /** PLAN T12 (Phase G) - per-session terminal-failure reason map. */
+  cliFailures?: Map<string, { reason: import("../store/cli-status-slice.js").CliFailure["reason"] }>;
   onSelect: (id: string) => void;
   onStartRename: (id: string, currentName: string) => void;
   onArchive: (e: React.MouseEvent, id: string) => void;
@@ -53,6 +55,7 @@ export function ProjectGroup({
   editInputRef,
   isFirst,
   getCouncilInfo,
+  cliFailures,
 }: ProjectGroupProps) {
   // Build collapsed preview: first 2 session names
   const collapsedPreview = isCollapsed
@@ -110,6 +113,7 @@ export function ProjectGroup({
           {group.sessions.map((s) => {
             const permCount = pendingPermissions.get(s.id)?.size ?? 0;
             const council = getCouncilInfo ? getCouncilInfo(s.id) : {};
+            const failed = cliFailures?.get(s.id);
             return (
               <SessionItem
                 key={s.id}
@@ -121,6 +125,7 @@ export function ProjectGroup({
                 councilPairing={council.pairing}
                 councilUnreadStops={council.unreadStops}
                 councilRole={council.role}
+                cliFailedReason={failed?.reason}
                 onSelect={onSelect}
                 onStartRename={onStartRename}
                 onArchive={onArchive}

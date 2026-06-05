@@ -619,6 +619,18 @@ function handleParsedMessage(
     case "session_init": {
       const existingSession = store.sessions.get(sessionId);
       store.addSession(data.session);
+      // PLAN T12 (Phase G) - a new CLI subprocess is alive
+      // (relaunch landed); clear any prior terminal-failure
+      // banner state so the Composer re-enables atomically.
+      store.clearCliFailure(sessionId);
+      // PLAN T12 (Phase G) - if the user clicked
+      // "Start new session with this draft" on a dead session,
+      // route the stashed draft into THIS session as a pickup
+      // draft (first session_init wins, then the stash clears).
+      const pendingDraft = store.consumePendingDraftForNextSession();
+      if (pendingDraft !== undefined && pendingDraft.length > 0) {
+        store.setPickupDraft(sessionId, pendingDraft);
+      }
       store.setCliConnected(sessionId, true);
       store.setCliReconnecting(sessionId, false);
       if (!existingSession) {
@@ -948,6 +960,11 @@ function handleParsedMessage(
     }
 
     case "error": {
+      // Phase F WATCHPOINT carry-forward - when this session has a
+      // live cli_failed banner, suppress the legacy chat-error
+      // message (session-orchestrator.ts:3267 and :3302 fire
+      // legacy "Session keeps crashing" alongside session:relaunch-exhausted).
+      if (store.cliFailures.has(sessionId)) break;
       store.appendMessage(sessionId, {
         id: nextId(),
         role: "system",
@@ -991,6 +1008,37 @@ function handleParsedMessage(
     case "cli_connected": {
       store.setCliConnected(sessionId, true);
       store.setCliReconnecting(sessionId, false);
+      break;
+    }
+
+    case "cli_failed": {
+      // PLAN T12 (Phase G) - terminal CLI failure landed on this
+      // session. Population into the cli-status-slice flips the
+      // ChatView priority chain to the CliFailedBanner slot AND
+      // disables the Composer submit path.
+      //
+      // Friedman R10 - clear all in-flight visual indicators
+      // atomically on banner mount so the user sees one terminal
+      // state, not banner + spinner + streaming-dots + optimistic
+      // bubble all at once. The spinner state lives across multiple
+      // store fields (streaming, streamingStats, sessionStatus,
+      // toolProgress, cliConnected); drain ALL of them here so the
+      // store transition itself is the atomic frame.
+      store.setCliFailure(sessionId, {
+        reason: data.reason,
+        drainedCount: data.drainedCount,
+        subprocessAlive: data.subprocessAlive,
+        firedAt: data.firedAt,
+        ...(data.details?.lastErrorSha256 !== undefined
+          ? { lastErrorSha256: data.details.lastErrorSha256 }
+          : {}),
+      });
+      store.setCliConnected(sessionId, false);
+      store.setCliReconnecting(sessionId, false);
+      store.setSessionStatus(sessionId, null);
+      store.setStreaming(sessionId, null);
+      store.setStreamingStats(sessionId, null);
+      store.clearToolProgress(sessionId);
       break;
     }
 

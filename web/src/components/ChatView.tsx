@@ -7,6 +7,8 @@ import { Composer } from "./Composer.js";
 import { PermissionBanner } from "./PermissionBanner.js";
 import { AiValidationBadge } from "./AiValidationBadge.js";
 import { BlockerBanner } from "./council/index.js";
+import { CliFailedBanner } from "./CliFailedBanner.js";
+import { navigateHome } from "../utils/routing.js";
 import { findUnresolvedStops } from "../observer-panel-state.js";
 
 export function ChatView({ sessionId }: { sessionId: string }) {
@@ -70,6 +72,25 @@ export function ChatView({ sessionId }: { sessionId: string }) {
     if (live.length === 0) return null;
     return live[live.length - 1] ?? null;
   }, [findings, dismissedStopIds]);
+
+  // PLAN T12 (Phase G) - terminal CLI failure for this session.
+  // Reading from cliFailures.get drives the priority chain below
+  // (permission > cliFailed > blocker). When non-null, Composer
+  // mirrors its draft text via composerTextRef so the "Start new
+  // session with this draft" affordance carries the draft forward.
+  const cliFailure = useStore((s) => s.cliFailures.get(sessionId));
+  const setPendingDraftForNextSession = useStore((s) => s.setPendingDraftForNextSession);
+  const newSession = useStore((s) => s.newSession);
+  const composerTextRef = useRef<string>("");
+  const handleComposerText = useCallback((text: string) => {
+    composerTextRef.current = text;
+  }, []);
+  const handleCliFailedStartNew = useCallback(() => {
+    const draft = composerTextRef.current.trim();
+    setPendingDraftForNextSession(draft.length > 0 ? draft : null);
+    navigateHome();
+    newSession();
+  }, [setPendingDraftForNextSession, newSession]);
 
   const showCliBanner = connStatus === "connected" && !cliConnected;
 
@@ -148,11 +169,18 @@ export function ChatView({ sessionId }: { sessionId: string }) {
           Permission-first stacking (PLAN T15.3): tool-call decisions trump
           findings; the blocker waits in the Observer panel until permission
           is resolved. */}
+      {/* PLAN T15.3 + Phase G priority chain:
+          permission > cliFailed > blocker.
+          Only one banner occupies this slot at a time. */}
       {perms.length > 0 ? (
         <div className="shrink-0 max-h-[60dvh] overflow-y-auto border-t border-cc-border bg-cc-card">
           {perms.map((p) => (
             <PermissionBanner key={p.request_id} permission={p} sessionId={sessionId} />
           ))}
+        </div>
+      ) : cliFailure ? (
+        <div id={`cli-failed-banner-${sessionId}`} className="shrink-0 border-t border-cc-border bg-cc-card">
+          <CliFailedBanner failure={cliFailure} onStartNewSession={handleCliFailedStartNew} />
         </div>
       ) : topBlocker ? (
         <div className="shrink-0 border-t border-cc-border bg-cc-card">
@@ -164,7 +192,7 @@ export function ChatView({ sessionId }: { sessionId: string }) {
           The toggle's set_permission_mode would be rejected server-side
           (ws-bridge observer-guard) and the observer has no user-driven
           chat input by design. */}
-      {!isObserver && <Composer sessionId={sessionId} />}
+      {!isObserver && <Composer sessionId={sessionId} onTextChange={handleComposerText} />}
     </div>
   );
 }

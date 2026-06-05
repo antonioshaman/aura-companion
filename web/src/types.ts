@@ -29,6 +29,15 @@ export type {
 };
 export type { SessionPhase } from "../server/session-state-machine.js";
 
+// PLAN T12 (Phase G) — re-export the Phase F wire frame so the
+// browser store + ws.ts dispatcher have a single canonical import
+// point that does not reach into the server's cleanup-folder layout
+// directly. The TYPE + AP-14 sole-assembly-site builder live in
+// `web/server/cli-failed-frame.ts`; `ws-bridge-types.ts` re-exports
+// them. We re-export from there (not directly from the builder
+// module) to honour the Phase F frontend-boundary contract.
+export type { CliFailedFrame, CliFailedReason } from "../server/ws-bridge-types.js";
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "system";

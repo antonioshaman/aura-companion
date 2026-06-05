@@ -23,7 +23,19 @@ interface CommandItem {
   type: "command" | "skill";
 }
 
-export function Composer({ sessionId }: { sessionId: string }) {
+/**
+ * PLAN T12 (Phase G) optional callback — emits the composer text
+ * whenever it changes. ChatView uses this to mirror the draft for
+ * the "Start new session with this draft" affordance on the
+ * `CliFailedBanner` (Friedman R4 + R5: input stays typeable, the
+ * typed draft survives the navigation home -> new session flow).
+ */
+export interface ComposerProps {
+  sessionId: string;
+  onTextChange?: (text: string) => void;
+}
+
+export function Composer({ sessionId, onTextChange }: ComposerProps) {
   const [text, setText] = useState("");
   const [images, setImages] = useState<ImageAttachment[]>([]);
   const [slashMenuOpen, setSlashMenuOpen] = useState(false);
@@ -49,6 +61,13 @@ export function Composer({ sessionId }: { sessionId: string }) {
     const draft = consumePickupDraft(sessionId);
     if (draft) setText(draft);
   }, [sessionId, consumePickupDraft]);
+
+  // PLAN T12 (Phase G) - mirror the current text up to ChatView
+  // so CliFailedBanner can carry it forward to a new session.
+  // One-way data flow: parent reads via callback only.
+  useEffect(() => {
+    if (onTextChange) onTextChange(text);
+  }, [text, onTextChange]);
   // Raw selector — return "" when the map entry is absent so pickRestoreMode
   // can detect the "no prior mode" case and apply the backend-aware default.
   // Previously this defaulted to "acceptEdits" (a Claude-shaped value) which
@@ -56,6 +75,11 @@ export function Composer({ sessionId }: { sessionId: string }) {
   const previousMode = useStore((s) => s.previousPermissionMode.get(sessionId) ?? "");
 
   const isConnected = cliConnected.get(sessionId) ?? false;
+  // PLAN T12 (Phase G) - terminal CLI failure for this session.
+  // When present, the banner above owns recovery; Composer stays
+  // typeable (Friedman R4) but submit is gated.
+  const cliFailures = useStore((s) => s.cliFailures);
+  const cliFailed = cliFailures.has(sessionId);
   const currentMode = sessionData?.permissionMode || "acceptEdits";
   const isPlan = currentMode === "plan";
   const isCodex = sessionData?.backend_type === "codex";
@@ -160,6 +184,11 @@ export function Composer({ sessionId }: { sessionId: string }) {
   function handleSend() {
     const msg = text.trim();
     if (!msg || !isConnected) return;
+    // PLAN T12 (Phase G) Friedman R4 - terminal-failure gate.
+    // Banner owns the recovery affordance; Composer must never
+    // produce a user_message that a dead subprocess can never
+    // receive. Tests assert this branch against aria-disabled.
+    if (cliFailed) return;
     // Refuse-and-affordance: plan-mode collides with interactive-discovery
     // skills that wait on typed user input. The affordance is rendered
     // above the textarea on every keystroke that matches; this early-return
@@ -696,9 +725,13 @@ export function Composer({ sessionId }: { sessionId: string }) {
               onPaste={handlePaste}
               aria-label="Message input"
               placeholder={isConnected
-                ? "Type a message... (/ + @)"
+                ? (cliFailed
+                  ? "This session has ended - start a new one to send messages"
+                  : "Type a message... (/ + @)")
                 : "Waiting for CLI connection..."}
               disabled={!isConnected}
+              aria-disabled={cliFailed ? true : undefined}
+              aria-describedby={cliFailed ? `cli-failed-banner-${sessionId}` : undefined}
               rows={1}
               className="w-full px-1 py-1.5 text-base sm:text-sm bg-transparent resize-none outline-none text-cc-fg font-sans-ui placeholder:text-cc-muted disabled:opacity-50 overflow-y-auto"
               style={{ minHeight: "36px", maxHeight: "200px" }}
