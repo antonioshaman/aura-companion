@@ -605,6 +605,12 @@ import {
   initMemoryPressureProbe,
   shouldEmitMemoryPressureWarn,
 } from "./cleanup/memory-pressure-probe.js";
+// AURA-LOCAL: PLAN T9 (Phase E) — daily retention sweep registered with
+// the CleanupScheduler. The sweep is wired AFTER the diagnostics config
+// snapshot lands so a single `loadCleanupConfig()` call covers both
+// consumers (memory-pressure WARN + retention TTLs); the per-knob
+// `cleanup.config.resolved` log lines fire exactly once at boot.
+import { sweepRetention } from "./cleanup/retention-sweeper.js";
 
 const DIAGNOSTICS_INTERVAL_MS = 5 * 60_000; // every 5 minutes
 
@@ -622,6 +628,45 @@ const diagnosticsCleanupConfig = loadCleanupConfig();
 // noise. Subsequent `readMemoryPressure()` calls inside the tick reuse
 // the cached resolution without re-emitting.
 initMemoryPressureProbe();
+
+// AURA-LOCAL: PLAN T9 — register the 4-tier retention sweep with the
+// CleanupScheduler (instantiated + started above near line 270). The
+// scheduler's contract allows `registerSweep` AFTER `start()` — the
+// next-tick cadence covers the new tier without a re-arm.
+//
+// Roots:
+//   sessionsRoot   sessionStore.directory             (~/.companion/sessions)
+//   recordingsRoot recorder.getRecordingsDir()        (~/.companion/recordings)
+//   logsRoot       logFileWriter?.getLogsDir() ?? env-fallback under COMPANION_HOME
+//   sentinelRoot   COMPANION_HOME — siblings-not-children of each tier root
+//
+// Active-FD deps:
+//   getActiveRecordingPaths → RecorderManager.getActiveRecordingPaths() (Persistence R6)
+//   getActiveLogPaths       → the single LogFileWriter.filePath (current run)
+//
+// Wire-site rationale: the worker brief's "TOUCH cleanup-scheduler.ts to
+// wire" reading is structurally wrong — cleanup-scheduler.ts is generic
+// (it owns cadence + error boundary, not specific sweep knowledge). The
+// HANDOFF-implement-after-D pickup recommends index.ts for symmetry
+// with how Phase D wired the reaper at the same boot seam.
+cleanupScheduler.registerSweep("retention-sweep", async () => {
+  await sweepRetention(
+    diagnosticsCleanupConfig,
+    {
+      sessionsRoot: sessionStore.directory,
+      recordingsRoot: recorder.getRecordingsDir(),
+      logsRoot:
+        logFileWriter?.getLogsDir() ??
+        (process.env.COMPANION_LOG_DIR ?? join(COMPANION_HOME, "logs")),
+      sentinelRoot: COMPANION_HOME,
+    },
+    {
+      getActiveRecordingPaths: () => recorder.getActiveRecordingPaths(),
+      getActiveLogPaths: () =>
+        logFileWriter ? new Set([logFileWriter.filePath]) : new Set(),
+    },
+  );
+});
 
 // AURA-LOCAL: tracks when the memory-pressure WARN last fired so the
 // pure `shouldEmitMemoryPressureWarn` gate can apply its 30-min rate

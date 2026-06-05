@@ -497,6 +497,29 @@ export class RecorderManager {
     return recorder ? { filePath: recorder.filePath } : {};
   }
 
+  /**
+   * Absolute paths of every recording file currently being appended to.
+   *
+   * AURA-LOCAL (PLAN T9 / Persistence R6): the retention sweep consults
+   * this set before unlinking or moving any file under the recordings
+   * tree. Unlinking an open file on Linux silently loses the recording
+   * — the fd stays valid, subsequent appends succeed, but the inode is
+   * unreachable on disk after the last writer closes. Skipping
+   * currently-open files closes that loss window.
+   *
+   * Returns a fresh `Set` each call so the caller can mutate it without
+   * leaking into our internal map iteration. The set is empty when no
+   * sessions are recording (manager disabled OR all per-session
+   * overrides flipped off).
+   */
+  getActiveRecordingPaths(): Set<string> {
+    const out = new Set<string>();
+    for (const rec of this.recorders.values()) {
+      out.add(rec.filePath);
+    }
+    return out;
+  }
+
   listRecordings(): RecordingFileMeta[] {
     try {
       const files = readdirSync(this.recordingsDir);
