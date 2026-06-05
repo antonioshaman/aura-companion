@@ -235,6 +235,69 @@ describe("registerSweep — validation + idempotent replacement", () => {
   });
 });
 
+describe("sweep-status accessors — PLAN T6 (Phase C)", () => {
+  // The 5-min diagnostic tick in `index.ts` consumes these three
+  // accessors to surface `lastSweepCompletedAt`, `lastSweepDurationMs`,
+  // `sweepInFlight` in the operator-facing snapshot. Pre-first-sweep,
+  // the timestamp + duration MUST be `null` so the operator sees the
+  // "armed, no tick yet" state distinctly from a long-running tick.
+  it("returns null timestamps before the first sweep completes", () => {
+    const sched = new CleanupScheduler();
+    expect(sched.getLastSweepCompletedAt()).toBeNull();
+    expect(sched.getLastSweepDurationMs()).toBeNull();
+    expect(sched.getSweepInFlight()).toBe(false);
+  });
+
+  // After a sweep completes, the accessors return the latest tick's
+  // wallclock + duration. This is the contract the diagnostic emit
+  // depends on (Phase C `lastSweepCompletedAt` field).
+  it("returns the latest completed-sweep timestamp + duration after a tick fires", async () => {
+    const sched = new CleanupScheduler();
+    sched.registerSweep("tier", () => {});
+    sched.__setIntervalMsForTests(10);
+    sched.start();
+
+    const before = Date.now();
+    await vi.advanceTimersByTimeAsync(10);
+    const after = Date.now();
+
+    const completedAt = sched.getLastSweepCompletedAt();
+    const durationMs = sched.getLastSweepDurationMs();
+    expect(completedAt).not.toBeNull();
+    expect(durationMs).not.toBeNull();
+    expect(completedAt!).toBeGreaterThanOrEqual(before);
+    expect(completedAt!).toBeLessThanOrEqual(after);
+    expect(durationMs!).toBeGreaterThanOrEqual(0);
+    expect(sched.getSweepInFlight()).toBe(false);
+
+    await sched.dispose();
+  });
+
+  // `sweepInFlight` flips true during a slow async sweep and back to
+  // false after settlement — the diagnostic snapshot uses this to tell
+  // "long durationMs because still running" from "long durationMs but
+  // finished cleanly."
+  it("getSweepInFlight is true mid-sweep and false after settlement", async () => {
+    const sched = new CleanupScheduler();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((res) => { release = res; });
+    sched.registerSweep("slow", async () => { await gate; });
+    sched.__setIntervalMsForTests(10);
+    sched.start();
+
+    await vi.advanceTimersByTimeAsync(10);
+    expect(sched.getSweepInFlight()).toBe(true);
+
+    release();
+    // Let the .finally fire so inFlight clears.
+    await vi.advanceTimersByTimeAsync(0);
+    await Promise.resolve();
+    expect(sched.getSweepInFlight()).toBe(false);
+
+    await sched.dispose();
+  });
+});
+
 describe("__runSweepNowForTests — manual one-shot sweep without timer", () => {
   // The test seam for suites that want to exercise the error-boundary
   // path without involving `setTimeout` at all. Useful for tightly

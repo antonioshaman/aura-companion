@@ -571,8 +571,36 @@ isReady = true;
 // ── Runtime diagnostics ──────────────────────────────────────────────────────
 import { log } from "./logger.js";
 import { metricsCollector } from "./metrics-collector.js";
+// AURA-LOCAL: cleanup-subsystem diagnostic surfaces. PLAN T6 (Phase C).
+import { loadCleanupConfig } from "./cleanup/cleanup-config.js";
+import { readMemoryPressure, initMemoryPressureProbe } from "./cleanup/memory-pressure-probe.js";
+import { ageMs } from "./cleanup/age-ms.js";
 
 const DIAGNOSTICS_INTERVAL_MS = 5 * 60_000; // every 5 minutes
+
+// AURA-LOCAL: cleanup-subsystem config snapshot used by the 5-min
+// diagnostic tick's memory-pressure WARN. Loaded ONCE at module
+// initialisation so the per-knob `cleanup.config.resolved` log lines
+// don't double-fire alongside the scheduler's own load (Phase B did NOT
+// thread config into the scheduler constructor — the threshold lives
+// outside the scheduler's "cadence + error boundary" concern).
+const diagnosticsCleanupConfig = loadCleanupConfig();
+
+// AURA-LOCAL: fire the boot `event:"memory.pressure.probe"` WARN at
+// server-init rather than on-first-tick so operators see the probe
+// resolution (or "unavailable") next to the rest of the bootstrap log
+// noise. Subsequent `readMemoryPressure()` calls inside the tick reuse
+// the cached resolution without re-emitting.
+initMemoryPressureProbe();
+
+// AURA-LOCAL: 30-min rate-limit floor on the memory-pressure WARN so
+// a sustained throttle doesn't bury the log in identical lines. Module-
+// scope `let` — read + written exclusively inside the diagnostic tick;
+// not test-imported, so the AP-17 reset triplet is not required (no
+// orchestrator suite imports index.ts).
+const MEMORY_PRESSURE_WARN_MIN_INTERVAL_MS = 30 * 60_000;
+let lastMemoryPressureWarnAt: number | null = null;
+
 setInterval(() => {
   const snap = metricsCollector.getSnapshot(wsBridge);
   const mem = snap.gauges.memory;
@@ -583,6 +611,13 @@ setInterval(() => {
     .slice(0, 3)
     .map((s) => `${s.id.slice(0, 8)}(h=${s.historyLen},b=${s.browsers})`)
     .join(", ");
+
+  // PLAN T6: proxy for "archived rows still in the wsBridge.sessions
+  // Map that Phase H eviction will reclaim." totalActiveSessions counts
+  // phase != "terminated"; the Map total includes terminated/archived
+  // rows the bridge still holds. Until Phase H ships, this delta is the
+  // most direct surface of the memory-leak symptom this PLAN targets.
+  const unevictedArchivedCount = Math.max(0, sessionStats.length - snap.gauges.totalActiveSessions);
 
   log.info("diagnostics", "Runtime snapshot", {
     rss: `${mb(mem.rss)}MB`,
@@ -595,7 +630,46 @@ setInterval(() => {
     eventBuffer: snap.gauges.totalEventBufferSize,
     errors: Object.values(snap.counters.errors).reduce((a, b) => a + b, 0),
     topSessions: topSessions || "none",
+    // ── PLAN T6: cleanup-subsystem counters (Phase B projection methods) ──
+    // Operator-facing API — pinned literally by the EC-19 canary in
+    // `index.diagnostics-emit.test.ts`. Renames without canary update
+    // are a structural failure.
+    evictedLastHour: metricsCollector.getEvictedLastHour(),
+    orphanReapedLastHour: metricsCollector.getOrphanReapedLastHour(),
+    drainedPendingLastHour: metricsCollector.getDrainedPendingLastHour(),
+    recordingsSoftArchivedLastHour: metricsCollector.getRecordingsSoftArchivedLastHour(),
+    recordingsHardDeletedLastHour: metricsCollector.getRecordingsHardDeletedLastHour(),
+    // ── PLAN T6: sweep-status fields (Phase C accessors on the scheduler) ──
+    lastSweepCompletedAt: cleanupScheduler.getLastSweepCompletedAt(),
+    lastSweepDurationMs: cleanupScheduler.getLastSweepDurationMs(),
+    sweepInFlight: cleanupScheduler.getSweepInFlight(),
   });
+
+  // ── PLAN T6: memory-pressure WARN with 30-min rate limit ──────────────
+  // Folded into the 5-min diagnostic tick (per master HANDOFF Phase C
+  // recommendation) rather than a separate timer — same cadence, same
+  // wsBridge access, no new setInterval to manage. The probe is
+  // capability-checked: when the cgroup PSI file isn't available
+  // (macOS dev, kernel <4.20, cgroup v1) the read short-circuits to
+  // {available: false} and the WARN is silently skipped.
+  if (diagnosticsCleanupConfig.memoryPressureWarn.enabled) {
+    const reading = readMemoryPressure();
+    if (reading.available && reading.fullAvg300Us > diagnosticsCleanupConfig.memoryPressureWarn.us) {
+      const sinceLastWarnMs = lastMemoryPressureWarnAt === null
+        ? Number.POSITIVE_INFINITY
+        : ageMs(lastMemoryPressureWarnAt);
+      if (sinceLastWarnMs >= MEMORY_PRESSURE_WARN_MIN_INTERVAL_MS) {
+        log.warn("cleanup", "Memory pressure threshold exceeded", {
+          event: "cli.cleanup.memory_pressure",
+          fullAvg300Us: reading.fullAvg300Us,
+          thresholdUs: diagnosticsCleanupConfig.memoryPressureWarn.us,
+          sessions: snap.gauges.totalActiveSessions,
+          unevictedArchivedCount,
+        });
+        lastMemoryPressureWarnAt = Date.now();
+      }
+    }
+  }
 }, DIAGNOSTICS_INTERVAL_MS);
 
 // ── Graceful shutdown — Council teardown + persist container state ───────────

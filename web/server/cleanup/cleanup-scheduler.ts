@@ -57,6 +57,13 @@ export class CleanupScheduler {
   private intervalMs: number;
   /** AURA-LOCAL: test-only override bypasses the [1h, 25h] clamp. */
   private intervalOverrideForTests: number | null = null;
+  // PLAN T6 (Phase C): sweep-status fields surfaced via accessors so the
+  // 5-min diagnostic tick can report `lastSweepCompletedAt`,
+  // `lastSweepDurationMs`, `sweepInFlight` without reaching into private
+  // scheduler state. Bumped at sweep-completion (start + duration only —
+  // a still-in-flight sweep is observable via `sweepInFlight`).
+  private lastSweepCompletedAt: number | null = null;
+  private lastSweepDurationMs: number | null = null;
 
   constructor(opts: CleanupSchedulerOptions = {}) {
     this.intervalMs = clampInterval(opts.intervalMs ?? DEFAULT_INTERVAL_MS);
@@ -84,6 +91,38 @@ export class CleanupScheduler {
   /** Returns true after `start()` has armed the first timer. Idempotent. */
   isStarted(): boolean {
     return this.started && !this.disposed;
+  }
+
+  /**
+   * Wallclock timestamp (Date.now-style ms) at which the most recent
+   * sweep tick LANDED `cleanup.sweep.completed`. `null` before the first
+   * sweep finishes — operators reading the 5-min diagnostic see `null`
+   * during the freshly-booted "scheduler armed, first tick not due yet"
+   * window. PLAN T6.
+   */
+  getLastSweepCompletedAt(): number | null {
+    return this.lastSweepCompletedAt;
+  }
+
+  /**
+   * Wallclock duration (ms) of the most recent sweep tick from
+   * `cleanup.sweep.started` to `cleanup.sweep.completed`. `null` before
+   * the first sweep finishes. Pair with `getLastSweepCompletedAt` in the
+   * diagnostic emit so a sweep that takes pathologically long is visible
+   * before it bites the gracefulShutdown 8s budget.
+   */
+  getLastSweepDurationMs(): number | null {
+    return this.lastSweepDurationMs;
+  }
+
+  /**
+   * True while a sweep tick is mid-flight. False between ticks (and
+   * before `start()` arms the first tick). The diagnostic snapshot reads
+   * this so operators can correlate a long `lastSweepDurationMs` with a
+   * still-running tick vs. a previously-completed slow tick.
+   */
+  getSweepInFlight(): boolean {
+    return this.inFlight !== null;
   }
 
   /**
@@ -210,10 +249,19 @@ export class CleanupScheduler {
         });
       }
     }
+    const sweepCompletedAt = Date.now();
+    const durationMs = sweepCompletedAt - sweepStartedAt;
+    // PLAN T6: capture sweep-status snapshot so the 5-min diagnostic
+    // tick's `lastSweepCompletedAt` / `lastSweepDurationMs` accessors
+    // return the LATEST completed tick's values. `getSweepInFlight()`
+    // is derived from `this.inFlight` so it auto-clears on the
+    // `.finally` in `scheduleNext`.
+    this.lastSweepCompletedAt = sweepCompletedAt;
+    this.lastSweepDurationMs = durationMs;
     log.info("cleanup-scheduler", "Sweep tick complete", {
       event: "cleanup.sweep.completed",
       sweepCount: this.sweeps.size,
-      durationMs: Date.now() - sweepStartedAt,
+      durationMs,
     });
   }
 }
