@@ -1,0 +1,94 @@
+---
+title: Automated Claude models sync
+description: How the static `CLAUDE_MODELS` fallback stays current with Anthropic /v1/models without manual intervention.
+---
+
+## Why this exists
+
+Aura Companion fetches `/v1/models` dynamically at runtime when the user
+configures their own Anthropic API key in Settings. End users who do not
+configure a key (for example, Claude Pro/Max subscription users who
+authenticate Claude Code via OAuth) fall back to a static model list
+hardcoded in `web/src/utils/backends.ts`.
+
+Anthropic does **not** publish evergreen aliases like
+`claude-opus-latest` — every published ID is a pinned snapshot. So the
+static fallback drifts every time a new model ships. The workflow
+described below closes that drift automatically.
+
+## How it works
+
+1. `.github/workflows/sync-claude-models.yml` runs daily at 06:00 UTC
+   (and on `workflow_dispatch` for on-demand refresh).
+2. The workflow calls
+   `web/scripts/sync-claude-models.ts` which GETs
+   `https://api.anthropic.com/v1/models` using the repository secret
+   `ANTHROPIC_API_KEY`.
+3. The script re-uses the canonical parser + sort from
+   `web/server/anthropic-models-cache.ts` so this offline path agrees
+   with the runtime cache on every edge case (Trojan-Source defence,
+   tier ordering, version-aware numeric tiebreaker).
+4. The top model per tier (opus, sonnet, haiku) is written into the
+   `AUTO-GENERATED:CLAUDE-MODELS-START/END` block of
+   `web/src/utils/backends.ts`.
+5. If a diff results, the workflow opens (or updates) a PR on the
+   canonical branch `chore/auto-sync-claude-models`.
+6. The maintainer reviews and merges. The next aura-companion release
+   ships with the fresh fallback list — and every Pro/Max user (who
+   does not configure their own key) sees the updated models on next
+   update.
+
+## One-time setup
+
+The workflow needs a repository secret named `ANTHROPIC_API_KEY`.
+
+1. **Create an Anthropic API key.** Log in at
+   <https://console.anthropic.com/>, navigate to **Settings → API
+   Keys**, click **Create Key**. The key only needs the default
+   permissions — `/v1/models` is a read-only endpoint and is free.
+
+2. **Add the key as a repository secret.** In the GitHub repo settings:
+   - Go to **Settings → Secrets and variables → Actions**.
+   - Click **New repository secret**.
+   - **Name:** `ANTHROPIC_API_KEY`
+   - **Value:** the `sk-ant-...` string you just created.
+   - Click **Add secret**.
+
+3. **(Optional) Trigger the first run manually.** Navigate to
+   **Actions → Sync Claude models → Run workflow** and click the
+   button. The first run on a fresh secret will validate the
+   configuration end-to-end without waiting for the cron tick.
+
+## Cost
+
+`/v1/models` is a free metadata endpoint — no token charges. The
+workflow runs once per day, so the cost per repo is one HTTPS request
+per day plus the negligible GitHub Actions minutes.
+
+## When a PR appears
+
+When the workflow opens or updates `chore/auto-sync-claude-models`:
+
+1. Check the diff in `web/src/utils/backends.ts` — it must only touch
+   the `AUTO-GENERATED` block.
+2. Cross-reference the new IDs against the
+   [Anthropic models overview](https://docs.anthropic.com/en/docs/about-claude/models/overview)
+   Latest models table.
+3. Coverage and CI checks should pass (the change is literals only — no
+   code structure or test surface shifts).
+4. Merge.
+
+## When it doesn't run
+
+The job is gated to `github.repository_owner == 'antonioshaman'` so
+forks don't waste their own Actions minutes attempting a sync. Forks
+that want to enable it for their own deploys can edit the `if:` line
+or remove it.
+
+## Disabling
+
+To disable the workflow temporarily, navigate to **Actions → Sync
+Claude models** and toggle **Disable workflow**. To remove it
+permanently, delete `.github/workflows/sync-claude-models.yml` —
+the static fallback then falls back to whatever was last manually
+committed, which is fine until the next Anthropic release.
