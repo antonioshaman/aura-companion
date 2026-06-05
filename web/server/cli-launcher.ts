@@ -324,13 +324,24 @@ export class CliLauncher {
           // On `unavailable` (macOS dev box, no /proc) the helper emits
           // a one-time boot WARN and we conservatively trust the old
           // liveness-only check — degraded but no worse than today.
-          const verdict = verifyProcessIdentity(info.pid, info.sessionId, null);
-          if (verdict.kind === "match") {
+          //
+          // Dual-backend contract: the probe's argv factor recognizes only
+          // Claude's `--sdk-url ws/cli/<sessionId>` token. Host-mode Codex
+          // (`app-server`, no `--sdk-url`) would always fail that factor →
+          // false `mismatch` → a live Codex app-server reaped on every
+          // restart (regression vs the prior bare `process.kill`). Route
+          // Codex host-mode through the liveness-only fallback; the identity
+          // probe is Claude-only until a Codex argv/port identity lands.
+          const verdict =
+            info.backendType === "codex"
+              ? null
+              : verifyProcessIdentity(info.pid, info.sessionId, null);
+          if (verdict && verdict.kind === "match") {
             info.state = "starting"; // WS not yet re-established, wait for CLI to reconnect
             this.sessions.set(info.sessionId, info);
             recovered++;
-          } else if (verdict.kind === "unavailable") {
-            // Non-Linux fallback: legacy liveness-only probe.
+          } else if (!verdict || verdict.kind === "unavailable") {
+            // Codex host-mode OR non-Linux fallback: legacy liveness-only probe.
             try {
               process.kill(info.pid, 0);
               info.state = "starting";

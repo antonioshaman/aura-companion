@@ -1177,6 +1177,15 @@ describe("codex websocket launcher", () => {
 
 describe("persistence", () => {
   describe("restoreFromDisk", () => {
+    // EC-40 / AP-17: the module-scope proc-reader override installed by the
+    // identity-probe tests below must be reset even if an assertion throws
+    // mid-test — otherwise a leaked `killCheck:()=>true` reader makes sibling
+    // tests (e.g. "marks dead PIDs") pass for the wrong reason.
+    afterEach(async () => {
+      const procIdentity = await import("./process-identity.js");
+      procIdentity.__resetProcReaderForTests();
+    });
+
     it("recovers sessions from the store", async () => {
       // Manually write launcher data to disk to simulate a previous run
       const savedSessions = [
@@ -1262,6 +1271,100 @@ describe("persistence", () => {
       expect(session).toBeDefined();
       expect(session?.state).toBe("exited");
       expect(session?.exitCode).toBe(-1);
+
+      killSpy.mockRestore();
+    });
+
+    // PLAN T3 regression guard: an ALIVE pid whose argv does NOT carry the
+    // expected sessionId is the exact symptom the identity probe exists to
+    // catch (PID reuse). It must be reaped (exited) and emit boot_probe.mismatch,
+    // not silently re-attached. Without this test the happy-path argv-match
+    // test (above) passes even if the argv factor is a no-op.
+    it("marks an alive PID whose argv lacks the sessionId as exited (argv mismatch)", async () => {
+      const savedSessions = [
+        {
+          sessionId: "mismatch-1",
+          pid: 22222,
+          state: "connected" as const,
+          cwd: "/tmp/project",
+          createdAt: Date.now(),
+        },
+      ];
+      store.saveLauncher(savedSessions);
+
+      const procIdentity = await import("./process-identity.js");
+      procIdentity.setProcReaderForTests({
+        platform: () => "linux",
+        killCheck: () => true, // alive
+        // argv carries a DIFFERENT sessionId → argv factor must reject.
+        readCmdline: () =>
+          ["claude", "--sdk-url", "ws://localhost:3456/ws/cli/some-other-session"].join("\0") + "\0",
+      });
+      const warnSpy = vi.spyOn(log, "warn").mockImplementation(() => undefined);
+
+      const newLauncher = new CliLauncher(3456);
+      newLauncher.setStore(store);
+      const recovered = newLauncher.restoreFromDisk();
+
+      expect(recovered).toBe(0);
+      const session = newLauncher.getSession("mismatch-1");
+      expect(session?.state).toBe("exited");
+      expect(session?.exitCode).toBe(-1);
+      // The mismatch must be surfaced via the structured boot_probe.mismatch WARN.
+      const emittedMismatch = warnSpy.mock.calls.some(
+        (args) => (args[2] as { event?: string } | undefined)?.event === "boot_probe.mismatch",
+      );
+      expect(emittedMismatch).toBe(true);
+
+      warnSpy.mockRestore();
+    });
+
+    // Dual-backend contract (CLAUDE.md): host-mode Codex (`app-server`, no
+    // `--sdk-url`) must survive a server restart. The Claude-only argv factor
+    // would otherwise reap it on every restart. Codex backend routes to the
+    // liveness-only fallback, so an alive pid is recovered even though its
+    // argv would never satisfy the Claude identity probe.
+    it("recovers a host-mode Codex session whose argv lacks --sdk-url", async () => {
+      const savedSessions = [
+        {
+          sessionId: "codex-host-1",
+          pid: 33333,
+          state: "connected" as const,
+          cwd: "/tmp/project",
+          createdAt: Date.now(),
+          backendType: "codex" as const,
+          cliSessionId: "codex-cli-xyz",
+          // host-mode: no containerId, no codexWsPort → falls to the pid branch.
+        },
+      ];
+      store.saveLauncher(savedSessions);
+
+      // Liveness-only fallback uses the real process.kill(pid, 0); make it succeed.
+      const origKill = process.kill;
+      const killSpy = vi.spyOn(process, "kill").mockImplementation(((
+        pid: number,
+        signal?: string | number,
+      ) => {
+        if (signal === 0) return true;
+        return origKill.call(process, pid, signal as any);
+      }) as any);
+      // Install a hostile identity reader that WOULD mismatch — proving the
+      // Codex path bypasses the identity probe entirely rather than passing it.
+      const procIdentity = await import("./process-identity.js");
+      procIdentity.setProcReaderForTests({
+        platform: () => "linux",
+        killCheck: () => false, // would yield "gone" if the probe ran
+        readCmdline: () => ["codex", "app-server", "--listen", "127.0.0.1:0"].join("\0") + "\0",
+      });
+
+      const newLauncher = new CliLauncher(3456);
+      newLauncher.setStore(store);
+      const recovered = newLauncher.restoreFromDisk();
+
+      expect(recovered).toBe(1);
+      const session = newLauncher.getSession("codex-host-1");
+      expect(session?.state).toBe("starting");
+      expect(session?.cliSessionId).toBe("codex-cli-xyz");
 
       killSpy.mockRestore();
     });
