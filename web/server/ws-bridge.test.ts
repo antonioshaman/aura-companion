@@ -18,7 +18,14 @@ if (typeof globalThis.Bun === "undefined") {
 
 const mockExecSync = vi.hoisted(() => vi.fn());
 vi.mock("node:child_process", () => ({ execSync: mockExecSync }));
-vi.mock("node:crypto", () => ({ randomUUID: () => "test-uuid" }));
+// Preserve the real crypto exports (writeAtomicJson, now used by
+// SessionStore.saveSync per finding #3, needs randomBytes); only override
+// randomUUID for deterministic ids. A bare `() => ({ randomUUID })` would
+// make randomBytes undefined, silently failing every atomic write.
+vi.mock("node:crypto", async (importActual) => ({
+  ...(await importActual<typeof import("node:crypto")>()),
+  randomUUID: () => "test-uuid",
+}));
 
 // Mock settings-manager to prevent AI validation from interfering with tests.
 // Without this mock, the real settings file (~/.companion/settings.json) may have
@@ -4930,6 +4937,23 @@ describe("diagnostics and callbacks", () => {
     expect(stats[0].browsers).toBe(0);
     expect(stats[0].historyLen).toBe(0);
     expect(stats[1].id).toBe("diag-2");
+  });
+
+  // Fowler finding #12 — `reachable` is derived at read time from the live
+  // adapter, not a cached bit mirrored across attach/detach handlers. A
+  // session with a connected CLI adapter reports reachable=true; one with no
+  // adapter reports false. Mutation-resistant: reverting to a stored field
+  // that the attach path forgets to set would flip the connected assertion.
+  it("getSessionMemoryStats derives reachable from the live adapter", () => {
+    const cli = makeCliSocket("diag-reach");
+    bridge.handleCLIOpen(cli, "diag-reach");
+    bridge.getOrCreateSession("diag-noadapter");
+
+    const stats = bridge.getSessionMemoryStats();
+    const reachStat = stats.find((s) => s.id === "diag-reach");
+    const noAdapterStat = stats.find((s) => s.id === "diag-noadapter");
+    expect(reachStat?.reachable).toBe(true);
+    expect(noAdapterStat?.reachable).toBe(false);
   });
 
   it("companionBus message:assistant: unsubscribe function removes the listener", async () => {

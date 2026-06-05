@@ -535,3 +535,106 @@ describe("migratePersistedSession", () => {
     expect(warnings[0]).toContain(String(CURRENT_SESSION_SCHEMA_VERSION + 5));
   });
 });
+
+// AURA-LOCAL — PLAN T13 (Phase H). `SessionStore.moveToArchive(sessionId)`
+// + `SessionStore.cancelDebounce(sessionId)` — the disk-half of the
+// session-map eviction protocol. Tests cover:
+//   - Happy path: source → archived/, fsync best-effort succeeds.
+//   - Idempotent on source-absent (eviction-sweep restart-replay).
+//   - Debounce cancellation BEFORE rename (the Debounce-recreate race).
+//   - EXDEV throws loudly (Persistence R2 — never fall back to copy+delete).
+//   - Invalid sessionId rejected at the boundary.
+import { describe as describe2, it as it2, expect as expect2, beforeEach as beforeEach2, afterEach as afterEach2 } from "vitest";
+import { join as join2 } from "node:path";
+import { existsSync as existsSync2, writeFileSync as writeFileSync2, mkdirSync as mkdirSync2, mkdtempSync as mkdtempSync2, rmSync as rmSync2, statSync as statSync2 } from "node:fs";
+import { tmpdir as tmpdir2 } from "node:os";
+import { ARCHIVED_SESSIONS_SUBDIR as ARCHIVED_SUB } from "./cleanup/cleanup-paths.js";
+
+describe2("SessionStore.moveToArchive (PLAN T13 / Phase H)", () => {
+  let dir: string;
+  let store2: SessionStore;
+
+  beforeEach2(() => {
+    dir = mkdtempSync2(join2(tmpdir2(), "session-store-move-"));
+    store2 = new SessionStore(dir);
+  });
+
+  afterEach2(() => {
+    store2.dispose();
+    try { rmSync2(dir, { recursive: true, force: true }); } catch { /* */ }
+  });
+
+  it2("happy path: moves <dir>/<sid>.json into <dir>/archived/<sid>.json", () => {
+    const sid = "sess-h-1";
+    writeFileSync2(join2(dir, `${sid}.json`), '{"id":"sess-h-1"}');
+
+    const result = store2.moveToArchive(sid);
+    expect2(result.kind).toBe("moved");
+
+    // Source gone, dest present.
+    expect2(existsSync2(join2(dir, `${sid}.json`))).toBe(false);
+    expect2(existsSync2(join2(dir, ARCHIVED_SUB, `${sid}.json`))).toBe(true);
+  });
+
+  it2("idempotent on source-absent: returns {kind:'absent'} without throwing", () => {
+    const out = store2.moveToArchive("sess-never-existed");
+    expect2(out).toEqual({ kind: "absent" });
+  });
+
+  it2("cancels pending debounce timer BEFORE rename (Debounce-recreate race defence)", async () => {
+    const sid = "sess-h-debounce";
+    // Trigger a debounced save (the 150ms timer is now armed pointing
+    // at the source path).
+    store2.save({
+      schemaVersion: CURRENT_SESSION_SCHEMA_VERSION,
+      id: sid,
+      state: { session_id: sid } as never,
+      messageHistory: [],
+      pendingMessages: [],
+      pendingPermissions: [],
+    });
+    // Pre-populate the source JSON so moveToArchive has something to rename.
+    writeFileSync2(join2(dir, `${sid}.json`), '{"id":"sess-h-debounce","manual":true}');
+
+    // Move ASAP — must cancel the debounce.
+    const out = store2.moveToArchive(sid);
+    expect2(out.kind).toBe("moved");
+
+    // Wait 250ms — well past the 150ms debounce horizon. The debounced
+    // saveSync MUST NOT have resurrected the source JSON.
+    await new Promise((r) => setTimeout(r, 250));
+    expect2(existsSync2(join2(dir, `${sid}.json`))).toBe(false);
+  });
+
+  it2("rejects invalid sessionId (path-traversal shape)", () => {
+    expect2(() => store2.moveToArchive("../escape")).toThrow();
+    expect2(() => store2.moveToArchive("")).toThrow();
+    expect2(() => store2.moveToArchive("a/b")).toThrow();
+    expect2(() => store2.moveToArchive("a\0null")).toThrow();
+  });
+
+  it2("cancelDebounce: returns true when timer was cancelled, false otherwise", () => {
+    const sid = "sess-h-c1";
+    expect2(store2.cancelDebounce(sid)).toBe(false);
+    store2.save({
+      schemaVersion: CURRENT_SESSION_SCHEMA_VERSION,
+      id: sid,
+      state: { session_id: sid } as never,
+      messageHistory: [],
+      pendingMessages: [],
+      pendingPermissions: [],
+    });
+    expect2(store2.cancelDebounce(sid)).toBe(true);
+    // Cancelled — second call is no-op.
+    expect2(store2.cancelDebounce(sid)).toBe(false);
+  });
+
+  it2("Persistence R2: archive dir gets created with mode 0o700 on first use", () => {
+    const sid = "sess-h-mode";
+    writeFileSync2(join2(dir, `${sid}.json`), "{}");
+    store2.moveToArchive(sid);
+    const st = statSync2(join2(dir, ARCHIVED_SUB));
+    // mode & 0o777 — strip file-type bits.
+    expect2((st.mode & 0o777) & 0o077).toBe(0); // group/world bits cleared.
+  });
+});

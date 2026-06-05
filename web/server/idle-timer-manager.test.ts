@@ -626,3 +626,82 @@ describe("EC-14 probe interface — IdleTimerProbe is exported + consumed by nam
     expect(typeof probe.noteTerminalResultFrame).toBe("function");
   });
 });
+
+// AURA-LOCAL — PLAN T13 (Phase H). `setArchived(sessionId)` cancels
+// the armed idle-fire timer AND clears the sticky pendingSyntheticTurnToken
+// flag so eviction-sweep and the auto-proceed idle fire don't race
+// the same row (Subprocess R6). Mutation-resistant per EC-42: the test
+// asserts BOTH cancellation lines so a future refactor removing either
+// fails loudly.
+describe("IdleTimerManager.setArchived — Phase H idle-kill cancellation (EC-42 mutation-resistant)", () => {
+  it("cancels an armed timer + clears pendingSyntheticTurnToken in ONE call", () => {
+    // The mutation resistance is the union of two assertions on the
+    // same setArchived call:
+    //   (a) isArmed → false after setArchived (timer.cancel ran)
+    //   (b) isSyntheticTurnInFlight → false after setArchived
+    //       (pendingSyntheticTurnToken cleared)
+    // A future refactor that drops EITHER line fails this test.
+    const h = buildHarness();
+    const m = new IdleTimerManager(h.deps);
+
+    // Arm a timer.
+    const armOut = m.arm("sess-orch-1", VALID_OPTS);
+    expect(armOut).toEqual({ kind: "armed" });
+    expect(m.isArmed("sess-orch-1")).toBe(true);
+
+    // Manually flip the sticky pending-synthetic-turn flag the way
+    // `fire()` does — exposing the assertion target without
+    // requiring a full fire cycle.
+    const internalStates = (m as unknown as {
+      states: Map<string, { pendingSyntheticTurnToken: number | null; turnToken: number }>;
+    }).states;
+    const state = internalStates.get("sess-orch-1");
+    expect(state).toBeDefined();
+    state!.pendingSyntheticTurnToken = state!.turnToken;
+    expect(m.isSyntheticTurnInFlight("sess-orch-1")).toBe(true);
+
+    // The cancellation under test.
+    m.setArchived("sess-orch-1");
+
+    // (a) timer cancelled.
+    expect(m.isArmed("sess-orch-1")).toBe(false);
+    // (b) sticky flag cleared.
+    expect(m.isSyntheticTurnInFlight("sess-orch-1")).toBe(false);
+  });
+
+  it("is idempotent for unknown session / already-cancelled session", () => {
+    const h = buildHarness();
+    const m = new IdleTimerManager(h.deps);
+
+    // Unknown session — no-op (no throw).
+    expect(() => m.setArchived("sess-never-seen")).not.toThrow();
+
+    // Already-cancelled session — no-op.
+    m.arm("sess-orch-1", VALID_OPTS);
+    m.cancel("sess-orch-1");
+    expect(() => m.setArchived("sess-orch-1")).not.toThrow();
+    expect(m.isArmed("sess-orch-1")).toBe(false);
+  });
+
+  it("leaves iterationCount intact so unarchive can re-arm without losing the cap", () => {
+    // The persisted trace is the cap-authoritative counter. setArchived
+    // must NOT reset it — an unarchive path resumes from the persisted
+    // count.
+    const h = buildHarness();
+    const m = new IdleTimerManager(h.deps);
+    const trace = {
+      schemaVersion: AUTO_PROCEED_TRACE_SCHEMA_VERSION,
+      sessionGroupId: GROUP_ID,
+      iterationCount: 7,
+      firedAt: ["2026-01-01T00:00:00.000Z"],
+      cappedAt: null,
+      lastObjectiveGateResult: null as "pass" | "fail" | null,
+    };
+    m.rehydrate("sess-orch-1", trace, GROUP_ID);
+    expect(m.getIterationCount("sess-orch-1")).toBe(7);
+
+    m.setArchived("sess-orch-1");
+    // iterationCount preserved.
+    expect(m.getIterationCount("sess-orch-1")).toBe(7);
+  });
+});

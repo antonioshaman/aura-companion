@@ -57,6 +57,7 @@ import { SessionLaunchOverlay } from "./SessionLaunchOverlay.js";
 import { PlaygroundUpdateOverlay } from "./UpdateOverlay.js";
 import { PlaygroundDockerUpdateDialog } from "./DockerUpdateDialog.js";
 import { SessionItem } from "./SessionItem.js";
+import { CliFailedBanner } from "./CliFailedBanner.js";
 import type { CreationProgressEvent } from "../types.js";
 import type { SessionItem as SessionItemType } from "../utils/project-grouping.js";
 
@@ -3255,6 +3256,46 @@ function CouncilModeSection() {
         </Card>
         <Card label="DegradedBanner — controlled respawning state">
           <DegradedBanner deadRole="observer" onRespawn={() => {}} isRespawning={true} />
+        </Card>
+
+        {/* PLAN T12 (Phase G) - per-variant CliFailedBanner mocks. Five
+            cards mirror the closed CliFailedReason union; each carries
+            human-readable copy + drainedCount + (when present) SHA. */}
+        <Card label="CliFailedBanner — relaunch_exhausted (retry budget spent)">
+          <CliFailedBanner
+            failure={{
+              reason: "relaunch_exhausted",
+              drainedCount: 3,
+              subprocessAlive: false,
+              firedAt: Date.now() - 10_000,
+              lastErrorSha256: "d4f5e8a912c0f1234567890abcdef1234567890abcdef1234567890abcdef1234",
+            }}
+            onStartNewSession={() => { /* noop */ }}
+          />
+        </Card>
+        <Card label="CliFailedBanner — container_missing (Docker container deleted)">
+          <CliFailedBanner
+            failure={{ reason: "container_missing", drainedCount: 0, subprocessAlive: false, firedAt: Date.now() - 5_000 }}
+            onStartNewSession={() => { /* noop */ }}
+          />
+        </Card>
+        <Card label="CliFailedBanner — container_stopped (Docker container won't start)">
+          <CliFailedBanner
+            failure={{ reason: "container_stopped", drainedCount: 1, subprocessAlive: false, firedAt: Date.now() - 5_000 }}
+            onStartNewSession={() => { /* noop */ }}
+          />
+        </Card>
+        <Card label="CliFailedBanner — binary_missing (claude/codex absent in container)">
+          <CliFailedBanner
+            failure={{ reason: "binary_missing", drainedCount: 0, subprocessAlive: false, firedAt: Date.now() - 5_000 }}
+            onStartNewSession={() => { /* noop */ }}
+          />
+        </Card>
+        <Card label="CliFailedBanner — browser_closed_no_reconnect (tab gone past grace)">
+          <CliFailedBanner
+            failure={{ reason: "browser_closed_no_reconnect", drainedCount: 5, subprocessAlive: true, firedAt: Date.now() - 60_000 }}
+            onStartNewSession={() => { /* noop */ }}
+          />
         </Card>
 
         <Card label="FindingsLog — empty state">

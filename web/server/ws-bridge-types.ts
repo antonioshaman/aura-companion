@@ -10,6 +10,15 @@ import type { IBackendAdapter } from "./backend-adapter.js";
 import type { SessionStateMachine } from "./session-state-machine.js";
 import { getSettings } from "./settings-manager.js";
 
+// PLAN T10 (Phase F) - re-export the wire frame so the Phase G
+// frontend bridge (`web/src/types.ts`) can import a single named
+// type from this module instead of reaching into the cleanup-
+// folder boundary directly. The TYPE definition (+ the AP-14
+// sole-assembly-site builder `buildCliFailedFrame`) lives in
+// `cli-failed-frame.ts`.
+export type { CliFailedFrame, CliFailedReason } from "./cli-failed-frame.js";
+
+
 export interface CLISocketData {
   kind: "cli";
   sessionId: string;

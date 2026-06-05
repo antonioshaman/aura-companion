@@ -69,6 +69,8 @@ interface MockStoreState {
   groups: Map<string, { pairing: string }>;
   findings: Map<string, unknown[]>;
   dismissedStopIds: Set<string>;
+  // PLAN T12 (Phase G) - per-session terminal-failure axis.
+  cliFailures: Map<string, { reason: string; drainedCount: number; subprocessAlive: boolean; firedAt: number }>;
 }
 
 function makeSession(id: string, overrides: Partial<SessionState> = {}): SessionState {
@@ -140,6 +142,7 @@ function createMockState(overrides: Partial<MockStoreState> = {}): MockStoreStat
     groups: new Map(),
     findings: new Map(),
     dismissedStopIds: new Set(),
+    cliFailures: new Map(),
     ...overrides,
   };
 }

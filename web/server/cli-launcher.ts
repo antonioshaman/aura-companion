@@ -17,6 +17,17 @@ import { resolveBinary, getEnrichedPath } from "./path-resolver.js";
 import { resolveObserverPromptForSpawn } from "./observer-prompt-spawn.js";
 import { assertExhaustiveObserverPromptSource } from "./observer-prompt.js";
 import { log } from "./logger.js";
+import { verifyProcessIdentity, readProcessStartMs } from "./process-identity.js";
+// AURA-LOCAL — PLAN T7. Per-session runtime sidecar carrying spawn-time
+// pid + processStartMs + argvSha256. Phase D upgrades the boot probe
+// from Phase A's interim two-factor to three-factor and feeds the
+// orphan-reaper's PID-reuse classification.
+import {
+  SIDECAR_SCHEMA_VERSION,
+  argvSha256,
+  readRuntimeSidecar,
+  writeRuntimeSidecar,
+} from "./cli-runtime-sidecar.js";
 import {
   OBSERVER_ALLOWED_TOOLS,
   OBSERVER_DISALLOWED_TOOLS,
@@ -24,6 +35,7 @@ import {
 } from "./observer-permissions.js";
 import { containerManager } from "./container-manager.js";
 import { companionBus } from "./event-bus.js";
+import type { RelaunchExhaustedReason } from "./event-bus-types.js";
 import {
   getLegacyCodexHome,
   resolveCompanionCodexSessionHome,
@@ -269,6 +281,174 @@ export class CliLauncher {
     this.store.saveLauncher(data);
   }
 
+  /**
+   * AURA-LOCAL — PLAN T7/T8. Route EVERY "skip relaunch" early-return in
+   * `relaunch()` through this helper. The four required mutations:
+   *
+   *   1. `info.pid = undefined` — the stale PID was the head of the
+   *      live-symptom chain (boot probe + auto-relaunch treating the
+   *      reused PID as "ours"). Nulling it terminates the chain.
+   *   2. `info.state = "exited"` — gives the orchestrator, idle-timer,
+   *      eviction sweep, and group-reconnect listeners a coherent
+   *      shared view.
+   *   3. `persistState()` — debounced disk write. The persist call
+   *      fires BEFORE the caller's `return`, so a crash inside the
+   *      caller between mutate and return doesn't lose the state
+   *      update.
+   *   4. `companionBus.emit("session:relaunch-exhausted", ...)` — Phase F
+   *      drain-dispatch reads this to fire the `cli_failed` browser
+   *      frame + clear pending message queues. Distinct from
+   *      `session:relaunch-failed` (which fires on ANY relaunch
+   *      failure, transient + structural); this channel is the
+   *      narrower "permanent loss" subset.
+   *
+   *      Phase F (PLAN T10+T11) wiring: the `WsBridge` constructor
+   *      subscribes to this event and routes each fire through
+   *      `WsBridge.dispatchCliFailedDrain`, which builds the
+   *      `cli_failed` frame via `buildCliFailedFrame`
+   *      (`cli-failed-frame.ts`, AP-14 sole assembly site) and
+   *      executes the inline 4-step dispatch (snapshot pendingMsgs
+   *      length -> clear + persist BEFORE broadcast per Persistence
+   *      R7 -> broadcastToBrowsers -> recordCleanupEvent
+   *      "drained_pending"). The reason argument here is mapped to
+   *      the closed `CliFailedReason` union by
+   *      `mapClearReasonToCliFailedReason` in ws-bridge.ts:
+   *        - container_missing             -> container_missing
+   *        - container_start_failed        -> container_stopped
+   *        - container_binary_missing      -> binary_missing
+   *        - observer_prompt_config_failed -> relaunch_exhausted
+   *        - observer_prompt_source_drift_refused -> relaunch_exhausted
+   *      `subprocessAlive: false` for every reason here — the
+   *      structural failure means the CLI is permanently dead.
+   *
+   * EC-19 floor: every `return { ok: false, ... }` in `relaunch()` MUST
+   * be preceded by a `clearPidAndPersist(sessionId, reason)` call. The
+   * matching static-grep canary in `cli-launcher.test.ts` (
+   * `EC-19 — clearPidAndPersist routing in relaunch()`) enforces this
+   * at test time via regex-anchored brace-counted body extraction.
+   *
+   * NOT called on the `return { ok: true }` success path — that path
+   * leaves `state="starting"` for the spawn handshake. Also NOT called
+   * on the very first `if (!info) return` (session missing entirely;
+   * no state to mutate).
+   */
+  private clearPidAndPersist(sessionId: string, reason: RelaunchExhaustedReason): void {
+    const info = this.sessions.get(sessionId);
+    if (!info) {
+      // Defensive: caller already filtered out the "session not found"
+      // case; structural arrival here means a race. Log + bail.
+      log.warn("cli-launcher", "clearPidAndPersist: session vanished mid-relaunch", {
+        event: "cli_launcher.clear_pid.missing_session",
+        sessionId,
+        reason,
+      });
+      return;
+    }
+    info.pid = undefined;
+    info.state = "exited";
+    if (info.exitCode == null) info.exitCode = 1;
+    this.persistState();
+    companionBus.emit("session:relaunch-exhausted", { sessionId, reason });
+    log.info("cli-launcher", "relaunch path cleared; pid nulled and session marked exited", {
+      event: "cli_launcher.relaunch_exhausted",
+      sessionId,
+      reason,
+    });
+  }
+
+  /**
+   * AURA-LOCAL — PLAN T7. Persist the per-session runtime sidecar
+   * (`<sessionId>.runtime.json`) right after `Bun.spawn` returns so the
+   * spawn-time anchor (pid + processStartMs + argv hash) is durable.
+   * Boot recovery reads this on the next restart; the orphan reaper
+   * reads it to authoritatively classify PPID=1 candidates.
+   *
+   * Errors are logged but DO NOT fail the spawn — the sidecar is
+   * forensic forward-recovery, not a hard prerequisite. The boot probe
+   * degrades to the Phase A two-factor path when a session has no
+   * sidecar (still strictly stronger than the bare `kill(pid, 0)`).
+   */
+  private writeRuntimeSidecarForSpawn(
+    sessionId: string,
+    pid: number,
+    argv: readonly string[],
+  ): void {
+    if (!this.store) return;
+    try {
+      // EC-49 — anchor on the KERNEL start instant (same quantity the
+      // verifier reads from /proc/<pid>/stat field-22), not Date.now().
+      // The JS wallclock and the kernel clock-of-record diverge under a
+      // GC pause / event-loop stall / cgroup MemoryHigh throttle between
+      // fork and this read, which can exceed the verifier's ±2s window
+      // and false-flag a live session as mismatch(starttime) — precisely
+      // under the memory pressure where boot recovery matters most.
+      // Fall back to Date.now() only when the kernel read is unavailable
+      // (non-Linux), where the starttime factor is skipped anyway.
+      const kernelStartMs = readProcessStartMs(pid);
+      writeRuntimeSidecar(this.store.directory, sessionId, {
+        schemaVersion: SIDECAR_SCHEMA_VERSION,
+        pid,
+        processStartMs: kernelStartMs ?? Date.now(),
+        argvSha256: argvSha256(argv),
+      });
+    } catch (e) {
+      log.warn("cli-launcher", "runtime sidecar write failed", {
+        event: "cli_launcher.sidecar_write_failed",
+        sessionId,
+        error_code: (e as NodeJS.ErrnoException).code ?? "unknown",
+      });
+    }
+  }
+
+  /**
+   * EC-45 — decide whether the relaunch path may SIGTERM `info.pid`, a PID
+   * inherited from a previous server instance (no live in-process handle).
+   *
+   * The asymmetry favours NOT killing when identity cannot be positively
+   * confirmed: a skipped kill leaks an orphan the next-boot reaper
+   * reclaims, but a wrong kill SIGTERMs an unrelated process that reused
+   * the PID. So:
+   *   • Claude on Linux → run the three-factor probe. `match` → kill;
+   *     `mismatch`/`gone` → SKIP (the PID is not ours / already dead).
+   *   • `unavailable` (non-Linux, no /proc) → kill best-effort: identity is
+   *     unknowable and there is no stronger signal than the prior behaviour.
+   *   • Codex host-mode → kill best-effort: the argv factor recognises only
+   *     Claude's `--sdk-url` token, so the probe can't verify Codex; a
+   *     Codex argv/port identity factor is future work.
+   */
+  private shouldSignalPreviousInstancePid(info: SdkSessionInfo): boolean {
+    if (typeof info.pid !== "number") return false;
+    // Codex has no argv identity factor — preserve prior best-effort kill.
+    if (info.backendType === "codex") return true;
+    let expectedStartMs: number | null = null;
+    if (this.store) {
+      try {
+        const sidecar = readRuntimeSidecar(this.store.directory, info.sessionId);
+        if (sidecar.kind === "present") expectedStartMs = sidecar.payload.processStartMs;
+      } catch {
+        // Corrupt/absent sidecar → degrade to the two-factor probe
+        // (liveness + argv), still strictly stronger than a blind kill.
+      }
+    }
+    const verdict = verifyProcessIdentity(info.pid, info.sessionId, expectedStartMs);
+    switch (verdict.kind) {
+      case "match":
+        return true;
+      case "unavailable":
+        return true; // identity unknowable off-Linux — best-effort kill
+      case "mismatch":
+        log.warn("cli-launcher", "relaunch declined to SIGTERM a PID-reuse mismatch", {
+          event: "relaunch.kill_declined",
+          sessionId: info.sessionId,
+          pid: info.pid,
+          reason: verdict.reason,
+        });
+        return false;
+      case "gone":
+        return false; // already dead — nothing to signal
+    }
+  }
+
   private claimCodexWsPort(port: number): void {
     this.claimedCodexWsPorts.add(port);
   }
@@ -296,9 +476,16 @@ export class CliLauncher {
 
       // Check if the process is still alive
       if (info.state !== "exited") {
-        if (info.containerId && info.codexWsPort) {
-          // Docker WS mode: the stored PID is `docker exec -d` which exits
-          // immediately after launch.  Check container liveness instead.
+        if (info.containerId) {
+          // Any containerized session (Codex Docker-WS OR Claude): the
+          // stored PID is the HOST-side `docker exec` wrapper, never the
+          // in-container CLI. The argv identity factor is structurally
+          // unable to verify a `docker exec -i … bash -lc 'claude --sdk-url …'`
+          // wrapper (the --sdk-url token is buried inside the single
+          // bash -lc string arg → indexOf returns -1 → false mismatch →
+          // relaunch storm). Container liveness is the only valid signal
+          // for both backends. (Previously gated on `&& info.codexWsPort`,
+          // which let containerized Claude fall through to the PID probe.)
           const containerState = containerManager.isContainerAlive(info.containerId);
           if (containerState === "running") {
             info.state = "starting";
@@ -310,13 +497,83 @@ export class CliLauncher {
             this.sessions.set(info.sessionId, info);
           }
         } else if (info.pid) {
-          try {
-            process.kill(info.pid, 0); // signal 0 = just check if alive
+          // PLAN T3 (Phase A) + T7 (Phase D): three-factor identity
+          // probe — closes the live symptom where alive subprocesses
+          // don't match Map `pid` fields (PID reuse → false-positive
+          // liveness → relaunch storm).
+          //
+          // Phase D: the runtime sidecar (`<sessionId>.runtime.json`)
+          // carries the spawn-time `processStartMs` anchor. The boot
+          // probe loads it AND passes the anchor into
+          // `verifyProcessIdentity` so the third factor (starttime
+          // ±2s) engages. Closes PID-reuse-across-reboot which the
+          // Phase A interim two-factor (liveness + argv) couldn't.
+          //
+          // When the sidecar is absent (Phase A-era sessions migrating
+          // forward; sidecar write failed at spawn time), we degrade
+          // to the Phase A two-factor — still strictly stronger than
+          // the bare `process.kill(pid, 0)` it replaces.
+          //
+          // On `unavailable` (macOS dev box, no /proc) the helper emits
+          // a one-time boot WARN and we conservatively trust the old
+          // liveness-only check — degraded but no worse than today.
+          //
+          // Dual-backend contract: the probe's argv factor recognizes only
+          // Claude's `--sdk-url ws/cli/<sessionId>` token. Host-mode Codex
+          // (`app-server`, no `--sdk-url`) would always fail that factor →
+          // false `mismatch` → a live Codex app-server reaped on every
+          // restart (regression vs the prior bare `process.kill`). Route
+          // Codex host-mode through the liveness-only fallback; the identity
+          // probe is Claude-only until a Codex argv/port identity lands.
+          let expectedStartMs: number | null = null;
+          if (this.store && info.backendType !== "codex") {
+            try {
+              const sidecar = readRuntimeSidecar(this.store.directory, info.sessionId);
+              if (sidecar.kind === "present") {
+                expectedStartMs = sidecar.payload.processStartMs;
+              }
+            } catch (e) {
+              // Corrupt sidecar — degrade to two-factor probe but log
+              // structurally so operators see the corruption. Sibling
+              // shape to the observer-prompt loader's ENOENT-vs-malformed
+              // contract.
+              log.warn("cli-launcher", "runtime sidecar load failed — degrading to two-factor probe", {
+                event: "boot_probe.sidecar_corrupt",
+                sessionId: info.sessionId,
+                error_code: (e as NodeJS.ErrnoException).code ?? "unknown",
+              });
+            }
+          }
+          const verdict =
+            info.backendType === "codex"
+              ? null
+              : verifyProcessIdentity(info.pid, info.sessionId, expectedStartMs);
+          if (verdict && verdict.kind === "match") {
             info.state = "starting"; // WS not yet re-established, wait for CLI to reconnect
             this.sessions.set(info.sessionId, info);
             recovered++;
-          } catch {
-            // Process is dead
+          } else if (!verdict || verdict.kind === "unavailable") {
+            // Codex host-mode OR non-Linux fallback: legacy liveness-only probe.
+            try {
+              process.kill(info.pid, 0);
+              info.state = "starting";
+              this.sessions.set(info.sessionId, info);
+              recovered++;
+            } catch {
+              info.state = "exited";
+              info.exitCode = -1;
+              this.sessions.set(info.sessionId, info);
+            }
+          } else {
+            // "gone" | "mismatch" → not the process we spawned.
+            if (verdict.kind === "mismatch") {
+              log.warn("cli-launcher", "Boot probe rejected PID reuse / argv mismatch", {
+                event: "boot_probe.mismatch",
+                sessionId: info.sessionId,
+                pid: info.pid,
+                reason: verdict.reason,
+              });
+            }
             info.state = "exited";
             info.exitCode = -1;
             this.sessions.set(info.sessionId, info);
@@ -578,8 +835,14 @@ export class CliLauncher {
       } catch {}
       this.processes.delete(sessionId);
     } else if (info.pid) {
-      // Process from a previous server instance — kill by PID
-      try { process.kill(info.pid, "SIGTERM"); } catch {}
+      // EC-45 — a PID from a previous server instance is no proof of
+      // identity. The original CLI may have exited and the kernel handed
+      // its PID to an unrelated process; an unconditional SIGTERM would be
+      // a silent collateral kill. Re-verify at the signal instant and skip
+      // the kill on a mismatch/gone verdict.
+      if (this.shouldSignalPreviousInstancePid(info)) {
+        try { process.kill(info.pid, "SIGTERM"); } catch {}
+      }
     }
 
     // Release any host-mode Codex port claim before picking a new one.
@@ -592,9 +855,13 @@ export class CliLauncher {
 
       if (containerState === "missing") {
         console.error(`[cli-launcher] Container ${containerLabel} no longer exists for session ${sessionId}`);
-        info.state = "exited";
         info.exitCode = 1;
-        this.persistState();
+        // PLAN T7 (Phase D): structural failure — container is gone and
+        // will never come back via the retry budget. Route through
+        // `clearPidAndPersist` so `pid` is nulled (kills the boot-probe
+        // false-positive chain), `state` flips exited, persist fires,
+        // and `session:relaunch-exhausted` fans out for Phase F drain.
+        this.clearPidAndPersist(sessionId, "container_missing");
         return {
           ok: false,
           error: `Container "${containerLabel}" was removed externally. Please create a new session.`,
@@ -606,9 +873,10 @@ export class CliLauncher {
           containerManager.startContainer(info.containerId);
           console.log(`[cli-launcher] Restarted stopped container ${containerLabel} for session ${sessionId}`);
         } catch (e) {
-          info.state = "exited";
           info.exitCode = 1;
-          this.persistState();
+          // PLAN T7 (Phase D): docker startContainer threw — structural
+          // failure. Route through `clearPidAndPersist`.
+          this.clearPidAndPersist(sessionId, "container_start_failed");
           return {
             ok: false,
             error: `Container "${containerLabel}" is stopped and could not be restarted: ${e instanceof Error ? e.message : String(e)}`,
@@ -620,9 +888,10 @@ export class CliLauncher {
       const binary = info.backendType === "codex" ? "codex" : "claude";
       if (!containerManager.hasBinaryInContainer(info.containerId, binary)) {
         console.error(`[cli-launcher] "${binary}" not found in container ${containerLabel} for session ${sessionId}`);
-        info.state = "exited";
         info.exitCode = 127;
-        this.persistState();
+        // PLAN T7 (Phase D): CLI binary missing inside the container —
+        // structural failure that won't fix itself across retries.
+        this.clearPidAndPersist(sessionId, "container_binary_missing");
         return {
           ok: false,
           error: `"${binary}" command not found inside container "${containerLabel}". The container image may need to be rebuilt.`,
@@ -675,9 +944,7 @@ export class CliLauncher {
     try {
       effectiveRelaunchOptions = this.buildObserverSpawnOverrides(sessionId, info, baseRelaunchOptions);
     } catch (err) {
-      info.state = "exited";
       info.exitCode = 1;
-      this.persistState();
       // Council Review 2026-05-15-0820 P2 #8 (D4): emit `session:relaunch-failed`
       // (NOT `session:exited`). The typed channel exists at
       // `event-bus-types.ts:28` and is already wired in
@@ -690,6 +957,11 @@ export class CliLauncher {
         const reason = `observer-prompt-config-failed: ${err instanceof Error ? err.message : String(err)}`;
         companionBus.emit("session:relaunch-failed", { sessionId, reason });
       }
+      // PLAN T7 (Phase D): observer-prompt-config load failure is
+      // deterministic — retrying won't fix it. Route through
+      // `clearPidAndPersist` so the pid is nulled, state persisted,
+      // and Phase F's drain dispatch listener wakes.
+      this.clearPidAndPersist(sessionId, "observer_prompt_config_failed");
       return {
         ok: false,
         error: err instanceof Error ? err.message : String(err),
@@ -744,11 +1016,13 @@ export class CliLauncher {
       // the policy change. SHA-only drift within the same source
       // (workspace artifact edited in place) stays WARN-only.
       if (crossedSourceBoundary) {
-        info.state = "exited";
         info.exitCode = 1;
-        this.persistState();
         const reason = `observer-prompt-source-drift-refused: ${previousObserverPromptSource} → ${info.observerPromptSource}`;
         companionBus.emit("session:relaunch-failed", { sessionId, reason });
+        // PLAN T7 (Phase D): operator must restart the group to ack the
+        // policy change; we route through `clearPidAndPersist` to
+        // surface the structural failure to Phase F's drain listener.
+        this.clearPidAndPersist(sessionId, "observer_prompt_source_drift_refused");
         return { ok: false, error: reason };
       }
     }
@@ -944,6 +1218,13 @@ export class CliLauncher {
 
     info.pid = proc.pid;
     this.processes.set(sessionId, proc);
+    // PLAN T7 (Phase D): persist the spawn-time identity anchor — pid +
+    // processStartMs + argv hash — to `<sessionId>.runtime.json`.
+    // Boot-recovery + orphan-reaper read this to authoritatively
+    // classify the running process across bun restarts. Errors are
+    // logged but don't fail the spawn (sidecar is forensic forward-
+    // recovery, not a hard prerequisite).
+    this.writeRuntimeSidecarForSpawn(sessionId, proc.pid, spawnCmd);
 
     // Stream stdout/stderr for debugging
     this.pipeOutput(sessionId, proc);
@@ -1169,6 +1450,8 @@ export class CliLauncher {
 
     info.pid = proc.pid;
     this.processes.set(sessionId, proc);
+    // PLAN T7 (Phase D): runtime-sidecar write for Codex WS spawn.
+    this.writeRuntimeSidecarForSpawn(sessionId, proc.pid, spawnCmd);
 
     // Pipe stdout/stderr for debugging (JSON-RPC goes over WebSocket now)
     this.pipeOutput(sessionId, proc);
@@ -1409,6 +1692,8 @@ export class CliLauncher {
 
     info.pid = proc.pid;
     this.processes.set(sessionId, proc);
+    // PLAN T7 (Phase D): runtime-sidecar write for Codex stdio spawn.
+    this.writeRuntimeSidecarForSpawn(sessionId, proc.pid, spawnCmd);
 
     // Pipe stderr for debugging (stdout is used for JSON-RPC)
     const stderr = proc.stderr;

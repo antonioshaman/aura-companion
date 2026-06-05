@@ -754,4 +754,47 @@ describe("SessionItem", () => {
     expect(onContinueInNew).toHaveBeenCalledTimes(1);
     expect(onContinueInNew.mock.calls[0][1]).toBe("session-1");
   });
+
+  // ─── PLAN T12 (Phase G) — terminal CLI-failure glyph ─────────────────
+  //
+  // The cliFailedReason prop drives a destructive ✕ glyph next to the
+  // status dot, distinct from the exited outline dot. Mutation-resistant:
+  // a regression that swaps the destructive token for warning/yellow
+  // trips the className assertion; a regression that drops the prop
+  // mapping entirely trips the testid presence assertion.
+
+  it("renders the destructive cli-failed glyph when cliFailedReason is set", () => {
+    render(<SessionItem {...buildProps({ cliFailedReason: "relaunch_exhausted" })} />);
+    const glyph = screen.getByTestId("session-item-cli-failed-glyph");
+    expect(glyph).toBeInTheDocument();
+    expect(glyph).toHaveAttribute("data-reason", "relaunch_exhausted");
+    // Destructive token (cc-error) NOT warning - reverting to cc-warning fails.
+    expect(glyph.className).toMatch(/cc-error/);
+    expect(glyph.className).not.toMatch(/cc-warning/);
+  });
+
+  it("does NOT render the cli-failed glyph when cliFailedReason is absent", () => {
+    render(<SessionItem {...buildProps()} />);
+    expect(screen.queryByTestId("session-item-cli-failed-glyph")).toBeNull();
+  });
+
+  it("tooltip text comes from cliFailedCopy headline (operator hover discovery)", () => {
+    render(<SessionItem {...buildProps({ cliFailedReason: "browser_closed_no_reconnect" })} />);
+    const glyph = screen.getByTestId("session-item-cli-failed-glyph");
+    expect(glyph).toHaveAttribute("title");
+    expect(glyph.getAttribute("title")).toMatch(/you/i);
+  });
+
+  it("aria-label spells out the failure for screen readers", () => {
+    render(<SessionItem {...buildProps({ cliFailedReason: "container_missing" })} />);
+    const glyph = screen.getByTestId("session-item-cli-failed-glyph");
+    expect(glyph.getAttribute("aria-label")).toMatch(/^Session failed:/);
+  });
+
+  it("passes axe scan with the cli-failed glyph rendered", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(<SessionItem {...buildProps({ cliFailedReason: "container_stopped" })} />);
+    const results = await axe(container);
+    expect(results).toHaveNoViolations();
+  });
 });

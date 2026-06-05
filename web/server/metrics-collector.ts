@@ -10,6 +10,20 @@ import type {
   CounterMetrics,
   GaugeMetrics,
 } from "./metrics-types.js";
+// AURA-LOCAL: cleanup-event projection seam. PLAN T5 — counters live in
+// the cleanup-events module's bounded store; metricsCollector reads via
+// the typed `CleanupEventKind` projection helper (single source of truth
+// per EC-21). Phase D/E/F/H emit `recordCleanupEvent(kind)` at their
+// emit sites; the diagnostic snapshot (Phase C) reads the projection
+// methods below.
+import { getCleanupEventCountLastHour } from "./cleanup/cleanup-events.js";
+// AURA-LOCAL: EC-43 sweep applied during Phase B. The four wallclock-
+// delta sites below (`sessionInitTimeMs`, `turnDurationMs`,
+// `permissionDurationMs`, `serverUptimeMs`) route through `ageMs(...)`
+// per the Phase A HANDOFF's deferred-sweep list. Semantics identical
+// for positive deltas; the EC-38 clamp ensures backward clock jumps
+// no longer pollute histogram min/max with negative durations.
+import { ageMs } from "./cleanup/age-ms.js";
 
 // ── Histogram bucket boundaries (ms) ──────────────────────────────────────
 
@@ -141,7 +155,7 @@ export class MetricsCollector {
         if (to === "ready" && (from === "initializing" || from === "starting")) {
           const spawned = this.sessionSpawnedAt.get(sessionId);
           if (spawned != null) {
-            recordHistogramValue(this.sessionInitTime, Date.now() - spawned);
+            recordHistogramValue(this.sessionInitTime, ageMs(spawned));
             this.sessionSpawnedAt.delete(sessionId);
           }
         }
@@ -167,7 +181,7 @@ export class MetricsCollector {
       companionBus.on("message:result", ({ sessionId }) => {
         const started = this.turnStartedAt.get(sessionId);
         if (started != null) {
-          recordHistogramValue(this.turnDuration, Date.now() - started);
+          recordHistogramValue(this.turnDuration, ageMs(started));
           this.turnStartedAt.delete(sessionId);
         }
       }),
@@ -219,7 +233,7 @@ export class MetricsCollector {
 
     const requested = this.permissionRequestedAt.get(requestId);
     if (requested != null) {
-      recordHistogramValue(this.permissionDuration, Date.now() - requested);
+      recordHistogramValue(this.permissionDuration, ageMs(requested));
       this.permissionRequestedAt.delete(requestId);
       this.permissionRequestToSession.delete(requestId);
     }
@@ -243,6 +257,39 @@ export class MetricsCollector {
     this.errors.set(category, (this.errors.get(category) ?? 0) + 1);
   }
 
+  // ── Cleanup-event projections — PLAN T5 (Phase B) ─────────────────────
+  //
+  // Each method reads the cleanup-events store via the typed projection
+  // helper (`getCleanupEventCountLastHour(kind)`). Sweepers do NOT own
+  // counters — they call `recordCleanupEvent(kind)` from the cleanup
+  // module; metricsCollector is the consumer. This preserves EC-21
+  // single-source-of-truth: a future Phase C diagnostic snapshot or a
+  // future `/api/metrics` endpoint both read these same projections.
+  //
+  // AURA-LOCAL. `nowMs` is the optional injected clock for tests;
+  // production callers omit it and let `ageMs` read the module-scope
+  // clock source.
+
+  getEvictedLastHour(nowMs?: number): number {
+    return getCleanupEventCountLastHour("evicted", nowMs);
+  }
+
+  getOrphanReapedLastHour(nowMs?: number): number {
+    return getCleanupEventCountLastHour("orphan_reaped", nowMs);
+  }
+
+  getDrainedPendingLastHour(nowMs?: number): number {
+    return getCleanupEventCountLastHour("drained_pending", nowMs);
+  }
+
+  getRecordingsSoftArchivedLastHour(nowMs?: number): number {
+    return getCleanupEventCountLastHour("recordings_soft_archived", nowMs);
+  }
+
+  getRecordingsHardDeletedLastHour(nowMs?: number): number {
+    return getCleanupEventCountLastHour("recordings_hard_deleted", nowMs);
+  }
+
   // ── Snapshot ──────────────────────────────────────────────────────────
 
   getSnapshot(gaugeProvider?: GaugeDataProvider): MetricsSnapshot {
@@ -255,7 +302,7 @@ export class MetricsCollector {
     };
 
     return {
-      serverUptimeMs: Date.now() - this.startedAt,
+      serverUptimeMs: ageMs(this.startedAt),
       snapshotAt: Date.now(),
       counters,
       gauges,

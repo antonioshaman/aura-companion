@@ -438,6 +438,42 @@ export class IdleTimerManager implements IdleTimerProbe {
   }
 
   /**
+   * AURA-LOCAL — PLAN T13 (Phase H). Cancel any armed idle-fire timer
+   * AND clear the sticky `pendingSyntheticTurnToken` flag for a
+   * session that has just been archived. Called from the orchestrator's
+   * `archiveSession` path so eviction-sweep and the auto-proceed idle
+   * fire don't race the same row (Subprocess R6).
+   *
+   * Semantics:
+   *   • Cancels the pending timer handle (so no fresh synthetic
+   *     `[auto-proceed:idle-timeout v1]` frame ever fires post-archive).
+   *   • Clears the sticky pending-turn token so the denylist gate the
+   *     bridge consults via `isSyntheticTurnInFlight` correctly returns
+   *     false for an archived row.
+   *   • Leaves `iterationCount` + `firedAt` intact so an unarchive
+   *     path can re-arm without losing cap-bookkeeping (the persisted
+   *     trace remains the cap-authoritative counter — see Task 4).
+   *
+   * Idempotent — calling for an unknown session, an already-cancelled
+   * session, or a session with no pending synthetic turn is a no-op.
+   *
+   * EC-42 invariant: the cancel path mutates BOTH `state.timer` AND
+   * `state.pendingSyntheticTurnToken`. A mutation-resistant test in
+   * `idle-timer-manager.test.ts` exercises both fields after a single
+   * `setArchived` call so a future refactor that removes either line
+   * fails loudly.
+   */
+  setArchived(sessionId: string): void {
+    const state = this.states.get(sessionId);
+    if (!state) return;
+    if (state.timer) {
+      state.timer.cancel();
+      state.timer = null;
+    }
+    state.pendingSyntheticTurnToken = null;
+  }
+
+  /**
    * SIGTERM-drain helper. Cancels every armed timer in one pass so
    * the process doesn't hold up exit. EC-2 invariant — mark teardown
    * BEFORE the kills propagate to children; the cancel-all happens

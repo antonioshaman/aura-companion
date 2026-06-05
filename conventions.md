@@ -412,6 +412,78 @@ Reference: Council Review 2026-06-04-1826 found three independent burndown tests
 
 ---
 
+### EC-45: Every kill-path on a persisted PID MUST re-verify process identity immediately before signalling
+
+**Convention:** Any `process.kill(pid, signal)` (or `kill(pid, ...)`) that targets a PID NOT held as a live in-process handle — i.e. a PID read from disk, a sidecar, or classified from `/proc` — MUST call `verifyProcessIdentity(pid, sessionId, expectedStartMs)` (or recompute the argv/start-time anchor it relies on) immediately before the signal, and MUST abort the kill on any non-match verdict. The whole feature added `verifyProcessIdentity` precisely because a stored PID is no proof of identity across a server restart or after the original process exits; kill-paths that trust the raw PID re-open the exact PID-reuse hole the probe was built to close. The pure probe is fail-CLOSED and side-effect-free — there is no excuse for a kill-path to skip it. This applies symmetrically (EC-43) to relaunch, the orphan-reaper REAP branch, graceful shutdown, and any future signal site. Reference symptom: Council Review 2026-06-05-0731 Finding 2 (`relaunch()` SIGTERMs `info.pid` from a previous server instance with zero identity check) + Finding 9 (orphan-reaper no-known-session REAP issues SIGTERM with a classify→kill TOCTOU window).
+
+**How to apply:** Before writing any `kill(pid, ...)`, ask: "is this PID a live handle I spawned in THIS process, or a value I read/classified?" If read/classified, gate the signal on a fresh identity verdict at the signal instant (not at classify time — the gap between classify and kill is real wall-time during which the PID can be reused). Abort on `mismatch`/`gone`/inconclusive.
+
+**Origin:** Subprocess × Hunt — Council Review 2026-06-05-0731 (Finding 2 P1 + Finding 9 P2)
+
+**Principle:** Track PID, but never trust PID across reboots; TOCTOU on lifecycle edges; sibling EC-17 (fail-CLOSED gates) + memory `feedback_verify_runtime_argv_not_source`
+
+---
+
+### EC-46: Primary state writes MUST be as atomic as archive writes — route through `writeAtomicJson`, never raw `writeFileSync`
+
+**Convention:** Any persistence write whose truncation would break boot recovery (session state, launcher state — `saveSync` / `saveLauncher`) MUST go through the tmp+rename+fsync path (`writeAtomicJson`), identical to the already-atomic `moveToArchive`. A raw `writeFileSync` is not crash-atomic: a crash mid-write leaves a truncated JSON file on disk that the next boot cannot parse, stranding the very session the write was meant to preserve. The archive path was made atomic for exactly this reason; the primary path inherits the same requirement. The asymmetry "archive is atomic but the hotter primary write is not" is itself the bug.
+
+**How to apply:** Grep for `writeFileSync` / `Bun.write` on any state file under the persistence layer; each one whose partial content would fail a subsequent parse must be converted to `writeAtomicJson`. When adding a new persisted artifact, default to the atomic helper.
+
+**Origin:** Persistence — Council Review 2026-06-05-0731 (Finding 3 P1 — non-atomic `saveSync`/`saveLauncher`)
+
+**Principle:** Crash-atomicity of load-bearing state; sibling EC-8 (sentinel-before-sweep) + AP-3 (writer+reader co-location)
+
+---
+
+### EC-47: `removeSession` MUST NOT signal the subprocess PID, MUST close browser sockets, and the no-kill invariant MUST be pinned by a mutation-resistance test
+
+**Convention:** The entire safety argument for evicting a session on a STALE probe verdict rests on one property: `removeSession` (the eviction drop) only drops the Map row + cancels timers + clears persistence — it NEVER signals the PID. That property MUST be pinned by an EC-42 mutation-resistance test (remove the no-kill guarantee → a test goes red), because a future change that makes the drop also kill would silently turn "leaked orphan, reclaimed next boot" into "killed live process." SEPARATELY, the eviction drop MUST close + clear the session's browser sockets (the way `closeSession` does) and emit a terminal browser frame before the close — otherwise a still-subscribed tab gets no terminal signal, and on reconnect `getOrCreateSession` resurrects a blank zombie row (`nextEventSeq` reset to 1, no adapter), silently undoing the eviction. Gating eviction on `browserSockets.size === 0` alone is insufficient: it leaves the resurrection vector open for a tab that reconnects after the drop.
+
+**How to apply:** At the eviction site, document the load-bearing "removeSession MUST NOT signal the PID" invariant and back it with a mutation test. Make `removeSession` symmetric with `closeSession` on socket teardown, and cross-check `getOrCreateSession` resurrection against the eviction sentinel / just-archived disk row so a post-eviction reconnect cannot recreate a live row.
+
+**Origin:** Realtime × Subprocess — Council Review 2026-06-05-0731 (Finding 1 P1 — orphaned sockets + resurrection; Finding 12 P3 — stale probe verdict relies on non-destructive drop)
+
+**Principle:** Make the bridge's death visible to the client (silent-death class); sibling EC-42 (mutation-resistance) + EC-16 (server-originated frames carry `origin`)
+
+---
+
+### EC-48: Wire `seq` is assigned by a single authority (`sequenceEvent`); pre-built `seq` in builder/selector paths is forbidden
+
+**Convention:** The authoritative event sequence number is assigned at exactly one site — `sequenceEvent` (`nextEventSeq++`). No builder or selector upstream of the broadcast may pre-compute a `seq` and pass it along: it is dead weight that only HAPPENS to agree because nothing currently mutates `nextEventSeq` between frame-build and broadcast. Any future edit that emits a broadcast between those two points (e.g. a "draining" status_change before `cli_failed`) silently desynchronises the pre-built `seq` from the assigned one, breaking reconnect-replay gap math — with no test or type catching it, because the only guard today is a JSDoc prose contract. Either drop the pre-built `seq` entirely (let `sequenceEvent` be sole authority, as it already overwrites), or turn the prose invariant into a runtime tripwire: assert in `sequenceEvent` that any incoming `msg.seq` equals the assigned value before overwrite.
+
+**How to apply:** When building a frame that will be broadcast, do NOT set `seq` from `nextEventSeq` at build time. Let the single sequencing site assign it. If a type forces the field, build with a placeholder and add the equality tripwire.
+
+**Origin:** Realtime — Council Review 2026-06-05-0731 (Finding 8 P2 — undefended drain↔broadcast seq coupling)
+
+**Principle:** Single source of truth for sequence; sibling EC-21 (single-source derived fields) + memory `feedback_council_documented_contract_canary` (JSDoc is doc, not enforcement)
+
+---
+
+### EC-49: Process-identity start-time anchors MUST store the kernel start instant, not a JS wallclock timestamp
+
+**Convention:** When persisting the start-time factor used by `verifyProcessIdentity` (the sidecar's `processStartMs`), store the SAME quantity the verifier reads — the kernel process-start instant from `/proc/<pid>/stat` field-22 — captured as close to spawn as possible. Do NOT store `Date.now()` evaluated in JS after `Bun.spawn` returns: that is a different clock-of-record, and a GC pause / event-loop stall / cgroup `MemoryHigh` throttle between fork and the JS read can push the gap past the ±2s verification window, false-flagging a perfectly live, correctly-identified subprocess as `mismatch (starttime)` — and triggering a relaunch under exactly the memory pressure that caused the skew, compounding it. Compare like-for-like with zero clock-domain skew. (If the kernel read is genuinely unavailable, the fallback is to widen the tolerance AND document that the stored value is a JS-wallclock approximation — but the clean fix is to store the kernel quantity.)
+
+**How to apply:** At spawn, read `/proc/<proc.pid>/stat` field-22 once and persist that as the identity anchor. The verifier already reads field-22; the two values must come from the same clock.
+
+**Origin:** Subprocess — Council Review 2026-06-05-0731 (Finding 7 P2 — `processStartMs` is JS-wallclock, not kernel start instant)
+
+**Principle:** Make data flow visible and explicit; compare like-for-like; sibling EC-38 (clamp negative wallclock skew) + memory `feedback_cgroup_memoryhigh_throttle_ui_hang`
+
+---
+
+### AP-18: The `cli_failed` drain clears ALL in-flight visual indicators atomically — including `pendingPermissions`
+
+**Pattern:** When a session transitions to terminal `cli_failed`, the client-side dispatch MUST drain EVERY in-flight indicator for that session in one atomic step so the user sees exactly one terminal state, not "terminal banner + leftover spinner/approval." The existing drain already clears streaming / status / toolProgress / cliConnected; `pendingPermissions` is an in-flight indicator the drain currently MISSES, and it is load-bearing because the most natural way a CLI dies is mid-tool-call (a crash-loop on a tool) — exactly the state that leaves a permission pending. Since permission outranks `cliFailed` in the single banner slot, an un-cleared pending permission HIDES the terminal banner behind an Allow/Deny prompt for a dead subprocess: clicking either sends a `control_response` the CLI will never consume, and the "start a new session" surface stays invisible. Therefore: any indicator that can occupy or outrank the terminal-banner slot MUST be in the `cli_failed` drain set.
+
+**How to apply:** When adding a new in-flight indicator or a new banner-slot occupant, audit the `cli_failed` dispatch and add it to the atomic drain if it can survive or outrank the terminal banner. The drain's stated intent ("one terminal state, not banner + spinner + …") is the test.
+
+**Origin:** Friedman — Council Review 2026-06-05-0731 (Finding 5 P2 — pending permission hides terminal banner behind un-answerable approval)
+
+**Rationale:** A terminal state that can be visually pre-empted by a stale interactive gate is a dead-end + trust-break; the atomic-drain contract only holds if it covers every slot occupant, not just the spinners.
+
+---
+
 ### AP-17: Module-scope mutable flags for once-per-process operator warnings are legitimate ONLY when accompanied by (a) `__reset...ForTests` helper, (b) at least one test exercising the warn-path, (c) beforeEach reset in any orchestrator suite that could inadvertently trigger them
 
 **Pattern:** Module-scope `let someFlag: boolean = false` IS an acceptable shape for once-per-process operator-facing warnings — the use case is "warn the operator about a degraded runtime configuration, but only on the first occurrence so the log doesn't fill with duplicates." This pattern is legitimate because the alternative (logging every occurrence) creates log-noise that hides the signal, and the alternative-alternative (carrying the flag through every call site as a parameter) is overkill for a process-level concern. HOWEVER: every module-scope mutable flag MUST come bundled with three test-infrastructure pieces:

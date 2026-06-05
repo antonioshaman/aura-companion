@@ -164,6 +164,7 @@ type SessionItemSharedProps = Omit<
   | "councilPairing"
   | "councilUnreadStops"
   | "councilRole"
+  | "cliFailedReason"
 >;
 
 interface CollapsibleSessionListProps {
@@ -178,6 +179,8 @@ interface CollapsibleSessionListProps {
   pendingPermissions: Map<string, Map<string, unknown>>;
   recentlyRenamed: Set<string>;
   getCouncilInfo: (id: string) => { pairing?: string; unreadStops?: number; role?: "orchestrator" | "observer" };
+  /** PLAN T12 (Phase G) - per-session terminal-failure reason map. */
+  cliFailures: Map<string, { reason: import("../store/cli-status-slice.js").CliFailure["reason"] }>;
   sessionItemProps: SessionItemSharedProps;
 }
 
@@ -193,6 +196,7 @@ function CollapsibleSessionList({
   pendingPermissions,
   recentlyRenamed,
   getCouncilInfo,
+  cliFailures,
   sessionItemProps,
 }: CollapsibleSessionListProps) {
   return (
@@ -214,6 +218,7 @@ function CollapsibleSessionList({
         <div className="mt-0.5">
           {sessions.map((s) => {
             const council = getCouncilInfo(s.id);
+            const failed = cliFailures.get(s.id);
             return (
               <SessionItem
                 key={s.id}
@@ -226,6 +231,7 @@ function CollapsibleSessionList({
                 councilPairing={council.pairing}
                 councilUnreadStops={council.unreadStops}
                 councilRole={council.role}
+                cliFailedReason={failed?.reason}
                 {...sessionItemProps}
               />
             );
@@ -284,6 +290,9 @@ export function Sidebar() {
   const groups = useStore((s) => s.groups);
   const findings = useStore((s) => s.findings);
   const dismissedStopIds = useStore((s) => s.dismissedStopIds);
+  // PLAN T12 (Phase G) - per-session terminal-failure map drives
+  // the destructive glyph + tooltip in SessionItem.
+  const cliFailures = useStore((s) => s.cliFailures);
   const route = parseHash(hash);
 
   // Poll for SDK sessions on mount
@@ -811,6 +820,7 @@ export function Sidebar() {
                 recentlyRenamed={recentlyRenamed}
                 isFirst={i === 0}
                 getCouncilInfo={councilInfoFor}
+                cliFailures={cliFailures}
                 {...sessionItemProps}
               />
             ))}
@@ -826,6 +836,7 @@ export function Sidebar() {
                 pendingPermissions={pendingPermissions}
                 recentlyRenamed={recentlyRenamed}
                 getCouncilInfo={councilInfoFor}
+                cliFailures={cliFailures}
                 sessionItemProps={sessionItemProps}
               />
             )}
@@ -841,6 +852,7 @@ export function Sidebar() {
                 pendingPermissions={pendingPermissions}
                 recentlyRenamed={recentlyRenamed}
                 getCouncilInfo={councilInfoFor}
+                cliFailures={cliFailures}
                 sessionItemProps={sessionItemProps}
               />
             )}
@@ -868,6 +880,7 @@ export function Sidebar() {
                 pendingPermissions={pendingPermissions}
                 recentlyRenamed={recentlyRenamed}
                 getCouncilInfo={councilInfoFor}
+                cliFailures={cliFailures}
                 sessionItemProps={sessionItemProps}
               />
             )}

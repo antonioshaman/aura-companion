@@ -60,6 +60,15 @@ import { SessionStateMachine } from "./session-state-machine.js";
 import { metricsCollector } from "./metrics-collector.js";
 import { log } from "./logger.js";
 
+// AURA-LOCAL — PLAN T10/T11 (Phase F). Drain dispatch wiring.
+import {
+  selectDrainTargets,
+  shouldSuppressDrain,
+} from "./cleanup/drain-selector.js";
+import { recordCleanupEvent } from "./cleanup/cleanup-events.js";
+import type { CliFailedReason } from "./cli-failed-frame.js";
+import type { RelaunchExhaustedReason } from "./event-bus-types.js";
+
 // ─── Bridge ───────────────────────────────────────────────────────────────────
 
 /**
@@ -74,6 +83,35 @@ export type BridgeObserverWakeOutcome =
   | { kind: "adapter_missing" }
   | { kind: "unsupported_backend" };
 
+/**
+ * AURA-LOCAL — PLAN T10 (Phase F). Map the cli-launcher's closed
+ * `RelaunchExhaustedReason` producer union to the closed
+ * `CliFailedReason` wire union. The 3 structural-failure reasons map
+ * 1:1; the 2 observer-prompt failure paths
+ * (observer_prompt_config_failed, observer_prompt_source_drift_refused)
+ * fold into `relaunch_exhausted` — the operator-visible UI affordance
+ * is the same ("CLI is permanently dead, start a new session"). The
+ * switch is exhaustive with a `const _: never` tripwire (no `default`)
+ * so a new producer reason forces an explicit mapping decision rather
+ * than silently degrading to the catch-all.
+ */
+function mapClearReasonToCliFailedReason(reason: RelaunchExhaustedReason): CliFailedReason {
+  switch (reason) {
+    case "container_missing": return "container_missing";
+    case "container_start_failed": return "container_stopped";
+    case "container_binary_missing": return "binary_missing";
+    // Both observer-prompt failure paths surface the same operator
+    // affordance as a spent retry budget ("CLI permanently dead, start
+    // a new session"), so they intentionally fold into relaunch_exhausted.
+    case "observer_prompt_config_failed": return "relaunch_exhausted";
+    case "observer_prompt_source_drift_refused": return "relaunch_exhausted";
+  }
+  // Exhaustiveness tripwire: a new RelaunchExhaustedReason must be
+  // classified above before it can ship — no silent catch-all degrade.
+  const _: never = reason;
+  return _;
+}
+
 const RETRYABLE_BACKEND_MESSAGE_TYPES = new Set<BrowserOutgoingMessage["type"]>([
   "user_message",
   "mcp_get_status",
@@ -84,6 +122,45 @@ const RETRYABLE_BACKEND_MESSAGE_TYPES = new Set<BrowserOutgoingMessage["type"]>(
 
 export class WsBridge {
   private static readonly PROCESSED_CLIENT_MSG_ID_LIMIT = 1000;
+  /**
+   * AURA-LOCAL — PLAN T11 (Story 2b). Browser-close drain grace.
+   * When the LAST browser disconnects from a session that still
+   * has queued pendingMessages, arm a timer. If no browser
+   * reconnects before it fires, drain the queue + broadcast a
+   * `cli_failed` frame (reason: `browser_closed_no_reconnect`,
+   * `subprocessAlive: true` — drain is queue+notify only per
+   * Subprocess R10).
+   *
+   * Default 300_000 ms (5 min). Operator override via
+   * `COMPANION_BROWSER_DRAIN_GRACE_MS`. Negative / NaN values fall
+   * back to the default. Zero fires the drain on next tick.
+   */
+  private static readonly BROWSER_DRAIN_GRACE_MS = (() => {
+    const raw = process.env.COMPANION_BROWSER_DRAIN_GRACE_MS;
+    if (raw === undefined) return 300_000;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < 0) return 300_000;
+    return n;
+  })();
+  /** Per-session browser-close drain timers. */
+  private browserDrainTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+  constructor() {
+    // AURA-LOCAL — PLAN T10/T11 (Phase F). Subscribe to the
+    // cli-launcher's structural-failure channel (Phase D
+    // clearPidAndPersist) and materialise cli_failed via the
+    // 4-step dispatch (`selectDrainTargets` -> clear -> persist ->
+    // broadcast -> recordCleanupEvent).
+    //
+    // companionBus is a singleton; tests that call clear() wipe
+    // this subscription. Tests for the dispatch path call
+    // `dispatchCliFailedDrain` directly.
+    companionBus.on("session:relaunch-exhausted", ({ sessionId, reason }) => {
+      const mapped = mapClearReasonToCliFailedReason(reason);
+      this.dispatchCliFailedDrain(sessionId, mapped);
+    });
+  }
+
   /** Maximum number of queued browser→backend messages per session to prevent unbounded memory growth. */
   private static readonly PENDING_MESSAGES_LIMIT = 200;
   private static readonly DISCONNECT_DEBOUNCE_MS = Number(
@@ -494,6 +571,24 @@ export class WsBridge {
     return this.sessions.get(sessionId);
   }
 
+  /**
+   * AURA-LOCAL — PLAN T13 (Phase H) / Fowler R8 hook. Return a
+   * defensive SNAPSHOT (array, not iterator) of the live sessions map
+   * so the eviction sweep can iterate without observing concurrent
+   * mutations mid-await (Backend-TS R6 — Map iteration mid-async-op
+   * is real even in single-threaded JS because awaits release the loop
+   * and unrelated handlers can `delete`/`set`). The snapshot is shallow
+   * — each entry is `[sessionId, Session]` and the `Session` reference
+   * is live (the sweep does not mutate any field on it).
+   *
+   * This hook is the ONLY new read surface added to the bridge in
+   * Phase H per Fowler R8 — drain-dispatch lives inline at the
+   * terminal-close paths and `removeSession` already existed.
+   */
+  getSessionEntries(): Array<[string, Session]> {
+    return [...this.sessions.entries()];
+  }
+
   getAllSessions(): SessionState[] {
     return Array.from(this.sessions.values()).map((s) => s.state);
   }
@@ -544,14 +639,129 @@ export class WsBridge {
     return synthesised;
   }
 
+  /**
+   * AURA-LOCAL — PLAN T10/T11 (Phase F). Public 4-step drain
+   * dispatch. Routes through the AP-14 sole-assembly-site builder
+   * (`buildCliFailedFrame` via `selectDrainTargets`). The four
+   * steps kept INLINE so pendingMessages mutation stays visible:
+   *
+   *   (1) snapshot pendingMessages.length via the selector
+   *   (2) clear Map entry + persistSession BEFORE broadcast
+   *       (Persistence R7)
+   *   (3) broadcastToBrowsers(session, frame)
+   *   (4) recordCleanupEvent("drained_pending")
+   *
+   * Suppresses the broadcast when reason is
+   * browser_closed_no_reconnect AND drainedCount === 0
+   * (Story 2 AC); ALWAYS-fires otherwise (Realtime R2).
+   *
+   * Per-session fanout only (Hunt R5) — never iterates
+   * sessions.values().
+   */
+  dispatchCliFailedDrain(
+    sessionId: string,
+    reason: CliFailedReason,
+    opts?: { details?: { lastErrorSha256?: string } },
+  ): { fired: boolean; drainedCount: number } {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      log.warn("ws-bridge", "dispatchCliFailedDrain: session not found", {
+        event: "ws_bridge.cli_failed.session_unknown",
+        sessionId,
+        reason,
+      });
+      return { fired: false, drainedCount: 0 };
+    }
+    const pendingCount = session.pendingMessages.length;
+    if (shouldSuppressDrain(reason, pendingCount)) {
+      log.info("ws-bridge", "cli_failed drain suppressed (zero queued)", {
+        event: "ws_bridge.cli_failed.suppressed",
+        sessionId,
+        reason,
+      });
+      return { fired: false, drainedCount: 0 };
+    }
+    // (1) snapshot via selector — frame seq is the bridge's
+    //     next event-seq (the broadcast helper increments after
+    //     send).
+    const firedAt = Date.now();
+    const selection = selectDrainTargets(
+      session,
+      reason,
+      session.nextEventSeq,
+      firedAt,
+      opts?.details,
+    );
+    // (2) clear Map entry + persist BEFORE broadcast.
+    if (pendingCount > 0) {
+      session.pendingMessages.length = 0;
+      this.persistSession(session);
+    }
+    // (3) broadcast — frame lands in eventBuffer for replay.
+    this.broadcastToBrowsers(session, selection.frame);
+    // (4) counter for the 5-min diagnostic snapshot.
+    recordCleanupEvent("drained_pending");
+    log.info("ws-bridge", "cli_failed drain dispatched", {
+      event: "ws_bridge.cli_failed.dispatched",
+      sessionId,
+      reason,
+      drainedCount: pendingCount,
+      browserCount: selection.browserIds.length,
+      subprocessAlive: selection.frame.subprocessAlive,
+    });
+    return { fired: true, drainedCount: pendingCount };
+  }
+
+  /**
+   * AURA-LOCAL — PLAN T11 (Story 2b). Start the browser-close
+   * drain timer for a session. Called from `handleBrowserClose`
+   * after the last browser leaves AND the session has queued
+   * pendingMessages. Cancelled in handleBrowserOpen /
+   * removeSession / closeSession.
+   *
+   * Idempotent — calling twice for the same session leaves a
+   * single armed timer.
+   */
+  private startBrowserDrainTimer(sessionId: string): void {
+    const existing = this.browserDrainTimers.get(sessionId);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      this.browserDrainTimers.delete(sessionId);
+      // Re-check at fire time — browser may have reconnected
+      // between arm + fire and we missed the cancel race.
+      const session = this.sessions.get(sessionId);
+      if (!session) return;
+      if (session.browserSockets.size > 0) return;
+      this.dispatchCliFailedDrain(sessionId, "browser_closed_no_reconnect");
+    }, WsBridge.BROWSER_DRAIN_GRACE_MS);
+    this.browserDrainTimers.set(sessionId, timer);
+  }
+
+  /** Cancel any armed browser-close drain timer for a session. */
+  private cancelBrowserDrainTimer(sessionId: string): boolean {
+    const t = this.browserDrainTimers.get(sessionId);
+    if (!t) return false;
+    clearTimeout(t);
+    this.browserDrainTimers.delete(sessionId);
+    return true;
+  }
+
   /** Return per-session memory stats for diagnostics. */
-  getSessionMemoryStats(): { id: string; browsers: number; historyLen: number; eventBufferLen: number; pendingMsgs: number }[] {
+  getSessionMemoryStats(): { id: string; browsers: number; historyLen: number; eventBufferLen: number; pendingMsgs: number; reachable: boolean }[] {
     return Array.from(this.sessions.values()).map((s) => ({
       id: s.id,
       browsers: s.browserSockets.size,
       historyLen: s.messageHistory.length,
       eventBufferLen: s.eventBuffer.length,
       pendingMsgs: s.pendingMessages.length,
+      // AURA-LOCAL — Realtime R6. Partition pendingMsgs by
+      // reachability so orphaned counts do not silently inflate
+      // the visible total per Story 2 AC.
+      // Fowler finding #12 — derived at read time from the single source of
+      // truth (the live adapter) rather than a cached `reachable` field that
+      // ≥5 handlers had to keep in sync. Removing the stored copy removes the
+      // class of bug where a new re-attach site forgets to update it.
+      reachable: s.backendAdapter?.isConnected() ?? false,
     }));
   }
 
@@ -579,6 +789,21 @@ export class WsBridge {
     session?.unsubscribeStateMachine?.();
     this.cancelDisconnectTimer(sessionId);
     this.stopIdleKillWatchdog(sessionId);
+    this.cancelBrowserDrainTimer(sessionId);
+    // Realtime finding #1 — close+clear any still-attached browser sockets
+    // instead of orphaning them. A live socket left open after the Map row
+    // is deleted would resurrect a blank session on its next frame. Emit the
+    // terminal `session_evicted` frame FIRST (so the client marks the session
+    // archived and does NOT request a relaunch), then close the socket. This
+    // mirrors `closeSession`'s socket teardown; `removeSession` previously
+    // dropped the Map row but left the sockets dangling.
+    if (session) {
+      for (const ws of session.browserSockets) {
+        try { this.sendToBrowser(ws, { type: "session_evicted" }); } catch { /* socket may be closing */ }
+        try { ws.close(); } catch { /* already closed */ }
+      }
+      session.browserSockets.clear();
+    }
     this.sessions.delete(sessionId);
     this.autoNamingAttempted.delete(sessionId);
     this.store?.remove(sessionId);
@@ -623,6 +848,7 @@ export class WsBridge {
   closeSession(sessionId: string) {
     this.cancelDisconnectTimer(sessionId);
     this.stopIdleKillWatchdog(sessionId);
+    this.cancelBrowserDrainTimer(sessionId);
     const session = this.sessions.get(sessionId);
     if (!session) return;
 
@@ -656,6 +882,9 @@ export class WsBridge {
   attachBackendAdapter(sessionId: string, adapter: IBackendAdapter, backendType?: BackendType): void {
     const session = this.getOrCreateSession(sessionId, backendType);
     session.backendAdapter = adapter;
+    // Fowler finding #12 — reachability is no longer cached on the session;
+    // `getSessionMemoryStats` derives it from `backendAdapter?.isConnected()`
+    // at read time, so attach/detach sites no longer mirror the bit.
 
     // Advance the state machine so that system_init (starting → ready) is reachable.
     // For Claude, handleCLIOpen does starting → initializing via cli_ws_open.
@@ -911,6 +1140,8 @@ export class WsBridge {
       // BEFORE persisting so the bubble lands in the same atomic save and
       // is visible to browsers reconnecting after the disconnect.
       this.flushInterruptedStream(session);
+      // Fowler finding #12 — nulling the adapter is sufficient; reachability
+      // is derived from it at read time, no separate bit to clear.
       session.backendAdapter = null;
       this.persistSession(session);
       console.log(`[ws-bridge] Backend adapter disconnected for session ${sessionId}`);
@@ -939,6 +1170,8 @@ export class WsBridge {
 
     // Broadcast cli_connected
     this.broadcastToBrowsers(session, { type: "cli_connected" });
+    // Fowler finding #12 — reachability derived from the live adapter at read
+    // time; no cached bit to flip here.
     log.info("ws-bridge", "Backend adapter attached", {
       sessionId,
       backendType: session.backendType,
@@ -1150,6 +1383,9 @@ export class WsBridge {
       // broadcasting `cli_disconnected` so an attached browser receives the
       // synthesised `assistant` frame in the same flush window.
       this.flushInterruptedStream(session);
+      // Fowler finding #12 — reachability derived from the adapter at read
+      // time; the disconnect-confirmed path leaves the adapter null/disconnected
+      // so the snapshot reports unreachable without a cached bit.
       this.broadcastToBrowsers(session, { type: "cli_disconnected" });
       for (const [reqId] of session.pendingPermissions) {
         this.broadcastToBrowsers(session, { type: "permission_cancelled", request_id: reqId });
@@ -1167,6 +1403,21 @@ export class WsBridge {
   handleBrowserOpen(ws: ServerWebSocket<SocketData>, sessionId: string) {
     metricsCollector.recordWsConnection("browser", "open");
     this.recorder?.recordEvent(sessionId, "ws_open", "browser");
+    // Realtime finding #1 — resurrection guard. If the row is absent from
+    // the Map AND an archived disk row exists, the eviction sweep already
+    // reclaimed this session. Creating a fresh blank row here (and emitting
+    // `cli_disconnected`/`session:relaunch-needed` below) is exactly the
+    // zombie-resurrection the eviction was built to prevent. Tell the stale
+    // tab the session was evicted and stop — no blank row, no relaunch.
+    if (!this.sessions.has(sessionId) && this.store?.hasArchivedRow(sessionId)) {
+      log.info("ws-bridge", "Browser reconnect to evicted session — refusing resurrection", {
+        event: "ws_bridge.evicted_reconnect_refused",
+        sessionId,
+      });
+      this.sendToBrowser(ws, { type: "session_evicted" });
+      try { ws.close(); } catch { /* already closing */ }
+      return;
+    }
     const session = this.getOrCreateSession(sessionId);
     const browserData = ws.data as BrowserSocketData;
     browserData.subscribed = false;
@@ -1176,6 +1427,10 @@ export class WsBridge {
 
     // Cancel idle kill watchdog — a browser is back
     this.stopIdleKillWatchdog(sessionId);
+    // AURA-LOCAL — PLAN T11 (Story 2b). Cancel the browser-
+    // close drain timer if armed — the new browser will pick up
+    // any queued pendingMessages without loss.
+    this.cancelBrowserDrainTimer(sessionId);
 
     // Refresh git state on browser connect so branch changes made mid-session are reflected.
     this.refreshGitInfo(session, { notifyPoller: true });
@@ -1411,6 +1666,19 @@ export class WsBridge {
     // Start idle kill watchdog when last browser disconnects
     if (session.browserSockets.size === 0 && !this.idleKillTimers.has(sessionId)) {
       this.startIdleKillWatchdog(sessionId);
+    }
+    // AURA-LOCAL — PLAN T11 (Story 2b). When the LAST browser
+    // leaves a session that still has queued pendingMessages,
+    // arm the drain-grace timer. If no browser reconnects
+    // before it fires, drain the queue + broadcast cli_failed.
+    // Suppression rule (Story 2 AC): no timer arm when there
+    // is nothing to drain.
+    if (
+      session.browserSockets.size === 0 &&
+      session.pendingMessages.length > 0 &&
+      !this.browserDrainTimers.has(sessionId)
+    ) {
+      this.startBrowserDrainTimer(sessionId);
     }
   }
 

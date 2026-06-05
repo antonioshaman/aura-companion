@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import { mkdtempSync, rmSync, realpathSync } from "node:fs";
+import { mkdtempSync, rmSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -82,6 +82,12 @@ import { SessionStore } from "./session-store.js";
 import { CliLauncher } from "./cli-launcher.js";
 import { companionBus } from "./event-bus.js";
 import { log } from "./logger.js";
+import {
+  writeRuntimeSidecar,
+  sidecarPath,
+  argvSha256,
+  SIDECAR_SCHEMA_VERSION,
+} from "./cli-runtime-sidecar.js";
 
 // ─── Bun.spawn mock ─────────────────────────────────────────────────────────
 
@@ -1177,7 +1183,16 @@ describe("codex websocket launcher", () => {
 
 describe("persistence", () => {
   describe("restoreFromDisk", () => {
-    it("recovers sessions from the store", () => {
+    // EC-40 / AP-17: the module-scope proc-reader override installed by the
+    // identity-probe tests below must be reset even if an assertion throws
+    // mid-test — otherwise a leaked `killCheck:()=>true` reader makes sibling
+    // tests (e.g. "marks dead PIDs") pass for the wrong reason.
+    afterEach(async () => {
+      const procIdentity = await import("./process-identity.js");
+      procIdentity.__resetProcReaderForTests();
+    });
+
+    it("recovers sessions from the store", async () => {
       // Manually write launcher data to disk to simulate a previous run
       const savedSessions = [
         {
@@ -1201,6 +1216,19 @@ describe("persistence", () => {
         return origKill.call(process, pid, signal as any);
       }) as any);
 
+      // PLAN T3 (Phase A): boot probe now routes through `verifyProcessIdentity`,
+      // which on Linux also reads `/proc/<pid>/cmdline` to confirm the alive
+      // PID actually carries the expected sessionId. Inject the proc reader
+      // so this test asserts the new contract (liveness + argv match) rather
+      // than the old one (liveness only).
+      const procIdentity = await import("./process-identity.js");
+      procIdentity.setProcReaderForTests({
+        platform: () => "linux",
+        killCheck: () => true,
+        readCmdline: () =>
+          ["claude", "--sdk-url", "ws://localhost:3456/ws/cli/restored-1"].join("\0") + "\0",
+      });
+
       const newLauncher = new CliLauncher(3456);
       newLauncher.setStore(store);
       const recovered = newLauncher.restoreFromDisk();
@@ -1214,6 +1242,110 @@ describe("persistence", () => {
       expect(session?.cliSessionId).toBe("cli-abc");
 
       killSpy.mockRestore();
+      procIdentity.__resetProcReaderForTests();
+    });
+
+    // Phase D WARN fix: the launcher-side 3-factor wiring (sidecar read →
+    // processStartMs anchor → verifyProcessIdentity) had no coverage; the
+    // mechanism was proven only in cli-runtime-sidecar.test.ts + the reaper.
+    // This asserts a MATCHING sidecar drives a 3-factor `match` recovery.
+    it("recovers via 3-factor probe when a matching runtime sidecar is present", async () => {
+      const sessionId = "sidecar-match-1";
+      store.saveLauncher([
+        {
+          sessionId,
+          pid: 44444,
+          state: "connected" as const,
+          cwd: "/tmp/project",
+          createdAt: Date.now(),
+          cliSessionId: "cli-sc-1",
+        },
+      ]);
+
+      // Sidecar anchors the 3rd factor: processStartMs that the proc-reader
+      // stub below reproduces exactly (btime 1700000000 + 0 ticks).
+      writeRuntimeSidecar(store.directory, sessionId, {
+        schemaVersion: SIDECAR_SCHEMA_VERSION,
+        pid: 44444,
+        processStartMs: 1_700_000_000_000,
+        argvSha256: argvSha256([
+          "claude",
+          "--sdk-url",
+          `ws://localhost:3456/ws/cli/${sessionId}`,
+        ]),
+      });
+
+      // /proc/<pid>/stat with starttime=0 → ticksToWallMs(0, 1700000000, 100)
+      // = 1_700_000_000_000, exactly the sidecar anchor (within ±2s).
+      const procStat = `1 (claude) ${["S", "1", ...Array(20).fill("0")].join(" ")}\n`;
+      const procIdentity = await import("./process-identity.js");
+      procIdentity.setProcReaderForTests({
+        platform: () => "linux",
+        killCheck: () => true,
+        readCmdline: () =>
+          ["claude", "--sdk-url", `ws://localhost:3456/ws/cli/${sessionId}`].join("\0") + "\0",
+        readStat: () => procStat,
+        readBootStat: () => `btime 1700000000\n`,
+        clkTck: 100,
+      });
+
+      const newLauncher = new CliLauncher(3456);
+      newLauncher.setStore(store);
+      const recovered = newLauncher.restoreFromDisk();
+
+      expect(recovered).toBe(1);
+      expect(newLauncher.getSession(sessionId)?.state).toBe("starting");
+
+      procIdentity.__resetProcReaderForTests();
+    });
+
+    // Phase D WARN fix: a corrupt sidecar must degrade to the two-factor
+    // probe (liveness + argv) AND surface the corruption via the structured
+    // boot_probe.sidecar_corrupt WARN — not silently masquerade as absent.
+    it("degrades to two-factor + WARNs boot_probe.sidecar_corrupt on a malformed sidecar", async () => {
+      const sessionId = "sidecar-corrupt-1";
+      store.saveLauncher([
+        {
+          sessionId,
+          pid: 55555,
+          state: "connected" as const,
+          cwd: "/tmp/project",
+          createdAt: Date.now(),
+        },
+      ]);
+
+      // Valid JSON but invalid schema (wrong schemaVersion + wrong pid type)
+      // → readRuntimeSidecar THROWs per its strict-validator contract.
+      writeFileSync(
+        sidecarPath(store.directory, sessionId),
+        '{"schemaVersion": 99, "pid": "nope"}',
+        "utf8",
+      );
+
+      // Alive + argv-match: with the sidecar throwing, expectedStartMs stays
+      // null → two-factor path → `match` → recovered.
+      const procIdentity = await import("./process-identity.js");
+      procIdentity.setProcReaderForTests({
+        platform: () => "linux",
+        killCheck: () => true,
+        readCmdline: () =>
+          ["claude", "--sdk-url", `ws://localhost:3456/ws/cli/${sessionId}`].join("\0") + "\0",
+      });
+      const warnSpy = vi.spyOn(log, "warn").mockImplementation(() => undefined);
+
+      const newLauncher = new CliLauncher(3456);
+      newLauncher.setStore(store);
+      const recovered = newLauncher.restoreFromDisk();
+
+      expect(recovered).toBe(1);
+      expect(newLauncher.getSession(sessionId)?.state).toBe("starting");
+      const emittedCorrupt = warnSpy.mock.calls.some(
+        (args) => (args[2] as { event?: string } | undefined)?.event === "boot_probe.sidecar_corrupt",
+      );
+      expect(emittedCorrupt).toBe(true);
+
+      warnSpy.mockRestore();
+      procIdentity.__resetProcReaderForTests();
     });
 
     it("marks dead PIDs as exited", () => {
@@ -1248,6 +1380,100 @@ describe("persistence", () => {
       expect(session).toBeDefined();
       expect(session?.state).toBe("exited");
       expect(session?.exitCode).toBe(-1);
+
+      killSpy.mockRestore();
+    });
+
+    // PLAN T3 regression guard: an ALIVE pid whose argv does NOT carry the
+    // expected sessionId is the exact symptom the identity probe exists to
+    // catch (PID reuse). It must be reaped (exited) and emit boot_probe.mismatch,
+    // not silently re-attached. Without this test the happy-path argv-match
+    // test (above) passes even if the argv factor is a no-op.
+    it("marks an alive PID whose argv lacks the sessionId as exited (argv mismatch)", async () => {
+      const savedSessions = [
+        {
+          sessionId: "mismatch-1",
+          pid: 22222,
+          state: "connected" as const,
+          cwd: "/tmp/project",
+          createdAt: Date.now(),
+        },
+      ];
+      store.saveLauncher(savedSessions);
+
+      const procIdentity = await import("./process-identity.js");
+      procIdentity.setProcReaderForTests({
+        platform: () => "linux",
+        killCheck: () => true, // alive
+        // argv carries a DIFFERENT sessionId → argv factor must reject.
+        readCmdline: () =>
+          ["claude", "--sdk-url", "ws://localhost:3456/ws/cli/some-other-session"].join("\0") + "\0",
+      });
+      const warnSpy = vi.spyOn(log, "warn").mockImplementation(() => undefined);
+
+      const newLauncher = new CliLauncher(3456);
+      newLauncher.setStore(store);
+      const recovered = newLauncher.restoreFromDisk();
+
+      expect(recovered).toBe(0);
+      const session = newLauncher.getSession("mismatch-1");
+      expect(session?.state).toBe("exited");
+      expect(session?.exitCode).toBe(-1);
+      // The mismatch must be surfaced via the structured boot_probe.mismatch WARN.
+      const emittedMismatch = warnSpy.mock.calls.some(
+        (args) => (args[2] as { event?: string } | undefined)?.event === "boot_probe.mismatch",
+      );
+      expect(emittedMismatch).toBe(true);
+
+      warnSpy.mockRestore();
+    });
+
+    // Dual-backend contract (CLAUDE.md): host-mode Codex (`app-server`, no
+    // `--sdk-url`) must survive a server restart. The Claude-only argv factor
+    // would otherwise reap it on every restart. Codex backend routes to the
+    // liveness-only fallback, so an alive pid is recovered even though its
+    // argv would never satisfy the Claude identity probe.
+    it("recovers a host-mode Codex session whose argv lacks --sdk-url", async () => {
+      const savedSessions = [
+        {
+          sessionId: "codex-host-1",
+          pid: 33333,
+          state: "connected" as const,
+          cwd: "/tmp/project",
+          createdAt: Date.now(),
+          backendType: "codex" as const,
+          cliSessionId: "codex-cli-xyz",
+          // host-mode: no containerId, no codexWsPort → falls to the pid branch.
+        },
+      ];
+      store.saveLauncher(savedSessions);
+
+      // Liveness-only fallback uses the real process.kill(pid, 0); make it succeed.
+      const origKill = process.kill;
+      const killSpy = vi.spyOn(process, "kill").mockImplementation(((
+        pid: number,
+        signal?: string | number,
+      ) => {
+        if (signal === 0) return true;
+        return origKill.call(process, pid, signal as any);
+      }) as any);
+      // Install a hostile identity reader that WOULD mismatch — proving the
+      // Codex path bypasses the identity probe entirely rather than passing it.
+      const procIdentity = await import("./process-identity.js");
+      procIdentity.setProcReaderForTests({
+        platform: () => "linux",
+        killCheck: () => false, // would yield "gone" if the probe ran
+        readCmdline: () => ["codex", "app-server", "--listen", "127.0.0.1:0"].join("\0") + "\0",
+      });
+
+      const newLauncher = new CliLauncher(3456);
+      newLauncher.setStore(store);
+      const recovered = newLauncher.restoreFromDisk();
+
+      expect(recovered).toBe(1);
+      const session = newLauncher.getSession("codex-host-1");
+      expect(session?.state).toBe("starting");
+      expect(session?.cliSessionId).toBe("codex-cli-xyz");
 
       killSpy.mockRestore();
     });
@@ -1887,5 +2113,116 @@ describe("EC-19 canaries — buildObserverSpawnOverrides routing + sentinel-path
       offending,
       `session:relaunch-failed must only be emitted from cli-launcher.ts:relaunch() or session-orchestrator.ts:handleAutoRelaunch(). Offenders:\n${offending.map((o) => `${o.file}:${o.lineNum} → ${o.line}`).join("\n")}`,
     ).toEqual([]);
+  });
+});
+
+describe("EC-19 canary — clearPidAndPersist routing in relaunch() (PLAN T7/T8)", () => {
+  // Brief-mandatory canary: every "skip relaunch" return in relaunch()
+  // MUST be preceded by a call to clearPidAndPersist. Regex-anchored on
+  // the function name + brace-counted body extraction per EC-19 (NEVER
+  // literal substring of the whole file — that would weaken silently
+  // under parameter renames / return-type widenings).
+  //
+  // Exemptions (documented in clearPidAndPersist JSDoc):
+  //   - `if (!info) return ...` at the function entry — there's no
+  //     session state to mutate when the lookup fails.
+  //   - `return { ok: true }` at the success path — leaves state
+  //     "starting" for the spawn handshake to complete.
+  //
+  // Every other `return { ok: false, ... }` MUST be preceded (within
+  // the immediately-enclosing brace block) by `clearPidAndPersist(`.
+  it("every ok:false return in relaunch() routes through clearPidAndPersist", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const src = fs.readFileSync(path.join(__dirname, "cli-launcher.ts"), "utf-8");
+
+    // Anchor on the relaunch() signature literal prefix — matches the
+    // pattern used by the sibling buildObserverSpawnOverrides canary
+    // (CR-14 / Beck B5 — literal-prefix is robust to type-annotation
+    // widening + default-arg containing `)` chars).
+    const signaturePrefix = "async relaunch(";
+    const sigIdx = src.indexOf(signaturePrefix);
+    expect(sigIdx, "relaunch signature must be locatable").toBeGreaterThan(-1);
+    const openIdx = src.indexOf("{", sigIdx);
+    expect(openIdx, "opening brace must follow the signature").toBeGreaterThan(-1);
+    let depth = 1;
+    let bodyEnd = -1;
+    for (let i = openIdx + 1; i < src.length; i++) {
+      if (src[i] === "{") depth++;
+      else if (src[i] === "}") {
+        depth--;
+        if (depth === 0) {
+          bodyEnd = i + 1;
+          break;
+        }
+      }
+    }
+    expect(bodyEnd, "relaunch body must be locatable").toBeGreaterThan(-1);
+    const body = src.slice(openIdx, bodyEnd);
+
+    // Find every `return { ok: false` in the body, then for each one
+    // check that a `clearPidAndPersist(` appears within a reasonable
+    // backward window (sibling lines in the same control branch).
+    // The 800-char window covers a multi-line ok:false return with a
+    // template-literal error message + preceding setup like
+    // `info.exitCode = 1`. Anything larger would be a structural
+    // refactor that warrants a fresh canary review.
+    const returnRegex = /return\s*\{\s*ok:\s*false\b/g;
+    const callRegex = /\bclearPidAndPersist\s*\(/g;
+    const violations: Array<{ at: number; snippet: string }> = [];
+    let m: RegExpExecArray | null;
+    while ((m = returnRegex.exec(body)) !== null) {
+      const returnAt = m.index;
+      const windowStart = Math.max(0, returnAt - 800);
+      const window = body.slice(windowStart, returnAt);
+      if (!callRegex.test(window)) {
+        violations.push({
+          at: returnAt,
+          snippet: body.slice(Math.max(0, returnAt - 200), returnAt + 80),
+        });
+      }
+      callRegex.lastIndex = 0;
+    }
+    expect(
+      violations,
+      `Every ok:false return in cli-launcher.relaunch() must route through clearPidAndPersist(sessionId, reason). Violations:\n${violations
+        .map((v) => `at body-offset ${v.at}:\n${v.snippet}\n`)
+        .join("\n")}`,
+    ).toEqual([]);
+  });
+
+  // EC-22: the emit on `session:relaunch-exhausted` must actually fire
+  // — typecheck alone would green-stamp a refactor that wraps the emit
+  // in an unreachable conditional, or replaces it with a noop. The
+  // emit lives in clearPidAndPersist; the EC-19 canary above pins the
+  // call-site presence at every relaunch return. This sibling canary
+  // pins the emit-site presence inside clearPidAndPersist itself.
+  it("clearPidAndPersist body emits on session:relaunch-exhausted (EC-22)", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const src = fs.readFileSync(path.join(__dirname, "cli-launcher.ts"), "utf-8");
+
+    const signaturePrefix = "private clearPidAndPersist(";
+    const sigIdx = src.indexOf(signaturePrefix);
+    expect(sigIdx, "clearPidAndPersist signature must be locatable").toBeGreaterThan(-1);
+    const openIdx = src.indexOf("{", sigIdx);
+    let depth = 1;
+    let bodyEnd = -1;
+    for (let i = openIdx + 1; i < src.length; i++) {
+      if (src[i] === "{") depth++;
+      else if (src[i] === "}") {
+        depth--;
+        if (depth === 0) {
+          bodyEnd = i + 1;
+          break;
+        }
+      }
+    }
+    const body = src.slice(openIdx, bodyEnd);
+    expect(body).toMatch(/companionBus\.emit\(\s*["']session:relaunch-exhausted["']/);
+    // And the four required side-effects per the PLAN T7/T8 contract.
+    expect(body).toMatch(/info\.pid\s*=\s*undefined/);
+    expect(body).toMatch(/info\.state\s*=\s*["']exited["']/);
+    expect(body).toMatch(/this\.persistState\s*\(/);
   });
 });

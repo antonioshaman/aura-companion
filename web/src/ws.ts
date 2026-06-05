@@ -619,6 +619,23 @@ function handleParsedMessage(
     case "session_init": {
       const existingSession = store.sessions.get(sessionId);
       store.addSession(data.session);
+      // PLAN T12 (Phase G) - a new CLI subprocess is alive
+      // (relaunch landed); clear any prior terminal-failure
+      // banner state so the Composer re-enables atomically.
+      store.clearCliFailure(sessionId);
+      // PLAN T12 (Phase G) - if the user clicked
+      // "Start new session with this draft" on a dead session,
+      // route the stashed draft into THIS session as a pickup
+      // draft. Friedman finding #4 — only a genuinely-NEW session
+      // may claim the stash; a reconnect/relaunch's session_init for
+      // an already-known session must not silently swallow a draft the
+      // user staged for a different new session.
+      if (!existingSession) {
+        const pendingDraft = store.consumePendingDraftForNextSession();
+        if (pendingDraft !== undefined && pendingDraft.length > 0) {
+          store.setPickupDraft(sessionId, pendingDraft);
+        }
+      }
       store.setCliConnected(sessionId, true);
       store.setCliReconnecting(sessionId, false);
       if (!existingSession) {
@@ -948,6 +965,11 @@ function handleParsedMessage(
     }
 
     case "error": {
+      // Phase F WATCHPOINT carry-forward - when this session has a
+      // live cli_failed banner, suppress the legacy chat-error
+      // message (session-orchestrator.ts:3267 and :3302 fire
+      // legacy "Session keeps crashing" alongside session:relaunch-exhausted).
+      if (store.cliFailures.has(sessionId)) break;
       store.appendMessage(sessionId, {
         id: nextId(),
         role: "system",
@@ -991,6 +1013,57 @@ function handleParsedMessage(
     case "cli_connected": {
       store.setCliConnected(sessionId, true);
       store.setCliReconnecting(sessionId, false);
+      break;
+    }
+
+    case "cli_failed": {
+      // PLAN T12 (Phase G) - terminal CLI failure landed on this
+      // session. Population into the cli-status-slice flips the
+      // ChatView priority chain to the CliFailedBanner slot AND
+      // disables the Composer submit path.
+      //
+      // Friedman R10 - clear all in-flight visual indicators
+      // atomically on banner mount so the user sees one terminal
+      // state, not banner + spinner + streaming-dots + optimistic
+      // bubble all at once. The spinner state lives across multiple
+      // store fields (streaming, streamingStats, sessionStatus,
+      // toolProgress, cliConnected); drain ALL of them here so the
+      // store transition itself is the atomic frame.
+      store.setCliFailure(sessionId, {
+        reason: data.reason,
+        drainedCount: data.drainedCount,
+        subprocessAlive: data.subprocessAlive,
+        firedAt: data.firedAt,
+        ...(data.details?.lastErrorSha256 !== undefined
+          ? { lastErrorSha256: data.details.lastErrorSha256 }
+          : {}),
+      });
+      store.setCliConnected(sessionId, false);
+      store.setCliReconnecting(sessionId, false);
+      store.setSessionStatus(sessionId, null);
+      store.setStreaming(sessionId, null);
+      store.setStreamingStats(sessionId, null);
+      store.clearToolProgress(sessionId);
+      // Finding #5 — a permission pending when the CLI dies must be cleared,
+      // or it outranks the CliFailedBanner in the single-slot priority chain
+      // and hides the terminal banner behind an un-answerable approval. The
+      // most common way a CLI dies is mid-tool-call, which is exactly the
+      // state that leaves a permission pending — so this is common, not edge.
+      store.clearPendingPermissions(sessionId);
+      break;
+    }
+
+    case "session_evicted": {
+      // Realtime finding #1 — the server evicted this archived session from
+      // memory after archive. Drop the live bridge row so the UI stops
+      // treating it as active; unlike `cli_disconnected` this does NOT request
+      // a relaunch. The session remains in the archived list (REST-sourced
+      // `sdkSessions`); a reconnect is refused server-side by the resurrection
+      // guard, so the client simply stops here.
+      store.setCliConnected(sessionId, false);
+      store.setCliReconnecting(sessionId, false);
+      store.setSessionStatus(sessionId, null);
+      store.removeBridgeSession(sessionId);
       break;
     }
 

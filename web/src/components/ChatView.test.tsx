@@ -46,6 +46,15 @@ vi.mock("./PermissionBanner.js", () => ({
   PermissionBanner: () => <div data-testid="permission-banner" />,
 }));
 
+// PLAN T12 (Phase G) - mock CliFailedBanner so the priority chain
+// test can assert which banner occupies the slot without rendering
+// the full component implementation.
+vi.mock("./CliFailedBanner.js", () => ({
+  CliFailedBanner: ({ failure }: { failure: { reason: string } }) => (
+    <div data-testid="cli-failed-banner" data-reason={failure.reason} />
+  ),
+}));
+
 vi.mock("./AiValidationBadge.js", () => ({
   AiValidationBadge: () => <div data-testid="ai-validation-badge" />,
 }));
@@ -59,6 +68,7 @@ function setupStore(overrides: {
   hasPendingPerms?: boolean;
   hasAiResolved?: boolean;
   sessionGroupRole?: "orchestrator" | "observer";
+  cliFailureReason?: "relaunch_exhausted" | "container_missing" | "container_stopped" | "binary_missing" | "browser_closed_no_reconnect";
 } = {}) {
   const {
     connectionStatus = "connected",
@@ -67,6 +77,7 @@ function setupStore(overrides: {
     hasPendingPerms = false,
     hasAiResolved = false,
     sessionGroupRole,
+    cliFailureReason,
   } = overrides;
 
   const connMap = new Map<string, string>();
@@ -111,6 +122,13 @@ function setupStore(overrides: {
     findings: new Map(),
     dismissedStopIds: new Set(),
     dismissStop: vi.fn(),
+    // PLAN T12 (Phase G) - cli-status-slice state + draft-stash actions
+    // that the cli-failed primary action wires.
+    cliFailures: cliFailureReason
+      ? new Map([["s1", { reason: cliFailureReason, drainedCount: 0, subprocessAlive: false, firedAt: 1_000 }]])
+      : new Map(),
+    setPendingDraftForNextSession: vi.fn(),
+    newSession: vi.fn(),
   };
 }
 
@@ -276,5 +294,51 @@ describe("ChatView", () => {
     setupStore({ sessionGroupRole: undefined });
     render(<ChatView sessionId="s1" />);
     expect(screen.getByTestId("composer")).toBeTruthy();
+  });
+
+  // ─── PLAN T12 (Phase G) — banner priority chain ─────────────────────
+  //
+  // Priority ladder: permission > cliFailed > blocker. Only ONE banner
+  // occupies the slot at a time. Mutation-resistant: reordering the
+  // chain or dropping the cliFailed branch flips these.
+
+  it("renders CliFailedBanner when cliFailures.has(sessionId) and no permissions pending", () => {
+    setupStore({ cliFailureReason: "relaunch_exhausted" });
+    render(<ChatView sessionId="s1" />);
+    expect(screen.getByTestId("cli-failed-banner")).toBeTruthy();
+    expect(screen.queryByTestId("permission-banner")).toBeNull();
+  });
+
+  // Phase G observer STOP regression: a terminal cli_failed drains cliConnected
+  // to false (ws.ts atomic indicator drain). Without the !cliFailure guard on
+  // showCliBanner, the transient yellow "CLI disconnected / Reconnect" banner
+  // renders SIMULTANEOUSLY with the red terminal CliFailedBanner, re-offering
+  // the futile Reconnect affordance the cliFailed axis exists to suppress.
+  // This test pins the PRODUCTION pairing (cliFailureReason set AND
+  // cliConnected:false — the inverse of setupStore's cliConnected=true default)
+  // and asserts the yellow reconnect banner is absent. Mutation-resistant:
+  // reverting line-95 to drop `&& !cliFailure` makes both assertions fail.
+  it("does NOT render the yellow CLI-disconnected/Reconnect banner alongside the terminal CliFailedBanner (production pairing: cliConnected=false + cliFailure set)", () => {
+    setupStore({ cliFailureReason: "relaunch_exhausted", cliConnected: false });
+    render(<ChatView sessionId="s1" />);
+    // Terminal banner present...
+    expect(screen.getByTestId("cli-failed-banner")).toBeTruthy();
+    // ...and the transient yellow recovery banner is NOT.
+    expect(screen.queryByText("CLI disconnected")).toBeNull();
+    expect(screen.queryByRole("button", { name: /reconnect/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /retry/i })).toBeNull();
+  });
+
+  it("permission banner WINS over cliFailed when both are present (Friedman R8 stacking)", () => {
+    setupStore({ cliFailureReason: "relaunch_exhausted", hasPendingPerms: true });
+    render(<ChatView sessionId="s1" />);
+    expect(screen.getByTestId("permission-banner")).toBeTruthy();
+    expect(screen.queryByTestId("cli-failed-banner")).toBeNull();
+  });
+
+  it("does NOT render CliFailedBanner when cliFailures is empty (default state)", () => {
+    setupStore();
+    render(<ChatView sessionId="s1" />);
+    expect(screen.queryByTestId("cli-failed-banner")).toBeNull();
   });
 });

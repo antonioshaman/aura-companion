@@ -3,6 +3,7 @@ import { MetricsCollector } from "./metrics-collector.js";
 import type { GaugeDataProvider } from "./metrics-collector.js";
 import type { SessionPhase } from "./session-state-machine.js";
 import { companionBus } from "./event-bus.js";
+import { log } from "./logger.js";
 
 // Fresh collector per test (avoids singleton pollution)
 let collector: MetricsCollector;
@@ -249,6 +250,69 @@ describe("histograms", () => {
     expect(h.buckets["250"]).toBe(1);
     expect(h.buckets["1000"]).toBe(1);
     expect(h.buckets["5000"]).toBe(1);
+  });
+});
+
+// ── Clock-skew clamp (EC-43 ageMs sweep) ────────────────────────────────────
+//
+// The four wallclock-delta sites in metrics-collector (sessionInitTime,
+// turnDuration, permissionDuration, serverUptime) were swept from raw
+// `Date.now() - x` to `ageMs(x)`, which routes them through the EC-38
+// negative-skew clamp. Before the sweep a backward clock jump produced a
+// silent negative histogram value; after it the value is clamped to 0 and a
+// `clock.skew_detected` WARN is emitted. These tests lock in that behavior
+// change (the Phase B council review flagged it as unverified).
+
+describe("clock-skew clamp (EC-43 ageMs sweep)", () => {
+  it("clamps a backward-jumping init duration to 0 and emits a clock.skew_detected WARN", () => {
+    const warnSpy = vi.spyOn(log, "warn").mockImplementation(() => undefined);
+
+    vi.useFakeTimers();
+    // Spawn recorded at t=10s, then the host clock jumps backward to t=7s
+    // (NTP correction / VM resume) before the ready transition fires.
+    vi.setSystemTime(10_000);
+    collector.recordSessionSpawned("s1");
+    vi.setSystemTime(7_000);
+
+    companionBus.emit("session:phase-changed", {
+      sessionId: "s1",
+      from: "initializing" as SessionPhase,
+      to: "ready" as SessionPhase,
+      trigger: "system_init",
+    });
+
+    vi.useRealTimers();
+
+    const snap = collector.getSnapshot();
+    // The histogram recorded one sample, clamped to 0 — never a negative.
+    expect(snap.histograms.sessionInitTimeMs.count).toBe(1);
+    expect(snap.histograms.sessionInitTimeMs.sum).toBe(0);
+    expect(snap.histograms.sessionInitTimeMs.max).toBe(0);
+    // The clamp is observable: exactly the skew WARN fired (the post-real-timers
+    // getSnapshot uptime read is positive, so it adds no second skew WARN).
+    expect(warnSpy).toHaveBeenCalledWith(
+      "age-ms",
+      expect.any(String),
+      expect.objectContaining({ event: "clock.skew_detected", skewMs: -3_000 }),
+    );
+
+    warnSpy.mockRestore();
+  });
+
+  it("keeps serverUptimeMs non-negative without a skew WARN under a forward clock", () => {
+    const warnSpy = vi.spyOn(log, "warn").mockImplementation(() => undefined);
+
+    const snap = collector.getSnapshot();
+    // Constructed in beforeEach moments ago: uptime is a small non-negative
+    // number and the sweep did not spuriously trip the skew path.
+    expect(snap.serverUptimeMs).toBeGreaterThanOrEqual(0);
+    expect(warnSpy).not.toHaveBeenCalledWith(
+      "age-ms",
+      expect.any(String),
+      expect.objectContaining({ event: "clock.skew_detected" }),
+    );
+
+    warnSpy.mockRestore();
   });
 });
 

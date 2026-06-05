@@ -53,6 +53,15 @@ export interface SessionsSlice {
    * Composer mount within the same tab session.
    */
   pickupDrafts: Map<string, string>;
+  /**
+   * AURA-LOCAL - PLAN T12 (Phase G). One-shot draft that the next
+   * `session_init` handler converts into a `pickupDraft` keyed by
+   * the freshly-created session id. Set by `CliFailedBanner` when
+   * the user clicks "Start new session with this draft" so the
+   * composer text survives the navigation home -> new session flow
+   * even though the future session id is not yet known.
+   */
+  pendingDraftForNextSession: string | null;
 
   setCurrentSession: (id: string | null) => void;
   addSession: (session: SessionState) => void;
@@ -77,6 +86,10 @@ export interface SessionsSlice {
   setPickupDraft: (sessionId: string, text: string) => void;
   /** Read + clear the pickup draft atomically. Returns undefined if none pending. */
   consumePickupDraft: (sessionId: string) => string | undefined;
+  /** Phase G - stash a draft for the NEXT session_init to pick up. */
+  setPendingDraftForNextSession: (text: string | null) => void;
+  /** Phase G - read+clear the pending draft atomically. */
+  consumePendingDraftForNextSession: () => string | undefined;
 }
 
 export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> = (set) => ({
@@ -95,6 +108,7 @@ export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> 
   mcpServers: new Map(),
   collapsedProjects: getInitialCollapsedProjects(),
   pickupDrafts: new Map(),
+  pendingDraftForNextSession: null,
 
   setCurrentSession: (id) => {
     if (id) {
@@ -200,6 +214,10 @@ export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> 
         groupBySessionId,
         findings,
         groundingDowngrades,
+        // PLAN T12 (Phase G) - drop any cli-status-slice entry
+        // when the session leaves the store. Sibling of the
+        // permissionPermissions cleanup above.
+        cliFailures: deleteFromMap(s.cliFailures, sessionId),
       };
     }),
 
@@ -339,6 +357,20 @@ export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> 
       const pickupDrafts = new Map(s.pickupDrafts);
       pickupDrafts.delete(sessionId);
       return { pickupDrafts };
+    });
+    return consumed;
+  },
+
+  setPendingDraftForNextSession: (text) => set({ pendingDraftForNextSession: text }),
+
+  // Phase G: ws.ts session_init reads this to route the cli-failed
+  // hand-off draft into the new session as a regular pickup draft.
+  consumePendingDraftForNextSession: () => {
+    let consumed: string | undefined;
+    set((s) => {
+      if (s.pendingDraftForNextSession === null) return {};
+      consumed = s.pendingDraftForNextSession;
+      return { pendingDraftForNextSession: null };
     });
     return consumed;
   },

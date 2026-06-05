@@ -7,6 +7,7 @@ import { getEnrichedPath } from "./path-resolver.js";
 process.env.PATH = getEnrichedPath();
 
 import { dirname, resolve } from "node:path";
+import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
@@ -39,6 +40,8 @@ import { NoVncProxy } from "./novnc-proxy.js";
 import { isOriginAllowed } from "./middleware/origin-allowlist.js";
 import { securityHeaders } from "./middleware/security-headers.js";
 
+import { CleanupScheduler } from "./cleanup/cleanup-scheduler.js";
+import { reapOrphans } from "./orphan-reaper.js";
 import { startPeriodicCheck, setServiceMode } from "./update-checker.js";
 import { imagePullManager } from "./image-pull-manager.js";
 import { restoreIfNeeded as restoreTailscaleFunnel, cleanup as cleanupTailscaleFunnel } from "./tailscale-manager.js";
@@ -230,6 +233,43 @@ containerManager.restoreState(CONTAINER_STATE_PATH);
 
 // ── Session orchestrator — centralizes lifecycle event wiring ────────────────
 orchestrator.initialize();
+
+// AURA-LOCAL: PPID=1 orphan reaper — PLAN T8. Runs ONCE at server-init
+// AFTER bridge + orchestrator wiring (so the launcher's restored
+// `loadedSessions` is complete) AND BEFORE any session-level state
+// machine fires (so re-attaching an orphan's PID doesn't trigger a
+// spurious idle-kill / relaunch event). Fire-and-forget (Promise) —
+// the 5s hard cap inside `reapOrphans` keeps init bounded so systemd
+// readiness doesn't flap.
+//
+// Subprocess R5: re-attach is PURE Map mutation. Subprocess R6: ordering
+// matters — this seam sits between orchestrator.initialize() (boot
+// reconcile complete) and the CleanupScheduler.start() that arms
+// downstream sweeps.
+void reapOrphans({
+  loadedSessions: launcher.listSessions(),
+  sentinelRoot: sessionStore.directory,
+  sessionsRoot: sessionStore.directory,
+}).catch((err) => {
+  // The reaper is structurally never-throw (every per-pid path catches
+  // its own errors); this .catch is a belt-and-braces guard so a future
+  // refactor that introduces a top-level throw doesn't crash bun init.
+  appLog.warn("orphan-reaper", "boot reap pass crashed (top-level)", {
+    event: "orphan_reaper.boot_crash",
+    message: err instanceof Error ? err.message : String(err),
+  });
+});
+
+// AURA-LOCAL: cleanup-subsystem scheduler. PLAN T4. Owns the daily
+// retention/eviction cadence — instantiated AFTER the orchestrator+bridge
+// are wired so Phase D/E/H sweepers (registered later via
+// `cleanupScheduler.registerSweep(...)`) can safely reach into
+// `wsBridge.sessions` / launcher state without a TOCTOU window. The
+// scheduler is started here with zero registered sweeps; the lifecycle
+// skeleton is the only Phase B contribution. `dispose()` is wired into
+// `gracefulShutdown` below so SIGTERM awaits any in-flight tier.
+const cleanupScheduler = new CleanupScheduler();
+cleanupScheduler.start();
 
 console.log(`[server] Session persistence: ${sessionStore.directory}`);
 if (recorder.isGloballyEnabled()) {
@@ -559,9 +599,161 @@ isReady = true;
 // ── Runtime diagnostics ──────────────────────────────────────────────────────
 import { log } from "./logger.js";
 import { metricsCollector } from "./metrics-collector.js";
+// AURA-LOCAL: cleanup-subsystem diagnostic surfaces. PLAN T6 (Phase C).
+import { loadCleanupConfig } from "./cleanup/cleanup-config.js";
+import {
+  readMemoryPressure,
+  initMemoryPressureProbe,
+  shouldEmitMemoryPressureWarn,
+} from "./cleanup/memory-pressure-probe.js";
+// AURA-LOCAL: PLAN T9 (Phase E) — daily retention sweep registered with
+// the CleanupScheduler. The sweep is wired AFTER the diagnostics config
+// snapshot lands so a single `loadCleanupConfig()` call covers both
+// consumers (memory-pressure WARN + retention TTLs); the per-knob
+// `cleanup.config.resolved` log lines fire exactly once at boot.
+import { sweepRetention } from "./cleanup/retention-sweeper.js";
+// AURA-LOCAL: PLAN T13 (Phase H) — session-map eviction sweep + boot-
+// time reconcile registered with the CleanupScheduler. Same wire-site
+// convention as Phase E (registerSweep) plus the new registerReconcile
+// seam for the EC-8 sentinel-recovery half of the contract.
+import { sweepEviction, reconcileEvictionSentinels } from "./cleanup/eviction-sweeper.js";
+import { readdirSync as nodeReaddirSync, statSync as nodeStatSync, unlinkSync as nodeUnlinkSync } from "node:fs";
 
 const DIAGNOSTICS_INTERVAL_MS = 5 * 60_000; // every 5 minutes
-setInterval(() => {
+
+// AURA-LOCAL: cleanup-subsystem config snapshot used by the 5-min
+// diagnostic tick's memory-pressure WARN. Loaded ONCE at module
+// initialisation so the per-knob `cleanup.config.resolved` log lines
+// don't double-fire alongside the scheduler's own load (Phase B did NOT
+// thread config into the scheduler constructor — the threshold lives
+// outside the scheduler's "cadence + error boundary" concern).
+const diagnosticsCleanupConfig = loadCleanupConfig();
+
+// AURA-LOCAL: fire the boot `event:"memory.pressure.probe"` WARN at
+// server-init rather than on-first-tick so operators see the probe
+// resolution (or "unavailable") next to the rest of the bootstrap log
+// noise. Subsequent `readMemoryPressure()` calls inside the tick reuse
+// the cached resolution without re-emitting.
+initMemoryPressureProbe();
+
+// AURA-LOCAL: PLAN T9 — register the 4-tier retention sweep with the
+// CleanupScheduler (instantiated + started above near line 270). The
+// scheduler's contract allows `registerSweep` AFTER `start()` — the
+// next-tick cadence covers the new tier without a re-arm.
+//
+// Roots:
+//   sessionsRoot   sessionStore.directory             (~/.companion/sessions)
+//   recordingsRoot recorder.getRecordingsDir()        (~/.companion/recordings)
+//   logsRoot       logFileWriter?.getLogsDir() ?? env-fallback under COMPANION_HOME
+//   sentinelRoot   COMPANION_HOME — siblings-not-children of each tier root
+//
+// Active-FD deps:
+//   getActiveRecordingPaths → RecorderManager.getActiveRecordingPaths() (Persistence R6)
+//   getActiveLogPaths       → the single LogFileWriter.filePath (current run)
+//
+// Wire-site rationale: the worker brief's "TOUCH cleanup-scheduler.ts to
+// wire" reading is structurally wrong — cleanup-scheduler.ts is generic
+// (it owns cadence + error boundary, not specific sweep knowledge). The
+// HANDOFF-implement-after-D pickup recommends index.ts for symmetry
+// with how Phase D wired the reaper at the same boot seam.
+cleanupScheduler.registerSweep("retention-sweep", async () => {
+  await sweepRetention(
+    diagnosticsCleanupConfig,
+    {
+      sessionsRoot: sessionStore.directory,
+      recordingsRoot: recorder.getRecordingsDir(),
+      logsRoot:
+        logFileWriter?.getLogsDir() ??
+        (process.env.COMPANION_LOG_DIR ?? join(COMPANION_HOME, "logs")),
+      sentinelRoot: COMPANION_HOME,
+    },
+    {
+      getActiveRecordingPaths: () => recorder.getActiveRecordingPaths(),
+      // Canonicalise the active log path for the same realpath/raw reason as
+      // getActiveRecordingPaths (see recorder.ts): the sweeper compares
+      // against resolveCleanupPath's realpath'd entry, so a raw path silently
+      // fails the skip under a symlinked ancestor. The open log file exists;
+      // fall back to the raw path only if realpathSync races a close.
+      getActiveLogPaths: () => {
+        if (!logFileWriter) return new Set<string>();
+        try {
+          return new Set([realpathSync(logFileWriter.filePath)]);
+        } catch {
+          return new Set([logFileWriter.filePath]);
+        }
+      },
+    },
+  );
+});
+
+// AURA-LOCAL: PLAN T13 (Phase H) — session-map eviction sweep.
+// Predicate gates: archived AND state=exited AND ageMs(archiveMtime) >
+// evictionGrace AND verifyProcessIdentity !== "match". Wire-site
+// rationale matches Phase E: cleanup-scheduler.ts is generic (cadence
+// + error boundary); per-sweep deps live at the boot wire-in so the
+// scheduler stays decoupled from launcher / bridge / store.
+cleanupScheduler.registerSweep("eviction-sweep", async () => {
+  await sweepEviction(diagnosticsCleanupConfig, {
+    bridge: {
+      getSessionEntries: () =>
+        wsBridge.getSessionEntries() as Array<[string, unknown]>,
+      removeSession: (sid) => wsBridge.removeSession(sid),
+      getBrowserSocketCount: (sid) =>
+        wsBridge.getSession(sid)?.browserSockets.size ?? 0,
+    },
+    store: {
+      moveToArchive: (sid) => sessionStore.moveToArchive(sid),
+      directory: sessionStore.directory,
+    },
+    getLauncherSession: (sid) => {
+      const info = launcher.getSession(sid);
+      if (!info) return null;
+      return {
+        sessionId: info.sessionId,
+        pid: info.pid,
+        archived: info.archived,
+        state: info.state,
+      };
+    },
+    notifyArchived: (sid) => idleTimerManager.setArchived(sid),
+  });
+});
+
+// AURA-LOCAL: PLAN T13 (Phase H) — boot-time reconcile fires ONCE at
+// scheduler start (BEFORE the first periodic tick). Recovers from a
+// crash mid-eviction: finishes the rename if the source JSON still
+// exists, else deletes the orphan `.evicting` sentinel. Also sweeps
+// orphan `.<hex>.tmp` files older than boot time.
+cleanupScheduler.registerReconcile("eviction-reconcile", (bootTimeMs) => {
+  reconcileEvictionSentinels({
+    store: {
+      moveToArchive: (sid) => sessionStore.moveToArchive(sid),
+      directory: sessionStore.directory,
+    },
+    bootTimeMs,
+    readdir: (p) => nodeReaddirSync(p),
+    stat: (p) => {
+      const st = nodeStatSync(p);
+      return { mtimeMs: st.mtimeMs };
+    },
+    unlink: (p) => nodeUnlinkSync(p),
+  });
+});
+
+// AURA-LOCAL: tracks when the memory-pressure WARN last fired so the
+// pure `shouldEmitMemoryPressureWarn` gate can apply its 30-min rate
+// limit. Module-scope `let` — read + written exclusively inside the
+// diagnostic tick; not test-imported, so the AP-17 reset triplet is not
+// required (no orchestrator suite imports index.ts).
+let lastMemoryPressureWarnAt: number | null = null;
+
+// Backend-TS finding #6 — capture the handle so `gracefulShutdown` can
+// clear it (a fired tick mid-shutdown races the teardown), `.unref()` so a
+// pending tick never keeps the process alive on exit, and wrap the body in
+// try/catch so a single snapshot/probe throw cannot kill the only diagnostic
+// timer for the rest of the process lifetime.
+const diagnosticsTimer = setInterval(() => {
+  try {
   const snap = metricsCollector.getSnapshot(wsBridge);
   const mem = snap.gauges.memory;
   const mb = (bytes: number) => (bytes / 1024 / 1024).toFixed(1);
@@ -571,6 +763,13 @@ setInterval(() => {
     .slice(0, 3)
     .map((s) => `${s.id.slice(0, 8)}(h=${s.historyLen},b=${s.browsers})`)
     .join(", ");
+
+  // PLAN T6: proxy for "archived rows still in the wsBridge.sessions
+  // Map that Phase H eviction will reclaim." totalActiveSessions counts
+  // phase != "terminated"; the Map total includes terminated/archived
+  // rows the bridge still holds. Until Phase H ships, this delta is the
+  // most direct surface of the memory-leak symptom this PLAN targets.
+  const unevictedArchivedCount = Math.max(0, sessionStats.length - snap.gauges.totalActiveSessions);
 
   log.info("diagnostics", "Runtime snapshot", {
     rss: `${mb(mem.rss)}MB`,
@@ -583,8 +782,63 @@ setInterval(() => {
     eventBuffer: snap.gauges.totalEventBufferSize,
     errors: Object.values(snap.counters.errors).reduce((a, b) => a + b, 0),
     topSessions: topSessions || "none",
+    // ── PLAN T6: cleanup-subsystem counters (Phase B projection methods) ──
+    // Operator-facing API — pinned literally by the EC-19 canary in
+    // `index.diagnostics-emit.test.ts`. Renames without canary update
+    // are a structural failure.
+    evictedLastHour: metricsCollector.getEvictedLastHour(),
+    orphanReapedLastHour: metricsCollector.getOrphanReapedLastHour(),
+    drainedPendingLastHour: metricsCollector.getDrainedPendingLastHour(),
+    recordingsSoftArchivedLastHour: metricsCollector.getRecordingsSoftArchivedLastHour(),
+    recordingsHardDeletedLastHour: metricsCollector.getRecordingsHardDeletedLastHour(),
+    // ── PLAN T6: sweep-status fields (Phase C accessors on the scheduler) ──
+    lastSweepCompletedAt: cleanupScheduler.getLastSweepCompletedAt(),
+    lastSweepDurationMs: cleanupScheduler.getLastSweepDurationMs(),
+    sweepInFlight: cleanupScheduler.getSweepInFlight(),
   });
+
+  // ── PLAN T6: memory-pressure WARN with 30-min rate limit ──────────────
+  // Folded into the 5-min diagnostic tick (per master HANDOFF Phase C
+  // recommendation) rather than a separate timer — same cadence, same
+  // wsBridge access, no new setInterval to manage. The probe is
+  // capability-checked: when the cgroup PSI file isn't available
+  // (macOS dev, kernel <4.20, cgroup v1) the read short-circuits to
+  // {available: false} and the WARN is silently skipped.
+  const warnCfg = diagnosticsCleanupConfig.memoryPressureWarn;
+  const pressureReading = readMemoryPressure();
+  const pressureNowMs = Date.now();
+  if (
+    // `warnCfg.enabled` narrows the threshold-config union so `warnCfg.us`
+    // is available for both the gate input and the payload below.
+    warnCfg.enabled &&
+    shouldEmitMemoryPressureWarn({
+      reading: pressureReading,
+      thresholdUs: warnCfg.us,
+      enabled: warnCfg.enabled,
+      lastWarnAtMs: lastMemoryPressureWarnAt,
+      nowMs: pressureNowMs,
+    }) &&
+    // The helper guarantees availability when it returns true; re-checking
+    // the discriminated union narrows `fullAvg300Us` for the payload.
+    pressureReading.available
+  ) {
+    log.warn("cleanup", "Memory pressure threshold exceeded", {
+      event: "cli.cleanup.memory_pressure",
+      fullAvg300Us: pressureReading.fullAvg300Us,
+      thresholdUs: warnCfg.us,
+      sessions: snap.gauges.totalActiveSessions,
+      unevictedArchivedCount,
+    });
+    lastMemoryPressureWarnAt = pressureNowMs;
+  }
+  } catch (err) {
+    log.error("diagnostics", "Diagnostic tick failed (timer preserved)", {
+      event: "diagnostics.tick_error",
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }, DIAGNOSTICS_INTERVAL_MS);
+diagnosticsTimer.unref();
 
 // ── Graceful shutdown — Council teardown + persist container state ───────────
 //
@@ -604,6 +858,10 @@ setInterval(() => {
 // Step 3 is async; the wrapper awaits it (Node's process.exit triggers
 // after the promise resolves). Total shutdown budget is bounded.
 async function gracefulShutdown() {
+  // Backend-TS finding #6 — stop the diagnostic tick first so a fired
+  // callback cannot race the teardown below (it reads wsBridge state that
+  // shutdown is actively dismantling).
+  clearInterval(diagnosticsTimer);
   try {
     const coordinator = orchestrator.getCouncilCoordinator();
     if (coordinator) {
@@ -641,6 +899,17 @@ async function gracefulShutdown() {
     }
   } catch (err) {
     console.error("[server] Council shutdown error (continuing to container persist):", err);
+  }
+  // AURA-LOCAL: PLAN T4. Dispose the cleanup scheduler BEFORE the
+  // container-state persist so any in-flight sweep tier drains within
+  // the ~8s shutdown budget. `dispose()` is idempotent and resolves
+  // once the registered sweeps settle; a sweep that exceeds the budget
+  // is the orchestrator's problem (the scheduler is a transparent
+  // forwarder, not a timeout enforcer).
+  try {
+    await cleanupScheduler.dispose();
+  } catch (err) {
+    console.error("[server] Cleanup scheduler dispose error (continuing to container persist):", err);
   }
   console.log("[server] Persisting container state before shutdown...");
   containerManager.persistState(CONTAINER_STATE_PATH);

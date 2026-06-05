@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback, useRef, type RefObject } from "react";
 import type { SessionItem as SessionItemType } from "../utils/project-grouping.js";
 import { ProviderBadges, pairHalvesAfterBackendCollapse, providerChipClass } from "./council/index.js";
+import { cliFailedCopy } from "../cli-failed-copy.js";
+import type { CliFailedReason } from "../types.js";
 
 interface SessionItemProps {
   session: SessionItemType;
@@ -19,6 +21,14 @@ interface SessionItemProps {
    * Undefined when the session isn't part of a council pair. (2026-05-15 Item 17)
    */
   councilRole?: "orchestrator" | "observer";
+  /**
+   * PLAN T12 (Phase G) — when present, this session has a terminal
+   * CLI failure (cli_failed wire frame landed). Renders a destructive
+   * `✕` glyph next to the status dot + tooltip with the cause headline.
+   * Distinct from `derivedStatus === "exited"` (a graceful close where
+   * the agent finished its work; that uses an outline dot, not ✕).
+   */
+  cliFailedReason?: CliFailedReason;
   onSelect: (id: string) => void;
   onStartRename: (id: string, currentName: string) => void;
   onArchive: (e: React.MouseEvent, id: string) => void;
@@ -102,6 +112,7 @@ export function SessionItem({
   councilPairing,
   councilUnreadStops,
   councilRole,
+  cliFailedReason,
   onSelect,
   onStartRename,
   onArchive,
@@ -223,6 +234,25 @@ export function SessionItem({
         {/* Status dot */}
         {!isEditing && (
           <StatusDot status={derivedStatus} />
+        )}
+
+        {/* PLAN T12 (Phase G) - terminal CLI-failure glyph. Distinct
+            from the `exited` outline dot (graceful close) — ✕ is the
+            destructive token for "this session can no longer run".
+            Tooltip carries the user-facing headline from
+            cliFailedCopy so hover discovery beats opening the chat. */}
+        {!isEditing && cliFailedReason && (
+          <span
+            data-testid="session-item-cli-failed-glyph"
+            data-reason={cliFailedReason}
+            title={cliFailedCopy(cliFailedReason).headline}
+            className="inline-flex items-center justify-center w-3.5 h-3.5 rounded-full bg-cc-error/15 border border-cc-error/30 text-cc-error shrink-0"
+            aria-label={`Session failed: ${cliFailedCopy(cliFailedReason).headline}`}
+          >
+            <svg viewBox="0 0 12 12" fill="currentColor" className="w-2 h-2" aria-hidden="true">
+              <path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" fill="none" />
+            </svg>
+          </span>
         )}
 
         {/* Session name / edit input. Two-row layout (UX feedback, May 2026):

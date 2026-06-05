@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, appendFileSync, statSync, unlinkSync } from "node:fs";
+import { mkdirSync, readdirSync, appendFileSync, statSync, unlinkSync, realpathSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import type { BackendType } from "./session-types.js";
@@ -162,6 +162,20 @@ const SECRET_VALUE_PATTERNS: readonly RegExp[] = [
   /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g,
   // GitHub fine-grained PATs (github_pat_*).
   /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,
+  // Hunt finding #7 — Companion auth token travelling in a WS URL query
+  // string (`?token=<hex>` / `&access_token=<hex>`). Lookbehind keeps the
+  // param NAME in the recording (useful for debugging which URL leaked) and
+  // redacts only the value. Covers any URL-shaped value, not just keys under
+  // SENSITIVE_KEY_PATTERNS.
+  /(?<=[?&](?:token|access_token)=)[A-Za-z0-9._~+/=-]{16,}/g,
+  // Hunt finding #7 — the Companion auth token is a bare 32-byte hex value
+  // (`randomBytes(32).toString("hex")` → exactly 64 lowercase hex chars) with
+  // no prefix, so prefix-anchored patterns above never catch it when it
+  // appears outside a `token=` query string (e.g. echoed in a ws_close reason
+  // or an error string). Over-redaction of incidental 64-hex hashes (sha256)
+  // in recordings is an accepted trade vs. leaking a long-lived, un-rotated
+  // session credential.
+  /\b[0-9a-f]{64}\b/g,
 ];
 
 /**
@@ -179,6 +193,11 @@ const SECRET_PRESCREEN_REGEX = new RegExp(
     "\\bBearer\\b",
     "\\bgh[pousr]_",
     "\\bgithub_pat_",
+    // Hunt finding #7 — `?token=`/`&access_token=` query-string credential
+    // and the bare 64-hex Companion auth-token shape. The hex marker forces
+    // any frame carrying a 64-char hex run through the parse-redact path.
+    "[?&](?:token|access_token)=",
+    "[0-9a-f]{64}",
     // sensitive key-name markers (subset — narrow enough to avoid frequent
     // false-prescreens but broad enough to catch every key in
     // SENSITIVE_KEY_PATTERNS in any common casing).
@@ -495,6 +514,40 @@ export class RecorderManager {
   getRecordingStatus(sessionId: string): { filePath?: string } {
     const recorder = this.recorders.get(sessionId);
     return recorder ? { filePath: recorder.filePath } : {};
+  }
+
+  /**
+   * Absolute paths of every recording file currently being appended to.
+   *
+   * AURA-LOCAL (PLAN T9 / Persistence R6): the retention sweep consults
+   * this set before unlinking or moving any file under the recordings
+   * tree. Unlinking an open file on Linux silently loses the recording
+   * — the fd stays valid, subsequent appends succeed, but the inode is
+   * unreachable on disk after the last writer closes. Skipping
+   * currently-open files closes that loss window.
+   *
+   * Returns a fresh `Set` each call so the caller can mutate it without
+   * leaking into our internal map iteration. The set is empty when no
+   * sessions are recording (manager disabled OR all per-session
+   * overrides flipped off).
+   */
+  getActiveRecordingPaths(): Set<string> {
+    const out = new Set<string>();
+    for (const rec of this.recorders.values()) {
+      // Canonicalise to match the retention sweeper's resolveCleanupPath
+      // output, which realpath's the deepest existing ancestor. A raw path
+      // string-mismatches the sweeper's realpath'd entry whenever an ancestor
+      // of the recordings dir is a symlink (macOS $TMPDIR→/private/var,
+      // containerised bind-mounts), defeating the active-file skip and risking
+      // unlink of a live recording — silent data loss. The file is open so
+      // realpathSync succeeds; if it raced closed, fall back to the raw path.
+      try {
+        out.add(realpathSync(rec.filePath));
+      } catch {
+        out.add(rec.filePath);
+      }
+    }
+    return out;
   }
 
   listRecordings(): RecordingFileMeta[] {

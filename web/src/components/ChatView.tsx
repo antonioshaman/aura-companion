@@ -7,6 +7,8 @@ import { Composer } from "./Composer.js";
 import { PermissionBanner } from "./PermissionBanner.js";
 import { AiValidationBadge } from "./AiValidationBadge.js";
 import { BlockerBanner } from "./council/index.js";
+import { CliFailedBanner } from "./CliFailedBanner.js";
+import { navigateHome } from "../utils/routing.js";
 import { findUnresolvedStops } from "../observer-panel-state.js";
 
 export function ChatView({ sessionId }: { sessionId: string }) {
@@ -71,7 +73,34 @@ export function ChatView({ sessionId }: { sessionId: string }) {
     return live[live.length - 1] ?? null;
   }, [findings, dismissedStopIds]);
 
-  const showCliBanner = connStatus === "connected" && !cliConnected;
+  // PLAN T12 (Phase G) - terminal CLI failure for this session.
+  // Reading from cliFailures.get drives the priority chain below
+  // (permission > cliFailed > blocker). When non-null, Composer
+  // mirrors its draft text via composerTextRef so the "Start new
+  // session with this draft" affordance carries the draft forward.
+  const cliFailure = useStore((s) => s.cliFailures.get(sessionId));
+  const setPendingDraftForNextSession = useStore((s) => s.setPendingDraftForNextSession);
+  const newSession = useStore((s) => s.newSession);
+  const composerTextRef = useRef<string>("");
+  const handleComposerText = useCallback((text: string) => {
+    composerTextRef.current = text;
+  }, []);
+  const handleCliFailedStartNew = useCallback(() => {
+    const draft = composerTextRef.current.trim();
+    setPendingDraftForNextSession(draft.length > 0 ? draft : null);
+    navigateHome();
+    newSession();
+  }, [setPendingDraftForNextSession, newSession]);
+
+  // A terminal cli_failed drains cliConnected to false (ws.ts atomic indicator
+  // drain), so without the !cliFailure guard the transient yellow "CLI
+  // disconnected / Reconnect" banner would render on top of the red terminal
+  // CliFailedBanner — offering the exact futile Reconnect affordance the
+  // cliFailed axis exists to suppress (cli-status-slice.ts:4-10). The two axes
+  // are distinct (EC-44): cliConnected = transient transport, cliFailure =
+  // terminal. Terminal wins.
+  const showCliBanner =
+    connStatus === "connected" && !cliConnected && !cliFailure;
 
   // Council Mode: observer half has its permission-mode locked at spawn
   // (EC-1, applyCouncilObserverSpawnConfig). Mounting Composer under the
@@ -121,8 +150,10 @@ export function ChatView({ sessionId }: { sessionId: string }) {
         </div>
       )}
 
-      {/* WebSocket disconnected banner */}
-      {connStatus === "disconnected" && (
+      {/* WebSocket disconnected banner — suppressed on a terminal cli_failed:
+          a dead session is not "reconnecting", and showing the spinner would
+          re-introduce the recovery affordance the terminal banner suppresses. */}
+      {connStatus === "disconnected" && !cliFailure && (
         <div className="px-4 py-2.5 bg-gradient-to-r from-cc-warning/8 to-cc-warning/4 border-b border-cc-warning/15 flex items-center justify-center gap-2 animate-[fadeSlideIn_0.3s_ease-out]">
           <span className="w-3 h-3 rounded-full border-2 border-cc-warning/30 border-t-cc-warning animate-spin" />
           <span className="text-xs text-cc-warning font-medium">
@@ -148,11 +179,18 @@ export function ChatView({ sessionId }: { sessionId: string }) {
           Permission-first stacking (PLAN T15.3): tool-call decisions trump
           findings; the blocker waits in the Observer panel until permission
           is resolved. */}
+      {/* PLAN T15.3 + Phase G priority chain:
+          permission > cliFailed > blocker.
+          Only one banner occupies this slot at a time. */}
       {perms.length > 0 ? (
         <div className="shrink-0 max-h-[60dvh] overflow-y-auto border-t border-cc-border bg-cc-card">
           {perms.map((p) => (
             <PermissionBanner key={p.request_id} permission={p} sessionId={sessionId} />
           ))}
+        </div>
+      ) : cliFailure ? (
+        <div id={`cli-failed-banner-${sessionId}`} className="shrink-0 border-t border-cc-border bg-cc-card">
+          <CliFailedBanner failure={cliFailure} onStartNewSession={handleCliFailedStartNew} />
         </div>
       ) : topBlocker ? (
         <div className="shrink-0 border-t border-cc-border bg-cc-card">
@@ -164,7 +202,7 @@ export function ChatView({ sessionId }: { sessionId: string }) {
           The toggle's set_permission_mode would be rejected server-side
           (ws-bridge observer-guard) and the observer has no user-driven
           chat input by design. */}
-      {!isObserver && <Composer sessionId={sessionId} />}
+      {!isObserver && <Composer sessionId={sessionId} onTextChange={handleComposerText} />}
     </div>
   );
 }

@@ -1,6 +1,8 @@
-import { mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkSync, existsSync, copyFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, readdirSync, readFileSync, unlinkSync, existsSync, copyFileSync, statSync, renameSync, fsyncSync, openSync, closeSync, realpathSync } from "node:fs";
+import { join, sep } from "node:path";
 import { tmpdir, homedir } from "node:os";
+import { ARCHIVED_SESSIONS_SUBDIR } from "./cleanup/cleanup-paths.js";
+import { writeAtomicJson } from "./atomic-write.js";
 import type {
   SessionState,
   BrowserIncomingMessage,
@@ -260,7 +262,13 @@ export class SessionStore {
         ...session,
         schemaVersion: CURRENT_SESSION_SCHEMA_VERSION,
       };
-      writeFileSync(this.filePath(session.id), JSON.stringify(stamped), "utf-8");
+      // EC-46 — primary state writes are crash-atomic (tmp+fsync+rename),
+      // symmetric with moveToArchive. A raw writeFileSync mid-crash leaves
+      // a truncated JSON the next boot cannot parse, stranding the very
+      // session this write meant to preserve. Uncapped (Infinity) because
+      // session JSON carries full message history and a size cap would
+      // newly throw + drop the write — a regression over writeFileSync.
+      writeAtomicJson(this.filePath(session.id), stamped, { maxBytes: Number.POSITIVE_INFINITY });
     } catch (err) {
       console.error(`[session-store] Failed to save session ${session.id}:`, err);
     }
@@ -324,7 +332,10 @@ export class SessionStore {
   /** Persist launcher state (separate file). */
   saveLauncher(data: unknown): void {
     try {
-      writeFileSync(join(this.dir, "launcher.json"), JSON.stringify(data), "utf-8");
+      // EC-46 — launcher state is crash-atomic for the same reason as
+      // saveSync: a truncated launcher.json breaks boot recovery for every
+      // tracked process. Uncapped to preserve prior writeFileSync behaviour.
+      writeAtomicJson(join(this.dir, "launcher.json"), data, { maxBytes: Number.POSITIVE_INFINITY });
     } catch (err) {
       console.error("[session-store] Failed to save launcher state:", err);
     }
@@ -338,6 +349,132 @@ export class SessionStore {
     } catch {
       return null;
     }
+  }
+
+  /**
+   * AURA-LOCAL — PLAN T13 (Phase H). Cancel the pending debounced
+   * `save()` timer for ONE session, if armed. No-op when no timer is
+   * pending. The eviction sweep calls this before `moveToArchive` so a
+   * 150ms-late debounced write doesn't resurrect the JSON at the source
+   * path after the rename — that resurrection is the Debounce-recreate
+   * race the spec calls out. Returns whether a timer was actually
+   * cancelled (purely for test observability — production callers do
+   * not branch on this).
+   */
+  cancelDebounce(sessionId: string): boolean {
+    const timer = this.debounceTimers.get(sessionId);
+    if (!timer) return false;
+    clearTimeout(timer);
+    this.debounceTimers.delete(sessionId);
+    return true;
+  }
+
+  /**
+   * AURA-LOCAL — PLAN T13 (Phase H). Move `<dir>/<sessionId>.json` to
+   * `<dir>/<ARCHIVED_SESSIONS_SUBDIR>/<sessionId>.json` atomically via
+   * `renameSync`. Discipline:
+   *   • Cancel any pending debounce timer FIRST so a 150ms-late
+   *     `saveSync` does not recreate the source file post-rename.
+   *   • Bounds-check both source AND destination via `realpathSync`
+   *     of the deepest existing ancestor + `startsWith(sessionRoot + sep)`
+   *     (EC-7 floor). A symlinked `~/.companion/sessions/` that
+   *     escapes its parent is rejected before any syscall fires.
+   *   • `renameSync` only — NEVER fallback to copy+delete on EXDEV.
+   *     A cross-FS deployment silently double-storing every archived
+   *     row defeats the atomicity contract the eviction-sweep
+   *     sentinel-before-sweep idiom rests on (Persistence R2). On
+   *     EXDEV: log loudly `session-store.moveToArchive.exdev` so the
+   *     operator can re-mount on the same FS, then RETHROW.
+   *   • fsync the archive parent directory after the rename so the
+   *     directory entry survives a power cut.
+   *
+   * Idempotent on source-absent — if `<sessionId>.json` already moved
+   * (eviction-sweep restart-replay), the source `existsSync` is false
+   * and the helper returns `{kind: "absent"}` without throwing. Callers
+   * treat that as "already evicted" + delete the .evicting sentinel.
+   *
+   * Returns the destination path on success (callers log the basename
+   * only — EC-23 forbids raw absolute paths in structured logs).
+   */
+  moveToArchive(sessionId: string): { kind: "moved"; dest: string } | { kind: "absent" } {
+    if (typeof sessionId !== "string" || sessionId.length === 0 || sessionId.includes("/") || sessionId.includes("\\") || sessionId.includes("\0")) {
+      throw new Error(`SessionStore.moveToArchive: invalid sessionId`);
+    }
+    // Cancel debounce BEFORE rename. The 150ms saveSync would write to the
+    // OLD source path; once cancelled, the next save (if any) goes through
+    // the debounce queue afresh against whatever new state exists.
+    this.cancelDebounce(sessionId);
+
+    const source = this.filePath(sessionId);
+    if (!existsSync(source)) {
+      return { kind: "absent" };
+    }
+
+    // Bounds-check the source: resolve symlinks on the deepest existing
+    // ancestor of the source path, then verify it lives under sessionRoot.
+    // EC-7 floor — never trust a caller-supplied sessionId at the syscall.
+    // Finding #15: a single post-realpath bounds check is airtight for BOTH
+    // the symlinked and non-symlinked source — `resolvedSource` is the fully
+    // resolved path either way, so `startsWith(resolvedRoot + sep)` rejects
+    // every escape. The earlier `resolvedSource !== source && …` guard was
+    // dead (fully subsumed by this one) and invited a future "simplify" that
+    // would reopen a symlink-escape; collapsed to the one unconditional check.
+    const resolvedRoot = realpathSync(this.dir);
+    let resolvedSource: string;
+    try {
+      resolvedSource = realpathSync(source);
+    } catch {
+      return { kind: "absent" };
+    }
+    if (!resolvedSource.startsWith(resolvedRoot + sep)) {
+      throw new Error(`SessionStore.moveToArchive: source escapes session root`);
+    }
+
+    const archiveDir = join(this.dir, ARCHIVED_SESSIONS_SUBDIR);
+    mkdirSync(archiveDir, { recursive: true, mode: 0o700 });
+    const resolvedArchiveDir = realpathSync(archiveDir);
+    if (!(resolvedArchiveDir === resolvedRoot + sep + ARCHIVED_SESSIONS_SUBDIR || resolvedArchiveDir.startsWith(resolvedRoot + sep))) {
+      throw new Error(`SessionStore.moveToArchive: archive dir escapes session root`);
+    }
+
+    const dest = join(resolvedArchiveDir, `${sessionId}.json`);
+
+    try {
+      renameSync(resolvedSource, dest);
+    } catch (e) {
+      const err = e as NodeJS.ErrnoException;
+      // Persistence R2 — REJECT on EXDEV loudly at first call rather
+      // than silently fall back to copy+delete. The eviction sweep's
+      // sentinel-before-sweep contract requires the rename be atomic;
+      // a copy+delete fallback breaks that on partial failure (sentinel
+      // + source still present + half-written dest), producing an
+      // ambiguous on-disk state the boot reconcile cannot resolve.
+      if (err.code === "EXDEV") {
+        console.error(
+          `[session-store] moveToArchive: EXDEV — session root (${this.dir}) and ` +
+          `archive dir (${archiveDir}) are on different filesystems. Re-mount ` +
+          `on a single FS or move ${sessionId}.json manually. THROWING — ` +
+          `the eviction sweep must NOT silently fall back to copy+delete.`,
+        );
+      }
+      throw err;
+    }
+
+    // fsync the parent directory so the rename itself survives a power
+    // cut. Best-effort — some filesystems don't support fsync on dirs.
+    let dirFd = -1;
+    try {
+      dirFd = openSync(resolvedArchiveDir, "r");
+      fsyncSync(dirFd);
+    } catch {
+      /* best-effort */
+    } finally {
+      if (dirFd >= 0) {
+        try { closeSync(dirFd); } catch { /* ignore */ }
+      }
+    }
+
+    return { kind: "moved", dest };
   }
 
   /** Cancel all pending debounce timers (for clean test teardown). */
@@ -373,5 +510,27 @@ export class SessionStore {
 
   get directory(): string {
     return this.dir;
+  }
+
+  /**
+   * Realtime finding #1 — resurrection guard. Returns true when an
+   * archived row exists at `<dir>/<ARCHIVED_SESSIONS_SUBDIR>/<sessionId>.json`,
+   * i.e. the eviction sweep already moved this session to the archive.
+   * `handleBrowserOpen` consults this before `getOrCreateSession` so a stale
+   * tab reconnecting cannot recreate a blank live row for a session that was
+   * intentionally evicted. Validates the sessionId shape (same rejection set
+   * as `moveToArchive`) so a crafted id can never escape the archive subdir.
+   */
+  hasArchivedRow(sessionId: string): boolean {
+    if (
+      typeof sessionId !== "string" ||
+      sessionId.length === 0 ||
+      sessionId.includes("/") ||
+      sessionId.includes("\\") ||
+      sessionId.includes("\0")
+    ) {
+      return false;
+    }
+    return existsSync(join(this.dir, ARCHIVED_SESSIONS_SUBDIR, `${sessionId}.json`));
   }
 }
