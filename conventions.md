@@ -371,3 +371,56 @@ These must be followed — flag violations as findings.
 **Origin:** Fowler — Council Review 2026-06-04-0823 (returned 0 P1 / 0 P2 / 3 P3 — explicit structural sign-off)
 
 **Rationale:** Multi-file decomposition of a tightly-coupled writer+reader+parser+orchestrator surface re-introduces the exact drift the AP-3 floor was codified to prevent; the line count is a derived metric, the cohesion is the structural metric.
+
+---
+
+### EC-42: Vacuous-test detection — every behavioural test MUST be mutation-resistant; if removing the production defence leaves the test green, the test does not pin behaviour
+
+**Convention:** Every test that claims to pin a contract introduced by a code change MUST be REMOVABLE-FROM-CODE-AND-RED — that is, mentally (or actually, via mutation testing) flip the production defence to its prior shape; if the test still passes, the test is a structurally vacuous artefact, NOT a contract pin. Sibling discipline to EC-37: EC-37 demands the test exist, EC-42 demands the test actually red on regression. Common failure shapes flagged by Council Review 2026-06-04-1826:
+- **Simulation-instead-of-verification:** test manually sets the post-state (`element.focus()`) and asserts subsequent behaviour, rather than triggering the producer that's supposed to set the post-state. Symptom: comment in the test admits the workaround ("JSDOM doesn't implement X exactly, so call .focus() directly to model the post-rAF state"). Fix: use the producer-realistic harness — `vi.spyOn(window, "requestAnimationFrame").mockImplementation((cb)=>{cb(0);return 0;})` to flush rAFs synchronously, OR an integration harness that runs the producer.
+- **Wrong-renderer-instance:** test renders two component instances, opens the first, queries via `screen.getByRole(...)` which finds an artefact from the SECOND (or a stale prior render via test-framework cleanup quirks), asserts the expected null on the WRONG instance. Symptom: passes regardless of whether the production fix is in place. Fix: single render with the exact setup state; query via `within(container)` not `screen` to scope.
+- **Both-branches-identical-state-shape:** test exercises a defence that uses `if/else` to return state updates, but both branches happen to set the same fields to the same shapes (the defence is vacuous in the code itself). Symptom: collapsing the if/else into one return leaves both the production code and the test green. Fix: either make the branches genuinely different (one mutates a field the other preserves), OR delete the conditional and the test together — don't pretend the defence exists.
+Reference: Council Review 2026-06-04-1826 found three independent burndown tests with these shapes shipping green; the META-pattern across them is "every claim has a test-shaped artefact" decay of EC-37's "every claim has a test" discipline.
+
+**Origin:** Beck × a11y × Backend-TS — Council Review 2026-06-04-1826 (P1 findings #1, #3, #4 convergence)
+
+**Principle:** `references/quality-testing.md` → Mutation resistance + "the red step is the proof"; sibling memories `feedback_verify_test_bodies_not_just_names` (universal — read test bodies not just names) + `feedback_council_documented_contract_canary` (JSDoc + plan invariants are doku-not-enforcement); convention EC-37 (sibling: PLAN watchpoints demand test + grep) + EC-22 (typed-channel emit paths need behavioural-assertion tests)
+
+---
+
+### EC-43: Convention-floor violations MUST be applied symmetrically — when an EC is codified, EVERY sibling call site of the same shape MUST be audited in the same commit
+
+**Convention:** When a convention is added to `conventions.md` (Phase 7 of any Council Review), the commit that codifies the convention MUST ALSO grep the codebase for ALL sibling call sites with the same shape and either (a) bring them into compliance, OR (b) document each non-compliant site as a known-exception with a `// CONVENTION-EXEMPT: EC-N (reason)` comment + a follow-up issue. Adding a convention without auditing siblings is a structural failure: the next reviewer reads the convention, sees it nominally codified, and treats unaudited sibling sites as out-of-scope. Reference symptom from Council Review 2026-06-04-1826: EC-38 (cache predicates over `Date.now()` MUST clamp negative-skew) was added BY the first review's Phase 7 to close `isCacheRecordValid:762`. The SAME file's `readMemoryCache:841` has the identical bare `now - record.fetched_at > IN_MEMORY_TTL_MS` shape — never audited, ship green. Classic `feedback_symmetric_path_missing_transformation` shape: parallel paths where the missing transformation IS the bug. The grep cost is ~10 seconds at convention-add time; the rediscovery cost at the next review is one whole review cycle.
+
+**How to apply:** For each new convention being added in Phase 7, the proposer MUST run `git grep` for the offending pattern across the repo (e.g., for EC-38: `git grep -E "now\s*-\s*\w+\s*>\s*"` to find bare TTL-style predicates). For each hit OTHER than the originating finding's site, either fix it in the same commit OR add a `// CONVENTION-EXEMPT: EC-N` comment with an issue link. The reviewer at the next pass reads the comments to know what's exempt vs unaudited.
+
+**Origin:** Persistence-FS × Carmack — Council Review 2026-06-04-1826 (P2 #7 — EC-38 violated at sibling site in the same file)
+
+**Principle:** `references/quality-persistence.md` → P7 (Replay determinism — applied symmetrically); sibling memory `feedback_symmetric_path_missing_transformation` (universal — parallel paths' missing transformation IS the bug); pairs with EC-37 (PLAN watchpoints demand test + grep) by extending the grep discipline to convention-floor edits
+
+---
+
+### EC-44: New discriminated-union semantic states MUST widen the type alias, NOT overload an existing variant with a sentinel-data-shape
+
+**Convention:** When a code change introduces a semantically distinct state that previously was implicit (e.g., "rejected with prior data preserved" vs "rejected with no data"), the type union MUST be widened to discriminate the two states EXPLICITLY. Overloading an existing variant by ADDING a second field whose presence-or-absence carries the distinction (e.g., `status: "rejected"` + `data: T | undefined`) is forbidden because consumers reading the status field cannot decide the case without combining with a sibling field — and the type system doesn't enforce the combination is read. Acceptable shapes for widening: (a) literal-union extension — `"rejected" | "rejected-stale"` discriminates by the literal alone; (b) tagged-object union — `{kind: "rejected"; hasStaleData: boolean}` or `{kind: "rejected-empty"} | {kind: "rejected-stale"; data: T}` makes the discrimination structural. Forbidden shape: keeping the union narrow and documenting the implicit second-axis in JSDoc — that's `feedback_council_documented_contract_canary` (JSDoc-as-doku-not-enforcement) shipping a fresh instance. Reference symptom: Council Review 2026-06-04-1826 P2 #6 — `loadBackendModels` introduced "soft-rejected" semantics in burndown comments but `DynamicModelsStatus = "idle" | "pending" | "resolved" | "rejected"` was unchanged. The next consumer writing a refresh-button surface must combine `dynamicBackendModelsStatus[backend]` AND `dynamicBackendModels[backend] !== undefined` to render correctly, and the type system doesn't enforce the combination.
+
+**How to apply:** When introducing a new semantic state, ask: "would a consumer reading ONLY the status field know which case they're in?" If no, widen the type. Add the corresponding selector that consumers SHOULD use (e.g., `selectDynamicBackendModelsStatusDetailed(s, backend): "idle" | "pending" | "resolved" | "rejected-empty" | "rejected-stale"`) so the discrimination is at one site, type-system-enforced.
+
+**Origin:** Backend-TS × Fowler — Council Review 2026-06-04-1826 (P2 #6 — soft-rejected semantic introduced without type widening)
+
+**Principle:** `references/quality-backend.md` → P8 (Type safety at the boundary); `references/refactoring.md` → P5 (Primitive Obsession — applied to "primitive" union variants); sibling EC-10 (Discriminated-union state renderers must compile-fail on missing variants) + EC-21 (Documented log/event triplet fields derive from single source — same shape: implicit-second-axis from a "single status field" with hidden combinator); sibling memory `feedback_council_documented_contract_canary`
+
+---
+
+### AP-17: Module-scope mutable flags for once-per-process operator warnings are legitimate ONLY when accompanied by (a) `__reset...ForTests` helper, (b) at least one test exercising the warn-path, (c) beforeEach reset in any orchestrator suite that could inadvertently trigger them
+
+**Pattern:** Module-scope `let someFlag: boolean = false` IS an acceptable shape for once-per-process operator-facing warnings — the use case is "warn the operator about a degraded runtime configuration, but only on the first occurrence so the log doesn't fill with duplicates." This pattern is legitimate because the alternative (logging every occurrence) creates log-noise that hides the signal, and the alternative-alternative (carrying the flag through every call site as a parameter) is overkill for a process-level concern. HOWEVER: every module-scope mutable flag MUST come bundled with three test-infrastructure pieces:
+1. **An exported `__resetForTests` companion helper** — names follow `__reset<FlagName>ForTests`. The `__` prefix signals test-only; the suffix names the flag explicitly so future test authors find it via grep.
+2. **At least one test that exercises the warn-path** — proves the flag mechanism works AND that the corresponding `log.warn` (or equivalent) event-name fires with the documented shape (EC-22 emit-path discipline). Otherwise the warn ships green without ever being seen.
+3. **A `beforeEach` (or test-suite-level) reset call in every orchestrator suite that COULD inadvertently trigger the warn-path** — prevents process-lifetime test leakage where one test's warn-trigger silently propagates the `true` flag state to every subsequent test in the suite, making subsequent tests assert against a degraded mode that production users wouldn't see.
+Reference: Council Review 2026-06-04-1826 P2 #10 — `signalCoalesceDegradeLogged` shipped with the reset helper exported AND zero test callers AND zero test coverage of the warn-event AND no beforeEach reset in the orchestrator suite. Burndown added the helper performatively; the discipline was missing.
+
+**Origin:** Beck × Backend-TS — Council Review 2026-06-04-1826 (P2 #10 — module-scope flag without test infrastructure)
+
+**Rationale:** Module-scope mutable state is acceptable for the legitimate use case it serves, but it crosses the test-isolation boundary in ways that ordinary closure-scoped state does not. The three-piece bundle is the floor that keeps the legitimacy from drifting into test-pollution; without it, the next test author touching the suite inherits a hidden global with no obvious cause.
+

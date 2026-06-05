@@ -2,6 +2,7 @@ import { chmodSync, closeSync, constants as fsConstants, fsyncSync, mkdirSync, o
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { COUNCIL_ARTIFACT_MAX_BYTES } from "./council-types.js";
+import { log } from "./logger.js";
 
 /**
  * SYNC by design: the caller needs the rename to be visible AND fsynced
@@ -41,8 +42,22 @@ export function writeAtomicJson(target: string, payload: unknown): void {
     // parent), the atomic write itself still proceeds — file mode 0o600
     // remains enforced by the O_CREAT below.
     chmodSync(dir, 0o700);
-  } catch {
-    /* best-effort — file 0o600 is the primary defence */
+  } catch (e) {
+    // PR #91 burndown Task 15 (Council Review 2026-06-04-1826 P3 #12):
+    // narrow the swallow with a forensic warn so operators can trace
+    // bypasses. The catch absorbs four distinct error modes — legitimate
+    // cross-UID parent (intended), EACCES on immediate dir from umask
+    // (regression — defence silently NOT taken), EPERM on macOS SIP,
+    // ENOENT race. The log entry surfaces which one fired so the
+    // operator has a triage handle without breaking the best-effort
+    // contract that keeps the write succeeding.
+    const err = e as NodeJS.ErrnoException;
+    log.warn("atomic-write", "chmod-failed", {
+      event: "atomic-write.chmod-failed",
+      dir,
+      error_code: err.code ?? "unknown",
+      error_name: err.name ?? "Error",
+    });
   }
 
   const json = JSON.stringify(payload);

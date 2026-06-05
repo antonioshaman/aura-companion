@@ -3851,6 +3851,31 @@ describe("GET /api/backends/:id/models", () => {
     const body = await res.json();
     expect(body.error).toContain("frontend defaults");
   });
+
+  it("threads parentSignal (c.req.raw.signal) into getAnthropicModels — browser-cancel propagation", async () => {
+    // PR #91 burndown Task 1 (closes Council Review 2026-06-04-1826 P1 #2):
+    // routes.ts MUST pass Hono's request AbortSignal so `resolveCoalescedSignal`
+    // in anthropic-models-cache.ts is actually reachable. Without this, the
+    // ternary at anthropic-models-cache.ts:665 always falls into the
+    // timeoutController branch, and `AbortSignal.any` coalescing is dead code.
+    //
+    // Mutation-resistance (EC-42): reverting routes.ts:1586 to drop the deps
+    // arg makes `lastCall[1]` undefined → this test goes RED.
+    vi.mocked(anthropicModelsCache.getAnthropicModels).mockResolvedValueOnce({
+      kind: "ok",
+      source: "memory",
+      fetched_at: Date.now(),
+      models: [],
+    });
+
+    await app.request("/api/backends/claude/models", { method: "GET" });
+
+    const calls = vi.mocked(anthropicModelsCache.getAnthropicModels).mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    const lastCall = calls[calls.length - 1];
+    expect(lastCall[1]).toBeDefined();
+    expect(lastCall[1]?.parentSignal).toBeInstanceOf(AbortSignal);
+  });
 });
 
 // ─── Session creation with backend type ──────────────────────────────────────

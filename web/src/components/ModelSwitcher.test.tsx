@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import "@testing-library/jest-dom";
 
 const mockSendToSession = vi.fn();
@@ -352,6 +352,44 @@ describe("ModelSwitcher", () => {
         model: "claude-haiku-4-5-20251001",
       });
     });
+
+    // PR #91 burndown Task 12 (Council Review 2026-06-04-1826 P3 #13):
+    // when the dynamic list shrinks mid-open (e.g., Settings save with
+    // dropdown still open), `activeIndex` may point past the new list's
+    // bounds. The clamping effect must bring it back so the keydown
+    // handler doesn't read `models[activeIndex] === undefined`.
+    it("clamps activeIndex when the dynamic list shrinks while the dropdown is open", () => {
+      const longList = [
+        { value: "claude-opus-4-8", label: "Opus 4.8", icon: "" },
+        { value: "claude-opus-4-7", label: "Opus 4.7", icon: "" },
+        { value: "claude-sonnet-4-6", label: "Sonnet 4.6", icon: "" },
+        { value: "claude-haiku-4-5-20251001", label: "Haiku 4.5", icon: "" },
+      ];
+      resetStore({ dynamicBackendModels: { claude: longList } });
+      const { rerender } = render(<ModelSwitcher sessionId="s1" />);
+      fireEvent.click(screen.getByLabelText("Switch model"));
+      const listbox = screen.getByRole("listbox");
+      fireEvent.keyDown(listbox, { key: "End" }); // index 3 (Haiku, last)
+      expect(listbox.getAttribute("aria-activedescendant")).toMatch(/-option-3$/);
+
+      // Simulate Settings-save mid-open: dynamic list shrinks to 2 items
+      // (e.g., Anthropic removed Haiku + Sonnet from /v1/models).
+      resetStore({
+        dynamicBackendModels: {
+          claude: [
+            { value: "claude-opus-4-8", label: "Opus 4.8", icon: "" },
+            { value: "claude-opus-4-7", label: "Opus 4.7", icon: "" },
+          ],
+        },
+      });
+      rerender(<ModelSwitcher sessionId="s1" />);
+
+      // Mutation-resistance (EC-42): without the clamp effect,
+      // activeIndex stays at 3 and Enter would crash on
+      // `models[3]!.value`. With the clamp, it falls to max=1.
+      const listboxAfter = screen.getByRole("listbox");
+      expect(listboxAfter.getAttribute("aria-activedescendant")).toMatch(/-option-1$/);
+    });
   });
 
   // ── PLAN Task 12 — verify-by-absence (a11y R4) ──────────────────────────
@@ -394,6 +432,39 @@ describe("ModelSwitcher", () => {
   // ── Council Review 2026-06-04-0823 burndown — focus contract pins ────────
 
   describe("focus contract on dismissal (Council P1 #2, P1 #3 — EC-39)", () => {
+    // PR #91 burndown Task 6 (Council Review 2026-06-04-1826 P1 #1):
+    // verify the OPEN-EDGE rAF-autofocus contract directly. The prior
+    // burndown shipped only the click-outside restoration test, leaving
+    // the open-edge contract unpinned. EC-42 mutation-resistance: stub
+    // `window.requestAnimationFrame` to flush its callback synchronously
+    // AND assert the spy was called — reverting ModelSwitcher.tsx:179
+    // from `requestAnimationFrame` to `queueMicrotask` makes the spy
+    // assertion go RED regardless of focus side-effects.
+    it("opening dropdown calls requestAnimationFrame AND focus lands on listbox", () => {
+      const rafSpy = vi
+        .spyOn(window, "requestAnimationFrame")
+        .mockImplementation((cb) => {
+          cb(0);
+          return 0;
+        });
+      try {
+        render(<ModelSwitcher sessionId="s1" />);
+        const trigger = screen.getByLabelText("Switch model");
+        fireEvent.click(trigger);
+
+        // Mutation: switch back to queueMicrotask → 0 rAF calls → RED.
+        expect(rafSpy).toHaveBeenCalled();
+
+        // Producer-realistic: after synchronous rAF flush, focus is on
+        // the listbox div (autofocus contract). Mutation: drop the
+        // `listboxRef.current?.focus()` line → focus stays on trigger.
+        const listbox = screen.getByRole("listbox");
+        expect(listbox).toHaveFocus();
+      } finally {
+        rafSpy.mockRestore();
+      }
+    });
+
     // Council Review 2026-06-04-0823 P1 #2: click-outside dismissal must
     // restore focus to the trigger, mirroring the Escape path. Asymmetric
     // contracts ship undetected; this test pins the symmetric behaviour
@@ -408,9 +479,11 @@ describe("ModelSwitcher", () => {
       const trigger = screen.getByLabelText("Switch model");
       fireEvent.click(trigger);
       const listbox = screen.getByRole("listbox");
-      // Simulate focus actually landing in the listbox after rAF (jsdom
-      // doesn't implement requestAnimationFrame's paint-tick exactly, so
-      // call .focus() directly to model the post-rAF state).
+      // This test pins click-outside FOCUS RESTORATION (back to trigger),
+      // NOT the open-edge autofocus contract — that's covered by the
+      // `requestAnimationFrame` test above. We pre-position focus on the
+      // listbox to simulate the post-open state regardless of how the
+      // production code achieved it (rAF, microtask, etc.).
       listbox.focus();
       // Click outside the dropdown.
       fireEvent.mouseDown(screen.getByTestId("elsewhere"));
@@ -468,26 +541,35 @@ describe("ModelSwitcher", () => {
   });
 
   describe("no-key footnote is structurally OUTSIDE the listbox role (Council P2 #12)", () => {
-    // Council Review 2026-06-04-0823 P2 #12 (a11y): footnote previously
-    // rendered as a non-option <div> inside the role="listbox" container,
-    // causing SR to iterate it as a phantom option. After the fix the
-    // footnote is a sibling of the listbox div, so it does NOT appear via
-    // within(listbox).queryByRole("link") and DOES appear via the wrapper.
-    it("no-key footnote (<a> link) is NOT a descendant of role='listbox'", async () => {
-      const { container } = render(<ModelSwitcher sessionId="s1" />);
+    // PR #91 burndown Task 7 (Council Review 2026-06-04-1826 P1 #3):
+    // single render, scope ALL queries through `within(container)` so
+    // both the listbox AND the link resolve from the ONE component
+    // instance. Prior shape rendered twice (default+override) and let
+    // `screen.getByRole` pick whichever instance — assertion passed
+    // regardless of fix. EC-42 mutation-resistance: moving the footnote
+    // back INSIDE the listbox div makes `listbox.contains(link)` return
+    // true → assertion goes RED.
+    it("no-key footnote (<a> link) is NOT a descendant of role='listbox'", () => {
+      // Configure no-key state BEFORE the single render — footnote
+      // visibility is gated on `anthropicApiKeyConfigured === false`.
       resetStore({ anthropicApiKeyConfigured: false });
-      render(<ModelSwitcher sessionId="s1" />);
-      fireEvent.click(screen.getAllByLabelText("Switch model")[0]!);
-      const listbox = screen.getByRole("listbox");
-      // The footnote link is in the document...
-      expect(
-        screen.getByRole("link", { name: /Add an API key in Settings/ }),
-      ).toBeInTheDocument();
-      // ...but NOT a descendant of the listbox div.
-      expect(
-        listbox.querySelector('a[href="#/settings"]'),
-      ).toBeNull();
-      void container;
+      const { container } = render(<ModelSwitcher sessionId="s1" />);
+
+      // Open this exact instance.
+      fireEvent.click(within(container).getByLabelText("Switch model"));
+
+      // Scoped queries — both resolve from THIS component's DOM.
+      const listbox = within(container).getByRole("listbox");
+      const link = within(container).getByRole("link", {
+        name: /Add an API key in Settings/,
+      });
+
+      // Both nodes present in the same wrapper, but the link must be a
+      // SIBLING of the listbox (not a descendant). DOM-level identity
+      // check — mutation-resistant.
+      expect(listbox.contains(link)).toBe(false);
+      // Belt and braces: link IS a descendant of the outer wrapper.
+      expect(container.contains(link)).toBe(true);
     });
 
     it("footnote is a clickable link to #/settings that closes the dropdown on activation", () => {

@@ -1583,7 +1583,13 @@ export function createRoutes(
       // (`?refresh=1`, `?nocache=1`, `?force=1`). Cache TTL is server-owned;
       // refresh trigger lives at app-mount + Settings save (frontend).
       const settings = getSettings();
-      const result = await getAnthropicModels(settings.anthropicApiKey);
+      // PR #91 burndown Task 1: thread Hono's request AbortSignal so
+      // browser-cancelled REST calls coalesce with the cache module's
+      // 5s timeout — closes the dead-on-arrival `resolveCoalescedSignal`
+      // branch flagged by Council Review 2026-06-04-1826 P1 #2.
+      const result = await getAnthropicModels(settings.anthropicApiKey, {
+        parentSignal: c.req.raw.signal,
+      });
       switch (result.kind) {
         case "ok":
           return c.json(result.models);
