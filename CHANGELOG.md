@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.7.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.6.0...aura-companion-v1.7.0) (2026-06-05)
+
+
+### Features
+
+* **cleanup:** session-map eviction, boot hygiene + 15 council fixes ([#94](https://github.com/antonioshaman/aura-companion/issues/94)) ([1f12430](https://github.com/antonioshaman/aura-companion/commit/1f12430c765985fb9a13a9121fb1671028104213))
+* **models:** dynamic Claude model list via Anthropic /v1/models ([#91](https://github.com/antonioshaman/aura-companion/issues/91)) ([8314318](https://github.com/antonioshaman/aura-companion/commit/831431885be87ff1da60b2d53082cef60ddf4d7b))
+
+
+### Bug Fixes
+
+* **council-router:** close all 15 findings from PR [#91](https://github.com/antonioshaman/aura-companion/issues/91) 2nd review ([#92](https://github.com/antonioshaman/aura-companion/issues/92)) ([a96a38a](https://github.com/antonioshaman/aura-companion/commit/a96a38a015b97c59cc52d358ab878963be1e4c52))
+* **session:** evict in-memory state of archived sessions ([#89](https://github.com/antonioshaman/aura-companion/issues/89)) ([55de874](https://github.com/antonioshaman/aura-companion/commit/55de874f306743d21f3e66159d872ca965b3026f))
+
 ## [1.6.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.5.0...aura-companion-v1.6.0) (2026-06-01)
 
 
