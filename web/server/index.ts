@@ -7,6 +7,7 @@ import { getEnrichedPath } from "./path-resolver.js";
 process.env.PATH = getEnrichedPath();
 
 import { dirname, resolve } from "node:path";
+import { realpathSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
@@ -662,8 +663,19 @@ cleanupScheduler.registerSweep("retention-sweep", async () => {
     },
     {
       getActiveRecordingPaths: () => recorder.getActiveRecordingPaths(),
-      getActiveLogPaths: () =>
-        logFileWriter ? new Set([logFileWriter.filePath]) : new Set(),
+      // Canonicalise the active log path for the same realpath/raw reason as
+      // getActiveRecordingPaths (see recorder.ts): the sweeper compares
+      // against resolveCleanupPath's realpath'd entry, so a raw path silently
+      // fails the skip under a symlinked ancestor. The open log file exists;
+      // fall back to the raw path only if realpathSync races a close.
+      getActiveLogPaths: () => {
+        if (!logFileWriter) return new Set<string>();
+        try {
+          return new Set([realpathSync(logFileWriter.filePath)]);
+        } catch {
+          return new Set([logFileWriter.filePath]);
+        }
+      },
     },
   );
 });

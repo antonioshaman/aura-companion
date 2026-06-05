@@ -16,6 +16,8 @@ import {
   DEFAULT_MAX_ENTRIES_PER_PASS,
   type RetentionSweepRoots,
 } from "./retention-sweeper.js";
+import { realpathSync } from "node:fs";
+import { RecorderManager } from "../recorder.js";
 import type { CleanupConfig } from "./cleanup-config.js";
 import {
   ARCHIVED_RECORDINGS_SUBDIR,
@@ -348,6 +350,62 @@ describe("active recording paths skip (Persistence R6)", () => {
     expect(tier.succeeded).toBe(1);
     expect(existsSync(liveLog)).toBe(true);
     expect(existsSync(oldLog)).toBe(false);
+  });
+
+  // Load-bearing guard for the realpath/raw canonicalisation fix (observer
+  // phase-e STOP). The recordings root here is a SYMLINK to its real target,
+  // so the sweeper's resolveCleanupPath realpath's each entry to the real
+  // path while a *raw* active-set entry would still carry the symlinked path
+  // — string-unequal, defeating the skip. We drive the active set through the
+  // REAL RecorderManager.getActiveRecordingPaths() (not a hand-built raw
+  // Set), so this test reproduces the production divergence: it passes only
+  // because the getter realpath's its paths, and would flip red (skippedActive
+  // 0, live recording moved into archived-recordings/) if that fix is reverted.
+  it("skips the live recording even when the recordings root is a symlinked ancestor (realpath canonicalisation)", async () => {
+    const now = 1_000_000_000_000;
+    setClockSourceForTests(() => now);
+
+    // Real target + a symlink standing in as the recordings root, so
+    // realpath(symlinkRoot/file) !== symlinkRoot/file.
+    const realRec = join(tmpRoot, "real-recordings");
+    mkdirSync(join(realRec, ARCHIVED_RECORDINGS_SUBDIR), { recursive: true });
+    const symlinkRec = join(tmpRoot, "linked-recordings");
+    symlinkSync(realRec, symlinkRec);
+
+    // A real recorder pointed at the SYMLINKED root. globalEnabled:false
+    // avoids the startup cleanup timer; enable the one session explicitly.
+    const recorder = new RecorderManager({ globalEnabled: false, recordingsDir: symlinkRec });
+    recorder.enableForSession("live-sess");
+    recorder.record("live-sess", "in", "{\"hello\":\"world\"}", "cli", "claude", tmpRoot);
+
+    // The active path the production getter reports (already realpath'd).
+    const actives = recorder.getActiveRecordingPaths();
+    expect(actives.size).toBe(1);
+    const livePath = [...actives][0];
+    // The fix means the reported path is the REAL one, not the symlinked one.
+    expect(livePath.startsWith(realpathSync(realRec))).toBe(true);
+
+    // Age the live file past the soft TTL so the sweeper would otherwise move it.
+    const agedSec = (now - 30 * DAY_MS) / 1000;
+    utimesSync(livePath, agedSec, agedSec);
+
+    const cfg = buildConfig({
+      archiveDays: 30,
+      recordingsSoftDays: 14,
+      recordingsHardDays: 60,
+      logsDays: 7,
+    });
+
+    const summary = await sweepRetention(
+      cfg,
+      { sessionsRoot, recordingsRoot: symlinkRec, logsRoot, sentinelRoot },
+      { getActiveRecordingPaths: () => recorder.getActiveRecordingPaths() },
+    );
+
+    const tier = summary.tiers.find((t) => t.tier === "recordings-soft")!;
+    expect(tier.skippedActive).toBe(1);
+    // The live recording stayed put — NOT moved into archived-recordings/.
+    expect(existsSync(livePath)).toBe(true);
   });
 });
 

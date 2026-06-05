@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, appendFileSync, statSync, unlinkSync } from "node:fs";
+import { mkdirSync, readdirSync, appendFileSync, statSync, unlinkSync, realpathSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import type { BackendType } from "./session-types.js";
@@ -515,7 +515,18 @@ export class RecorderManager {
   getActiveRecordingPaths(): Set<string> {
     const out = new Set<string>();
     for (const rec of this.recorders.values()) {
-      out.add(rec.filePath);
+      // Canonicalise to match the retention sweeper's resolveCleanupPath
+      // output, which realpath's the deepest existing ancestor. A raw path
+      // string-mismatches the sweeper's realpath'd entry whenever an ancestor
+      // of the recordings dir is a symlink (macOS $TMPDIR→/private/var,
+      // containerised bind-mounts), defeating the active-file skip and risking
+      // unlink of a live recording — silent data loss. The file is open so
+      // realpathSync succeeds; if it raced closed, fall back to the raw path.
+      try {
+        out.add(realpathSync(rec.filePath));
+      } catch {
+        out.add(rec.filePath);
+      }
     }
     return out;
   }
