@@ -573,6 +573,24 @@ export class WsBridge {
     return this.sessions.get(sessionId);
   }
 
+  /**
+   * AURA-LOCAL — PLAN T13 (Phase H) / Fowler R8 hook. Return a
+   * defensive SNAPSHOT (array, not iterator) of the live sessions map
+   * so the eviction sweep can iterate without observing concurrent
+   * mutations mid-await (Backend-TS R6 — Map iteration mid-async-op
+   * is real even in single-threaded JS because awaits release the loop
+   * and unrelated handlers can `delete`/`set`). The snapshot is shallow
+   * — each entry is `[sessionId, Session]` and the `Session` reference
+   * is live (the sweep does not mutate any field on it).
+   *
+   * This hook is the ONLY new read surface added to the bridge in
+   * Phase H per Fowler R8 — drain-dispatch lives inline at the
+   * terminal-close paths and `removeSession` already existed.
+   */
+  getSessionEntries(): Array<[string, Session]> {
+    return [...this.sessions.entries()];
+  }
+
   getAllSessions(): SessionState[] {
     return Array.from(this.sessions.values()).map((s) => s.state);
   }

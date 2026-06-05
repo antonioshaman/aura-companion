@@ -612,6 +612,12 @@ import {
 // consumers (memory-pressure WARN + retention TTLs); the per-knob
 // `cleanup.config.resolved` log lines fire exactly once at boot.
 import { sweepRetention } from "./cleanup/retention-sweeper.js";
+// AURA-LOCAL: PLAN T13 (Phase H) — session-map eviction sweep + boot-
+// time reconcile registered with the CleanupScheduler. Same wire-site
+// convention as Phase E (registerSweep) plus the new registerReconcile
+// seam for the EC-8 sentinel-recovery half of the contract.
+import { sweepEviction, reconcileEvictionSentinels } from "./cleanup/eviction-sweeper.js";
+import { readdirSync as nodeReaddirSync, statSync as nodeStatSync, unlinkSync as nodeUnlinkSync } from "node:fs";
 
 const DIAGNOSTICS_INTERVAL_MS = 5 * 60_000; // every 5 minutes
 
@@ -678,6 +684,58 @@ cleanupScheduler.registerSweep("retention-sweep", async () => {
       },
     },
   );
+});
+
+// AURA-LOCAL: PLAN T13 (Phase H) — session-map eviction sweep.
+// Predicate gates: archived AND state=exited AND ageMs(archiveMtime) >
+// evictionGrace AND verifyProcessIdentity !== "match". Wire-site
+// rationale matches Phase E: cleanup-scheduler.ts is generic (cadence
+// + error boundary); per-sweep deps live at the boot wire-in so the
+// scheduler stays decoupled from launcher / bridge / store.
+cleanupScheduler.registerSweep("eviction-sweep", async () => {
+  await sweepEviction(diagnosticsCleanupConfig, {
+    bridge: {
+      getSessionEntries: () =>
+        wsBridge.getSessionEntries() as Array<[string, unknown]>,
+      removeSession: (sid) => wsBridge.removeSession(sid),
+    },
+    store: {
+      moveToArchive: (sid) => sessionStore.moveToArchive(sid),
+      directory: sessionStore.directory,
+    },
+    getLauncherSession: (sid) => {
+      const info = launcher.getSession(sid);
+      if (!info) return null;
+      return {
+        sessionId: info.sessionId,
+        pid: info.pid,
+        archived: info.archived,
+        state: info.state,
+      };
+    },
+    notifyArchived: (sid) => idleTimerManager.setArchived(sid),
+  });
+});
+
+// AURA-LOCAL: PLAN T13 (Phase H) — boot-time reconcile fires ONCE at
+// scheduler start (BEFORE the first periodic tick). Recovers from a
+// crash mid-eviction: finishes the rename if the source JSON still
+// exists, else deletes the orphan `.evicting` sentinel. Also sweeps
+// orphan `.<hex>.tmp` files older than boot time.
+cleanupScheduler.registerReconcile("eviction-reconcile", (bootTimeMs) => {
+  reconcileEvictionSentinels({
+    store: {
+      moveToArchive: (sid) => sessionStore.moveToArchive(sid),
+      directory: sessionStore.directory,
+    },
+    bootTimeMs,
+    readdir: (p) => nodeReaddirSync(p),
+    stat: (p) => {
+      const st = nodeStatSync(p);
+      return { mtimeMs: st.mtimeMs };
+    },
+    unlink: (p) => nodeUnlinkSync(p),
+  });
 });
 
 // AURA-LOCAL: tracks when the memory-pressure WARN last fired so the

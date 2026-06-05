@@ -43,18 +43,50 @@ export interface SweepRegistration {
   readonly run: SweepCallback;
 }
 
+/**
+ * AURA-LOCAL — PLAN T13 (Phase H). A reconcile callback fires exactly
+ * ONCE at `start()`, BEFORE the first periodic tick. Receives the
+ * server's boot timestamp so the callback can distinguish "orphan
+ * sentinel from a previous crash" from "sentinel from a sweep on
+ * THIS process".
+ */
+export type ReconcileCallback = (bootTimeMs: number) => Promise<void> | void;
+
 export interface CleanupSchedulerOptions {
   /** Optional initial interval; defaults to 24h, clamped to [1h, 25h]. */
   readonly intervalMs?: number;
+  /**
+   * AURA-LOCAL — PLAN T13 (Phase H). Test seam: pin the bootTimeMs
+   * passed to reconcile callbacks. Production omits this; the scheduler
+   * captures `Date.now()` at construction.
+   */
+  readonly bootTimeMsForTests?: number;
 }
 
 export class CleanupScheduler {
   private readonly sweeps: Map<string, SweepCallback> = new Map();
+  /**
+   * AURA-LOCAL — PLAN T13 (Phase H). Reconcile callbacks fired exactly
+   * ONCE at `start()` BEFORE the first periodic tick. This is the
+   * recovery-after-crash seam for sentinel-based sweeps:
+   *   • Phase H eviction → finishes `.evicting` sentinel renames +
+   *     sweeps orphan `.<hex>.tmp` files older than boot time.
+   * Future tiers (e.g., recordings-tier .sweep-in-progress recovery)
+   * can register here without rewiring the periodic tick contract.
+   *
+   * The bootTimeMs argument is passed to each callback so a reconcile
+   * can distinguish "orphan from a previous crash" from "actively
+   * being written by THIS process right now".
+   */
+  private readonly reconciles: Map<string, ReconcileCallback> = new Map();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private inFlight: Promise<void> | null = null;
   private started = false;
   private disposed = false;
   private intervalMs: number;
+  /** AURA-LOCAL: bootTimeMs captured at construction so reconciles see a
+   *  stable cutoff between "in-flight on this process" and "stale orphan". */
+  private readonly bootTimeMs: number;
   /** AURA-LOCAL: test-only override bypasses the [1h, 25h] clamp. */
   private intervalOverrideForTests: number | null = null;
   // PLAN T6 (Phase C): sweep-status fields surfaced via accessors so the
@@ -67,6 +99,60 @@ export class CleanupScheduler {
 
   constructor(opts: CleanupSchedulerOptions = {}) {
     this.intervalMs = clampInterval(opts.intervalMs ?? DEFAULT_INTERVAL_MS);
+    this.bootTimeMs = opts.bootTimeMsForTests ?? Date.now();
+  }
+
+  /**
+   * AURA-LOCAL — PLAN T13 (Phase H). Register a reconcile callback
+   * that fires exactly ONCE — either at the upcoming `start()` (if
+   * not yet started), OR immediately as a fire-and-forget Promise
+   * (if `start()` has already armed the periodic tick). Idempotent
+   * on `name`: re-registration replaces the previous callback.
+   * Reconciles run in insertion order.
+   *
+   * Production wires `start()` at ~index.ts:272 and registers reconciles
+   * at ~index.ts:725 — well after `start()`. The fire-on-register path
+   * is the production path; the pre-start path supports tests that
+   * register before arming.
+   *
+   * No-op when the scheduler is disposed.
+   *
+   * Throws on a callback that fires synchronously and throws — the
+   * scheduler wraps each reconcile in try/catch + structured log
+   * (`event=cleanup.reconcile.error`) so a buggy reconcile from one
+   * sweep cannot suppress siblings.
+   */
+  registerReconcile(name: string, run: ReconcileCallback): void {
+    if (this.disposed) return;
+    if (typeof name !== "string" || name.length === 0) {
+      throw new Error("CleanupScheduler.registerReconcile: invalid name");
+    }
+    if (typeof run !== "function") {
+      throw new Error("CleanupScheduler.registerReconcile: invalid callback");
+    }
+    this.reconciles.set(name, run);
+    if (this.started) {
+      // Fire immediately — start() already happened, so the
+      // boot-drain pass has run with whatever set existed at that
+      // moment. The fire-on-register path keeps the semantics
+      // "every registered reconcile runs exactly once".
+      void this.runReconcile(name, run);
+    }
+  }
+
+  private async runReconcile(name: string, run: ReconcileCallback): Promise<void> {
+    try {
+      await run(this.bootTimeMs);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      const code = (err as NodeJS.ErrnoException | undefined)?.code;
+      log.error("cleanup-scheduler", "Reconcile callback threw", {
+        event: "cleanup.reconcile.error",
+        reconcile: name,
+        error_message: message,
+        error_code: code ?? "unknown",
+      });
+    }
   }
 
   /**
@@ -137,8 +223,26 @@ export class CleanupScheduler {
       event: "cleanup.scheduler.started",
       intervalMs: this.getEffectiveIntervalMs(),
       sweepCount: this.sweeps.size,
+      reconcileCount: this.reconciles.size,
+      bootTimeMs: this.bootTimeMs,
     });
+    // AURA-LOCAL — PLAN T13 (Phase H). Boot-time reconcile pass fires
+    // BEFORE the first periodic sweep tick. Each reconcile is wrapped
+    // in try/catch so a thrower in one doesn't suppress siblings.
+    //
+    // Phase H scheduling: the reconcile is fire-and-forget (no `await`)
+    // so the scheduler's start() stays synchronous — Node's process.exit
+    // shouldn't wait on a reconcile that's exceeded its budget. Each
+    // reconcile is bounded internally (eviction reconcile is a single
+    // readdir + per-entry op; no syscalls past the cap).
+    void this.drainReconciles();
     this.scheduleNext();
+  }
+
+  private async drainReconciles(): Promise<void> {
+    for (const [name, run] of this.reconciles) {
+      await this.runReconcile(name, run);
+    }
   }
 
   /**
