@@ -1359,46 +1359,6 @@ describe("getUsageLimits", () => {
 });
 
 // ===========================================================================
-// Update checking API
-// ===========================================================================
-describe("update API", () => {
-  it("checkForUpdate sends GET to /api/update-check", async () => {
-    const data = { currentVersion: "0.60.0", latestVersion: "0.61.0", updateAvailable: true, isServiceMode: false, updateInProgress: false, lastChecked: 123 };
-    mockFetch.mockResolvedValueOnce(mockResponse(data));
-
-    const result = await api.checkForUpdate();
-
-    const [url] = mockFetch.mock.calls[0];
-    expect(url).toBe("/api/update-check");
-    expect(result).toEqual(data);
-  });
-
-  it("forceCheckForUpdate sends POST to /api/update-check", async () => {
-    const data = { currentVersion: "0.60.0", latestVersion: "0.61.0", updateAvailable: true, isServiceMode: false, updateInProgress: false, lastChecked: 456 };
-    mockFetch.mockResolvedValueOnce(mockResponse(data));
-
-    const result = await api.forceCheckForUpdate();
-
-    const [url, opts] = mockFetch.mock.calls[0];
-    expect(url).toBe("/api/update-check");
-    expect(opts.method).toBe("POST");
-    expect(result).toEqual(data);
-  });
-
-  it("triggerUpdate sends POST to /api/update", async () => {
-    const data = { ok: true, message: "Update started" };
-    mockFetch.mockResolvedValueOnce(mockResponse(data));
-
-    const result = await api.triggerUpdate();
-
-    const [url, opts] = mockFetch.mock.calls[0];
-    expect(url).toBe("/api/update");
-    expect(opts.method).toBe("POST");
-    expect(result).toEqual(data);
-  });
-});
-
-// ===========================================================================
 // Cron jobs API
 // ===========================================================================
 describe("cron jobs API", () => {

@@ -35,7 +35,6 @@ const { mockStoreState, mockGetState } = vi.hoisted(() => {
     sessionCreatingBackend: null,
     creationProgress: null,
     creationError: null,
-    updateOverlayActive: false,
     changedFilesTick: new Map(),
     diffBase: "HEAD",
     setGitChangedFilesCount: vi.fn(),
@@ -45,7 +44,6 @@ const { mockStoreState, mockGetState } = vi.hoisted(() => {
     setSidebarOpen: vi.fn(),
     setTaskPanelOpen: vi.fn(),
     clearCreation: vi.fn(),
-    setUpdateInfo: vi.fn(),
     setDockerUpdateDialogOpen: vi.fn(),
     // Council Mode slice — ObserverPanel + useBrowserTitleAlert read these.
     // The maps stay empty in this test, so the panel renders null and the
@@ -95,7 +93,6 @@ vi.mock("./ws.js", () => ({
 vi.mock("./api.js", () => ({
   api: {
     getChangedFiles: vi.fn().mockResolvedValue({ files: [] }),
-    checkForUpdate: vi.fn().mockResolvedValue(null),
     getSettings: vi.fn().mockResolvedValue({ publicUrl: "" }),
     // PR #68: App.tsx fires fetchGroups() on auth flip. Mocked to a
     // resolved-empty shape so authenticated tests don't hit `undefined`.
@@ -147,18 +144,8 @@ vi.mock("./components/DiffPanel.js", () => ({
   DiffPanel: () => <div data-testid="diff-panel">DiffPanel</div>,
 }));
 
-vi.mock("./components/UpdateBanner.js", () => ({
-  UpdateBanner: () => <div data-testid="update-banner">UpdateBanner</div>,
-}));
-
 vi.mock("./components/SessionLaunchOverlay.js", () => ({
   SessionLaunchOverlay: () => <div data-testid="session-launch-overlay">SessionLaunchOverlay</div>,
-}));
-
-vi.mock("./components/UpdateOverlay.js", () => ({
-  UpdateOverlay: ({ active }: { active: boolean }) => (
-    <div data-testid="update-overlay" data-active={active}>UpdateOverlay</div>
-  ),
 }));
 
 vi.mock("./components/DockerUpdateDialog.js", () => ({
@@ -227,7 +214,6 @@ beforeEach(() => {
     sessionCreatingBackend: null,
     creationProgress: null,
     creationError: null,
-    updateOverlayActive: false,
     changedFilesTick: new Map(),
     diffBase: "HEAD",
     setGitChangedFilesCount: vi.fn(),
@@ -237,13 +223,11 @@ beforeEach(() => {
     setSidebarOpen: vi.fn(),
     setTaskPanelOpen: vi.fn(),
     clearCreation: vi.fn(),
-    setUpdateInfo: vi.fn(),
     setDockerUpdateDialogOpen: vi.fn(),
   });
   mockGetState.mockReturnValue(mockStoreState);
   (parseHash as ReturnType<typeof vi.fn>).mockReturnValue({ page: "home" });
   window.location.hash = "";
-  localStorage.removeItem("companion_docker_prompt_pending");
 });
 
 // ─── Tests ───────────────────────────────────────────────────────
@@ -267,17 +251,15 @@ describe("App", () => {
       setStoreValues({ isAuthenticated: true });
     });
 
-    it("renders Sidebar, TopBar, UpdateBanner, and HomePage when on home route with no session", () => {
+    it("renders Sidebar, TopBar, and HomePage when on home route with no session", () => {
       // Authenticated user on the home route (no active session) should see the
-      // full chrome: sidebar, topbar, update banner, and the home page content.
+      // full chrome: sidebar, topbar, and the home page content.
       render(<App />);
 
       expect(screen.queryByTestId("login-page")).not.toBeInTheDocument();
       expect(screen.getByTestId("sidebar")).toBeInTheDocument();
       expect(screen.getByTestId("topbar")).toBeInTheDocument();
-      expect(screen.getByTestId("update-banner")).toBeInTheDocument();
       expect(screen.getByTestId("home-page")).toBeInTheDocument();
-      expect(screen.getByTestId("update-overlay")).toBeInTheDocument();
     });
 
     it("renders ChatView when a session is active", () => {
@@ -383,27 +365,6 @@ describe("App", () => {
       // Playground route should NOT have sidebar/topbar
       expect(screen.queryByTestId("sidebar")).not.toBeInTheDocument();
       expect(screen.queryByTestId("topbar")).not.toBeInTheDocument();
-    });
-  });
-
-  describe("docker update dialog activation", () => {
-    it("opens DockerUpdateDialog and clears localStorage when companion_docker_prompt_pending is set", () => {
-      // After an app update, the localStorage flag triggers the Docker update dialog.
-      // This useEffect reads the flag, removes it, and opens the dialog via the store.
-      localStorage.setItem("companion_docker_prompt_pending", "1");
-      setStoreValues({ isAuthenticated: true });
-      render(<App />);
-
-      expect(mockStoreState.setDockerUpdateDialogOpen).toHaveBeenCalledWith(true);
-      expect(localStorage.getItem("companion_docker_prompt_pending")).toBeNull();
-    });
-
-    it("does not open DockerUpdateDialog on normal page load", () => {
-      // Without the localStorage flag, the dialog should not be triggered.
-      setStoreValues({ isAuthenticated: true });
-      render(<App />);
-
-      expect(mockStoreState.setDockerUpdateDialogOpen).not.toHaveBeenCalled();
     });
   });
 

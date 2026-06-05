@@ -13,9 +13,7 @@ import { TopBar } from "./components/TopBar.js";
 import { HomePage } from "./components/HomePage.js";
 import { TaskPanel } from "./components/TaskPanel.js";
 import { DiffPanel } from "./components/DiffPanel.js";
-import { UpdateBanner } from "./components/UpdateBanner.js";
 import { SessionLaunchOverlay } from "./components/SessionLaunchOverlay.js";
-import { UpdateOverlay } from "./components/UpdateOverlay.js";
 import { DockerUpdateDialog } from "./components/DockerUpdateDialog.js";
 import { OnboardingModal } from "./components/OnboardingModal.js";
 import { ObserverPanel } from "./components/council/index.js";
@@ -62,7 +60,6 @@ export default function App() {
   const sessionCreatingBackend = useStore((s) => s.sessionCreatingBackend);
   const creationProgress = useStore((s) => s.creationProgress);
   const creationError = useStore((s) => s.creationError);
-  const updateOverlayActive = useStore((s) => s.updateOverlayActive);
   const hash = useHash();
   const route = useMemo(() => parseHash(hash), [hash]);
   const isSettingsPage = route.page === "settings";
@@ -148,18 +145,6 @@ export default function App() {
     return () => { cancelled = true; };
   }, [currentSessionId, sessionCwd, diffBase, changedFilesTick, setGitChangedFilesCount]);
 
-  // Poll for updates
-  useEffect(() => {
-    const check = () => {
-      api.checkForUpdate().then((info) => {
-        useStore.getState().setUpdateInfo(info);
-      }).catch(() => {});
-    };
-    check();
-    const interval = setInterval(check, 5 * 60 * 1000);
-    return () => clearInterval(interval);
-  }, []);
-
   // Load publicUrl from settings + check onboarding status.
   // Re-runs when isAuthenticated flips to true (e.g. after login) so that
   // users who authenticate first still see the onboarding wizard.
@@ -201,14 +186,6 @@ export default function App() {
     });
   }, [isAuthenticated]);
 
-  // Show Docker image update dialog if an app update just completed
-  useEffect(() => {
-    if (localStorage.getItem("companion_docker_prompt_pending") === "1") {
-      localStorage.removeItem("companion_docker_prompt_pending");
-      useStore.getState().setDockerUpdateDialogOpen(true);
-    }
-  }, []);
-
   // Auth gate: show login page when not authenticated
   if (!isAuthenticated) {
     return <LoginPage />;
@@ -243,7 +220,6 @@ export default function App() {
       {/* Main area */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         <TopBar />
-        <UpdateBanner />
         <div className="flex-1 overflow-hidden relative">
           {isSettingsPage && (
             <div className="absolute inset-0">
@@ -385,7 +361,6 @@ export default function App() {
           </div>
         </>
       )}
-      <UpdateOverlay active={updateOverlayActive} />
       <DockerUpdateDialog />
       {showOnboarding && <OnboardingModal onComplete={() => setShowOnboarding(false)} />}
     </div>

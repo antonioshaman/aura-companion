@@ -42,7 +42,6 @@ import { securityHeaders } from "./middleware/security-headers.js";
 
 import { CleanupScheduler } from "./cleanup/cleanup-scheduler.js";
 import { reapOrphans } from "./orphan-reaper.js";
-import { startPeriodicCheck, setServiceMode } from "./update-checker.js";
 import { imagePullManager } from "./image-pull-manager.js";
 import { restoreIfNeeded as restoreTailscaleFunnel, cleanup as cleanupTailscaleFunnel } from "./tailscale-manager.js";
 import { isRunningAsService } from "./service.js";
@@ -584,11 +583,8 @@ restoreTailscaleFunnel(port).catch((err) => {
   console.warn("[server] Tailscale Funnel restoration failed:", err);
 });
 
-// ── Update checker ──────────────────────────────────────────────────────────
-startPeriodicCheck();
 if (isRunningAsService()) {
-  setServiceMode(true);
-  console.log("[server] Running as background service (auto-update available)");
+  console.log("[server] Running as background service");
 }
 
 // ── Bootstrap finished — /ready may now flip green (Deploy expert D5) ──────

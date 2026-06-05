@@ -52,7 +52,6 @@ import { verifyToken, getToken, regenerateToken, getAllAddresses } from "./auth-
 import QRCode from "qrcode";
 import { VSCODE_EDITOR_CONTAINER_PORT, NOVNC_CONTAINER_PORT } from "./constants.js";
 
-const UPDATE_CHECK_STALE_MS = 5 * 60 * 1000;
 const ROUTES_DIR = dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = dirname(ROUTES_DIR);
 const VSCODE_EDITOR_HOST_PORT = Number(process.env.COMPANION_EDITOR_PORT || "13338");
@@ -1642,7 +1641,6 @@ export function createRoutes(
     launcher,
     wsBridge,
     terminalManager,
-    updateCheckStaleMs: UPDATE_CHECK_STALE_MS,
   });
 
   registerSkillRoutes(api);

@@ -1197,53 +1197,6 @@ describe("Connection and session status", () => {
   });
 });
 
-// ─── Update info ─────────────────────────────────────────────────────────────
-
-describe("Update info", () => {
-  it("setUpdateInfo: stores update info", () => {
-    const info = {
-      currentVersion: "1.0.0",
-      latestVersion: "1.1.0",
-      updateAvailable: true,
-      isServiceMode: false,
-      updateInProgress: false,
-      lastChecked: Date.now(),
-      channel: "stable" as const,
-    };
-    useStore.getState().setUpdateInfo(info);
-    expect(useStore.getState().updateInfo).toEqual(info);
-  });
-
-  it("setUpdateInfo(null): clears update info", () => {
-    useStore.getState().setUpdateInfo({
-      currentVersion: "1.0.0",
-      latestVersion: "1.1.0",
-      updateAvailable: true,
-      isServiceMode: false,
-      updateInProgress: false,
-      lastChecked: Date.now(),
-      channel: "stable",
-    });
-    useStore.getState().setUpdateInfo(null);
-    expect(useStore.getState().updateInfo).toBeNull();
-  });
-
-  it("dismissUpdate: persists dismissed version to localStorage", () => {
-    useStore.getState().dismissUpdate("1.1.0");
-    expect(useStore.getState().updateDismissedVersion).toBe("1.1.0");
-    expect(localStorage.getItem("cc-update-dismissed")).toBe("1.1.0");
-  });
-
-  it("setUpdateOverlayActive: sets the overlay active state", () => {
-    useStore.getState().setUpdateOverlayActive(true);
-    expect(useStore.getState().updateOverlayActive).toBe(true);
-
-    useStore.getState().setUpdateOverlayActive(false);
-    expect(useStore.getState().updateOverlayActive).toBe(false);
-  });
-
-});
-
 // ─── Active tab & diff panel ─────────────────────────────────────────────────
 
 describe("Active tab & diff panel", () => {

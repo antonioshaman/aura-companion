@@ -223,27 +223,9 @@ vi.mock("./claude-session-history.js", () => ({
 }));
 
 const mockGetUsageLimits = vi.hoisted(() => vi.fn());
-const mockUpdateCheckerState = vi.hoisted(() => ({
-  currentVersion: "0.22.1",
-  latestVersion: null as string | null,
-  lastChecked: 0,
-  isServiceMode: false,
-  checking: false,
-  updateInProgress: false,
-}));
-const mockCheckForUpdate = vi.hoisted(() => vi.fn(async () => {}));
-const mockIsUpdateAvailable = vi.hoisted(() => vi.fn(() => false));
-const mockSetUpdateInProgress = vi.hoisted(() => vi.fn());
 
 vi.mock("./usage-limits.js", () => ({
   getUsageLimits: mockGetUsageLimits,
-}));
-
-vi.mock("./update-checker.js", () => ({
-  getUpdateState: vi.fn(() => ({ ...mockUpdateCheckerState })),
-  checkForUpdate: mockCheckForUpdate,
-  isUpdateAvailable: mockIsUpdateAvailable,
-  setUpdateInProgress: mockSetUpdateInProgress,
 }));
 
 // Mock image-pull-manager — default: images are always ready
@@ -385,12 +367,6 @@ beforeEach(() => {
   vi.mocked(resolveApiKey).mockReturnValue({ apiKey: "lin_api_123", connectionId: "test-conn" });
   mockDiscoverClaudeSessions.mockReturnValue([]);
   mockGetClaudeSessionHistoryPage.mockReturnValue(null);
-  mockUpdateCheckerState.currentVersion = "0.22.1";
-  mockUpdateCheckerState.latestVersion = null;
-  mockUpdateCheckerState.lastChecked = 0;
-  mockUpdateCheckerState.isServiceMode = false;
-  mockUpdateCheckerState.checking = false;
-  mockUpdateCheckerState.updateInProgress = false;
   orchestrator = createMockOrchestrator();
   launcher = createMockLauncher();
   bridge = createMockBridge();
@@ -3439,39 +3415,6 @@ describe("PATCH /api/sessions/:id/name", () => {
     });
 
     expect(res.status).toBe(400);
-  });
-});
-
-// ─── Update checking ────────────────────────────────────────────────────────
-
-describe("GET /api/update-check", () => {
-  it("triggers a refresh when never checked", async () => {
-    mockUpdateCheckerState.lastChecked = 0;
-
-    const res = await app.request("/api/update-check", { method: "GET" });
-
-    expect(res.status).toBe(200);
-    expect(mockCheckForUpdate).toHaveBeenCalledOnce();
-  });
-
-  it("does not trigger a refresh when the previous check is fresh", async () => {
-    mockUpdateCheckerState.lastChecked = Date.now();
-
-    const res = await app.request("/api/update-check", { method: "GET" });
-
-    expect(res.status).toBe(200);
-    expect(mockCheckForUpdate).not.toHaveBeenCalled();
-  });
-});
-
-describe("POST /api/update-check", () => {
-  it("always forces a refresh", async () => {
-    mockUpdateCheckerState.lastChecked = Date.now();
-
-    const res = await app.request("/api/update-check", { method: "POST" });
-
-    expect(res.status).toBe(200);
-    expect(mockCheckForUpdate).toHaveBeenCalledOnce();
   });
 });
 
