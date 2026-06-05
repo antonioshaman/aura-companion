@@ -454,3 +454,159 @@ describe("reapOrphans — skips non-PPID=1 processes", () => {
     expect(kill).not.toHaveBeenCalled();
   });
 });
+
+describe("reapOrphans — inconclusive verdict on known session defers reap (WARN fix)", () => {
+  // Cross-cut safety alignment with cli-launcher.restoreFromDisk: an
+  // inconclusive (`unavailable`/`gone`) verdict on a re-attach candidate must
+  // NOT reap. Killing here would SIGTERM the very session that reconnected via
+  // KillMode=process → the duplicate-relaunch storm this subsystem prevents.
+  it("unavailable verdict → skip (no kill, no sentinel, skippedInconclusive=1)", async () => {
+    const sessionId = "sess-inconclusive-unavail";
+    writeRuntimeSidecar(tmpRoot, sessionId, {
+      schemaVersion: SIDECAR_SCHEMA_VERSION,
+      pid: 30000,
+      processStartMs: 1_700_000_000_000,
+      argvSha256: argvSha256(["claude", "--sdk-url", `ws://localhost:3456/ws/cli/${sessionId}`]),
+    });
+    // process-identity sees a NON-linux platform → returns `unavailable`,
+    // while the reaper itself runs (deps.platform === "linux").
+    setProcReaderForTests({
+      platform: () => "darwin",
+      killCheck: () => true,
+      readCmdline: () => claudeCmdline(sessionId),
+      readStat: () => fakeStat("claude", 1),
+      readBootStat: () => `btime 1700000000\n`,
+      clkTck: 100,
+    });
+    const known: ReaperKnownSession = { sessionId, pid: undefined };
+    const kill = vi.fn();
+    const deps: OrphanReaperDeps = {
+      loadedSessions: [known],
+      sentinelRoot: tmpRoot,
+      sessionsRoot: tmpRoot,
+      platform: () => "linux",
+      listProcPids: () => [4242],
+      readStat: () => fakeStat("claude", 1),
+      readCmdline: () => claudeCmdline(sessionId),
+      killCheck: () => true,
+      kill,
+      sleep: async () => {},
+      now: () => 1_700_000_001_000,
+    };
+    const sum = await reapOrphans(deps);
+    expect(sum.skippedInconclusive).toBe(1);
+    expect(sum.reaped).toBe(0);
+    expect(sum.reattached).toBe(0);
+    expect(known.pid).toBeUndefined(); // NOT mutated — not a confirmed match.
+    expect(kill).not.toHaveBeenCalled();
+    expect(existsSync(join(tmpRoot, REAPING_SENTINEL_SUBDIR, `4242.json`))).toBe(false);
+    expect(warnSpy).toHaveBeenCalledWith(
+      "orphan-reaper",
+      expect.stringContaining("inconclusive identity verdict"),
+      expect.objectContaining({ event: "orphan_reaper.verify_inconclusive", verdict: "unavailable" }),
+    );
+  });
+
+  it("gone verdict (probe sees process dead) → skip (no kill, skippedInconclusive=1)", async () => {
+    const sessionId = "sess-inconclusive-gone";
+    writeRuntimeSidecar(tmpRoot, sessionId, {
+      schemaVersion: SIDECAR_SCHEMA_VERSION,
+      pid: 31000,
+      processStartMs: 1_700_000_000_000,
+      argvSha256: argvSha256(["claude", "--sdk-url", `ws://localhost:3456/ws/cli/${sessionId}`]),
+    });
+    // process-identity's liveness probe returns false → fail-CLOSED `gone`.
+    setProcReaderForTests({
+      platform: () => "linux",
+      killCheck: () => false,
+      readCmdline: () => claudeCmdline(sessionId),
+      readStat: () => fakeStat("claude", 1),
+      readBootStat: () => `btime 1700000000\n`,
+      clkTck: 100,
+    });
+    const known: ReaperKnownSession = { sessionId, pid: undefined };
+    const kill = vi.fn();
+    const deps: OrphanReaperDeps = {
+      loadedSessions: [known],
+      sentinelRoot: tmpRoot,
+      sessionsRoot: tmpRoot,
+      platform: () => "linux",
+      listProcPids: () => [4343],
+      readStat: () => fakeStat("claude", 1),
+      readCmdline: () => claudeCmdline(sessionId),
+      killCheck: () => true,
+      kill,
+      sleep: async () => {},
+      now: () => 1_700_000_001_000,
+    };
+    const sum = await reapOrphans(deps);
+    expect(sum.skippedInconclusive).toBe(1);
+    expect(sum.reaped).toBe(0);
+    expect(known.pid).toBeUndefined();
+    expect(kill).not.toHaveBeenCalled();
+    expect(warnSpy).toHaveBeenCalledWith(
+      "orphan-reaper",
+      expect.stringContaining("inconclusive identity verdict"),
+      expect.objectContaining({ event: "orphan_reaper.verify_inconclusive", verdict: "gone" }),
+    );
+  });
+});
+
+describe("reapOrphans — non-ESRCH kill failure not counted as reaped (NOTE fix)", () => {
+  // EPERM means the process SURVIVES the SIGTERM attempt; counting it as
+  // reaped would over-report success while the orphan persists. ESRCH
+  // (already-exited) is the benign case and DOES count.
+  it("EPERM SIGTERM → killFailed=1, reaped=0, no orphan_reaped log", async () => {
+    const kill = vi.fn(() => {
+      throw Object.assign(new Error("operation not permitted"), { code: "EPERM" });
+    });
+    const deps: OrphanReaperDeps = {
+      loadedSessions: [],
+      sentinelRoot: tmpRoot,
+      sessionsRoot: tmpRoot,
+      platform: () => "linux",
+      listProcPids: () => [8888],
+      readStat: () => fakeStat("claude", 1),
+      readCmdline: () => claudeCmdline("eperm-orphan"),
+      killCheck: () => false,
+      kill,
+      sleep: async () => {},
+      now: () => 1_700_000_001_000,
+    };
+    const sum = await reapOrphans(deps);
+    expect(kill).toHaveBeenCalledWith(8888, "SIGTERM");
+    expect(sum.killFailed).toBe(1);
+    expect(sum.reaped).toBe(0); // survived → not a reap
+    const reapedLog = infoSpy.mock.calls.find(
+      (c: unknown[]) => (c[2] as { event?: string } | undefined)?.event === "orphan_reaped",
+    );
+    expect(reapedLog).toBeUndefined();
+    expect(warnSpy).toHaveBeenCalledWith(
+      "orphan-reaper",
+      expect.stringContaining("SIGTERM failed"),
+      expect.objectContaining({ event: "orphan_reaper.kill_failed", error_code: "EPERM" }),
+    );
+  });
+
+  it("ESRCH SIGTERM (already exited) → counted as reaped (benign)", async () => {
+    const kill = vi.fn(() => {
+      throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+    });
+    const deps: OrphanReaperDeps = {
+      loadedSessions: [],
+      sentinelRoot: tmpRoot,
+      sessionsRoot: tmpRoot,
+      platform: () => "linux",
+      listProcPids: () => [8889],
+      readStat: () => fakeStat("claude", 1),
+      readCmdline: () => claudeCmdline("esrch-orphan"),
+      killCheck: () => false,
+      kill,
+      sleep: async () => {},
+      now: () => 1_700_000_001_000,
+    };
+    const sum = await reapOrphans(deps);
+    expect(sum.reaped).toBe(1); // already-gone == effective reap
+    expect(sum.killFailed).toBe(0);
+  });
+});

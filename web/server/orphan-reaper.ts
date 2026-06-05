@@ -153,6 +153,10 @@ export interface ReapSummary {
   readonly reattached: number;
   readonly reaped: number;
   readonly skippedNoSessionMatch: number;
+  /** Known re-attach candidates left untouched on an inconclusive verdict. */
+  readonly skippedInconclusive: number;
+  /** Orphans whose SIGTERM threw a non-ESRCH error (e.g. EPERM) — not counted as reaped. */
+  readonly killFailed: number;
   readonly budgetExceeded: boolean;
   readonly durationMs: number;
 }
@@ -204,6 +208,8 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
       reattached: 0,
       reaped: 0,
       skippedNoSessionMatch: 0,
+      skippedInconclusive: 0,
+      killFailed: 0,
       budgetExceeded: false,
       durationMs: ageMs(startedAt, deps.now?.()),
     };
@@ -251,6 +257,8 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
       reattached: 0,
       reaped: 0,
       skippedNoSessionMatch: 0,
+      skippedInconclusive: 0,
+      killFailed: 0,
       budgetExceeded: false,
       durationMs: ageMs(startedAt, clock()),
     };
@@ -260,6 +268,8 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
   let reattached = 0;
   let reaped = 0;
   let skippedNoMatch = 0;
+  let skippedInconclusive = 0;
+  let killFailed = 0;
   let budgetExceeded = false;
   const rawArgvLogEnabled = process.env.COMPANION_LOG_PATHS_RAW === "1";
 
@@ -342,7 +352,28 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
         if (rawArgvLogEnabled) appendRawDebug({ event: "orphan_reattached", pid, argv });
         continue;
       }
-      // Verdict was mismatch/gone/unavailable — fall through to REAP.
+      if (verdict.kind === "unavailable" || verdict.kind === "gone") {
+        // INCONCLUSIVE verdict on a re-attach candidate (this orphan's argv
+        // carried the EXACT sessionId of a known session). Mirror the
+        // fail-safe posture of cli-launcher.restoreFromDisk, which KEEPS a
+        // live process on an `unavailable`/missing verdict: an inconclusive
+        // probe must NOT reap. Killing here would SIGTERM the very session
+        // that just reconnected via KillMode=process and trigger the
+        // duplicate-relaunch storm this subsystem exists to prevent. Defer to
+        // the next boot, where sentinel-before-sweep reconciliation
+        // re-classifies the pid with a (usually) conclusive verdict.
+        skippedInconclusive++;
+        log.warn("orphan-reaper", "inconclusive identity verdict on known session — deferring reap", {
+          event: "orphan_reaper.verify_inconclusive",
+          pid,
+          verdict: verdict.kind,
+          argvSha256: classification.argvSha256,
+          sessionIdPresent: true,
+        });
+        continue;
+      }
+      // Verdict was `mismatch` — a DIFFERENT process reused this pid.
+      // Fall through to REAP.
     }
 
     // REAP branch — sentinel-before-sweep per EC-8.
@@ -369,13 +400,20 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
     }
 
     let killOk = false;
+    let killAlreadyGone = false;
     try {
       kill(pid, "SIGTERM");
       killOk = true;
     } catch (e) {
-      // ESRCH (already gone) is the happy path; everything else WARN.
+      // ESRCH (already gone) is the happy path — the process exited between
+      // classification and kill; that's an effective reap. Everything else
+      // (e.g. EPERM) means the process likely SURVIVES — WARN + count
+      // separately, and do NOT report it as reaped.
       const code = (e as NodeJS.ErrnoException).code;
-      if (code !== "ESRCH") {
+      if (code === "ESRCH") {
+        killAlreadyGone = true;
+      } else {
+        killFailed++;
         log.warn("orphan-reaper", "SIGTERM failed", {
           event: "orphan_reaper.kill_failed",
           pid,
@@ -396,17 +434,22 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
       }
     }
 
-    reaped++;
-    log.info("orphan-reaper", "orphan reaped via SIGTERM", {
-      event: "orphan_reaped",
-      pid,
-      argvSha256: classification.argvSha256,
-      argvShape: classification.argvShape,
-      cwdDepth: classification.cwdDepth,
-      sessionIdPresent: classification.sessionId !== null,
-      reason,
-    });
-    if (rawArgvLogEnabled) appendRawDebug({ event: "orphan_reaped", pid, argv });
+    // Only count + log a reap when the process is actually on its way out
+    // (SIGTERM delivered, or already gone). A non-ESRCH failure leaves the
+    // orphan alive; the next boot re-classifies and re-reaps the same pid.
+    if (killOk || killAlreadyGone) {
+      reaped++;
+      log.info("orphan-reaper", "orphan reaped via SIGTERM", {
+        event: "orphan_reaped",
+        pid,
+        argvSha256: classification.argvSha256,
+        argvShape: classification.argvShape,
+        cwdDepth: classification.cwdDepth,
+        sessionIdPresent: classification.sessionId !== null,
+        reason,
+      });
+      if (rawArgvLogEnabled) appendRawDebug({ event: "orphan_reaped", pid, argv });
+    }
 
     // Cleanup the sentinel — best-effort; ENOENT silent.
     deleteReapingMarker(deps.sentinelRoot, pid);
@@ -419,6 +462,8 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
     reattached,
     reaped,
     skippedNoSessionMatch: skippedNoMatch,
+    skippedInconclusive,
+    killFailed,
     budgetExceeded,
     durationMs,
   });
@@ -429,6 +474,8 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
     reattached,
     reaped,
     skippedNoSessionMatch: skippedNoMatch,
+    skippedInconclusive,
+    killFailed,
     budgetExceeded,
     durationMs,
   };

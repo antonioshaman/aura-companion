@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import { mkdtempSync, rmSync, realpathSync } from "node:fs";
+import { mkdtempSync, rmSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -82,6 +82,12 @@ import { SessionStore } from "./session-store.js";
 import { CliLauncher } from "./cli-launcher.js";
 import { companionBus } from "./event-bus.js";
 import { log } from "./logger.js";
+import {
+  writeRuntimeSidecar,
+  sidecarPath,
+  argvSha256,
+  SIDECAR_SCHEMA_VERSION,
+} from "./cli-runtime-sidecar.js";
 
 // ─── Bun.spawn mock ─────────────────────────────────────────────────────────
 
@@ -1236,6 +1242,109 @@ describe("persistence", () => {
       expect(session?.cliSessionId).toBe("cli-abc");
 
       killSpy.mockRestore();
+      procIdentity.__resetProcReaderForTests();
+    });
+
+    // Phase D WARN fix: the launcher-side 3-factor wiring (sidecar read →
+    // processStartMs anchor → verifyProcessIdentity) had no coverage; the
+    // mechanism was proven only in cli-runtime-sidecar.test.ts + the reaper.
+    // This asserts a MATCHING sidecar drives a 3-factor `match` recovery.
+    it("recovers via 3-factor probe when a matching runtime sidecar is present", async () => {
+      const sessionId = "sidecar-match-1";
+      store.saveLauncher([
+        {
+          sessionId,
+          pid: 44444,
+          state: "connected" as const,
+          cwd: "/tmp/project",
+          createdAt: Date.now(),
+          cliSessionId: "cli-sc-1",
+        },
+      ]);
+
+      // Sidecar anchors the 3rd factor: processStartMs that the proc-reader
+      // stub below reproduces exactly (btime 1700000000 + 0 ticks).
+      writeRuntimeSidecar(store.directory, sessionId, {
+        schemaVersion: SIDECAR_SCHEMA_VERSION,
+        pid: 44444,
+        processStartMs: 1_700_000_000_000,
+        argvSha256: argvSha256([
+          "claude",
+          "--sdk-url",
+          `ws://localhost:3456/ws/cli/${sessionId}`,
+        ]),
+      });
+
+      // /proc/<pid>/stat with starttime=0 → ticksToWallMs(0, 1700000000, 100)
+      // = 1_700_000_000_000, exactly the sidecar anchor (within ±2s).
+      const procStat = `1 (claude) ${["S", "1", ...Array(20).fill("0")].join(" ")}\n`;
+      const procIdentity = await import("./process-identity.js");
+      procIdentity.setProcReaderForTests({
+        platform: () => "linux",
+        killCheck: () => true,
+        readCmdline: () =>
+          ["claude", "--sdk-url", `ws://localhost:3456/ws/cli/${sessionId}`].join("\0") + "\0",
+        readStat: () => procStat,
+        readBootStat: () => `btime 1700000000\n`,
+        clkTck: 100,
+      });
+
+      const newLauncher = new CliLauncher(3456);
+      newLauncher.setStore(store);
+      const recovered = newLauncher.restoreFromDisk();
+
+      expect(recovered).toBe(1);
+      expect(newLauncher.getSession(sessionId)?.state).toBe("starting");
+
+      procIdentity.__resetProcReaderForTests();
+    });
+
+    // Phase D WARN fix: a corrupt sidecar must degrade to the two-factor
+    // probe (liveness + argv) AND surface the corruption via the structured
+    // boot_probe.sidecar_corrupt WARN — not silently masquerade as absent.
+    it("degrades to two-factor + WARNs boot_probe.sidecar_corrupt on a malformed sidecar", async () => {
+      const sessionId = "sidecar-corrupt-1";
+      store.saveLauncher([
+        {
+          sessionId,
+          pid: 55555,
+          state: "connected" as const,
+          cwd: "/tmp/project",
+          createdAt: Date.now(),
+        },
+      ]);
+
+      // Valid JSON but invalid schema (wrong schemaVersion + wrong pid type)
+      // → readRuntimeSidecar THROWs per its strict-validator contract.
+      writeFileSync(
+        sidecarPath(store.directory, sessionId),
+        '{"schemaVersion": 99, "pid": "nope"}',
+        "utf8",
+      );
+
+      // Alive + argv-match: with the sidecar throwing, expectedStartMs stays
+      // null → two-factor path → `match` → recovered.
+      const procIdentity = await import("./process-identity.js");
+      procIdentity.setProcReaderForTests({
+        platform: () => "linux",
+        killCheck: () => true,
+        readCmdline: () =>
+          ["claude", "--sdk-url", `ws://localhost:3456/ws/cli/${sessionId}`].join("\0") + "\0",
+      });
+      const warnSpy = vi.spyOn(log, "warn").mockImplementation(() => undefined);
+
+      const newLauncher = new CliLauncher(3456);
+      newLauncher.setStore(store);
+      const recovered = newLauncher.restoreFromDisk();
+
+      expect(recovered).toBe(1);
+      expect(newLauncher.getSession(sessionId)?.state).toBe("starting");
+      const emittedCorrupt = warnSpy.mock.calls.some(
+        (args) => (args[2] as { event?: string } | undefined)?.event === "boot_probe.sidecar_corrupt",
+      );
+      expect(emittedCorrupt).toBe(true);
+
+      warnSpy.mockRestore();
       procIdentity.__resetProcReaderForTests();
     });
 
