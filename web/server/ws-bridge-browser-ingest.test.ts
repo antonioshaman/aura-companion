@@ -23,6 +23,7 @@ function makeDedupSession(): Session {
     processedClientMessageIds: [],
     processedClientMessageIdSet: new Set(),
     lastCliActivityTs: Date.now(),
+    reachable: false,
     stateMachine: new SessionStateMachine("test-session"),
   };
 }

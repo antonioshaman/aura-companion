@@ -301,6 +301,25 @@ export class CliLauncher {
    *      failure, transient + structural); this channel is the
    *      narrower "permanent loss" subset.
    *
+   *      Phase F (PLAN T10+T11) wiring: the `WsBridge` constructor
+   *      subscribes to this event and routes each fire through
+   *      `WsBridge.dispatchCliFailedDrain`, which builds the
+   *      `cli_failed` frame via `buildCliFailedFrame`
+   *      (`cli-failed-frame.ts`, AP-14 sole assembly site) and
+   *      executes the inline 4-step dispatch (snapshot pendingMsgs
+   *      length -> clear + persist BEFORE broadcast per Persistence
+   *      R7 -> broadcastToBrowsers -> recordCleanupEvent
+   *      "drained_pending"). The reason argument here is mapped to
+   *      the closed `CliFailedReason` union by
+   *      `mapClearReasonToCliFailedReason` in ws-bridge.ts:
+   *        - container_missing             -> container_missing
+   *        - container_start_failed        -> container_stopped
+   *        - container_binary_missing      -> binary_missing
+   *        - observer_prompt_config_failed -> relaunch_exhausted
+   *        - observer_prompt_source_drift_refused -> relaunch_exhausted
+   *      `subprocessAlive: false` for every reason here — the
+   *      structural failure means the CLI is permanently dead.
+   *
    * EC-19 floor: every `return { ok: false, ... }` in `relaunch()` MUST
    * be preceded by a `clearPidAndPersist(sessionId, reason)` call. The
    * matching static-grep canary in `cli-launcher.test.ts` (

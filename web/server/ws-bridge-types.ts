@@ -10,6 +10,15 @@ import type { IBackendAdapter } from "./backend-adapter.js";
 import type { SessionStateMachine } from "./session-state-machine.js";
 import { getSettings } from "./settings-manager.js";
 
+// PLAN T10 (Phase F) - re-export the wire frame so the Phase G
+// frontend bridge (`web/src/types.ts`) can import a single named
+// type from this module instead of reaching into the cleanup-
+// folder boundary directly. The TYPE definition (+ the AP-14
+// sole-assembly-site builder `buildCliFailedFrame`) lives in
+// `cli-failed-frame.ts`.
+export type { CliFailedFrame, CliFailedReason } from "./cli-failed-frame.js";
+
+
 export interface CLISocketData {
   kind: "cli";
   sessionId: string;
@@ -57,6 +66,21 @@ export interface Session {
   processedClientMessageIdSet: Set<string>;
   /** Timestamp of last non-keepalive CLI message (for idle detection) */
   lastCliActivityTs: number;
+  /**
+   * AURA-LOCAL — PLAN T11 (Realtime R6). Cached boolean axis:
+   * `true` when this session has a live, connected backend adapter
+   * (CLI subprocess we can reach), `false` otherwise. Updated on
+   * adapter attach/detach events in `ws-bridge.ts` so the
+   * diagnostic snapshot can label / partition `pendingMsgs`
+   * counts by reachability without a per-snapshot probe loop
+   * (`adapter?.isConnected()` derefs once per session per tick =
+   * O(sessions) on snapshot path, vs cached O(1) here).
+   *
+   * Phase F initial value is `false` for every existing session;
+   * the `attachBackendAdapter` / `handleCLIOpen` / `handleCLIClose`
+   * sites in the bridge flip it as adapters land + detach.
+   */
+  reachable: boolean;
   /** Formal session state machine tracking phase and validating transitions. */
   stateMachine: SessionStateMachine;
   /** Cleanup function for state machine transition listener — call on session teardown. */

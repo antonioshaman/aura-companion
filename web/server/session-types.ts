@@ -378,6 +378,13 @@ export type BrowserIncomingMessageBase =
   | { type: "error"; message: string }
   | { type: "cli_disconnected" }
   | { type: "cli_connected" }
+  // PLAN T10 (Phase F) - terminal CLI-failure wire frame.
+  // Construction routed through `buildCliFailedFrame` in
+  // `cli-failed-frame.ts` per AP-14 sole-assembly-site invariant;
+  // production callers never literal this variant. Re-exported as
+  // `CliFailedFrame` from `ws-bridge-types.ts` for the Phase G
+  // frontend bridge.
+  | import("./cli-failed-frame.js").CliFailedFrame
   | { type: "user_message"; content: string; timestamp: number; id?: string }
   | { type: "message_history"; messages: BrowserIncomingMessage[] }
   | { type: "event_replay"; events: BufferedBrowserEvent[] }
