@@ -1177,7 +1177,7 @@ describe("codex websocket launcher", () => {
 
 describe("persistence", () => {
   describe("restoreFromDisk", () => {
-    it("recovers sessions from the store", () => {
+    it("recovers sessions from the store", async () => {
       // Manually write launcher data to disk to simulate a previous run
       const savedSessions = [
         {
@@ -1201,6 +1201,19 @@ describe("persistence", () => {
         return origKill.call(process, pid, signal as any);
       }) as any);
 
+      // PLAN T3 (Phase A): boot probe now routes through `verifyProcessIdentity`,
+      // which on Linux also reads `/proc/<pid>/cmdline` to confirm the alive
+      // PID actually carries the expected sessionId. Inject the proc reader
+      // so this test asserts the new contract (liveness + argv match) rather
+      // than the old one (liveness only).
+      const procIdentity = await import("./process-identity.js");
+      procIdentity.setProcReaderForTests({
+        platform: () => "linux",
+        killCheck: () => true,
+        readCmdline: () =>
+          ["claude", "--sdk-url", "ws://localhost:3456/ws/cli/restored-1"].join("\0") + "\0",
+      });
+
       const newLauncher = new CliLauncher(3456);
       newLauncher.setStore(store);
       const recovered = newLauncher.restoreFromDisk();
@@ -1214,6 +1227,7 @@ describe("persistence", () => {
       expect(session?.cliSessionId).toBe("cli-abc");
 
       killSpy.mockRestore();
+      procIdentity.__resetProcReaderForTests();
     });
 
     it("marks dead PIDs as exited", () => {

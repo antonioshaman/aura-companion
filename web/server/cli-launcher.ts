@@ -17,6 +17,7 @@ import { resolveBinary, getEnrichedPath } from "./path-resolver.js";
 import { resolveObserverPromptForSpawn } from "./observer-prompt-spawn.js";
 import { assertExhaustiveObserverPromptSource } from "./observer-prompt.js";
 import { log } from "./logger.js";
+import { verifyProcessIdentity } from "./process-identity.js";
 import {
   OBSERVER_ALLOWED_TOOLS,
   OBSERVER_DISALLOWED_TOOLS,
@@ -310,13 +311,46 @@ export class CliLauncher {
             this.sessions.set(info.sessionId, info);
           }
         } else if (info.pid) {
-          try {
-            process.kill(info.pid, 0); // signal 0 = just check if alive
+          // PLAN T3 (Phase A): replace bare `process.kill(info.pid, 0)`
+          // with the three-factor identity probe — closes the live
+          // symptom where alive subprocesses don't match Map `pid` fields
+          // (PID reuse → false-positive liveness → relaunch storm).
+          //
+          // Phase A interim: pass `null` for expectedStartMs → degraded
+          // two-factor mode (liveness + argv only). Phase D adds the
+          // `<sessionId>.runtime.json` sidecar that carries the spawn-time
+          // anchor and lets the third factor engage.
+          //
+          // On `unavailable` (macOS dev box, no /proc) the helper emits
+          // a one-time boot WARN and we conservatively trust the old
+          // liveness-only check — degraded but no worse than today.
+          const verdict = verifyProcessIdentity(info.pid, info.sessionId, null);
+          if (verdict.kind === "match") {
             info.state = "starting"; // WS not yet re-established, wait for CLI to reconnect
             this.sessions.set(info.sessionId, info);
             recovered++;
-          } catch {
-            // Process is dead
+          } else if (verdict.kind === "unavailable") {
+            // Non-Linux fallback: legacy liveness-only probe.
+            try {
+              process.kill(info.pid, 0);
+              info.state = "starting";
+              this.sessions.set(info.sessionId, info);
+              recovered++;
+            } catch {
+              info.state = "exited";
+              info.exitCode = -1;
+              this.sessions.set(info.sessionId, info);
+            }
+          } else {
+            // "gone" | "mismatch" → not the process we spawned.
+            if (verdict.kind === "mismatch") {
+              log.warn("cli-launcher", "Boot probe rejected PID reuse / argv mismatch", {
+                event: "boot_probe.mismatch",
+                sessionId: info.sessionId,
+                pid: info.pid,
+                reason: verdict.reason,
+              });
+            }
             info.state = "exited";
             info.exitCode = -1;
             this.sessions.set(info.sessionId, info);
