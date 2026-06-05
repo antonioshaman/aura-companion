@@ -41,6 +41,20 @@ export function __resetClockSourceForTests(): void {
 }
 
 /**
+ * Read the module-scope clock source. Sibling helper to {@link ageMs} —
+ * exists so callers that record a timestamp at emit time (e.g.,
+ * `recordCleanupEvent` in cleanup-events.ts) use the same clock seam the
+ * read path's `ageMs` consults. Without this, a test that injects a
+ * deterministic clock via {@link setClockSourceForTests} would see the
+ * read path's clamp behave one way and the write path silently re-read
+ * the real `Date.now()` — a clock-seam asymmetry that masquerades as
+ * "events leak past the prune window."
+ */
+export function nowMs(): number {
+  return clockSource();
+}
+
+/**
  * Wallclock age in ms, clamped to ≥0. If the raw difference is negative
  * (clock jumped backward), the return value is clamped to 0 AND a
  * `clock.skew_detected` WARN is emitted naming the negative skew so

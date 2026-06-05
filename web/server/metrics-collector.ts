@@ -10,6 +10,13 @@ import type {
   CounterMetrics,
   GaugeMetrics,
 } from "./metrics-types.js";
+// AURA-LOCAL: cleanup-event projection seam. PLAN T5 — counters live in
+// the cleanup-events module's bounded store; metricsCollector reads via
+// the typed `CleanupEventKind` projection helper (single source of truth
+// per EC-21). Phase D/E/F/H emit `recordCleanupEvent(kind)` at their
+// emit sites; the diagnostic snapshot (Phase C) reads the projection
+// methods below.
+import { getCleanupEventCountLastHour } from "./cleanup/cleanup-events.js";
 
 // ── Histogram bucket boundaries (ms) ──────────────────────────────────────
 
@@ -241,6 +248,39 @@ export class MetricsCollector {
 
   recordError(category: string): void {
     this.errors.set(category, (this.errors.get(category) ?? 0) + 1);
+  }
+
+  // ── Cleanup-event projections — PLAN T5 (Phase B) ─────────────────────
+  //
+  // Each method reads the cleanup-events store via the typed projection
+  // helper (`getCleanupEventCountLastHour(kind)`). Sweepers do NOT own
+  // counters — they call `recordCleanupEvent(kind)` from the cleanup
+  // module; metricsCollector is the consumer. This preserves EC-21
+  // single-source-of-truth: a future Phase C diagnostic snapshot or a
+  // future `/api/metrics` endpoint both read these same projections.
+  //
+  // AURA-LOCAL. `nowMs` is the optional injected clock for tests;
+  // production callers omit it and let `ageMs` read the module-scope
+  // clock source.
+
+  getEvictedLastHour(nowMs?: number): number {
+    return getCleanupEventCountLastHour("evicted", nowMs);
+  }
+
+  getOrphanReapedLastHour(nowMs?: number): number {
+    return getCleanupEventCountLastHour("orphan_reaped", nowMs);
+  }
+
+  getDrainedPendingLastHour(nowMs?: number): number {
+    return getCleanupEventCountLastHour("drained_pending", nowMs);
+  }
+
+  getRecordingsSoftArchivedLastHour(nowMs?: number): number {
+    return getCleanupEventCountLastHour("recordings_soft_archived", nowMs);
+  }
+
+  getRecordingsHardDeletedLastHour(nowMs?: number): number {
+    return getCleanupEventCountLastHour("recordings_hard_deleted", nowMs);
   }
 
   // ── Snapshot ──────────────────────────────────────────────────────────

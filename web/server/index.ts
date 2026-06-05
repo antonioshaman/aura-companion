@@ -39,6 +39,7 @@ import { NoVncProxy } from "./novnc-proxy.js";
 import { isOriginAllowed } from "./middleware/origin-allowlist.js";
 import { securityHeaders } from "./middleware/security-headers.js";
 
+import { CleanupScheduler } from "./cleanup/cleanup-scheduler.js";
 import { startPeriodicCheck, setServiceMode } from "./update-checker.js";
 import { imagePullManager } from "./image-pull-manager.js";
 import { restoreIfNeeded as restoreTailscaleFunnel, cleanup as cleanupTailscaleFunnel } from "./tailscale-manager.js";
@@ -230,6 +231,17 @@ containerManager.restoreState(CONTAINER_STATE_PATH);
 
 // ── Session orchestrator — centralizes lifecycle event wiring ────────────────
 orchestrator.initialize();
+
+// AURA-LOCAL: cleanup-subsystem scheduler. PLAN T4. Owns the daily
+// retention/eviction cadence — instantiated AFTER the orchestrator+bridge
+// are wired so Phase D/E/H sweepers (registered later via
+// `cleanupScheduler.registerSweep(...)`) can safely reach into
+// `wsBridge.sessions` / launcher state without a TOCTOU window. The
+// scheduler is started here with zero registered sweeps; the lifecycle
+// skeleton is the only Phase B contribution. `dispose()` is wired into
+// `gracefulShutdown` below so SIGTERM awaits any in-flight tier.
+const cleanupScheduler = new CleanupScheduler();
+cleanupScheduler.start();
 
 console.log(`[server] Session persistence: ${sessionStore.directory}`);
 if (recorder.isGloballyEnabled()) {
@@ -641,6 +653,17 @@ async function gracefulShutdown() {
     }
   } catch (err) {
     console.error("[server] Council shutdown error (continuing to container persist):", err);
+  }
+  // AURA-LOCAL: PLAN T4. Dispose the cleanup scheduler BEFORE the
+  // container-state persist so any in-flight sweep tier drains within
+  // the ~8s shutdown budget. `dispose()` is idempotent and resolves
+  // once the registered sweeps settle; a sweep that exceeds the budget
+  // is the orchestrator's problem (the scheduler is a transparent
+  // forwarder, not a timeout enforcer).
+  try {
+    await cleanupScheduler.dispose();
+  } catch (err) {
+    console.error("[server] Cleanup scheduler dispose error (continuing to container persist):", err);
   }
   console.log("[server] Persisting container state before shutdown...");
   containerManager.persistState(CONTAINER_STATE_PATH);
