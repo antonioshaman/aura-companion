@@ -17,6 +17,13 @@ import type {
 // emit sites; the diagnostic snapshot (Phase C) reads the projection
 // methods below.
 import { getCleanupEventCountLastHour } from "./cleanup/cleanup-events.js";
+// AURA-LOCAL: EC-43 sweep applied during Phase B. The four wallclock-
+// delta sites below (`sessionInitTimeMs`, `turnDurationMs`,
+// `permissionDurationMs`, `serverUptimeMs`) route through `ageMs(...)`
+// per the Phase A HANDOFF's deferred-sweep list. Semantics identical
+// for positive deltas; the EC-38 clamp ensures backward clock jumps
+// no longer pollute histogram min/max with negative durations.
+import { ageMs } from "./cleanup/age-ms.js";
 
 // ── Histogram bucket boundaries (ms) ──────────────────────────────────────
 
@@ -148,7 +155,7 @@ export class MetricsCollector {
         if (to === "ready" && (from === "initializing" || from === "starting")) {
           const spawned = this.sessionSpawnedAt.get(sessionId);
           if (spawned != null) {
-            recordHistogramValue(this.sessionInitTime, Date.now() - spawned);
+            recordHistogramValue(this.sessionInitTime, ageMs(spawned));
             this.sessionSpawnedAt.delete(sessionId);
           }
         }
@@ -174,7 +181,7 @@ export class MetricsCollector {
       companionBus.on("message:result", ({ sessionId }) => {
         const started = this.turnStartedAt.get(sessionId);
         if (started != null) {
-          recordHistogramValue(this.turnDuration, Date.now() - started);
+          recordHistogramValue(this.turnDuration, ageMs(started));
           this.turnStartedAt.delete(sessionId);
         }
       }),
@@ -226,7 +233,7 @@ export class MetricsCollector {
 
     const requested = this.permissionRequestedAt.get(requestId);
     if (requested != null) {
-      recordHistogramValue(this.permissionDuration, Date.now() - requested);
+      recordHistogramValue(this.permissionDuration, ageMs(requested));
       this.permissionRequestedAt.delete(requestId);
       this.permissionRequestToSession.delete(requestId);
     }
@@ -295,7 +302,7 @@ export class MetricsCollector {
     };
 
     return {
-      serverUptimeMs: Date.now() - this.startedAt,
+      serverUptimeMs: ageMs(this.startedAt),
       snapshotAt: Date.now(),
       counters,
       gauges,
