@@ -314,6 +314,109 @@ describe("sweepEviction — canary 3: 'Subprocess alive' protection", () => {
   });
 });
 
+describe("sweepEviction — WARN(phase-h): disk-absent Map-stranded row still evicts", () => {
+  it("drops a Map-present archived+exited row whose JSON is absent (closes the removeSession-threw leak)", async () => {
+    // Observer phase-h WARN: if bridge.removeSession throws AFTER moveToArchive
+    // already moved the JSON, the row is stranded in wsBridge.sessions while the
+    // source JSON is gone. The pre-fix code short-circuited on
+    // existsSync(source)===false ("skipped_no_disk_file") and NEVER retried the
+    // Map drop — the exact memory leak T13 exists to close, persisting for the
+    // whole server uptime (self-heals only on restart). This pins the recovery:
+    // a disk-absent + archived + exited + Map-present row is evicted (Map dropped)
+    // on a single tick. Mutation-resistant: re-adding the skipped_no_disk_file
+    // short-circuit flips evicted→0 and leaves removeSession uncalled.
+    const now = 1_700_000_000_000;
+    setClockSourceForTests(() => now);
+    const sid = "sess-stranded-1";
+    // Deliberately DO NOT write the JSON — the disk half is already gone.
+    const store = buildStore();
+    const launcher = new Map<string, EvictionLauncherView>([
+      [sid, { sessionId: sid, archived: true, state: "exited", pid: 555 }],
+    ]);
+    const bridge = buildBridge([[sid, { id: sid }]]);
+
+    const summary = await sweepEviction(buildConfig(0), {
+      bridge,
+      store,
+      getLauncherSession: buildLauncherLookup(launcher),
+      probeProcessIdentity: staticProbe({ kind: "gone" }),
+      nowMs: () => now,
+    });
+
+    // Map-half: the stranded row IS dropped.
+    expect(summary.evicted).toBe(1);
+    expect(bridge.removedSessionIds).toEqual([sid]);
+    // Disk-half: nothing to move — no archived dest materialised.
+    expect(existsSync(join(sessionsRoot, ARCHIVED_SESSIONS_SUBDIR, `${sid}.json`))).toBe(false);
+    // The eviction log records the absent disk dest (vs "moved").
+    const evictedLog = infoCalls.find((c) => c.event === "eviction.row_evicted");
+    expect(evictedLog).toBeDefined();
+    expect(evictedLog!.payload.diskDest).toBe("absent");
+    // Sentinel cleared after the Map drop (EC-8, idempotent on absent rename).
+    expect(existsSync(join(sessionsRoot, ARCHIVED_SESSIONS_SUBDIR, `${sid}${EVICTING_SENTINEL_SUFFIX}`))).toBe(false);
+  });
+});
+
+describe("sweepEviction — WARN(phase-h): degraded/PID-reuse probe verdicts evict", () => {
+  // Observer phase-h WARN: 'unavailable' and 'mismatch' both fall through to
+  // evict but only 'gone'/'match' were pinned. These two cases lock the
+  // remaining branches so a refactor flipping either to retain-or-error fails
+  // loudly instead of silently changing reclaim semantics.
+
+  it("evicts when verifyProcessIdentity returns 'unavailable' (non-Linux host degrades to launcher.state.exited)", async () => {
+    // Subprocess R6-sensitive branch: on a non-Linux dev host the probe cannot
+    // verify, and the row is evicted on archived+exited alone. Flipping
+    // unavailable→retain would strand dev-host rows with no failing test.
+    const now = 1_700_000_000_000;
+    setClockSourceForTests(() => now);
+    const sid = "sess-unavail-1";
+    touchAged(join(sessionsRoot, `${sid}.json`), now, 10_000);
+    const store = buildStore();
+    const launcher = new Map<string, EvictionLauncherView>([
+      [sid, { sessionId: sid, archived: true, state: "exited", pid: 777 }],
+    ]);
+    const bridge = buildBridge([[sid, { id: sid }]]);
+
+    const summary = await sweepEviction(buildConfig(0), {
+      bridge,
+      store,
+      getLauncherSession: buildLauncherLookup(launcher),
+      probeProcessIdentity: staticProbe({ kind: "unavailable", platform: "darwin" }),
+      nowMs: () => now,
+    });
+
+    expect(summary.evicted).toBe(1);
+    expect(summary.retainedAlive).toBe(0);
+    expect(bridge.removedSessionIds).toEqual([sid]);
+    expect(existsSync(join(sessionsRoot, `${sid}.json`))).toBe(false);
+  });
+
+  it("evicts when verifyProcessIdentity returns 'mismatch' (PID reuse — verified subprocess gone, a different process holds the pid)", async () => {
+    const now = 1_700_000_000_000;
+    setClockSourceForTests(() => now);
+    const sid = "sess-mismatch-1";
+    touchAged(join(sessionsRoot, `${sid}.json`), now, 10_000);
+    const store = buildStore();
+    const launcher = new Map<string, EvictionLauncherView>([
+      [sid, { sessionId: sid, archived: true, state: "exited", pid: 888 }],
+    ]);
+    const bridge = buildBridge([[sid, { id: sid }]]);
+
+    const summary = await sweepEviction(buildConfig(0), {
+      bridge,
+      store,
+      getLauncherSession: buildLauncherLookup(launcher),
+      probeProcessIdentity: staticProbe({ kind: "mismatch", reason: "argv" }),
+      nowMs: () => now,
+    });
+
+    expect(summary.evicted).toBe(1);
+    expect(summary.retainedAlive).toBe(0);
+    expect(bridge.removedSessionIds).toEqual([sid]);
+    expect(existsSync(join(sessionsRoot, `${sid}.json`))).toBe(false);
+  });
+});
+
 describe("sweepEviction — canary 4: EXDEV loud-throw", () => {
   it("captures EXDEV from moveToArchive as error, leaves sentinel marker for boot reconcile", async () => {
     // Persistence R2: moveToArchive MUST throw on EXDEV rather than

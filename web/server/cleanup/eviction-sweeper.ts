@@ -171,7 +171,6 @@ export interface EvictionDecision {
     | "skipped_not_exited"
     | "skipped_within_grace"
     | "skipped_subprocess_alive"
-    | "skipped_no_disk_file"
     | "skipped_no_launcher_view"
     | "error";
   readonly errorCode?: string;
@@ -186,7 +185,6 @@ export interface EvictionSummary {
   readonly skippedNotExited: number;
   readonly skippedWithinGrace: number;
   readonly skippedNoLauncherView: number;
-  readonly skippedNoDiskFile: number;
   readonly errors: number;
   readonly decisions: ReadonlyArray<EvictionDecision>;
   readonly startedAt: number;
@@ -231,7 +229,6 @@ export async function sweepEviction(
       skippedNotExited: 0,
       skippedWithinGrace: 0,
       skippedNoLauncherView: 0,
-      skippedNoDiskFile: 0,
       errors: 0,
       decisions: [],
       startedAt,
@@ -280,7 +277,6 @@ export async function sweepEviction(
     skippedNotExited: decisions.filter((d) => d.action === "skipped_not_exited").length,
     skippedWithinGrace: decisions.filter((d) => d.action === "skipped_within_grace").length,
     skippedNoLauncherView: decisions.filter((d) => d.action === "skipped_no_launcher_view").length,
-    skippedNoDiskFile: decisions.filter((d) => d.action === "skipped_no_disk_file").length,
     errors: decisions.filter((d) => d.action === "error").length,
     decisions,
     startedAt,
@@ -331,22 +327,30 @@ async function classifyAndEvictOne(
 
   // Age check: mtime of the JSON at the source path. setArchived ↦
   // saveSync ↦ writeFileSync updates the mtime; ageMs(mtime) ≈ time
-  // since archive. Source-absent ⇒ skip (already-evicted, partial-
-  // restart, or pre-Phase-H legacy session).
+  // since archive.
   const sourcePath = join(ctx.deps.store.directory, `${sessionId}.json`);
-  let mtimeMs: number;
+  let mtimeMs: number | null = null;
   try {
-    if (!existsSync(sourcePath)) {
-      return { sessionId, action: "skipped_no_disk_file" };
+    if (existsSync(sourcePath)) {
+      mtimeMs = statSync(sourcePath).mtimeMs;
     }
-    mtimeMs = statSync(sourcePath).mtimeMs;
   } catch (e) {
     const err = e as NodeJS.ErrnoException;
     return { sessionId, action: "error", errorCode: err.code ?? "stat_failed" };
   }
-  const age = ageMs(mtimeMs, ctx.clock());
-  if (age <= ctx.graceMs) {
-    return { sessionId, action: "skipped_within_grace" };
+  // Disk-absent (already-evicted-but-Map-stranded after a mid-tick
+  // bridge.removeSession throw, partial restart, or pre-Phase-H legacy
+  // row): the JSON is already gone, so there is nothing to age-gate and
+  // nothing to move — but the in-memory row is EXACTLY the leak T13 closes.
+  // Fall through to the subprocess guard and a Map-only drop (moveToArchive
+  // returns {kind:"absent"} ⇒ no rename). Only the disk-PRESENT path is
+  // age-gated; a disk-absent row has no fresh-archive grace to honour.
+  let age = 0;
+  if (mtimeMs !== null) {
+    age = ageMs(mtimeMs, ctx.clock());
+    if (age <= ctx.graceMs) {
+      return { sessionId, action: "skipped_within_grace" };
+    }
   }
 
   // Subprocess invariant — NEVER evict a row whose Companion-spawned
