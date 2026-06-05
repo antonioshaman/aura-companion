@@ -229,7 +229,26 @@ describe("ModelSwitcher", () => {
     });
 
     it("marks the newest model per tier with a 'Latest' badge (Friedman R1)", () => {
-      resetStore({ dynamicBackendModels: { claude: dynamicClaude } });
+      // Use a current model that is NOT in `dynamicClaude` so no rendered
+      // option gets `aria-selected=true` — the Latest badge is gated on
+      // `!isSelected`, so a selected option would suppress its tier's
+      // badge and confound the per-tier-count assertion. PR #93 surfaced
+      // this coupling: when `CLAUDE_MODELS[0]` happened to equal
+      // `dynamicClaude[0]`, the first opus got selected → only 2 badges
+      // rendered instead of 3. Pinning currentModel to a legacy slug
+      // makes the assertion independent of the static fallback's [0].
+      resetStore({
+        dynamicBackendModels: { claude: dynamicClaude },
+        sdkSessions: [
+          {
+            sessionId: "s1",
+            model: "claude-opus-4-5-20251101",
+            backendType: "claude",
+            cwd: "/repo",
+          },
+        ],
+        sessions: new Map([["s1", { model: "claude-opus-4-5-20251101" }]]),
+      });
       render(<ModelSwitcher sessionId="s1" />);
       fireEvent.click(screen.getByLabelText("Switch model"));
       // Exactly 3 "Latest" badges (one per tier: opus, sonnet, haiku).
