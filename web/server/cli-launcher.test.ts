@@ -2006,3 +2006,114 @@ describe("EC-19 canaries — buildObserverSpawnOverrides routing + sentinel-path
     ).toEqual([]);
   });
 });
+
+describe("EC-19 canary — clearPidAndPersist routing in relaunch() (PLAN T7/T8)", () => {
+  // Brief-mandatory canary: every "skip relaunch" return in relaunch()
+  // MUST be preceded by a call to clearPidAndPersist. Regex-anchored on
+  // the function name + brace-counted body extraction per EC-19 (NEVER
+  // literal substring of the whole file — that would weaken silently
+  // under parameter renames / return-type widenings).
+  //
+  // Exemptions (documented in clearPidAndPersist JSDoc):
+  //   - `if (!info) return ...` at the function entry — there's no
+  //     session state to mutate when the lookup fails.
+  //   - `return { ok: true }` at the success path — leaves state
+  //     "starting" for the spawn handshake to complete.
+  //
+  // Every other `return { ok: false, ... }` MUST be preceded (within
+  // the immediately-enclosing brace block) by `clearPidAndPersist(`.
+  it("every ok:false return in relaunch() routes through clearPidAndPersist", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const src = fs.readFileSync(path.join(__dirname, "cli-launcher.ts"), "utf-8");
+
+    // Anchor on the relaunch() signature literal prefix — matches the
+    // pattern used by the sibling buildObserverSpawnOverrides canary
+    // (CR-14 / Beck B5 — literal-prefix is robust to type-annotation
+    // widening + default-arg containing `)` chars).
+    const signaturePrefix = "async relaunch(";
+    const sigIdx = src.indexOf(signaturePrefix);
+    expect(sigIdx, "relaunch signature must be locatable").toBeGreaterThan(-1);
+    const openIdx = src.indexOf("{", sigIdx);
+    expect(openIdx, "opening brace must follow the signature").toBeGreaterThan(-1);
+    let depth = 1;
+    let bodyEnd = -1;
+    for (let i = openIdx + 1; i < src.length; i++) {
+      if (src[i] === "{") depth++;
+      else if (src[i] === "}") {
+        depth--;
+        if (depth === 0) {
+          bodyEnd = i + 1;
+          break;
+        }
+      }
+    }
+    expect(bodyEnd, "relaunch body must be locatable").toBeGreaterThan(-1);
+    const body = src.slice(openIdx, bodyEnd);
+
+    // Find every `return { ok: false` in the body, then for each one
+    // check that a `clearPidAndPersist(` appears within a reasonable
+    // backward window (sibling lines in the same control branch).
+    // The 800-char window covers a multi-line ok:false return with a
+    // template-literal error message + preceding setup like
+    // `info.exitCode = 1`. Anything larger would be a structural
+    // refactor that warrants a fresh canary review.
+    const returnRegex = /return\s*\{\s*ok:\s*false\b/g;
+    const callRegex = /\bclearPidAndPersist\s*\(/g;
+    const violations: Array<{ at: number; snippet: string }> = [];
+    let m: RegExpExecArray | null;
+    while ((m = returnRegex.exec(body)) !== null) {
+      const returnAt = m.index;
+      const windowStart = Math.max(0, returnAt - 800);
+      const window = body.slice(windowStart, returnAt);
+      if (!callRegex.test(window)) {
+        violations.push({
+          at: returnAt,
+          snippet: body.slice(Math.max(0, returnAt - 200), returnAt + 80),
+        });
+      }
+      callRegex.lastIndex = 0;
+    }
+    expect(
+      violations,
+      `Every ok:false return in cli-launcher.relaunch() must route through clearPidAndPersist(sessionId, reason). Violations:\n${violations
+        .map((v) => `at body-offset ${v.at}:\n${v.snippet}\n`)
+        .join("\n")}`,
+    ).toEqual([]);
+  });
+
+  // EC-22: the emit on `session:relaunch-exhausted` must actually fire
+  // — typecheck alone would green-stamp a refactor that wraps the emit
+  // in an unreachable conditional, or replaces it with a noop. The
+  // emit lives in clearPidAndPersist; the EC-19 canary above pins the
+  // call-site presence at every relaunch return. This sibling canary
+  // pins the emit-site presence inside clearPidAndPersist itself.
+  it("clearPidAndPersist body emits on session:relaunch-exhausted (EC-22)", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const src = fs.readFileSync(path.join(__dirname, "cli-launcher.ts"), "utf-8");
+
+    const signaturePrefix = "private clearPidAndPersist(";
+    const sigIdx = src.indexOf(signaturePrefix);
+    expect(sigIdx, "clearPidAndPersist signature must be locatable").toBeGreaterThan(-1);
+    const openIdx = src.indexOf("{", sigIdx);
+    let depth = 1;
+    let bodyEnd = -1;
+    for (let i = openIdx + 1; i < src.length; i++) {
+      if (src[i] === "{") depth++;
+      else if (src[i] === "}") {
+        depth--;
+        if (depth === 0) {
+          bodyEnd = i + 1;
+          break;
+        }
+      }
+    }
+    const body = src.slice(openIdx, bodyEnd);
+    expect(body).toMatch(/companionBus\.emit\(\s*["']session:relaunch-exhausted["']/);
+    // And the four required side-effects per the PLAN T7/T8 contract.
+    expect(body).toMatch(/info\.pid\s*=\s*undefined/);
+    expect(body).toMatch(/info\.state\s*=\s*["']exited["']/);
+    expect(body).toMatch(/this\.persistState\s*\(/);
+  });
+});

@@ -40,6 +40,37 @@ export interface CompanionEventMap {
    */
   "session:relaunch-failed": { sessionId: string; reason: string };
 
+  /**
+   * Structural / deterministic relaunch failure — the session can NEVER
+   * recover via the existing retry-budget path. Emitted from
+   * `cli-launcher.ts:clearPidAndPersist`, which routes every "skip
+   * relaunch" early-return in `relaunch()` through one site (container
+   * missing/stopped, binary missing inside container, observer-prompt
+   * config load failure, observer-prompt workspace↔bundled boundary
+   * crossing). PLAN tasks T7 + T8.
+   *
+   * Distinct from `session:relaunch-failed` which fires on EVERY relaunch
+   * failure (transient + budget-exhausted + structural) — this channel
+   * is the narrower "permanent loss" signal Phase F's drain dispatch
+   * consumes to fire the `cli_failed` browser frame + clear pending
+   * message queues. The two channels are siblings (this one is strictly
+   * a subset); a subscriber that wants "all failures" reads
+   * `session:relaunch-failed`, a subscriber that wants "drain now"
+   * reads `session:relaunchExhausted`.
+   *
+   * NOTE: distinct from the `relaunchExhaustedNotified` Set in
+   * `session-orchestrator.ts` — that Set tracks per-session
+   * notification-dedupe state for the orchestrator's MAX_AUTO_RELAUNCHES
+   * retry budget. This event is the cli-launcher's structural-failure
+   * signal at the relaunch-loop boundary.
+   *
+   * Naming: kebab-case to match the existing `session:relaunch-failed`
+   * sibling. The brief described this as the "relaunchExhausted" signal;
+   * the event name on the bus is `session:relaunch-exhausted` to honour
+   * the established `session:<verb>-<adverb>` convention.
+   */
+  "session:relaunch-exhausted": { sessionId: string; reason: string };
+
   /** Idle-kill threshold reached with no connected browsers. */
   "session:idle-kill": { sessionId: string };
 
