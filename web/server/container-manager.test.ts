@@ -878,9 +878,11 @@ describe("ContainerManager buildImage", () => {
 // ---------------------------------------------------------------------------
 
 describe("ContainerManager.getRegistryImage", () => {
-  it("returns registry path for the-companion:latest", () => {
-    const result = ContainerManager.getRegistryImage("the-companion:latest");
-    expect(result).toContain("stangirard/the-companion:latest");
+  // The fork has no managed registry — the default sandbox image is loaded
+  // locally from a backup tarball (sandbox-image.ts), so getRegistryImage
+  // never resolves a remote source for any tag.
+  it("returns null for the default sandbox image (no remote registry)", () => {
+    expect(ContainerManager.getRegistryImage("aura-companion-sandbox:latest")).toBeNull();
   });
 
   it("returns null for non-default images", () => {
@@ -1094,7 +1096,7 @@ describe("ContainerManager pullImage", () => {
     mockExecSync.mockReturnValue("");
 
     const manager = new ContainerManager();
-    const result = await manager.pullImage("docker.io/stangirard/test:v1", "test:v1");
+    const result = await manager.pullImage("registry.example.com/test:v1", "test:v1");
     expect(result).toBe(true);
     // Should tag the image
     const cmds = mockExecSync.mock.calls.map((c) => String(c[0] ?? ""));

@@ -12,6 +12,7 @@ import {
 import { refreshServiceDefinition } from "../service.js";
 import { getSettings } from "../settings-manager.js";
 import { imagePullManager } from "../image-pull-manager.js";
+import { DEFAULT_SANDBOX_IMAGE } from "../sandbox-image.js";
 
 export function registerSystemRoutes(
   api: Hono,
@@ -133,8 +134,8 @@ export function registerSystemRoutes(
         if (getSettings().dockerAutoUpdate) {
           try {
             console.log("[update] Re-pulling Docker image (dockerAutoUpdate enabled)...");
-            imagePullManager.pull("the-companion:latest");
-            const ready = await imagePullManager.waitForReady("the-companion:latest", 120_000);
+            imagePullManager.pull(DEFAULT_SANDBOX_IMAGE);
+            const ready = await imagePullManager.waitForReady(DEFAULT_SANDBOX_IMAGE, 120_000);
             if (ready) {
               console.log("[update] Docker image re-pull complete.");
             } else {

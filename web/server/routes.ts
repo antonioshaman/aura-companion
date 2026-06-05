@@ -814,7 +814,7 @@ export function createRoutes(
       return c.json({
         available: false,
         mode: "container" as const,
-        message: "Browser preview requires Xvfb and noVNC in the container image. Rebuild with the latest the-companion image.",
+        message: "Browser preview requires Xvfb and noVNC in the container image. Rebuild with the latest aura-companion-sandbox image.",
       });
     }
 

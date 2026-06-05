@@ -8,6 +8,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { DEFAULT_SANDBOX_IMAGE } from "./sandbox-image.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -20,7 +21,7 @@ export interface ContainerPortSpec {
 }
 
 export interface ContainerConfig {
-  /** Docker image to use (e.g. "the-companion:latest", "node:22-slim") */
+  /** Docker image to use (e.g. "aura-companion-sandbox:latest", "node:22-slim") */
   image: string;
   /** Container ports to expose (e.g. [3000, 8080] or [{ port: 6080, hostIp: "127.0.0.1" }]) */
   ports: (number | ContainerPortSpec)[];
@@ -62,8 +63,6 @@ const STANDARD_EXEC_TIMEOUT_MS = 30_000;
 const CONTAINER_BOOT_TIMEOUT_MS = 20_000;
 const WORKSPACE_COPY_TIMEOUT_MS = 15 * 60_000; // 15 min for large repos
 const IMAGE_PULL_TIMEOUT_MS = 300_000; // 5 min for pulling images
-
-const DOCKER_REGISTRY = "docker.io/stangirard";
 
 function exec(cmd: string, opts?: ExecSyncOptionsWithStringEncoding): string {
   return execSync(cmd, { ...EXEC_OPTS, ...opts }).trim();
@@ -832,7 +831,7 @@ export class ContainerManager {
    * Build a Docker image from a provided Dockerfile path.
    * Returns the build output log. Throws on failure.
    */
-  buildImage(dockerfilePath: string, tag: string = "the-companion:latest"): string {
+  buildImage(dockerfilePath: string, tag: string = DEFAULT_SANDBOX_IMAGE): string {
     const contextDir = dockerfilePath.replace(/\/[^/]+$/, "") || ".";
     try {
       const output = exec(
@@ -938,12 +937,12 @@ export class ContainerManager {
   }
 
   /**
-   * Return the Docker Hub remote path for a default image, or null for non-default images.
+   * Return the remote registry path for a pullable image, or null when the
+   * image has no remote source. The fork has no managed registry — the default
+   * sandbox image is loaded locally from a backup tarball (see sandbox-image.ts),
+   * so this always returns null.
    */
-  static getRegistryImage(localTag: string): string | null {
-    if (localTag === "the-companion:latest") {
-      return `${DOCKER_REGISTRY}/the-companion:latest`;
-    }
+  static getRegistryImage(_localTag: string): string | null {
     return null;
   }
 

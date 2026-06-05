@@ -279,7 +279,7 @@ export function HomePage() {
     void loadBackendModels(backend);
   }, [backend, loadBackendModels]);
 
-  // When sandbox is enabled, check the-companion:latest image status
+  // When sandbox is enabled, check aura-companion-sandbox:latest image status
   useEffect(() => {
     if (sandboxImagePollRef.current) {
       clearInterval(sandboxImagePollRef.current);
@@ -289,7 +289,7 @@ export function HomePage() {
 
     if (!sandboxEnabled) return;
 
-    const effectiveImage = "the-companion:latest";
+    const effectiveImage = "aura-companion-sandbox:latest";
 
     const checkAndPull = () => {
       api.getImageStatus(effectiveImage).then((state) => {
@@ -1197,7 +1197,7 @@ export function HomePage() {
                       sandboxEnabled && !selectedSandbox ? "text-cc-primary font-medium" : "text-cc-fg"
                     }`}
                   >
-                    Default (the-companion:latest)
+                    Default (aura-companion-sandbox:latest)
                   </button>
                   {sandboxes.map((sb) => (
                     <button

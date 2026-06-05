@@ -1379,7 +1379,7 @@ describe("HomePage", () => {
       await act(async () => { fireEvent.click(sandboxBtn); });
 
       // Dropdown opens — select Default to enable sandbox
-      const defaultOption = await screen.findByText("Default (the-companion:latest)");
+      const defaultOption = await screen.findByText("Default (aura-companion-sandbox:latest)");
       await act(async () => { fireEvent.click(defaultOption.closest("button")!); });
 
       expect(localStorage.getItem("cc-sandbox-enabled")).toBe("true");
@@ -1402,7 +1402,7 @@ describe("HomePage", () => {
 
       // The dropdown should show Off, Default, and our sandbox
       await screen.findByText("Off");
-      await screen.findByText("Default (the-companion:latest)");
+      await screen.findByText("Default (aura-companion-sandbox:latest)");
       await screen.findByText("My Sandbox");
     });
 

@@ -3,6 +3,7 @@ import type { Hono } from "hono";
 import * as sandboxManager from "../sandbox-manager.js";
 import { containerManager, type ContainerConfig } from "../container-manager.js";
 import { imagePullManager } from "../image-pull-manager.js";
+import { DEFAULT_SANDBOX_IMAGE } from "../sandbox-image.js";
 
 export function registerSandboxRoutes(
   api: Hono,
@@ -81,7 +82,7 @@ export function registerSandboxRoutes(
 
     if (!containerManager.checkDocker()) return c.json({ error: "Docker is not available" }, 503);
 
-    const effectiveImage = "the-companion:latest";
+    const effectiveImage = DEFAULT_SANDBOX_IMAGE;
     if (!imagePullManager.isReady(effectiveImage)) {
       return c.json({ error: `Docker image ${effectiveImage} is not available. Pull it first.` }, 503);
     }

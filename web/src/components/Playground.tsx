@@ -2713,7 +2713,7 @@ export function Playground() {
                     },
                   ] satisfies CreationProgressEvent[]
                 }
-                error="Failed to pull docker.io/stangirard/the-companion:latest — connection timed out after 30s"
+                error="Image aura-companion-sandbox:latest not available locally — run: docker load -i /root/backUp/aura-companion-sandbox.tar"
               />
             </Card>
             <Card label="With streaming init script logs">
@@ -2883,7 +2883,7 @@ export function Playground() {
                       },
                     ] satisfies CreationProgressEvent[]
                   }
-                  error="Failed to pull docker.io/stangirard/the-companion:latest — connection timed out after 30s"
+                  error="Image aura-companion-sandbox:latest not available locally — run: docker load -i /root/backUp/aura-companion-sandbox.tar"
                   backend="claude"
                   onCancel={() => {}}
                 />
