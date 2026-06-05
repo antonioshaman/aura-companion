@@ -39,6 +39,8 @@ vi.mock("./settings-manager.js", () => ({
 import { WsBridge, type SocketData } from "./ws-bridge.js";
 import { SessionStore } from "./session-store.js";
 import { companionBus } from "./event-bus.js";
+import type { RelaunchExhaustedReason } from "./event-bus-types.js";
+import type { CliFailedReason } from "./cli-failed-frame.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -177,7 +179,7 @@ describe("Phase F — bus subscriber (replay regression, EC-6)", () => {
 
   // Mapping coverage: each cli-launcher reason routes to the
   // correct CliFailedReason via mapClearReasonToCliFailedReason.
-  it.each([
+  it.each<[RelaunchExhaustedReason, CliFailedReason]>([
     ["container_missing", "container_missing"],
     ["container_start_failed", "container_stopped"],
     ["container_binary_missing", "binary_missing"],

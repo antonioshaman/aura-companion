@@ -67,6 +67,7 @@ import {
 } from "./cleanup/drain-selector.js";
 import { recordCleanupEvent } from "./cleanup/cleanup-events.js";
 import type { CliFailedReason } from "./cli-failed-frame.js";
+import type { RelaunchExhaustedReason } from "./event-bus-types.js";
 
 // ─── Bridge ───────────────────────────────────────────────────────────────────
 
@@ -83,21 +84,32 @@ export type BridgeObserverWakeOutcome =
   | { kind: "unsupported_backend" };
 
 /**
- * AURA-LOCAL — PLAN T10 (Phase F). Map the cli-launcher's
- * `clearPidAndPersist` reason string to the closed CliFailedReason
- * union. The 3 structural-failure reasons map 1:1; the 2 observer-
- * prompt failure paths (observer_prompt_config_failed,
- * observer_prompt_source_drift_refused) map to the catch-all
- * `relaunch_exhausted` — the operator-visible UI affordance is
- * the same ("CLI is permanently dead, start a new session").
+ * AURA-LOCAL — PLAN T10 (Phase F). Map the cli-launcher's closed
+ * `RelaunchExhaustedReason` producer union to the closed
+ * `CliFailedReason` wire union. The 3 structural-failure reasons map
+ * 1:1; the 2 observer-prompt failure paths
+ * (observer_prompt_config_failed, observer_prompt_source_drift_refused)
+ * fold into `relaunch_exhausted` — the operator-visible UI affordance
+ * is the same ("CLI is permanently dead, start a new session"). The
+ * switch is exhaustive with a `const _: never` tripwire (no `default`)
+ * so a new producer reason forces an explicit mapping decision rather
+ * than silently degrading to the catch-all.
  */
-function mapClearReasonToCliFailedReason(reason: string): CliFailedReason {
+function mapClearReasonToCliFailedReason(reason: RelaunchExhaustedReason): CliFailedReason {
   switch (reason) {
     case "container_missing": return "container_missing";
     case "container_start_failed": return "container_stopped";
     case "container_binary_missing": return "binary_missing";
-    default: return "relaunch_exhausted";
+    // Both observer-prompt failure paths surface the same operator
+    // affordance as a spent retry budget ("CLI permanently dead, start
+    // a new session"), so they intentionally fold into relaunch_exhausted.
+    case "observer_prompt_config_failed": return "relaunch_exhausted";
+    case "observer_prompt_source_drift_refused": return "relaunch_exhausted";
   }
+  // Exhaustiveness tripwire: a new RelaunchExhaustedReason must be
+  // classified above before it can ship — no silent catch-all degrade.
+  const _: never = reason;
+  return _;
 }
 
 const RETRYABLE_BACKEND_MESSAGE_TYPES = new Set<BrowserOutgoingMessage["type"]>([

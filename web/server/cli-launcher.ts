@@ -35,6 +35,7 @@ import {
 } from "./observer-permissions.js";
 import { containerManager } from "./container-manager.js";
 import { companionBus } from "./event-bus.js";
+import type { RelaunchExhaustedReason } from "./event-bus-types.js";
 import {
   getLegacyCodexHome,
   resolveCompanionCodexSessionHome,
@@ -331,7 +332,7 @@ export class CliLauncher {
    * on the very first `if (!info) return` (session missing entirely;
    * no state to mutate).
    */
-  private clearPidAndPersist(sessionId: string, reason: string): void {
+  private clearPidAndPersist(sessionId: string, reason: RelaunchExhaustedReason): void {
     const info = this.sessions.get(sessionId);
     if (!info) {
       // Defensive: caller already filtered out the "session not found"

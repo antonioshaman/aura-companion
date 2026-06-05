@@ -5,6 +5,23 @@ import type { BrowserIncomingMessage } from "./session-types.js";
 import type { CodexAdapter } from "./codex-adapter.js";
 import type { SessionPhase } from "./session-state-machine.js";
 
+/**
+ * Closed producer-side reason union for `session:relaunch-exhausted`.
+ * `cli-launcher.ts:clearPidAndPersist` emits exactly these five
+ * structural-failure reasons. Consumer-side,
+ * `ws-bridge.ts:mapClearReasonToCliFailedReason` switches each variant
+ * 1:1 to a `CliFailedReason` behind a `const _: never` tripwire — so
+ * adding a sixth producer reason here is a compile error until it is
+ * explicitly classified at the mapper (no silent degrade to the
+ * `relaunch_exhausted` catch-all).
+ */
+export type RelaunchExhaustedReason =
+  | "container_missing"
+  | "container_start_failed"
+  | "container_binary_missing"
+  | "observer_prompt_config_failed"
+  | "observer_prompt_source_drift_refused";
+
 export interface CompanionEventMap {
   // ── Session lifecycle ──────────────────────────────────────────────
 
@@ -69,7 +86,7 @@ export interface CompanionEventMap {
    * the event name on the bus is `session:relaunch-exhausted` to honour
    * the established `session:<verb>-<adverb>` convention.
    */
-  "session:relaunch-exhausted": { sessionId: string; reason: string };
+  "session:relaunch-exhausted": { sessionId: string; reason: RelaunchExhaustedReason };
 
   /** Idle-kill threshold reached with no connected browsers. */
   "session:idle-kill": { sessionId: string };
