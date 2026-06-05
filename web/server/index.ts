@@ -573,8 +573,11 @@ import { log } from "./logger.js";
 import { metricsCollector } from "./metrics-collector.js";
 // AURA-LOCAL: cleanup-subsystem diagnostic surfaces. PLAN T6 (Phase C).
 import { loadCleanupConfig } from "./cleanup/cleanup-config.js";
-import { readMemoryPressure, initMemoryPressureProbe } from "./cleanup/memory-pressure-probe.js";
-import { ageMs } from "./cleanup/age-ms.js";
+import {
+  readMemoryPressure,
+  initMemoryPressureProbe,
+  shouldEmitMemoryPressureWarn,
+} from "./cleanup/memory-pressure-probe.js";
 
 const DIAGNOSTICS_INTERVAL_MS = 5 * 60_000; // every 5 minutes
 
@@ -593,12 +596,11 @@ const diagnosticsCleanupConfig = loadCleanupConfig();
 // the cached resolution without re-emitting.
 initMemoryPressureProbe();
 
-// AURA-LOCAL: 30-min rate-limit floor on the memory-pressure WARN so
-// a sustained throttle doesn't bury the log in identical lines. Module-
-// scope `let` — read + written exclusively inside the diagnostic tick;
-// not test-imported, so the AP-17 reset triplet is not required (no
-// orchestrator suite imports index.ts).
-const MEMORY_PRESSURE_WARN_MIN_INTERVAL_MS = 30 * 60_000;
+// AURA-LOCAL: tracks when the memory-pressure WARN last fired so the
+// pure `shouldEmitMemoryPressureWarn` gate can apply its 30-min rate
+// limit. Module-scope `let` — read + written exclusively inside the
+// diagnostic tick; not test-imported, so the AP-17 reset triplet is not
+// required (no orchestrator suite imports index.ts).
 let lastMemoryPressureWarnAt: number | null = null;
 
 setInterval(() => {
@@ -652,23 +654,32 @@ setInterval(() => {
   // capability-checked: when the cgroup PSI file isn't available
   // (macOS dev, kernel <4.20, cgroup v1) the read short-circuits to
   // {available: false} and the WARN is silently skipped.
-  if (diagnosticsCleanupConfig.memoryPressureWarn.enabled) {
-    const reading = readMemoryPressure();
-    if (reading.available && reading.fullAvg300Us > diagnosticsCleanupConfig.memoryPressureWarn.us) {
-      const sinceLastWarnMs = lastMemoryPressureWarnAt === null
-        ? Number.POSITIVE_INFINITY
-        : ageMs(lastMemoryPressureWarnAt);
-      if (sinceLastWarnMs >= MEMORY_PRESSURE_WARN_MIN_INTERVAL_MS) {
-        log.warn("cleanup", "Memory pressure threshold exceeded", {
-          event: "cli.cleanup.memory_pressure",
-          fullAvg300Us: reading.fullAvg300Us,
-          thresholdUs: diagnosticsCleanupConfig.memoryPressureWarn.us,
-          sessions: snap.gauges.totalActiveSessions,
-          unevictedArchivedCount,
-        });
-        lastMemoryPressureWarnAt = Date.now();
-      }
-    }
+  const warnCfg = diagnosticsCleanupConfig.memoryPressureWarn;
+  const pressureReading = readMemoryPressure();
+  const pressureNowMs = Date.now();
+  if (
+    // `warnCfg.enabled` narrows the threshold-config union so `warnCfg.us`
+    // is available for both the gate input and the payload below.
+    warnCfg.enabled &&
+    shouldEmitMemoryPressureWarn({
+      reading: pressureReading,
+      thresholdUs: warnCfg.us,
+      enabled: warnCfg.enabled,
+      lastWarnAtMs: lastMemoryPressureWarnAt,
+      nowMs: pressureNowMs,
+    }) &&
+    // The helper guarantees availability when it returns true; re-checking
+    // the discriminated union narrows `fullAvg300Us` for the payload.
+    pressureReading.available
+  ) {
+    log.warn("cleanup", "Memory pressure threshold exceeded", {
+      event: "cli.cleanup.memory_pressure",
+      fullAvg300Us: pressureReading.fullAvg300Us,
+      thresholdUs: warnCfg.us,
+      sessions: snap.gauges.totalActiveSessions,
+      unevictedArchivedCount,
+    });
+    lastMemoryPressureWarnAt = pressureNowMs;
   }
 }, DIAGNOSTICS_INTERVAL_MS);
 

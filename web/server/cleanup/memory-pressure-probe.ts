@@ -44,6 +44,7 @@ import {
   realpathSync as defaultRealpathSync,
 } from "node:fs";
 import { log } from "../logger.js";
+import { ageMs } from "./age-ms.js";
 
 const SYS_FS_CGROUP_ROOT = "/sys/fs/cgroup" as const;
 const SYS_FS_CGROUP_PREFIX = `${SYS_FS_CGROUP_ROOT}/` as const;
@@ -252,5 +253,39 @@ export function readMemoryPressure(): MemoryPressureReading {
 function derivePlatformLabel(): string {
   if (process.platform === "linux") return "linux-no-psi";
   return process.platform;
+}
+
+/** Minimum gap between two `cli.cleanup.memory_pressure` WARNs (30 min). */
+export const MEMORY_PRESSURE_WARN_MIN_INTERVAL_MS = 30 * 60_000;
+
+export interface MemoryPressureWarnDecisionInput {
+  readonly reading: MemoryPressureReading;
+  readonly thresholdUs: number;
+  readonly enabled: boolean;
+  /** `null` until the first WARN has ever fired this process. */
+  readonly lastWarnAtMs: number | null;
+  /** Injected clock so the rate-limit boundary is deterministic in tests. */
+  readonly nowMs: number;
+}
+
+/**
+ * Pure decision for the memory-pressure WARN, extracted out of the
+ * diagnostic-tick lambda so the bug-prone edges (exactly-at-threshold,
+ * first-fire, rate-limit suppression) are unit-testable. The tick lambda
+ * just calls this and logs when it returns `true`.
+ *
+ * Gate, in order: feature-flag → capability (fail-closed when the probe is
+ * unavailable) → strictly-above threshold (`>`, never `>=`) → 30-min
+ * rate-limit. The rate-limit routes through `ageMs(lastWarnAtMs, nowMs)`
+ * so a backward clock jump (EC-38) clamps to age 0 and SUPPRESSES the WARN
+ * rather than fail-open — identical semantics to the inline code it replaced.
+ */
+export function shouldEmitMemoryPressureWarn(input: MemoryPressureWarnDecisionInput): boolean {
+  const { reading, thresholdUs, enabled, lastWarnAtMs, nowMs } = input;
+  if (!enabled) return false;
+  if (!reading.available) return false;
+  if (reading.fullAvg300Us <= thresholdUs) return false;
+  if (lastWarnAtMs === null) return true;
+  return ageMs(lastWarnAtMs, nowMs) >= MEMORY_PRESSURE_WARN_MIN_INTERVAL_MS;
 }
 

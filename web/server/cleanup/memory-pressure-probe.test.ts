@@ -5,7 +5,10 @@ import {
   initMemoryPressureProbe,
   pressureMonitorAvailable,
   readMemoryPressure,
+  shouldEmitMemoryPressureWarn,
+  MEMORY_PRESSURE_WARN_MIN_INTERVAL_MS,
 } from "./memory-pressure-probe.js";
+import type { MemoryPressureReading } from "./memory-pressure-probe.js";
 
 // AP-17: every suite that exercises the probe MUST reset the module-scope
 // cache + warn latch + fs adapter in beforeEach/afterEach so neither
@@ -300,5 +303,103 @@ describe("resolveSysFsPath — EC-7 bounds enforcement", () => {
     });
     const probe = initMemoryPressureProbe();
     expect(probe.available).toBe(false);
+  });
+});
+
+// ── shouldEmitMemoryPressureWarn — pure gate boundaries (PLAN T6 review) ──
+// The memory-pressure WARN decision was extracted out of index.ts's
+// diagnostic-tick lambda (which is structurally untestable) into this pure
+// helper so its bug-prone edges get direct coverage: feature-flag,
+// capability fail-closed, the strictly-above-threshold compare, and the
+// 30-min rate-limit (first-fire / suppressed-within / allowed-after).
+// Phase C council review flagged the inline version as having no
+// behavioral test.
+
+describe("shouldEmitMemoryPressureWarn — gate boundaries", () => {
+  const THRESHOLD = 10_000_000; // µs
+  const above: MemoryPressureReading = { available: true, fullAvg300Us: THRESHOLD + 1 };
+  const atThreshold: MemoryPressureReading = { available: true, fullAvg300Us: THRESHOLD };
+  const NOW = 1_000_000_000_000;
+
+  it("does not fire when the feature flag is disabled", () => {
+    expect(
+      shouldEmitMemoryPressureWarn({
+        reading: above,
+        thresholdUs: THRESHOLD,
+        enabled: false,
+        lastWarnAtMs: null,
+        nowMs: NOW,
+      }),
+    ).toBe(false);
+  });
+
+  it("fails closed when the probe reading is unavailable", () => {
+    expect(
+      shouldEmitMemoryPressureWarn({
+        reading: { available: false },
+        thresholdUs: THRESHOLD,
+        enabled: true,
+        lastWarnAtMs: null,
+        nowMs: NOW,
+      }),
+    ).toBe(false);
+  });
+
+  it("does NOT fire exactly at the threshold (`>` not `>=`) but DOES fire just above", () => {
+    const common = { thresholdUs: THRESHOLD, enabled: true, lastWarnAtMs: null, nowMs: NOW };
+    expect(shouldEmitMemoryPressureWarn({ reading: atThreshold, ...common })).toBe(false);
+    expect(shouldEmitMemoryPressureWarn({ reading: above, ...common })).toBe(true);
+  });
+
+  it("fires on the first qualifying tick (lastWarnAtMs === null)", () => {
+    expect(
+      shouldEmitMemoryPressureWarn({
+        reading: above,
+        thresholdUs: THRESHOLD,
+        enabled: true,
+        lastWarnAtMs: null,
+        nowMs: NOW,
+      }),
+    ).toBe(true);
+  });
+
+  it("suppresses a repeat WARN within the 30-min rate-limit window", () => {
+    expect(
+      shouldEmitMemoryPressureWarn({
+        reading: above,
+        thresholdUs: THRESHOLD,
+        enabled: true,
+        // 1ms short of the interval → suppressed.
+        lastWarnAtMs: NOW - (MEMORY_PRESSURE_WARN_MIN_INTERVAL_MS - 1),
+        nowMs: NOW,
+      }),
+    ).toBe(false);
+  });
+
+  it("allows the WARN once the rate-limit window has elapsed (boundary is inclusive)", () => {
+    expect(
+      shouldEmitMemoryPressureWarn({
+        reading: above,
+        thresholdUs: THRESHOLD,
+        enabled: true,
+        // exactly the interval → age === interval → `>=` allows it.
+        lastWarnAtMs: NOW - MEMORY_PRESSURE_WARN_MIN_INTERVAL_MS,
+        nowMs: NOW,
+      }),
+    ).toBe(true);
+  });
+
+  it("suppresses (does not fail-open) when the clock jumps backward (EC-38 clamp)", () => {
+    // lastWarnAtMs in the future relative to nowMs → ageMs clamps to 0 <
+    // interval → suppressed, never a spurious fire on a negative delta.
+    expect(
+      shouldEmitMemoryPressureWarn({
+        reading: above,
+        thresholdUs: THRESHOLD,
+        enabled: true,
+        lastWarnAtMs: NOW + 60_000,
+        nowMs: NOW,
+      }),
+    ).toBe(false);
   });
 });
