@@ -92,7 +92,15 @@ export function ChatView({ sessionId }: { sessionId: string }) {
     newSession();
   }, [setPendingDraftForNextSession, newSession]);
 
-  const showCliBanner = connStatus === "connected" && !cliConnected;
+  // A terminal cli_failed drains cliConnected to false (ws.ts atomic indicator
+  // drain), so without the !cliFailure guard the transient yellow "CLI
+  // disconnected / Reconnect" banner would render on top of the red terminal
+  // CliFailedBanner — offering the exact futile Reconnect affordance the
+  // cliFailed axis exists to suppress (cli-status-slice.ts:4-10). The two axes
+  // are distinct (EC-44): cliConnected = transient transport, cliFailure =
+  // terminal. Terminal wins.
+  const showCliBanner =
+    connStatus === "connected" && !cliConnected && !cliFailure;
 
   // Council Mode: observer half has its permission-mode locked at spawn
   // (EC-1, applyCouncilObserverSpawnConfig). Mounting Composer under the
@@ -142,8 +150,10 @@ export function ChatView({ sessionId }: { sessionId: string }) {
         </div>
       )}
 
-      {/* WebSocket disconnected banner */}
-      {connStatus === "disconnected" && (
+      {/* WebSocket disconnected banner — suppressed on a terminal cli_failed:
+          a dead session is not "reconnecting", and showing the spinner would
+          re-introduce the recovery affordance the terminal banner suppresses. */}
+      {connStatus === "disconnected" && !cliFailure && (
         <div className="px-4 py-2.5 bg-gradient-to-r from-cc-warning/8 to-cc-warning/4 border-b border-cc-warning/15 flex items-center justify-center gap-2 animate-[fadeSlideIn_0.3s_ease-out]">
           <span className="w-3 h-3 rounded-full border-2 border-cc-warning/30 border-t-cc-warning animate-spin" />
           <span className="text-xs text-cc-warning font-medium">

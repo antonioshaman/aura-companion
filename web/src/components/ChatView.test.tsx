@@ -309,6 +309,26 @@ describe("ChatView", () => {
     expect(screen.queryByTestId("permission-banner")).toBeNull();
   });
 
+  // Phase G observer STOP regression: a terminal cli_failed drains cliConnected
+  // to false (ws.ts atomic indicator drain). Without the !cliFailure guard on
+  // showCliBanner, the transient yellow "CLI disconnected / Reconnect" banner
+  // renders SIMULTANEOUSLY with the red terminal CliFailedBanner, re-offering
+  // the futile Reconnect affordance the cliFailed axis exists to suppress.
+  // This test pins the PRODUCTION pairing (cliFailureReason set AND
+  // cliConnected:false — the inverse of setupStore's cliConnected=true default)
+  // and asserts the yellow reconnect banner is absent. Mutation-resistant:
+  // reverting line-95 to drop `&& !cliFailure` makes both assertions fail.
+  it("does NOT render the yellow CLI-disconnected/Reconnect banner alongside the terminal CliFailedBanner (production pairing: cliConnected=false + cliFailure set)", () => {
+    setupStore({ cliFailureReason: "relaunch_exhausted", cliConnected: false });
+    render(<ChatView sessionId="s1" />);
+    // Terminal banner present...
+    expect(screen.getByTestId("cli-failed-banner")).toBeTruthy();
+    // ...and the transient yellow recovery banner is NOT.
+    expect(screen.queryByText("CLI disconnected")).toBeNull();
+    expect(screen.queryByRole("button", { name: /reconnect/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /retry/i })).toBeNull();
+  });
+
   it("permission banner WINS over cliFailed when both are present (Friedman R8 stacking)", () => {
     setupStore({ cliFailureReason: "relaunch_exhausted", hasPendingPerms: true });
     render(<ChatView sessionId="s1" />);
