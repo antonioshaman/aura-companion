@@ -18,21 +18,11 @@ interface MockStoreState {
   notificationDesktop: boolean;
   diffBase: string;
   publicUrl: string;
-  updateInfo: {
-    currentVersion: string;
-    latestVersion: string | null;
-    updateAvailable: boolean;
-    isServiceMode: boolean;
-    updateInProgress: boolean;
-    lastChecked: number;
-  } | null;
   toggleDarkMode: ReturnType<typeof vi.fn>;
   toggleNotificationSound: ReturnType<typeof vi.fn>;
   setNotificationDesktop: ReturnType<typeof vi.fn>;
   setDiffBase: ReturnType<typeof vi.fn>;
   setPublicUrl: ReturnType<typeof vi.fn>;
-  setUpdateInfo: ReturnType<typeof vi.fn>;
-  setUpdateOverlayActive: ReturnType<typeof vi.fn>;
   setEditorTabEnabled: ReturnType<typeof vi.fn>;
 }
 
@@ -45,14 +35,11 @@ function createMockState(overrides: Partial<MockStoreState> = {}): MockStoreStat
     notificationDesktop: false,
     diffBase: "last-commit",
     publicUrl: "",
-    updateInfo: null,
     toggleDarkMode: vi.fn(),
     toggleNotificationSound: vi.fn(),
     setNotificationDesktop: vi.fn(),
     setDiffBase: vi.fn(),
     setPublicUrl: vi.fn(),
-    setUpdateInfo: vi.fn(),
-    setUpdateOverlayActive: vi.fn(),
     setEditorTabEnabled: vi.fn(),
     ...overrides,
   };
@@ -61,8 +48,6 @@ function createMockState(overrides: Partial<MockStoreState> = {}): MockStoreStat
 const mockApi = {
   getSettings: vi.fn(),
   updateSettings: vi.fn(),
-  forceCheckForUpdate: vi.fn(),
-  triggerUpdate: vi.fn(),
   getAuthToken: vi.fn(),
   regenerateAuthToken: vi.fn(),
   getAuthQr: vi.fn(),
@@ -78,8 +63,6 @@ vi.mock("../api.js", () => ({
   api: {
     getSettings: (...args: unknown[]) => mockApi.getSettings(...args),
     updateSettings: (...args: unknown[]) => mockApi.updateSettings(...args),
-    forceCheckForUpdate: (...args: unknown[]) => mockApi.forceCheckForUpdate(...args),
-    triggerUpdate: (...args: unknown[]) => mockApi.triggerUpdate(...args),
     getAuthToken: (...args: unknown[]) => mockApi.getAuthToken(...args),
     regenerateAuthToken: (...args: unknown[]) => mockApi.regenerateAuthToken(...args),
     getAuthQr: (...args: unknown[]) => mockApi.getAuthQr(...args),
@@ -121,19 +104,6 @@ beforeEach(() => {
     linearAutoTransitionStateName: "",
     updateChannel: "stable",
     publicUrl: "",
-  });
-  mockApi.forceCheckForUpdate.mockResolvedValue({
-    currentVersion: "0.22.1",
-    latestVersion: null,
-    updateAvailable: false,
-    isServiceMode: false,
-    updateInProgress: false,
-    lastChecked: Date.now(),
-    channel: "stable",
-  });
-  mockApi.triggerUpdate.mockResolvedValue({
-    ok: true,
-    message: "Update started. Server will restart shortly.",
   });
   mockApi.getAuthToken.mockResolvedValue({ token: "abc123testtoken" });
   mockApi.regenerateAuthToken.mockResolvedValue({ token: "newtoken456" });
@@ -375,54 +345,6 @@ describe("SettingsPage", () => {
     vi.unstubAllGlobals();
   });
 
-  it("checks for updates from settings and stores update info", async () => {
-    mockApi.forceCheckForUpdate.mockResolvedValueOnce({
-      currentVersion: "0.22.1",
-      latestVersion: "0.23.0",
-      updateAvailable: true,
-      isServiceMode: true,
-      updateInProgress: false,
-      lastChecked: Date.now(),
-      channel: "stable",
-    });
-
-    render(<SettingsPage />);
-    await screen.findByText("Anthropic key configured");
-    fireEvent.click(screen.getByRole("button", { name: "Check for updates" }));
-
-    await waitFor(() => {
-      expect(mockApi.forceCheckForUpdate).toHaveBeenCalledTimes(1);
-      expect(mockState.setUpdateInfo).toHaveBeenCalledWith(expect.objectContaining({
-        latestVersion: "0.23.0",
-        updateAvailable: true,
-      }));
-    });
-    expect(await screen.findByText("Update v0.23.0 is available.")).toBeInTheDocument();
-  });
-
-  it("triggers app update from settings when service mode is enabled", async () => {
-    mockState = createMockState({
-      updateInfo: {
-        currentVersion: "0.22.1",
-        latestVersion: "0.23.0",
-        updateAvailable: true,
-        isServiceMode: true,
-        updateInProgress: false,
-        lastChecked: Date.now(),
-      },
-    });
-    render(<SettingsPage />);
-    await screen.findByText("Anthropic key configured");
-
-    fireEvent.click(screen.getByRole("button", { name: "Update & Restart" }));
-
-    await waitFor(() => {
-      expect(mockApi.triggerUpdate).toHaveBeenCalledTimes(1);
-    });
-    expect(mockState.setUpdateOverlayActive).toHaveBeenCalledWith(true);
-    expect(await screen.findByText("Update started. Server will restart shortly.")).toBeInTheDocument();
-  });
-
   // Verify left sidebar nav renders category labels for quick navigation
   it("renders category navigation with all section labels", async () => {
     render(<SettingsPage />);
@@ -446,7 +368,6 @@ describe("SettingsPage", () => {
     expect(document.getElementById("authentication")).toBeInTheDocument();
     expect(document.getElementById("notifications")).toBeInTheDocument();
     expect(document.getElementById("anthropic")).toBeInTheDocument();
-    expect(document.getElementById("updates")).toBeInTheDocument();
     expect(document.getElementById("telemetry")).toBeInTheDocument();
     expect(document.getElementById("environments")).toBeInTheDocument();
   });
@@ -885,158 +806,6 @@ describe("SettingsPage", () => {
 
     const aiValButtons = screen.getAllByRole("button", { name: "AI Validation" });
     expect(aiValButtons.length).toBeGreaterThanOrEqual(1);
-  });
-
-  // ─── Update Channel section tests ──────────────────────────────────
-
-  // The update channel selector renders with Stable selected by default.
-  it("renders update channel selector with Stable selected by default", async () => {
-    render(<SettingsPage />);
-    await screen.findByText("Anthropic key configured");
-
-    expect(screen.getByText("Stable")).toBeInTheDocument();
-    expect(screen.getByText("Prerelease")).toBeInTheDocument();
-    expect(screen.getByText(/Tracking stable channel/)).toBeInTheDocument();
-  });
-
-  // When settings load with prerelease channel, it shows the prerelease description.
-  it("shows prerelease description when channel is prerelease", async () => {
-    mockApi.getSettings.mockResolvedValueOnce({
-      anthropicApiKeyConfigured: true,
-      anthropicModel: "claude-sonnet-4-6",
-      linearApiKeyConfigured: false,
-      linearAutoTransition: false,
-      linearAutoTransitionStateName: "",
-      updateChannel: "prerelease",
-    });
-
-    render(<SettingsPage />);
-    await screen.findByText("Anthropic key configured");
-
-    expect(screen.getByText(/Tracking prerelease channel/)).toBeInTheDocument();
-  });
-
-  // Clicking Prerelease calls updateSettings and re-checks for updates.
-  it("switches to prerelease channel and re-checks updates", async () => {
-    mockApi.updateSettings.mockResolvedValueOnce({
-      anthropicApiKeyConfigured: true,
-      anthropicModel: "claude-sonnet-4-6",
-      linearApiKeyConfigured: false,
-      linearAutoTransition: false,
-      linearAutoTransitionStateName: "",
-      updateChannel: "prerelease",
-    });
-    mockApi.forceCheckForUpdate.mockResolvedValueOnce({
-      currentVersion: "0.66.0",
-      latestVersion: "0.67.0-preview.1",
-      updateAvailable: true,
-      isServiceMode: false,
-      updateInProgress: false,
-      lastChecked: Date.now(),
-      channel: "prerelease",
-    });
-
-    render(<SettingsPage />);
-    await screen.findByText("Anthropic key configured");
-
-    fireEvent.click(screen.getByText("Prerelease"));
-
-    await waitFor(() => {
-      expect(mockApi.updateSettings).toHaveBeenCalledWith({ updateChannel: "prerelease" });
-    });
-    await waitFor(() => {
-      expect(mockApi.forceCheckForUpdate).toHaveBeenCalled();
-    });
-  });
-
-  // Clicking Stable when already on stable is a no-op (doesn't call updateSettings).
-  it("does not call updateSettings when clicking already-selected channel", async () => {
-    render(<SettingsPage />);
-    await screen.findByText("Anthropic key configured");
-
-    fireEvent.click(screen.getByText("Stable"));
-
-    // Should not have called updateSettings since stable is already selected
-    expect(mockApi.updateSettings).not.toHaveBeenCalled();
-  });
-
-  // ─── Docker Auto-Update toggle tests ──────────────────────────────────
-
-  // The Docker auto-update toggle renders in the Updates section and calls
-  // updateSettings with dockerAutoUpdate when clicked.
-  it("toggles dockerAutoUpdate and calls updateSettings", async () => {
-    mockApi.getSettings.mockResolvedValueOnce({
-      anthropicApiKeyConfigured: true,
-      anthropicModel: "claude-sonnet-4-6",
-      linearApiKeyConfigured: false,
-      linearAutoTransition: false,
-      linearAutoTransitionStateName: "",
-      updateChannel: "stable",
-      dockerAutoUpdate: false,
-    });
-
-    render(<SettingsPage />);
-    await screen.findByText("Anthropic key configured");
-
-    // Find the toggle by its role=switch and aria-checked attribute
-    const toggle = screen.getByRole("switch", { name: "" });
-    expect(toggle).toHaveAttribute("aria-checked", "false");
-
-    // Click to enable
-    fireEvent.click(toggle);
-
-    await waitFor(() => {
-      expect(mockApi.updateSettings).toHaveBeenCalledWith({ dockerAutoUpdate: true });
-    });
-  });
-
-  // When the API call for dockerAutoUpdate fails, the toggle should revert
-  // to its previous value (optimistic update rollback).
-  it("reverts dockerAutoUpdate toggle on API failure", async () => {
-    mockApi.getSettings.mockResolvedValueOnce({
-      anthropicApiKeyConfigured: true,
-      anthropicModel: "claude-sonnet-4-6",
-      linearApiKeyConfigured: false,
-      linearAutoTransition: false,
-      linearAutoTransitionStateName: "",
-      updateChannel: "stable",
-      dockerAutoUpdate: false,
-    });
-    mockApi.updateSettings.mockRejectedValueOnce(new Error("network error"));
-
-    render(<SettingsPage />);
-    await screen.findByText("Anthropic key configured");
-
-    const toggle = screen.getByRole("switch", { name: "" });
-    expect(toggle).toHaveAttribute("aria-checked", "false");
-
-    // Click to enable — optimistic update sets it to true
-    fireEvent.click(toggle);
-
-    // After the API rejects, the toggle should revert back to false
-    await waitFor(() => {
-      expect(toggle).toHaveAttribute("aria-checked", "false");
-    });
-  });
-
-  // When settings load with dockerAutoUpdate: true, the toggle should
-  // reflect the enabled state.
-  it("shows dockerAutoUpdate as enabled when loaded from settings", async () => {
-    mockApi.getSettings.mockResolvedValueOnce({
-      anthropicApiKeyConfigured: true,
-      anthropicModel: "claude-sonnet-4-6",
-      linearApiKeyConfigured: false,
-      linearAutoTransition: false,
-      linearAutoTransitionStateName: "",
-      updateChannel: "stable",
-      dockerAutoUpdate: true,
-    });
-
-    render(<SettingsPage />);
-    await screen.findByText("Anthropic key configured");
-
-    const toggle = screen.getByRole("switch", { name: "" });
-    expect(toggle).toHaveAttribute("aria-checked", "true");
   });
 
   // ─── Webhooks section tests ──────────────────────────────────

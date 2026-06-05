@@ -107,7 +107,7 @@ function oldPlistPath(): string {
 }
 
 function unitPath(): string {
-  return join(tempDir, ".config", "systemd", "user", "the-companion.service");
+  return join(tempDir, ".config", "systemd", "user", "aura-companion.service");
 }
 
 function logDir(): string {
@@ -650,7 +650,7 @@ describe("start (linux)", () => {
     await service.start();
 
     const startCall = mockExecSync.mock.calls.find(
-      ([cmd]) => typeof cmd === "string" && cmd.includes("start the-companion.service"),
+      ([cmd]) => typeof cmd === "string" && cmd.includes("start aura-companion.service"),
     );
     expect(startCall).toBeDefined();
   });
@@ -799,7 +799,7 @@ describe("stop (linux)", () => {
     await service.stop();
 
     const stopCall = mockExecSync.mock.calls.find(
-      ([cmd]) => typeof cmd === "string" && cmd.includes("stop the-companion.service"),
+      ([cmd]) => typeof cmd === "string" && cmd.includes("stop aura-companion.service"),
     );
     expect(stopCall).toBeDefined();
   });
@@ -874,7 +874,7 @@ describe("restart (linux)", () => {
     await service.restart();
 
     const restartCall = mockExecSync.mock.calls.find(
-      ([cmd]) => typeof cmd === "string" && cmd.includes("restart the-companion.service"),
+      ([cmd]) => typeof cmd === "string" && cmd.includes("restart aura-companion.service"),
     );
     expect(restartCall).toBeDefined();
   });
@@ -1041,7 +1041,7 @@ describe("status (linux)", () => {
     service = await import("./service.js");
     mockExecSync.mockReset();
     mockExecSync.mockImplementation((cmd: string) => {
-      if (typeof cmd === "string" && cmd.includes("show the-companion.service")) {
+      if (typeof cmd === "string" && cmd.includes("show aura-companion.service")) {
         return "ActiveState=active\nMainPID=54321\n";
       }
       return "";
@@ -1067,7 +1067,7 @@ describe("status (linux)", () => {
     service = await import("./service.js");
     mockExecSync.mockReset();
     mockExecSync.mockImplementation((cmd: string) => {
-      if (typeof cmd === "string" && cmd.includes("show the-companion.service")) {
+      if (typeof cmd === "string" && cmd.includes("show aura-companion.service")) {
         return "ActiveState=inactive\nMainPID=0\n";
       }
       return "";
@@ -1090,7 +1090,7 @@ describe("status (linux)", () => {
     service = await import("./service.js");
     mockExecSync.mockReset();
     mockExecSync.mockImplementation((cmd: string) => {
-      if (typeof cmd === "string" && cmd.includes("show the-companion.service")) {
+      if (typeof cmd === "string" && cmd.includes("show aura-companion.service")) {
         return "ActiveState=active\nMainPID=1234\n";
       }
       return "";

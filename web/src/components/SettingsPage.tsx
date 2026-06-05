@@ -16,7 +16,6 @@ const CATEGORIES = [
   { id: "providers", label: "Providers" },
   { id: "anthropic", label: "Anthropic" },
   { id: "ai-validation", label: "AI Validation" },
-  { id: "updates", label: "Updates" },
   { id: "telemetry", label: "Telemetry" },
   { id: "environments", label: "Environments" },
 ] as const;
@@ -39,16 +38,7 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
   const toggleNotificationSound = useStore((s) => s.toggleNotificationSound);
   const notificationDesktop = useStore((s) => s.notificationDesktop);
   const setNotificationDesktop = useStore((s) => s.setNotificationDesktop);
-  const updateInfo = useStore((s) => s.updateInfo);
-  const setUpdateInfo = useStore((s) => s.setUpdateInfo);
-  const setUpdateOverlayActive = useStore((s) => s.setUpdateOverlayActive);
   const notificationApiAvailable = typeof Notification !== "undefined";
-  const [updateChannel, setUpdateChannel] = useState<"stable" | "prerelease">("stable");
-  const [dockerAutoUpdate, setDockerAutoUpdate] = useState(false);
-  const [checkingUpdates, setCheckingUpdates] = useState(false);
-  const [updatingApp, setUpdatingApp] = useState(false);
-  const [updateStatus, setUpdateStatus] = useState("");
-  const [updateError, setUpdateError] = useState("");
   const [telemetryEnabled, setTelemetryEnabled] = useState(getTelemetryPreferenceEnabled());
   const [aiValidationEnabled, setAiValidationEnabled] = useState(false);
   const [aiValidationAutoApprove, setAiValidationAutoApprove] = useState(true);
@@ -171,8 +161,6 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
         if (typeof s.aiValidationEnabled === "boolean") setAiValidationEnabled(s.aiValidationEnabled);
         if (typeof s.aiValidationAutoApprove === "boolean") setAiValidationAutoApprove(s.aiValidationAutoApprove);
         if (typeof s.aiValidationAutoDeny === "boolean") setAiValidationAutoDeny(s.aiValidationAutoDeny);
-        if (s.updateChannel === "stable" || s.updateChannel === "prerelease") setUpdateChannel(s.updateChannel);
-        if (typeof s.dockerAutoUpdate === "boolean") setDockerAutoUpdate(s.dockerAutoUpdate);
         if (typeof s.publicUrl === "string") {
           setPublicUrl(s.publicUrl);
           useStore.getState().setPublicUrl(s.publicUrl);
@@ -245,42 +233,6 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
       if (field === "aiValidationEnabled") setAiValidationEnabled(current);
       else if (field === "aiValidationAutoApprove") setAiValidationAutoApprove(current);
       else setAiValidationAutoDeny(current);
-    }
-  }
-
-  async function onCheckUpdates() {
-    setCheckingUpdates(true);
-    setUpdateStatus("");
-    setUpdateError("");
-    try {
-      const info = await api.forceCheckForUpdate();
-      setUpdateInfo(info);
-      if (info.updateAvailable && info.latestVersion) {
-        setUpdateStatus(`Update v${info.latestVersion} is available.`);
-      } else {
-        setUpdateStatus("You are up to date.");
-      }
-    } catch (err: unknown) {
-      setUpdateError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setCheckingUpdates(false);
-    }
-  }
-
-  async function onTriggerUpdate() {
-    setUpdatingApp(true);
-    setUpdateStatus("");
-    setUpdateError("");
-    try {
-      // Flag so the Docker image update dialog appears after restart
-      localStorage.setItem("companion_docker_prompt_pending", "1");
-      const res = await api.triggerUpdate();
-      setUpdateStatus(res.message);
-      setUpdateOverlayActive(true);
-    } catch (err: unknown) {
-      localStorage.removeItem("companion_docker_prompt_pending");
-      setUpdateError(err instanceof Error ? err.message : String(err));
-      setUpdatingApp(false);
     }
   }
 
@@ -915,165 +867,6 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                     </button>
                   </>
                 )}
-              </div>
-            </section>
-
-            {/* Updates */}
-            <section id="updates" ref={setSectionRef("updates")}>
-              <h2 className="text-sm font-semibold text-cc-fg mb-4">Updates</h2>
-              <div className="space-y-3">
-                {updateInfo ? (
-                  <p className="text-xs text-cc-muted">
-                    Current version: v{updateInfo.currentVersion}
-                    {updateInfo.latestVersion ? ` • Latest: v${updateInfo.latestVersion}` : ""}
-                    {updateInfo.channel === "prerelease" ? " (prerelease)" : ""}
-                  </p>
-                ) : (
-                  <p className="text-xs text-cc-muted">Version information not loaded yet.</p>
-                )}
-
-                <div>
-                  <span id="update-channel-label" className="block text-sm font-medium mb-1.5">
-                    Update Channel
-                  </span>
-                  <div className="flex gap-1" role="radiogroup" aria-labelledby="update-channel-label">
-                    <button
-                      type="button"
-                      role="radio"
-                      aria-checked={updateChannel === "stable"}
-                      onClick={async () => {
-                        if (updateChannel === "stable") return;
-                        setUpdateChannel("stable");
-                        try {
-                          await api.updateSettings({ updateChannel: "stable" });
-                        } catch {
-                          setUpdateChannel("prerelease");
-                          return;
-                        }
-                        try {
-                          const info = await api.forceCheckForUpdate();
-                          setUpdateInfo(info);
-                        } catch { /* settings saved; swallow check error */ }
-                      }}
-                      className={`px-3 py-2 min-h-[44px] rounded-lg text-sm font-medium transition-colors cursor-pointer ${
-                        updateChannel === "stable"
-                          ? "bg-cc-primary text-white"
-                          : "bg-cc-hover text-cc-muted hover:text-cc-fg hover:bg-cc-active"
-                      }`}
-                    >
-                      Stable
-                    </button>
-                    <button
-                      type="button"
-                      role="radio"
-                      aria-checked={updateChannel === "prerelease"}
-                      onClick={async () => {
-                        if (updateChannel === "prerelease") return;
-                        setUpdateChannel("prerelease");
-                        try {
-                          await api.updateSettings({ updateChannel: "prerelease" });
-                        } catch {
-                          setUpdateChannel("stable");
-                          return;
-                        }
-                        try {
-                          const info = await api.forceCheckForUpdate();
-                          setUpdateInfo(info);
-                        } catch { /* settings saved; swallow check error */ }
-                      }}
-                      className={`px-3 py-2 min-h-[44px] rounded-lg text-sm font-medium transition-colors cursor-pointer ${
-                        updateChannel === "prerelease"
-                          ? "bg-cc-primary text-white"
-                          : "bg-cc-hover text-cc-muted hover:text-cc-fg hover:bg-cc-active"
-                      }`}
-                    >
-                      Prerelease
-                    </button>
-                  </div>
-                  <p className="mt-1.5 text-xs text-cc-muted">
-                    {updateChannel === "prerelease"
-                      ? "Tracking prerelease channel. You will receive preview builds from the latest main branch."
-                      : "Tracking stable channel. You will only receive versioned releases."}
-                  </p>
-                </div>
-
-                <div className="flex items-center justify-between">
-                  <div>
-                    <span className="block text-sm font-medium">Auto-update Docker image</span>
-                    <p className="mt-0.5 text-xs text-cc-muted">
-                      Automatically re-pull the sandbox Docker image when updating Aura Companion
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={dockerAutoUpdate}
-                    onClick={async () => {
-                      const next = !dockerAutoUpdate;
-                      setDockerAutoUpdate(next);
-                      try {
-                        await api.updateSettings({ dockerAutoUpdate: next });
-                      } catch {
-                        setDockerAutoUpdate(!next);
-                      }
-                    }}
-                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${
-                      dockerAutoUpdate ? "bg-cc-primary" : "bg-cc-hover"
-                    }`}
-                  >
-                    <span
-                      className={`pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transform transition-transform ${
-                        dockerAutoUpdate ? "translate-x-5" : "translate-x-0"
-                      }`}
-                    />
-                  </button>
-                </div>
-
-                {updateError && (
-                  <div className="px-3 py-2 rounded-lg bg-cc-error/10 border border-cc-error/20 text-xs text-cc-error">
-                    {updateError}
-                  </div>
-                )}
-
-                {updateStatus && (
-                  <div className="px-3 py-2 rounded-lg bg-cc-success/10 border border-cc-success/20 text-xs text-cc-success">
-                    {updateStatus}
-                  </div>
-                )}
-
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    onClick={onCheckUpdates}
-                    disabled={checkingUpdates}
-                    className={`px-3 py-2 min-h-[44px] rounded-lg text-sm font-medium transition-colors ${
-                      checkingUpdates
-                        ? "bg-cc-hover text-cc-muted cursor-not-allowed"
-                        : "bg-cc-hover hover:bg-cc-active text-cc-fg cursor-pointer"
-                    }`}
-                  >
-                    {checkingUpdates ? "Checking..." : "Check for updates"}
-                  </button>
-
-                  {updateInfo?.isServiceMode ? (
-                    <button
-                      type="button"
-                      onClick={onTriggerUpdate}
-                      disabled={updatingApp || updateInfo.updateInProgress || !updateInfo.updateAvailable}
-                      className={`px-3 py-2 min-h-[44px] rounded-lg text-sm font-medium transition-colors ${
-                        updatingApp || updateInfo.updateInProgress || !updateInfo.updateAvailable
-                          ? "bg-cc-hover text-cc-muted cursor-not-allowed"
-                          : "bg-cc-primary hover:bg-cc-primary-hover text-white cursor-pointer"
-                      }`}
-                    >
-                      {updatingApp || updateInfo.updateInProgress ? "Updating..." : "Update & Restart"}
-                    </button>
-                  ) : (
-                    <p className="text-xs text-cc-muted self-center">
-                      Install service mode with <code className="font-mono-code bg-cc-code-bg px-1 py-0.5 rounded text-cc-code-fg">the-companion install</code> to enable one-click updates.
-                    </p>
-                  )}
-                </div>
               </div>
             </section>
 

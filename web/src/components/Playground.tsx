@@ -11,7 +11,6 @@ import {
 import { DiffViewer } from "./DiffViewer.js";
 import { useStore } from "../store.js";
 import { navigateToSession, navigateHome } from "../utils/routing.js";
-import { UpdateBanner } from "./UpdateBanner.js";
 import { ClaudeMdEditor } from "./ClaudeMdEditor.js";
 import { ChatView } from "./ChatView.js";
 import { EmptyChatState } from "./chat/EmptyChatState.js";
@@ -41,7 +40,6 @@ import { ToolTurnSummary } from "./ToolTurnSummary.js";
 import type { ToolActivityEntry } from "../store/tasks-slice.js";
 import type { TaskItem } from "../types.js";
 import type {
-  UpdateInfo,
   GitHubPRInfo,
   LinearIssue,
   LinearComment,
@@ -54,7 +52,6 @@ import {
 import { LinearLogo } from "./LinearLogo.js";
 import { SessionCreationProgress } from "./SessionCreationProgress.js";
 import { SessionLaunchOverlay } from "./SessionLaunchOverlay.js";
-import { PlaygroundUpdateOverlay } from "./UpdateOverlay.js";
 import { PlaygroundDockerUpdateDialog } from "./DockerUpdateDialog.js";
 import { SessionItem } from "./SessionItem.js";
 import { CliFailedBanner } from "./CliFailedBanner.js";
@@ -1971,67 +1968,6 @@ export function Playground() {
           </div>
         </Section>
 
-        {/* ─── Update Banner ──────────────────────────────── */}
-        <Section
-          title="Update Banner"
-          description="Notification banner for available updates"
-        >
-          <div className="space-y-4 max-w-3xl">
-            <Card label="Service mode (auto-update)">
-              <PlaygroundUpdateBanner
-                updateInfo={{
-                  currentVersion: "0.22.1",
-                  latestVersion: "0.23.0",
-                  updateAvailable: true,
-                  isServiceMode: true,
-                  updateInProgress: false,
-                  lastChecked: Date.now(),
-                  channel: "stable",
-                }}
-              />
-            </Card>
-            <Card label="Foreground mode (manual)">
-              <PlaygroundUpdateBanner
-                updateInfo={{
-                  currentVersion: "0.22.1",
-                  latestVersion: "0.23.0",
-                  updateAvailable: true,
-                  isServiceMode: false,
-                  updateInProgress: false,
-                  lastChecked: Date.now(),
-                  channel: "stable",
-                }}
-              />
-            </Card>
-            <Card label="Update in progress">
-              <PlaygroundUpdateBanner
-                updateInfo={{
-                  currentVersion: "0.22.1",
-                  latestVersion: "0.23.0",
-                  updateAvailable: true,
-                  isServiceMode: true,
-                  updateInProgress: true,
-                  lastChecked: Date.now(),
-                  channel: "stable",
-                }}
-              />
-            </Card>
-            <Card label="Prerelease channel update">
-              <PlaygroundUpdateBanner
-                updateInfo={{
-                  currentVersion: "0.22.1",
-                  latestVersion: "0.23.0-preview.20260228120000.abc1234",
-                  updateAvailable: true,
-                  isServiceMode: true,
-                  updateInProgress: false,
-                  lastChecked: Date.now(),
-                  channel: "prerelease",
-                }}
-              />
-            </Card>
-          </div>
-        </Section>
-
         {/* ─── Status Indicators ──────────────────────────────── */}
         <Section
           title="Status Indicators"
@@ -2909,34 +2845,6 @@ export function Playground() {
                   backend="codex"
                   onCancel={() => {}}
                 />
-              </div>
-            </Card>
-          </div>
-        </Section>
-        {/* ─── Update Overlay ──────────────────────────── */}
-        <Section
-          title="Update Overlay"
-          description="Full-screen overlay shown when auto-update is in progress, polls server and reloads when ready"
-        >
-          <div className="space-y-4">
-            <Card label="Installing phase">
-              <div className="relative h-[360px] bg-cc-bg rounded-lg overflow-hidden border border-cc-border">
-                <PlaygroundUpdateOverlay phase="installing" />
-              </div>
-            </Card>
-            <Card label="Restarting phase">
-              <div className="relative h-[360px] bg-cc-bg rounded-lg overflow-hidden border border-cc-border">
-                <PlaygroundUpdateOverlay phase="restarting" />
-              </div>
-            </Card>
-            <Card label="Waiting for server">
-              <div className="relative h-[360px] bg-cc-bg rounded-lg overflow-hidden border border-cc-border">
-                <PlaygroundUpdateOverlay phase="waiting" />
-              </div>
-            </Card>
-            <Card label="Update complete">
-              <div className="relative h-[360px] bg-cc-bg rounded-lg overflow-hidden border border-cc-border">
-                <PlaygroundUpdateOverlay phase="ready" />
               </div>
             </Card>
           </div>
@@ -4162,28 +4070,6 @@ function CodexPlaygroundDemo() {
       <CodexTokenDetailsSection sessionId={CODEX_DEMO_SESSION} />
     </div>
   );
-}
-
-// ─── Inline UpdateBanner (sets store state for playground preview) ───────────
-
-function PlaygroundUpdateBanner({ updateInfo }: { updateInfo: UpdateInfo }) {
-  useEffect(() => {
-    const prev = useStore.getState().updateInfo;
-    const prevDismissed = useStore.getState().updateDismissedVersion;
-    useStore.getState().setUpdateInfo(updateInfo);
-    // Clear any dismiss so the banner shows
-    if (prevDismissed) {
-      useStore.setState({ updateDismissedVersion: null });
-    }
-    return () => {
-      useStore.getState().setUpdateInfo(prev);
-      if (prevDismissed) {
-        useStore.setState({ updateDismissedVersion: prevDismissed });
-      }
-    };
-  }, [updateInfo]);
-
-  return <UpdateBanner />;
 }
 
 // ─── Inline ClaudeMd Button (opens the real editor modal) ───────────────────

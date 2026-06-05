@@ -5,9 +5,14 @@ import { useStore } from "../store.js";
 type DialogPhase = "prompt" | "pulling" | "done" | "error";
 
 /**
- * DockerUpdateDialog — shown after an app update completes to ask the user
- * whether they also want to re-pull the sandbox Docker image.
- * Includes a toggle to persist the "always update" preference (dockerAutoUpdate).
+ * DockerUpdateDialog — re-pull prompt for the sandbox Docker image.
+ *
+ * LEGACY / DORMANT: this dialog has no production trigger. Its only opener was
+ * the post-self-update `companion_docker_prompt_pending` localStorage flag, which
+ * was removed when the CLI self-update subsystem was severed. The component and its
+ * store state (`dockerUpdateDialogOpen` / `dockerAutoUpdate`) are kept intact so a
+ * future manual entry point (e.g. a Settings button) can wire it back up. Until then
+ * it is never mounted-open in production. Inherited from the upstream fork.
  */
 export function DockerUpdateDialog() {
   const open = useStore((s) => s.dockerUpdateDialogOpen);

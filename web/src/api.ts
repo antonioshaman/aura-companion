@@ -357,16 +357,6 @@ export interface TreeNode {
   children?: TreeNode[];
 }
 
-export interface UpdateInfo {
-  currentVersion: string;
-  latestVersion: string | null;
-  updateAvailable: boolean;
-  isServiceMode: boolean;
-  updateInProgress: boolean;
-  lastChecked: number;
-  channel: "stable" | "prerelease";
-}
-
 export interface UsageLimits {
   five_hour: { utilization: number; resets_at: string | null } | null;
   seven_day: { utilization: number; resets_at: string | null } | null;
@@ -1236,12 +1226,6 @@ export const api = {
         ? `/terminal?terminalId=${encodeURIComponent(terminalId)}`
         : "/terminal",
     ),
-
-  // Update checking
-  checkForUpdate: () => get<UpdateInfo>("/update-check"),
-  forceCheckForUpdate: () => post<UpdateInfo>("/update-check"),
-  triggerUpdate: () =>
-    post<{ ok: boolean; message: string }>("/update"),
 
   // Cron jobs
   listCronJobs: () => get<CronJobInfo[]>("/cron/jobs"),
