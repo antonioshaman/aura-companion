@@ -7,6 +7,7 @@ import type { BackendType, CreationStepId, SessionGroupRole } from "./session-ty
 import type { ContainerConfig, ContainerInfo } from "./container-manager.js";
 import { containerManager } from "./container-manager.js";
 import { imagePullManager } from "./image-pull-manager.js";
+import { DEFAULT_SANDBOX_IMAGE } from "./sandbox-image.js";
 import * as envManager from "./env-manager.js";
 import { ConvergenceTracker } from "./convergence-tracker.js";
 import * as sandboxManager from "./sandbox-manager.js";
@@ -2525,7 +2526,7 @@ export class SessionOrchestrator {
       // Resolve Docker image early
       let effectiveImage: string | null = null;
       if (sandboxEnabled) {
-        effectiveImage = "the-companion:latest";
+        effectiveImage = DEFAULT_SANDBOX_IMAGE;
       } else if (body.container?.image) {
         effectiveImage = body.container.image;
       }
@@ -2676,7 +2677,7 @@ export class SessionOrchestrator {
           ports: containerPorts,
           volumes: body.container?.volumes,
           env: { ...(envVars ?? {}), DISPLAY: ":99" },
-          privileged: sandboxEnabled && effectiveImage === "the-companion:latest",
+          privileged: sandboxEnabled && effectiveImage === DEFAULT_SANDBOX_IMAGE,
         };
         try {
           containerInfo = containerManager.createContainer(tempId, cwd!, cConfig);

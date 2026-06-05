@@ -4,6 +4,7 @@ import { join } from "node:path";
 import * as envManager from "../env-manager.js";
 import { containerManager } from "../container-manager.js";
 import { imagePullManager } from "../image-pull-manager.js";
+import { DEFAULT_SANDBOX_IMAGE } from "../sandbox-image.js";
 
 export function registerEnvRoutes(
   api: Hono,
@@ -65,7 +66,7 @@ export function registerEnvRoutes(
       return c.json({ error: "Base Dockerfile not found at " + dockerfilePath }, 404);
     }
     try {
-      const log = containerManager.buildImage(dockerfilePath, "the-companion:latest");
+      const log = containerManager.buildImage(dockerfilePath, DEFAULT_SANDBOX_IMAGE);
       return c.json({ success: true, log });
     } catch (e: unknown) {
       return c.json({ success: false, error: e instanceof Error ? e.message : String(e) }, 500);
@@ -73,8 +74,8 @@ export function registerEnvRoutes(
   });
 
   api.get("/docker/base-image", (c) => {
-    const exists = containerManager.imageExists("the-companion:latest");
-    return c.json({ exists, image: "the-companion:latest" });
+    const exists = containerManager.imageExists(DEFAULT_SANDBOX_IMAGE);
+    return c.json({ exists, image: DEFAULT_SANDBOX_IMAGE });
   });
 
   api.get("/images/:tag/status", (c) => {

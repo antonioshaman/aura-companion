@@ -42,7 +42,7 @@ export function DockerUpdateDialog() {
     }
 
     pollRef.current = setInterval(() => {
-      api.getImageStatus("the-companion:latest")
+      api.getImageStatus("aura-companion-sandbox:latest")
         .then((state) => {
           setPullState(state);
           if (state.status === "ready") {
@@ -66,7 +66,7 @@ export function DockerUpdateDialog() {
 
   function triggerPull() {
     setPhase("pulling");
-    api.pullImage("the-companion:latest")
+    api.pullImage("aura-companion-sandbox:latest")
       .then((res) => {
         if (res.state) setPullState(res.state);
       })
@@ -173,7 +173,7 @@ export function DockerUpdateDialog() {
               </h2>
             </div>
             <p className="text-sm text-cc-muted mb-3">
-              Pulling the-companion:latest
+              Pulling aura-companion-sandbox:latest
             </p>
             {pullState?.progress && pullState.progress.length > 0 && (
               <pre
@@ -292,7 +292,7 @@ export function PlaygroundDockerUpdateDialog({ phase }: { phase: DialogPhase }) 
               <h2 className="text-sm font-semibold text-cc-fg">Updating Sandbox Image...</h2>
             </div>
             <pre className="px-2 py-1.5 text-[9px] font-mono-code bg-cc-code-bg rounded text-cc-muted max-h-[80px] overflow-auto whitespace-pre-wrap">
-              {"Pulling the-companion:latest...\nLayer 1/5: abc123 downloading\nLayer 2/5: def456 complete"}
+              {"Pulling aura-companion-sandbox:latest...\nLayer 1/5: abc123 downloading\nLayer 2/5: def456 complete"}
             </pre>
           </div>
         )}

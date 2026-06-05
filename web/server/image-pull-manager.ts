@@ -2,6 +2,7 @@ import { join, dirname } from "node:path";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { containerManager, ContainerManager } from "./container-manager.js";
+import { DEFAULT_SANDBOX_IMAGE } from "./sandbox-image.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -174,8 +175,13 @@ class ImagePullManager {
     if (registryImage) {
       this.doPullFromRegistry(image, registryImage);
     } else {
-      // No registry mapping — mark as error since we can't pull custom images
-      this.markError(image, `No registry mapping for image "${image}". Build it from a Dockerfile instead.`);
+      // No registry mapping — the fork pulls from no remote. Load the image
+      // locally from the backup tarball instead of pulling.
+      this.markError(
+        image,
+        `No registry for image "${image}". Load it locally, e.g. ` +
+          `\`docker load -i /root/backUp/aura-companion-sandbox.tar\`.`,
+      );
     }
   }
 
@@ -189,7 +195,7 @@ class ImagePullManager {
         this.markReady(localTag);
       } else {
         // Pull failed — try local build for default image
-        if (localTag === "the-companion:latest") {
+        if (localTag === DEFAULT_SANDBOX_IMAGE) {
           this.appendProgress(localTag, "Pull failed, falling back to local build...");
           await this.doLocalBuild(localTag);
         } else {
@@ -199,7 +205,7 @@ class ImagePullManager {
     } catch (e) {
       const reason = e instanceof Error ? e.message : String(e);
       // Try local build fallback for default image
-      if (localTag === "the-companion:latest") {
+      if (localTag === DEFAULT_SANDBOX_IMAGE) {
         this.appendProgress(localTag, `Pull error (${reason}), falling back to local build...`);
         await this.doLocalBuild(localTag);
       } else {

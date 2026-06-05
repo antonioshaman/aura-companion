@@ -74,7 +74,7 @@ describe("instances routes (hetzner)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     process.env.HETZNER_API_TOKEN = "hcloud-token";
-    process.env.COMPANION_IMAGE = "docker.io/stangirard/the-companion-server:latest";
+    process.env.COMPANION_IMAGE = "registry.example.com/aura-companion-server:latest";
     delete process.env.HETZNER_SSH_KEY_ID;
     delete process.env.HETZNER_SERVER_TYPE_STARTER;
     delete process.env.HETZNER_SERVER_TYPE_PRO;
@@ -116,7 +116,7 @@ describe("instances routes (hetzner)", () => {
     expect(provisionerCtorMock).toHaveBeenCalledWith(
       expect.objectContaining({
         hetznerToken: "hcloud-token",
-        companionImage: "docker.io/stangirard/the-companion-server:latest",
+        companionImage: "registry.example.com/aura-companion-server:latest",
       }),
     );
     expect(insertValuesMock).toHaveBeenCalledWith(

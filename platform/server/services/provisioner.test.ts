@@ -88,7 +88,7 @@ describe("Provisioner (hetzner)", () => {
   function makeProvisioner() {
     return new Provisioner({
       hetznerToken: "hcloud-token",
-      companionImage: "docker.io/stangirard/the-companion-server:latest",
+      companionImage: "registry.example.com/aura-companion-server:latest",
       hetznerServerTypes: {
         starter: "cpx11",
         pro: "cpx21",
@@ -362,7 +362,7 @@ describe("Provisioner (hetzner)", () => {
 
     const provisioner = new Provisioner({
       hetznerToken: "hcloud-token",
-      companionImage: "docker.io/stangirard/the-companion-server:latest",
+      companionImage: "registry.example.com/aura-companion-server:latest",
       hetznerServerTypes: {
         starter: "cpx11",
       },
@@ -428,7 +428,7 @@ describe("Provisioner (hetzner)", () => {
 
     const provisioner = new Provisioner({
       hetznerToken: "hcloud-token",
-      companionImage: "docker.io/stangirard/the-companion-server:latest",
+      companionImage: "registry.example.com/aura-companion-server:latest",
       hetznerServerTypes: {
         starter: "104",
       },
@@ -499,7 +499,7 @@ describe("Provisioner (hetzner)", () => {
 
     const provisioner = new Provisioner({
       hetznerToken: "hcloud-token",
-      companionImage: "docker.io/stangirard/the-companion-server:latest",
+      companionImage: "registry.example.com/aura-companion-server:latest",
       hetznerServerTypes: {
         starter: "cpx22",
       },

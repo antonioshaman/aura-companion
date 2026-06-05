@@ -7,6 +7,7 @@ import * as envManager from "./env-manager.js";
 import * as sandboxManager from "./sandbox-manager.js";
 import * as gitUtils from "./git-utils.js";
 import { containerManager } from "./container-manager.js";
+import { DEFAULT_SANDBOX_IMAGE } from "./sandbox-image.js";
 import { hasContainerClaudeAuth } from "./claude-container-auth.js";
 import { hasContainerCodexAuth } from "./codex-container-auth.js";
 import { imagePullManager } from "./image-pull-manager.js";
@@ -120,7 +121,7 @@ export async function executeSessionCreation(
   // Resolve Docker image early
   let effectiveImage: string | null = null;
   if (sandboxEnabled) {
-    effectiveImage = "the-companion:latest";
+    effectiveImage = DEFAULT_SANDBOX_IMAGE;
   } else if ((body.container as Record<string, unknown>)?.image) {
     effectiveImage = (body.container as Record<string, unknown>).image as string;
   }
@@ -281,7 +282,7 @@ export async function executeSessionCreation(
       ports: containerPorts,
       volumes: (body.container as Record<string, unknown>)?.volumes as string[] | undefined,
       env: { ...(envVars ?? {}), DISPLAY: ":99" },
-      privileged: sandboxEnabled && effectiveImage === "the-companion:latest",
+      privileged: sandboxEnabled && effectiveImage === DEFAULT_SANDBOX_IMAGE,
     };
     try {
       containerInfo = containerManager.createContainer(tempId, cwd!, cConfig);
