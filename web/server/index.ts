@@ -40,6 +40,7 @@ import { isOriginAllowed } from "./middleware/origin-allowlist.js";
 import { securityHeaders } from "./middleware/security-headers.js";
 
 import { CleanupScheduler } from "./cleanup/cleanup-scheduler.js";
+import { reapOrphans } from "./orphan-reaper.js";
 import { startPeriodicCheck, setServiceMode } from "./update-checker.js";
 import { imagePullManager } from "./image-pull-manager.js";
 import { restoreIfNeeded as restoreTailscaleFunnel, cleanup as cleanupTailscaleFunnel } from "./tailscale-manager.js";
@@ -231,6 +232,32 @@ containerManager.restoreState(CONTAINER_STATE_PATH);
 
 // ── Session orchestrator — centralizes lifecycle event wiring ────────────────
 orchestrator.initialize();
+
+// AURA-LOCAL: PPID=1 orphan reaper — PLAN T8. Runs ONCE at server-init
+// AFTER bridge + orchestrator wiring (so the launcher's restored
+// `loadedSessions` is complete) AND BEFORE any session-level state
+// machine fires (so re-attaching an orphan's PID doesn't trigger a
+// spurious idle-kill / relaunch event). Fire-and-forget (Promise) —
+// the 5s hard cap inside `reapOrphans` keeps init bounded so systemd
+// readiness doesn't flap.
+//
+// Subprocess R5: re-attach is PURE Map mutation. Subprocess R6: ordering
+// matters — this seam sits between orchestrator.initialize() (boot
+// reconcile complete) and the CleanupScheduler.start() that arms
+// downstream sweeps.
+void reapOrphans({
+  loadedSessions: launcher.listSessions(),
+  sentinelRoot: sessionStore.directory,
+  sessionsRoot: sessionStore.directory,
+}).catch((err) => {
+  // The reaper is structurally never-throw (every per-pid path catches
+  // its own errors); this .catch is a belt-and-braces guard so a future
+  // refactor that introduces a top-level throw doesn't crash bun init.
+  appLog.warn("orphan-reaper", "boot reap pass crashed (top-level)", {
+    event: "orphan_reaper.boot_crash",
+    message: err instanceof Error ? err.message : String(err),
+  });
+});
 
 // AURA-LOCAL: cleanup-subsystem scheduler. PLAN T4. Owns the daily
 // retention/eviction cadence — instantiated AFTER the orchestrator+bridge
