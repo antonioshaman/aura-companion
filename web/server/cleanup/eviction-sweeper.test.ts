@@ -139,7 +139,10 @@ function buildStore(): EvictionStoreView & { evictedSessionIds: string[] } {
   };
 }
 
-function buildBridge(entries: Array<[string, unknown]>): EvictionBridgeView & {
+function buildBridge(
+  entries: Array<[string, unknown]>,
+  socketCounts: Record<string, number> = {},
+): EvictionBridgeView & {
   removedSessionIds: string[];
   snapshotCalls: number;
 } {
@@ -152,6 +155,9 @@ function buildBridge(entries: Array<[string, unknown]>): EvictionBridgeView & {
     },
     removeSession(sid) {
       removed.push(sid);
+    },
+    getBrowserSocketCount(sid) {
+      return socketCounts[sid] ?? 0;
     },
     get removedSessionIds() { return removed; },
     get snapshotCalls() { return calls; },
@@ -267,6 +273,70 @@ describe("sweepEviction — canary 1: spec self-verification (grace=0 + archived
       existsSync(join(sessionsRoot, ARCHIVED_SESSIONS_SUBDIR, `${sid}.json`));
     expect(mapDropped).toBe(true);
     expect(diskMoved).toBe(true);
+  });
+});
+
+describe("sweepEviction — Realtime finding #1: live-browser-socket protection", () => {
+  it("retains an evictable archived+exited row while a browser socket is attached", async () => {
+    // Realtime finding #1 floor: never reclaim a row a user is actively
+    // viewing. An archived+exited+pid-gone row is otherwise fully evictable,
+    // but a live socket (getBrowserSocketCount > 0) means a tab has the
+    // archived session open — yanking it would slam a terminal
+    // `session_evicted` frame onto a healthy view. The row must survive until
+    // the tab closes; the next tick re-checks.
+    const now = 1_700_000_000_000;
+    setClockSourceForTests(() => now);
+    const sid = "sess-attached-1";
+    touchAged(join(sessionsRoot, `${sid}.json`), now, 10_000);
+
+    const store = buildStore();
+    const launcher = new Map<string, EvictionLauncherView>([
+      [sid, { sessionId: sid, archived: true, state: "exited", pid: 12345 }],
+    ]);
+    // One live browser socket attached → eviction must be refused.
+    const bridge = buildBridge([[sid, { id: sid }]], { [sid]: 1 });
+
+    const summary = await sweepEviction(buildConfig(0), {
+      bridge,
+      store,
+      getLauncherSession: buildLauncherLookup(launcher),
+      probeProcessIdentity: staticProbe({ kind: "gone" }),
+      nowMs: () => now,
+    });
+
+    expect(summary.evicted).toBe(0);
+    // Memory-half: never dropped from the Map while viewed.
+    expect(bridge.removedSessionIds).toEqual([]);
+    // Disk-half: source JSON untouched at original path.
+    expect(existsSync(join(sessionsRoot, `${sid}.json`))).toBe(true);
+    expect(existsSync(join(sessionsRoot, ARCHIVED_SESSIONS_SUBDIR, `${sid}.json`))).toBe(false);
+  });
+
+  it("evicts the same row once the last browser socket detaches (count → 0)", async () => {
+    // Mutation-resistant companion to the guard above: the guard must be the
+    // ONLY thing holding the row. With zero sockets the identical row evicts,
+    // proving the retain was caused by the socket count and not some other gate.
+    const now = 1_700_000_000_000;
+    setClockSourceForTests(() => now);
+    const sid = "sess-detached-1";
+    touchAged(join(sessionsRoot, `${sid}.json`), now, 10_000);
+
+    const store = buildStore();
+    const launcher = new Map<string, EvictionLauncherView>([
+      [sid, { sessionId: sid, archived: true, state: "exited", pid: 12345 }],
+    ]);
+    const bridge = buildBridge([[sid, { id: sid }]], { [sid]: 0 });
+
+    const summary = await sweepEviction(buildConfig(0), {
+      bridge,
+      store,
+      getLauncherSession: buildLauncherLookup(launcher),
+      probeProcessIdentity: staticProbe({ kind: "gone" }),
+      nowMs: () => now,
+    });
+
+    expect(summary.evicted).toBe(1);
+    expect(bridge.removedSessionIds).toEqual([sid]);
   });
 });
 

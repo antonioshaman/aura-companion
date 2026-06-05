@@ -698,6 +698,8 @@ cleanupScheduler.registerSweep("eviction-sweep", async () => {
       getSessionEntries: () =>
         wsBridge.getSessionEntries() as Array<[string, unknown]>,
       removeSession: (sid) => wsBridge.removeSession(sid),
+      getBrowserSocketCount: (sid) =>
+        wsBridge.getSession(sid)?.browserSockets.size ?? 0,
     },
     store: {
       moveToArchive: (sid) => sessionStore.moveToArchive(sid),
@@ -745,7 +747,13 @@ cleanupScheduler.registerReconcile("eviction-reconcile", (bootTimeMs) => {
 // required (no orchestrator suite imports index.ts).
 let lastMemoryPressureWarnAt: number | null = null;
 
-setInterval(() => {
+// Backend-TS finding #6 — capture the handle so `gracefulShutdown` can
+// clear it (a fired tick mid-shutdown races the teardown), `.unref()` so a
+// pending tick never keeps the process alive on exit, and wrap the body in
+// try/catch so a single snapshot/probe throw cannot kill the only diagnostic
+// timer for the rest of the process lifetime.
+const diagnosticsTimer = setInterval(() => {
+  try {
   const snap = metricsCollector.getSnapshot(wsBridge);
   const mem = snap.gauges.memory;
   const mb = (bytes: number) => (bytes / 1024 / 1024).toFixed(1);
@@ -823,7 +831,14 @@ setInterval(() => {
     });
     lastMemoryPressureWarnAt = pressureNowMs;
   }
+  } catch (err) {
+    log.error("diagnostics", "Diagnostic tick failed (timer preserved)", {
+      event: "diagnostics.tick_error",
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }, DIAGNOSTICS_INTERVAL_MS);
+diagnosticsTimer.unref();
 
 // ── Graceful shutdown — Council teardown + persist container state ───────────
 //
@@ -843,6 +858,10 @@ setInterval(() => {
 // Step 3 is async; the wrapper awaits it (Node's process.exit triggers
 // after the promise resolves). Total shutdown budget is bounded.
 async function gracefulShutdown() {
+  // Backend-TS finding #6 — stop the diagnostic tick first so a fired
+  // callback cannot race the teardown below (it reads wsBridge state that
+  // shutdown is actively dismantling).
+  clearInterval(diagnosticsTimer);
   try {
     const coordinator = orchestrator.getCouncilCoordinator();
     if (coordinator) {

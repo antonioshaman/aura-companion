@@ -53,6 +53,26 @@ describe("cliFailedCopy", () => {
     expect(copy.body).toMatch(/claude|codex/);
   });
 
+  // Friedman finding #14 — the copy must NOT promise a remedy the lone
+  // "Start a new session" button can't deliver. binary_missing sets the
+  // honest expectation that a fresh session fails the same way until an
+  // operator rebuilds the image; mutation-resistant against re-introducing
+  // the old "Rebuilding the image will restore it" false-promise phrasing.
+  it("binary_missing copy sets honest expectations for the lone action (finding #14)", () => {
+    const copy = cliFailedCopy("binary_missing");
+    expect(copy.body).toMatch(/operator/i);
+    expect(copy.body).toMatch(/same way|fail/i);
+  });
+
+  // Friedman finding #14 — container_stopped acknowledges a new session may
+  // hit the same wall (host can't start a container) rather than implying
+  // Aura can restart the dead one.
+  it("container_stopped copy acknowledges the action may not resolve it (finding #14)", () => {
+    const copy = cliFailedCopy("container_stopped");
+    expect(copy.body).toMatch(/new session/i);
+    expect(copy.body).toMatch(/outside Aura|attention/i);
+  });
+
   // Friedman R2 - past-tense second-person for browser_closed_no_reconnect.
   // "You closed" is the actor whose action produced the state. Mutation-
   // resistant against drift to passive-voice ("This tab was closed").

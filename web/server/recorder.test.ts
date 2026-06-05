@@ -605,6 +605,42 @@ describe("redactRaw — pure function", () => {
     expect(parsed.companion_auth_token).toBe(REDACTED_PLACEHOLDER);
   });
 
+  it("redacts the Companion auth token in a WS URL query string (?token=)", () => {
+    // Hunt finding #7 — the bare-hex token rides in the browser WS upgrade
+    // URL. If that URL is echoed into a recorded frame value (close reason,
+    // error string) the value must be redacted while the param name survives.
+    const token = "a".repeat(64);
+    const raw = JSON.stringify({
+      type: "ws_close",
+      reason: `connect failed: ws://localhost:3456/ws/browser/sess-1?token=${token}`,
+    });
+    const out = redactRaw(raw);
+    expect(out).not.toContain(token);
+    expect(out).toContain(REDACTED_PLACEHOLDER);
+    // Param name is retained for debugging which URL leaked.
+    expect(out).toContain("token=");
+    expect(() => JSON.parse(out)).not.toThrow();
+  });
+
+  it("redacts the &access_token= query-param variant", () => {
+    const token = "deadbeef".repeat(8); // 64 hex chars
+    const raw = JSON.stringify({ url: `wss://host/x?foo=1&access_token=${token}` });
+    const out = redactRaw(raw);
+    expect(out).not.toContain(token);
+    expect(out).toContain(REDACTED_PLACEHOLDER);
+  });
+
+  it("redacts a bare 64-hex Companion auth token outside any query string", () => {
+    // No `token=` prefix — the bare-hex value-shape pattern is the only thing
+    // that can catch a token echoed standalone into an argv/error string.
+    const token = "0123456789abcdef".repeat(4); // exactly 64 hex chars
+    const raw = JSON.stringify({ type: "system", note: `spawned with auth ${token}` });
+    const out = redactRaw(raw);
+    expect(out).not.toContain(token);
+    expect(out).toContain(REDACTED_PLACEHOLDER);
+    expect(() => JSON.parse(out)).not.toThrow();
+  });
+
   it("redacts in arrays + nested objects", () => {
     const raw = JSON.stringify({
       env_list: [

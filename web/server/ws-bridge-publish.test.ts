@@ -4,6 +4,7 @@ import {
   sendToBrowser,
   EVENT_BUFFER_LIMIT,
 } from "./ws-bridge-publish.js";
+import { sequenceEvent } from "./ws-bridge-replay.js";
 import type { Session, SocketData } from "./ws-bridge-types.js";
 import type { BrowserIncomingMessage } from "./session-types.js";
 import { SessionStateMachine } from "./session-state-machine.js";
@@ -60,7 +61,6 @@ function makeSession(overrides: Partial<Session> = {}): Session {
     processedClientMessageIds: [],
     processedClientMessageIdSet: new Set(),
     lastCliActivityTs: Date.now(),
-    reachable: false,
     stateMachine: new SessionStateMachine("test-session"),
     ...overrides,
   };
@@ -364,5 +364,58 @@ describe("sendToBrowser", () => {
 describe("EVENT_BUFFER_LIMIT", () => {
   it("is 600", () => {
     expect(EVENT_BUFFER_LIMIT).toBe(600);
+  });
+});
+
+// ─── sequenceEvent seq-authority tripwire (Realtime finding #13) ──────────────
+
+describe("sequenceEvent — sole seq authority (finding #13)", () => {
+  // A cli_failed frame whose pre-built seq matches the counter passes through
+  // and gets the authoritative seq stamped. This is the normal drain path.
+  it("stamps the authoritative seq onto a matching cli_failed frame", () => {
+    const session = makeSession({ nextEventSeq: 7 });
+    const frame: BrowserIncomingMessage = {
+      type: "cli_failed",
+      seq: 7, // pre-built from session.nextEventSeq, agrees with the counter
+      sessionId: "test-session",
+      reason: "relaunch_exhausted",
+      drainedCount: 0,
+      subprocessAlive: false,
+      firedAt: 1_000,
+      origin: "server:cleanup-drain",
+    } as BrowserIncomingMessage;
+    const out = sequenceEvent(session, frame, EVENT_BUFFER_LIMIT, vi.fn());
+    expect((out as { seq: number }).seq).toBe(7);
+    expect(session.nextEventSeq).toBe(8);
+  });
+
+  // The tripwire: if a broadcast advanced the counter between the drain's
+  // build and dispatch, the pre-built seq no longer matches and the desync is
+  // caught loudly instead of silently shipping a wrong replay seq.
+  // Mutation-resistant: deleting the tripwire lets this pass silently.
+  it("throws when a cli_failed frame's pre-built seq has gone stale", () => {
+    const session = makeSession({ nextEventSeq: 9 });
+    const staleFrame: BrowserIncomingMessage = {
+      type: "cli_failed",
+      seq: 7, // built when nextEventSeq was 7; a later broadcast bumped it to 9
+      sessionId: "test-session",
+      reason: "relaunch_exhausted",
+      drainedCount: 0,
+      subprocessAlive: false,
+      firedAt: 1_000,
+      origin: "server:cleanup-drain",
+    } as BrowserIncomingMessage;
+    expect(() => sequenceEvent(session, staleFrame, EVENT_BUFFER_LIMIT, vi.fn())).toThrow(
+      /pre-built seq 7 != authoritative seq 9/,
+    );
+  });
+
+  // Non-cli_failed frames carry no pre-built seq and must pass through
+  // untouched — the tripwire is scoped to the only pre-sequenced frame type.
+  it("leaves ordinary frames (no pre-built seq) unaffected", () => {
+    const session = makeSession({ nextEventSeq: 3 });
+    const out = sequenceEvent(session, { type: "cli_connected" }, EVENT_BUFFER_LIMIT, vi.fn());
+    expect((out as { seq: number }).seq).toBe(3);
+    expect(session.nextEventSeq).toBe(4);
   });
 });

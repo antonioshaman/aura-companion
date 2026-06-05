@@ -17,7 +17,7 @@ import { resolveBinary, getEnrichedPath } from "./path-resolver.js";
 import { resolveObserverPromptForSpawn } from "./observer-prompt-spawn.js";
 import { assertExhaustiveObserverPromptSource } from "./observer-prompt.js";
 import { log } from "./logger.js";
-import { verifyProcessIdentity } from "./process-identity.js";
+import { verifyProcessIdentity, readProcessStartMs } from "./process-identity.js";
 // AURA-LOCAL — PLAN T7. Per-session runtime sidecar carrying spawn-time
 // pid + processStartMs + argvSha256. Phase D upgrades the boot probe
 // from Phase A's interim two-factor to three-factor and feeds the
@@ -375,10 +375,20 @@ export class CliLauncher {
   ): void {
     if (!this.store) return;
     try {
+      // EC-49 — anchor on the KERNEL start instant (same quantity the
+      // verifier reads from /proc/<pid>/stat field-22), not Date.now().
+      // The JS wallclock and the kernel clock-of-record diverge under a
+      // GC pause / event-loop stall / cgroup MemoryHigh throttle between
+      // fork and this read, which can exceed the verifier's ±2s window
+      // and false-flag a live session as mismatch(starttime) — precisely
+      // under the memory pressure where boot recovery matters most.
+      // Fall back to Date.now() only when the kernel read is unavailable
+      // (non-Linux), where the starttime factor is skipped anyway.
+      const kernelStartMs = readProcessStartMs(pid);
       writeRuntimeSidecar(this.store.directory, sessionId, {
         schemaVersion: SIDECAR_SCHEMA_VERSION,
         pid,
-        processStartMs: Date.now(),
+        processStartMs: kernelStartMs ?? Date.now(),
         argvSha256: argvSha256(argv),
       });
     } catch (e) {
@@ -387,6 +397,55 @@ export class CliLauncher {
         sessionId,
         error_code: (e as NodeJS.ErrnoException).code ?? "unknown",
       });
+    }
+  }
+
+  /**
+   * EC-45 — decide whether the relaunch path may SIGTERM `info.pid`, a PID
+   * inherited from a previous server instance (no live in-process handle).
+   *
+   * The asymmetry favours NOT killing when identity cannot be positively
+   * confirmed: a skipped kill leaks an orphan the next-boot reaper
+   * reclaims, but a wrong kill SIGTERMs an unrelated process that reused
+   * the PID. So:
+   *   • Claude on Linux → run the three-factor probe. `match` → kill;
+   *     `mismatch`/`gone` → SKIP (the PID is not ours / already dead).
+   *   • `unavailable` (non-Linux, no /proc) → kill best-effort: identity is
+   *     unknowable and there is no stronger signal than the prior behaviour.
+   *   • Codex host-mode → kill best-effort: the argv factor recognises only
+   *     Claude's `--sdk-url` token, so the probe can't verify Codex; a
+   *     Codex argv/port identity factor is future work.
+   */
+  private shouldSignalPreviousInstancePid(info: SdkSessionInfo): boolean {
+    if (typeof info.pid !== "number") return false;
+    // Codex has no argv identity factor — preserve prior best-effort kill.
+    if (info.backendType === "codex") return true;
+    let expectedStartMs: number | null = null;
+    if (this.store) {
+      try {
+        const sidecar = readRuntimeSidecar(this.store.directory, info.sessionId);
+        if (sidecar.kind === "present") expectedStartMs = sidecar.payload.processStartMs;
+      } catch {
+        // Corrupt/absent sidecar → degrade to the two-factor probe
+        // (liveness + argv), still strictly stronger than a blind kill.
+      }
+    }
+    const verdict = verifyProcessIdentity(info.pid, info.sessionId, expectedStartMs);
+    switch (verdict.kind) {
+      case "match":
+        return true;
+      case "unavailable":
+        return true; // identity unknowable off-Linux — best-effort kill
+      case "mismatch":
+        log.warn("cli-launcher", "relaunch declined to SIGTERM a PID-reuse mismatch", {
+          event: "relaunch.kill_declined",
+          sessionId: info.sessionId,
+          pid: info.pid,
+          reason: verdict.reason,
+        });
+        return false;
+      case "gone":
+        return false; // already dead — nothing to signal
     }
   }
 
@@ -417,9 +476,16 @@ export class CliLauncher {
 
       // Check if the process is still alive
       if (info.state !== "exited") {
-        if (info.containerId && info.codexWsPort) {
-          // Docker WS mode: the stored PID is `docker exec -d` which exits
-          // immediately after launch.  Check container liveness instead.
+        if (info.containerId) {
+          // Any containerized session (Codex Docker-WS OR Claude): the
+          // stored PID is the HOST-side `docker exec` wrapper, never the
+          // in-container CLI. The argv identity factor is structurally
+          // unable to verify a `docker exec -i … bash -lc 'claude --sdk-url …'`
+          // wrapper (the --sdk-url token is buried inside the single
+          // bash -lc string arg → indexOf returns -1 → false mismatch →
+          // relaunch storm). Container liveness is the only valid signal
+          // for both backends. (Previously gated on `&& info.codexWsPort`,
+          // which let containerized Claude fall through to the PID probe.)
           const containerState = containerManager.isContainerAlive(info.containerId);
           if (containerState === "running") {
             info.state = "starting";
@@ -769,8 +835,14 @@ export class CliLauncher {
       } catch {}
       this.processes.delete(sessionId);
     } else if (info.pid) {
-      // Process from a previous server instance — kill by PID
-      try { process.kill(info.pid, "SIGTERM"); } catch {}
+      // EC-45 — a PID from a previous server instance is no proof of
+      // identity. The original CLI may have exited and the kernel handed
+      // its PID to an unrelated process; an unconditional SIGTERM would be
+      // a silent collateral kill. Re-verify at the signal instant and skip
+      // the kill on a mismatch/gone verdict.
+      if (this.shouldSignalPreviousInstancePid(info)) {
+        try { process.kill(info.pid, "SIGTERM"); } catch {}
+      }
     }
 
     // Release any host-mode Codex port claim before picking a new one.

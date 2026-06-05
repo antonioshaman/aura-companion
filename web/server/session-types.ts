@@ -378,6 +378,12 @@ export type BrowserIncomingMessageBase =
   | { type: "error"; message: string }
   | { type: "cli_disconnected" }
   | { type: "cli_connected" }
+  // Terminal frame for the session-map eviction sweep (Realtime finding #1).
+  // Unlike `cli_disconnected` (transient — drives a relaunch), this tells the
+  // browser the row was INTENTIONALLY evicted from memory after archive. The
+  // client marks the session archived and MUST NOT request a relaunch, so a
+  // stale tab can no longer resurrect a blank live row on reconnect.
+  | { type: "session_evicted" }
   // PLAN T10 (Phase F) - terminal CLI-failure wire frame.
   // Construction routed through `buildCliFailedFrame` in
   // `cli-failed-frame.ts` per AP-14 sole-assembly-site invariant;

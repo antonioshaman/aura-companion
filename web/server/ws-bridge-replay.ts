@@ -49,6 +49,24 @@ export function sequenceEvent(
   persistSession: (session: Session) => void,
 ): BrowserIncomingMessage {
   const seq = session.nextEventSeq++;
+  // Realtime finding #13 — `sequenceEvent` is the SOLE authority for the
+  // monotonic `seq`. The cli_failed drain (drain-selector.ts) pre-builds its
+  // frame with `session.nextEventSeq` so the typed wire shape is complete at
+  // build time, then relies on this function assigning the identical value.
+  // That agreement was a JSDoc-only "MUST match" invariant, enforced nowhere:
+  // any broadcast inserted between the drain's build and this overwrite would
+  // silently advance the counter and desync the replay `seq`. Turn the prose
+  // contract into a runtime tripwire (scoped to the only pre-sequenced frame
+  // type to avoid false positives on the common no-seq broadcast path).
+  if (msg.type === "cli_failed") {
+    const preBuilt = (msg as { seq?: unknown }).seq;
+    if (typeof preBuilt === "number" && preBuilt !== seq) {
+      throw new Error(
+        `sequenceEvent: cli_failed frame pre-built seq ${preBuilt} != authoritative seq ${seq} ` +
+          `for session ${session.id} — a broadcast was inserted between drain build and dispatch (replay desync)`,
+      );
+    }
+  }
   const sequenced = { ...msg, seq };
   if (shouldBufferForReplay(msg)) {
     session.eventBuffer.push({ seq, message: msg });

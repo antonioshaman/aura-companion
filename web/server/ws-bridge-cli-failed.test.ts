@@ -255,14 +255,15 @@ describe("Phase F — browser-close drain grace timer", () => {
 });
 
 describe("Phase F — getSessionMemoryStats reachability axis", () => {
-  it("labels each session with cached reachable axis", () => {
+  it("derives the reachable axis from the live adapter", () => {
     const sid = "sess_reach";
     const ws = makeBrowserSocket(sid);
     bridge.handleBrowserOpen(ws, sid);
     const stats = bridge.getSessionMemoryStats();
     expect(stats).toHaveLength(1);
     expect(stats[0].id).toBe(sid);
-    // Without an attached adapter, the session is unreachable.
+    // Without an attached adapter, `backendAdapter?.isConnected() ?? false`
+    // resolves to false (Fowler finding #12 — derived, not cached).
     expect(stats[0].reachable).toBe(false);
   });
 });

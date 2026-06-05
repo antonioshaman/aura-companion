@@ -52,6 +52,10 @@ export interface DrainSelection {
  * selector remains pure. The bridge's broadcast path increments
  * the counter at send time; the seq passed here MUST match the
  * value the bridge will assign when calling `broadcastToBrowsers`.
+ * That "MUST match" is no longer prose-only (Realtime finding #13):
+ * `sequenceEvent` asserts the pre-built seq equals the authoritative
+ * counter before overwriting it, so a broadcast inserted between this
+ * build and dispatch throws instead of silently desyncing replay.
  */
 export function selectDrainTargets(
   session: Session,

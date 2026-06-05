@@ -53,17 +53,26 @@ export function cliFailedCopy(reason: CliFailedReason): CliFailedCopy {
         action: "Start a new session with this draft",
       };
     case "container_stopped":
+      // Friedman finding #14 — describe what the button can actually do
+      // (start fresh) rather than implying Aura can restart the dead
+      // container. If the host itself is down, a new session may hit the
+      // same wall; say so instead of promising a remedy the lone action
+      // can’t deliver.
       return {
         headline: "The Docker container won’t start",
         body:
-          "The container that hosted this session is stopped and Aura could not restart it. The agent process can no longer attach.",
+          "The container that hosted this session is stopped and Aura could not restart it. Starting a new session tries a fresh container; if the host keeps failing to start one, it needs attention outside Aura.",
         action: "Start a new session with this draft",
       };
     case "binary_missing":
+      // Friedman finding #14 — the old copy ("Rebuilding the image will
+      // restore it") promised a fix the in-product button can’t perform and
+      // stranded non-operator users. State plainly that a fresh session may
+      // fail the same way until someone rebuilds the image.
       return {
         headline: "The agent binary is missing",
         body:
-          "The container is running, but the `claude` or `codex` binary that this session needs is no longer installed inside it. Rebuilding the image will restore it.",
+          "The container is running, but the `claude` or `codex` binary this session needs isn’t installed inside it. A new session will fail the same way until the image is rebuilt with the binary — that’s an operator task, not something this button can do.",
         action: "Start a new session with this draft",
       };
     case "browser_closed_no_reconnect":

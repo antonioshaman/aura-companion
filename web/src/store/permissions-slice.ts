@@ -13,6 +13,8 @@ export interface PermissionsSlice {
 
   addPermission: (sessionId: string, perm: PermissionRequest) => void;
   removePermission: (sessionId: string, requestId: string) => void;
+  /** Drop ALL pending permissions for a session — used by the cli_failed drain (finding #5). */
+  clearPendingPermissions: (sessionId: string) => void;
   addAiResolvedPermission: (sessionId: string, entry: { request: PermissionRequest; behavior: "allow" | "deny"; reason: string; timestamp: number }) => void;
   clearAiResolvedPermissions: (sessionId: string) => void;
 }
@@ -39,6 +41,14 @@ export const createPermissionsSlice: StateCreator<AppState, [], [], PermissionsS
         updated.delete(requestId);
         pendingPermissions.set(sessionId, updated);
       }
+      return { pendingPermissions };
+    }),
+
+  clearPendingPermissions: (sessionId) =>
+    set((s) => {
+      if (!s.pendingPermissions.has(sessionId)) return s;
+      const pendingPermissions = new Map(s.pendingPermissions);
+      pendingPermissions.delete(sessionId);
       return { pendingPermissions };
     }),
 

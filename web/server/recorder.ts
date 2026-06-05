@@ -162,6 +162,20 @@ const SECRET_VALUE_PATTERNS: readonly RegExp[] = [
   /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g,
   // GitHub fine-grained PATs (github_pat_*).
   /\bgithub_pat_[A-Za-z0-9_]{20,}\b/g,
+  // Hunt finding #7 — Companion auth token travelling in a WS URL query
+  // string (`?token=<hex>` / `&access_token=<hex>`). Lookbehind keeps the
+  // param NAME in the recording (useful for debugging which URL leaked) and
+  // redacts only the value. Covers any URL-shaped value, not just keys under
+  // SENSITIVE_KEY_PATTERNS.
+  /(?<=[?&](?:token|access_token)=)[A-Za-z0-9._~+/=-]{16,}/g,
+  // Hunt finding #7 — the Companion auth token is a bare 32-byte hex value
+  // (`randomBytes(32).toString("hex")` → exactly 64 lowercase hex chars) with
+  // no prefix, so prefix-anchored patterns above never catch it when it
+  // appears outside a `token=` query string (e.g. echoed in a ws_close reason
+  // or an error string). Over-redaction of incidental 64-hex hashes (sha256)
+  // in recordings is an accepted trade vs. leaking a long-lived, un-rotated
+  // session credential.
+  /\b[0-9a-f]{64}\b/g,
 ];
 
 /**
@@ -179,6 +193,11 @@ const SECRET_PRESCREEN_REGEX = new RegExp(
     "\\bBearer\\b",
     "\\bgh[pousr]_",
     "\\bgithub_pat_",
+    // Hunt finding #7 — `?token=`/`&access_token=` query-string credential
+    // and the bare 64-hex Companion auth-token shape. The hex marker forces
+    // any frame carrying a 64-char hex run through the parse-redact path.
+    "[?&](?:token|access_token)=",
+    "[0-9a-f]{64}",
     // sensitive key-name markers (subset — narrow enough to avoid frequent
     // false-prescreens but broad enough to catch every key in
     // SENSITIVE_KEY_PATTERNS in any common casing).

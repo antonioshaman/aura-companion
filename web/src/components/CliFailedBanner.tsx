@@ -40,7 +40,7 @@
 // "0 messages lost" reassurance - when the server fires with
 // drainedCount=0 there was no queue loss to mention).
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { cliFailedCopy } from "../cli-failed-copy.js";
 import type { CliFailure } from "../store/cli-status-slice.js";
 
@@ -57,6 +57,17 @@ export function CliFailedBanner({ failure, onStartNewSession }: CliFailedBannerP
   const copy = useMemo(() => cliFailedCopy(failure.reason), [failure.reason]);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const sha = failure.lastErrorSha256;
+
+  // a11y finding #11 — the banner is the terminal surface with a single
+  // recovery action, but `role="alert"` only ANNOUNCES; keyboard/SR focus is
+  // left wherever it was (typically the now-disabled Composer). Move focus to
+  // the sole recovery button on mount so the next Tab/Enter acts on recovery.
+  // The banner mounts exactly on the failure transition (parent renders it
+  // only while `cliFailure` is truthy), so mount === transition.
+  const primaryRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    primaryRef.current?.focus();
+  }, []);
 
   return (
     <div
@@ -136,6 +147,7 @@ export function CliFailedBanner({ failure, onStartNewSession }: CliFailedBannerP
                 can focus / keyboard-shortcut it later if needed. */}
             <div className="mt-3">
               <button
+                ref={primaryRef}
                 type="button"
                 data-cli-failed-primary=""
                 data-testid="cli-failed-primary-action"

@@ -120,12 +120,19 @@ export interface EvictionLauncherView {
   readonly state: "starting" | "connected" | "running" | "exited";
 }
 
-/** Bridge surface the sweep needs — three calls only, all read-only or evict. */
+/** Bridge surface the sweep needs — read-only probes + the evict call. */
 export interface EvictionBridgeView {
   /** Snapshot of live sessions Map. Backend-TS R6: never iterate the live Map. */
   getSessionEntries(): Array<[string, unknown]>;
   /** Remove a session from the in-memory Map + cancel its timers. */
   removeSession(sessionId: string): void;
+  /**
+   * Realtime finding #1 — count of browser sockets currently attached to the
+   * session. The sweep refuses to evict a row a user is actively viewing
+   * (a live socket): yanking it would force a terminal frame on a healthy
+   * archived view. 0 means safe to reclaim. Unknown session → 0.
+   */
+  getBrowserSocketCount(sessionId: string): number;
 }
 
 /** SessionStore surface the sweep needs. */
@@ -171,6 +178,7 @@ export interface EvictionDecision {
     | "skipped_not_exited"
     | "skipped_within_grace"
     | "skipped_subprocess_alive"
+    | "skipped_browsers_attached"
     | "skipped_no_launcher_view"
     | "error";
   readonly errorCode?: string;
@@ -184,6 +192,7 @@ export interface EvictionSummary {
   readonly skippedNotArchived: number;
   readonly skippedNotExited: number;
   readonly skippedWithinGrace: number;
+  readonly skippedBrowsersAttached: number;
   readonly skippedNoLauncherView: number;
   readonly errors: number;
   readonly decisions: ReadonlyArray<EvictionDecision>;
@@ -228,6 +237,7 @@ export async function sweepEviction(
       skippedNotArchived: 0,
       skippedNotExited: 0,
       skippedWithinGrace: 0,
+      skippedBrowsersAttached: 0,
       skippedNoLauncherView: 0,
       errors: 0,
       decisions: [],
@@ -276,6 +286,7 @@ export async function sweepEviction(
     skippedNotArchived: decisions.filter((d) => d.action === "skipped_not_archived").length,
     skippedNotExited: decisions.filter((d) => d.action === "skipped_not_exited").length,
     skippedWithinGrace: decisions.filter((d) => d.action === "skipped_within_grace").length,
+    skippedBrowsersAttached: decisions.filter((d) => d.action === "skipped_browsers_attached").length,
     skippedNoLauncherView: decisions.filter((d) => d.action === "skipped_no_launcher_view").length,
     errors: decisions.filter((d) => d.action === "error").length,
     decisions,
@@ -323,6 +334,15 @@ async function classifyAndEvictOne(
   }
   if (launcherView.state !== "exited") {
     return { sessionId, action: "skipped_not_exited" };
+  }
+  // Realtime finding #1 — never evict a row a browser is actively viewing.
+  // A live socket means a user has the (archived) session open; reclaiming
+  // it would slam a terminal `session_evicted` frame onto a healthy view.
+  // The row stays until the tab closes; the next tick re-checks. This is the
+  // in-memory complement to `removeSession`'s socket teardown — the gate
+  // prevents the eviction, the teardown handles the genuinely-orphaned case.
+  if (ctx.deps.bridge.getBrowserSocketCount(sessionId) > 0) {
+    return { sessionId, action: "skipped_browsers_attached" };
   }
 
   // Age check: mtime of the JSON at the source path. setArchived ↦

@@ -456,7 +456,6 @@ export class WsBridge {
           Array.isArray(p.processedClientMessageIds) ? p.processedClientMessageIds : [],
         ),
         lastCliActivityTs: Date.now(),
-        reachable: false,
         stateMachine: new SessionStateMachine(p.id, "terminated"),
       };
       session.state.backend_type = session.backendType;
@@ -555,7 +554,6 @@ export class WsBridge {
         processedClientMessageIds: [],
         processedClientMessageIdSet: new Set(),
         lastCliActivityTs: Date.now(),
-        reachable: false,
         stateMachine: new SessionStateMachine(sessionId),
       };
       this.sessions.set(sessionId, session);
@@ -759,7 +757,11 @@ export class WsBridge {
       // AURA-LOCAL — Realtime R6. Partition pendingMsgs by
       // reachability so orphaned counts do not silently inflate
       // the visible total per Story 2 AC.
-      reachable: s.reachable,
+      // Fowler finding #12 — derived at read time from the single source of
+      // truth (the live adapter) rather than a cached `reachable` field that
+      // ≥5 handlers had to keep in sync. Removing the stored copy removes the
+      // class of bug where a new re-attach site forgets to update it.
+      reachable: s.backendAdapter?.isConnected() ?? false,
     }));
   }
 
@@ -788,6 +790,20 @@ export class WsBridge {
     this.cancelDisconnectTimer(sessionId);
     this.stopIdleKillWatchdog(sessionId);
     this.cancelBrowserDrainTimer(sessionId);
+    // Realtime finding #1 — close+clear any still-attached browser sockets
+    // instead of orphaning them. A live socket left open after the Map row
+    // is deleted would resurrect a blank session on its next frame. Emit the
+    // terminal `session_evicted` frame FIRST (so the client marks the session
+    // archived and does NOT request a relaunch), then close the socket. This
+    // mirrors `closeSession`'s socket teardown; `removeSession` previously
+    // dropped the Map row but left the sockets dangling.
+    if (session) {
+      for (const ws of session.browserSockets) {
+        try { this.sendToBrowser(ws, { type: "session_evicted" }); } catch { /* socket may be closing */ }
+        try { ws.close(); } catch { /* already closed */ }
+      }
+      session.browserSockets.clear();
+    }
     this.sessions.delete(sessionId);
     this.autoNamingAttempted.delete(sessionId);
     this.store?.remove(sessionId);
@@ -866,12 +882,9 @@ export class WsBridge {
   attachBackendAdapter(sessionId: string, adapter: IBackendAdapter, backendType?: BackendType): void {
     const session = this.getOrCreateSession(sessionId, backendType);
     session.backendAdapter = adapter;
-    // AURA-LOCAL — Realtime R6. Cache reachability on adapter
-    // attach. Codex adapters are "connected" from the bridge's
-    // perspective the moment they attach (stdio is already up);
-    // Claude adapters need handleCLIOpen to flip to true once
-    // the WS handshake completes.
-    session.reachable = adapter.isConnected();
+    // Fowler finding #12 — reachability is no longer cached on the session;
+    // `getSessionMemoryStats` derives it from `backendAdapter?.isConnected()`
+    // at read time, so attach/detach sites no longer mirror the bit.
 
     // Advance the state machine so that system_init (starting → ready) is reachable.
     // For Claude, handleCLIOpen does starting → initializing via cli_ws_open.
@@ -1127,11 +1140,8 @@ export class WsBridge {
       // BEFORE persisting so the bubble lands in the same atomic save and
       // is visible to browsers reconnecting after the disconnect.
       this.flushInterruptedStream(session);
-      // AURA-LOCAL — Realtime R6. Codex adapter is gone;
-      // cache reachable=false so the diagnostic snapshot stops
-      // counting this session's pendingMsgs in the reachable
-      // partition.
-      session.reachable = false;
+      // Fowler finding #12 — nulling the adapter is sufficient; reachability
+      // is derived from it at read time, no separate bit to clear.
       session.backendAdapter = null;
       this.persistSession(session);
       console.log(`[ws-bridge] Backend adapter disconnected for session ${sessionId}`);
@@ -1160,10 +1170,8 @@ export class WsBridge {
 
     // Broadcast cli_connected
     this.broadcastToBrowsers(session, { type: "cli_connected" });
-    // AURA-LOCAL — Realtime R6. The adapter is now wired +
-    // pushing frames; cache the live reachability axis for the
-    // diagnostic snapshot. Idempotent (already-true on Codex).
-    session.reachable = true;
+    // Fowler finding #12 — reachability derived from the live adapter at read
+    // time; no cached bit to flip here.
     log.info("ws-bridge", "Backend adapter attached", {
       sessionId,
       backendType: session.backendType,
@@ -1375,12 +1383,9 @@ export class WsBridge {
       // broadcasting `cli_disconnected` so an attached browser receives the
       // synthesised `assistant` frame in the same flush window.
       this.flushInterruptedStream(session);
-      // AURA-LOCAL — Realtime R6. Disconnect confirmed after
-      // the 15s debounce — the CLI is unreachable until a
-      // fresh handshake. Cache this for the diagnostic
-      // snapshot so pendingMsgs can be partitioned by
-      // reachable=false.
-      session.reachable = false;
+      // Fowler finding #12 — reachability derived from the adapter at read
+      // time; the disconnect-confirmed path leaves the adapter null/disconnected
+      // so the snapshot reports unreachable without a cached bit.
       this.broadcastToBrowsers(session, { type: "cli_disconnected" });
       for (const [reqId] of session.pendingPermissions) {
         this.broadcastToBrowsers(session, { type: "permission_cancelled", request_id: reqId });
@@ -1398,6 +1403,21 @@ export class WsBridge {
   handleBrowserOpen(ws: ServerWebSocket<SocketData>, sessionId: string) {
     metricsCollector.recordWsConnection("browser", "open");
     this.recorder?.recordEvent(sessionId, "ws_open", "browser");
+    // Realtime finding #1 — resurrection guard. If the row is absent from
+    // the Map AND an archived disk row exists, the eviction sweep already
+    // reclaimed this session. Creating a fresh blank row here (and emitting
+    // `cli_disconnected`/`session:relaunch-needed` below) is exactly the
+    // zombie-resurrection the eviction was built to prevent. Tell the stale
+    // tab the session was evicted and stop — no blank row, no relaunch.
+    if (!this.sessions.has(sessionId) && this.store?.hasArchivedRow(sessionId)) {
+      log.info("ws-bridge", "Browser reconnect to evicted session — refusing resurrection", {
+        event: "ws_bridge.evicted_reconnect_refused",
+        sessionId,
+      });
+      this.sendToBrowser(ws, { type: "session_evicted" });
+      try { ws.close(); } catch { /* already closing */ }
+      return;
+    }
     const session = this.getOrCreateSession(sessionId);
     const browserData = ws.data as BrowserSocketData;
     browserData.subscribed = false;

@@ -157,6 +157,8 @@ export interface ReapSummary {
   readonly skippedInconclusive: number;
   /** Orphans whose SIGTERM threw a non-ESRCH error (e.g. EPERM) — not counted as reaped. */
   readonly killFailed: number;
+  /** EC-45 — reaps aborted because the pid's identity drifted between classify and the kill instant (TOCTOU guard). */
+  readonly killAbortedDrift: number;
   readonly budgetExceeded: boolean;
   readonly durationMs: number;
 }
@@ -165,6 +167,15 @@ export interface ReapSummary {
 interface ArgvClassification {
   /** Whether the argv shape looks like a Companion-spawned CLI. */
   readonly isCompanionShape: boolean;
+  /**
+   * Stricter than `isCompanionShape`: the argv carries a marker that only a
+   * Companion-SPAWNED process has — `--sdk-url` (Claude) or the `app-server`
+   * subcommand (Codex). A developer's bare interactive `claude`/`codex`
+   * reparented to init matches `isCompanionShape` (basename only) but NOT
+   * this. The `no_known_session` reap branch gates on this so the reaper
+   * never SIGTERMs an unrelated user CLI that merely shares the basename.
+   */
+  readonly isServerManagedShape: boolean;
   /** Extracted `sessionId` from the --sdk-url URL path (Claude). */
   readonly sessionId: string | null;
   /** Categorical argv shape for EC-23 redacted logging. */
@@ -210,6 +221,7 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
       skippedNoSessionMatch: 0,
       skippedInconclusive: 0,
       killFailed: 0,
+      killAbortedDrift: 0,
       budgetExceeded: false,
       durationMs: ageMs(startedAt, deps.now?.()),
     };
@@ -259,6 +271,7 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
       skippedNoSessionMatch: 0,
       skippedInconclusive: 0,
       killFailed: 0,
+      killAbortedDrift: 0,
       budgetExceeded: false,
       durationMs: ageMs(startedAt, clock()),
     };
@@ -270,6 +283,7 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
   let skippedNoMatch = 0;
   let skippedInconclusive = 0;
   let killFailed = 0;
+  let killAbortedDrift = 0;
   let budgetExceeded = false;
   const rawArgvLogEnabled = process.env.COMPANION_LOG_PATHS_RAW === "1";
 
@@ -377,6 +391,25 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
     }
 
     // REAP branch — sentinel-before-sweep per EC-8.
+    //
+    // Hunt finding #9(a): the `no_known_session` reap must require a
+    // server-spawn marker (`--sdk-url` / `app-server`), not just the
+    // basename. Otherwise a developer's bare interactive `claude`/`codex`
+    // reparented to init (nohup, disown, terminal closed) matches
+    // `isCompanionShape` and gets SIGTERMed. The `identity_mismatch` branch
+    // is exempt: its argv carried the EXACT sessionId of a known session
+    // (so `--sdk-url` was present), and the probe positively said a DIFFERENT
+    // process now holds the pid — that is unambiguously reapable.
+    if (!known && !classification.isServerManagedShape) {
+      skippedNoMatch++;
+      log.warn("orphan-reaper", "companion-basename orphan lacks server-spawn marker — not reaping", {
+        event: "orphan_reaper.skipped_unmanaged_shape",
+        pid,
+        argvSha256: classification.argvSha256,
+        argvShape: classification.argvShape,
+      });
+      continue;
+    }
     if (!known) skippedNoMatch++;
     const reason = known ? "identity_mismatch" : "no_known_session";
     try {
@@ -396,6 +429,39 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
         argvSha256: classification.argvSha256,
         error_code: (e as NodeJS.ErrnoException).code ?? "unknown",
       });
+      continue;
+    }
+
+    // EC-45 — TOCTOU re-verify at the signal instant. Between the argv
+    // classification above and this kill there is real wall-time (the
+    // budget loop, the sidecar read, the sentinel fsync). If the orphan
+    // exited in that window and the kernel reused its PID, SIGTERM would
+    // land on an unrelated freshly-spawned process. Re-read /proc/<pid>
+    // and confirm ppid is STILL 1 AND the argv STILL classifies to the
+    // SAME Companion shape (argvSha256 match). Abort on any drift — the
+    // sentinel is already written, so delete it here (we are not reaping)
+    // and let the next boot's reconcile re-classify with a fresh verdict.
+    let stillSameOrphan = false;
+    try {
+      const reStat = readStat(pid);
+      const reArgv = splitCmdline(readCmdline(pid));
+      const reClass = classifyArgv(reArgv);
+      stillSameOrphan =
+        parsePpidFromStat(reStat) === 1 &&
+        reClass.isCompanionShape &&
+        reClass.argvSha256 === classification.argvSha256;
+    } catch {
+      stillSameOrphan = false; // pid vanished mid-window — nothing to kill
+    }
+    if (!stillSameOrphan) {
+      killAbortedDrift++;
+      log.warn("orphan-reaper", "identity drift before SIGTERM — aborting kill", {
+        event: "orphan_reaper.kill_aborted_drift",
+        pid,
+        argvSha256: classification.argvSha256,
+        sessionIdPresent: classification.sessionId !== null,
+      });
+      deleteReapingMarker(deps.sentinelRoot, pid);
       continue;
     }
 
@@ -464,6 +530,7 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
     skippedNoSessionMatch: skippedNoMatch,
     skippedInconclusive,
     killFailed,
+    killAbortedDrift,
     budgetExceeded,
     durationMs,
   });
@@ -476,6 +543,7 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
     skippedNoSessionMatch: skippedNoMatch,
     skippedInconclusive,
     killFailed,
+    killAbortedDrift,
     budgetExceeded,
     durationMs,
   };
@@ -546,6 +614,7 @@ function defaultSleep(ms: number): Promise<void> {
 export function classifyArgv(argv: readonly string[]): ArgvClassification {
   const shape: string[] = [];
   let isCompanionShape = false;
+  let isServerManagedShape = false;
   let sessionId: string | null = null;
   let cwdDepth = 0;
 
@@ -578,6 +647,7 @@ export function classifyArgv(argv: readonly string[]): ArgvClassification {
       shape.push("<URL>");
       // Extract sessionId from --sdk-url ws://.../<sessionId>
       if (i > 0 && argv[i - 1] === "--sdk-url") {
+        isServerManagedShape = true; // Claude: --sdk-url is server-spawn-only
         try {
           const url = new URL(tok);
           const segs = url.pathname.split("/").filter((s) => s.length > 0);
@@ -587,6 +657,9 @@ export function classifyArgv(argv: readonly string[]): ArgvClassification {
       }
       continue;
     }
+    // Codex: the `app-server` subcommand is present only on Companion-spawned
+    // Codex processes; a bare interactive `codex` never carries it.
+    if (tok === "app-server") isServerManagedShape = true;
     if (tok.includes("/") || tok.includes("\\")) {
       shape.push("<PATH>");
       // Track depth of the deepest path token for cwd-depth-ish forensic.
@@ -599,6 +672,7 @@ export function classifyArgv(argv: readonly string[]): ArgvClassification {
 
   return {
     isCompanionShape,
+    isServerManagedShape,
     sessionId,
     argvShape: shape,
     argvSha256: computeArgvSha(argv),

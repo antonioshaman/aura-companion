@@ -122,6 +122,16 @@ describe("CliFailedBanner — render + a11y", () => {
     expect(onStart).toHaveBeenCalledTimes(1);
   });
 
+  // a11y finding #11 - on mount (= the failure transition, since the parent
+  // renders the banner only while the failure is present), focus moves to the
+  // sole recovery action so a keyboard/SR user's next Tab/Enter acts on it
+  // rather than on the now-disabled Composer. Mutation-resistant: dropping the
+  // focus effect or the ref leaves focus on document.body and trips this.
+  it("moves focus to the primary recovery action on mount (a11y finding #11)", () => {
+    render(<CliFailedBanner failure={failure()} onStartNewSession={() => {}} />);
+    expect(screen.getByTestId("cli-failed-primary-action")).toHaveFocus();
+  });
+
   // a11y R10 - single-fire announcement on MOUNT, not on rerender.
   // Behavioural assertion: same `failure` reference rerendered does not
   // unmount + remount the role=alert node, so the screen reader does not

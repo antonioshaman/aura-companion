@@ -626,10 +626,15 @@ function handleParsedMessage(
       // PLAN T12 (Phase G) - if the user clicked
       // "Start new session with this draft" on a dead session,
       // route the stashed draft into THIS session as a pickup
-      // draft (first session_init wins, then the stash clears).
-      const pendingDraft = store.consumePendingDraftForNextSession();
-      if (pendingDraft !== undefined && pendingDraft.length > 0) {
-        store.setPickupDraft(sessionId, pendingDraft);
+      // draft. Friedman finding #4 — only a genuinely-NEW session
+      // may claim the stash; a reconnect/relaunch's session_init for
+      // an already-known session must not silently swallow a draft the
+      // user staged for a different new session.
+      if (!existingSession) {
+        const pendingDraft = store.consumePendingDraftForNextSession();
+        if (pendingDraft !== undefined && pendingDraft.length > 0) {
+          store.setPickupDraft(sessionId, pendingDraft);
+        }
       }
       store.setCliConnected(sessionId, true);
       store.setCliReconnecting(sessionId, false);
@@ -1039,6 +1044,26 @@ function handleParsedMessage(
       store.setStreaming(sessionId, null);
       store.setStreamingStats(sessionId, null);
       store.clearToolProgress(sessionId);
+      // Finding #5 — a permission pending when the CLI dies must be cleared,
+      // or it outranks the CliFailedBanner in the single-slot priority chain
+      // and hides the terminal banner behind an un-answerable approval. The
+      // most common way a CLI dies is mid-tool-call, which is exactly the
+      // state that leaves a permission pending — so this is common, not edge.
+      store.clearPendingPermissions(sessionId);
+      break;
+    }
+
+    case "session_evicted": {
+      // Realtime finding #1 — the server evicted this archived session from
+      // memory after archive. Drop the live bridge row so the UI stops
+      // treating it as active; unlike `cli_disconnected` this does NOT request
+      // a relaunch. The session remains in the archived list (REST-sourced
+      // `sdkSessions`); a reconnect is refused server-side by the resurrection
+      // guard, so the client simply stops here.
+      store.setCliConnected(sessionId, false);
+      store.setCliReconnecting(sessionId, false);
+      store.setSessionStatus(sessionId, null);
+      store.removeBridgeSession(sessionId);
       break;
     }
 

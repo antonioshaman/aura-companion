@@ -21,7 +21,17 @@ import { log } from "./logger.js";
  * Throws on filesystem error, oversize, or tmp-name collision (extremely
  * unlikely with 64-bit random suffix + O_EXCL).
  */
-export function writeAtomicJson(target: string, payload: unknown): void {
+export function writeAtomicJson(
+  target: string,
+  payload: unknown,
+  opts?: { maxBytes?: number },
+): void {
+  // Default cap is the council-artifact limit. Callers persisting
+  // unbounded state (session JSON carries full message history) pass
+  // Number.POSITIVE_INFINITY to opt out — converting a previously
+  // uncapped writeFileSync to a capped atomic write would newly throw
+  // and silently drop a large session's write, a regression.
+  const maxBytes = opts?.maxBytes ?? COUNCIL_ARTIFACT_MAX_BYTES;
   const dir = dirname(target);
   // Council Review 2026-06-04-0823 P2 #8 (Persistence × Hunt — closes
   // PLAN-aura-dynamic-model-list Task 4's explicit "parent dir 0o700"
@@ -64,9 +74,9 @@ export function writeAtomicJson(target: string, payload: unknown): void {
   // Byte-count via Buffer — JS string `.length` is UTF-16 code units and
   // undercounts multibyte content by up to 3×. Hunt #6.
   const byteLen = Buffer.byteLength(json, "utf8");
-  if (byteLen > COUNCIL_ARTIFACT_MAX_BYTES) {
+  if (byteLen > maxBytes) {
     throw new Error(
-      `atomic-write: payload (${byteLen} bytes) exceeds COUNCIL_ARTIFACT_MAX_BYTES (${COUNCIL_ARTIFACT_MAX_BYTES})`,
+      `atomic-write: payload (${byteLen} bytes) exceeds maxBytes (${maxBytes})`,
     );
   }
 

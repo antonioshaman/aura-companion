@@ -49,7 +49,11 @@ export function Composer({ sessionId, onTextChange }: ComposerProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const pendingSelectionRef = useRef<number | null>(null);
-  const cliConnected = useStore((s) => s.cliConnected);
+  // React/UI finding #10 — subscribe to THIS session's connection boolean,
+  // not the whole `cliConnected` Map. The Map identity changes on every
+  // session's connect/disconnect, so the old whole-Map subscription re-rendered
+  // every open Composer on unrelated sessions' state churn.
+  const isConnected = useStore((s) => s.cliConnected.get(sessionId) ?? false);
   const sessionData = useStore((s) => s.sessions.get(sessionId));
   const consumePickupDraft = useStore((s) => s.consumePickupDraft);
 
@@ -74,12 +78,11 @@ export function Composer({ sessionId, onTextChange }: ComposerProps) {
   // masked the Codex empty-previous case from the fallback logic at toggleMode.
   const previousMode = useStore((s) => s.previousPermissionMode.get(sessionId) ?? "");
 
-  const isConnected = cliConnected.get(sessionId) ?? false;
   // PLAN T12 (Phase G) - terminal CLI failure for this session.
   // When present, the banner above owns recovery; Composer stays
   // typeable (Friedman R4) but submit is gated.
-  const cliFailures = useStore((s) => s.cliFailures);
-  const cliFailed = cliFailures.has(sessionId);
+  // React/UI finding #10 — per-session boolean selector, not the whole Map.
+  const cliFailed = useStore((s) => s.cliFailures.has(sessionId));
   const currentMode = sessionData?.permissionMode || "acceptEdits";
   const isPlan = currentMode === "plan";
   const isCodex = sessionData?.backend_type === "codex";

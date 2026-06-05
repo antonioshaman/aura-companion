@@ -299,6 +299,34 @@ export function verifyProcessIdentity(
   return { kind: "match" };
 }
 
+/**
+ * EC-49 — read the KERNEL process-start instant for `pid` (the same
+ * quantity `verifyProcessIdentity` compares against), in epoch-ms.
+ *
+ * Returns `null` on non-Linux (no `/proc`) or any read/parse error. The
+ * caller (sidecar write at spawn) stores this so the verifier compares
+ * like-for-like with zero clock-domain skew — instead of `Date.now()`
+ * read in JS after spawn, which a GC pause / event-loop stall / cgroup
+ * `MemoryHigh` throttle between fork and the JS read can push past the
+ * ±2s window, false-flagging a live, correctly-identified subprocess as
+ * `mismatch (starttime)`.
+ *
+ * Pure: no kills, no mutation. Routes through the same injectable
+ * `procReader` seam as the verifier so tests drive both from one fake.
+ */
+export function readProcessStartMs(pid: number): number | null {
+  if (procReader.platform() !== "linux") return null;
+  try {
+    const procStat = procReader.readStat(pid);
+    const bootStat = procReader.readBootStat();
+    const ticks = parseStartTimeTicks(procStat);
+    const bootSecs = parseBootTimeSecs(bootStat);
+    return ticksToWallMs(ticks, bootSecs, procReader.clkTck);
+  } catch {
+    return null;
+  }
+}
+
 // Test-only: exported so tests can verify the splitter independently of
 // the full probe.
 export const __INTERNAL_FOR_TESTS = {

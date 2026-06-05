@@ -34,7 +34,6 @@ function makeSession(opts: {
     processedClientMessageIdSet: new Set(),
     lastCliActivityTs: 0,
     stateMachine: new SessionStateMachine(sessionId),
-    reachable: false,
   } as Session;
 }
 

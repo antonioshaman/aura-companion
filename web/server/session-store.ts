@@ -1,7 +1,8 @@
-import { mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkSync, existsSync, copyFileSync, statSync, renameSync, fsyncSync, openSync, closeSync, realpathSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, unlinkSync, existsSync, copyFileSync, statSync, renameSync, fsyncSync, openSync, closeSync, realpathSync } from "node:fs";
 import { join, sep } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { ARCHIVED_SESSIONS_SUBDIR } from "./cleanup/cleanup-paths.js";
+import { writeAtomicJson } from "./atomic-write.js";
 import type {
   SessionState,
   BrowserIncomingMessage,
@@ -261,7 +262,13 @@ export class SessionStore {
         ...session,
         schemaVersion: CURRENT_SESSION_SCHEMA_VERSION,
       };
-      writeFileSync(this.filePath(session.id), JSON.stringify(stamped), "utf-8");
+      // EC-46 — primary state writes are crash-atomic (tmp+fsync+rename),
+      // symmetric with moveToArchive. A raw writeFileSync mid-crash leaves
+      // a truncated JSON the next boot cannot parse, stranding the very
+      // session this write meant to preserve. Uncapped (Infinity) because
+      // session JSON carries full message history and a size cap would
+      // newly throw + drop the write — a regression over writeFileSync.
+      writeAtomicJson(this.filePath(session.id), stamped, { maxBytes: Number.POSITIVE_INFINITY });
     } catch (err) {
       console.error(`[session-store] Failed to save session ${session.id}:`, err);
     }
@@ -325,7 +332,10 @@ export class SessionStore {
   /** Persist launcher state (separate file). */
   saveLauncher(data: unknown): void {
     try {
-      writeFileSync(join(this.dir, "launcher.json"), JSON.stringify(data), "utf-8");
+      // EC-46 — launcher state is crash-atomic for the same reason as
+      // saveSync: a truncated launcher.json breaks boot recovery for every
+      // tracked process. Uncapped to preserve prior writeFileSync behaviour.
+      writeAtomicJson(join(this.dir, "launcher.json"), data, { maxBytes: Number.POSITIVE_INFINITY });
     } catch (err) {
       console.error("[session-store] Failed to save launcher state:", err);
     }
@@ -403,6 +413,12 @@ export class SessionStore {
     // Bounds-check the source: resolve symlinks on the deepest existing
     // ancestor of the source path, then verify it lives under sessionRoot.
     // EC-7 floor — never trust a caller-supplied sessionId at the syscall.
+    // Finding #15: a single post-realpath bounds check is airtight for BOTH
+    // the symlinked and non-symlinked source — `resolvedSource` is the fully
+    // resolved path either way, so `startsWith(resolvedRoot + sep)` rejects
+    // every escape. The earlier `resolvedSource !== source && …` guard was
+    // dead (fully subsumed by this one) and invited a future "simplify" that
+    // would reopen a symlink-escape; collapsed to the one unconditional check.
     const resolvedRoot = realpathSync(this.dir);
     let resolvedSource: string;
     try {
@@ -410,11 +426,8 @@ export class SessionStore {
     } catch {
       return { kind: "absent" };
     }
-    if (resolvedSource !== source && !resolvedSource.startsWith(resolvedRoot + sep)) {
-      throw new Error(`SessionStore.moveToArchive: source escapes session root after symlink resolution`);
-    }
     if (!resolvedSource.startsWith(resolvedRoot + sep)) {
-      throw new Error(`SessionStore.moveToArchive: source not under session root`);
+      throw new Error(`SessionStore.moveToArchive: source escapes session root`);
     }
 
     const archiveDir = join(this.dir, ARCHIVED_SESSIONS_SUBDIR);
@@ -497,5 +510,27 @@ export class SessionStore {
 
   get directory(): string {
     return this.dir;
+  }
+
+  /**
+   * Realtime finding #1 — resurrection guard. Returns true when an
+   * archived row exists at `<dir>/<ARCHIVED_SESSIONS_SUBDIR>/<sessionId>.json`,
+   * i.e. the eviction sweep already moved this session to the archive.
+   * `handleBrowserOpen` consults this before `getOrCreateSession` so a stale
+   * tab reconnecting cannot recreate a blank live row for a session that was
+   * intentionally evicted. Validates the sessionId shape (same rejection set
+   * as `moveToArchive`) so a crafted id can never escape the archive subdir.
+   */
+  hasArchivedRow(sessionId: string): boolean {
+    if (
+      typeof sessionId !== "string" ||
+      sessionId.length === 0 ||
+      sessionId.includes("/") ||
+      sessionId.includes("\\") ||
+      sessionId.includes("\0")
+    ) {
+      return false;
+    }
+    return existsSync(join(this.dir, ARCHIVED_SESSIONS_SUBDIR, `${sessionId}.json`));
   }
 }
