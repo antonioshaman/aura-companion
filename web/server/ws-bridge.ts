@@ -438,6 +438,18 @@ export class WsBridge {
     const persisted = this.store.loadAll();
     let count = 0;
     for (const p of persisted) {
+      // AURA-LOCAL: defence-in-depth guard against malformed persisted records.
+      // SessionStore.loadAll() is the upstream filter; this hard-rejects anything
+      // that still slips through (missing id or state) rather than sentinel-defaulting
+      // — fail-closed avoids reviving a record with synthetic identity that the
+      // launcher half cannot rejoin.
+      if (!p.id || !p.state || typeof p.state !== "object") {
+        console.warn(
+          `[ws-bridge] restoreFromDisk: skipping malformed record (missing id or state); ` +
+            `id=${JSON.stringify((p as { id?: unknown }).id)} state_type=${typeof (p as { state?: unknown }).state}`,
+        );
+        continue;
+      }
       if (this.sessions.has(p.id)) continue; // don't overwrite live sessions
       const session: Session = {
         id: p.id,
