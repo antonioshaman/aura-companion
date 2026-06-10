@@ -205,6 +205,7 @@ When submitting a pull request:
 - Add a screenshot of the changes in the PR description if it's a visual change
 - Explain simply what the PR does and why it's needed
 - Tell me if the code was reviewed by a human or simply generated directly by an AI. 
+- The `Co-Authored-By` commit trailer MUST be version-less — use `Co-Authored-By: Claude <noreply@anthropic.com>`. Never append a model version (e.g. "Opus 4.7"): the harness default hardcodes a stale version that does not track the running model.
 
 ## Linear Issues
 

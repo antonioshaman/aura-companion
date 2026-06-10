@@ -894,25 +894,50 @@ function GitBranchSection({ sessionId }: { sessionId: string }) {
   );
 }
 
+/** Threshold past which the task snapshot is flagged as possibly stale (5 min). */
+const TASKS_STALE_AFTER_MS = 5 * 60 * 1000;
+
 /** Tasks section — only visible for Claude Code sessions */
 function TasksSection({ sessionId }: { sessionId: string }) {
   const tasks = useStore((s) => s.sessionTasks.get(sessionId) || EMPTY_TASKS);
+  const updatedAt = useStore((s) => s.sessionTasksUpdatedAt.get(sessionId));
   const session = useStore((s) => s.sessions.get(sessionId));
   const sdk = useSdkSession(sessionId);
   const isCodex = (session?.backend_type || sdk?.backendType) === "codex";
 
+  // Re-render every 30s so the relative "updated N ago" hint keeps advancing
+  // while the session is idle and no new TodoWrite frame arrives.
+  const [, setNowTick] = useState(0);
+  useEffect(() => {
+    if (!updatedAt) return;
+    const id = setInterval(() => setNowTick((n) => n + 1), 30_000);
+    return () => clearInterval(id);
+  }, [updatedAt]);
+
   if (!session || isCodex) return null;
+
+  const isStale = updatedAt != null && Date.now() - updatedAt > TASKS_STALE_AFTER_MS;
 
   return (
     <div className="px-3 py-2">
       {tasks.length === 0 ? (
         <p className="text-[11px] text-cc-muted text-center py-6">Tasks will appear here as the agent works</p>
       ) : (
-        <div className="space-y-0.5">
-          {tasks.map((task) => (
-            <TaskRow key={task.id} task={task} />
-          ))}
-        </div>
+        <>
+          {updatedAt != null && (
+            <p
+              className={`mb-1.5 px-2.5 text-[10px] ${isStale ? "text-cc-warning" : "text-cc-muted"}`}
+              title="The task list mirrors the agent's last TodoWrite — it may lag behind actual progress until the agent updates it."
+            >
+              Snapshot · updated {timeAgo(updatedAt)}
+            </p>
+          )}
+          <div className="space-y-0.5">
+            {tasks.map((task) => (
+              <TaskRow key={task.id} task={task} />
+            ))}
+          </div>
+        </>
       )}
     </div>
   );

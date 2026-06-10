@@ -1232,6 +1232,46 @@ describe("handleMessage: message_history", () => {
     expect(msgs[1].content).toBe("4");
   });
 
+  it("stamps tasks from history with the original message timestamp, not page-load time", () => {
+    // Regression: the panel's "updated N ago" hint must reflect when the agent
+    // actually last touched its todos, not when the browser replayed history.
+    // Otherwise a long-frozen session reads "just now" on every page load and the
+    // staleness signal is defeated exactly where it matters most.
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+
+    const oldTs = Date.now() - 3 * 60 * 60 * 1000; // 3h ago
+    fireMessage({
+      type: "message_history",
+      messages: [
+        {
+          type: "assistant",
+          timestamp: oldTs,
+          message: {
+            id: "msg-hist-todo",
+            type: "message",
+            role: "assistant",
+            model: "claude-opus-4-20250514",
+            content: [
+              {
+                type: "tool_use",
+                id: "tu-hist-todo",
+                name: "TodoWrite",
+                input: { todos: [{ content: "Old task", status: "in_progress", activeForm: "Doing old task" }] },
+              },
+            ],
+            stop_reason: "tool_use",
+            usage: { input_tokens: 5, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+          },
+          parent_tool_use_id: null,
+        },
+      ],
+    });
+
+    expect(useStore.getState().sessionTasks.get("s1")).toHaveLength(1);
+    expect(useStore.getState().sessionTasksUpdatedAt.get("s1")).toBe(oldTs);
+  });
+
   it("includes error results from history as system messages", () => {
     wsModule.connectSession("s1");
     fireMessage({ type: "session_init", session: makeSession("s1") });

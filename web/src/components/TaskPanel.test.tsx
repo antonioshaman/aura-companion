@@ -58,6 +58,7 @@ interface TaskItemMock {
 
 interface MockStoreState {
   sessionTasks: Map<string, TaskItemMock[]>;
+  sessionTasksUpdatedAt: Map<string, number>;
   sessions: Map<string, {
     backend_type?: string;
     cwd?: string;
@@ -95,6 +96,7 @@ let mockState: MockStoreState;
 function resetStore(overrides: Partial<MockStoreState> = {}) {
   mockState = {
     sessionTasks: new Map(),
+    sessionTasksUpdatedAt: new Map(),
     sessions: new Map([["s1", { backend_type: "codex" }]]),
     sdkSessions: [],
     taskPanelOpen: true,
@@ -598,6 +600,46 @@ describe("TasksSection (Claude Code sessions)", () => {
     render(<TaskPanel sessionId="s1" />);
     expect(screen.queryByText("Tasks")).not.toBeInTheDocument();
     expect(screen.queryByText("Some task")).not.toBeInTheDocument();
+  });
+
+  it("shows a fresh snapshot hint when tasks were updated recently", () => {
+    // The "updated N ago" line makes explicit that the panel is a point-in-time
+    // mirror of the agent's last TodoWrite, not a live progress tracker.
+    resetStore({
+      sessions: new Map([["s1", { backend_type: "claude" }]]),
+      sessionTasks: new Map([["s1", [{ id: "t1", status: "in_progress", subject: "Work" }]]]),
+      sessionTasksUpdatedAt: new Map([["s1", Date.now()]]),
+    });
+    render(<TaskPanel sessionId="s1" />);
+    const hint = screen.getByText(/Snapshot · updated/);
+    expect(hint).toBeInTheDocument();
+    // Recent snapshot uses the muted (not warning) color
+    expect(hint.className).toContain("text-cc-muted");
+    expect(hint.className).not.toContain("text-cc-warning");
+  });
+
+  it("flags the snapshot as stale (warning color) when older than 5 minutes", () => {
+    // A frozen/abandoned todo list (agent finished but never emitted a closing
+    // TodoWrite) is the worst case — the warning color signals it may not reflect reality.
+    resetStore({
+      sessions: new Map([["s1", { backend_type: "claude" }]]),
+      sessionTasks: new Map([["s1", [{ id: "t1", status: "in_progress", subject: "Work" }]]]),
+      sessionTasksUpdatedAt: new Map([["s1", Date.now() - 6 * 60 * 1000]]),
+    });
+    render(<TaskPanel sessionId="s1" />);
+    const hint = screen.getByText(/Snapshot · updated/);
+    expect(hint.className).toContain("text-cc-warning");
+  });
+
+  it("omits the snapshot hint when no update timestamp is known", () => {
+    // Defensive: tasks present but no recorded updatedAt → no misleading "just now".
+    resetStore({
+      sessions: new Map([["s1", { backend_type: "claude" }]]),
+      sessionTasks: new Map([["s1", [{ id: "t1", status: "pending", subject: "Work" }]]]),
+      sessionTasksUpdatedAt: new Map(),
+    });
+    render(<TaskPanel sessionId="s1" />);
+    expect(screen.queryByText(/Snapshot · updated/)).not.toBeInTheDocument();
   });
 });
 

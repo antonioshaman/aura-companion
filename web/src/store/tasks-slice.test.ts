@@ -137,6 +137,25 @@ describe("Tasks", () => {
     expect(tasks[0].subject).toBe("Task 1"); // other fields preserved
     expect(tasks[1].status).toBe("pending"); // other task untouched
   });
+
+  it("records sessionTasksUpdatedAt on every task mutation (drives the panel staleness hint)", () => {
+    // The freshness timestamp is what lets the UI surface "updated N ago" and flag
+    // a frozen/abandoned todo list. All three mutators must stamp it.
+    const sid = "s-freshness";
+    const before = Date.now();
+    expect(useStore.getState().sessionTasksUpdatedAt.has(sid)).toBe(false);
+
+    useStore.getState().setTasks(sid, [makeTask({ id: "t1" })]);
+    const afterSet = useStore.getState().sessionTasksUpdatedAt.get(sid);
+    expect(afterSet).toBeGreaterThanOrEqual(before);
+
+    useStore.getState().addTask(sid, makeTask({ id: "t2" }));
+    expect(useStore.getState().sessionTasksUpdatedAt.get(sid)).toBeGreaterThanOrEqual(afterSet!);
+
+    const afterAdd = useStore.getState().sessionTasksUpdatedAt.get(sid)!;
+    useStore.getState().updateTask(sid, "t1", { status: "completed" });
+    expect(useStore.getState().sessionTasksUpdatedAt.get(sid)).toBeGreaterThanOrEqual(afterAdd);
+  });
 });
 
 // ─── Changed files tracking ──────────────────────────────────────────────────

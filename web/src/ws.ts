@@ -156,7 +156,10 @@ function getProcessedSet(sessionId: string): Set<string> {
   return set;
 }
 
-function extractTasksFromBlocks(sessionId: string, blocks: ContentBlock[]) {
+// `frameTs` is the wall-clock time the task mutation actually happened. Live
+// frames default to now; history-replay passes the original message timestamp so
+// the panel's "updated N ago" reflects the true age, not the page-load time.
+function extractTasksFromBlocks(sessionId: string, blocks: ContentBlock[], frameTs: number = Date.now()) {
   const store = useStore.getState();
   const processed = getProcessedSet(sessionId);
 
@@ -181,7 +184,7 @@ function extractTasksFromBlocks(sessionId: string, blocks: ContentBlock[]) {
           activeForm: t.activeForm,
           status: (t.status as TaskItem["status"]) || "pending",
         }));
-        store.setTasks(sessionId, tasks);
+        store.setTasks(sessionId, tasks, frameTs);
         taskCounters.set(sessionId, tasks.length);
       }
       continue;
@@ -198,7 +201,7 @@ function extractTasksFromBlocks(sessionId: string, blocks: ContentBlock[]) {
         activeForm: input.activeForm as string | undefined,
         status: "pending" as const,
       };
-      store.addTask(sessionId, task);
+      store.addTask(sessionId, task, frameTs);
       continue;
     }
 
@@ -211,7 +214,7 @@ function extractTasksFromBlocks(sessionId: string, blocks: ContentBlock[]) {
         if (input.owner) updates.owner = input.owner as string;
         if (input.activeForm !== undefined) updates.activeForm = input.activeForm as string;
         if (input.addBlockedBy) updates.blockedBy = input.addBlockedBy as string[];
-        store.updateTask(sessionId, taskId, updates);
+        store.updateTask(sessionId, taskId, updates, frameTs);
       }
     }
   }
@@ -1122,10 +1125,10 @@ function handleParsedMessage(
           }
           // Also extract tasks, changed files, and background processes from history
           if (msg.content?.length) {
-            extractTasksFromBlocks(sessionId, msg.content);
+            const baseTimestamp = histMsg.timestamp || Date.now();
+            extractTasksFromBlocks(sessionId, msg.content, baseTimestamp);
             extractChangedFilesFromBlocks(sessionId, msg.content);
             extractProcessesFromBlocks(sessionId, msg.content);
-            const baseTimestamp = histMsg.timestamp || Date.now();
             for (const block of msg.content) {
               if (block.type === "tool_use") {
                 const input = (block as { input?: Record<string, unknown> }).input || {};

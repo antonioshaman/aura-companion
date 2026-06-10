@@ -199,6 +199,7 @@ export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> 
         aiResolvedPermissions: deleteFromMap(s.aiResolvedPermissions, sessionId),
         // Tasks slice fields
         sessionTasks: deleteFromMap(s.sessionTasks, sessionId),
+        sessionTasksUpdatedAt: deleteFromMap(s.sessionTasksUpdatedAt, sessionId),
         changedFilesTick: deleteFromMap(s.changedFilesTick, sessionId),
         gitChangedFilesCount: deleteFromMap(s.gitChangedFilesCount, sessionId),
         sessionProcesses: deleteFromMap(s.sessionProcesses, sessionId),

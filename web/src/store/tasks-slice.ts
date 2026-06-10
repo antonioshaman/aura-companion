@@ -16,15 +16,17 @@ export interface ToolActivityEntry {
 
 export interface TasksSlice {
   sessionTasks: Map<string, TaskItem[]>;
+  /** Wall-clock ms of the last task mutation per session — drives the panel's "updated N ago" staleness hint. */
+  sessionTasksUpdatedAt: Map<string, number>;
   sessionProcesses: Map<string, ProcessItem[]>;
   changedFilesTick: Map<string, number>;
   gitChangedFilesCount: Map<string, number>;
   toolProgress: Map<string, Map<string, { toolName: string; elapsedSeconds: number }>>;
   toolActivity: Map<string, ToolActivityEntry[]>;
 
-  addTask: (sessionId: string, task: TaskItem) => void;
-  setTasks: (sessionId: string, tasks: TaskItem[]) => void;
-  updateTask: (sessionId: string, taskId: string, updates: Partial<TaskItem>) => void;
+  addTask: (sessionId: string, task: TaskItem, updatedAt?: number) => void;
+  setTasks: (sessionId: string, tasks: TaskItem[], updatedAt?: number) => void;
+  updateTask: (sessionId: string, taskId: string, updates: Partial<TaskItem>, updatedAt?: number) => void;
   addProcess: (sessionId: string, process: ProcessItem) => void;
   updateProcess: (sessionId: string, taskId: string, updates: Partial<ProcessItem>) => void;
   updateProcessByToolUseId: (sessionId: string, toolUseId: string, updates: Partial<ProcessItem>) => void;
@@ -39,28 +41,33 @@ export interface TasksSlice {
 
 export const createTasksSlice: StateCreator<AppState, [], [], TasksSlice> = (set) => ({
   sessionTasks: new Map(),
+  sessionTasksUpdatedAt: new Map(),
   sessionProcesses: new Map(),
   changedFilesTick: new Map(),
   gitChangedFilesCount: new Map(),
   toolProgress: new Map(),
   toolActivity: new Map(),
 
-  addTask: (sessionId, task) =>
+  addTask: (sessionId, task, updatedAt) =>
     set((s) => {
       const sessionTasks = new Map(s.sessionTasks);
       const tasks = [...(sessionTasks.get(sessionId) || []), task];
       sessionTasks.set(sessionId, tasks);
-      return { sessionTasks };
+      const sessionTasksUpdatedAt = new Map(s.sessionTasksUpdatedAt);
+      sessionTasksUpdatedAt.set(sessionId, updatedAt ?? Date.now());
+      return { sessionTasks, sessionTasksUpdatedAt };
     }),
 
-  setTasks: (sessionId, tasks) =>
+  setTasks: (sessionId, tasks, updatedAt) =>
     set((s) => {
       const sessionTasks = new Map(s.sessionTasks);
       sessionTasks.set(sessionId, tasks);
-      return { sessionTasks };
+      const sessionTasksUpdatedAt = new Map(s.sessionTasksUpdatedAt);
+      sessionTasksUpdatedAt.set(sessionId, updatedAt ?? Date.now());
+      return { sessionTasks, sessionTasksUpdatedAt };
     }),
 
-  updateTask: (sessionId, taskId, updates) =>
+  updateTask: (sessionId, taskId, updates, updatedAt) =>
     set((s) => {
       const sessionTasks = new Map(s.sessionTasks);
       const tasks = sessionTasks.get(sessionId);
@@ -70,7 +77,9 @@ export const createTasksSlice: StateCreator<AppState, [], [], TasksSlice> = (set
           tasks.map((t) => (t.id === taskId ? { ...t, ...updates } : t)),
         );
       }
-      return { sessionTasks };
+      const sessionTasksUpdatedAt = new Map(s.sessionTasksUpdatedAt);
+      sessionTasksUpdatedAt.set(sessionId, updatedAt ?? Date.now());
+      return { sessionTasks, sessionTasksUpdatedAt };
     }),
 
   addProcess: (sessionId, process) =>
