@@ -7,8 +7,7 @@ compatibility_date = "2024-09-23"
 # and the app read GET /stats/global.
 #
 # KV namespace holds one key per active instance (30d TTL) plus a cumulative
-# total counter. Create the namespace and paste its id below before deploy:
-#   bunx wrangler kv namespace create STATS_KV
+# total counter. Recreate with: bunx wrangler kv namespace create STATS_KV
 [[kv_namespaces]]
 binding = "STATS_KV"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+id = "23553fab795e45c29bf25e32e5dca178"
