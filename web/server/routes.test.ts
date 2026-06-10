@@ -109,6 +109,7 @@ vi.mock("./settings-manager.js", () => ({
     publicUrl: "",
     updateChannel: "stable",
     dockerAutoUpdate: false,
+    telemetryEnabled: false,
     updatedAt: 0,
   })),
   updateSettings: vi.fn((patch) => ({
@@ -1297,6 +1298,7 @@ describe("GET /api/sessions/:id/archive-info", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telemetryEnabled: false,
       updatedAt: 0,
     });
     const res = await app.request("/api/sessions/s1/archive-info", { method: "GET" });
@@ -1667,6 +1669,7 @@ describe("GET /api/settings", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telemetryEnabled: false,
       updatedAt: 123,
     });
 
@@ -1723,6 +1726,7 @@ describe("GET /api/settings", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telemetryEnabled: false,
       updatedAt: 123,
     });
 
@@ -1780,6 +1784,7 @@ describe("GET /api/settings", () => {
       publicUrl: "https://example.com",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telemetryEnabled: false,
       updatedAt: 100,
     });
 
@@ -1817,6 +1822,7 @@ describe("PUT /api/settings", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telemetryEnabled: false,
       updatedAt: 456,
     });
 
@@ -1895,6 +1901,7 @@ describe("PUT /api/settings", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telemetryEnabled: false,
       updatedAt: 789,
     });
 
@@ -1940,6 +1947,7 @@ describe("PUT /api/settings", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telemetryEnabled: false,
       updatedAt: 999,
     });
 
@@ -2036,6 +2044,7 @@ describe("PUT /api/settings", () => {
       publicUrl: "https://my-server.com",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telemetryEnabled: false,
       updatedAt: 500,
     });
 
@@ -2262,6 +2271,7 @@ describe("GET /api/linear/issues", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telemetryEnabled: false,
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -2297,6 +2307,7 @@ describe("GET /api/linear/issues", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telemetryEnabled: false,
       updatedAt: 0,
     });
 
@@ -2385,6 +2396,7 @@ describe("GET /api/linear/issues", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telemetryEnabled: false,
       updatedAt: 0,
     });
 
@@ -2480,6 +2492,7 @@ describe("GET /api/linear/issues", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telemetryEnabled: false,
       updatedAt: 0,
     });
 
@@ -2540,6 +2553,7 @@ describe("GET /api/linear/connection", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telemetryEnabled: false,
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -2575,6 +2589,7 @@ describe("GET /api/linear/connection", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telemetryEnabled: false,
       updatedAt: 0,
     });
 
@@ -2632,6 +2647,7 @@ describe("POST /api/linear/issues/:id/transition", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telemetryEnabled: false,
       updatedAt: 0,
     });
 
@@ -2671,6 +2687,7 @@ describe("POST /api/linear/issues/:id/transition", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telemetryEnabled: false,
       updatedAt: 0,
     });
 
@@ -2709,6 +2726,7 @@ describe("POST /api/linear/issues/:id/transition", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telemetryEnabled: false,
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -2749,6 +2767,7 @@ describe("POST /api/linear/issues/:id/transition", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telemetryEnabled: false,
       updatedAt: 0,
     });
 
@@ -2823,6 +2842,7 @@ describe("POST /api/linear/issues/:id/transition", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telemetryEnabled: false,
       updatedAt: 0,
     });
 
@@ -2876,6 +2896,7 @@ describe("GET /api/linear/projects", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telemetryEnabled: false,
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -2911,6 +2932,7 @@ describe("GET /api/linear/projects", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telemetryEnabled: false,
       updatedAt: 0,
     });
 
@@ -2976,6 +2998,7 @@ describe("GET /api/linear/project-issues", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telemetryEnabled: false,
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -3011,6 +3034,7 @@ describe("GET /api/linear/project-issues", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telemetryEnabled: false,
       updatedAt: 0,
     });
 
@@ -3091,6 +3115,7 @@ describe("GET /api/linear/project-issues", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telemetryEnabled: false,
       updatedAt: 0,
     });
 

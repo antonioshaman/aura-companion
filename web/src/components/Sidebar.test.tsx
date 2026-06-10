@@ -33,6 +33,7 @@ vi.mock("../api.js", () => ({
     renameSession: (...args: unknown[]) => mockApi.renameSession(...args),
     getArchiveInfo: (...args: unknown[]) => mockApi.getArchiveInfo(...args),
   },
+  fetchGlobalStats: () => Promise.resolve(null),
 }));
 
 // ─── Store mock helpers ──────────────────────────────────────────────────────

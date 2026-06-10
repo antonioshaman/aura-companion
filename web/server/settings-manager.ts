@@ -43,6 +43,8 @@ export interface CompanionSettings {
   publicUrl: string;
   updateChannel: UpdateChannel;
   dockerAutoUpdate: boolean;
+  /** Opt-in: send an anonymous 30-day heartbeat to the global usage counter. Default off. */
+  telemetryEnabled: boolean;
   updatedAt: number;
 }
 
@@ -74,6 +76,7 @@ let settings: CompanionSettings = {
   publicUrl: "",
   updateChannel: "stable",
   dockerAutoUpdate: false,
+  telemetryEnabled: false,
   updatedAt: 0,
 };
 
@@ -105,6 +108,7 @@ function normalize(raw: Partial<CompanionSettings> | null | undefined): Companio
     publicUrl: typeof raw?.publicUrl === "string" ? raw.publicUrl.trim().replace(/\/+$/, "") : "",
     updateChannel: raw?.updateChannel === "prerelease" ? "prerelease" : "stable",
     dockerAutoUpdate: typeof raw?.dockerAutoUpdate === "boolean" ? raw.dockerAutoUpdate : false,
+    telemetryEnabled: typeof raw?.telemetryEnabled === "boolean" ? raw.telemetryEnabled : false,
     updatedAt: typeof raw?.updatedAt === "number" ? raw.updatedAt : 0,
   };
 }
@@ -133,7 +137,7 @@ export function getSettings(): CompanionSettings {
 }
 
 export function updateSettings(
-  patch: Partial<Pick<CompanionSettings, "anthropicApiKey" | "anthropicModel" | "claudeCodeOAuthToken" | "openaiApiKey" | "onboardingCompleted" | "linearApiKey" | "linearAutoTransition" | "linearAutoTransitionStateId" | "linearAutoTransitionStateName" | "linearArchiveTransition" | "linearArchiveTransitionStateId" | "linearArchiveTransitionStateName" | "linearOAuthClientId" | "linearOAuthClientSecret" | "linearOAuthWebhookSecret" | "linearOAuthAccessToken" | "linearOAuthRefreshToken" | "aiValidationEnabled" | "aiValidationAutoApprove" | "aiValidationAutoDeny" | "publicUrl" | "updateChannel" | "dockerAutoUpdate">>,
+  patch: Partial<Pick<CompanionSettings, "anthropicApiKey" | "anthropicModel" | "claudeCodeOAuthToken" | "openaiApiKey" | "onboardingCompleted" | "linearApiKey" | "linearAutoTransition" | "linearAutoTransitionStateId" | "linearAutoTransitionStateName" | "linearArchiveTransition" | "linearArchiveTransitionStateId" | "linearArchiveTransitionStateName" | "linearOAuthClientId" | "linearOAuthClientSecret" | "linearOAuthWebhookSecret" | "linearOAuthAccessToken" | "linearOAuthRefreshToken" | "aiValidationEnabled" | "aiValidationAutoApprove" | "aiValidationAutoDeny" | "publicUrl" | "updateChannel" | "dockerAutoUpdate" | "telemetryEnabled">>,
 ): CompanionSettings {
   ensureLoaded();
   settings = normalize({
@@ -160,6 +164,7 @@ export function updateSettings(
     publicUrl: patch.publicUrl ?? settings.publicUrl,
     updateChannel: patch.updateChannel ?? settings.updateChannel,
     dockerAutoUpdate: patch.dockerAutoUpdate ?? settings.dockerAutoUpdate,
+    telemetryEnabled: patch.telemetryEnabled ?? settings.telemetryEnabled,
     updatedAt: Date.now(),
   });
   persist();

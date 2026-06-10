@@ -1,0 +1,14 @@
+name = "companion-stats"
+main = "src/index.ts"
+compatibility_date = "2024-09-23"
+
+# Anonymous global usage counter for Aura Companion.
+# Self-hosted instances opt-in to POST /telemetry/heartbeat; the landing page
+# and the app read GET /stats/global.
+#
+# KV namespace holds one key per active instance (30d TTL) plus a cumulative
+# total counter. Create the namespace and paste its id below before deploy:
+#   bunx wrangler kv namespace create STATS_KV
+[[kv_namespaces]]
+binding = "STATS_KV"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
