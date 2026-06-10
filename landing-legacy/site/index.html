@@ -440,10 +440,6 @@
   .modal-submit { width: 100%; background: linear-gradient(135deg, var(--amber), var(--ember)); color: #fff; border: none; padding: 14px; border-radius: 12px; font-weight: 600; font-size: 14px; cursor: pointer; font-family: inherit; margin-top: 8px; }
   .modal-success { text-align: center; padding: 20px 0; }
   .modal-success .check { width: 64px; height: 64px; border-radius: 50%; background: linear-gradient(135deg, var(--amber), var(--ember)); margin: 0 auto 20px; display: flex; align-items: center; justify-content: center; font-size: 32px; color: #fff; }
-  .usage-stats { display: flex; flex-wrap: wrap; justify-content: center; gap: 40px; margin: 28px auto 0; padding: 20px 28px; max-width: 560px; background: var(--surface); border: 1px solid var(--border); border-radius: 20px; box-shadow: var(--shadow-lift); }
-  .usage-stat { text-align: center; }
-  .usage-num { font-family: 'Cormorant Garamond', serif; font-size: clamp(34px, 6vw, 52px); font-weight: 600; line-height: 1; color: var(--amber); font-variant-numeric: tabular-nums; }
-  .usage-label { margin-top: 8px; font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-mute); }
 </style>
 </head>
 <body>
@@ -512,17 +508,6 @@
       <div class="hero-eyebrow"><span class="dot"></span> Доступно из России, Беларуси, Казахстана и СНГ — без VPN</div>
       <h1>Сложные ИИ-системы.<br><span class="accent">Голосом.</span> С телефона.</h1>
       <p class="hero-sub">Aura Companion даёт каждому простой доступ к мощи Claude Code и Codex — без сложных настроек, без иностранных карт, без знания английского. Программируйте, советуйтесь, создавайте — просто говоря голосом со своего телефона.</p>
-
-      <div class="usage-stats" id="usage-stats" hidden>
-        <div class="usage-stat">
-          <div class="usage-num" id="usage-active">—</div>
-          <div class="usage-label">активных установок</div>
-        </div>
-        <div class="usage-stat">
-          <div class="usage-num" id="usage-total">—</div>
-          <div class="usage-label">всего установок</div>
-        </div>
-      </div>
 
       <div class="paths" id="paths">
         <a href="#pricing" class="path">
@@ -1145,30 +1130,6 @@
       document.querySelectorAll('.lang-switch button')[1].classList.remove('on');
     }
   }
-
-  // Anonymous global usage counter — reads the opt-in telemetry aggregator.
-  // Renders nothing until counts are available, so an unreachable worker is
-  // silently absent rather than a broken card.
-  (function () {
-    var STATS_URL = 'https://companion-stats.antonshmonin.workers.dev';
-    fetch(STATS_URL + '/stats/global')
-      .then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (data) {
-        if (!data) return;
-        var active = typeof data.activeInstances30d === 'number' ? data.activeInstances30d : null;
-        var total = typeof data.totalInstances === 'number' ? data.totalInstances : null;
-        if (active === null && total === null) return;
-        var box = document.getElementById('usage-stats');
-        var aEl = document.getElementById('usage-active');
-        var tEl = document.getElementById('usage-total');
-        if (active !== null && aEl) { aEl.textContent = active.toLocaleString('ru-RU'); aEl.parentElement.hidden = false; }
-        else if (aEl) { aEl.parentElement.style.display = 'none'; }
-        if (total !== null && tEl) { tEl.textContent = total.toLocaleString('ru-RU'); tEl.parentElement.hidden = false; }
-        else if (tEl) { tEl.parentElement.style.display = 'none'; }
-        if (box) box.hidden = false;
-      })
-      .catch(function () {});
-  })();
 </script>
 </body>
 </html>
