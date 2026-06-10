@@ -45,7 +45,7 @@ import { WsBridge, type SocketData } from "./ws-bridge.js";
 import { SessionStore } from "./session-store.js";
 import { containerManager } from "./container-manager.js";
 import { companionBus } from "./event-bus.js";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -2530,6 +2530,56 @@ describe("Persistence", () => {
     expect(session!.backendAdapter).toBeNull();
     expect(session!.browserSockets.size).toBe(0);
     expect(session!.processedClientMessageIdSet.has("restored-client-1")).toBe(true);
+  });
+
+  it("restoreFromDisk: skips malformed records (missing id or state)", () => {
+    // AURA-LOCAL: defence-in-depth guard. SessionStore.loadAll() is the producer-side
+    // filter for *.runtime.json sister files; this test exercises the consumer-side
+    // hard-reject for anything that still slips through (e.g., a future sister-file
+    // class added without updating loadAll, or a malformed write). Fail-closed —
+    // skip the record rather than synthesising sentinel identity that the launcher
+    // half cannot rejoin.
+    store.saveSync({
+      id: "good",
+      state: {
+        session_id: "good",
+        model: "claude-sonnet-4-6",
+        cwd: "/saved",
+        tools: [],
+        permissionMode: "default",
+        claude_code_version: "1.0",
+        mcp_servers: [],
+        agents: [],
+        slash_commands: [],
+        skills: [],
+        total_cost_usd: 0,
+        num_turns: 0,
+        context_used_percent: 0,
+        is_compacting: false,
+        git_branch: "",
+        is_worktree: false,
+        is_containerized: false,
+        repo_root: "",
+        git_ahead: 0,
+        git_behind: 0,
+        total_lines_added: 0,
+        total_lines_removed: 0,
+      },
+      messageHistory: [],
+      pendingMessages: [],
+      pendingPermissions: [],
+    });
+    // Drop a plain `.json` file (passes loadAll filter — not a launcher/runtime sister)
+    // but missing both `id` and `state`. The guard must reject without crashing.
+    writeFileSync(
+      join(tempDir, "malformed.json"),
+      JSON.stringify({ schemaVersion: 1, foo: "bar" }),
+      "utf-8",
+    );
+
+    const count = bridge.restoreFromDisk();
+    expect(count).toBe(1);
+    expect(bridge.getSession("good")).toBeDefined();
   });
 
   it("restoreFromDisk: does not overwrite live sessions", () => {

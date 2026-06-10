@@ -289,7 +289,14 @@ export class SessionStore {
   loadAll(): PersistedSession[] {
     const sessions: PersistedSession[] = [];
     try {
-      const files = readdirSync(this.dir).filter((f) => f.endsWith(".json") && f !== "launcher.json");
+      // AURA-LOCAL: exclude sister-files (*.runtime.json) — process-identity records
+      // persisted under the same directory by cli-launcher's boot-hygiene path. Their
+      // shape (schemaVersion + pid + processStartMs + argvSha256) lacks `id` and
+      // `state`, so reading them as PersistedSession crashes restoreFromDisk on
+      // `p.state.backend_type`. Producer-side dual to the launcher.json exclusion.
+      const files = readdirSync(this.dir).filter(
+        (f) => f.endsWith(".json") && !f.endsWith(".runtime.json") && f !== "launcher.json",
+      );
       for (const file of files) {
         try {
           const raw = readFileSync(join(this.dir, file), "utf-8");

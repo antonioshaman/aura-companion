@@ -214,6 +214,25 @@ describe("loadAll", () => {
     expect(all[0].id).toBe("session-1");
   });
 
+  it("excludes *.runtime.json sister files (process-identity records)", () => {
+    // AURA-LOCAL: cli-launcher boot-hygiene persists per-session process identity
+    // (pid + processStartMs + argvSha256) as `<sessionId>.runtime.json` siblings to
+    // the SessionStore JSONs. They share the directory and the `.json` extension,
+    // so without this filter loadAll() would surface them as malformed sessions
+    // (no `id`, no `state`) and crash WsBridge.restoreFromDisk on the first boot
+    // after any such file is written.
+    store.saveSync(makeSession("session-rt"));
+    writeFileSync(
+      join(tempDir, "session-rt.runtime.json"),
+      JSON.stringify({ schemaVersion: 1, pid: 1234, processStartMs: 99, argvSha256: "abc" }),
+      "utf-8",
+    );
+
+    const all = store.loadAll();
+    expect(all).toHaveLength(1);
+    expect(all[0].id).toBe("session-rt");
+  });
+
   it("returns an empty array for an empty directory", () => {
     const all = store.loadAll();
     expect(all).toEqual([]);
