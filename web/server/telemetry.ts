@@ -12,7 +12,7 @@ import { getOrCreateInstanceId } from "./instance-id.js";
 
 // Default aggregator endpoint. Override with COMPANION_STATS_URL for self-host
 // forks or before the production Worker is deployed.
-export const DEFAULT_STATS_URL = "https://companion-stats.auracomp.workers.dev";
+export const DEFAULT_STATS_URL = "https://companion-stats.antonshmonin.workers.dev";
 
 // Heartbeat every 6 hours; the Worker's active window is 30 days, so this is
 // far more often than needed to stay "active" while surviving daily restarts.

@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 const VITE_ENV = (import.meta as unknown as { env?: Record<string, string | undefined> }).env;
 const STATS_URL =
   VITE_ENV?.VITE_STATS_URL?.replace(/\/+$/, "") ||
-  "https://companion-stats.auracomp.workers.dev";
+  "https://companion-stats.antonshmonin.workers.dev";
 
 interface GlobalStats {
   activeInstances30d: number | null;
