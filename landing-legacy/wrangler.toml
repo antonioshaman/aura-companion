@@ -1,0 +1,13 @@
+name = "auraco"
+compatibility_date = "2024-09-23"
+
+# Restored auraco.space marketing landing (the single-file site that was
+# generated in Claude Code "design" and had no saved source). Recovered from
+# the Cloudflare edge cache on 2026-06-10 and committed here so it is never
+# lost again. The anonymous usage counter (Active/Total installs) reads the
+# opt-in telemetry aggregator at companion-stats.antonshmonin.workers.dev.
+#
+# Deploy:  cd landing-legacy && wrangler deploy
+[assets]
+directory = "./site"
+not_found_handling = "single-page-application"
