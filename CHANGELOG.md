@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.7.0...aura-companion-v1.8.0) (2026-06-10)
+
+
+### Features
+
+* **tasks:** surface snapshot-freshness hint on TASKS panel ([#99](https://github.com/antonioshaman/aura-companion/issues/99)) ([a5be218](https://github.com/antonioshaman/aura-companion/commit/a5be218ed237ff58ebccbccce25515f0d76679fb))
+
 ## [1.7.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.6.0...aura-companion-v1.7.0) (2026-06-05)
 
 
