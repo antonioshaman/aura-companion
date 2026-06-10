@@ -73,6 +73,7 @@ const mockApi = vi.hoisted(() => ({
 
 vi.mock("./api.js", () => ({
   api: mockApi,
+  fetchGlobalStats: () => Promise.resolve(null),
 }));
 
 vi.mock("./ws.js", () => ({

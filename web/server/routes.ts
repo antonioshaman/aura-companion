@@ -38,6 +38,7 @@ import { registerSettingsRoutes } from "./routes/settings-routes.js";
 import { registerTailscaleRoutes } from "./routes/tailscale-routes.js";
 import { registerGitRoutes } from "./routes/git-routes.js";
 import { registerSystemRoutes } from "./routes/system-routes.js";
+import { registerStatsRoutes } from "./routes/stats-routes.js";
 import { isRecordingHubEnabled } from "./recording-hub/hub-config.js";
 import { registerHubRoutes } from "./recording-hub/hub-routes.js";
 import { registerLinearRoutes, fetchLinearTeamStates } from "./routes/linear-routes.js";
@@ -151,6 +152,10 @@ export function createRoutes(
   if (linearAgentBridge) {
     registerLinearAgentWebhookRoute(api, linearAgentBridge);
   }
+
+  // ─── Public global usage counter (exempt from auth middleware) ───────────
+  // Non-sensitive vanity metric read by the app shell + landing page.
+  registerStatsRoutes(api);
 
   // ─── Auth middleware (protects all routes below) ───────────────────
 

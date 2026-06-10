@@ -1,5 +1,6 @@
 import { ClawdLogo } from "./ClawdLogo";
 import { InstallBlock } from "./InstallBlock";
+import { UsageCounter } from "./UsageCounter";
 
 export function Hero() {
   return (
@@ -28,6 +29,8 @@ export function Hero() {
         <div className="animate-fade-up-4 text-center">
           <InstallBlock />
         </div>
+
+        <UsageCounter />
 
         <p className="mt-4 text-center text-sm text-cc-muted animate-fade-up-4">
           Then open{" "}

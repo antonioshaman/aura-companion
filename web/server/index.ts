@@ -7,7 +7,7 @@ import { getEnrichedPath } from "./path-resolver.js";
 process.env.PATH = getEnrichedPath();
 
 import { dirname, resolve } from "node:path";
-import { realpathSync } from "node:fs";
+import { realpathSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
@@ -21,6 +21,7 @@ import { WorktreeTracker } from "./worktree-tracker.js";
 import { containerManager } from "./container-manager.js";
 import { join } from "node:path";
 import { COMPANION_HOME } from "./paths.js";
+import { startTelemetryHeartbeat } from "./telemetry.js";
 import { TerminalManager } from "./terminal-manager.js";
 import { PRPoller } from "./pr-poller.js";
 import { RecorderManager } from "./recorder.js";
@@ -232,6 +233,21 @@ containerManager.restoreState(CONTAINER_STATE_PATH);
 
 // ── Session orchestrator — centralizes lifecycle event wiring ────────────────
 orchestrator.initialize();
+
+// ── Anonymous opt-in usage heartbeat (default off) ───────────────────────────
+// Feeds the global "N people use Aura Companion" counter. No-op unless the
+// user opted in (settings.telemetryEnabled) or COMPANION_TELEMETRY=1 is set.
+function readPackageVersion(): string {
+  try {
+    const pkg = JSON.parse(readFileSync(resolve(packageRoot, "package.json"), "utf-8")) as {
+      version?: string;
+    };
+    return typeof pkg.version === "string" ? pkg.version : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+startTelemetryHeartbeat(readPackageVersion());
 
 // AURA-LOCAL: PPID=1 orphan reaper — PLAN T8. Runs ONCE at server-init
 // AFTER bridge + orchestrator wiring (so the launcher's restored

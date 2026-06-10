@@ -825,6 +825,33 @@ export async function autoAuth(): Promise<string | null> {
   }
 }
 
+export interface GlobalUsageStats {
+  activeInstances30d: number | null;
+  totalInstances: number | null;
+  generatedAt: number;
+}
+
+/**
+ * Read the public global usage counter (active 30-day installs + cumulative
+ * total). Best-effort: returns null on any failure so the badge can hide
+ * itself rather than surface an error for a vanity metric.
+ */
+export async function fetchGlobalStats(): Promise<GlobalUsageStats | null> {
+  try {
+    const res = await fetch(`${BASE}/stats/global`, { headers: { ...getAuthHeaders() } });
+    if (!res.ok) return null;
+    const data = (await res.json()) as Partial<GlobalUsageStats>;
+    return {
+      activeInstances30d:
+        typeof data.activeInstances30d === "number" ? data.activeInstances30d : null,
+      totalInstances: typeof data.totalInstances === "number" ? data.totalInstances : null,
+      generatedAt: typeof data.generatedAt === "number" ? data.generatedAt : Date.now(),
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function verifyAuthToken(token: string): Promise<boolean> {
   try {
     const res = await fetch(`${BASE}/auth/verify`, {
