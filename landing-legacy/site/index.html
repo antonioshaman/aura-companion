@@ -1,0 +1,1174 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Aura Companion — программируй голосом со своего телефона</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700;800&family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg-0: #0a0706;
+    --bg-1: #120d0a;
+    --bg-2: #1c130e;
+    --surface: rgba(28, 19, 14, 0.6);
+    --surface-hi: rgba(40, 27, 20, 0.75);
+    --border: rgba(255, 168, 90, 0.12);
+    --border-hi: rgba(255, 168, 90, 0.28);
+    --amber: #ff8c42;
+    --amber-soft: #ffb070;
+    --gold: #f4c97a;
+    --mauve: #b48ac0;
+    --ember: #e85d2c;
+    --text: #f5ede0;
+    --text-mute: #b8a89a;
+    --text-dim: #7c6a5d;
+    --shadow-lift: 0 20px 60px -20px rgba(0, 0, 0, 0.7), 0 1px 0 rgba(255, 168, 90, 0.05) inset;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: 'Manrope', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: var(--bg-0);
+    color: var(--text);
+    line-height: 1.6;
+    overflow-x: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .ambient { position: fixed; inset: 0; pointer-events: none; z-index: 0; overflow: hidden; }
+  .ambient::before, .ambient::after {
+    content: ''; position: absolute; width: 80vmax; height: 80vmax;
+    border-radius: 50%; filter: blur(120px); opacity: 0.5;
+  }
+  .ambient::before {
+    background: radial-gradient(circle, rgba(255, 140, 66, 0.18), transparent 60%);
+    top: -30vmax; right: -20vmax;
+    animation: drift1 30s ease-in-out infinite;
+  }
+  .ambient::after {
+    background: radial-gradient(circle, rgba(180, 138, 192, 0.12), transparent 60%);
+    bottom: -30vmax; left: -20vmax;
+    animation: drift2 35s ease-in-out infinite;
+  }
+  @keyframes drift1 { 0%,100%{transform:translate(0,0) scale(1);} 50%{transform:translate(-10vw,10vh) scale(1.1);} }
+  @keyframes drift2 { 0%,100%{transform:translate(0,0) scale(1);} 50%{transform:translate(10vw,-5vh) scale(1.15);} }
+
+  .wrap { max-width: 1200px; margin: 0 auto; padding: 0 24px; position: relative; z-index: 1; }
+
+  /* Header */
+  header {
+    position: sticky; top: 0; z-index: 100;
+    backdrop-filter: blur(20px) saturate(150%);
+    -webkit-backdrop-filter: blur(20px) saturate(150%);
+    background: rgba(10, 7, 6, 0.7);
+    border-bottom: 1px solid var(--border);
+  }
+  .nav { display: flex; align-items: center; justify-content: space-between; padding: 18px 0; gap: 16px; }
+  .logo { display: inline-flex; align-items: center; gap: 14px; font-family: 'Cormorant Garamond', serif; font-size: 26px; font-weight: 600; letter-spacing: 0.02em; text-decoration: none; color: var(--text); line-height: 1; }
+  .logo-mark {
+    width: 38px; height: 38px; border-radius: 50%;
+    background: radial-gradient(circle at 30% 30%, var(--gold), var(--amber) 50%, var(--ember));
+    box-shadow: 0 0 24px rgba(255, 140, 66, 0.5), inset 0 0 12px rgba(255, 200, 100, 0.4);
+    position: relative; animation: pulse 4s ease-in-out infinite; flex-shrink: 0;
+  }
+  .logo-mark::after { content: ''; position: absolute; inset: -4px; border-radius: 50%; border: 1px solid rgba(255, 168, 90, 0.3); animation: ring 4s ease-in-out infinite; }
+  @keyframes pulse { 0%,100%{box-shadow:0 0 24px rgba(255,140,66,0.5),inset 0 0 12px rgba(255,200,100,0.4);} 50%{box-shadow:0 0 36px rgba(255,140,66,0.75),inset 0 0 16px rgba(255,200,100,0.6);} }
+  @keyframes ring { 0%,100%{transform:scale(1); opacity:0.6;} 50%{transform:scale(1.15); opacity:0;} }
+  .logo-word { display: inline-flex; align-items: center; gap: 14px; }
+  .logo-word .aura { color: var(--text); letter-spacing: 0.01em; line-height: 1; }
+  .logo-co {
+    position: relative;
+    display: inline-flex; align-items: center; gap: 6px;
+    padding-left: 14px;
+  }
+  .logo-co::before {
+    content: '';
+    position: absolute;
+    left: 0; top: 50%;
+    width: 1px; height: 22px;
+    background: linear-gradient(to bottom, transparent, var(--border-hi), transparent);
+    transform: translateY(-50%);
+  }
+  .co-c, .co-o {
+    display: inline-block;
+    width: 24px; height: 24px;
+    flex-shrink: 0;
+  }
+  .co-c { filter: drop-shadow(0 0 4px rgba(180, 138, 192, 0.35)); }
+  .co-o {
+    filter: drop-shadow(0 0 6px rgba(255, 140, 66, 0.5));
+    animation: sunGlow 4s ease-in-out infinite;
+  }
+  @keyframes sunGlow {
+    0%, 100% { filter: drop-shadow(0 0 6px rgba(255, 140, 66, 0.45)); }
+    50% { filter: drop-shadow(0 0 12px rgba(255, 140, 66, 0.75)); }
+  }
+  @media (max-width: 560px) {
+    .logo { font-size: 22px; gap: 10px; }
+    .logo-mark { width: 32px; height: 32px; }
+    .logo-co { padding-left: 10px; gap: 4px; }
+    .co-c, .co-o { width: 20px; height: 20px; }
+  }
+  .nav-links { display: flex; gap: 28px; align-items: center; }
+  .nav-links a { color: var(--text-mute); text-decoration: none; font-size: 14px; font-weight: 500; transition: color 0.2s; }
+  .nav-links a:hover { color: var(--amber); }
+  .nav-right { display: flex; gap: 10px; align-items: center; }
+  .gh-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 12px; background: var(--surface);
+    border: 1px solid var(--border-hi); border-radius: 999px;
+    color: var(--text); text-decoration: none; font-size: 12px; font-weight: 600;
+    transition: all 0.2s;
+  }
+  .gh-badge:hover { background: var(--surface-hi); border-color: var(--amber); color: var(--amber); }
+  .lang-switch { display: flex; gap: 4px; padding: 4px; background: var(--surface); border: 1px solid var(--border); border-radius: 999px; font-size: 12px; }
+  .lang-switch button { background: none; border: none; color: var(--text-mute); padding: 4px 10px; border-radius: 999px; cursor: pointer; font-weight: 600; font-family: inherit; }
+  .lang-switch button.on { background: var(--amber); color: var(--bg-0); }
+  .nav-cta { background: linear-gradient(135deg, var(--amber), var(--ember)); color: #fff; padding: 10px 20px; border-radius: 999px; text-decoration: none; font-weight: 600; font-size: 14px; transition: transform 0.2s, box-shadow 0.2s; box-shadow: 0 4px 20px rgba(232, 93, 44, 0.35); }
+  .nav-cta:hover { transform: translateY(-1px); box-shadow: 0 6px 24px rgba(232, 93, 44, 0.5); }
+  @media (max-width: 980px) {
+    .nav-links { display: none; }
+    .gh-badge span { display: none; }
+  }
+
+  /* Hero */
+  .hero { padding: 80px 0 60px; position: relative; }
+  .hero-eyebrow { display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px; background: var(--surface); border: 1px solid var(--border); border-radius: 999px; font-size: 13px; color: var(--amber-soft); margin-bottom: 24px; }
+  .hero-eyebrow .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 8px var(--amber); animation: blink 2s ease-in-out infinite; }
+  @keyframes blink { 0%,100%{opacity:1;} 50%{opacity:0.4;} }
+  .hero h1 { font-family: 'Cormorant Garamond', serif; font-size: clamp(40px, 7vw, 76px); font-weight: 500; line-height: 1.05; letter-spacing: -0.02em; margin-bottom: 24px; max-width: 900px; }
+  .hero h1 .accent { background: linear-gradient(135deg, var(--gold), var(--amber) 40%, var(--mauve)); -webkit-background-clip: text; background-clip: text; color: transparent; font-style: italic; }
+  .hero-sub { font-size: clamp(16px, 2vw, 20px); color: var(--text-mute); max-width: 680px; margin-bottom: 48px; line-height: 1.6; }
+
+  .paths { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-bottom: 40px; }
+  @media (max-width: 880px) { .paths { grid-template-columns: 1fr; } }
+  .path {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 20px; padding: 28px;
+    position: relative; overflow: hidden;
+    transition: transform 0.3s, border-color 0.3s, box-shadow 0.3s;
+    cursor: pointer; text-decoration: none; color: inherit; display: block;
+  }
+  .path:hover { transform: translateY(-4px); border-color: var(--border-hi); box-shadow: var(--shadow-lift); }
+  .path-icon { width: 48px; height: 48px; border-radius: 14px; display: flex; align-items: center; justify-content: center; font-size: 24px; margin-bottom: 18px; background: linear-gradient(135deg, rgba(255, 140, 66, 0.15), rgba(244, 201, 122, 0.05)); border: 1px solid var(--border-hi); }
+  .path h3 { font-family: 'Cormorant Garamond', serif; font-size: 24px; font-weight: 600; margin-bottom: 8px; color: var(--text); }
+  .path p { color: var(--text-mute); font-size: 14px; margin-bottom: 16px; line-height: 1.5; }
+  .path-cta { display: inline-flex; align-items: center; gap: 6px; color: var(--amber); font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; }
+  .path-cta::after { content: '→'; transition: transform 0.2s; }
+  .path:hover .path-cta::after { transform: translateX(4px); }
+
+  /* Phone mockup */
+  .hero-visual { margin-top: 60px; display: flex; justify-content: center; align-items: center; perspective: 1200px; }
+  .phone { width: 320px; height: 640px; background: linear-gradient(160deg, #1c130e, #0a0706); border-radius: 48px; border: 2px solid rgba(255, 168, 90, 0.2); box-shadow: 0 60px 120px -30px rgba(232, 93, 44, 0.35), 0 0 0 8px #0a0706, 0 0 0 10px rgba(255, 168, 90, 0.1); position: relative; transform: rotateX(8deg) rotateY(-12deg); transition: transform 0.6s ease; padding: 16px; max-width: 100%; }
+  .phone:hover { transform: rotateX(4deg) rotateY(-6deg); }
+  .phone-notch { width: 100px; height: 24px; background: #000; border-radius: 0 0 16px 16px; position: absolute; top: 16px; left: 50%; transform: translateX(-50%); }
+  .phone-screen { width: 100%; height: 100%; border-radius: 32px; background: linear-gradient(180deg, #120d0a, #0a0706); display: flex; flex-direction: column; padding: 56px 20px 20px; overflow: hidden; }
+  .chat-msg { background: var(--surface-hi); border: 1px solid var(--border); border-radius: 16px; padding: 12px 14px; margin-bottom: 12px; font-size: 13px; line-height: 1.4; animation: fadeUp 0.6s ease both; }
+  .chat-msg.user { background: linear-gradient(135deg, rgba(255, 140, 66, 0.18), rgba(232, 93, 44, 0.1)); border-color: rgba(255, 140, 66, 0.3); margin-left: 30px; border-bottom-right-radius: 4px; animation-delay: 0.3s; }
+  .chat-msg.ai { margin-right: 30px; border-bottom-left-radius: 4px; animation-delay: 0.8s; }
+  .chat-msg .label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-dim); margin-bottom: 4px; }
+  @keyframes fadeUp { from{opacity:0; transform:translateY(10px);} to{opacity:1; transform:translateY(0);} }
+  .voice-input { margin-top: auto; display: flex; align-items: center; gap: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 999px; padding: 10px 14px; }
+  .voice-bars { display: flex; gap: 3px; align-items: center; flex: 1; }
+  .voice-bars span { width: 3px; background: var(--amber); border-radius: 2px; animation: voice 1s ease-in-out infinite; }
+  .voice-bars span:nth-child(1){height:12px; animation-delay:0s;} .voice-bars span:nth-child(2){height:20px; animation-delay:0.1s;} .voice-bars span:nth-child(3){height:8px; animation-delay:0.2s;} .voice-bars span:nth-child(4){height:16px; animation-delay:0.3s;} .voice-bars span:nth-child(5){height:22px; animation-delay:0.4s;} .voice-bars span:nth-child(6){height:10px; animation-delay:0.5s;} .voice-bars span:nth-child(7){height:18px; animation-delay:0.6s;} .voice-bars span:nth-child(8){height:14px; animation-delay:0.7s;}
+  @keyframes voice { 0%,100%{transform:scaleY(0.4);} 50%{transform:scaleY(1);} }
+  .voice-mic { width: 36px; height: 36px; background: linear-gradient(135deg, var(--amber), var(--ember)); border-radius: 50%; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 16px rgba(232, 93, 44, 0.5); }
+
+  /* Section */
+  section { padding: 100px 0; position: relative; }
+  .section-eyebrow { text-transform: uppercase; letter-spacing: 0.14em; font-size: 12px; color: var(--amber); font-weight: 600; margin-bottom: 14px; }
+  .section-title { font-family: 'Cormorant Garamond', serif; font-size: clamp(32px, 5vw, 52px); font-weight: 500; line-height: 1.1; margin-bottom: 16px; letter-spacing: -0.01em; }
+  .section-title em { color: var(--gold); font-style: italic; }
+  .section-sub { color: var(--text-mute); font-size: 17px; max-width: 640px; margin-bottom: 56px; }
+
+  /* Showcase / Cases */
+  .showcase {
+    background: linear-gradient(135deg, rgba(255, 140, 66, 0.06), rgba(180, 138, 192, 0.04));
+    border: 1px solid var(--border-hi);
+    border-radius: 28px;
+    padding: 48px;
+    display: grid;
+    grid-template-columns: 1.1fr 1fr;
+    gap: 48px;
+    align-items: center;
+    position: relative;
+    overflow: hidden;
+  }
+  .showcase::before { content: ''; position: absolute; inset: 0; background: radial-gradient(circle at 90% 20%, rgba(255, 140, 66, 0.1), transparent 50%); pointer-events: none; }
+  .showcase-info { position: relative; z-index: 1; }
+  .showcase-badge {
+    display: inline-block;
+    background: linear-gradient(135deg, var(--gold), var(--amber));
+    color: var(--bg-0);
+    font-size: 11px; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.1em;
+    padding: 5px 12px; border-radius: 999px;
+    margin-bottom: 16px;
+  }
+  .showcase h3 { font-family: 'Cormorant Garamond', serif; font-size: clamp(32px, 4vw, 44px); font-weight: 600; margin-bottom: 16px; letter-spacing: -0.01em; color: var(--text); }
+  .showcase-desc { color: var(--text-mute); font-size: 15px; line-height: 1.7; margin-bottom: 14px; }
+  .showcase-desc strong { color: var(--gold); font-weight: 600; }
+  .showcase-links { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
+  .showcase-link {
+    display: inline-flex; align-items: center; gap: 8px;
+    padding: 12px 18px; border-radius: 12px;
+    text-decoration: none; font-weight: 600; font-size: 14px;
+    border: 1px solid var(--border-hi); color: var(--text);
+    background: var(--surface-hi); transition: all 0.2s;
+  }
+  .showcase-link:hover { border-color: var(--amber); color: var(--amber); transform: translateY(-1px); }
+  .showcase-link.primary {
+    background: linear-gradient(135deg, var(--amber), var(--ember));
+    border-color: transparent;
+    color: #fff;
+    box-shadow: 0 4px 16px rgba(232, 93, 44, 0.3);
+  }
+  .showcase-link.primary:hover { color: #fff; transform: translateY(-2px); }
+  .showcase-preview {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 10px;
+    position: relative;
+    z-index: 1;
+  }
+  .preview-card {
+    background: var(--surface-hi);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 16px;
+    transition: transform 0.3s, border-color 0.3s;
+  }
+  .preview-card:hover { transform: translateY(-2px); border-color: var(--border-hi); }
+  .preview-glyph {
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--bg-0);
+    margin-bottom: 10px;
+  }
+  .preview-card h4 { font-family: 'Cormorant Garamond', serif; font-size: 17px; font-weight: 600; margin-bottom: 4px; color: var(--text); }
+  .preview-card p { color: var(--text-mute); font-size: 12px; line-height: 1.4; }
+  .preview-card.featured {
+    grid-column: span 2;
+    background: linear-gradient(135deg, rgba(180, 138, 192, 0.15), rgba(255, 140, 66, 0.05));
+    border-color: var(--border-hi);
+  }
+  .cases-footer { text-align: center; color: var(--text-dim); font-size: 14px; margin-top: 36px; }
+  .cases-footer a { color: var(--amber); text-decoration: none; font-weight: 600; }
+  @media (max-width: 880px) {
+    .showcase { grid-template-columns: 1fr; padding: 32px 24px; border-radius: 20px; gap: 32px; }
+  }
+
+  /* Skills */
+  .skills-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+  @media (max-width: 880px) { .skills-grid { grid-template-columns: 1fr; } }
+  .skill-col { background: var(--surface); border: 1px solid var(--border); border-radius: 24px; padding: 32px; }
+  .skill-col h3 { font-family: 'Cormorant Garamond', serif; font-size: 26px; font-weight: 600; margin-bottom: 6px; }
+  .skill-col .count { color: var(--amber); font-size: 13px; font-weight: 600; margin-bottom: 20px; }
+  .skill-col ul { list-style: none; }
+  .skill-col li { padding: 10px 0; border-bottom: 1px solid var(--border); color: var(--text-mute); font-size: 14px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .skill-col li:last-child { border-bottom: none; }
+  .skill-col code { color: var(--gold); font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12px; background: rgba(244, 201, 122, 0.08); padding: 2px 6px; border-radius: 4px; }
+
+  /* Council */
+  .council { background: linear-gradient(135deg, rgba(180, 138, 192, 0.08), rgba(255, 140, 66, 0.04)); border: 1px solid var(--border-hi); border-radius: 32px; padding: 60px; position: relative; overflow: hidden; }
+  @media (max-width: 880px) { .council { padding: 32px; border-radius: 20px; } }
+  .council::before { content: ''; position: absolute; width: 400px; height: 400px; background: radial-gradient(circle, rgba(180, 138, 192, 0.2), transparent 60%); top: -200px; right: -100px; filter: blur(40px); pointer-events: none; }
+  .council-flow { display: grid; grid-template-columns: 1fr auto 1fr; gap: 24px; align-items: center; margin-top: 32px; }
+  @media (max-width: 720px) { .council-flow { grid-template-columns: 1fr; } }
+  .agent-box { background: var(--surface-hi); border: 1px solid var(--border-hi); border-radius: 20px; padding: 24px; text-align: center; }
+  .agent-box.orchestrator { border-color: rgba(255, 140, 66, 0.4); }
+  .agent-box.observer { border-color: rgba(180, 138, 192, 0.4); }
+  .agent-box .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.12em; color: var(--text-dim); margin-bottom: 8px; }
+  .agent-box .name { font-family: 'Cormorant Garamond', serif; font-size: 22px; font-weight: 600; margin-bottom: 4px; }
+  .agent-box .desc { font-size: 13px; color: var(--text-mute); }
+  .arrows { display: flex; flex-direction: column; gap: 8px; align-items: center; color: var(--amber); font-size: 24px; }
+  @media (max-width: 720px) { .arrows { transform: rotate(90deg); } }
+  .stop-banner { margin-top: 32px; background: linear-gradient(90deg, rgba(232, 93, 44, 0.15), transparent); border-left: 3px solid var(--ember); padding: 16px 20px; border-radius: 8px; display: flex; align-items: center; gap: 14px; }
+  .stop-tag { background: var(--ember); color: #fff; font-size: 11px; font-weight: 700; letter-spacing: 0.08em; padding: 3px 8px; border-radius: 4px; }
+
+  /* Council extras */
+  .council-extras { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; margin-top: 28px; position: relative; z-index: 1; }
+  @media (max-width: 720px) { .council-extras { grid-template-columns: 1fr; } }
+  .council-extra { background: var(--surface-hi); border: 1px solid var(--border); border-radius: 16px; padding: 20px; }
+  .council-extra h4 { font-family: 'Cormorant Garamond', serif; font-size: 18px; font-weight: 600; margin-bottom: 10px; color: var(--text); }
+  .council-extra ul { list-style: none; }
+  .council-extra li { font-size: 13px; color: var(--text-mute); padding: 5px 0; line-height: 1.5; }
+  .council-extra code { color: var(--gold); font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 11px; background: rgba(244, 201, 122, 0.08); padding: 2px 6px; border-radius: 4px; }
+  .council-extra strong { color: var(--text); font-weight: 600; }
+  .council-extra em { color: var(--mauve); font-style: italic; font-size: 11px; margin-left: 4px; }
+
+  /* Council experts */
+  .council-experts { margin-top: 40px; padding-top: 32px; border-top: 1px solid var(--border); position: relative; z-index: 1; }
+  .council-experts-desc { color: var(--text-mute); font-size: 14px; line-height: 1.7; margin-bottom: 18px; max-width: 720px; }
+  .council-experts-desc strong { color: var(--gold); font-weight: 600; }
+  .experts-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 8px; }
+  .expert { background: var(--surface-hi); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; font-size: 13px; color: var(--text); transition: all 0.2s; line-height: 1.4; }
+  .expert:hover { border-color: var(--border-hi); transform: translateY(-1px); }
+  .expert strong { color: var(--amber); font-weight: 600; }
+  .expert small { color: var(--text-mute); display: block; font-size: 11px; margin-top: 2px; }
+
+  /* Tension pairs */
+  .pairs-eyebrow { margin-top: 36px; }
+  .pairs-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; margin-top: 16px; }
+  .pair { background: linear-gradient(135deg, rgba(255, 140, 66, 0.07), rgba(180, 138, 192, 0.05)); border: 1px solid var(--border-hi); border-radius: 12px; padding: 14px 16px; font-size: 13px; color: var(--text); }
+  .pair-names { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+  .pair-a { color: var(--amber); }
+  .pair-b { color: var(--mauve); }
+  .pair-tension { color: var(--text-mute); font-size: 12px; font-weight: 400; line-height: 1.4; }
+  .roadmap-note { margin-top: 24px; padding: 14px 18px; background: rgba(180, 138, 192, 0.08); border-left: 3px solid var(--mauve); border-radius: 8px; font-size: 13px; color: var(--text-mute); line-height: 1.6; }
+  .roadmap-note strong { color: var(--mauve); font-weight: 600; }
+
+  /* Open Source */
+  .opensource { background: linear-gradient(135deg, rgba(255, 140, 66, 0.06), rgba(244, 201, 122, 0.03)), var(--surface); border: 1px solid var(--border-hi); border-radius: 32px; padding: 60px; position: relative; overflow: hidden; }
+  @media (max-width: 880px) { .opensource { padding: 36px 28px; border-radius: 20px; } }
+  .opensource::before { content: ''; position: absolute; inset: 0; background: radial-gradient(circle at 85% 50%, rgba(255, 140, 66, 0.12), transparent 50%); pointer-events: none; }
+  .os-grid { display: grid; grid-template-columns: 1.3fr 1fr; gap: 48px; align-items: center; position: relative; z-index: 1; }
+  @media (max-width: 880px) { .os-grid { grid-template-columns: 1fr; gap: 32px; } }
+  .os-content h2 { font-family: 'Cormorant Garamond', serif; font-size: clamp(28px, 4vw, 42px); font-weight: 500; line-height: 1.1; margin-bottom: 16px; letter-spacing: -0.01em; }
+  .os-content h2 em { color: var(--gold); font-style: italic; }
+  .os-content p { color: var(--text-mute); font-size: 16px; line-height: 1.7; margin-bottom: 24px; }
+  .os-buttons { display: flex; gap: 12px; flex-wrap: wrap; }
+  .os-btn { display: inline-flex; align-items: center; gap: 10px; padding: 14px 22px; border-radius: 12px; text-decoration: none; font-weight: 600; font-size: 14px; transition: all 0.2s; }
+  .os-btn-primary { background: linear-gradient(135deg, var(--amber), var(--ember)); color: #fff; box-shadow: 0 4px 20px rgba(232, 93, 44, 0.3); }
+  .os-btn-primary:hover { transform: translateY(-2px); box-shadow: 0 6px 28px rgba(232, 93, 44, 0.45); }
+  .os-btn-ghost { background: var(--surface-hi); border: 1px solid var(--border-hi); color: var(--text); }
+  .os-btn-ghost:hover { border-color: var(--amber); color: var(--amber); }
+  .os-stats { display: flex; gap: 24px; margin-top: 24px; flex-wrap: wrap; }
+  .os-stat { display: flex; flex-direction: column; }
+  .os-stat-val { font-family: 'Cormorant Garamond', serif; font-size: 28px; font-weight: 600; color: var(--gold); line-height: 1; }
+  .os-stat-lbl { font-size: 12px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.08em; margin-top: 4px; }
+  .os-terminal { background: #060403; border: 1px solid var(--border-hi); border-radius: 16px; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 13px; overflow: hidden; box-shadow: var(--shadow-lift); }
+  .os-terminal-bar { background: rgba(255, 168, 90, 0.06); padding: 10px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
+  .os-terminal-bar .dots { display: flex; gap: 6px; }
+  .os-terminal-bar .dots span { width: 10px; height: 10px; border-radius: 50%; }
+  .os-terminal-bar .dots span:nth-child(1) { background: #ff5f57; }
+  .os-terminal-bar .dots span:nth-child(2) { background: #febc2e; }
+  .os-terminal-bar .dots span:nth-child(3) { background: #28c840; }
+  .os-terminal-bar .title { color: var(--text-dim); font-size: 12px; margin-left: 8px; }
+  .os-terminal-body { padding: 18px; color: var(--text); line-height: 1.8; }
+  .os-terminal-body .prompt { color: var(--amber); }
+  .os-terminal-body .comment { color: var(--text-dim); }
+  .os-terminal-body .ok { color: #6bce8a; }
+
+  /* Pricing */
+  .pricing-toggle { display: inline-flex; align-items: center; background: var(--surface); border: 1px solid var(--border); border-radius: 999px; padding: 4px; margin-bottom: 40px; gap: 2px; }
+  .pricing-toggle button { background: none; border: none; color: var(--text-mute); padding: 10px 22px; border-radius: 999px; cursor: pointer; font-family: inherit; font-size: 14px; font-weight: 600; transition: all 0.2s; display: inline-flex; align-items: center; gap: 8px; }
+  .pricing-toggle button.on { background: linear-gradient(135deg, var(--amber), var(--ember)); color: #fff; box-shadow: 0 4px 14px rgba(232, 93, 44, 0.3); }
+  .toggle-discount { background: rgba(244, 201, 122, 0.18); color: var(--gold); font-size: 11px; padding: 2px 8px; border-radius: 999px; font-weight: 700; }
+  .pricing-toggle button.on .toggle-discount { background: rgba(255, 255, 255, 0.2); color: #fff; }
+
+  .pricing { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; }
+  .plan { background: var(--surface); border: 1px solid var(--border); border-radius: 20px; padding: 24px 22px; display: flex; flex-direction: column; position: relative; }
+  .plan.featured { background: linear-gradient(160deg, rgba(255, 140, 66, 0.12), rgba(232, 93, 44, 0.04)); border-color: var(--amber); box-shadow: 0 0 60px rgba(255, 140, 66, 0.15); }
+  .ribbon { position: absolute; top: -10px; right: 20px; background: linear-gradient(135deg, var(--gold), var(--amber)); color: var(--bg-0); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; padding: 4px 10px; border-radius: 999px; }
+  .family-badge { position: absolute; top: 14px; right: 14px; background: linear-gradient(135deg, var(--mauve), var(--amber)); color: var(--bg-0); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; padding: 3px 8px; border-radius: 999px; }
+  .plan-name { font-family: 'Cormorant Garamond', serif; font-size: 22px; font-weight: 600; margin-bottom: 8px; }
+  .plan-price { font-size: 26px; font-weight: 700; margin-bottom: 4px; }
+  .plan-price small { font-size: 13px; color: var(--text-mute); font-weight: 400; }
+  .plan-desc { color: var(--text-mute); font-size: 13px; margin-bottom: 18px; min-height: 36px; line-height: 1.4; }
+  .plan ul { list-style: none; margin-bottom: 20px; flex: 1; }
+  .plan li { padding: 6px 0; font-size: 13px; color: var(--text-mute); display: flex; gap: 8px; line-height: 1.4; }
+  .plan li::before { content: '✓'; color: var(--amber); font-weight: 700; flex-shrink: 0; }
+  .plan-savings { font-size: 11px; color: var(--gold); margin: 0 0 14px; padding: 9px 11px; background: rgba(244, 201, 122, 0.08); border-radius: 8px; border: 1px solid rgba(244, 201, 122, 0.2); line-height: 1.4; }
+  .plan-cta { display: block; text-align: center; padding: 12px; border-radius: 12px; text-decoration: none; font-weight: 600; font-size: 14px; border: 1px solid var(--border-hi); color: var(--text); transition: all 0.2s; cursor: pointer; background: transparent; font-family: inherit; width: 100%; }
+  .plan.featured .plan-cta { background: linear-gradient(135deg, var(--amber), var(--ember)); border-color: transparent; color: #fff; }
+  .plan-cta:hover { transform: translateY(-1px); box-shadow: var(--shadow-lift); }
+
+  /* Promo */
+  .promo-block { margin-top: 36px; display: flex; justify-content: center; }
+  .promo-card { background: var(--surface); border: 1px solid var(--border); border-radius: 16px; padding: 18px 22px; display: flex; align-items: center; gap: 16px; max-width: 620px; width: 100%; flex-wrap: wrap; }
+  .promo-card-icon { width: 40px; height: 40px; border-radius: 10px; background: linear-gradient(135deg, var(--gold), var(--amber)); display: flex; align-items: center; justify-content: center; font-size: 18px; flex-shrink: 0; }
+  .promo-card-info { flex: 1; min-width: 180px; }
+  .promo-title { font-size: 14px; font-weight: 600; color: var(--text); }
+  .promo-desc { font-size: 12px; color: var(--text-mute); }
+  .promo-input-wrap { display: flex; gap: 8px; flex: 1; min-width: 220px; }
+  .promo-input { flex: 1; background: var(--bg-1); border: 1px solid var(--border); border-radius: 10px; padding: 10px 14px; color: var(--text); font-family: inherit; font-size: 13px; text-transform: uppercase; letter-spacing: 0.06em; min-width: 0; }
+  .promo-input:focus { outline: none; border-color: var(--amber); }
+  .promo-apply { background: var(--surface-hi); border: 1px solid var(--border-hi); color: var(--text); padding: 10px 18px; border-radius: 10px; font-weight: 600; font-size: 13px; cursor: pointer; font-family: inherit; transition: all 0.2s; white-space: nowrap; }
+  .promo-apply:hover { border-color: var(--amber); color: var(--amber); }
+  .promo-result { margin-top: 14px; font-size: 13px; color: var(--gold); text-align: center; min-height: 20px; font-weight: 600; }
+  .promo-result.err { color: var(--ember); }
+
+  /* Start steps */
+  .start-steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; }
+  @media (max-width: 880px) { .start-steps { grid-template-columns: 1fr; } }
+  .step { background: var(--surface); border: 1px solid var(--border); border-radius: 20px; padding: 32px; }
+  .step-num { font-family: 'Cormorant Garamond', serif; font-size: 64px; font-weight: 500; line-height: 1; background: linear-gradient(135deg, var(--gold), var(--amber)); -webkit-background-clip: text; background-clip: text; color: transparent; margin-bottom: 16px; font-style: italic; }
+  .step h4 { font-family: 'Cormorant Garamond', serif; font-size: 22px; font-weight: 600; margin-bottom: 8px; }
+  .step p { color: var(--text-mute); font-size: 14px; }
+
+  /* FAQ */
+  .faq-list { max-width: 800px; }
+  .faq-item { border-bottom: 1px solid var(--border); padding: 24px 0; }
+  .faq-q { display: flex; justify-content: space-between; align-items: center; cursor: pointer; font-family: 'Cormorant Garamond', serif; font-size: 22px; font-weight: 600; color: var(--text); user-select: none; gap: 16px; }
+  .faq-q::after { content: '+'; font-size: 28px; color: var(--amber); font-weight: 300; transition: transform 0.3s; flex-shrink: 0; }
+  .faq-item.open .faq-q::after { transform: rotate(45deg); }
+  .faq-a { max-height: 0; overflow: hidden; transition: max-height 0.4s ease, margin-top 0.4s ease; color: var(--text-mute); font-size: 15px; line-height: 1.7; }
+  .faq-item.open .faq-a { max-height: 400px; margin-top: 14px; }
+  .faq-a a { color: var(--amber); text-decoration: none; }
+
+  /* Footer */
+  footer { border-top: 1px solid var(--border); padding: 60px 0 30px; position: relative; }
+  .footer-grid { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 40px; margin-bottom: 40px; }
+  @media (max-width: 720px) { .footer-grid { grid-template-columns: 1fr 1fr; } }
+  .footer-col h5 { color: var(--text-dim); text-transform: uppercase; font-size: 11px; letter-spacing: 0.12em; margin-bottom: 16px; font-weight: 600; }
+  .footer-col a { display: block; color: var(--text-mute); text-decoration: none; padding: 6px 0; font-size: 14px; transition: color 0.2s; }
+  .footer-col a:hover { color: var(--amber); }
+  .footer-about p { color: var(--text-mute); font-size: 14px; margin-top: 14px; max-width: 340px; line-height: 1.6; }
+  .footer-bottom { display: flex; justify-content: space-between; align-items: center; padding-top: 24px; border-top: 1px solid var(--border); color: var(--text-dim); font-size: 13px; flex-wrap: wrap; gap: 12px; }
+
+  /* Modal */
+  .modal { position: fixed; inset: 0; background: rgba(10, 7, 6, 0.85); backdrop-filter: blur(8px); z-index: 200; display: none; align-items: center; justify-content: center; padding: 20px; }
+  .modal.open { display: flex; }
+  .modal-card { background: var(--bg-2); border: 1px solid var(--border-hi); border-radius: 24px; padding: 40px; max-width: 460px; width: 100%; position: relative; }
+  .modal-close { position: absolute; top: 16px; right: 16px; background: none; border: none; color: var(--text-mute); font-size: 24px; cursor: pointer; width: 36px; height: 36px; border-radius: 50%; display: flex; align-items: center; justify-content: center; }
+  .modal-close:hover { background: var(--surface); color: var(--text); }
+  .modal h3 { font-family: 'Cormorant Garamond', serif; font-size: 28px; font-weight: 600; margin-bottom: 8px; }
+  .modal p { color: var(--text-mute); margin-bottom: 20px; font-size: 14px; }
+  .modal input, .modal select { width: 100%; background: var(--bg-1); border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; color: var(--text); font-family: inherit; font-size: 14px; margin-bottom: 12px; }
+  .modal input:focus, .modal select:focus { outline: none; border-color: var(--amber); }
+  .modal-submit { width: 100%; background: linear-gradient(135deg, var(--amber), var(--ember)); color: #fff; border: none; padding: 14px; border-radius: 12px; font-weight: 600; font-size: 14px; cursor: pointer; font-family: inherit; margin-top: 8px; }
+  .modal-success { text-align: center; padding: 20px 0; }
+  .modal-success .check { width: 64px; height: 64px; border-radius: 50%; background: linear-gradient(135deg, var(--amber), var(--ember)); margin: 0 auto 20px; display: flex; align-items: center; justify-content: center; font-size: 32px; color: #fff; }
+  .usage-stats { display: flex; flex-wrap: wrap; justify-content: center; gap: 40px; margin: 28px auto 0; padding: 20px 28px; max-width: 560px; background: var(--surface); border: 1px solid var(--border); border-radius: 20px; box-shadow: var(--shadow-lift); }
+  .usage-stat { text-align: center; }
+  .usage-num { font-family: 'Cormorant Garamond', serif; font-size: clamp(34px, 6vw, 52px); font-weight: 600; line-height: 1; color: var(--amber); font-variant-numeric: tabular-nums; }
+  .usage-label { margin-top: 8px; font-size: 12px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--text-mute); }
+</style>
+</head>
+<body>
+
+<div class="ambient"></div>
+
+<header>
+  <div class="wrap nav">
+    <a href="#" class="logo">
+      <div class="logo-mark"></div>
+      <span class="logo-word">
+        <span class="aura">aura</span>
+        <span class="logo-co">
+          <svg class="co-c" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="9.5" fill="#d8c8b0"/>
+            <circle cx="15.5" cy="12" r="7.8" fill="#0a0706"/>
+          </svg>
+          <svg class="co-o" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="5.5" fill="#ff8c42"/>
+            <circle cx="12" cy="12" r="5.5" fill="url(#sunGradH)" opacity="0.9"/>
+            <defs>
+              <radialGradient id="sunGradH" cx="35%" cy="35%" r="65%">
+                <stop offset="0%" stop-color="#ffd98a"/>
+                <stop offset="100%" stop-color="#e85d2c"/>
+              </radialGradient>
+            </defs>
+            <g stroke="#ffb070" stroke-width="1.6" stroke-linecap="round">
+              <line x1="12" y1="2" x2="12" y2="4.5"/>
+              <line x1="12" y1="19.5" x2="12" y2="22"/>
+              <line x1="2" y1="12" x2="4.5" y2="12"/>
+              <line x1="19.5" y1="12" x2="22" y2="12"/>
+              <line x1="5" y1="5" x2="6.7" y2="6.7"/>
+              <line x1="17.3" y1="17.3" x2="19" y2="19"/>
+              <line x1="5" y1="19" x2="6.7" y2="17.3"/>
+              <line x1="17.3" y1="6.7" x2="19" y2="5"/>
+            </g>
+          </svg>
+        </span>
+      </span>
+    </a>
+    <nav class="nav-links">
+      <a href="#paths">Как работает</a>
+      <a href="#cases">Кейсы</a>
+      <a href="#skills">Навыки</a>
+      <a href="#council">Council Mode</a>
+      <a href="#pricing">Тарифы</a>
+      <a href="#faq">FAQ</a>
+    </nav>
+    <div class="nav-right">
+      <a href="https://github.com/antonioshaman/aura-companion" target="_blank" rel="noopener" class="gh-badge">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        <span>MIT</span>
+      </a>
+      <div class="lang-switch">
+        <button class="on" onclick="setLang('ru', this)">RU</button>
+        <button onclick="setLang('en', this)">EN</button>
+      </div>
+      <a href="#pricing" class="nav-cta">Начать</a>
+    </div>
+  </div>
+</header>
+
+<main>
+  <section class="hero">
+    <div class="wrap">
+      <div class="hero-eyebrow"><span class="dot"></span> Доступно из России, Беларуси, Казахстана и СНГ — без VPN</div>
+      <h1>Сложные ИИ-системы.<br><span class="accent">Голосом.</span> С телефона.</h1>
+      <p class="hero-sub">Aura Companion даёт каждому простой доступ к мощи Claude Code и Codex — без сложных настроек, без иностранных карт, без знания английского. Программируйте, советуйтесь, создавайте — просто говоря голосом со своего телефона.</p>
+
+      <div class="usage-stats" id="usage-stats" hidden>
+        <div class="usage-stat">
+          <div class="usage-num" id="usage-active">—</div>
+          <div class="usage-label">активных установок</div>
+        </div>
+        <div class="usage-stat">
+          <div class="usage-num" id="usage-total">—</div>
+          <div class="usage-label">всего установок</div>
+        </div>
+      </div>
+
+      <div class="paths" id="paths">
+        <a href="#pricing" class="path">
+          <div class="path-icon">🎙</div>
+          <h3>Для каждого</h3>
+          <p>Заходите, говорите голосом, получаете результат. Готовые системы советников (как Razumai) или работа с вашими задачами напрямую.</p>
+          <div class="path-cta">Начать без настроек</div>
+        </a>
+        <a href="#pricing" class="path">
+          <div class="path-icon">⚡</div>
+          <h3>Для вайбкодеров</h3>
+          <p>API-токен auraco — и Claude Code, Codex и все 29 навыков работают у вас в коде. Платите по использованию.</p>
+          <div class="path-cta">Получить токен</div>
+        </a>
+        <a href="https://github.com/antonioshaman/aura-companion" target="_blank" rel="noopener" class="path">
+          <div class="path-icon">🔓</div>
+          <h3>Для энтузиастов</h3>
+          <p>Код по MIT-лицензии — забирайте и ставьте сами. Или дайте ссылку Claude — он развернёт всё за вас.</p>
+          <div class="path-cta">Открыть на GitHub</div>
+        </a>
+      </div>
+
+      <div class="hero-visual">
+        <div class="phone">
+          <div class="phone-notch"></div>
+          <div class="phone-screen">
+            <div class="chat-msg user">
+              <div class="label">Вы — голосом</div>
+              Сделай мне систему учёта расходов, чтобы я могла фотографировать чеки и она сама всё считала
+            </div>
+            <div class="chat-msg ai">
+              <div class="label">Aura</div>
+              Поняла. Создаю мини-приложение «Семейный бюджет». Готовлю распознавание чеков, категории и месячный отчёт. 2 минуты.
+            </div>
+            <div class="chat-msg user">
+              <div class="label">Вы — голосом</div>
+              Ещё чтобы напоминал мужу про продукты по средам
+            </div>
+            <div class="voice-input">
+              <div class="voice-bars">
+                <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+              </div>
+              <div class="voice-mic">🎤</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="cases">
+    <div class="wrap">
+      <div class="section-eyebrow">Создано на Aura Companion</div>
+      <h2 class="section-title">Готовые проекты — <em>уже работают</em></h2>
+      <p class="section-sub">Aura Companion это не только инструмент для разработчиков, но и фундамент для целых платформ. Вот живой пример того, что можно построить на её основе.</p>
+
+      <div class="showcase">
+        <div class="showcase-info">
+          <span class="showcase-badge">Флагманский кейс</span>
+          <h3>Razumai.space</h3>
+          <p class="showcase-desc">Система из нескольких десятков советников для жизни и самопознания. От психологии и отношений до бизнеса, финансов и воспитания — целая платформа осмысленных разговоров на родном языке.</p>
+          <p class="showcase-desc">В центре — <strong>MetaPersonaGPT</strong>, самый мощный советник в наборе. Из одной беседы он типирует человека по <strong>27+ системам</strong>: MBTI, соционика, Big Five, эннеаграмма, психософия, темпераменты, архетипы Юнга.</p>
+          <p class="showcase-desc">Вокруг Razumai сложилось живое сообщество — <strong>«Синергия Разума»</strong> в Telegram.</p>
+
+          <div class="showcase-links">
+            <a href="https://razumai.space" target="_blank" rel="noopener" class="showcase-link primary">🌐 razumai.space</a>
+            <a href="https://t.me/razumai" target="_blank" rel="noopener" class="showcase-link">💬 @razumai</a>
+            <a href="https://t.me/razumai_space_bot" target="_blank" rel="noopener" class="showcase-link">🤖 Telegram-бот</a>
+          </div>
+        </div>
+
+        <div class="showcase-preview">
+          <div class="preview-card featured">
+            <div class="preview-glyph" style="background: linear-gradient(135deg, #b48ac0, #ff8c42);">Ψ</div>
+            <h4>MetaPersonaGPT</h4>
+            <p>Типирует личность по 27+ психологическим системам — флагман Razumai</p>
+          </div>
+          <div class="preview-card">
+            <div class="preview-glyph" style="background: linear-gradient(135deg, #ff8c42, #f4c97a);">Ж</div>
+            <h4>Жизненный путь</h4>
+            <p>Направление, ценности, выбор</p>
+          </div>
+          <div class="preview-card">
+            <div class="preview-glyph" style="background: linear-gradient(135deg, #e85d2c, #b48ac0);">♥</div>
+            <h4>Отношения</h4>
+            <p>Семья, пара, дети</p>
+          </div>
+          <div class="preview-card">
+            <div class="preview-glyph" style="background: linear-gradient(135deg, #ff8c42, #e85d2c);">$</div>
+            <h4>Бизнес</h4>
+            <p>Стратегии, переговоры, рост</p>
+          </div>
+          <div class="preview-card">
+            <div class="preview-glyph" style="background: linear-gradient(135deg, #f4c97a, #ff8c42);">₽</div>
+            <h4>Финансы</h4>
+            <p>Бюджет, накопления, инвестиции</p>
+          </div>
+        </div>
+      </div>
+
+      <p class="cases-footer">Хотите построить свою платформу советников или сервис? <a href="#pricing">Начните с Aura Companion →</a></p>
+    </div>
+  </section>
+
+  <section id="skills">
+    <div class="wrap">
+      <div class="section-eyebrow">29 навыков</div>
+      <h2 class="section-title">Что внутри <em>Aura Companion</em></h2>
+      <p class="section-sub">Три семейства навыков, которые работают вместе: знания накапливаются, дизайн совершенствуется, инженерный совет ловит ошибки.</p>
+
+      <div class="skills-grid">
+        <div class="skill-col">
+          <h3>Self-Learning</h3>
+          <div class="count">5 навыков · база знаний</div>
+          <ul>
+            <li><code>/prime</code><span>Загружает релевантные знания</span></li>
+            <li><code>/learn</code><span>Захватывает инсайт прямо в процессе</span></li>
+            <li><code>/self-reflect</code><span>Извлекает уроки в конце сессии</span></li>
+            <li><code>/evolve</code><span>Продвигает паттерны в правила</span></li>
+            <li><code>/review-with-kb</code><span>Ревью с учётом накопленного</span></li>
+          </ul>
+        </div>
+        <div class="skill-col">
+          <h3>Carmack Council</h3>
+          <div class="count">6 навыков · 14 экспертов с именами</div>
+          <ul>
+            <li><code>/council-plan</code><span>Архитектура с советом экспертов</span></li>
+            <li><code>/council-review</code><span>Ревью с 10 голосами (Fowler, Beck, Hunt, Willison…)</span></li>
+            <li><code>/council-implement</code><span>Пошаговая реализация</span></li>
+            <li><code>/spec-writer</code><span>Job Stories + Gherkin критерии</span></li>
+            <li><code>/test-architect</code><span>Аудит качества тестов</span></li>
+            <li><code>/self-improvement</code><span>Continuous learning</span></li>
+          </ul>
+        </div>
+        <div class="skill-col">
+          <h3>Design &amp; UX</h3>
+          <div class="count">18 навыков · impeccable</div>
+          <ul>
+            <li><code>/frontend-design</code><span>Производственный UI</span></li>
+            <li><code>/animate</code><span>Микро-взаимодействия</span></li>
+            <li><code>/audit</code><span>Аудит a11y</span></li>
+            <li><code>/polish</code><span>Финальный проход качества</span></li>
+            <li><code>/harden</code><span>Обработка ошибок и edge cases</span></li>
+            <li style="color: var(--text-dim);">…и ещё 13 навыков</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="council">
+    <div class="wrap">
+      <div class="council">
+        <div class="section-eyebrow">Council Mode · BlockerBanner + ObserverPanel</div>
+        <h2 class="section-title">Два ИИ. <em>Один ловит то,</em><br>что другой пропустил.</h2>
+        <p class="section-sub">Главная киллер-фича Aura. Оркестратор делает работу, наблюдатель просыпается на каждом чекпойнте, читает только изменённую поверхность и пушит обоснованные находки обратно — как баннер в чате, который нельзя пропустить.</p>
+
+        <div class="council-flow">
+          <div class="agent-box orchestrator">
+            <div class="label">Слева — основной чат</div>
+            <div class="name">Оркестратор</div>
+            <div class="desc">Claude Code или Codex выполняет вашу задачу. Пишет чекпойнты в <code style="color: var(--gold);">.council/checkpoints/</code></div>
+          </div>
+          <div class="arrows">↔</div>
+          <div class="agent-box observer">
+            <div class="label">Справа — панель наблюдателя</div>
+            <div class="name">Наблюдатель</div>
+            <div class="desc">Читает delta, возвращает обоснованные STOP / WARN / NOTE / INFO. Привязан к изменённой поверхности — никаких галлюцинаций.</div>
+          </div>
+        </div>
+
+        <div class="stop-banner">
+          <span class="stop-tag">STOP</span>
+          <span>Обнаружена уязвимость в обработке токенов — рекомендую остановить деплой до фикса</span>
+        </div>
+
+        <div class="council-extras">
+          <div class="council-extra">
+            <h4>Парные сессии в один клик</h4>
+            <ul>
+              <li><strong>claude + claude</strong> <em>default</em> — две сессии Claude Code в одной рабочей области</li>
+              <li><strong>claude + codex</strong> <em>experimental</em> — оркестратор на Claude, наблюдатель на Codex для кросс-модельной независимости</li>
+              <li>Включается переключателем в диалоге New Session</li>
+            </ul>
+          </div>
+          <div class="council-extra">
+            <h4>UI-компоненты в браузере</h4>
+            <ul>
+              <li><code>BlockerBanner</code> — последний STOP в слоте чата, JSX-escaped, дисмиссится</li>
+              <li><code>ObserverPanel</code> — статус-пилюля <code>sleeping / spawning / reviewing / blocker-found</code> + сворачиваемый лог</li>
+              <li><code>ProviderBadges</code> — асимметричные чипы при mixed-provider парах</li>
+              <li>Хоткеи <code>⌘⇧O</code> и <code>⌘⇧B</code></li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="council-experts">
+          <div class="section-eyebrow">Совет настоящих инженеров</div>
+          <p class="council-experts-desc">В Council Mode сидят не безликие теги, а <strong>14 экспертов с реальными именами</strong> — каждый со своим узнаваемым подходом. Имена улучшают LLM-роутинг (proper-noun disambiguation per <em>willison REC-4</em>) и привязывают каждый «голос» к опубликованной школе мышления.</p>
+
+          <div class="experts-grid">
+            <div class="expert"><strong>Martin Fowler</strong><small>Refactoring &amp; evolutionary architecture</small></div>
+            <div class="expert"><strong>Kent Beck</strong><small>TDD, small safe steps</small></div>
+            <div class="expert"><strong>Troy Hunt</strong><small>Security &amp; breach forensics</small></div>
+            <div class="expert"><strong>Simon Willison</strong><small>LLM pipelines, prompt engineering</small></div>
+            <div class="expert"><strong>Brandur Leach</strong><small>PostgreSQL &amp; migration safety</small></div>
+            <div class="expert"><strong>Karri Saarinen</strong><small>UI quality &amp; polish</small></div>
+            <div class="expert"><strong>Vitaly Friedman</strong><small>UX &amp; scanability</small></div>
+            <div class="expert"><strong>Léonie Watson</strong><small>Accessibility · ARIA · WCAG</small></div>
+            <div class="expert"><strong>Dan Abramov</strong><small>React internals</small></div>
+            <div class="expert"><strong>Ryan Dahl</strong><small>Bun + Hono + TypeScript</small></div>
+            <div class="expert"><strong>Dennis Ritchie</strong><small>Unix &amp; filesystem discipline</small></div>
+            <div class="expert"><strong>Mitchell Hashimoto</strong><small>DevOps · Docker · GHA · VPS</small></div>
+            <div class="expert"><strong>Guido van Rossum</strong><small>Python &amp; async IO</small></div>
+            <div class="expert"><strong>Nikolay Durov</strong><small>Telegram bot UX</small></div>
+          </div>
+
+          <div class="section-eyebrow pairs-eyebrow">Roadmap v2 · Идеологические пары</div>
+          <p class="council-experts-desc">Phase 3β расширит совет до 22, добавив 6 пар экспертов на одних доменах, но с противоположными философиями. Синтез становится <strong>разрешением спора</strong>, а не списком мнений. Carmack-кресло арбитрирует, исходя из экономики проекта.</p>
+
+          <div class="pairs-list">
+            <div class="pair">
+              <div class="pair-names"><span class="pair-a">Fowler</span> ↔ <span class="pair-b">Uncle Bob</span></div>
+              <div class="pair-tension">Прагматизм vs принципы (SOLID)</div>
+            </div>
+            <div class="pair">
+              <div class="pair-names"><span class="pair-a">Ritchie</span> ↔ <span class="pair-b">Torvalds</span></div>
+              <div class="pair-tension">Классический Unix vs Linux-эра</div>
+            </div>
+            <div class="pair">
+              <div class="pair-names"><span class="pair-a">Beck</span> ↔ <span class="pair-b">Hickey</span></div>
+              <div class="pair-tension">TDD vs фундаментальная простота</div>
+            </div>
+            <div class="pair">
+              <div class="pair-names"><span class="pair-a">Hunt</span> ↔ <span class="pair-b">Willison</span></div>
+              <div class="pair-tension">Параноя vs исследование (LLM tooling)</div>
+            </div>
+            <div class="pair">
+              <div class="pair-names"><span class="pair-a">Evans</span> ↔ <span class="pair-b">Fowler</span></div>
+              <div class="pair-tension">Стратегический DDD vs микросервисы</div>
+            </div>
+            <div class="pair">
+              <div class="pair-names"><span class="pair-a">Majors</span> ↔ <span class="pair-b">Hashimoto</span></div>
+              <div class="pair-tension">Observability-first vs immutable prevention</div>
+            </div>
+          </div>
+
+          <div class="roadmap-note">
+            <strong>Статус roadmap:</strong> v1 (production default) на 14 экспертах с доменными тегами. v2 в активной разработке на ветке <code style="color: var(--gold);">feat/council-v2-pipeline</code> — Phase 3α завершает обогащение справочных доков, Phase 3β добавит пары. Atomic-swap promotion в Phase 6. Opt-in через <code style="color: var(--gold);">/council-plan-v2</code>, <code style="color: var(--gold);">/council-review-v2</code>. См. <a href="https://github.com/antonioshaman/aura-companion/blob/main/docs/reference/expert-catalog-v2-roadmap.mdx" target="_blank" rel="noopener" style="color: var(--mauve);">Expert Catalog v2 Roadmap →</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="opensource">
+    <div class="wrap">
+      <div class="opensource">
+        <div class="os-grid">
+          <div class="os-content">
+            <div class="section-eyebrow" style="margin-bottom: 14px;">Open Source · MIT License</div>
+            <h2>Весь код — <em>в свободном доступе</em></h2>
+            <p>Aura Companion это не «чёрный ящик». Полный исходный код лежит на GitHub под лицензией MIT — берите, форкайте, изучайте, ставьте у себя. Прозрачность это наш принцип. Если хотите доверять системе, в которой говорите голосом про свою жизнь, вы должны иметь возможность заглянуть внутрь.</p>
+            <div class="os-buttons">
+              <a href="https://github.com/antonioshaman/aura-companion" target="_blank" rel="noopener" class="os-btn os-btn-primary">
+                <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+                Открыть на GitHub
+              </a>
+              <a href="https://github.com/antonioshaman/aura-companion/blob/main/LICENSE" target="_blank" rel="noopener" class="os-btn os-btn-ghost">MIT-лицензия</a>
+            </div>
+            <div class="os-stats">
+              <div class="os-stat"><div class="os-stat-val">v1.3.2</div><div class="os-stat-lbl">релиз май 2026</div></div>
+              <div class="os-stat"><div class="os-stat-val">29</div><div class="os-stat-lbl">навыков</div></div>
+              <div class="os-stat"><div class="os-stat-val">14</div><div class="os-stat-lbl">экспертов</div></div>
+              <div class="os-stat"><div class="os-stat-val">MIT</div><div class="os-stat-lbl">лицензия</div></div>
+              <div class="os-stat"><div class="os-stat-val">99%</div><div class="os-stat-lbl">TypeScript</div></div>
+            </div>
+          </div>
+          <div class="os-terminal">
+            <div class="os-terminal-bar">
+              <div class="dots"><span></span><span></span><span></span></div>
+              <div class="title">~/projects · zsh · aura v1.3.2</div>
+            </div>
+            <div class="os-terminal-body">
+              <div><span class="comment"># Клонируйте и запустите за минуту</span></div>
+              <div><span class="prompt">$</span> git clone github.com/antonioshaman/aura-companion</div>
+              <div><span class="prompt">$</span> cd aura-companion/web</div>
+              <div><span class="prompt">$</span> bun install &amp;&amp; bun run dev</div>
+              <div style="margin-top: 8px;"><span class="ok">→ Hono server on :3456</span></div>
+              <div><span class="ok">→ React 19 frontend on :5174</span></div>
+              <div style="margin-top: 14px;"><span class="comment"># Или скопируйте ссылку</span></div>
+              <div><span class="comment"># на репозиторий в Claude —</span></div>
+              <div><span class="comment"># он развернёт всё за вас</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="pricing">
+    <div class="wrap">
+      <div class="section-eyebrow">Тарифы</div>
+      <h2 class="section-title">Выберите <em>свой путь</em></h2>
+      <p class="section-sub">Оплата картами РФ, Беларуси, Казахстана, СНГ. ЮKassa, СБП, криптовалюта — всё работает.</p>
+
+      <div class="pricing-toggle">
+        <button class="on" onclick="togglePricing('month', this)">Месяц</button>
+        <button onclick="togglePricing('year', this)">Год <span class="toggle-discount">−17%</span></button>
+      </div>
+
+      <div class="pricing">
+        <div class="plan">
+          <div class="plan-name">Free</div>
+          <div class="plan-price">0 ₽</div>
+          <div class="plan-desc">Познакомиться без вложений</div>
+          <ul>
+            <li>50 сообщений в месяц</li>
+            <li>Базовые навыки</li>
+            <li>Голосовой ввод</li>
+            <li>1 готовая система</li>
+          </ul>
+          <button class="plan-cta" onclick="openModal('Регистрация Free')">Начать</button>
+        </div>
+
+        <div class="plan">
+          <div class="plan-name">Lite</div>
+          <div class="plan-price" data-monthly="1 490" data-yearly="14 900" data-unit-m="₽ / мес" data-unit-y="₽ / год">1 490 <small>₽ / мес</small></div>
+          <div class="plan-desc">Повседневное использование</div>
+          <ul>
+            <li>500 сообщений в месяц</li>
+            <li>Все 29 навыков</li>
+            <li>Голос + сохранение</li>
+            <li>Razumai и другие системы</li>
+            <li>Поддержка в Telegram</li>
+          </ul>
+          <button class="plan-cta" onclick="openModal('Подписка Lite')">Оформить Lite</button>
+        </div>
+
+        <div class="plan featured">
+          <div class="ribbon">Популярный</div>
+          <div class="plan-name">Pro</div>
+          <div class="plan-price" data-monthly="8 000" data-yearly="79 990" data-unit-m="₽ / мес" data-unit-y="₽ / год">8 000 <small>₽ / мес</small></div>
+          <div class="plan-desc">Безлимит для профессионалов</div>
+          <ul>
+            <li><strong>Безлимит</strong> Claude Code + Codex</li>
+            <li>Все 29 навыков + Council Mode</li>
+            <li>Парные сессии</li>
+            <li>Интеграции и история</li>
+            <li>Приоритетная поддержка</li>
+          </ul>
+          <div class="plan-savings">≈ 30 000 ₽/мес если покупать Claude Max + ChatGPT Pro отдельно</div>
+          <button class="plan-cta" onclick="openModal('Подписка Pro')">Оформить Pro</button>
+        </div>
+
+        <div class="plan">
+          <span class="family-badge">Семья</span>
+          <div class="plan-name">Family</div>
+          <div class="plan-price" data-monthly="14 990" data-yearly="149 900" data-unit-m="₽ / мес" data-unit-y="₽ / год">14 990 <small>₽ / мес</small></div>
+          <div class="plan-desc">До 3 пользователей · экономия 9 010 ₽</div>
+          <ul>
+            <li>Всё из Pro × 3 аккаунта</li>
+            <li>Общая база знаний</li>
+            <li>Отдельные сессии</li>
+            <li>Единый биллинг</li>
+            <li>Один администратор</li>
+          </ul>
+          <button class="plan-cta" onclick="openModal('Подписка Family')">Оформить Family</button>
+        </div>
+
+        <div class="plan">
+          <div class="plan-name">Vibecoder API</div>
+          <div class="plan-price">по токенам</div>
+          <div class="plan-desc">Для разработчиков</div>
+          <ul>
+            <li>API-токен auraco</li>
+            <li>Claude Code + Codex</li>
+            <li>Все 29 навыков</li>
+            <li>В свой инстанс Aura</li>
+            <li>Оплата по использованию</li>
+          </ul>
+          <button class="plan-cta" onclick="openModal('Получить API-токен')">Получить токен</button>
+        </div>
+      </div>
+
+      <div class="promo-block">
+        <div class="promo-card">
+          <div class="promo-card-icon">🎁</div>
+          <div class="promo-card-info">
+            <div class="promo-title">Есть промокод?</div>
+            <div class="promo-desc">Для подписчиков «Синергия Разума» и ранних пользователей</div>
+          </div>
+          <div class="promo-input-wrap">
+            <input type="text" class="promo-input" id="promo-input" placeholder="SINERGY" onkeypress="if(event.key==='Enter')applyPromo()">
+            <button class="promo-apply" onclick="applyPromo()">Применить</button>
+          </div>
+        </div>
+      </div>
+      <div id="promo-result" class="promo-result"></div>
+
+      <p style="text-align: center; color: var(--text-dim); font-size: 14px; margin-top: 32px;">
+        Команда больше 3 человек? <a href="mailto:hello@auraco.space" style="color: var(--amber); text-decoration: none; font-weight: 600;">Напишите для Enterprise →</a><br>
+        Или развернуть Aura у себя бесплатно — <a href="https://github.com/antonioshaman/aura-companion" target="_blank" rel="noopener" style="color: var(--amber); text-decoration: none; font-weight: 600;">забрать MIT-код с GitHub →</a>
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <div class="wrap">
+      <div class="section-eyebrow">Как начать</div>
+      <h2 class="section-title">За <em>60 секунд</em></h2>
+      <p class="section-sub">Не нужен VPN, не нужна иностранная карта, не нужно ничего настраивать.</p>
+
+      <div class="start-steps">
+        <div class="step">
+          <div class="step-num">01</div>
+          <h4>Войдите по почте</h4>
+          <p>Регистрация в один клик. Подтверждение по коду. Никаких сложных форм.</p>
+        </div>
+        <div class="step">
+          <div class="step-num">02</div>
+          <h4>Выберите задачу</h4>
+          <p>Подключите свой проект, готовый Telegram-бот или платформу советников вроде Razumai — Aura подгрузит правильный контекст.</p>
+        </div>
+        <div class="step">
+          <div class="step-num">03</div>
+          <h4>Говорите голосом</h4>
+          <p>Нажмите микрофон и расскажите своими словами. Aura поймёт и сделает.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="faq">
+    <div class="wrap">
+      <div class="section-eyebrow">Вопросы</div>
+      <h2 class="section-title">Что обычно <em>спрашивают</em></h2>
+
+      <div class="faq-list">
+        <div class="faq-item">
+          <div class="faq-q" onclick="toggleFaq(this)">Нужен ли VPN для работы?</div>
+          <div class="faq-a">Нет. Сайт работает напрямую из России, Беларуси, Казахстана и других стран СНГ. Мы держим инфраструктуру так, чтобы доступ был стабильным без обходных путей.</div>
+        </div>
+        <div class="faq-item">
+          <div class="faq-q" onclick="toggleFaq(this)">Как платить из РФ?</div>
+          <div class="faq-a">Картой МИР, через СБП, ЮKassa, CloudPayments, по криптокошельку. Не нужна иностранная карта или счёт.</div>
+        </div>
+        <div class="faq-item">
+          <div class="faq-q" onclick="toggleFaq(this)">Это правда программирует «домохозяйка»?</div>
+          <div class="faq-a">Да. Голосом по-русски вы описываете задачу — например, «сделай мне систему учёта расходов». Aura уточнит детали и соберёт работающее решение. Вам не нужно знать код.</div>
+        </div>
+        <div class="faq-item">
+          <div class="faq-q" onclick="toggleFaq(this)">Чем это отличается от ChatGPT?</div>
+          <div class="faq-a">Aura — это не один диалог, а целая платформа: 29 инженерных навыков, Council Mode для проверки качества, самообучающаяся база знаний. И всё это доступно из СНГ без VPN.</div>
+        </div>
+        <div class="faq-item">
+          <div class="faq-q" onclick="toggleFaq(this)">Что такое MetaPersonaGPT?</div>
+          <div class="faq-a">Это флагманский советник проекта <a href="https://razumai.space" target="_blank" rel="noopener">Razumai.space</a> — отдельной платформы, построенной на Aura Companion. Из одной беседы он типирует вас по 27+ психологическим системам. Aura это инструмент-основа, Razumai это пример того, что на ней можно создать.</div>
+        </div>
+        <div class="faq-item">
+          <div class="faq-q" onclick="toggleFaq(this)">А если я разработчик и хочу свой инстанс?</div>
+          <div class="faq-a">Берите код по MIT-лицензии на GitHub. Или оформите Vibecoder API и получите токен auraco, который подключается к нашей инфраструктуре. Claude может настроить локально за вас, если дать ему ссылку на репозиторий.</div>
+        </div>
+        <div class="faq-item">
+          <div class="faq-q" onclick="toggleFaq(this)">Безопасны ли мои данные?</div>
+          <div class="faq-a">Сессии хранятся зашифрованными. Голосовые данные не используются для обучения. Можно удалить историю в один клик. Self-hosted версия — полный контроль над данными.</div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="footer-grid">
+      <div class="footer-col footer-about">
+        <a href="#" class="logo">
+          <div class="logo-mark"></div>
+          <span class="logo-word">
+            <span class="aura">aura</span>
+            <span class="logo-co">
+              <svg class="co-c" viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="12" cy="12" r="9.5" fill="#d8c8b0"/>
+                <circle cx="15.5" cy="12" r="7.8" fill="#0a0706"/>
+              </svg>
+              <svg class="co-o" viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="12" cy="12" r="5.5" fill="url(#sunGradF)"/>
+                <defs>
+                  <radialGradient id="sunGradF" cx="35%" cy="35%" r="65%">
+                    <stop offset="0%" stop-color="#ffd98a"/>
+                    <stop offset="100%" stop-color="#e85d2c"/>
+                  </radialGradient>
+                </defs>
+                <g stroke="#ffb070" stroke-width="1.6" stroke-linecap="round">
+                  <line x1="12" y1="2" x2="12" y2="4.5"/>
+                  <line x1="12" y1="19.5" x2="12" y2="22"/>
+                  <line x1="2" y1="12" x2="4.5" y2="12"/>
+                  <line x1="19.5" y1="12" x2="22" y2="12"/>
+                  <line x1="5" y1="5" x2="6.7" y2="6.7"/>
+                  <line x1="17.3" y1="17.3" x2="19" y2="19"/>
+                  <line x1="5" y1="19" x2="6.7" y2="17.3"/>
+                  <line x1="17.3" y1="6.7" x2="19" y2="5"/>
+                </g>
+              </svg>
+            </span>
+          </span>
+        </a>
+        <p>Самообучающийся ИИ-компаньон для каждого. Программируйте, советуйтесь и творите голосом со своего телефона — без VPN, без сложных настроек, без барьеров.</p>
+      </div>
+      <div class="footer-col">
+        <h5>Продукт</h5>
+        <a href="#cases">Кейсы</a>
+        <a href="#skills">Навыки</a>
+        <a href="#council">Council Mode</a>
+        <a href="#pricing">Тарифы</a>
+      </div>
+      <div class="footer-col">
+        <h5>Ресурсы</h5>
+        <a href="https://github.com/antonioshaman/aura-companion" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://razumai.space" target="_blank" rel="noopener">Razumai.space</a>
+        <a href="https://t.me/razumai" target="_blank" rel="noopener">Синергия Разума</a>
+        <a href="#faq">FAQ</a>
+      </div>
+      <div class="footer-col">
+        <h5>Контакты</h5>
+        <a href="mailto:hello@auraco.space">hello@auraco.space</a>
+        <a href="https://t.me/razumai_space_bot" target="_blank" rel="noopener">Telegram-бот</a>
+        <a href="#">Поддержка</a>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <div>© 2026 auraco.space · Aura Companion работает на MIT-лицензии</div>
+      <div>Сделано с теплом для пост-советского пространства</div>
+    </div>
+  </div>
+</footer>
+
+<div class="modal" id="modal">
+  <div class="modal-card" id="modalContent">
+    <button class="modal-close" onclick="closeModal()">×</button>
+    <h3 id="modalTitle">Записаться</h3>
+    <p>Оставьте контакт — пришлём ссылку для входа и инструкции на русском.</p>
+    <input type="text" placeholder="Как к вам обращаться" id="m-name">
+    <input type="text" placeholder="Email или Telegram" id="m-contact">
+    <button class="modal-submit" onclick="submitModal()">Отправить</button>
+  </div>
+</div>
+
+<script>
+  function togglePricing(period, btn) {
+    document.querySelectorAll('.pricing-toggle button').forEach(b => b.classList.remove('on'));
+    btn.classList.add('on');
+    document.querySelectorAll('[data-monthly]').forEach(el => {
+      const val = period === 'year' ? el.dataset.yearly : el.dataset.monthly;
+      const unit = period === 'year' ? el.dataset.unitY : el.dataset.unitM;
+      el.innerHTML = val + ' <small>' + unit + '</small>';
+    });
+  }
+
+  const promoCodes = {
+    'SINERGY': { off: 25, name: 'Синергия Разума' },
+    'RAZUMAI': { off: 25, name: 'Сообщество Razumai' },
+    'AURA50': { off: 50, name: 'Ранний доступ' },
+    'FRIEND': { off: 15, name: 'По приглашению друга' }
+  };
+  function applyPromo() {
+    const input = document.getElementById('promo-input');
+    const result = document.getElementById('promo-result');
+    const code = (input.value || '').trim().toUpperCase();
+    if (!code) {
+      result.className = 'promo-result err';
+      result.textContent = 'Введите промокод';
+      return;
+    }
+    if (promoCodes[code]) {
+      const p = promoCodes[code];
+      result.className = 'promo-result';
+      result.textContent = '✓ Промокод применён: скидка ' + p.off + '% (' + p.name + '). Появится при оформлении.';
+      input.style.borderColor = 'var(--gold)';
+    } else {
+      result.className = 'promo-result err';
+      result.textContent = '✗ Промокод не найден. Попробуйте SINERGY или RAZUMAI';
+      input.style.borderColor = 'var(--ember)';
+    }
+  }
+
+  function openModal(title) {
+    document.getElementById('modalTitle').textContent = title;
+    document.getElementById('modal').classList.add('open');
+    document.body.style.overflow = 'hidden';
+  }
+  function closeModal() {
+    document.getElementById('modal').classList.remove('open');
+    document.body.style.overflow = '';
+  }
+  function submitModal() {
+    const name = document.getElementById('m-name').value.trim();
+    const contact = document.getElementById('m-contact').value.trim();
+    if (!name || !contact) { alert('Заполните имя и контакт'); return; }
+    document.getElementById('modalContent').innerHTML =
+      '<button class="modal-close" onclick="closeModal()">×</button>' +
+      '<div class="modal-success"><div class="check">✓</div>' +
+      '<h3>Спасибо, ' + name + '!</h3>' +
+      '<p>Мы написали вам на <strong>' + contact + '</strong>. Ссылка для входа придёт в течение минуты.</p></div>';
+  }
+  document.getElementById('modal').addEventListener('click', (e) => {
+    if (e.target.id === 'modal') closeModal();
+  });
+
+  function toggleFaq(el) {
+    el.parentElement.classList.toggle('open');
+  }
+
+  function setLang(lang, btn) {
+    document.querySelectorAll('.lang-switch button').forEach(b => b.classList.remove('on'));
+    btn.classList.add('on');
+    if (lang === 'en') {
+      alert('English version coming soon — пока работает только русская версия.');
+      document.querySelectorAll('.lang-switch button')[0].classList.add('on');
+      document.querySelectorAll('.lang-switch button')[1].classList.remove('on');
+    }
+  }
+
+  // Anonymous global usage counter — reads the opt-in telemetry aggregator.
+  // Renders nothing until counts are available, so an unreachable worker is
+  // silently absent rather than a broken card.
+  (function () {
+    var STATS_URL = 'https://companion-stats.antonshmonin.workers.dev';
+    fetch(STATS_URL + '/stats/global')
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) {
+        if (!data) return;
+        var active = typeof data.activeInstances30d === 'number' ? data.activeInstances30d : null;
+        var total = typeof data.totalInstances === 'number' ? data.totalInstances : null;
+        if (active === null && total === null) return;
+        var box = document.getElementById('usage-stats');
+        var aEl = document.getElementById('usage-active');
+        var tEl = document.getElementById('usage-total');
+        if (active !== null && aEl) { aEl.textContent = active.toLocaleString('ru-RU'); aEl.parentElement.hidden = false; }
+        else if (aEl) { aEl.parentElement.style.display = 'none'; }
+        if (total !== null && tEl) { tEl.textContent = total.toLocaleString('ru-RU'); tEl.parentElement.hidden = false; }
+        else if (tEl) { tEl.parentElement.style.display = 'none'; }
+        if (box) box.hidden = false;
+      })
+      .catch(function () {});
+  })();
+</script>
+</body>
+</html>
