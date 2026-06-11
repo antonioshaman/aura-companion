@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.9.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.8.0...aura-companion-v1.9.0) (2026-06-11)
+
+
+### Features
+
+* **cleanup:** reap orphaned PTY terminals across restarts ([#106](https://github.com/antonioshaman/aura-companion/issues/106)) ([136bb55](https://github.com/antonioshaman/aura-companion/commit/136bb5593dba5750bd71c5f86e9aa900d5e2cfe2))
+* **landing:** restore lost auraco.space landing + add usage counter ([#104](https://github.com/antonioshaman/aura-companion/issues/104)) ([e0ac404](https://github.com/antonioshaman/aura-companion/commit/e0ac404e5c22d48ecdb3480ea49dd4f13d0512a9))
+* **telemetry:** add opt-in global usage counter ([#102](https://github.com/antonioshaman/aura-companion/issues/102)) ([76418a2](https://github.com/antonioshaman/aura-companion/commit/76418a29b2c95efafd29d7400fb0c10ec452b30d))
+
+
+### Bug Fixes
+
+* **council:** suppress ghost-group replay on archived-half browser reconnect ([#107](https://github.com/antonioshaman/aura-companion/issues/107)) ([7ef5c78](https://github.com/antonioshaman/aura-companion/commit/7ef5c78d46e3c0158cfe47a0137b96a8fc855943))
+* **session-store:** skip *.runtime.json sister files + defensive guard ([#98](https://github.com/antonioshaman/aura-companion/issues/98)) ([ac3fac4](https://github.com/antonioshaman/aura-companion/commit/ac3fac458ca38477002011e0c71239cf33eade9b))
+
 ## [1.8.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.7.0...aura-companion-v1.8.0) (2026-06-10)
 
 
