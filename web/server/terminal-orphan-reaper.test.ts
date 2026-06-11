@@ -287,9 +287,11 @@ describe("reapStrandedTerminals — verdict branches", () => {
     expect(deleteSidecar).toHaveBeenCalledWith(ROOT, p.terminalId);
   });
 
-  // EPERM (or any non-ESRCH error) means the process SURVIVES — do not count
-  // it as reaped, do not delete the sidecar (next pass retries).
-  it("does not count an EPERM SIGTERM failure as reaped", async () => {
+  // EPERM (or any non-ESRCH error) means the process SURVIVES but the error is
+  // DETERMINISTIC — retrying every pass forever just churns WARN noise while the
+  // sidecar never clears. So it is NOT counted as reaped, but the stale sidecar
+  // IS pruned (loud WARN, no infinite retry) and handed to the operator.
+  it("prunes the sidecar on a deterministic EPERM SIGTERM failure (no infinite retry)", async () => {
     const p = payload();
     const deleteSidecar = vi.fn();
     const deps = makeDeps({
@@ -308,7 +310,8 @@ describe("reapStrandedTerminals — verdict branches", () => {
 
     expect(summary.reaped).toBe(0);
     expect(summary.killFailed).toBe(1);
-    expect(deleteSidecar).not.toHaveBeenCalled();
+    // Pruned — the unsignalable sidecar must not be retried daily forever.
+    expect(deleteSidecar).toHaveBeenCalledWith(ROOT, p.terminalId);
   });
 
   // Non-Linux dev host → the whole pass is a no-op; sidecars are never touched.
@@ -329,24 +332,33 @@ describe("reapStrandedTerminals — verdict branches", () => {
   });
 
   // A docker terminal's sentinel reason carries the kind so the reap log
-  // distinguishes host vs host-side docker-exec-client kills (FLAG B).
-  it("stamps the docker kind into the sentinel reason", async () => {
+  // distinguishes host vs host-side docker-exec-client kills (FLAG B). The
+  // FLAG B design claim is "SAME kill path for both kinds; kind only colours
+  // the sentinel reason" — so assert the docker terminal is actually SIGTERMed
+  // and reaped, not just that the label survived (a no-kill docker branch must
+  // not pass this test).
+  it("stamps the docker kind into the sentinel reason AND reaps via the same kill path", async () => {
     const p = payload({ kind: "docker", terminalId: "docker-term" });
     const writeMarker = vi.fn();
+    const kill = vi.fn();
     const deps = makeDeps({
       listSidecarIds: () => [p.terminalId],
       readSidecar: () => present(p),
       verify: () => ({ kind: "match" }),
       writeMarker,
+      kill,
     });
 
-    await reapStrandedTerminals(deps);
+    const summary = await reapStrandedTerminals(deps);
 
     expect(writeMarker).toHaveBeenCalledWith(
       SENTINEL,
       p.pid,
       expect.objectContaining({ reason: "terminal_docker" }),
     );
+    // Same kill path as host: the host-side docker-exec client IS SIGTERMed.
+    expect(kill).toHaveBeenCalledWith(p.pid, "SIGTERM");
+    expect(summary.reaped).toBe(1);
   });
 
   // A corrupt-but-present sidecar throws on read — skip it (cannot trust its
@@ -365,6 +377,86 @@ describe("reapStrandedTerminals — verdict branches", () => {
 
     expect(summary.skippedUnreadable).toBe(1);
     expect(kill).not.toHaveBeenCalled();
+  });
+});
+
+describe("reapStrandedTerminals — grace + budget guards", () => {
+  // P2 #4: the documented AURA_TERMINAL_ORPHAN_GRACE_SECONDS knob means "don't
+  // reap a browserless PTY younger than N seconds". A matched-but-young terminal
+  // (process age < minReapAgeMs) is deferred a pass — NOT killed — and its
+  // sidecar is kept so a later pass can reap it once it ages past the grace.
+  it("defers a matched terminal younger than the grace window", async () => {
+    const p = payload({ processStartMs: 9_000 }); // age = now(10_000) - 9_000 = 1_000ms
+    const kill = vi.fn();
+    const deleteSidecar = vi.fn();
+    const writeMarker = vi.fn();
+    const deps = makeDeps({
+      now: () => 10_000,
+      minReapAgeMs: 5_000, // 1_000ms old < 5_000ms grace → too young
+      listSidecarIds: () => [p.terminalId],
+      readSidecar: () => present(p),
+      verify: () => ({ kind: "match" }),
+      kill,
+      deleteSidecar,
+      writeMarker,
+    });
+
+    const summary = await reapStrandedTerminals(deps);
+
+    expect(summary.skippedYoung).toBe(1);
+    expect(summary.reaped).toBe(0);
+    expect(kill).not.toHaveBeenCalled();
+    // Neither the sentinel nor the sidecar is touched — retried next pass.
+    expect(writeMarker).not.toHaveBeenCalled();
+    expect(deleteSidecar).not.toHaveBeenCalled();
+  });
+
+  // The other side of the grace gate: a terminal OLDER than the grace window is
+  // reaped normally. Proves the guard defers only the young, not every match.
+  it("reaps a matched terminal older than the grace window", async () => {
+    const p = payload({ processStartMs: 1_000 }); // age = 10_000 - 1_000 = 9_000ms
+    const kill = vi.fn();
+    const deps = makeDeps({
+      now: () => 10_000,
+      minReapAgeMs: 5_000, // 9_000ms old > 5_000ms grace → reap
+      listSidecarIds: () => [p.terminalId],
+      readSidecar: () => present(p),
+      verify: () => ({ kind: "match" }),
+      kill,
+    });
+
+    const summary = await reapStrandedTerminals(deps);
+
+    expect(summary.skippedYoung).toBe(0);
+    expect(summary.reaped).toBe(1);
+    expect(kill).toHaveBeenCalledWith(p.pid, "SIGTERM");
+  });
+
+  // P2 #8: a `match` blocks up to REAP_POST_TERM_GRACE_MS (1_500ms) waiting for
+  // the SIGTERMed process to exit. Admitting one when less than that remains in
+  // the pass budget would overrun the systemd readiness window. With a budget of
+  // 1_000ms (< the 1_500ms tail), the very first match is deferred — no kill —
+  // and budgetExceeded is flagged so the next pass picks it up.
+  it("defers a reap whose post-SIGTERM tail would overrun the pass budget", async () => {
+    const p = payload({ processStartMs: 1_000 });
+    const kill = vi.fn();
+    const writeMarker = vi.fn();
+    const deps = makeDeps({
+      now: () => 10_000, // frozen → elapsed is 0, so the 1_500ms tail vs 1_000ms budget decides
+      budgetMs: 1_000,
+      listSidecarIds: () => [p.terminalId],
+      readSidecar: () => present(p),
+      verify: () => ({ kind: "match" }),
+      kill,
+      writeMarker,
+    });
+
+    const summary = await reapStrandedTerminals(deps);
+
+    expect(summary.budgetExceeded).toBe(true);
+    expect(summary.reaped).toBe(0);
+    expect(kill).not.toHaveBeenCalled();
+    expect(writeMarker).not.toHaveBeenCalled();
   });
 });
 

@@ -630,6 +630,7 @@ import { sweepRetention } from "./cleanup/retention-sweeper.js";
 // convention as Phase E (registerSweep) plus the new registerReconcile
 // seam for the EC-8 sentinel-recovery half of the contract.
 import { sweepEviction, reconcileEvictionSentinels } from "./cleanup/eviction-sweeper.js";
+import { reconcileStaleReapingMarkers } from "./cleanup/sentinel-markers.js";
 import { readdirSync as nodeReaddirSync, statSync as nodeStatSync, unlinkSync as nodeUnlinkSync } from "node:fs";
 
 const DIAGNOSTICS_INTERVAL_MS = 5 * 60_000; // every 5 minutes
@@ -776,6 +777,13 @@ cleanupScheduler.registerReconcile("eviction-reconcile", (bootTimeMs) => {
 // store dir with the session orphan reaper — pids are globally unique so the
 // `.reaping/<pid>.json` namespace doesn't collide.
 const TERMINALS_ROOT = join(COMPANION_HOME, "terminals");
+// The documented grace (`AURA_TERMINAL_ORPHAN_GRACE_SECONDS`) means "don't
+// reap a browserless PTY younger than N seconds". Thread the resolved ms into
+// the reaper so the knob is honoured (not inert): a matched-but-young terminal
+// is deferred a pass. When the knob is disabled (0), no grace → reap on match.
+const terminalReapGraceMs = diagnosticsCleanupConfig.terminalOrphanGrace.enabled
+  ? diagnosticsCleanupConfig.terminalOrphanGrace.ms
+  : undefined;
 cleanupScheduler.registerReconcile("terminal-orphan-reconcile", async () => {
   // `await` (do NOT `void`) so the scheduler's await + try/catch error boundary
   // covers a rejection — a detached reject here is an unhandled rejection at
@@ -789,7 +797,16 @@ cleanupScheduler.registerReconcile("terminal-orphan-reconcile", async () => {
     terminalsRoot: TERMINALS_ROOT,
     sentinelRoot: sessionStore.directory,
     isLocallyTracked: (id) => terminalManager.has(id),
+    minReapAgeMs: terminalReapGraceMs,
   });
+});
+// Boot reconcile also prunes orphaned `.reaping/<pid>.json` markers whose pid
+// is no longer live: the parent can die between the sentinel write and the
+// post-exit delete, and the terminal reaper enumerates sidecars only (the
+// sidecar is usually deleted in the same crashed pass), so without this the
+// markers accumulate unbounded across crashy restarts.
+cleanupScheduler.registerReconcile("reaping-marker-reconcile", () => {
+  reconcileStaleReapingMarkers(sessionStore.directory);
 });
 if (diagnosticsCleanupConfig.terminalOrphanGrace.enabled) {
   cleanupScheduler.registerSweep("terminal-orphan-sweep", async () => {
@@ -797,6 +814,7 @@ if (diagnosticsCleanupConfig.terminalOrphanGrace.enabled) {
       terminalsRoot: TERMINALS_ROOT,
       sentinelRoot: sessionStore.directory,
       isLocallyTracked: (id) => terminalManager.has(id),
+      minReapAgeMs: terminalReapGraceMs,
     });
   });
 }

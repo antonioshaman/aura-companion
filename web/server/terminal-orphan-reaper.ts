@@ -74,6 +74,15 @@ export interface TerminalReaperDeps {
    * orphanTimer — are never reaped out from under the running server.
    */
   readonly isLocallyTracked?: (terminalId: string) => boolean;
+  /**
+   * Grace in ms (`AURA_TERMINAL_ORPHAN_GRACE_SECONDS`). A `match` terminal
+   * whose process age (`now - processStartMs`) is below this is left for a
+   * later pass — the operator-documented "don't reap a browserless shell
+   * younger than N seconds" contract. `undefined` (knob disabled) reaps a
+   * matched terminal immediately. Only gates the kill; `gone`/`mismatch`
+   * sidecars are pruned regardless of age.
+   */
+  readonly minReapAgeMs?: number;
   /** Test seam — enumerate sidecar ids. */
   readonly listSidecarIds?: (root: string) => string[];
   /** Test seam — read one sidecar. */
@@ -117,7 +126,12 @@ export interface TerminalReapSummary {
   readonly prunedReused: number;
   /** Live terminals skipped because the current process still owns them. */
   readonly skippedTracked: number;
-  /** Reaps where SIGTERM threw a non-ESRCH error (e.g. EPERM) — process survives. */
+  /** Matched terminals left unreaped this pass because they are younger than
+   *  the configured grace (`minReapAgeMs`). Retried on a later pass. */
+  readonly skippedYoung: number;
+  /** Reaps where SIGTERM threw a non-ESRCH error (e.g. EPERM): the process
+   *  survives but the error is deterministic, so the stale sidecar is pruned
+   *  with a loud WARN instead of retried daily forever (no infinite churn). */
   readonly killFailed: number;
   /** Corrupt/absent sidecars skipped without action. */
   readonly skippedUnreadable: number;
@@ -133,6 +147,7 @@ function emptySummary(platform: NodeJS.Platform, durationMs: number): TerminalRe
     prunedGone: 0,
     prunedReused: 0,
     skippedTracked: 0,
+    skippedYoung: 0,
     killFailed: 0,
     skippedUnreadable: 0,
     budgetExceeded: false,
@@ -209,6 +224,7 @@ export async function reapStrandedTerminals(
   let prunedGone = 0;
   let prunedReused = 0;
   let skippedTracked = 0;
+  let skippedYoung = 0;
   let killFailed = 0;
   let skippedUnreadable = 0;
   let budgetExceeded = false;
@@ -298,6 +314,38 @@ export async function reapStrandedTerminals(
 
     // verdict.kind === "match" — a stranded terminal we own. REAP it.
     //
+    // Grace guard (AURA_TERMINAL_ORPHAN_GRACE_SECONDS): a terminal younger
+    // than the configured grace is left for a later pass — the documented
+    // "don't reap a browserless shell younger than N seconds" contract. Age
+    // is process age (now - kernel start). `gone`/`mismatch` already pruned
+    // above; this only defers a live, provably-ours, still-young terminal.
+    if (deps.minReapAgeMs !== undefined && clock() - processStartMs < deps.minReapAgeMs) {
+      skippedYoung++;
+      log.info("terminal-reaper", "terminal within grace window — deferring reap", {
+        event: "terminal_reaper.skipped_young",
+        pid,
+        kind,
+        ageMs: clock() - processStartMs,
+        graceMs: deps.minReapAgeMs,
+      });
+      continue;
+    }
+
+    // Reap-tail budget guard: a `match` blocks up to REAP_POST_TERM_GRACE_MS
+    // waiting for the SIGTERMed process to exit. Admitting one when less than
+    // that remains would push the pass past the systemd readiness budget the
+    // loop-top check protects. Defer to the next pass — the sidecar is kept
+    // and re-verified — rather than overrun.
+    if (ageMs(startedAt, clock()) + REAP_POST_TERM_GRACE_MS > budgetMs) {
+      budgetExceeded = true;
+      log.warn("terminal-reaper", "reap tail would overrun budget — deferring remaining terminals", {
+        event: "terminal_reaper.budget_exceeded",
+        scanned,
+        reaped,
+      });
+      break;
+    }
+
     // FLAG B (docker): for a `kind === "docker"` terminal, `pid` is the
     // host-side `docker exec` client, NOT the in-container shell. SIGTERMing
     // the host client is sufficient to release the host resource we leaked —
@@ -328,9 +376,15 @@ export async function reapStrandedTerminals(
       if (code === "ESRCH") {
         killAlreadyGone = true;
       } else {
+        // Non-ESRCH (EPERM — pid now owned by another UID/namespace, or a
+        // docker-exec client we can no longer signal) is deterministic.
+        // Retrying every pass forever just churns WARN noise while the
+        // sidecar never clears. Prune the stale provenance with a loud WARN
+        // and hand it to the operator rather than silent infinite retry.
         killFailed++;
-        log.warn("terminal-reaper", "SIGTERM failed", {
-          event: "terminal_reaper.kill_failed",
+        deleteOne(deps.terminalsRoot, terminalId);
+        log.warn("terminal-reaper", "SIGTERM unsignalable — pruning stale sidecar (no retry)", {
+          event: "terminal_reaper.kill_unsignalable",
           pid,
           kind,
           error_code: code ?? "unknown",
@@ -357,6 +411,11 @@ export async function reapStrandedTerminals(
         event: "terminal_reaped",
         pid,
         kind,
+        // FLAG B: for docker, SIGTERM hit the host-side `docker exec` client
+        // only; the in-container shell may survive (container's lifecycle).
+        // Colour the reclaim scope so an operator can tell a full host reap
+        // from a host-client-only release in the metrics/logs.
+        reclaim_scope: kind === "docker" ? "host_client_only" : "full",
       });
     }
 
@@ -383,6 +442,7 @@ export async function reapStrandedTerminals(
     prunedGone,
     prunedReused,
     skippedTracked,
+    skippedYoung,
     killFailed,
     skippedUnreadable,
     budgetExceeded,
@@ -396,6 +456,7 @@ export async function reapStrandedTerminals(
     prunedGone,
     prunedReused,
     skippedTracked,
+    skippedYoung,
     killFailed,
     skippedUnreadable,
     budgetExceeded,
