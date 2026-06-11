@@ -39,6 +39,12 @@ export function trimArchivedSessionState(
   session: Session,
   retention: number = ARCHIVED_HISTORY_RETENTION,
 ): void {
+  // Mark the bridge-local archived bit. This is the single chokepoint hit by
+  // BOTH archive paths: live archive (`trimArchivedSessionMemory`) and restore
+  // of an already-archived row on boot. Downstream, `handleBrowserConnect`
+  // reads it to suppress the synthetic `group_created` replay + relaunch
+  // request so an archived Council half cannot be resurrected as a ghost group.
+  session.archived = true;
   if (session.messageHistory.length > retention) {
     session.messageHistory.splice(0, session.messageHistory.length - retention);
   }
