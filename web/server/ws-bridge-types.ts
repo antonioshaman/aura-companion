@@ -52,6 +52,17 @@ export interface PendingControlRequest {
 export interface Session {
   id: string;
   backendType: BackendType;
+  /**
+   * Runtime mirror of the session's archived status. Set true when an archived
+   * session is restored from disk or trimmed at live-archive time
+   * (`trimArchivedSessionState`), cleared on unarchive. Load-bearing: gates the
+   * synthetic `group_created` replay + liveness machinery in
+   * `handleBrowserConnect` so a browser reconnecting to an archived Council half
+   * cannot resurrect the just-exited group as a ghost. The launcher/store hold
+   * the durable flag; this is the bridge-local copy for hot-path reads without a
+   * launcher reference.
+   */
+  archived?: boolean;
   /** Unified backend adapter — replaces the former cliSocket (Claude) / codexAdapter (Codex) fields. */
   backendAdapter: IBackendAdapter | null;
   browserSockets: Set<ServerWebSocket<SocketData>>;

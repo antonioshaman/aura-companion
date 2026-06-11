@@ -3020,6 +3020,7 @@ export class SessionOrchestrator {
   unarchiveSession(sessionId: string): { ok: boolean } {
     this.launcher.setArchived(sessionId, false);
     this.sessionStore.setArchived(sessionId, false);
+    this.wsBridge.markSessionUnarchived(sessionId);
     return { ok: true };
   }
 

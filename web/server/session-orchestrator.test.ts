@@ -183,6 +183,7 @@ function createMockBridge() {
     sendObserverWakeFrame: vi.fn(() => ({ kind: "sent" })),
     onUserFrameObserved: vi.fn(() => () => {}),
     trimArchivedSessionMemory: vi.fn(),
+    markSessionUnarchived: vi.fn(),
   } as any;
 }
 

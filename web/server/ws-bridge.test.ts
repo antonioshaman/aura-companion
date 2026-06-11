@@ -5473,6 +5473,107 @@ describe("handleBrowserOpen — Council group hydration", () => {
     expect(historyIdx).toBeGreaterThanOrEqual(0);
     expect(groupIdx).toBeLessThan(historyIdx);
   });
+
+  // ─── Archived-half ghost-group regression ────────────────────────────────
+  // Bug: archiving a Council pair kills both CLIs + drops the group from the
+  // coordinator, but the bridge Session objects linger in `this.sessions`
+  // (archive keeps the disk row for unarchive). A browser reconnecting to an
+  // archived half would replay a synthetic `group_created` (status hardcoded
+  // "active"), resurrecting a ghost group the orchestrator no longer tracks —
+  // the UI re-adds it as active (the "мерцание"/flicker) and then 404s on
+  // `GET /groups/:id/findings`. The archived guard in deriveGroupCreatedForBrowser
+  // must suppress the synthetic frame; the guard in handleBrowserOpen must
+  // suppress the spurious `cli_disconnected` that renders "reconnecting".
+  it("does NOT replay synthetic group_created when the subscribed half is archived", () => {
+    const orch = bridge.getOrCreateSession("a-orch", "claude");
+    const obs = bridge.getOrCreateSession("a-obs", "claude");
+    orch.state.sessionGroupId = "grp_arch";
+    orch.state.sessionGroupRole = "orchestrator";
+    obs.state.sessionGroupId = "grp_arch";
+    obs.state.sessionGroupRole = "observer";
+
+    // Sanity: a live pair WOULD hydrate.
+    const liveBrowser = makeBrowserSocket("a-orch");
+    bridge.handleBrowserOpen(liveBrowser, "a-orch");
+    expect(
+      liveBrowser.send.mock.calls
+        .map(([arg]: [string]) => JSON.parse(arg))
+        .find((c: any) => c.type === "group_created"),
+    ).toBeDefined();
+    bridge.handleBrowserClose(liveBrowser);
+
+    // Archive the orchestrator half (the chokepoint sets session.archived).
+    bridge.trimArchivedSessionMemory("a-orch");
+
+    const browser = makeBrowserSocket("a-orch");
+    bridge.handleBrowserOpen(browser, "a-orch");
+
+    const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
+    expect(calls.find((c: any) => c.type === "group_created")).toBeUndefined();
+  });
+
+  it("does NOT replay synthetic group_created when the counterpart half is archived", () => {
+    // Asymmetric archive: only the observer half got trimmed. The orchestrator
+    // half is still un-archived in the Map, but its group is gone — the
+    // counterpart.archived guard must still suppress the ghost.
+    const orch = bridge.getOrCreateSession("c-orch", "claude");
+    const obs = bridge.getOrCreateSession("c-obs", "claude");
+    orch.state.sessionGroupId = "grp_carch";
+    orch.state.sessionGroupRole = "orchestrator";
+    obs.state.sessionGroupId = "grp_carch";
+    obs.state.sessionGroupRole = "observer";
+
+    bridge.trimArchivedSessionMemory("c-obs");
+
+    const browser = makeBrowserSocket("c-orch");
+    bridge.handleBrowserOpen(browser, "c-orch");
+
+    const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
+    expect(calls.find((c: any) => c.type === "group_created")).toBeUndefined();
+  });
+
+  it("does NOT send cli_disconnected when reconnecting to an archived half with a dead backend", () => {
+    // An archived session's backend is dead by design. Without the archived
+    // guard in handleBrowserOpen, the missing backendAdapter would emit
+    // `cli_disconnected`, which the UI renders as a "reconnecting" flap.
+    const relaunchCb = vi.fn();
+    companionBus.on("session:relaunch-needed", ({ sessionId }) => relaunchCb(sessionId));
+
+    const session = bridge.getOrCreateSession("d-orch", "claude");
+    session.state.sessionGroupId = "grp_dead";
+    session.state.sessionGroupRole = "orchestrator";
+    // No backendAdapter attached → backendConnected is false.
+    bridge.trimArchivedSessionMemory("d-orch");
+
+    const browser = makeBrowserSocket("d-orch");
+    bridge.handleBrowserOpen(browser, "d-orch");
+
+    const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
+    expect(calls.find((c: any) => c.type === "cli_disconnected")).toBeUndefined();
+    expect(relaunchCb).not.toHaveBeenCalled();
+  });
+
+  it("markSessionUnarchived re-enables synthetic group_created hydration", () => {
+    // Unarchiving must clear the bridge-local archived bit so a re-activated
+    // pair once again hydrates group state on browser reconnect.
+    const orch = bridge.getOrCreateSession("u-orch", "claude");
+    const obs = bridge.getOrCreateSession("u-obs", "claude");
+    orch.state.sessionGroupId = "grp_un";
+    orch.state.sessionGroupRole = "orchestrator";
+    obs.state.sessionGroupId = "grp_un";
+    obs.state.sessionGroupRole = "observer";
+
+    bridge.trimArchivedSessionMemory("u-orch");
+    bridge.trimArchivedSessionMemory("u-obs");
+    bridge.markSessionUnarchived("u-orch");
+    bridge.markSessionUnarchived("u-obs");
+
+    const browser = makeBrowserSocket("u-orch");
+    bridge.handleBrowserOpen(browser, "u-orch");
+
+    const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
+    expect(calls.find((c: any) => c.type === "group_created")).toBeDefined();
+  });
 });
 
 // ─── injectSystemPrompt ─────────────────────────────────────────────────────

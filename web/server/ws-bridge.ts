@@ -835,6 +835,18 @@ export class WsBridge {
     trimArchivedSessionState(session);
   }
 
+  /**
+   * Clear the bridge-local archived bit on unarchive. The durable flag lives in
+   * the launcher + store; this resets the hot-path copy so a re-activated
+   * session's browser reconnect once again hydrates group state / requests
+   * relaunch normally. No-op if the session is unknown.
+   */
+  markSessionUnarchived(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    session.archived = false;
+  }
+
   /** Wire state machine transition listener to broadcast phase changes. */
   private wireStateMachineListeners(session: Session): void {
     // Unsubscribe any previous listener (e.g. from session restoration) to prevent leaks
@@ -1483,7 +1495,11 @@ export class WsBridge {
     // during that window can kill a healthy startup.
     const backendConnected = !!session.backendAdapter;
 
-    if (!backendConnected && !this.disconnectTimers.has(sessionId)) {
+    // An archived session's backend is dead by design (the user closed it).
+    // Emitting `cli_disconnected` would render a spurious "reconnecting" flap
+    // in the UI and `session:relaunch-needed` is a no-op (handleAutoRelaunch
+    // short-circuits on `archived`) — skip both for archived sessions.
+    if (!backendConnected && !session.archived && !this.disconnectTimers.has(sessionId)) {
       // Only signal disconnection if we're not within the debounce window
       // (CLI may be mid-reconnect — avoid UI flap and spurious relaunch)
       this.sendToBrowser(ws, { type: "cli_disconnected" });
@@ -1556,6 +1572,13 @@ export class WsBridge {
     const groupId = session.state.sessionGroupId;
     const role = session.state.sessionGroupRole;
     if (!groupId || !role) return null;
+    // An archived half's group was already torn down (killed + removed from the
+    // coordinator) by archiveSession, but the bridge session lingers in the Map
+    // (archive keeps the disk row for unarchive). Replaying `group_created`
+    // here on a browser reconnect would resurrect a ghost group the
+    // orchestrator no longer tracks — the browser re-adds it as `active` and
+    // then 404s on `GET /groups/:id/findings`. Suppress for archived sessions.
+    if (session.archived) return null;
     let counterpart: Session | null = null;
     for (const other of this.sessions.values()) {
       if (other === session) continue;
@@ -1564,7 +1587,7 @@ export class WsBridge {
       counterpart = other;
       break;
     }
-    if (!counterpart) return null;
+    if (!counterpart || counterpart.archived) return null;
     const primary = role === "orchestrator" ? session : counterpart;
     const observer = role === "observer" ? session : counterpart;
     // PR #68: route through the shared `buildBrowserGroupRecord` helper —

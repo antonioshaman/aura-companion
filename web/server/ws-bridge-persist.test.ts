@@ -372,6 +372,19 @@ describe("trimArchivedSessionState", () => {
     expect((session.messageHistory[0] as any).message.id).toBe("m40");
   });
 
+  it("sets the runtime archived flag (single chokepoint for live-archive + restore-of-archived)", () => {
+    // The bridge reads session.archived on the hot path (handleBrowserOpen /
+    // deriveGroupCreatedForBrowser) to suppress ghost-group resurrection. This
+    // function is the ONE place both archive paths converge, so it must stamp
+    // the flag regardless of how much history there is to trim.
+    const session = makeSession();
+    expect(session.archived).toBeUndefined();
+
+    trimArchivedSessionState(session);
+
+    expect(session.archived).toBe(true);
+  });
+
   it("exports ARCHIVED_HISTORY_RETENTION constant", () => {
     expect(ARCHIVED_HISTORY_RETENTION).toBe(100);
     // Lower bound assertion — keep the retention well below MESSAGE_HISTORY_LIMIT
