@@ -103,6 +103,7 @@ function buildConfig(graceMs: number | null): CleanupConfig {
     recordingsHardTtl: { enabled: true, ms: 60 * 24 * HOUR_MS },
     logsTtl: { enabled: true, ms: 7 * 24 * HOUR_MS },
     memoryPressureWarn: { enabled: true, us: 10_000_000 },
+    terminalOrphanGrace: { enabled: true, ms: 300_000 },
   };
 }
 
@@ -207,6 +208,7 @@ describe("sweepEviction — canary 1: spec self-verification (grace=0 + archived
       recordingsHardTtl: { enabled: true, ms: 60 * 24 * HOUR_MS },
       logsTtl: { enabled: true, ms: 7 * 24 * HOUR_MS },
       memoryPressureWarn: { enabled: true, us: 10_000_000 },
+      terminalOrphanGrace: { enabled: true, ms: 300_000 },
     };
 
     const summary = await sweepEviction(cfg, {
