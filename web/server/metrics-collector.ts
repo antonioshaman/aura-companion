@@ -290,6 +290,10 @@ export class MetricsCollector {
     return getCleanupEventCountLastHour("recordings_hard_deleted", nowMs);
   }
 
+  getTerminalReapedLastHour(nowMs?: number): number {
+    return getCleanupEventCountLastHour("terminal_reaped", nowMs);
+  }
+
   // ── Snapshot ──────────────────────────────────────────────────────────
 
   getSnapshot(gaugeProvider?: GaugeDataProvider): MetricsSnapshot {

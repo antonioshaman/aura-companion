@@ -1,7 +1,15 @@
 import type { ServerWebSocket } from "bun";
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { SocketData } from "./ws-bridge.js";
+import { COMPANION_HOME } from "./paths.js";
+import { readProcessStartMs } from "./process-identity.js";
+import {
+  writeTerminalSidecar,
+  deleteTerminalSidecar,
+  argvSha256,
+} from "./terminal-runtime-sidecar.js";
 
 /** Bun's PTY terminal handle exposed on proc when spawned with `terminal` option */
 interface BunTerminalHandle {
@@ -30,6 +38,13 @@ function resolveShell(): string {
 
 export class TerminalManager {
   private instances = new Map<string, TerminalInstance>();
+
+  /**
+   * `terminalsRoot` is where per-terminal provenance sidecars
+   * (`<terminalId>.terminal.json`) live so the boot-reconcile reaper can
+   * find PTYs stranded across a `KillMode=process` server restart.
+   */
+  constructor(private readonly terminalsRoot: string = join(COMPANION_HOME, "terminals")) {}
 
   /** Spawn a terminal in the given directory (host or container). */
   spawn(cwd: string, cols = 80, rows = 24, options?: { containerId?: string }): string {
@@ -102,6 +117,27 @@ export class TerminalManager {
       `[terminal] Spawned terminal ${id} in ${cwd}${containerId ? ` (container ${containerId.slice(0, 12)})` : ""} (${containerId ? "docker-shell" : shell}, ${cols}x${rows})`,
     );
 
+    // Best-effort provenance sidecar — restart-survival only. The in-memory
+    // orphanTimer still covers the live case; a failed write must NOT abort
+    // the spawn. `pid` is the host process (host shell OR host-side docker-
+    // exec client — FLAG B). `processStartMs` closes PID-reuse across
+    // restarts; null (non-Linux / unreadable) → skip the sidecar entirely.
+    try {
+      const processStartMs = readProcessStartMs(proc.pid);
+      if (processStartMs !== null) {
+        writeTerminalSidecar(this.terminalsRoot, {
+          schemaVersion: 1,
+          terminalId: id,
+          pid: proc.pid,
+          processStartMs,
+          argvSha256: argvSha256(cmd),
+          kind: containerId ? "docker" : "host",
+        });
+      }
+    } catch (e) {
+      console.warn(`[terminal] sidecar write failed for ${id}: ${(e as Error).message}`);
+    }
+
     // Handle process exit
     proc.exited.then((exitCode) => {
       const inst = this.instances.get(id);
@@ -124,6 +160,7 @@ export class TerminalManager {
     if (!inst) return;
     if (inst.orphanTimer) clearTimeout(inst.orphanTimer);
     this.instances.delete(terminalId);
+    deleteTerminalSidecar(this.terminalsRoot, terminalId);
   }
 
   /** Handle a message from a browser WebSocket */
@@ -161,6 +198,7 @@ export class TerminalManager {
   private killInstance(inst: TerminalInstance): void {
     if (inst.orphanTimer) clearTimeout(inst.orphanTimer);
     this.instances.delete(inst.id);
+    deleteTerminalSidecar(this.terminalsRoot, inst.id);
 
     try {
       inst.proc.kill();
@@ -199,6 +237,49 @@ export class TerminalManager {
     const first = this.instances.values().next().value as TerminalInstance | undefined;
     if (!first) return null;
     return { id: first.id, cwd: first.cwd, containerId: first.containerId };
+  }
+
+  // ─── reclamation seam (resource-reclamation plan Task 4) ──────────────────
+  //
+  // The cleanup subsystem queries + acts on terminals through these public
+  // methods rather than reaching into the private `instances` Map. `has` feeds
+  // the terminal reaper's `isLocallyTracked` guard so a periodic reconcile
+  // never SIGTERMs a terminal this process still owns.
+
+  /** Whether the current process still tracks this terminal in-memory. */
+  has(terminalId: string): boolean {
+    return this.instances.has(terminalId);
+  }
+
+  /** All terminalIds the current process tracks — feeds `isLocallyTracked`. */
+  activeTerminalIds(): string[] {
+    return [...this.instances.keys()];
+  }
+
+  /**
+   * In-process reclamation candidates: live terminals with NO browser socket
+   * attached. These are the same population the per-terminal 5s `orphanTimer`
+   * targets — this method is the backstop the cleanup scheduler can sweep when
+   * a timer was cleared by a reconnect that then closed without re-arming.
+   */
+  getReclaimableTerminals(): string[] {
+    const ids: string[] = [];
+    for (const inst of this.instances.values()) {
+      if (inst.browserSockets.size === 0) ids.push(inst.id);
+    }
+    return ids;
+  }
+
+  /**
+   * Public reap of one terminal. Delegates to the same teardown as `kill`
+   * (SIGTERM → 2s → SIGKILL, sidecar deleted). Returns whether a terminal was
+   * present to act on, so the scheduler can count reclaimed terminals.
+   */
+  reapTerminal(terminalId: string): boolean {
+    const inst = this.instances.get(terminalId);
+    if (!inst) return false;
+    this.killInstance(inst);
+    return true;
   }
 
   /** Attach a browser WebSocket to the terminal */

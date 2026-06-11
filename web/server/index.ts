@@ -43,6 +43,7 @@ import { securityHeaders } from "./middleware/security-headers.js";
 
 import { CleanupScheduler } from "./cleanup/cleanup-scheduler.js";
 import { reapOrphans } from "./orphan-reaper.js";
+import { reapStrandedTerminals } from "./terminal-orphan-reaper.js";
 import { imagePullManager } from "./image-pull-manager.js";
 import { restoreIfNeeded as restoreTailscaleFunnel, cleanup as cleanupTailscaleFunnel } from "./tailscale-manager.js";
 import { isRunningAsService } from "./service.js";
@@ -629,6 +630,7 @@ import { sweepRetention } from "./cleanup/retention-sweeper.js";
 // convention as Phase E (registerSweep) plus the new registerReconcile
 // seam for the EC-8 sentinel-recovery half of the contract.
 import { sweepEviction, reconcileEvictionSentinels } from "./cleanup/eviction-sweeper.js";
+import { reconcileStaleReapingMarkers } from "./cleanup/sentinel-markers.js";
 import { readdirSync as nodeReaddirSync, statSync as nodeStatSync, unlinkSync as nodeUnlinkSync } from "node:fs";
 
 const DIAGNOSTICS_INTERVAL_MS = 5 * 60_000; // every 5 minutes
@@ -752,6 +754,71 @@ cleanupScheduler.registerReconcile("eviction-reconcile", (bootTimeMs) => {
   });
 });
 
+// AURA-LOCAL: resource-reclamation plan Task 6 — PTY-terminal orphan reaper.
+// Two-phase wiring, mirroring the eviction boot+periodic split:
+//
+//   reconcile (ONCE at start, before first tick) — the in-memory `instances`
+//     Map is empty at boot, so `isLocallyTracked` defaults to all-false and
+//     EVERY sidecar is a reclamation candidate. This closes the restart-
+//     survival leak: a `KillMode=process` restart strands the shell / docker-
+//     exec client with no in-process record (the 5s orphanTimer died with the
+//     old parent). The reaper verifies each pid against its sidecar anchor
+//     (argvSha256 + starttime, FLAG A) and SIGTERMs only the ones we spawned.
+//
+//   sweep (periodic backstop) — passes `isLocallyTracked: terminalManager.has`
+//     so live terminals (covered by their own orphanTimer) are never reaped
+//     out from under the running server. Catches sidecar/process drift across
+//     the long-lived run. Gated on `terminalOrphanGrace.enabled` so operators
+//     can disable the periodic backstop (AURA_TERMINAL_ORPHAN_GRACE_SECONDS=0)
+//     without affecting the boot reconcile.
+//
+// terminalsRoot MUST match TerminalManager's default constructor
+// (`join(COMPANION_HOME, "terminals")`). sentinelRoot shares the session
+// store dir with the session orphan reaper — pids are globally unique so the
+// `.reaping/<pid>.json` namespace doesn't collide.
+const TERMINALS_ROOT = join(COMPANION_HOME, "terminals");
+// The documented grace (`AURA_TERMINAL_ORPHAN_GRACE_SECONDS`) means "don't
+// reap a browserless PTY younger than N seconds". Thread the resolved ms into
+// the reaper so the knob is honoured (not inert): a matched-but-young terminal
+// is deferred a pass. When the knob is disabled (0), no grace → reap on match.
+const terminalReapGraceMs = diagnosticsCleanupConfig.terminalOrphanGrace.enabled
+  ? diagnosticsCleanupConfig.terminalOrphanGrace.ms
+  : undefined;
+cleanupScheduler.registerReconcile("terminal-orphan-reconcile", async () => {
+  // `await` (do NOT `void`) so the scheduler's await + try/catch error boundary
+  // covers a rejection — a detached reject here is an unhandled rejection at
+  // boot, the exact restart path this reaper exists to harden.
+  // `isLocallyTracked` is supplied to the boot reconcile too: by the time this
+  // fires, Bun.serve is already accepting connections, so a terminal a browser
+  // opened during the boot window is live + in the Map and must be skipped.
+  // Stranded terminals from the dead parent are absent from the new Map, so
+  // they remain candidates — no reclamation is lost.
+  await reapStrandedTerminals({
+    terminalsRoot: TERMINALS_ROOT,
+    sentinelRoot: sessionStore.directory,
+    isLocallyTracked: (id) => terminalManager.has(id),
+    minReapAgeMs: terminalReapGraceMs,
+  });
+});
+// Boot reconcile also prunes orphaned `.reaping/<pid>.json` markers whose pid
+// is no longer live: the parent can die between the sentinel write and the
+// post-exit delete, and the terminal reaper enumerates sidecars only (the
+// sidecar is usually deleted in the same crashed pass), so without this the
+// markers accumulate unbounded across crashy restarts.
+cleanupScheduler.registerReconcile("reaping-marker-reconcile", () => {
+  reconcileStaleReapingMarkers(sessionStore.directory);
+});
+if (diagnosticsCleanupConfig.terminalOrphanGrace.enabled) {
+  cleanupScheduler.registerSweep("terminal-orphan-sweep", async () => {
+    await reapStrandedTerminals({
+      terminalsRoot: TERMINALS_ROOT,
+      sentinelRoot: sessionStore.directory,
+      isLocallyTracked: (id) => terminalManager.has(id),
+      minReapAgeMs: terminalReapGraceMs,
+    });
+  });
+}
+
 // AURA-LOCAL: tracks when the memory-pressure WARN last fired so the
 // pure `shouldEmitMemoryPressureWarn` gate can apply its 30-min rate
 // limit. Module-scope `let` — read + written exclusively inside the
@@ -803,6 +870,12 @@ const diagnosticsTimer = setInterval(() => {
     drainedPendingLastHour: metricsCollector.getDrainedPendingLastHour(),
     recordingsSoftArchivedLastHour: metricsCollector.getRecordingsSoftArchivedLastHour(),
     recordingsHardDeletedLastHour: metricsCollector.getRecordingsHardDeletedLastHour(),
+    // ── reclamation plan T8: PTY-terminal observability ──
+    // `terminalCount` is the live gauge (in-memory Map size); the reaped
+    // counter rides the same EC-21 store as the sweeps above. Both pinned
+    // by the EC-19 canary alongside the cleanup counters.
+    terminalCount: terminalManager.activeTerminalIds().length,
+    terminalReapedLastHour: metricsCollector.getTerminalReapedLastHour(),
     // ── PLAN T6: sweep-status fields (Phase C accessors on the scheduler) ──
     lastSweepCompletedAt: cleanupScheduler.getLastSweepCompletedAt(),
     lastSweepDurationMs: cleanupScheduler.getLastSweepDurationMs(),

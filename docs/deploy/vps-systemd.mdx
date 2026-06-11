@@ -92,6 +92,34 @@ Environment="COMPANION_FS_DEFAULT_PATH=/srv"
 
 Replace `http://192.168.0.1:3456` with your actual origin. For HTTPS behind a reverse proxy, use the public URL the browser sees, for example `https://aura.example.com`.
 
+## 4b. Optional: tune the cleanup subsystem
+
+Aura Companion runs a periodic cleanup scheduler that reclaims memory and host resources: it evicts stale archived sessions, sweeps old recordings/logs, reaps orphaned agent subprocesses, and — covered here — reaps **orphaned PTY terminals**.
+
+A terminal opened through the embedded shell surface spawns a host login shell (or a host-side `docker exec` client). Its only in-process reaper is a 5-second timer that dies with the bun parent. Across a `KillMode=process` restart that timer is gone, so a browserless shell would leak — reparented to init with no record. The reaper closes this: at boot it reads a per-terminal provenance sidecar, verifies each PID is provably the shell we spawned (argv hash + kernel start-time), and `SIGTERM`s only the stranded ones. A periodic backstop catches drift during the long-lived run.
+
+All knobs are optional — the defaults are safe. Add any you want to change to the drop-in override:
+
+```ini
+[Service]
+# PTY-terminal orphan reaper grace, in SECONDS. Default 300 (5 min).
+# Set to 0 to disable the periodic terminal backstop (boot reconcile
+# still runs). Integer >= 0; invalid values fall back to the default
+# with a WARN in the journal — a typo never aborts boot.
+Environment="AURA_TERMINAL_ORPHAN_GRACE_SECONDS=300"
+
+# Other cleanup knobs (all integer >= 0, 0 = disabled):
+Environment="AURA_EVICTION_GRACE_HOURS=24"
+Environment="AURA_ARCHIVE_TTL_DAYS=30"
+Environment="AURA_RECORDINGS_SOFT_TTL_DAYS=14"
+Environment="AURA_RECORDINGS_HARD_TTL_DAYS=60"
+Environment="AURA_LOGS_TTL_DAYS=7"
+```
+
+**`KillMode=process` coupling:** the boot-reconcile reap pass is the half that recovers terminals stranded by the previous parent. It only has work to do *because* `KillMode=process` lets those shells survive the restart — keep that setting (step 3) or the reaper has nothing to reconcile.
+
+**Non-Linux is a safe no-op:** the identity check reads `/proc`, which only exists on Linux. On macOS (local dev) the verifier degrades to `"unavailable"` and the entire reap pass is skipped — no sidecar is touched, nothing is killed. Production VPS deploys are Linux, so the reaper is fully active there.
+
 ## 5. Enable and start
 
 ```bash

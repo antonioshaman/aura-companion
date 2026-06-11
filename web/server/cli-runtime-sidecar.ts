@@ -120,9 +120,18 @@ export function sidecarPath(sessionsRoot: string, sessionId: string): string {
  * sidecar payload. NUL-joining matches the kernel's cmdline format so
  * a reaper read of `/proc/<pid>/cmdline` can recompute and compare
  * without re-tokenising.
+ *
+ * Empty tokens are filtered BEFORE joining so this writer-side hash is
+ * symmetric with the reader: the reaper recomputes from
+ * `splitCmdline(/proc/<pid>/cmdline)`, which drops empty tokens (the
+ * kernel cmdline always carries a trailing NUL → a trailing empty
+ * segment). Without this filter an arg vector containing an empty string
+ * — or simply the trailing-NUL asymmetry — would hash differently on the
+ * two sides and the reaper would mis-classify a genuine match as a
+ * `mismatch`, leaking the terminal it was meant to reclaim.
  */
 export function argvSha256(args: readonly string[]): string {
-  const joined = args.join("\0");
+  const joined = args.filter((s) => s.length > 0).join("\0");
   return createHash("sha256").update(joined, "utf8").digest("hex");
 }
 

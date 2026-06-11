@@ -1,4 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadCleanupConfig } from "./cleanup-config.js";
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -36,6 +39,7 @@ describe("loadCleanupConfig — defaults", () => {
     expect(cfg.recordingsHardTtl).toEqual({ enabled: true, ms: 60 * DAY_MS });
     expect(cfg.logsTtl).toEqual({ enabled: true, ms: 7 * DAY_MS });
     expect(cfg.memoryPressureWarn).toEqual({ enabled: true, us: 10_000_000 });
+    expect(cfg.terminalOrphanGrace).toEqual({ enabled: true, ms: 300 * 1000 });
   });
 
   // The structured log line is operator-facing API — log analyzers will
@@ -43,7 +47,7 @@ describe("loadCleanupConfig — defaults", () => {
   // and the per-knob `source` discriminator.
   it("emits cleanup.config.resolved info per knob with source=default", () => {
     loadCleanupConfig({});
-    expect(infoSpy).toHaveBeenCalledTimes(6);
+    expect(infoSpy).toHaveBeenCalledTimes(7);
     for (const call of infoSpy.mock.calls) {
       const data = call[2] as Record<string, unknown>;
       expect(data.event).toBe("cleanup.config.resolved");
@@ -69,6 +73,19 @@ describe("loadCleanupConfig — env override", () => {
   it("parses AURA_MEMORY_PRESSURE_WARN_THRESHOLD_US in microseconds (no unit conversion)", () => {
     const cfg = loadCleanupConfig({ AURA_MEMORY_PRESSURE_WARN_THRESHOLD_US: "5000000" });
     expect(cfg.memoryPressureWarn).toEqual({ enabled: true, us: 5_000_000 });
+  });
+
+  // Seconds-unit knob: prove the seconds→ms multiplier (×1000), distinct from
+  // the hours/days knobs. This is the unit the EC-19 canary (Task 9) guards.
+  it("parses AURA_TERMINAL_ORPHAN_GRACE_SECONDS as seconds → ms", () => {
+    const cfg = loadCleanupConfig({ AURA_TERMINAL_ORPHAN_GRACE_SECONDS: "45" });
+    expect(cfg.terminalOrphanGrace).toEqual({ enabled: true, ms: 45 * 1000 });
+  });
+
+  // 0 disables the periodic terminal sweep entirely.
+  it("treats AURA_TERMINAL_ORPHAN_GRACE_SECONDS=0 as disabled", () => {
+    const cfg = loadCleanupConfig({ AURA_TERMINAL_ORPHAN_GRACE_SECONDS: "0" });
+    expect(cfg.terminalOrphanGrace).toEqual({ enabled: false });
   });
 });
 
@@ -131,6 +148,30 @@ describe("loadCleanupConfig — invalid input", () => {
     expect(data.source).toBe("default");
     expect(data.rawEnvValue).toBe("-1");
     expect(data.reason).toBe("invalid_input");
+  });
+});
+
+describe("AURA_TERMINAL_ORPHAN_GRACE_SECONDS — EC-19 operator-key canary", () => {
+  // The env-var NAME is an operator-facing contract: a deployer types it
+  // into their systemd override, and an alert/runbook references it. A
+  // rename in code that doesn't update the documented key — or vice
+  // versa — silently breaks every deployment that set the old name (the
+  // knob falls back to its default, no error). This canary fails the
+  // build the moment the loader source and the deploy doc disagree on
+  // the literal string, so the two can never drift apart unnoticed.
+  const KEY = "AURA_TERMINAL_ORPHAN_GRACE_SECONDS";
+  const here = dirname(fileURLToPath(import.meta.url));
+
+  it("appears literally in the cleanup-config loader source", () => {
+    const loaderSrc = readFileSync(join(here, "cleanup-config.ts"), "utf8");
+    expect(loaderSrc).toContain(KEY);
+  });
+
+  it("appears literally in the deploy docs (docs/deploy/vps-systemd.mdx)", () => {
+    // here = web/server/cleanup → repo root is three levels up.
+    const docPath = join(here, "..", "..", "..", "docs", "deploy", "vps-systemd.mdx");
+    const docSrc = readFileSync(docPath, "utf8");
+    expect(docSrc).toContain(KEY);
   });
 });
 

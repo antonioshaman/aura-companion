@@ -32,7 +32,7 @@
 // EC-23: log payloads on delete-failure include the marker kind +
 // numeric identifiers (sessionId, pid, tier) but NEVER raw path bytes.
 
-import { unlinkSync } from "node:fs";
+import { readdirSync, unlinkSync } from "node:fs";
 import { writeAtomicJson } from "../atomic-write.js";
 import { log } from "../logger.js";
 import {
@@ -120,6 +120,78 @@ export function deleteReapingMarker(sessionRoot: string, pid: number): void {
   }
   const target = resolveCleanupPath(sessionRoot, `${REAPING_SENTINEL_SUBDIR}/${pid}.json`);
   bestEffortUnlink(target, "reaping", { pid });
+}
+
+/**
+ * Enumerate the pids of all `.reaping/<pid>.json` markers under `sessionRoot`.
+ * A missing `.reaping/` dir yields `[]` (the common case — nothing was reaped
+ * since the last boot). Filenames whose stem isn't a positive integer are
+ * skipped defensively; only `writeReapingMarker` should ever populate the dir.
+ */
+export function listReapingMarkerPids(sessionRoot: string): number[] {
+  const dir = resolveCleanupPath(sessionRoot, REAPING_SENTINEL_SUBDIR);
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    if (err.code === "ENOENT") return [];
+    throw e;
+  }
+  const pids: number[] = [];
+  for (const name of entries) {
+    if (!name.endsWith(".json")) continue;
+    const stem = name.slice(0, -".json".length);
+    const pid = Number(stem);
+    if (Number.isInteger(pid) && pid > 0 && String(pid) === stem) pids.push(pid);
+  }
+  return pids;
+}
+
+export interface ReapingReconcileDeps {
+  /** True iff `pid` is a live process. Default: `process.kill(pid, 0)`. */
+  readonly isPidLive?: (pid: number) => boolean;
+}
+
+/**
+ * Boot/periodic reconcile of the `.reaping/` sentinel dir: prune any marker
+ * whose pid is no longer live. A live pid is LEFT intact — the marker means a
+ * SIGTERM was issued but exit not yet confirmed, and the terminal reaper owns
+ * the follow-up (the marker is its sentinel-before-sweep evidence per EC-8).
+ *
+ * Pruning is by liveness ONLY, not identity. A reused pid (a fresh process
+ * inheriting a dead reap-target's pid) keeps the marker until that pid also
+ * dies — harmless, because the marker carries no kill authority on its own;
+ * the reaper re-derives identity from the terminal sidecar before any SIGTERM.
+ */
+export function reconcileStaleReapingMarkers(
+  sessionRoot: string,
+  deps: ReapingReconcileDeps = {},
+): { scanned: number; pruned: number } {
+  const isPidLive = deps.isPidLive ?? defaultIsPidLive;
+  const pids = listReapingMarkerPids(sessionRoot);
+  let pruned = 0;
+  for (const pid of pids) {
+    if (isPidLive(pid)) continue;
+    deleteReapingMarker(sessionRoot, pid);
+    pruned++;
+    log.info("sentinel-markers", "Pruned stale reaping marker (pid no longer live)", {
+      event: "cleanup.sentinel.reaping_reconciled",
+      pid,
+    });
+  }
+  return { scanned: pids.length, pruned };
+}
+
+function defaultIsPidLive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    // EPERM = the pid exists but we may not signal it → still live.
+    return err.code === "EPERM";
+  }
 }
 
 /**

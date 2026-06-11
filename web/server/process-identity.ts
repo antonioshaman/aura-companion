@@ -25,6 +25,11 @@
 // macOS / non-Linux → `"unavailable"` with a one-time boot WARN; the
 // reaper caller degrades gracefully (Phase D) rather than no-op silently.
 //
+// Factor 2 (argv) is pluggable: `verifyProcessIdentity` matches the
+// session `--sdk-url <sessionId>` token; `verifyProcessIdentityByArgv`
+// takes a caller-supplied `ArgvMatcher` for non-session process classes
+// (PTY terminals), where uniqueness rests on factors 1 + 3.
+//
 // Pure helper: no kills, no mutation. Callers decide.
 //
 // EC-40: the test seam (`setProcReaderForTests`, `__resetProcReaderForTests`)
@@ -236,6 +241,40 @@ export function verifyProcessIdentity(
   expectedSessionId: string,
   expectedStartMs: number | null,
 ): ProcessIdentityResult {
+  return verifyProcessIdentityByArgv(
+    pid,
+    (tokens) => argvMatchesSessionId(tokens, expectedSessionId),
+    expectedStartMs,
+  );
+}
+
+/**
+ * Argv-shape predicate over the NUL-split `/proc/<pid>/cmdline` tokens.
+ * Returns `true` when the tokens identify the process class the caller
+ * expects. The session probe uses `argvMatchesSessionId`; other process
+ * classes (PTY shells, docker-exec clients) supply their own shape check
+ * — they carry no `--sdk-url <sessionId>` token, so uniqueness for those
+ * comes from the starttime factor (PID + spawn-time anchor), not argv.
+ */
+export type ArgvMatcher = (tokens: string[]) => boolean;
+
+/**
+ * Generalized three-factor probe: liveness + caller-supplied argv-shape
+ * predicate + starttime. `verifyProcessIdentity` is the session-flavoured
+ * wrapper; the PTY-terminal reaper (resource-reclamation) passes a
+ * terminal-shaped `argvMatches` here instead.
+ *
+ * Identical fail-CLOSED semantics and `expectedStartMs: null` two-factor
+ * degraded mode as `verifyProcessIdentity` — the only difference is which
+ * argv shape counts as a match.
+ *
+ * Pure: no kills, no mutation.
+ */
+export function verifyProcessIdentityByArgv(
+  pid: number,
+  argvMatches: ArgvMatcher,
+  expectedStartMs: number | null,
+): ProcessIdentityResult {
   const platform = procReader.platform();
   if (platform !== "linux") {
     if (!unavailableWarned) {
@@ -262,7 +301,7 @@ export function verifyProcessIdentity(
   try {
     const cmdline = procReader.readCmdline(pid);
     const tokens = splitCmdline(cmdline);
-    argvOk = argvMatchesSessionId(tokens, expectedSessionId);
+    argvOk = argvMatches(tokens);
   } catch {
     // ESRCH (race: process died between killCheck and readCmdline) or
     // EACCES (process owned by a different UID — shouldn't happen but

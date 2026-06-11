@@ -10,6 +10,8 @@ import {
   deleteReapingMarker,
   writeSweepInProgressMarker,
   deleteSweepInProgressMarker,
+  listReapingMarkerPids,
+  reconcileStaleReapingMarkers,
 } from "./sentinel-markers.js";
 import {
   ARCHIVED_SESSIONS_SUBDIR,
@@ -111,6 +113,53 @@ describe("reaping marker — pid-validated", () => {
     expect(existsSync(target)).toBe(true);
     deleteReapingMarker(tmpRoot, 999);
     expect(existsSync(target)).toBe(false);
+  });
+});
+
+describe("reaping marker reconcile — list + prune-by-liveness (P2 #5)", () => {
+  // The parent can die between the sentinel write and the post-exit delete, so
+  // `.reaping/<pid>.json` markers accumulate across crashy restarts. The boot
+  // reconcile prunes any marker whose pid is no longer live — leaving live pids
+  // for the terminal reaper to finish.
+
+  it("lists the pids of all .reaping/<pid>.json markers", () => {
+    writeReapingMarker(tmpRoot, 111, { pid: 111, decisionTs: 0, reason: "x" });
+    writeReapingMarker(tmpRoot, 222, { pid: 222, decisionTs: 0, reason: "x" });
+    expect(listReapingMarkerPids(tmpRoot).sort((a, b) => a - b)).toEqual([111, 222]);
+  });
+
+  it("returns [] when the .reaping dir was never created", () => {
+    expect(listReapingMarkerPids(tmpRoot)).toEqual([]);
+  });
+
+  it("ignores files whose stem is not a positive integer", () => {
+    // Only writeReapingMarker should populate the dir, but be defensive: a
+    // stray non-numeric file (e.g. a leftover .DS_Store) must not crash the
+    // enumeration or be mistaken for a pid.
+    writeReapingMarker(tmpRoot, 333, { pid: 333, decisionTs: 0, reason: "x" });
+    const dir = join(tmpRoot, REAPING_SENTINEL_SUBDIR);
+    writeFileSync(join(dir, "not-a-pid.json"), "{}");
+    writeFileSync(join(dir, "0.json"), "{}"); // zero is not a valid pid
+    expect(listReapingMarkerPids(tmpRoot)).toEqual([333]);
+  });
+
+  it("prunes a marker whose pid is dead and keeps a live one", () => {
+    writeReapingMarker(tmpRoot, 111, { pid: 111, decisionTs: 0, reason: "dead" });
+    writeReapingMarker(tmpRoot, 222, { pid: 222, decisionTs: 0, reason: "live" });
+
+    const result = reconcileStaleReapingMarkers(tmpRoot, {
+      isPidLive: (pid) => pid === 222, // 111 dead, 222 alive
+    });
+
+    expect(result).toEqual({ scanned: 2, pruned: 1 });
+    expect(existsSync(join(tmpRoot, REAPING_SENTINEL_SUBDIR, "111.json"))).toBe(false);
+    // The live pid's marker is left intact — the terminal reaper owns it.
+    expect(existsSync(join(tmpRoot, REAPING_SENTINEL_SUBDIR, "222.json"))).toBe(true);
+  });
+
+  it("is a no-op (scanned 0, pruned 0) when there are no markers", () => {
+    expect(reconcileStaleReapingMarkers(tmpRoot, { isPidLive: () => true }))
+      .toEqual({ scanned: 0, pruned: 0 });
   });
 });
 

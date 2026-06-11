@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import {
   verifyProcessIdentity,
+  verifyProcessIdentityByArgv,
   setProcReaderForTests,
   __resetProcReaderForTests,
   __resetUnavailableWarnedForTests,
@@ -274,6 +275,99 @@ describe("verifyProcessIdentity — Phase A two-factor degraded mode (expectedSt
     });
     verifyProcessIdentity(1234, SESSION_ID, null);
     expect(statReads).toBe(0);
+  });
+});
+
+// ─── generalized argv-predicate seam (resource-reclamation keystone) ────────
+//
+// `verifyProcessIdentityByArgv` is the process-class-agnostic core. PTY
+// terminals carry NO `--sdk-url <sessionId>` token, so the session probe
+// would mismatch every one of them; the reaper supplies a terminal-shaped
+// predicate instead, with uniqueness resting on liveness + starttime.
+describe("verifyProcessIdentityByArgv — generalized predicate core", () => {
+  // A shell argv (`/bin/bash -l`) carries no sessionId token, yet a
+  // predicate matching the recorded shell binary + the live starttime
+  // anchor yields a confident match. This is the path the PTY reaper uses.
+  it("returns {kind:'match'} for a terminal-shaped argv when predicate + starttime agree", () => {
+    setProcReaderForTests({
+      platform: () => "linux",
+      killCheck: () => true,
+      readCmdline: () => makeCmdline("/bin/bash", "-l"),
+      readStat: () => makeStatLine("bash", START_TICKS),
+      readBootStat: () => makeBootStat(BOOT_SECS),
+      clkTck: CLK_TCK,
+    });
+    const isOurShell = (tokens: string[]) => tokens[0] === "/bin/bash";
+    expect(verifyProcessIdentityByArgv(4321, isOurShell, EXPECTED_START_MS)).toEqual({
+      kind: "match",
+    });
+  });
+
+  // Predicate rejection surfaces as the same {mismatch, argv} verdict the
+  // session wrapper produces — PID reuse by an unrelated process class.
+  it("returns {kind:'mismatch', reason:'argv'} when the predicate rejects the argv", () => {
+    setProcReaderForTests({
+      platform: () => "linux",
+      killCheck: () => true,
+      readCmdline: () => makeCmdline("/usr/bin/python3", "server.py"),
+      readStat: () => makeStatLine("python3", START_TICKS),
+      readBootStat: () => makeBootStat(BOOT_SECS),
+      clkTck: CLK_TCK,
+    });
+    const isOurShell = (tokens: string[]) => tokens[0] === "/bin/bash";
+    expect(verifyProcessIdentityByArgv(4321, isOurShell, EXPECTED_START_MS)).toEqual({
+      kind: "mismatch",
+      reason: "argv",
+    });
+  });
+
+  // Starttime PID-reuse defense applies to terminals identically: a
+  // matching shell argv but a divergent wallclock anchor → mismatch.
+  it("returns {kind:'mismatch', reason:'starttime'} when the anchor differs by >2s", () => {
+    setProcReaderForTests({
+      platform: () => "linux",
+      killCheck: () => true,
+      readCmdline: () => makeCmdline("/bin/bash", "-l"),
+      readStat: () => makeStatLine("bash", START_TICKS),
+      readBootStat: () => makeBootStat(BOOT_SECS),
+      clkTck: CLK_TCK,
+    });
+    const isOurShell = (tokens: string[]) => tokens[0] === "/bin/bash";
+    expect(verifyProcessIdentityByArgv(4321, isOurShell, EXPECTED_START_MS + 5000)).toEqual({
+      kind: "mismatch",
+      reason: "starttime",
+    });
+  });
+
+  // Degraded mode (no sidecar anchor) reduces to liveness + predicate,
+  // mirroring the session wrapper's `expectedStartMs: null` contract.
+  it("returns {kind:'match'} in degraded mode (null anchor) when liveness + predicate agree", () => {
+    setProcReaderForTests({
+      platform: () => "linux",
+      killCheck: () => true,
+      readCmdline: () => makeCmdline("/bin/bash", "-l"),
+    });
+    const isOurShell = (tokens: string[]) => tokens[0] === "/bin/bash";
+    expect(verifyProcessIdentityByArgv(4321, isOurShell, null)).toEqual({ kind: "match" });
+  });
+
+  // Liveness is still the floor — a dead PID is `gone` regardless of the
+  // predicate.
+  it("returns {kind:'gone'} when the process is dead", () => {
+    setProcReaderForTests({ platform: () => "linux", killCheck: () => false });
+    expect(verifyProcessIdentityByArgv(4321, () => true, EXPECTED_START_MS)).toEqual({
+      kind: "gone",
+    });
+  });
+
+  // Non-Linux degrades to {unavailable} — the reaper caller no-ops safely
+  // on macOS dev boxes (no /proc).
+  it("returns {kind:'unavailable'} on non-Linux", () => {
+    setProcReaderForTests({ platform: () => "darwin" });
+    expect(verifyProcessIdentityByArgv(4321, () => true, EXPECTED_START_MS)).toEqual({
+      kind: "unavailable",
+      platform: "darwin",
+    });
   });
 });
 

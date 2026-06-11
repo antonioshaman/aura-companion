@@ -115,6 +115,7 @@ function buildConfig(opts: {
     recordingsHardTtl: toCfg(opts.recordingsHardDays),
     logsTtl: toCfg(opts.logsDays),
     memoryPressureWarn: { enabled: true, us: 10_000_000 },
+    terminalOrphanGrace: { enabled: true, ms: 300_000 },
   };
 }
 

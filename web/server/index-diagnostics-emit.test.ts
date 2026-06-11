@@ -46,6 +46,16 @@ describe("index.ts diagnostic-emit — EC-19 literal-string canary", () => {
     expect(indexSrc).toMatch(pattern);
   });
 
+  // Reclamation plan T8: PTY-terminal observability fields. `terminalCount`
+  // is the live gauge; `terminalReapedLastHour` rides the cleanup-event
+  // store. Same operator-facing-API contract as the cleanup counters above.
+  const TERMINAL_KEYS = ["terminalCount", "terminalReapedLastHour"] as const;
+
+  it.each(TERMINAL_KEYS)("emits terminal observability key '%s' literally in the diagnostic snapshot", (key) => {
+    const pattern = new RegExp(`\\b${key}\\b`);
+    expect(indexSrc).toMatch(pattern);
+  });
+
   // The three sweep-status fields surfaced from Phase C's cleanup-
   // scheduler accessors. Same canary contract as the counters.
   const SWEEP_STATUS_KEYS = [

@@ -85,6 +85,21 @@ describe("argvSha256 — content fingerprint", () => {
   it("is deterministic over identical input", () => {
     expect(argvSha256(["x", "y", "z"])).toBe(argvSha256(["x", "y", "z"]));
   });
+
+  // P2 #6: writer/reader symmetry. The reaper recomputes this hash from
+  // splitCmdline(/proc/<pid>/cmdline), which DROPS empty tokens (the kernel
+  // cmdline always ends in a trailing NUL → a trailing empty segment). The
+  // writer must therefore filter empty tokens too, or a genuine match hashes
+  // differently on the two sides and the reaper mis-classifies it as a
+  // `mismatch`, leaking the terminal it meant to reclaim. Empty tokens between
+  // — or trailing — must not change the fingerprint.
+  it("filters empty argv tokens so the writer matches the reader (splitCmdline)", () => {
+    const base = argvSha256(["/bin/bash", "-l"]);
+    // A stray empty token anywhere must not change the hash.
+    expect(argvSha256(["/bin/bash", "", "-l"])).toBe(base);
+    expect(argvSha256(["/bin/bash", "-l", ""])).toBe(base);
+    expect(argvSha256(["", "/bin/bash", "-l"])).toBe(base);
+  });
 });
 
 describe("writeRuntimeSidecar + readRuntimeSidecar — round-trip", () => {

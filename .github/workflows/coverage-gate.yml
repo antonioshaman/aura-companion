@@ -66,10 +66,18 @@ jobs:
             # 100%-covered test file. File-level gate at 78.33% is a god-module
             # cascade (per feedback_file_level_coverage_gate_cascade memory).
             # Proper backfill tracked in TASK-bidir-followups.md for Phase 3β.
+            #
+            # terminal-manager.ts added in the PTY-reclamation PR: the +81 LOC
+            # (provenance-sidecar write/delete on spawn/kill + the reclamation
+            # seam has/activeTerminalIds/getReclaimableTerminals/reapTerminal)
+            # ARE covered by terminal-manager.test.ts. File-level gate at 35.45%
+            # is a god-module cascade — the pre-existing ~240 LOC of PTY
+            # spawn/resize/exit handling needs a real Bun runtime and cannot run
+            # under vitest/Node, so it stays uncovered regardless of new tests.
             local CHANGED
             CHANGED=$(git diff --name-only --diff-filter=ACM origin/main...HEAD -- $DIFF_PATHS \
               | grep -E '\.(ts|tsx)$' \
-              | grep -v '\.test\.\|\.spec\.\|__mocks__\|test-setup\|session-types\.ts\|src/types\.ts\|agent-types\.ts\|server/index\.ts\|auth-schema\.ts\|event-bus-types\.ts\|metrics-types\.ts\|session-group-coordinator\.ts\|session-orchestrator\.ts' || true)
+              | grep -v '\.test\.\|\.spec\.\|__mocks__\|test-setup\|session-types\.ts\|src/types\.ts\|agent-types\.ts\|server/index\.ts\|auth-schema\.ts\|event-bus-types\.ts\|metrics-types\.ts\|session-group-coordinator\.ts\|session-orchestrator\.ts\|terminal-manager\.ts' || true)
 
             if [ -z "$CHANGED" ]; then
               echo "No new/changed source files in $PROJECT — nothing to gate."

@@ -8,13 +8,14 @@
 // resolved exactly once at boot inside `loadCleanupConfig`; downstream
 // code never re-interprets the raw env var.
 //
-// Six env vars (documented in docs/deploy/vps-systemd.mdx):
+// Seven env vars (documented in docs/deploy/vps-systemd.mdx):
 //   AURA_EVICTION_GRACE_HOURS                  default 24
 //   AURA_ARCHIVE_TTL_DAYS                      default 30
 //   AURA_RECORDINGS_SOFT_TTL_DAYS              default 14
 //   AURA_RECORDINGS_HARD_TTL_DAYS              default 60
 //   AURA_LOGS_TTL_DAYS                         default  7
 //   AURA_MEMORY_PRESSURE_WARN_THRESHOLD_US     default 10_000_000
+//   AURA_TERMINAL_ORPHAN_GRACE_SECONDS         default 300
 //
 // Each env var: integer ≥0. `0` = disabled (knob skipped). Invalid input
 // (negative, non-numeric, fractional) falls back to default with a
@@ -38,25 +39,34 @@ export interface CleanupConfig {
   readonly recordingsHardTtl: DurationConfig;
   readonly logsTtl: DurationConfig;
   readonly memoryPressureWarn: ThresholdConfig;
+  /**
+   * Grace before the periodic terminal-reclamation sweep reaps a browserless
+   * PTY terminal. Unit is SECONDS (not hours/days) because terminal idleness
+   * is a minutes-scale phenomenon — a user tab-switch should not lose their
+   * shell, but a closed tab need not leak for hours.
+   */
+  readonly terminalOrphanGrace: DurationConfig;
 }
 
 interface KnobSpec {
   readonly key: keyof CleanupConfig;
   readonly envVar: string;
   readonly defaultRaw: number;
-  readonly unit: "hours" | "days" | "us";
+  readonly unit: "hours" | "days" | "seconds" | "us";
 }
 
+const SEC_MS = 1000;
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 
 const SPECS: readonly KnobSpec[] = [
-  { key: "evictionGrace",      envVar: "AURA_EVICTION_GRACE_HOURS",            defaultRaw: 24,         unit: "hours" },
-  { key: "archiveTtl",         envVar: "AURA_ARCHIVE_TTL_DAYS",                defaultRaw: 30,         unit: "days"  },
-  { key: "recordingsSoftTtl",  envVar: "AURA_RECORDINGS_SOFT_TTL_DAYS",        defaultRaw: 14,         unit: "days"  },
-  { key: "recordingsHardTtl",  envVar: "AURA_RECORDINGS_HARD_TTL_DAYS",        defaultRaw: 60,         unit: "days"  },
-  { key: "logsTtl",            envVar: "AURA_LOGS_TTL_DAYS",                   defaultRaw:  7,         unit: "days"  },
+  { key: "evictionGrace",      envVar: "AURA_EVICTION_GRACE_HOURS",            defaultRaw: 24,         unit: "hours"   },
+  { key: "archiveTtl",         envVar: "AURA_ARCHIVE_TTL_DAYS",                defaultRaw: 30,         unit: "days"    },
+  { key: "recordingsSoftTtl",  envVar: "AURA_RECORDINGS_SOFT_TTL_DAYS",        defaultRaw: 14,         unit: "days"    },
+  { key: "recordingsHardTtl",  envVar: "AURA_RECORDINGS_HARD_TTL_DAYS",        defaultRaw: 60,         unit: "days"    },
+  { key: "logsTtl",            envVar: "AURA_LOGS_TTL_DAYS",                   defaultRaw:  7,         unit: "days"    },
   { key: "memoryPressureWarn", envVar: "AURA_MEMORY_PRESSURE_WARN_THRESHOLD_US", defaultRaw: 10_000_000, unit: "us"    },
+  { key: "terminalOrphanGrace", envVar: "AURA_TERMINAL_ORPHAN_GRACE_SECONDS",  defaultRaw: 300,        unit: "seconds" },
 ];
 
 interface ResolvedKnob {
@@ -83,10 +93,10 @@ function resolveRaw(envVar: string, defaultRaw: number, env: NodeJS.ProcessEnv):
   return { raw: parsed, source: "env", status: "parsed", rawEnvValue };
 }
 
-function buildDurationConfig(raw: number, unit: "hours" | "days"): DurationConfig {
+function buildDurationConfig(raw: number, unit: "hours" | "days" | "seconds"): DurationConfig {
   if (raw === 0) return { enabled: false };
-  const ms = unit === "hours" ? raw * HOUR_MS : raw * DAY_MS;
-  return { enabled: true, ms };
+  const factor = unit === "seconds" ? SEC_MS : unit === "hours" ? HOUR_MS : DAY_MS;
+  return { enabled: true, ms: raw * factor };
 }
 
 function buildThresholdConfig(raw: number): ThresholdConfig {
@@ -144,5 +154,6 @@ export function loadCleanupConfig(env: NodeJS.ProcessEnv = process.env): Cleanup
     recordingsHardTtl: knobs.recordingsHardTtl as DurationConfig,
     logsTtl: knobs.logsTtl as DurationConfig,
     memoryPressureWarn: knobs.memoryPressureWarn as ThresholdConfig,
+    terminalOrphanGrace: knobs.terminalOrphanGrace as DurationConfig,
   };
 }

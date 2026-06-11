@@ -29,15 +29,17 @@ import { log } from "../logger.js";
  * Closed enum of cleanup-event kinds. Phase D ships `orphan_reaped`
  * emit sites; Phase F ships `drained_pending`; Phase E ships
  * `recordings_soft_archived` + `recordings_hard_deleted`; Phase H
- * ships `evicted`. Adding a new kind requires extending this union
- * (Fowler P5 + primitive obsession — every consumer narrows on `kind`).
+ * ships `evicted`. The resource-reclamation plan ships `terminal_reaped`.
+ * Adding a new kind requires extending this union (Fowler P5 + primitive
+ * obsession — every consumer narrows on `kind`).
  */
 export type CleanupEventKind =
   | "evicted"
   | "orphan_reaped"
   | "drained_pending"
   | "recordings_soft_archived"
-  | "recordings_hard_deleted";
+  | "recordings_hard_deleted"
+  | "terminal_reaped";
 
 interface CleanupEvent {
   readonly kind: CleanupEventKind;
