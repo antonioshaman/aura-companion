@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.9.0...aura-companion-v1.10.0) (2026-06-12)
+
+
+### Features
+
+* **codex:** switch model in-session via relaunch with launchable-model validation ([#109](https://github.com/antonioshaman/aura-companion/issues/109)) ([9bc62a6](https://github.com/antonioshaman/aura-companion/commit/9bc62a6c6575903bee976ebc7c7ae1d4507d82ca))
+
 ## [1.9.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.8.0...aura-companion-v1.9.0) (2026-06-11)
 
 
