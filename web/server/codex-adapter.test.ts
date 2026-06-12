@@ -3915,6 +3915,61 @@ describe("CodexAdapter with ICodexTransport", () => {
     spy.mockRestore();
   });
 
+  it("surfaces the v2 'error' notification message instead of protocol drift", async () => {
+    // Regression (observed live 2026-06-12, codex 0.116): Codex emits a
+    // notification with method "error" carrying the real failure — e.g.
+    // expired auth ("refresh token was already used"). Previously this fell
+    // through to the protocol-drift path, masking the actual cause behind a
+    // generic "Companion may need an update" banner and sending users down a
+    // false protocol/model-incompatibility trail.
+    const { mock, messages } = await initAdapter();
+    const warnSpy = vi.spyOn(log, "warn").mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mock.pushNotification("error", {
+      error: {
+        message:
+          "Your access token could not be refreshed because your refresh token was already used. Please log out and sign in again.",
+        codexErrorInfo: "unauthorized",
+        additionalDetails: null,
+      },
+      willRetry: false,
+      threadId: "thr_1",
+      turnId: "turn_1",
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Must NOT be reported as protocol drift
+    expect(warnSpy).not.toHaveBeenCalledWith(
+      "protocol-monitor",
+      "Backend protocol drift detected",
+      expect.objectContaining({ messageName: "error" }),
+    );
+
+    const errors = messages.filter((m) => m.type === "error") as Array<{ message: string }>;
+    // Real upstream message surfaced verbatim, with codexErrorInfo appended
+    expect(errors.some((e) => e.message.includes("refresh token was already used"))).toBe(true);
+    expect(errors.some((e) => e.message.includes("(unauthorized)"))).toBe(true);
+    // No generic drift banner for this frame
+    expect(errors.some((e) => e.message.includes("Companion may need an update"))).toBe(false);
+    warnSpy.mockRestore();
+    errorSpy.mockRestore();
+  });
+
+  it("v2 'error' notification tolerates missing message and signals retry", async () => {
+    // Edge cases: (a) malformed frame without error.message still emits a
+    // visible error (never silently dropped); (b) willRetry=true is conveyed
+    // so the user knows Codex is not stuck.
+    const { mock, messages } = await initAdapter();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mock.pushNotification("error", { willRetry: true, threadId: "thr_1" });
+    await new Promise((r) => setTimeout(r, 20));
+
+    const errors = messages.filter((m) => m.type === "error") as Array<{ message: string }>;
+    expect(errors.some((e) => e.message.includes("Codex reported an error without a message"))).toBe(true);
+    expect(errors.some((e) => e.message.includes("Codex will retry"))).toBe(true);
+    errorSpy.mockRestore();
+  });
+
   it("handles thread/status/changed without unhandled-notification noise", async () => {
     const { mock, messages } = await initAdapter();
     const spy = vi.spyOn(console, "log").mockImplementation(() => {});
