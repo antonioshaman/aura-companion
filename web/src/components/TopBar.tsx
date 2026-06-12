@@ -18,7 +18,17 @@ export function TopBar() {
   const isSessionView = route.page === "session" || route.page === "home";
   const currentSessionId = useStore((s) => s.currentSessionId);
   const cliConnected = useStore((s) => s.cliConnected);
+  const cliReconnecting = useStore((s) => s.cliReconnecting);
   const sessionStatus = useStore((s) => s.sessionStatus);
+  const pendingPermissionsCount = useStore((s) =>
+    currentSessionId ? (s.pendingPermissions.get(currentSessionId)?.size ?? 0) : 0,
+  );
+  const pendingCodexSwitch = useStore((s) =>
+    currentSessionId ? s.pendingCodexModelSwitches.get(currentSessionId) : undefined,
+  );
+  const currentSession = useStore((s) =>
+    currentSessionId ? s.sessions.get(currentSessionId) : undefined,
+  );
   const sessionNames = useStore((s) => s.sessionNames);
   const sdkSessions = useStore((s) => s.sdkSessions);
   const sidebarOpen = useStore((s) => s.sidebarOpen);
@@ -33,6 +43,7 @@ export function TopBar() {
   );
   const status = currentSessionId ? (sessionStatus.get(currentSessionId) ?? null) : null;
   const isConnected = currentSessionId ? (cliConnected.get(currentSessionId) ?? false) : false;
+  const isReconnecting = currentSessionId ? (cliReconnecting.get(currentSessionId) ?? false) : false;
   // Council Mode — if the active session is in a group, surface the
   // pairing as ProviderBadges in TopBar (PLAN T15.5).
   const groupId = useStore((s) => (currentSessionId ? s.groupBySessionId.get(currentSessionId) : undefined));
@@ -45,6 +56,15 @@ export function TopBar() {
   const showWorkspaceControls = !!(currentSessionId && isSessionView);
   const showContextToggle = route.page === "session" && !!currentSessionId;
   const workspaceTabs: WorkspaceTab[] = ["chat", "diff"];
+  const statePill = pendingCodexSwitch
+    ? `Restarting to ${pendingCodexSwitch.requestedModel}`
+    : isReconnecting
+      ? "Restarting"
+      : pendingPermissionsCount > 0
+        ? "Waiting for approval"
+        : currentSession?.permissionMode === "plan"
+          ? "Plan mode"
+          : null;
 
   const activateWorkspaceTab = (tab: WorkspaceTab) => {
     if (tab === "chat" && activeTab !== "chat" && currentSessionId) {
@@ -132,6 +152,11 @@ export function TopBar() {
         )}
 
         <div className="flex items-center gap-2 shrink-0">
+          {showWorkspaceControls && statePill && (
+            <span className="hidden md:inline-flex items-center rounded-full border border-cc-border bg-cc-card px-2.5 py-1 text-[11px] text-cc-muted">
+              {statePill}
+            </span>
+          )}
           {showWorkspaceControls && groupPairing && (
             <ProviderBadges pairing={groupPairing} size="compact" />
           )}

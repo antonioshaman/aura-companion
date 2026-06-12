@@ -100,9 +100,18 @@ describe("CliStatusSlice — setCliFailure / clearCliFailure", () => {
     expect(useStore.getState().cliFailures).toBe(before);
   });
 
+  it("tracks and clears pending Codex model-switch state", () => {
+    useStore.getState().setPendingCodexModelSwitch("s1", "gpt-5.2-codex");
+    expect(useStore.getState().pendingCodexModelSwitches.get("s1")?.requestedModel).toBe("gpt-5.2-codex");
+
+    useStore.getState().clearPendingCodexModelSwitch("s1");
+    expect(useStore.getState().pendingCodexModelSwitches.has("s1")).toBe(false);
+  });
+
   // Brief: "Clears on session archive/relaunch."
   it("removeSession (archive path) drops the cliFailure entry for the session", () => {
     useStore.getState().setCliFailure("s1", failure());
+    useStore.getState().setPendingCodexModelSwitch("s1", "gpt-5.2-codex");
     useStore.getState().addSession({
       session_id: "s1",
       backend_type: "claude",
@@ -130,6 +139,7 @@ describe("CliStatusSlice — setCliFailure / clearCliFailure", () => {
     });
     useStore.getState().removeSession("s1");
     expect(useStore.getState().cliFailures.has("s1")).toBe(false);
+    expect(useStore.getState().pendingCodexModelSwitches.has("s1")).toBe(false);
   });
 
   // Brief: pendingDraftForNextSession round-trip - cli-failed banner stash flow.
@@ -141,5 +151,15 @@ describe("CliStatusSlice — setCliFailure / clearCliFailure", () => {
     expect(useStore.getState().pendingDraftForNextSession).toBeNull();
     // Second consume returns undefined (single-fire contract).
     expect(useStore.getState().consumePendingDraftForNextSession()).toBeUndefined();
+  });
+
+  it("reset clears pending cli-status state", () => {
+    useStore.getState().setCliFailure("s1", failure());
+    useStore.getState().setPendingCodexModelSwitch("s1", "gpt-5.2-codex");
+
+    useStore.getState().reset();
+
+    expect(useStore.getState().cliFailures.size).toBe(0);
+    expect(useStore.getState().pendingCodexModelSwitches.size).toBe(0);
   });
 });

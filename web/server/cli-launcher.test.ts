@@ -76,10 +76,36 @@ vi.mock("node:fs", async (importOriginal) => {
   };
 });
 
+// Codex models resolution must be deterministic regardless of the host's
+// ~/.codex/models_cache.json (present on dev boxes, absent in CI). Mock the
+// module with a fixed launchable list so launcher/relaunch tests exercise the
+// model-resolution control flow — not the on-disk cache, which codex-models.test.ts
+// owns. selectLaunchableCodexModel honours rejectModels so the
+// "invalid model keeps session alive" relaunch test still resolves to unavailable.
+const mockCodexModelList = vi.hoisted(() => [
+  { slug: "gpt-5.2-codex", displayName: "gpt-5.2-codex", description: "", priority: 0 },
+  { slug: "gpt-5.1-codex-mini", displayName: "gpt-5.1-codex-mini", description: "", priority: 10 },
+]);
+vi.mock("./codex-models.js", () => ({
+  readLaunchableCodexModels: () => ({ kind: "list", models: mockCodexModelList }),
+  selectLaunchableCodexModel: (requestedModel?: string, opts: { rejectModels?: readonly string[] } = {}) => {
+    const rejected = new Set(opts.rejectModels ?? []);
+    const available = mockCodexModelList.filter((m) => !rejected.has(m.slug));
+    if (available.length === 0) {
+      return { kind: "unavailable", reason: "no_launchable_models", message: "No launchable Codex models are available for this account." };
+    }
+    if (!requestedModel || requestedModel.length === 0) return { kind: "selected", model: available[0] };
+    const exact = available.find((m) => m.slug === requestedModel);
+    if (exact) return { kind: "selected", model: exact };
+    return { kind: "selected", model: available[0], fallbackFrom: requestedModel };
+  },
+}));
+
 // ─── Imports (after mocks) ───────────────────────────────────────────────────
 
 import { SessionStore } from "./session-store.js";
 import { CliLauncher } from "./cli-launcher.js";
+import { readLaunchableCodexModels } from "./codex-models.js";
 import { companionBus } from "./event-bus.js";
 import { log } from "./logger.js";
 import {
@@ -1104,6 +1130,58 @@ describe("codex websocket launcher", () => {
     expect(mockSpawn).toHaveBeenCalledTimes(4);
   });
 
+  it("relaunch with an unavailable codex model keeps the live session intact", async () => {
+    // Council review P1 #2 — the requested model must be validated BEFORE the
+    // running Codex process is killed. If resolution fails (model rejected /
+    // cache empty), relaunch() returns ok:false and leaves the live process,
+    // ws proxy, session state and model untouched — the user does not lose
+    // their working session over a stale/invalid model request.
+    process.env.COMPANION_CODEX_TRANSPORT = "ws";
+    mockResolveBinary.mockReturnValue("/opt/fake/codex");
+
+    const codexProc = createMockProc(7001);
+    const proxy = createPendingCodexWsProxyProc(7002);
+    mockSpawn
+      .mockReturnValueOnce(codexProc as any)
+      .mockReturnValueOnce(proxy.proc as any);
+
+    launcher.launch({
+      backendType: "codex",
+      cwd: "/tmp/project",
+      codexSandbox: "workspace-write",
+    });
+
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Force resolveCodexLaunchModel to return unavailable regardless of whether
+    // the box has a populated ~/.codex/models_cache.json: reject every
+    // launchable slug. (If the cache is missing, resolution is already
+    // unavailable, so the test is deterministic either way.)
+    const loaded = readLaunchableCodexModels();
+    const allSlugs = loaded.kind === "list" ? loaded.models.map((m) => m.slug) : [];
+    (launcher as any).rejectedCodexModels.set("test-session-id", new Set(allSlugs));
+
+    const liveProc = (launcher as any).processes.get("test-session-id");
+    const liveProxy = (launcher as any).codexWsProxies.get("test-session-id");
+    const info = launcher.getSession("test-session-id")!;
+    const modelBefore = info.model;
+    const spawnCallsBefore = mockSpawn.mock.calls.length;
+
+    const result = await launcher.relaunch("test-session-id", { model: "ghost-model" });
+
+    expect(result.ok).toBe(false);
+    // Live transport untouched — no kill, same map entries.
+    expect((launcher as any).processes.get("test-session-id")).toBe(liveProc);
+    expect((launcher as any).codexWsProxies.get("test-session-id")).toBe(liveProxy);
+    expect(codexProc.kill).not.toHaveBeenCalled();
+    expect(proxy.proc.kill).not.toHaveBeenCalled();
+    // Session state preserved — not torn down, model not overwritten.
+    expect(info.state).not.toBe("exited");
+    expect(info.model).toBe(modelBefore);
+    // No replacement process was spawned.
+    expect(mockSpawn.mock.calls.length).toBe(spawnCallsBefore);
+  });
+
   it("kill() returns true and kills the proxy when only a ws proxy remains", async () => {
     // Exercise the proxy-only branch introduced for WS cleanup robustness.
     launcher.launch({ cwd: "/tmp/project" });
@@ -1176,6 +1254,267 @@ describe("codex websocket launcher", () => {
     const session = launcher.getSession("test-session-id");
     expect(session?.state).toBe("exited");
     expect(session?.exitCode).toBe(7);
+  });
+});
+
+// ─── codex model-rejection auto-respawn (P1 #1 + in-session model switch) ─────
+
+describe("codex onInitError model-rejection auto-respawn", () => {
+  // These tests exercise the server-side recovery the orchestrator relies on:
+  // when Codex rejects the chosen model at init time (account lost access, slug
+  // retired), the launcher marks that model rejected for the session and
+  // respawns on the next launchable fallback rather than surfacing a dead
+  // session. The handler is registered on the CodexAdapter via onInitError; we
+  // capture the adapter off the bus and invoke its stored callback directly so
+  // the launcher branch is driven without standing up a full JSON-RPC init.
+
+  it("WS: rejects the failing model and respawns with a launchable fallback", async () => {
+    process.env.COMPANION_CODEX_TRANSPORT = "ws";
+    mockResolveBinary.mockReturnValue("/opt/fake/codex");
+
+    // Two codex+proxy pairs: the initial spawn and the fallback respawn.
+    const codexProc1 = createMockProc(8001);
+    const proxy1 = createPendingCodexWsProxyProc(8002);
+    const codexProc2 = createMockProc(8003);
+    const proxy2 = createPendingCodexWsProxyProc(8004);
+    mockSpawn
+      .mockReturnValueOnce(codexProc1 as any)
+      .mockReturnValueOnce(proxy1.proc as any)
+      .mockReturnValueOnce(codexProc2 as any)
+      .mockReturnValueOnce(proxy2.proc as any);
+
+    let capturedAdapter: any;
+    companionBus.on("backend:codex-adapter-created", ({ adapter }) => {
+      capturedAdapter ??= adapter;
+    });
+
+    launcher.launch({
+      backendType: "codex",
+      cwd: "/tmp/project",
+      model: "gpt-5.2-codex",
+      codexSandbox: "workspace-write",
+    });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const info = launcher.getSession("test-session-id")!;
+    expect(info.model).toBe("gpt-5.2-codex");
+    const spawnCallsBefore = mockSpawn.mock.calls.length;
+
+    // Drive the init-error handler with a model-availability error.
+    capturedAdapter.initErrorCb(
+      "Codex initialization failed: model gpt-5.2-codex is not available for this account",
+    );
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Failing model is now rejected for this session, model swapped to the
+    // launchable fallback, session put back into a starting state, and a
+    // replacement spawn issued.
+    expect(
+      Array.from((launcher as any).rejectedCodexModels.get("test-session-id") ?? []),
+    ).toContain("gpt-5.2-codex");
+    expect(info.model).toBe("gpt-5.1-codex-mini");
+    // The respawn immediately re-enters spawnCodex, which marks the session
+    // connected again — the meaningful guarantee is that it was NOT left exited.
+    expect(info.state).not.toBe("exited");
+    expect(mockSpawn.mock.calls.length).toBeGreaterThan(spawnCallsBefore);
+  });
+
+  it("WS: is a no-op when a newer generation already owns the session slot", async () => {
+    process.env.COMPANION_CODEX_TRANSPORT = "ws";
+    mockResolveBinary.mockReturnValue("/opt/fake/codex");
+
+    const codexProc1 = createMockProc(8011);
+    const proxy1 = createPendingCodexWsProxyProc(8012);
+    mockSpawn
+      .mockReturnValueOnce(codexProc1 as any)
+      .mockReturnValueOnce(proxy1.proc as any);
+
+    let capturedAdapter: any;
+    companionBus.on("backend:codex-adapter-created", ({ adapter }) => {
+      capturedAdapter ??= adapter;
+    });
+
+    launcher.launch({
+      backendType: "codex",
+      cwd: "/tmp/project",
+      model: "gpt-5.2-codex",
+      codexSandbox: "workspace-write",
+    });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const info = launcher.getSession("test-session-id")!;
+    const stateBefore = info.state;
+    const spawnCallsBefore = mockSpawn.mock.calls.length;
+
+    // Simulate a newer spawn claiming this session's process slot — the stale
+    // init-error from codexProc1 must not respawn or mutate the live session.
+    const newer = createMockProc(9999);
+    (launcher as any).processes.set("test-session-id", newer);
+
+    capturedAdapter.initErrorCb("model gpt-5.2-codex is not available");
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(info.state).toBe(stateBefore);
+    expect(info.model).toBe("gpt-5.2-codex");
+    expect(mockSpawn.mock.calls.length).toBe(spawnCallsBefore);
+    // The newer generation's proxy entry is preserved (not deleted by the stale handler).
+    expect((launcher as any).codexWsProxies.has("test-session-id")).toBe(true);
+  });
+
+  it("stdio: rejects the failing model, kills its own proc, and respawns with fallback", async () => {
+    // Default transport is stdio.
+    mockResolveBinary.mockReturnValue("/opt/fake/codex");
+
+    const codexProc1 = createMockCodexProc(8101);
+    const codexProc2 = createMockCodexProc(8102);
+    mockSpawn
+      .mockReturnValueOnce(codexProc1 as any)
+      .mockReturnValueOnce(codexProc2 as any);
+
+    let capturedAdapter: any;
+    companionBus.on("backend:codex-adapter-created", ({ adapter }) => {
+      capturedAdapter ??= adapter;
+    });
+
+    launcher.launch({
+      backendType: "codex",
+      cwd: "/tmp/project",
+      model: "gpt-5.2-codex",
+      codexSandbox: "workspace-write",
+    });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const info = launcher.getSession("test-session-id")!;
+    const spawnCallsBefore = mockSpawn.mock.calls.length;
+
+    capturedAdapter.initErrorCb("model gpt-5.2-codex is not available for this account");
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(info.model).toBe("gpt-5.1-codex-mini");
+    expect(info.state).not.toBe("exited");
+    expect(codexProc1.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(mockSpawn.mock.calls.length).toBeGreaterThan(spawnCallsBefore);
+  });
+
+  it("stdio: a non-availability init error marks the session exited without respawn", async () => {
+    mockResolveBinary.mockReturnValue("/opt/fake/codex");
+
+    const codexProc1 = createMockCodexProc(8111);
+    mockSpawn.mockReturnValueOnce(codexProc1 as any);
+
+    let capturedAdapter: any;
+    companionBus.on("backend:codex-adapter-created", ({ adapter }) => {
+      capturedAdapter ??= adapter;
+    });
+
+    launcher.launch({
+      backendType: "codex",
+      cwd: "/tmp/project",
+      model: "gpt-5.2-codex",
+      codexSandbox: "workspace-write",
+    });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const info = launcher.getSession("test-session-id")!;
+    const spawnCallsBefore = mockSpawn.mock.calls.length;
+
+    capturedAdapter.initErrorCb("Codex initialization failed: ECONNREFUSED");
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(info.state).toBe("exited");
+    expect(info.exitCode).toBe(1);
+    expect(info.cliSessionId).toBeUndefined();
+    // A connectivity failure is not a model-availability problem — no respawn.
+    expect(mockSpawn.mock.calls.length).toBe(spawnCallsBefore);
+  });
+
+  it("stdio: a superseded generation kills its own proc and leaves the live session untouched", async () => {
+    mockResolveBinary.mockReturnValue("/opt/fake/codex");
+
+    const codexProc1 = createMockCodexProc(8121);
+    mockSpawn.mockReturnValueOnce(codexProc1 as any);
+
+    let capturedAdapter: any;
+    companionBus.on("backend:codex-adapter-created", ({ adapter }) => {
+      capturedAdapter ??= adapter;
+    });
+
+    launcher.launch({
+      backendType: "codex",
+      cwd: "/tmp/project",
+      model: "gpt-5.2-codex",
+      codexSandbox: "workspace-write",
+    });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const info = launcher.getSession("test-session-id")!;
+    const stateBefore = info.state;
+
+    const newer = createMockCodexProc(9998);
+    (launcher as any).processes.set("test-session-id", newer);
+
+    capturedAdapter.initErrorCb("model gpt-5.2-codex is not available");
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(codexProc1.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(info.state).toBe(stateBefore);
+    expect(info.model).toBe("gpt-5.2-codex");
+  });
+});
+
+// ─── codex model-rejection helpers (unit) ─────────────────────────────────────
+
+describe("codex model-rejection helpers", () => {
+  const SID = "test-session-id";
+  const seedCodexSession = (model: string | undefined = "gpt-5.2-codex") => {
+    (launcher as any).sessions.set(SID, {
+      sessionId: SID,
+      state: "connected",
+      model,
+      cwd: "/tmp/project",
+      createdAt: Date.now(),
+      backendType: "codex",
+    });
+  };
+
+  it("syncRejectedCodexModels clears the map entry and info field when the set is empty", () => {
+    seedCodexSession();
+    const info = launcher.getSession(SID)!;
+    (launcher as any).rejectedCodexModels.set(SID, new Set(["gpt-5.2-codex"]));
+    info.rejectedCodexModels = ["gpt-5.2-codex"];
+
+    (launcher as any).syncRejectedCodexModels(SID, new Set());
+
+    expect((launcher as any).rejectedCodexModels.has(SID)).toBe(false);
+    expect(info.rejectedCodexModels).toBeUndefined();
+  });
+
+  it("markCodexModelRejected records the model and is a no-op for an undefined model", () => {
+    seedCodexSession();
+
+    (launcher as any).markCodexModelRejected(SID, undefined);
+    expect((launcher as any).rejectedCodexModels.has(SID)).toBe(false);
+
+    (launcher as any).markCodexModelRejected(SID, "gpt-5.2-codex");
+    expect(Array.from((launcher as any).rejectedCodexModels.get(SID))).toContain("gpt-5.2-codex");
+    expect(launcher.getSession(SID)!.rejectedCodexModels).toContain("gpt-5.2-codex");
+  });
+
+  it("resolveCodexLaunchModel skips a rejected model and falls back to the next launchable slug", () => {
+    seedCodexSession();
+    (launcher as any).rejectedCodexModels.set(SID, new Set(["gpt-5.2-codex"]));
+
+    const resolved = (launcher as any).resolveCodexLaunchModel(SID, "gpt-5.2-codex");
+
+    expect(resolved.ok).toBe(true);
+    expect(resolved.model).toBe("gpt-5.1-codex-mini");
+  });
+
+  it("isCodexModelAvailabilityError distinguishes availability errors from generic failures", () => {
+    expect((launcher as any).isCodexModelAvailabilityError("model gpt-5.2-codex is not available")).toBe(true);
+    expect((launcher as any).isCodexModelAvailabilityError("the model was rejected by the account")).toBe(true);
+    expect((launcher as any).isCodexModelAvailabilityError("network timeout")).toBe(false);
+    expect((launcher as any).isCodexModelAvailabilityError("ECONNREFUSED")).toBe(false);
   });
 });
 
@@ -2143,8 +2482,16 @@ describe("EC-19 canary — clearPidAndPersist routing in relaunch() (PLAN T7/T8)
     const signaturePrefix = "async relaunch(";
     const sigIdx = src.indexOf(signaturePrefix);
     expect(sigIdx, "relaunch signature must be locatable").toBeGreaterThan(-1);
-    const openIdx = src.indexOf("{", sigIdx);
-    expect(openIdx, "opening brace must follow the signature").toBeGreaterThan(-1);
+    // The naive `indexOf("{", sigIdx)` lands on the `{` inside the
+    // `opts: { model?: string }` PARAMETER type, not the function body —
+    // brace-counting from there closes immediately and yields an empty
+    // body, making this canary vacuously pass (it checked zero returns).
+    // Anchor instead on the first body statement, then walk back to the
+    // nearest preceding `{` (the real body-open brace).
+    const firstStmt = src.indexOf("const info = this.sessions.get(sessionId);", sigIdx);
+    expect(firstStmt, "relaunch first statement must be locatable").toBeGreaterThan(-1);
+    const openIdx = src.lastIndexOf("{", firstStmt);
+    expect(openIdx, "body-open brace must precede the first statement").toBeGreaterThan(sigIdx);
     let depth = 1;
     let bodyEnd = -1;
     for (let i = openIdx + 1; i < src.length; i++) {
@@ -2169,12 +2516,24 @@ describe("EC-19 canary — clearPidAndPersist routing in relaunch() (PLAN T7/T8)
     // refactor that warrants a fresh canary review.
     const returnRegex = /return\s*\{\s*ok:\s*false\b/g;
     const callRegex = /\bclearPidAndPersist\s*\(/g;
+    // EC-19-EXEMPT sentinel: a small set of ok:false returns legitimately
+    // do NOT abandon the session and so must not call clearPidAndPersist:
+    //   - the `if (!info)` entry guard (no state exists yet);
+    //   - the Codex pre-kill model-validation return (council review P1 #2)
+    //     — it bails BEFORE any kill, leaving the live session fully intact,
+    //     so nulling pid / firing relaunch-exhausted would be wrong.
+    // Each such return carries an `EC-19-EXEMPT` comment in its window.
+    const exemptRegex = /EC-19-EXEMPT/g;
     const violations: Array<{ at: number; snippet: string }> = [];
     let m: RegExpExecArray | null;
     while ((m = returnRegex.exec(body)) !== null) {
       const returnAt = m.index;
       const windowStart = Math.max(0, returnAt - 800);
       const window = body.slice(windowStart, returnAt);
+      exemptRegex.lastIndex = 0;
+      if (exemptRegex.test(window)) {
+        continue;
+      }
       if (!callRegex.test(window)) {
         violations.push({
           at: returnAt,

@@ -40,6 +40,10 @@ const { mockApi, createSessionStreamMock, mockStoreState, mockStoreGetState } = 
     // idle shape — selectors return `undefined` (silent fallback to
     // static models).
     dynamicBackendModels: {} as { claude?: unknown; codex?: unknown },
+    dynamicBackendModelsStatus: { claude: "idle", codex: "idle" } as {
+      claude: string;
+      codex: string;
+    },
     loadBackendModels: vi.fn(async () => undefined),
   },
   mockStoreGetState: vi.fn(() => ({
@@ -1438,6 +1442,11 @@ describe("HomePage", () => {
       localStorage.setItem("cc-backend", "codex");
       localStorage.setItem("cc-sandbox-enabled", "true");
       localStorage.setItem("cc-selected-sandbox", "my-sandbox");
+      // Codex create now requires a verified launchable model; populate the
+      // settings-slice cache so the submit guard doesn't short-circuit.
+      mockStoreState.dynamicBackendModels = {
+        codex: [{ value: "gpt-5.2-codex", label: "GPT-5.2 Codex", icon: "" }],
+      };
       createSessionStreamMock.mockReturnValue(new ReadableStream({
         start(controller) {
           controller.enqueue(JSON.stringify({ type: "complete", sessionId: "sess-1" }) + "\n");
@@ -1463,6 +1472,8 @@ describe("HomePage", () => {
       const callArgs = createSessionStreamMock.mock.calls[0][0];
       expect(callArgs.sandboxEnabled).toBe(true);
       expect(callArgs.sandboxSlug).toBe("my-sandbox");
+
+      mockStoreState.dynamicBackendModels = {};
     });
 
     it("does not send sandbox flags for codex backend when sandbox is disabled", async () => {
@@ -1474,6 +1485,11 @@ describe("HomePage", () => {
       mockApi.getBackendModels.mockResolvedValue([]);
       localStorage.setItem("cc-backend", "codex");
       localStorage.setItem("cc-sandbox-enabled", "false");
+      // Codex create now requires a verified launchable model; populate the
+      // settings-slice cache so the submit guard doesn't short-circuit.
+      mockStoreState.dynamicBackendModels = {
+        codex: [{ value: "gpt-5.2-codex", label: "GPT-5.2 Codex", icon: "" }],
+      };
       createSessionStreamMock.mockReturnValue(new ReadableStream({
         start(controller) {
           controller.enqueue(JSON.stringify({ type: "complete", sessionId: "sess-1" }) + "\n");
@@ -1499,6 +1515,8 @@ describe("HomePage", () => {
       const callArgs = createSessionStreamMock.mock.calls[0][0];
       expect(callArgs.sandboxEnabled).toBeUndefined();
       expect(callArgs.sandboxSlug).toBeUndefined();
+
+      mockStoreState.dynamicBackendModels = {};
     });
 
     it("shows image status indicator when pulling", async () => {

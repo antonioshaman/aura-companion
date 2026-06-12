@@ -255,6 +255,10 @@ export interface BackendModelInfo {
   description: string;
 }
 
+export interface RelaunchSessionOpts {
+  model?: string;
+}
+
 export interface ClaudeDiscoveredSession {
   sessionId: string;
   cwd: string;
@@ -934,8 +938,8 @@ export const api = {
   deleteSession: (sessionId: string) =>
     del(`/sessions/${encodeURIComponent(sessionId)}`),
 
-  relaunchSession: (sessionId: string) =>
-    post(`/sessions/${encodeURIComponent(sessionId)}/relaunch`),
+  relaunchSession: (sessionId: string, opts?: RelaunchSessionOpts) =>
+    post(`/sessions/${encodeURIComponent(sessionId)}/relaunch`, opts),
 
   archiveSession: (sessionId: string, opts?: { force?: boolean; linearTransition?: "none" | "backlog" | "configured" }) =>
     post(`/sessions/${encodeURIComponent(sessionId)}/archive`, opts),

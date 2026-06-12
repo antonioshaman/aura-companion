@@ -56,6 +56,9 @@ export function Composer({ sessionId, onTextChange }: ComposerProps) {
   const isConnected = useStore((s) => s.cliConnected.get(sessionId) ?? false);
   const sessionData = useStore((s) => s.sessions.get(sessionId));
   const consumePickupDraft = useStore((s) => s.consumePickupDraft);
+  const cliReconnecting = useStore((s) => s.cliReconnecting.get(sessionId) ?? false);
+  const pendingPermissionsCount = useStore((s) => s.pendingPermissions.get(sessionId)?.size ?? 0);
+  const pendingCodexSwitch = useStore((s) => s.pendingCodexModelSwitches.get(sessionId));
 
   // Single-fire: if a pickup draft was queued for this session by the
   // Continue-in-new-session flow, install it as the initial composer text
@@ -419,6 +422,10 @@ export function Composer({ sessionId, onTextChange }: ComposerProps) {
   const sessionStatus = useStore((s) => s.sessionStatus);
   const isRunning = sessionStatus.get(sessionId) === "running";
   const canSend = text.trim().length > 0 && isConnected;
+  const showStateHint = Boolean(pendingCodexSwitch)
+    || cliReconnecting
+    || isPlan
+    || pendingPermissionsCount > 0;
 
   return (
     <div className="shrink-0 px-0 sm:px-6 pt-0 sm:pt-3 pb-5 sm:pb-4 bg-cc-input-bg sm:bg-transparent">
@@ -712,6 +719,26 @@ export function Composer({ sessionId, onTextChange }: ComposerProps) {
                   Switch to agent mode
                 </button>
                 <span> to continue.</span>
+              </div>
+            </div>
+          )}
+
+          {showStateHint && !refuseDispatch && (
+            <div className="mx-3 mt-2 mb-1 sm:mx-3 sm:mt-2 px-3 py-2 rounded-md border border-cc-border bg-cc-card text-[12px] text-cc-fg flex items-start gap-2">
+              <svg viewBox="0 0 16 16" fill="currentColor" className="w-3.5 h-3.5 mt-0.5 shrink-0 text-cc-muted" aria-hidden="true">
+                <circle cx="8" cy="8" r="5.25" stroke="currentColor" strokeWidth="1.25" fill="none" />
+                <path d="M8 5.25v3.5M8 10.75v.5" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />
+              </svg>
+              <div className="flex-1">
+                {pendingCodexSwitch ? (
+                  <span>Restarting this Codex session with <span className="font-mono-code">{pendingCodexSwitch.requestedModel}</span>. Messages stay on this session once the relaunch finishes.</span>
+                ) : cliReconnecting ? (
+                  <span>Session is reconnecting. Wait for the restart to finish before sending the next message.</span>
+                ) : pendingPermissionsCount > 0 ? (
+                  <span>Waiting for your approval above before the session can continue.</span>
+                ) : isPlan ? (
+                  <span>Plan mode is paused for execution. Review the plan or switch back to {isCodex ? "auto" : "agent"} mode to continue running tools.</span>
+                ) : null}
               </div>
             </div>
           )}

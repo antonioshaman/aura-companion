@@ -112,6 +112,7 @@ export function HomePage() {
   // the slice's per-backend cache; `undefined` (idle / failed / no key)
   // → silent fallback to static `getModelsForBackend(backend)` below.
   const dynamicModelsForBackend = useStore((s) => s.dynamicBackendModels[backend]);
+  const dynamicModelsStatus = useStore((s) => s.dynamicBackendModelsStatus[backend]);
   const loadBackendModels = useStore((s) => s.loadBackendModels);
   const [linearConfigured, setLinearConfigured] = useState(false);
   const [selectedLinearIssue, setSelectedLinearIssue] = useState<LinearIssue | null>(null);
@@ -146,7 +147,9 @@ export function HomePage() {
     [backends],
   );
 
-  const MODELS = dynamicModelsForBackend ?? getModelsForBackend(backend);
+  const MODELS = backend === "codex"
+    ? (dynamicModelsForBackend ?? [])
+    : (dynamicModelsForBackend ?? getModelsForBackend(backend));
   const MODES = getModesForBackend(backend);
 
   // Environment state
@@ -279,6 +282,13 @@ export function HomePage() {
     void loadBackendModels(backend);
   }, [backend, loadBackendModels]);
 
+  useEffect(() => {
+    if (backend !== "codex") return;
+    if (!dynamicModelsForBackend || dynamicModelsForBackend.length === 0) return;
+    if (dynamicModelsForBackend.some((m) => m.value === model)) return;
+    setModel(dynamicModelsForBackend[0]!.value);
+  }, [backend, dynamicModelsForBackend, model]);
+
   // When sandbox is enabled, check aura-companion-sandbox:latest image status
   useEffect(() => {
     if (sandboxImagePollRef.current) {
@@ -354,7 +364,10 @@ export function HomePage() {
     });
   }, [cwd]);
 
-  const selectedModel = MODELS.find((m) => m.value === model) || MODELS[0];
+  const selectedModel = MODELS.find((m) => m.value === model)
+    || (backend === "codex" && model
+      ? { value: model, label: model, icon: "" }
+      : MODELS[0]);
   const selectedMode = MODES.find((m) => m.value === mode) || MODES[0];
   const logoSrc = backend === "codex" ? "/logo-codex.svg" : "/logo.svg";
   const dirLabel = cwd ? cwd.split("/").pop() || cwd : "Select folder";
@@ -632,6 +645,14 @@ export function HomePage() {
     store.setSessionCreating(true, backend as "claude" | "codex");
 
     try {
+      if (backend === "codex" && (!dynamicModelsForBackend || dynamicModelsForBackend.length === 0)) {
+        throw new Error(
+          dynamicModelsStatus === "pending"
+            ? "Codex models are still loading. Wait for verification to finish and try again."
+            : "No verified Codex models are available. Run codex once or refresh the account, then try again.",
+        );
+      }
+
       // Disconnect current session if any
       if (currentSessionId) {
         disconnectSession(currentSessionId);
@@ -652,11 +673,14 @@ export function HomePage() {
       const effectiveCreateBranch = launchOverride?.createBranch !== undefined
         ? launchOverride.createBranch
         : Boolean(effectiveBranch && isNewBranch);
+      const effectiveModel = backend === "codex"
+        ? (dynamicModelsForBackend?.find((m) => m.value === model)?.value ?? dynamicModelsForBackend?.[0]?.value)
+        : model;
 
       // Create session with progress streaming
       const result = await createSessionStream(
         {
-          model,
+          model: effectiveModel,
           permissionMode: mode,
           cwd: effectiveCwd || undefined,
           envSlug: selectedEnv || undefined,
@@ -701,7 +725,7 @@ export function HomePage() {
           cwd: result.cwd,
           createdAt: Date.now(),
           backendType: (result.backendType as BackendType | undefined) || backend,
-          model,
+          model: effectiveModel,
           permissionMode: mode,
           resumeSessionAt: effectiveResumeSessionAt,
           forkSession: effectiveResumeSessionAt ? effectiveForkSession === true : undefined,
@@ -962,12 +986,19 @@ export function HomePage() {
             {/* Model selector */}
             <div className="relative" ref={modelDropdownRef}>
               <button
-                onClick={() => setShowModelDropdown(!showModelDropdown)}
+                onClick={() => {
+                  if (backend === "codex" && MODELS.length === 0) return;
+                  setShowModelDropdown(!showModelDropdown);
+                }}
                 aria-expanded={showModelDropdown}
-                className="flex items-center gap-1 px-2 py-1 text-[11px] sm:text-xs text-cc-muted hover:text-cc-fg rounded-lg hover:bg-cc-hover transition-colors cursor-pointer"
+                className={`flex items-center gap-1 px-2 py-1 text-[11px] sm:text-xs rounded-lg transition-colors ${
+                  backend === "codex" && MODELS.length === 0
+                    ? "text-cc-muted/60 cursor-not-allowed"
+                    : "text-cc-muted hover:text-cc-fg hover:bg-cc-hover cursor-pointer"
+                }`}
               >
-                <span>{selectedModel.icon}</span>
-                <span>{selectedModel.label}</span>
+                <span>{selectedModel?.icon || ""}</span>
+                <span>{selectedModel?.label || "No verified Codex models"}</span>
                 <svg viewBox="0 0 16 16" fill="currentColor" className="w-2.5 h-2.5 opacity-40">
                   <path d="M4 6l4 4 4-4" />
                 </svg>
@@ -1261,6 +1292,14 @@ export function HomePage() {
               </svg>
             </button>
           </div>
+
+          {backend === "codex" && MODELS.length === 0 && (
+            <div className="px-4 pb-3 text-[11px] text-cc-muted">
+              {dynamicModelsStatus === "pending"
+                ? "Verifying launchable Codex models..."
+                : "No verified Codex models are available yet. Run codex once or refresh the account, then try again."}
+            </div>
+          )}
         </div>
 
         {/* ── Below-card controls ── */}

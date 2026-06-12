@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useStore } from "../store.js";
 import { sendToSession } from "../ws.js";
+import { api } from "../api.js";
 import { getModelsForBackend } from "../utils/backends.js";
 import type { ModelOption } from "../utils/backends.js";
 
@@ -37,6 +38,8 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
   // Runtime session state from WebSocket (has model from CLI init message)
   const runtimeSession = useStore((s) => s.sessions.get(sessionId));
   const cliConnected = useStore((s) => s.cliConnected.get(sessionId) ?? false);
+  const cliReconnecting = useStore((s) => s.cliReconnecting.get(sessionId) ?? false);
+  const pendingCodexSwitch = useStore((s) => s.pendingCodexModelSwitches.get(sessionId));
 
   const backendType = sdkSession?.backendType ?? runtimeSession?.backend_type ?? "claude";
   // Prefer runtime model (from CLI init) over sdkSession model (from launch config)
@@ -50,7 +53,9 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
   // from this list (Fowler R2: current-active and available-choices are
   // different nouns — do not collapse).
   const dynamicModels = useStore((s) => s.dynamicBackendModels[backendType]);
-  const models = dynamicModels ?? getModelsForBackend(backendType);
+  const models = backendType === "codex"
+    ? (dynamicModels ?? [])
+    : (dynamicModels ?? getModelsForBackend(backendType));
 
   // Council Review 2026-06-04-0823 P2 #13 (React/Web UI): the slice JSDoc
   // names ModelSwitcher as one of the concurrent mount callers of
@@ -105,6 +110,13 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
   // attribute below.
   const currentOption: ModelOption | null =
     models.find((m) => m.value === currentModel) ||
+    (pendingCodexSwitch && backendType === "codex"
+      ? {
+        value: pendingCodexSwitch.requestedModel,
+        label: `Restarting to ${pendingCodexSwitch.requestedModel}`,
+        icon: "",
+      }
+      : null) ||
     (currentModel ? { value: currentModel, label: currentModel, icon: "" } : null);
 
   // Sticky-stale heuristic: the fallback (currentModel not found in
@@ -115,9 +127,20 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
     currentOption !== null && !models.some((m) => m.value === currentModel);
 
   const handleSelect = useCallback(
-    (model: string) => {
+    async (model: string) => {
       setOpen(false);
-      if (model === currentModel) return;
+      if (model === currentModel || !cliConnected) return;
+
+      if (backendType === "codex") {
+        const store = useStore.getState();
+        store.setPendingCodexModelSwitch(sessionId, model);
+        try {
+          await api.relaunchSession(sessionId, { model });
+        } catch {
+          useStore.getState().clearPendingCodexModelSwitch(sessionId);
+        }
+        return;
+      }
 
       // Send set_model to CLI via WebSocket
       sendToSession(sessionId, { type: "set_model", model });
@@ -130,7 +153,7 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
         ),
       );
     },
-    [sessionId, currentModel],
+    [backendType, cliConnected, currentModel, sessionId],
   );
 
   // Close on click outside
@@ -257,8 +280,12 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
     [models, activeIndex, handleSelect],
   );
 
-  // Hide for Codex (set_model not supported) or when CLI disconnected
-  if (backendType === "codex" || !cliConnected || !currentOption) {
+  if (!currentOption) {
+    return null;
+  }
+  // Codex model switching uses relaunch, so the trigger stays visible while
+  // reconnecting; only a fully disconnected non-restarting session hides it.
+  if (!cliConnected && !cliReconnecting) {
     return null;
   }
 
@@ -266,14 +293,25 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
     <div ref={containerRef} className="relative shrink-0">
       <button
         ref={triggerRef}
-        onClick={() => setOpen((prev) => !prev)}
-        className={`flex items-center gap-1 h-8 px-2 rounded-md text-[12px] font-medium transition-colors cursor-pointer ${
-          open
+        onClick={() => {
+          if (pendingCodexSwitch) return;
+          if (backendType === "codex" && models.length === 0) return;
+          setOpen((prev) => !prev);
+        }}
+        disabled={Boolean(pendingCodexSwitch) || (backendType === "codex" && models.length === 0)}
+        className={`flex items-center gap-1 h-8 px-2 rounded-md text-[12px] font-medium transition-colors ${
+          pendingCodexSwitch || (backendType === "codex" && models.length === 0)
+            ? "text-cc-muted opacity-60 cursor-not-allowed"
+            : open
             ? "text-cc-fg bg-cc-active"
             : "text-cc-muted hover:text-cc-fg hover:bg-cc-hover"
         }`}
         title={
-          isStickyStale
+          pendingCodexSwitch
+            ? `Restarting session with ${pendingCodexSwitch.requestedModel}`
+            : backendType === "codex" && models.length === 0
+              ? "No verified Codex models are available yet"
+              : isStickyStale
             ? `Model "${currentModel}" not in current available list — preserved from your saved preference`
             : `Current model: ${currentOption.label}`
         }

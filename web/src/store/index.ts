@@ -48,6 +48,7 @@ export const useStore = create<AppState>((...args) => ({
       currentSessionId: null,
       connectionStatus: new Map(),
       cliConnected: new Map(),
+      cliReconnecting: new Map(),
       sessionStatus: new Map(),
       previousPermissionMode: new Map(),
       sessionNames: new Map(),
@@ -96,6 +97,7 @@ export const useStore = create<AppState>((...args) => ({
       dismissedStopIds: new Set(),
       // CLI terminal failures — reset to empty on hard store reset.
       cliFailures: new Map(),
+      pendingCodexModelSwitches: new Map(),
     });
   },
 }));
