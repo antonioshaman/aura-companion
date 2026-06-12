@@ -1660,6 +1660,12 @@ export class CodexAdapter implements IBackendAdapter {
         }
         break;
       }
+      case "error":
+        // v2 turn/thread-level error report (e.g. expired auth). Must NOT fall
+        // through to protocol drift — that masks the real cause behind a
+        // generic "Companion may need an update" banner.
+        this.handleErrorNotification(params);
+        break;
       case "companion/wsReconnected":
         this.handleWsReconnected();
         break;
@@ -1679,6 +1685,36 @@ export class CodexAdapter implements IBackendAdapter {
         message: `Codex notification handler crashed on "${method}". Companion may need an update.`,
       });
     }
+  }
+
+  /**
+   * v2 `error` notification. Wire shape (observed from codex 0.116):
+   * `{ error: { message, codexErrorInfo, additionalDetails }, willRetry, threadId, turnId }`
+   */
+  private handleErrorNotification(params: Record<string, unknown>): void {
+    const error = params.error as
+      | { message?: unknown; codexErrorInfo?: unknown }
+      | undefined;
+    const baseMessage =
+      typeof error?.message === "string" && error.message.trim().length > 0
+        ? error.message
+        : "Codex reported an error without a message.";
+    const info =
+      typeof error?.codexErrorInfo === "string" && error.codexErrorInfo.length > 0
+        ? error.codexErrorInfo
+        : null;
+    const willRetry = params.willRetry === true;
+
+    let message = baseMessage;
+    if (info && !baseMessage.toLowerCase().includes(info.toLowerCase())) {
+      message += ` (${info})`;
+    }
+    if (willRetry) {
+      message += " Codex will retry.";
+    }
+
+    console.error(`[codex-adapter] Codex error notification: ${message}`);
+    this.emit({ type: "error", message });
   }
 
   // ── Incoming request handlers (approval requests) ───────────────────────

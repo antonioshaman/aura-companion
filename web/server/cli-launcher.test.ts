@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import { mkdtempSync, rmSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, realpathSync, writeFileSync, mkdirSync, readFileSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -101,6 +101,19 @@ vi.mock("./codex-models.js", () => ({
   },
 }));
 
+// Mock the legacy Codex home (~/.codex) so prepareCodexHome seeding tests are
+// deterministic and never read the host machine's real auth/config files.
+// Default points at a nonexistent dir → prepareCodexHome no-ops for tests that
+// don't care about seeding. importActual spread keeps the other exports real.
+const mockLegacyCodexHome = vi.hoisted(() => ({ path: "/nonexistent-legacy-codex-home" }));
+vi.mock("./codex-home.js", async (importOriginal) => {
+  const actual = (await importOriginal()) as typeof import("./codex-home.js");
+  return {
+    ...actual,
+    getLegacyCodexHome: () => mockLegacyCodexHome.path,
+  };
+});
+
 // ─── Imports (after mocks) ───────────────────────────────────────────────────
 
 import { SessionStore } from "./session-store.js";
@@ -187,6 +200,7 @@ let launcher: CliLauncher;
 beforeEach(() => {
   vi.clearAllMocks();
   companionBus.clear();
+  mockLegacyCodexHome.path = "/nonexistent-legacy-codex-home";
   delete process.env.COMPANION_CONTAINER_SDK_HOST;
   delete process.env.COMPANION_FORCE_BYPASS_IN_CONTAINER;
   // Default to stdio for most tests; WS launcher behavior is covered explicitly below.
@@ -2583,5 +2597,85 @@ describe("EC-19 canary — clearPidAndPersist routing in relaunch() (PLAN T7/T8)
     expect(body).toMatch(/info\.pid\s*=\s*undefined/);
     expect(body).toMatch(/info\.state\s*=\s*["']exited["']/);
     expect(body).toMatch(/this\.persistState\s*\(/);
+  });
+});
+
+// ─── prepareCodexHome auth.json seeding ──────────────────────────────────────
+//
+// Regression (observed live 2026-06-12): the legacy ~/.codex/auth.json had not
+// been refreshed for a month while every NEW codex session got a copy of it,
+// failing instantly with "refresh token was already used". OAuth refresh
+// tokens are single-use, so after the user re-logs-in via `codex login` (which
+// only rewrites the legacy file) the per-session copies must be re-seeded —
+// but a fresher session copy (refreshed by the live CLI itself) must never be
+// clobbered by an older legacy file.
+describe("prepareCodexHome auth.json seeding", () => {
+  let legacyDir: string;
+  let codexHome: string;
+
+  beforeEach(() => {
+    legacyDir = mkdtempSync(join(tmpdir(), "legacy-codex-"));
+    codexHome = join(mkdtempSync(join(tmpdir(), "session-codex-")), "home");
+    mockLegacyCodexHome.path = legacyDir;
+  });
+
+  afterEach(() => {
+    rmSync(legacyDir, { recursive: true, force: true });
+    rmSync(join(codexHome, ".."), { recursive: true, force: true });
+  });
+
+  function callPrepare() {
+    (launcher as unknown as { prepareCodexHome(home: string): void }).prepareCodexHome(codexHome);
+  }
+
+  it("seeds auth.json into an empty session home", () => {
+    writeFileSync(join(legacyDir, "auth.json"), '{"token":"fresh"}');
+    callPrepare();
+    expect(readFileSync(join(codexHome, "auth.json"), "utf-8")).toBe('{"token":"fresh"}');
+  });
+
+  it("re-seeds auth.json when the legacy copy is newer than the session copy", () => {
+    mkdirSync(codexHome, { recursive: true });
+    writeFileSync(join(codexHome, "auth.json"), '{"token":"stale"}');
+    writeFileSync(join(legacyDir, "auth.json"), '{"token":"fresh"}');
+    // legacy newer by 1 hour
+    const now = Date.now() / 1000;
+    utimesSync(join(codexHome, "auth.json"), now - 3600, now - 3600);
+    utimesSync(join(legacyDir, "auth.json"), now, now);
+
+    callPrepare();
+    expect(readFileSync(join(codexHome, "auth.json"), "utf-8")).toBe('{"token":"fresh"}');
+  });
+
+  it("does NOT clobber a session auth.json that is newer than the legacy file", () => {
+    // The live CLI refreshes its own copy; an older legacy file must not win.
+    mkdirSync(codexHome, { recursive: true });
+    writeFileSync(join(codexHome, "auth.json"), '{"token":"session-refreshed"}');
+    writeFileSync(join(legacyDir, "auth.json"), '{"token":"older-legacy"}');
+    const now = Date.now() / 1000;
+    utimesSync(join(codexHome, "auth.json"), now, now);
+    utimesSync(join(legacyDir, "auth.json"), now - 3600, now - 3600);
+
+    callPrepare();
+    expect(readFileSync(join(codexHome, "auth.json"), "utf-8")).toBe('{"token":"session-refreshed"}');
+  });
+
+  it("does NOT re-seed non-auth files even when the legacy copy is newer", () => {
+    // config.toml may carry intentional per-session edits — seed-once only.
+    mkdirSync(codexHome, { recursive: true });
+    writeFileSync(join(codexHome, "config.toml"), "session = true");
+    writeFileSync(join(legacyDir, "config.toml"), "legacy = true");
+    const now = Date.now() / 1000;
+    utimesSync(join(codexHome, "config.toml"), now - 3600, now - 3600);
+    utimesSync(join(legacyDir, "config.toml"), now, now);
+
+    callPrepare();
+    expect(readFileSync(join(codexHome, "config.toml"), "utf-8")).toBe("session = true");
+  });
+
+  it("no-ops when the legacy home does not exist", () => {
+    mockLegacyCodexHome.path = "/nonexistent-legacy-codex-home";
+    callPrepare();
+    expect(() => readFileSync(join(codexHome, "auth.json"), "utf-8")).toThrow();
   });
 });

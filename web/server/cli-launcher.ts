@@ -5,6 +5,7 @@ import {
   copyFileSync,
   cpSync,
   realpathSync,
+  statSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1404,8 +1405,21 @@ export class CliLauncher {
       try {
         const src = join(legacyHome, name);
         const dest = join(codexHome, name);
-        if (!existsSync(dest) && existsSync(src)) {
+        if (!existsSync(src)) continue;
+        // auth.json: OAuth refresh tokens are single-use, so a stale
+        // per-session copy fails with "refresh token was already used" after
+        // the user re-logs-in (which only rewrites the legacy file). Re-seed
+        // whenever the legacy copy is newer; never clobber a fresher
+        // session copy (the live CLI may have refreshed it itself).
+        const reseedNewerAuth =
+          name === "auth.json" &&
+          existsSync(dest) &&
+          statSync(src).mtimeMs > statSync(dest).mtimeMs;
+        if (!existsSync(dest) || reseedNewerAuth) {
           copyFileSync(src, dest);
+          if (reseedNewerAuth) {
+            console.log(`[cli-launcher] Re-seeded ${name} from legacy home (legacy copy is newer)`);
+          }
         }
       } catch (e) {
         console.warn(`[cli-launcher] Failed to bootstrap ${name} from legacy home:`, e);
