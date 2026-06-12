@@ -107,6 +107,7 @@ function setupMockStore(overrides: {
     cliConnected: cliConnectedMap,
     sessionStatus: sessionStatusMap,
     previousPermissionMode: previousPermissionModeMap,
+    cliReconnecting: new Map<string, boolean>(),
     sdkSessions: [{ sessionId: "s1", model: "claude-sonnet-4-6", backendType: "claude", cwd: "/test" }],
     sessionNames: new Map<string, string>(),
     appendMessage: mockAppendMessage,
@@ -132,6 +133,8 @@ function setupMockStore(overrides: {
     // failure recorded. Specific tests below override this for the
     // composer-disable / submit-gate canaries.
     cliFailures: new Map(),
+    pendingPermissions: new Map(),
+    pendingCodexModelSwitches: new Map(),
   };
 }
 

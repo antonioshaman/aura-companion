@@ -80,6 +80,7 @@ vi.mock("node:fs", async (importOriginal) => {
 
 import { SessionStore } from "./session-store.js";
 import { CliLauncher } from "./cli-launcher.js";
+import { readLaunchableCodexModels } from "./codex-models.js";
 import { companionBus } from "./event-bus.js";
 import { log } from "./logger.js";
 import {
@@ -1102,6 +1103,58 @@ describe("codex websocket launcher", () => {
     expect(codexProc1.kill).toHaveBeenCalledWith("SIGTERM");
     expect(proxy1.proc.kill).toHaveBeenCalledWith("SIGTERM");
     expect(mockSpawn).toHaveBeenCalledTimes(4);
+  });
+
+  it("relaunch with an unavailable codex model keeps the live session intact", async () => {
+    // Council review P1 #2 — the requested model must be validated BEFORE the
+    // running Codex process is killed. If resolution fails (model rejected /
+    // cache empty), relaunch() returns ok:false and leaves the live process,
+    // ws proxy, session state and model untouched — the user does not lose
+    // their working session over a stale/invalid model request.
+    process.env.COMPANION_CODEX_TRANSPORT = "ws";
+    mockResolveBinary.mockReturnValue("/opt/fake/codex");
+
+    const codexProc = createMockProc(7001);
+    const proxy = createPendingCodexWsProxyProc(7002);
+    mockSpawn
+      .mockReturnValueOnce(codexProc as any)
+      .mockReturnValueOnce(proxy.proc as any);
+
+    launcher.launch({
+      backendType: "codex",
+      cwd: "/tmp/project",
+      codexSandbox: "workspace-write",
+    });
+
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Force resolveCodexLaunchModel to return unavailable regardless of whether
+    // the box has a populated ~/.codex/models_cache.json: reject every
+    // launchable slug. (If the cache is missing, resolution is already
+    // unavailable, so the test is deterministic either way.)
+    const loaded = readLaunchableCodexModels();
+    const allSlugs = loaded.kind === "list" ? loaded.models.map((m) => m.slug) : [];
+    (launcher as any).rejectedCodexModels.set("test-session-id", new Set(allSlugs));
+
+    const liveProc = (launcher as any).processes.get("test-session-id");
+    const liveProxy = (launcher as any).codexWsProxies.get("test-session-id");
+    const info = launcher.getSession("test-session-id")!;
+    const modelBefore = info.model;
+    const spawnCallsBefore = mockSpawn.mock.calls.length;
+
+    const result = await launcher.relaunch("test-session-id", { model: "ghost-model" });
+
+    expect(result.ok).toBe(false);
+    // Live transport untouched — no kill, same map entries.
+    expect((launcher as any).processes.get("test-session-id")).toBe(liveProc);
+    expect((launcher as any).codexWsProxies.get("test-session-id")).toBe(liveProxy);
+    expect(codexProc.kill).not.toHaveBeenCalled();
+    expect(proxy.proc.kill).not.toHaveBeenCalled();
+    // Session state preserved — not torn down, model not overwritten.
+    expect(info.state).not.toBe("exited");
+    expect(info.model).toBe(modelBefore);
+    // No replacement process was spawned.
+    expect(mockSpawn.mock.calls.length).toBe(spawnCallsBefore);
   });
 
   it("kill() returns true and kills the proxy when only a ws proxy remains", async () => {
@@ -2143,8 +2196,16 @@ describe("EC-19 canary — clearPidAndPersist routing in relaunch() (PLAN T7/T8)
     const signaturePrefix = "async relaunch(";
     const sigIdx = src.indexOf(signaturePrefix);
     expect(sigIdx, "relaunch signature must be locatable").toBeGreaterThan(-1);
-    const openIdx = src.indexOf("{", sigIdx);
-    expect(openIdx, "opening brace must follow the signature").toBeGreaterThan(-1);
+    // The naive `indexOf("{", sigIdx)` lands on the `{` inside the
+    // `opts: { model?: string }` PARAMETER type, not the function body —
+    // brace-counting from there closes immediately and yields an empty
+    // body, making this canary vacuously pass (it checked zero returns).
+    // Anchor instead on the first body statement, then walk back to the
+    // nearest preceding `{` (the real body-open brace).
+    const firstStmt = src.indexOf("const info = this.sessions.get(sessionId);", sigIdx);
+    expect(firstStmt, "relaunch first statement must be locatable").toBeGreaterThan(-1);
+    const openIdx = src.lastIndexOf("{", firstStmt);
+    expect(openIdx, "body-open brace must precede the first statement").toBeGreaterThan(sigIdx);
     let depth = 1;
     let bodyEnd = -1;
     for (let i = openIdx + 1; i < src.length; i++) {
@@ -2169,12 +2230,24 @@ describe("EC-19 canary — clearPidAndPersist routing in relaunch() (PLAN T7/T8)
     // refactor that warrants a fresh canary review.
     const returnRegex = /return\s*\{\s*ok:\s*false\b/g;
     const callRegex = /\bclearPidAndPersist\s*\(/g;
+    // EC-19-EXEMPT sentinel: a small set of ok:false returns legitimately
+    // do NOT abandon the session and so must not call clearPidAndPersist:
+    //   - the `if (!info)` entry guard (no state exists yet);
+    //   - the Codex pre-kill model-validation return (council review P1 #2)
+    //     — it bails BEFORE any kill, leaving the live session fully intact,
+    //     so nulling pid / firing relaunch-exhausted would be wrong.
+    // Each such return carries an `EC-19-EXEMPT` comment in its window.
+    const exemptRegex = /EC-19-EXEMPT/g;
     const violations: Array<{ at: number; snippet: string }> = [];
     let m: RegExpExecArray | null;
     while ((m = returnRegex.exec(body)) !== null) {
       const returnAt = m.index;
       const windowStart = Math.max(0, returnAt - 800);
       const window = body.slice(windowStart, returnAt);
+      exemptRegex.lastIndex = 0;
+      if (exemptRegex.test(window)) {
+        continue;
+      }
       if (!callRegex.test(window)) {
         violations.push({
           at: returnAt,

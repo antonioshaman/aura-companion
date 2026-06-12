@@ -1181,6 +1181,104 @@ describe("handleMessage: session_phase", () => {
 });
 
 // ===========================================================================
+// handleMessage: pendingCodexModelSwitch lifecycle (Council review P2 #3/#4)
+// ===========================================================================
+// The ModelSwitcher renders "Restarting to X" while a pending Codex model
+// switch is live. These tests pin WHEN the dispatcher clears that pending
+// state so the indicator can never stick forever, AND that a server-side
+// fallback substitution (requested model unavailable) surfaces a system
+// message before the switch is cleared.
+describe("handleMessage: pendingCodexModelSwitch lifecycle", () => {
+  function connectCodexSession() {
+    wsModule.connectSession("s1");
+    // Initial session_init connects the session so `existingSession` is set;
+    // a later session_init then represents the relaunch landing.
+    fireMessage({
+      type: "session_init",
+      session: { ...makeSession("s1"), backend_type: "codex", model: "gpt-5.2-codex" },
+    });
+  }
+
+  it("clears the pending switch on session_init when the relaunch lands on the requested model", () => {
+    connectCodexSession();
+    useStore.getState().setPendingCodexModelSwitch("s1", "gpt-5.2-codex");
+
+    fireMessage({
+      type: "session_init",
+      session: { ...makeSession("s1"), backend_type: "codex", model: "gpt-5.2-codex" },
+    });
+
+    expect(useStore.getState().pendingCodexModelSwitches.has("s1")).toBe(false);
+    // Exact-match landing must NOT emit a fallback system message.
+    const messages = useStore.getState().messages.get("s1") ?? [];
+    expect(messages.some((m) => m.role === "system" && m.content.includes("unavailable"))).toBe(false);
+  });
+
+  it("surfaces a fallback system message when session_init lands on a different model, then clears", () => {
+    connectCodexSession();
+    useStore.getState().setPendingCodexModelSwitch("s1", "ghost-model");
+
+    fireMessage({
+      type: "session_init",
+      session: { ...makeSession("s1"), backend_type: "codex", model: "gpt-5.2-codex" },
+    });
+
+    const messages = useStore.getState().messages.get("s1") ?? [];
+    const fallback = messages.find((m) => m.role === "system");
+    expect(fallback?.content).toContain('Requested Codex model "ghost-model" is unavailable');
+    expect(fallback?.content).toContain('Using "gpt-5.2-codex" instead');
+    expect(useStore.getState().pendingCodexModelSwitches.has("s1")).toBe(false);
+  });
+
+  it("clears the pending switch on session_evicted (terminal — no session_init follows)", () => {
+    connectCodexSession();
+    useStore.getState().setPendingCodexModelSwitch("s1", "gpt-5.2-codex");
+
+    fireMessage({ type: "session_evicted" });
+
+    expect(useStore.getState().pendingCodexModelSwitches.has("s1")).toBe(false);
+  });
+
+  it("clears the pending switch on cli_failed (relaunch-exhausted terminal path)", () => {
+    connectCodexSession();
+    useStore.getState().setPendingCodexModelSwitch("s1", "gpt-5.2-codex");
+
+    fireMessage({
+      type: "cli_failed",
+      reason: "relaunch_exhausted",
+      drainedCount: 0,
+      subprocessAlive: false,
+      firedAt: 1_000,
+    });
+
+    expect(useStore.getState().pendingCodexModelSwitches.has("s1")).toBe(false);
+  });
+
+  // Regression guard for the DELIBERATE exclusion in ws.ts: `terminated` and
+  // `cli_disconnected` both fire transiently during EVERY normal relaunch, so
+  // clearing the pending switch there would drop the "Restarting" indicator
+  // mid-relaunch and lose the eventual fallback system message. They MUST NOT
+  // clear; the survival lets the eventual session_init resolve the switch.
+  it("does NOT clear the pending switch on session_phase terminated (transient relaunch step)", () => {
+    connectCodexSession();
+    useStore.getState().setPendingCodexModelSwitch("s1", "gpt-5.2-codex");
+
+    fireMessage({ type: "session_phase", phase: "terminated", previousPhase: "reconnecting" });
+
+    expect(useStore.getState().pendingCodexModelSwitches.has("s1")).toBe(true);
+  });
+
+  it("does NOT clear the pending switch on cli_disconnected (transient relaunch step)", () => {
+    connectCodexSession();
+    useStore.getState().setPendingCodexModelSwitch("s1", "gpt-5.2-codex");
+
+    fireMessage({ type: "cli_disconnected" });
+
+    expect(useStore.getState().pendingCodexModelSwitches.has("s1")).toBe(true);
+  });
+});
+
+// ===========================================================================
 // handleMessage: message_history
 // ===========================================================================
 describe("handleMessage: message_history", () => {

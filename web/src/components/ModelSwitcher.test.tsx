@@ -3,15 +3,24 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import "@testing-library/jest-dom";
 
 const mockSendToSession = vi.fn();
+const mockRelaunchSession = vi.fn();
 
 vi.mock("../ws.js", () => ({
   sendToSession: (...args: unknown[]) => mockSendToSession(...args),
 }));
 
+vi.mock("../api.js", () => ({
+  api: {
+    relaunchSession: (...args: unknown[]) => mockRelaunchSession(...args),
+  },
+}));
+
 interface MockStoreState {
   sdkSessions: { sessionId: string; model?: string; backendType?: string; cwd: string }[];
   cliConnected: Map<string, boolean>;
+  cliReconnecting: Map<string, boolean>;
   sessions: Map<string, { model?: string; backend_type?: string }>;
+  pendingCodexModelSwitches: Map<string, { requestedModel: string; requestedAt: number }>;
   // PLAN-aura-dynamic-model-list Task 11: ModelSwitcher subscribes to the
   // settings-slice cache. Empty default → fallback to static models (the
   // pre-Task-11 behaviour these tests already assert).
@@ -33,7 +42,9 @@ function resetStore(overrides: Partial<MockStoreState> = {}) {
       { sessionId: "s1", model: DEFAULT_MODEL.value, backendType: "claude", cwd: "/repo" },
     ],
     cliConnected: new Map([["s1", true]]),
+    cliReconnecting: new Map(),
     sessions: new Map([["s1", { model: DEFAULT_MODEL.value }]]),
+    pendingCodexModelSwitches: new Map(),
     dynamicBackendModels: {},
     loadBackendModels: vi.fn(async () => undefined),
     anthropicApiKeyConfigured: null,
@@ -51,6 +62,8 @@ vi.mock("../store.js", () => ({
       getState: () => ({
         ...storeState,
         setSdkSessions: mockSetSdkSessions,
+        setPendingCodexModelSwitch: vi.fn(),
+        clearPendingCodexModelSwitch: vi.fn(),
       }),
     },
   ),
@@ -65,6 +78,7 @@ const DEFAULT_MODEL = CLAUDE_MODELS[0];
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockRelaunchSession.mockResolvedValue({ ok: true });
   resetStore();
 });
 
@@ -151,15 +165,27 @@ describe("ModelSwitcher", () => {
     expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
   });
 
-  it("is hidden when backend is Codex", () => {
-    // Codex does not support runtime model switching
+  it("renders for Codex and relaunches the same session with the selected model", async () => {
     resetStore({
       sdkSessions: [
         { sessionId: "s1", model: "gpt-5.3-codex", backendType: "codex", cwd: "/repo" },
       ],
+      sessions: new Map([["s1", { model: "gpt-5.3-codex", backend_type: "codex" }]]),
+      dynamicBackendModels: {
+        codex: [
+          { value: "gpt-5.3-codex", label: "GPT-5.3 Codex", icon: "" },
+          { value: "gpt-5.2-codex", label: "GPT-5.2 Codex", icon: "" },
+        ],
+      },
     });
-    const { container } = render(<ModelSwitcher sessionId="s1" />);
-    expect(container.innerHTML).toBe("");
+    render(<ModelSwitcher sessionId="s1" />);
+    fireEvent.click(screen.getByLabelText("Switch model"));
+    fireEvent.click(screen.getByRole("option", { name: /GPT-5\.2 Codex/i }));
+
+    await waitFor(() => {
+      expect(mockRelaunchSession).toHaveBeenCalledWith("s1", { model: "gpt-5.2-codex" });
+    });
+    expect(mockSendToSession).not.toHaveBeenCalled();
   });
 
   it("is hidden when CLI is not connected", () => {

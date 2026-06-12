@@ -15,7 +15,10 @@ vi.mock("../ws.js", () => ({
 interface MockStoreState {
   currentSessionId: string | null;
   cliConnected: Map<string, boolean>;
+  cliReconnecting: Map<string, boolean>;
   sessionStatus: Map<string, "idle" | "running" | "compacting" | null>;
+  pendingPermissions: Map<string, Map<string, unknown>>;
+  pendingCodexModelSwitches: Map<string, { requestedModel: string; requestedAt: number }>;
   sessionNames: Map<string, string>;
   sidebarOpen: boolean;
   setSidebarOpen: ReturnType<typeof vi.fn>;
@@ -24,7 +27,7 @@ interface MockStoreState {
   activeTab: "chat" | "diff";
   setActiveTab: ReturnType<typeof vi.fn>;
   markChatTabReentry: ReturnType<typeof vi.fn>;
-  sessions: Map<string, { cwd?: string; is_containerized?: boolean }>;
+  sessions: Map<string, { cwd?: string; is_containerized?: boolean; permissionMode?: string }>;
   sdkSessions: { sessionId: string; cwd?: string; containerId?: string; model?: string; backendType?: string }[];
   gitChangedFilesCount: Map<string, number>;
   // Council Mode slice: TopBar reads `groupBySessionId` + `groups` to
@@ -39,7 +42,10 @@ function resetStore(overrides: Partial<MockStoreState> = {}) {
   storeState = {
     currentSessionId: "s1",
     cliConnected: new Map([["s1", true]]),
+    cliReconnecting: new Map(),
     sessionStatus: new Map([["s1", "idle"]]),
+    pendingPermissions: new Map(),
+    pendingCodexModelSwitches: new Map(),
     sessionNames: new Map(),
     sidebarOpen: true,
     setSidebarOpen: vi.fn(),

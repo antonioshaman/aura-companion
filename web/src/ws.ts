@@ -621,6 +621,7 @@ function handleParsedMessage(
   switch (data.type) {
     case "session_init": {
       const existingSession = store.sessions.get(sessionId);
+      const pendingCodexSwitch = store.pendingCodexModelSwitches.get(sessionId);
       store.addSession(data.session);
       // PLAN T12 (Phase G) - a new CLI subprocess is alive
       // (relaunch landed); clear any prior terminal-failure
@@ -643,6 +644,17 @@ function handleParsedMessage(
       store.setCliReconnecting(sessionId, false);
       if (!existingSession) {
         store.setSessionStatus(sessionId, "idle");
+      }
+      if (pendingCodexSwitch) {
+        if (data.session.model && data.session.model !== pendingCodexSwitch.requestedModel) {
+          store.appendMessage(sessionId, {
+            id: nextId(),
+            role: "system",
+            content: `Requested Codex model "${pendingCodexSwitch.requestedModel}" is unavailable. Using "${data.session.model}" instead.`,
+            timestamp: Date.now(),
+          });
+        }
+        store.clearPendingCodexModelSwitch(sessionId);
       }
       if (!store.sessionNames.has(sessionId)) {
         const existingNames = new Set(store.sessionNames.values());
@@ -1041,6 +1053,7 @@ function handleParsedMessage(
           ? { lastErrorSha256: data.details.lastErrorSha256 }
           : {}),
       });
+      store.clearPendingCodexModelSwitch(sessionId);
       store.setCliConnected(sessionId, false);
       store.setCliReconnecting(sessionId, false);
       store.setSessionStatus(sessionId, null);
@@ -1066,6 +1079,20 @@ function handleParsedMessage(
       store.setCliConnected(sessionId, false);
       store.setCliReconnecting(sessionId, false);
       store.setSessionStatus(sessionId, null);
+      // Council review P2 #3: an evicted session is terminal — no
+      // `session_init` or `cli_failed` will follow to clear an in-flight
+      // Codex model switch, so the ModelSwitcher would be stuck rendering
+      // "Restarting to X" forever. Clear it here.
+      //
+      // NOTE: we deliberately do NOT clear on `session_phase: terminated`
+      // or `cli_disconnected` — both fire transiently during EVERY normal
+      // model-switch relaunch (old proc exit drives the SM to `terminated`;
+      // the old backend adapter dropping broadcasts `cli_disconnected`).
+      // The pending switch must survive those so the eventual `session_init`
+      // can surface the fallback-model system message. Permanent failure on
+      // those paths self-heals via `cli_failed` (relaunch-exhausted), which
+      // already clears the pending switch.
+      store.clearPendingCodexModelSwitch(sessionId);
       store.removeBridgeSession(sessionId);
       break;
     }

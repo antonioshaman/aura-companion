@@ -36,6 +36,7 @@ import {
 import { containerManager } from "./container-manager.js";
 import { companionBus } from "./event-bus.js";
 import type { RelaunchExhaustedReason } from "./event-bus-types.js";
+import { selectLaunchableCodexModel } from "./codex-models.js";
 import {
   getLegacyCodexHome,
   resolveCompanionCodexSessionHome,
@@ -133,6 +134,8 @@ export interface SdkSessionInfo {
   resumeSessionAt?: string;
   /** Whether the resumed session used --fork-session. */
   forkSession?: boolean;
+  /** Codex models that this account/session has already rejected. */
+  rejectedCodexModels?: string[];
   /** If this session was spawned by an agent */
   agentId?: string;
   /** Human-readable name of the agent that spawned this session */
@@ -255,6 +258,8 @@ export class CliLauncher {
   private codexWsProxies = new Map<string, Subprocess>();
   /** Host-mode Codex WS listen ports currently reserved by active sessions. */
   private claimedCodexWsPorts = new Set<number>();
+  /** Account- or runtime-rejected Codex models, remembered per session to avoid retry loops. */
+  private rejectedCodexModels = new Map<string, Set<string>>();
   /** Runtime-only env vars per session (kept out of persisted launcher state). */
   private sessionEnvs = new Map<string, Record<string, string>>();
   private port: number;
@@ -279,6 +284,74 @@ export class CliLauncher {
     if (!this.store) return;
     const data = Array.from(this.sessions.values());
     this.store.saveLauncher(data);
+  }
+
+  private syncRejectedCodexModels(sessionId: string, rejected: Set<string>): void {
+    const next = Array.from(rejected);
+    if (next.length === 0) {
+      this.rejectedCodexModels.delete(sessionId);
+    } else {
+      this.rejectedCodexModels.set(sessionId, new Set(next));
+    }
+    const info = this.sessions.get(sessionId);
+    if (!info) return;
+    if (next.length === 0) {
+      delete info.rejectedCodexModels;
+      return;
+    }
+    info.rejectedCodexModels = next;
+  }
+
+  private resolveCodexLaunchModel(
+    sessionId: string,
+    requestedModel: string | undefined,
+  ): { ok: true; model: string; fallbackFrom?: string } | { ok: false; error: string } {
+    const info = this.sessions.get(sessionId);
+    const rejected = Array.from(
+      this.rejectedCodexModels.get(sessionId) ??
+      new Set(info?.rejectedCodexModels ?? []),
+    );
+    const selection = selectLaunchableCodexModel(requestedModel, { rejectModels: rejected });
+    if (selection.kind === "unavailable") {
+      return { ok: false, error: selection.message };
+    }
+    return {
+      ok: true,
+      model: selection.model.slug,
+      fallbackFrom: selection.fallbackFrom,
+    };
+  }
+
+  /**
+   * Council review P1 #1 — spawn-generation guard.
+   *
+   * Codex sessions can be re-spawned in place under the SAME `sessionId`
+   * (fallback-respawn after an init error, or `relaunch()`), which replaces
+   * the entry in `this.processes`. The OLD generation's `proc.exited` /
+   * `onInitError` handlers still fire afterwards when the old subprocess is
+   * SIGTERM'd. Without this guard those stale handlers would set
+   * `state = "exited"`, delete the (now newer) map entries, persist, and
+   * emit `session:exited` — clobbering the live replacement process and
+   * triggering a false degraded / orphaned-process scenario.
+   *
+   * A handler is "superseded" when this session's `processes` slot no longer
+   * holds the process the handler was created for. Superseded handlers must
+   * clean up only their OWN transport and never touch shared session state.
+   */
+  private isSupersededGeneration(sessionId: string, ownProc: Subprocess): boolean {
+    return this.processes.get(sessionId) !== ownProc;
+  }
+
+  private markCodexModelRejected(sessionId: string, model: string | undefined): void {
+    if (!model) return;
+    const info = this.sessions.get(sessionId);
+    const next = new Set(this.rejectedCodexModels.get(sessionId) ?? info?.rejectedCodexModels ?? []);
+    next.add(model);
+    this.syncRejectedCodexModels(sessionId, next);
+  }
+
+  private isCodexModelAvailabilityError(error: string): boolean {
+    return /model/i.test(error) && /(available|unsupported|access|account|not found|rejected)/i.test(error);
   }
 
   /**
@@ -473,6 +546,9 @@ export class CliLauncher {
     let recovered = 0;
     for (const info of data) {
       if (this.sessions.has(info.sessionId)) continue;
+      if (info.backendType === "codex" && Array.isArray(info.rejectedCodexModels)) {
+        this.syncRejectedCodexModels(info.sessionId, new Set(info.rejectedCodexModels));
+      }
 
       // Check if the process is still alive
       if (info.state !== "exited") {
@@ -626,11 +702,21 @@ export class CliLauncher {
     }
     const cwd = options.cwd || process.cwd();
     const backendType = options.backendType || "claude";
+    let launchModel = options.model;
+
+    if (backendType === "codex") {
+      const resolved = this.resolveCodexLaunchModel(sessionId, options.model);
+      if (!resolved.ok) {
+        throw new Error(resolved.error);
+      }
+      launchModel = resolved.model;
+      this.syncRejectedCodexModels(sessionId, new Set());
+    }
 
     const info: SdkSessionInfo = {
       sessionId,
       state: "starting",
-      model: options.model,
+      model: launchModel,
       permissionMode: options.permissionMode,
       cwd,
       createdAt: Date.now(),
@@ -676,7 +762,10 @@ export class CliLauncher {
     // Council Mode observer spawn config (council review #1 P1#1) is
     // applied uniformly across both backends and reused on relaunch so
     // the council context isn't lost on every non-initial spawn (#4).
-    const effectiveOptions = this.buildObserverSpawnOverrides(sessionId, info, options);
+    const effectiveOptions = this.buildObserverSpawnOverrides(sessionId, info, {
+      ...options,
+      model: launchModel,
+    });
 
     this.sessions.set(sessionId, info);
     if (effectiveOptions.env) {
@@ -796,8 +885,13 @@ export class CliLauncher {
    * Kills the old process if still alive, then spawns a fresh CLI
    * that connects back to the same session in the WsBridge.
    */
-  async relaunch(sessionId: string): Promise<{ ok: boolean; error?: string }> {
+  async relaunch(
+    sessionId: string,
+    opts: { model?: string } = {},
+  ): Promise<{ ok: boolean; error?: string }> {
     const info = this.sessions.get(sessionId);
+    // EC-19-EXEMPT: session missing entirely — there is no pid/state to
+    // clear, so clearPidAndPersist does not apply at this entry guard.
     if (!info) return { ok: false, error: "Session not found" };
 
     // Council Review 2026-05-15-1015 CR-20 (Subprocess P3): capture the
@@ -809,6 +903,31 @@ export class CliLauncher {
     const previousObserverPromptSha = info.observerPromptSha256;
     const previousObserverPromptSource = info.observerPromptSource;
     const previousObserverPromptVersion = info.observerPromptVersion;
+
+    // Council review P1 #2: for Codex, resolve the requested model BEFORE
+    // we kill the live process. If the requested model is stale/unsupported
+    // and no launchable fallback exists, abort the relaunch WITHOUT
+    // destroying the running session — the user keeps their working session
+    // instead of losing it to a doomed relaunch. (Claude has no per-account
+    // launch-time model gating here, so this guard is Codex-only.)
+    let validatedCodexModel: string | undefined;
+    if (info.backendType === "codex") {
+      const requestedModel =
+        typeof opts.model === "string" && opts.model.trim().length > 0
+          ? opts.model.trim()
+          : info.model;
+      const resolved = this.resolveCodexLaunchModel(sessionId, requestedModel);
+      if (!resolved.ok) {
+        // EC-19-EXEMPT: pre-kill validation failure. No process was killed
+        // and no session state was mutated, so the live session is fully
+        // intact. clearPidAndPersist (which nulls pid, flips state to
+        // "exited", and fires session:relaunch-exhausted) is for the
+        // abandon-the-session paths — applying it here would destroy the
+        // very session this guard exists to protect.
+        return { ok: false, error: resolved.error };
+      }
+      validatedCodexModel = resolved.model;
+    }
 
     // Kill old process(es) if still alive.
     // Snapshot both handles first because killing the proxy can trigger the
@@ -900,6 +1019,12 @@ export class CliLauncher {
     }
 
     info.state = "starting";
+
+    // Model already validated pre-kill (council review P1 #2). Commit the
+    // resolved slug (may be a fallback) now that the relaunch is committed.
+    if (info.backendType === "codex" && validatedCodexModel !== undefined) {
+      info.model = validatedCodexModel;
+    }
 
     const runtimeEnv = this.sessionEnvs.get(sessionId);
 
@@ -1516,9 +1641,31 @@ export class CliLauncher {
     adapter.onInitError((error) => {
       console.error(`[cli-launcher] Codex WS session ${sessionId} init failed: ${error}`);
       try { proxyProc.kill("SIGTERM"); } catch {}
+      try { proc.kill("SIGTERM"); } catch {}
+      // P1 #1 generation guard: a newer spawn already owns this session's
+      // process slot, so the live proxy/state belongs to it. Our own procs
+      // are killed above; bail before deleting the (now newer) proxy entry,
+      // re-spawning, or marking the live session exited.
+      if (this.isSupersededGeneration(sessionId, proc)) {
+        return;
+      }
       this.codexWsProxies.delete(sessionId);
       const session = this.sessions.get(sessionId);
       if (session) {
+        if (this.isCodexModelAvailabilityError(error)) {
+          this.markCodexModelRejected(sessionId, session.model);
+          const resolved = this.resolveCodexLaunchModel(sessionId, session.model);
+          if (resolved.ok && resolved.model !== session.model) {
+            session.state = "starting";
+            session.exitCode = undefined;
+            session.cliSessionId = undefined;
+            session.model = resolved.model;
+            this.releaseCodexWsPort(session);
+            this.persistState();
+            this.spawnCodex(sessionId, session, { ...options, model: resolved.model });
+            return;
+          }
+        }
         session.state = "exited";
         session.exitCode = 1;
         session.cliSessionId = undefined;
@@ -1553,6 +1700,15 @@ export class CliLauncher {
         try { proc.kill("SIGTERM"); } catch {}
       } else {
         try { proxyProc.kill("SIGTERM"); } catch {}
+      }
+
+      // P1 #1 generation guard: a newer spawn already owns this session's
+      // process slot (fallback-respawn / relaunch). Our own transport is
+      // torn down above; do NOT mutate shared session state, delete the
+      // map entries (they belong to the live generation now), persist, or
+      // emit session:exited — that would clobber the live process.
+      if (this.isSupersededGeneration(sessionId, proc)) {
+        return;
       }
 
       const session = this.sessions.get(sessionId);
@@ -1719,8 +1875,28 @@ export class CliLauncher {
     // instead of trying to resume one whose rollout may be missing.
     adapter.onInitError((error) => {
       console.error(`[cli-launcher] Codex session ${sessionId} init failed: ${error}`);
+      // P1 #1 generation guard: a newer spawn already owns this session;
+      // the old init-error must not respawn or mark the live session exited.
+      if (this.isSupersededGeneration(sessionId, proc)) {
+        try { proc.kill("SIGTERM"); } catch {}
+        return;
+      }
       const session = this.sessions.get(sessionId);
       if (session) {
+        if (this.isCodexModelAvailabilityError(error)) {
+          this.markCodexModelRejected(sessionId, session.model);
+          const resolved = this.resolveCodexLaunchModel(sessionId, session.model);
+          if (resolved.ok && resolved.model !== session.model) {
+            try { proc.kill("SIGTERM"); } catch {}
+            session.state = "starting";
+            session.exitCode = undefined;
+            session.cliSessionId = undefined;
+            session.model = resolved.model;
+            this.persistState();
+            this.spawnCodex(sessionId, session, { ...options, model: resolved.model });
+            return;
+          }
+        }
         session.state = "exited";
         session.exitCode = 1;
         session.cliSessionId = undefined;
@@ -1737,6 +1913,12 @@ export class CliLauncher {
     // Monitor process exit
     proc.exited.then((exitCode) => {
       console.log(`[cli-launcher] Codex session ${sessionId} exited (code=${exitCode})`);
+      // P1 #1 generation guard: if a newer spawn already owns this session's
+      // process slot, this stale exit must not mark the live session exited,
+      // delete the (now newer) map entry, persist, or emit session:exited.
+      if (this.isSupersededGeneration(sessionId, proc)) {
+        return;
+      }
       const session = this.sessions.get(sessionId);
       if (session) {
         session.state = "exited";

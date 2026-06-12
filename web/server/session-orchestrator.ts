@@ -161,6 +161,10 @@ export interface CreateSessionRequest {
   autoProceedOnIdle?: { readonly idleMs: number; readonly maxIterations: number };
 }
 
+export interface RelaunchSessionRequest {
+  model?: string;
+}
+
 /** Public Council Mode pair-create request. The coordinator validates the
  *  pairing server-side against {@link SUPPORTED_PAIRINGS}; the browser's
  *  selection is treated as untrusted input. */
@@ -2858,7 +2862,10 @@ export class SessionOrchestrator {
 
   // ── Relaunch ───────────────────────────────────────────────────────────────
 
-  async relaunchSession(sessionId: string): Promise<{ ok: boolean; error?: string }> {
+  async relaunchSession(
+    sessionId: string,
+    opts: RelaunchSessionRequest = {},
+  ): Promise<{ ok: boolean; error?: string }> {
     const info = this.launcher.getSession(sessionId);
     if (info?.archived) {
       return { ok: false, error: "Session is archived and cannot be relaunched" };
@@ -2868,7 +2875,7 @@ export class SessionOrchestrator {
     if (session?.stateMachine) {
       session.stateMachine.transition("starting", "relaunch_initiated");
     }
-    return this.launcher.relaunch(sessionId);
+    return this.launcher.relaunch(sessionId, opts);
   }
 
   // ── Archive ────────────────────────────────────────────────────────────────

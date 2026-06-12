@@ -32,14 +32,23 @@ export interface CliFailure {
   lastErrorSha256?: string;
 }
 
+export interface PendingCodexModelSwitch {
+  requestedModel: string;
+  requestedAt: number;
+}
+
 export interface CliStatusSlice {
   cliFailures: Map<string, CliFailure>;
+  pendingCodexModelSwitches: Map<string, PendingCodexModelSwitch>;
   setCliFailure: (sessionId: string, failure: CliFailure) => void;
   clearCliFailure: (sessionId: string) => void;
+  setPendingCodexModelSwitch: (sessionId: string, requestedModel: string) => void;
+  clearPendingCodexModelSwitch: (sessionId: string) => void;
 }
 
 export const createCliStatusSlice: StateCreator<AppState, [], [], CliStatusSlice> = (set) => ({
   cliFailures: new Map(),
+  pendingCodexModelSwitches: new Map(),
 
   setCliFailure: (sessionId, failure) =>
     set((s) => {
@@ -54,5 +63,23 @@ export const createCliStatusSlice: StateCreator<AppState, [], [], CliStatusSlice
       const cliFailures = new Map(s.cliFailures);
       cliFailures.delete(sessionId);
       return { cliFailures };
+    }),
+
+  setPendingCodexModelSwitch: (sessionId, requestedModel) =>
+    set((s) => {
+      const pendingCodexModelSwitches = new Map(s.pendingCodexModelSwitches);
+      pendingCodexModelSwitches.set(sessionId, {
+        requestedModel,
+        requestedAt: Date.now(),
+      });
+      return { pendingCodexModelSwitches };
+    }),
+
+  clearPendingCodexModelSwitch: (sessionId) =>
+    set((s) => {
+      if (!s.pendingCodexModelSwitches.has(sessionId)) return {};
+      const pendingCodexModelSwitches = new Map(s.pendingCodexModelSwitches);
+      pendingCodexModelSwitches.delete(sessionId);
+      return { pendingCodexModelSwitches };
     }),
 });

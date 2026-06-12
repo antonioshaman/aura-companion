@@ -1138,7 +1138,18 @@ describe("SessionOrchestrator", () => {
       const result = await orchestrator.relaunchSession("s1");
 
       expect(result.ok).toBe(true);
-      expect(deps.launcher.relaunch).toHaveBeenCalledWith("s1");
+      expect(deps.launcher.relaunch).toHaveBeenCalledWith("s1", {});
+    });
+
+    it("passes model overrides through without mutating launcher session metadata first", async () => {
+      const sessionInfo = { archived: false, model: "gpt-5.2-codex" };
+      deps.launcher.getSession.mockReturnValue(sessionInfo as any);
+
+      const result = await orchestrator.relaunchSession("s1", { model: "gpt-5.3-codex" });
+
+      expect(result.ok).toBe(true);
+      expect(sessionInfo.model).toBe("gpt-5.2-codex");
+      expect(deps.launcher.relaunch).toHaveBeenCalledWith("s1", { model: "gpt-5.3-codex" });
     });
 
     it("rejects relaunching archived sessions", async () => {

@@ -1011,7 +1011,42 @@ describe("POST /api/sessions/:id/relaunch", () => {
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json).toEqual({ ok: true });
-    expect(orchestrator.relaunchSession).toHaveBeenCalledWith("s1");
+    expect(orchestrator.relaunchSession).toHaveBeenCalledWith("s1", { model: undefined });
+  });
+
+  // Council review P2 #4: the relaunch route is the producer side of the
+  // Codex in-session model switch. A valid string `model` in the body must
+  // be threaded through to `relaunchSession` verbatim (the launcher then
+  // validates/falls-back). Without this the switcher's chosen model would
+  // be silently dropped and every switch would no-op to the current model.
+  it("threads a valid string model from the body into relaunchSession", async () => {
+    orchestrator.relaunchSession.mockResolvedValue({ ok: true });
+
+    const res = await app.request("/api/sessions/s1/relaunch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "gpt-5-codex" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(orchestrator.relaunchSession).toHaveBeenCalledWith("s1", { model: "gpt-5-codex" });
+  });
+
+  // Council review P2 #4: a non-string `model` payload (number/object/null)
+  // must be coerced to `undefined`, NOT forwarded — otherwise a malformed
+  // client could push a bogus model value into the launch path. The route
+  // already guards with `typeof === "string"`; this pins that contract.
+  it("ignores a non-string model payload (coerces to undefined)", async () => {
+    orchestrator.relaunchSession.mockResolvedValue({ ok: true });
+
+    const res = await app.request("/api/sessions/s1/relaunch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: 12345 }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(orchestrator.relaunchSession).toHaveBeenCalledWith("s1", { model: undefined });
   });
 
   it("returns 503 with error when container is missing", async () => {
