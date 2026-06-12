@@ -1257,6 +1257,267 @@ describe("codex websocket launcher", () => {
   });
 });
 
+// ─── codex model-rejection auto-respawn (P1 #1 + in-session model switch) ─────
+
+describe("codex onInitError model-rejection auto-respawn", () => {
+  // These tests exercise the server-side recovery the orchestrator relies on:
+  // when Codex rejects the chosen model at init time (account lost access, slug
+  // retired), the launcher marks that model rejected for the session and
+  // respawns on the next launchable fallback rather than surfacing a dead
+  // session. The handler is registered on the CodexAdapter via onInitError; we
+  // capture the adapter off the bus and invoke its stored callback directly so
+  // the launcher branch is driven without standing up a full JSON-RPC init.
+
+  it("WS: rejects the failing model and respawns with a launchable fallback", async () => {
+    process.env.COMPANION_CODEX_TRANSPORT = "ws";
+    mockResolveBinary.mockReturnValue("/opt/fake/codex");
+
+    // Two codex+proxy pairs: the initial spawn and the fallback respawn.
+    const codexProc1 = createMockProc(8001);
+    const proxy1 = createPendingCodexWsProxyProc(8002);
+    const codexProc2 = createMockProc(8003);
+    const proxy2 = createPendingCodexWsProxyProc(8004);
+    mockSpawn
+      .mockReturnValueOnce(codexProc1 as any)
+      .mockReturnValueOnce(proxy1.proc as any)
+      .mockReturnValueOnce(codexProc2 as any)
+      .mockReturnValueOnce(proxy2.proc as any);
+
+    let capturedAdapter: any;
+    companionBus.on("backend:codex-adapter-created", ({ adapter }) => {
+      capturedAdapter ??= adapter;
+    });
+
+    launcher.launch({
+      backendType: "codex",
+      cwd: "/tmp/project",
+      model: "gpt-5.2-codex",
+      codexSandbox: "workspace-write",
+    });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const info = launcher.getSession("test-session-id")!;
+    expect(info.model).toBe("gpt-5.2-codex");
+    const spawnCallsBefore = mockSpawn.mock.calls.length;
+
+    // Drive the init-error handler with a model-availability error.
+    capturedAdapter.initErrorCb(
+      "Codex initialization failed: model gpt-5.2-codex is not available for this account",
+    );
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Failing model is now rejected for this session, model swapped to the
+    // launchable fallback, session put back into a starting state, and a
+    // replacement spawn issued.
+    expect(
+      Array.from((launcher as any).rejectedCodexModels.get("test-session-id") ?? []),
+    ).toContain("gpt-5.2-codex");
+    expect(info.model).toBe("gpt-5.1-codex-mini");
+    // The respawn immediately re-enters spawnCodex, which marks the session
+    // connected again — the meaningful guarantee is that it was NOT left exited.
+    expect(info.state).not.toBe("exited");
+    expect(mockSpawn.mock.calls.length).toBeGreaterThan(spawnCallsBefore);
+  });
+
+  it("WS: is a no-op when a newer generation already owns the session slot", async () => {
+    process.env.COMPANION_CODEX_TRANSPORT = "ws";
+    mockResolveBinary.mockReturnValue("/opt/fake/codex");
+
+    const codexProc1 = createMockProc(8011);
+    const proxy1 = createPendingCodexWsProxyProc(8012);
+    mockSpawn
+      .mockReturnValueOnce(codexProc1 as any)
+      .mockReturnValueOnce(proxy1.proc as any);
+
+    let capturedAdapter: any;
+    companionBus.on("backend:codex-adapter-created", ({ adapter }) => {
+      capturedAdapter ??= adapter;
+    });
+
+    launcher.launch({
+      backendType: "codex",
+      cwd: "/tmp/project",
+      model: "gpt-5.2-codex",
+      codexSandbox: "workspace-write",
+    });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const info = launcher.getSession("test-session-id")!;
+    const stateBefore = info.state;
+    const spawnCallsBefore = mockSpawn.mock.calls.length;
+
+    // Simulate a newer spawn claiming this session's process slot — the stale
+    // init-error from codexProc1 must not respawn or mutate the live session.
+    const newer = createMockProc(9999);
+    (launcher as any).processes.set("test-session-id", newer);
+
+    capturedAdapter.initErrorCb("model gpt-5.2-codex is not available");
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(info.state).toBe(stateBefore);
+    expect(info.model).toBe("gpt-5.2-codex");
+    expect(mockSpawn.mock.calls.length).toBe(spawnCallsBefore);
+    // The newer generation's proxy entry is preserved (not deleted by the stale handler).
+    expect((launcher as any).codexWsProxies.has("test-session-id")).toBe(true);
+  });
+
+  it("stdio: rejects the failing model, kills its own proc, and respawns with fallback", async () => {
+    // Default transport is stdio.
+    mockResolveBinary.mockReturnValue("/opt/fake/codex");
+
+    const codexProc1 = createMockCodexProc(8101);
+    const codexProc2 = createMockCodexProc(8102);
+    mockSpawn
+      .mockReturnValueOnce(codexProc1 as any)
+      .mockReturnValueOnce(codexProc2 as any);
+
+    let capturedAdapter: any;
+    companionBus.on("backend:codex-adapter-created", ({ adapter }) => {
+      capturedAdapter ??= adapter;
+    });
+
+    launcher.launch({
+      backendType: "codex",
+      cwd: "/tmp/project",
+      model: "gpt-5.2-codex",
+      codexSandbox: "workspace-write",
+    });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const info = launcher.getSession("test-session-id")!;
+    const spawnCallsBefore = mockSpawn.mock.calls.length;
+
+    capturedAdapter.initErrorCb("model gpt-5.2-codex is not available for this account");
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(info.model).toBe("gpt-5.1-codex-mini");
+    expect(info.state).not.toBe("exited");
+    expect(codexProc1.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(mockSpawn.mock.calls.length).toBeGreaterThan(spawnCallsBefore);
+  });
+
+  it("stdio: a non-availability init error marks the session exited without respawn", async () => {
+    mockResolveBinary.mockReturnValue("/opt/fake/codex");
+
+    const codexProc1 = createMockCodexProc(8111);
+    mockSpawn.mockReturnValueOnce(codexProc1 as any);
+
+    let capturedAdapter: any;
+    companionBus.on("backend:codex-adapter-created", ({ adapter }) => {
+      capturedAdapter ??= adapter;
+    });
+
+    launcher.launch({
+      backendType: "codex",
+      cwd: "/tmp/project",
+      model: "gpt-5.2-codex",
+      codexSandbox: "workspace-write",
+    });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const info = launcher.getSession("test-session-id")!;
+    const spawnCallsBefore = mockSpawn.mock.calls.length;
+
+    capturedAdapter.initErrorCb("Codex initialization failed: ECONNREFUSED");
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(info.state).toBe("exited");
+    expect(info.exitCode).toBe(1);
+    expect(info.cliSessionId).toBeUndefined();
+    // A connectivity failure is not a model-availability problem — no respawn.
+    expect(mockSpawn.mock.calls.length).toBe(spawnCallsBefore);
+  });
+
+  it("stdio: a superseded generation kills its own proc and leaves the live session untouched", async () => {
+    mockResolveBinary.mockReturnValue("/opt/fake/codex");
+
+    const codexProc1 = createMockCodexProc(8121);
+    mockSpawn.mockReturnValueOnce(codexProc1 as any);
+
+    let capturedAdapter: any;
+    companionBus.on("backend:codex-adapter-created", ({ adapter }) => {
+      capturedAdapter ??= adapter;
+    });
+
+    launcher.launch({
+      backendType: "codex",
+      cwd: "/tmp/project",
+      model: "gpt-5.2-codex",
+      codexSandbox: "workspace-write",
+    });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const info = launcher.getSession("test-session-id")!;
+    const stateBefore = info.state;
+
+    const newer = createMockCodexProc(9998);
+    (launcher as any).processes.set("test-session-id", newer);
+
+    capturedAdapter.initErrorCb("model gpt-5.2-codex is not available");
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(codexProc1.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(info.state).toBe(stateBefore);
+    expect(info.model).toBe("gpt-5.2-codex");
+  });
+});
+
+// ─── codex model-rejection helpers (unit) ─────────────────────────────────────
+
+describe("codex model-rejection helpers", () => {
+  const SID = "test-session-id";
+  const seedCodexSession = (model: string | undefined = "gpt-5.2-codex") => {
+    (launcher as any).sessions.set(SID, {
+      sessionId: SID,
+      state: "connected",
+      model,
+      cwd: "/tmp/project",
+      createdAt: Date.now(),
+      backendType: "codex",
+    });
+  };
+
+  it("syncRejectedCodexModels clears the map entry and info field when the set is empty", () => {
+    seedCodexSession();
+    const info = launcher.getSession(SID)!;
+    (launcher as any).rejectedCodexModels.set(SID, new Set(["gpt-5.2-codex"]));
+    info.rejectedCodexModels = ["gpt-5.2-codex"];
+
+    (launcher as any).syncRejectedCodexModels(SID, new Set());
+
+    expect((launcher as any).rejectedCodexModels.has(SID)).toBe(false);
+    expect(info.rejectedCodexModels).toBeUndefined();
+  });
+
+  it("markCodexModelRejected records the model and is a no-op for an undefined model", () => {
+    seedCodexSession();
+
+    (launcher as any).markCodexModelRejected(SID, undefined);
+    expect((launcher as any).rejectedCodexModels.has(SID)).toBe(false);
+
+    (launcher as any).markCodexModelRejected(SID, "gpt-5.2-codex");
+    expect(Array.from((launcher as any).rejectedCodexModels.get(SID))).toContain("gpt-5.2-codex");
+    expect(launcher.getSession(SID)!.rejectedCodexModels).toContain("gpt-5.2-codex");
+  });
+
+  it("resolveCodexLaunchModel skips a rejected model and falls back to the next launchable slug", () => {
+    seedCodexSession();
+    (launcher as any).rejectedCodexModels.set(SID, new Set(["gpt-5.2-codex"]));
+
+    const resolved = (launcher as any).resolveCodexLaunchModel(SID, "gpt-5.2-codex");
+
+    expect(resolved.ok).toBe(true);
+    expect(resolved.model).toBe("gpt-5.1-codex-mini");
+  });
+
+  it("isCodexModelAvailabilityError distinguishes availability errors from generic failures", () => {
+    expect((launcher as any).isCodexModelAvailabilityError("model gpt-5.2-codex is not available")).toBe(true);
+    expect((launcher as any).isCodexModelAvailabilityError("the model was rejected by the account")).toBe(true);
+    expect((launcher as any).isCodexModelAvailabilityError("network timeout")).toBe(false);
+    expect((launcher as any).isCodexModelAvailabilityError("ECONNREFUSED")).toBe(false);
+  });
+});
+
 // ─── persistence ─────────────────────────────────────────────────────────────
 
 describe("persistence", () => {
