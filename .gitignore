@@ -22,3 +22,27 @@ web/dev-dist/
 bun.log
 web/bun.log
 .aura-server.pid
+
+# ── Local working-tree artifacts (generated / scratch — keep out of git) ──
+# Test coverage output
+web/coverage/
+coverage/
+# Runtime locks
+.claude/scheduled_tasks.lock
+# Council Mode runtime artifacts (per-session generated output).
+# review-output/ keeps already-committed run dirs in history; only NEW
+# untracked runs and observer review files are ignored going forward.
+.council/checkpoints/
+.council/harness-logs/
+.council/review-output/
+.council/reviews/*-observer.md
+# Local self-improvement learnings store
+.learnings/
+# Local backup snapshots
+.backup-auraco-old/
+# Scratch handoff / plan docs (repo-root only)
+/HANDOFF-*.md
+/PLAN-*.md
+# Scratch planning specs that pair with the root PLAN-*.md scratch docs above
+/specs/session-map-eviction-and-boot-hygiene.md
+/specs/system-resource-reclamation.md
