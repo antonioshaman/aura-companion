@@ -76,6 +76,31 @@ vi.mock("node:fs", async (importOriginal) => {
   };
 });
 
+// Codex models resolution must be deterministic regardless of the host's
+// ~/.codex/models_cache.json (present on dev boxes, absent in CI). Mock the
+// module with a fixed launchable list so launcher/relaunch tests exercise the
+// model-resolution control flow — not the on-disk cache, which codex-models.test.ts
+// owns. selectLaunchableCodexModel honours rejectModels so the
+// "invalid model keeps session alive" relaunch test still resolves to unavailable.
+const mockCodexModelList = vi.hoisted(() => [
+  { slug: "gpt-5.2-codex", displayName: "gpt-5.2-codex", description: "", priority: 0 },
+  { slug: "gpt-5.1-codex-mini", displayName: "gpt-5.1-codex-mini", description: "", priority: 10 },
+]);
+vi.mock("./codex-models.js", () => ({
+  readLaunchableCodexModels: () => ({ kind: "list", models: mockCodexModelList }),
+  selectLaunchableCodexModel: (requestedModel?: string, opts: { rejectModels?: readonly string[] } = {}) => {
+    const rejected = new Set(opts.rejectModels ?? []);
+    const available = mockCodexModelList.filter((m) => !rejected.has(m.slug));
+    if (available.length === 0) {
+      return { kind: "unavailable", reason: "no_launchable_models", message: "No launchable Codex models are available for this account." };
+    }
+    if (!requestedModel || requestedModel.length === 0) return { kind: "selected", model: available[0] };
+    const exact = available.find((m) => m.slug === requestedModel);
+    if (exact) return { kind: "selected", model: exact };
+    return { kind: "selected", model: available[0], fallbackFrom: requestedModel };
+  },
+}));
+
 // ─── Imports (after mocks) ───────────────────────────────────────────────────
 
 import { SessionStore } from "./session-store.js";

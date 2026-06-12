@@ -705,11 +705,17 @@ export class CliLauncher {
     let launchModel = options.model;
 
     if (backendType === "codex") {
+      // Best-effort verified-model selection: when the models cache is present
+      // we upgrade to a known-launchable slug; when it's absent/unavailable
+      // (codex never run, fresh machine, CI) we pass the requested model
+      // through rather than blocking the spawn. The hard validate-before-kill
+      // gate lives on the relaunch path (P1 #2), where a LIVE process is at
+      // risk — an initial launch has nothing to strand, so failing loud here
+      // would only break fresh-account/CI launches for no protective benefit.
       const resolved = this.resolveCodexLaunchModel(sessionId, options.model);
-      if (!resolved.ok) {
-        throw new Error(resolved.error);
+      if (resolved.ok) {
+        launchModel = resolved.model;
       }
-      launchModel = resolved.model;
       this.syncRejectedCodexModels(sessionId, new Set());
     }
 
