@@ -836,6 +836,28 @@ function handleParsedMessage(
             timestamp: Date.now(),
           });
         }
+      } else if (
+        r.is_error &&
+        r.api_error_status === 404 &&
+        typeof r.result === "string" &&
+        r.result.toLowerCase().includes("model")
+      ) {
+        // No in-flight switch to revert: the session was LAUNCHED on a model
+        // the subscription can't use (dropdown sourced from the API-key
+        // /v1/models list; sessions run on OAuth). There is no previous model
+        // to fall back to, so surface a clear, non-silent message rather than
+        // letting every turn 404 in silence. Claude-only — Codex relaunches on
+        // switch and carries a different result shape.
+        const sdk = store.sdkSessions.find((s) => s.sessionId === sessionId);
+        if (sdk?.backendType !== "codex") {
+          const launchedModel = store.sessions.get(sessionId)?.model;
+          store.appendMessage(sessionId, {
+            id: nextId(),
+            role: "system",
+            content: `Model${launchedModel ? ` "${launchedModel}"` : ""} is unavailable for this session. Pick a different model from the selector.`,
+            timestamp: Date.now(),
+          });
+        }
       }
 
       const sessionUpdates: Partial<{ total_cost_usd: number; num_turns: number; context_used_percent: number; total_lines_added: number; total_lines_removed: number }> = {

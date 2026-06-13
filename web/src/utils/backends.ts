@@ -179,10 +179,16 @@ export function getDefaultModel(backend: BackendType): string {
  *     Sonnet" to "newest Opus" betrays the trust the preference encodes.
  *     ModelSwitcher's existing fallback path (`ModelSwitcher.tsx:29-30`)
  *     renders the value as a custom entry — preference flows through.
- *  2. `dynamic[0].value` — first item of the live list (sorted server-
- *     side: opus > sonnet > haiku, then created_at desc). This is the
- *     "newest Opus" case when the user has no saved preference.
- *  3. `getDefaultModel(backend)` — static fallback (zero-config path).
+ *  2. (Claude) newest dynamic model that is ALSO in the hand-verified
+ *     static `CLAUDE_MODELS` list. The dynamic list is sourced from the
+ *     API-key `/v1/models` surface, which can include bleeding-edge models
+ *     the user's SUBSCRIPTION can't actually run (e.g. fable-5 → 404 on the
+ *     first real turn, stranding a fresh session). Anchoring to the static
+ *     allow-list keeps the no-preference default on a known-good model.
+ *     (Codex) `dynamic[0].value` — its list is a local cache, not subject to
+ *     the key/subscription split, so the newest entry stays authoritative.
+ *  3. `getDefaultModel(backend)` — static fallback (zero-config path, and
+ *     the Claude case where NO dynamic model intersects the static list).
  *
  * NOTE on signature discipline (Fowler R3): `getDefaultModel` is NOT
  * widened — its job is "the static default for this backend". The new
@@ -198,6 +204,15 @@ export function pickSessionDefaultModel(
     return stickyPreference;
   }
   if (dynamic !== undefined && dynamic.length > 0) {
+    // Claude: the API-key /v1/models list can offer models the OAuth
+    // subscription can't run. Anchor to the newest entry that is also in the
+    // hand-verified static list; fall back to the static default rather than
+    // a guaranteed-unknown dynamic[0]. Codex's dynamic[0] stays authoritative.
+    if (backend !== "codex") {
+      const known = new Set(CLAUDE_MODELS.map((m) => m.value));
+      const safe = dynamic.find((m) => known.has(m.value));
+      return safe ? safe.value : getDefaultModel(backend);
+    }
     return dynamic[0]!.value;
   }
   return getDefaultModel(backend);
