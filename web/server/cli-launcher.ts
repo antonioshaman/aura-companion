@@ -1986,8 +1986,34 @@ export class CliLauncher {
       this.codexWsProxies.delete(sessionId);
     }
 
+    const session = this.sessions.get(sessionId);
     const proc = this.processes.get(sessionId);
-    if (!proc) return !!proxy;
+    if (!proc) {
+      // No in-process handle. A session that survived a server restart
+      // (systemd KillMode=process) keeps its CLI subprocess alive under
+      // `info.pid` (re-parented to PPID=1) but was never spawned by THIS
+      // bun instance, so `this.processes` is empty. Without this branch,
+      // archive/delete would SIGTERM nothing and the CLI would leak forever
+      // (`archived:true` + live process — neither orphan-reaper nor
+      // restart-reconcile reclaims it). Mirror the relaunch path: EC-45
+      // identity-verify the inherited PID, then SIGTERM→grace→SIGKILL.
+      if (session?.pid && this.shouldSignalPreviousInstancePid(session)) {
+        const pid = session.pid;
+        try { process.kill(pid, "SIGTERM"); } catch {}
+        const exited = await this.waitForPidExit(pid, 5_000);
+        if (!exited) {
+          console.log(`[cli-launcher] Force-killing restart-survived session ${sessionId} (pid ${pid})`);
+          try { process.kill(pid, "SIGKILL"); } catch {}
+        }
+        session.state = "exited";
+        session.exitCode = -1;
+        this.releaseCodexWsPort(session);
+        session.pid = undefined;
+        this.persistState();
+        return true;
+      }
+      return !!proxy;
+    }
 
     proc.kill("SIGTERM");
 
@@ -2002,7 +2028,6 @@ export class CliLauncher {
       proc.kill("SIGKILL");
     }
 
-    const session = this.sessions.get(sessionId);
     if (session) {
       session.state = "exited";
       session.exitCode = -1;
@@ -2011,6 +2036,29 @@ export class CliLauncher {
     this.processes.delete(sessionId);
     this.persistState();
     return true;
+  }
+
+  /**
+   * Poll `process.kill(pid, 0)` until the process is gone or `timeoutMs`
+   * elapses. Used to enforce a SIGTERM→grace→SIGKILL discipline against an
+   * inherited PID for which we hold no `Bun.Subprocess.exited` promise.
+   */
+  private async waitForPidExit(pid: number, timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      try {
+        process.kill(pid, 0);
+      } catch {
+        return true; // ESRCH — process is gone
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    try {
+      process.kill(pid, 0);
+      return false;
+    } catch {
+      return true;
+    }
   }
 
   /**

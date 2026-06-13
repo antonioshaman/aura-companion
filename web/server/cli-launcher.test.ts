@@ -810,6 +810,162 @@ describe("kill", () => {
   });
 });
 
+// ─── kill: restart-survived processes ─────────────────────────────────────────
+//
+// A session that outlives a server restart (systemd KillMode=process) keeps its
+// CLI child alive under `info.pid` (re-parented to PPID=1) but has NO
+// `Bun.Subprocess` handle in `this.processes` — this bun instance never spawned
+// it. Before the fix, kill() early-returned on the missing handle and the
+// process leaked forever (`archived:true` + alive; neither orphan-reaper nor
+// restart-reconcile reclaims an archived session). These assert kill() now
+// signals the inherited PID, gated by the same EC-45 identity check the
+// relaunch path uses (skip-on-mismatch favours a reclaimable leak over a
+// collateral kill of a PID-reuse victim).
+describe("kill: restart-survived processes", () => {
+  afterEach(async () => {
+    const procIdentity = await import("./process-identity.js");
+    procIdentity.__resetProcReaderForTests();
+  });
+
+  it("kills a restart-survived Claude session by its inherited PID when identity verifies", async () => {
+    store.saveLauncher([
+      {
+        sessionId: "survived-1",
+        pid: 77777,
+        state: "connected" as const,
+        cwd: "/tmp/project",
+        createdAt: Date.now(),
+        cliSessionId: "cli-s1",
+      },
+    ]);
+    const procIdentity = await import("./process-identity.js");
+    procIdentity.setProcReaderForTests({
+      platform: () => "linux",
+      killCheck: () => true,
+      readCmdline: () =>
+        ["claude", "--sdk-url", "ws://localhost:3456/ws/cli/survived-1"].join("\0") + "\0",
+    });
+
+    const newLauncher = new CliLauncher(3456);
+    newLauncher.setStore(store);
+    expect(newLauncher.restoreFromDisk()).toBe(1);
+    // The restored session carries its inherited PID but no in-process handle.
+    expect(newLauncher.getSession("survived-1")?.pid).toBe(77777);
+
+    // SIGTERM goes to the inherited PID; the liveness poll then sees it gone.
+    const origKill = process.kill;
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(((
+      pid: number,
+      signal?: string | number,
+    ) => {
+      if (signal === 0) throw new Error("ESRCH"); // already gone after SIGTERM
+      if (signal === "SIGTERM") return true;
+      return origKill.call(process, pid, signal as any);
+    }) as any);
+
+    const result = await newLauncher.kill("survived-1");
+    expect(result).toBe(true);
+    expect(killSpy).toHaveBeenCalledWith(77777, "SIGTERM");
+
+    const session = newLauncher.getSession("survived-1");
+    expect(session?.state).toBe("exited");
+    // PID cleared so a later boot-probe can't false-positive on it.
+    expect(session?.pid).toBeUndefined();
+
+    killSpy.mockRestore();
+  });
+
+  it("declines to signal a restart-survived PID when identity mismatches (leak-safe over wrong-kill)", async () => {
+    store.saveLauncher([
+      {
+        sessionId: "survived-2",
+        pid: 88888,
+        state: "connected" as const,
+        cwd: "/tmp/project",
+        createdAt: Date.now(),
+        cliSessionId: "cli-s2",
+      },
+    ]);
+    const procIdentity = await import("./process-identity.js");
+    // Boot probe sees a matching argv → session restores with its PID.
+    procIdentity.setProcReaderForTests({
+      platform: () => "linux",
+      killCheck: () => true,
+      readCmdline: () =>
+        ["claude", "--sdk-url", "ws://localhost:3456/ws/cli/survived-2"].join("\0") + "\0",
+    });
+    const newLauncher = new CliLauncher(3456);
+    newLauncher.setStore(store);
+    expect(newLauncher.restoreFromDisk()).toBe(1);
+
+    // By kill time the kernel has handed PID 88888 to an unrelated process
+    // (argv no longer carries our sessionId) → verdict mismatch → SKIP signal.
+    procIdentity.setProcReaderForTests({
+      platform: () => "linux",
+      killCheck: () => true,
+      readCmdline: () => ["some-unrelated-process"].join("\0") + "\0",
+    });
+
+    const origKill = process.kill;
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(((
+      pid: number,
+      signal?: string | number,
+    ) => {
+      if (signal === 0) return true;
+      return origKill.call(process, pid, signal as any);
+    }) as any);
+
+    const result = await newLauncher.kill("survived-2");
+    // No proxy and no signal sent → false (nothing was killed).
+    expect(result).toBe(false);
+    // Critically: the reused PID was never SIGTERM'd.
+    expect(killSpy).not.toHaveBeenCalledWith(88888, "SIGTERM");
+
+    killSpy.mockRestore();
+  });
+
+  it("force-signals a restart-survived Codex session's inherited PID (best-effort, no argv factor)", async () => {
+    store.saveLauncher([
+      {
+        sessionId: "survived-codex",
+        pid: 99001,
+        state: "connected" as const,
+        cwd: "/tmp/project",
+        createdAt: Date.now(),
+        cliSessionId: "cli-cx",
+        backendType: "codex" as const,
+      },
+    ]);
+    const newLauncher = new CliLauncher(3456);
+    newLauncher.setStore(store);
+
+    const origKill = process.kill;
+    let sigtermSent = false;
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(((
+      pid: number,
+      signal?: string | number,
+    ) => {
+      if (signal === 0) {
+        // Alive during the boot liveness probe; gone once SIGTERM landed.
+        if (sigtermSent) throw new Error("ESRCH");
+        return true;
+      }
+      if (signal === "SIGTERM") { sigtermSent = true; return true; }
+      return origKill.call(process, pid, signal as any);
+    }) as any);
+
+    expect(newLauncher.restoreFromDisk()).toBe(1);
+
+    const result = await newLauncher.kill("survived-codex");
+    expect(result).toBe(true);
+    // Codex has no argv identity factor → best-effort SIGTERM to the PID.
+    expect(killSpy).toHaveBeenCalledWith(99001, "SIGTERM");
+    expect(newLauncher.getSession("survived-codex")?.state).toBe("exited");
+
+    killSpy.mockRestore();
+  });
+});
+
 // ─── relaunch ────────────────────────────────────────────────────────────────
 
 describe("relaunch", () => {
