@@ -310,10 +310,41 @@ describe("pickSessionDefaultModel", () => {
     expect(pickSessionDefaultModel("codex")).toBe(CODEX_MODELS[0].value);
   });
 
-  it("returns dynamic[0].value when a dynamic list is provided and sticky is empty", () => {
+  it("returns the newest known-good dynamic model when sticky is empty (here = dynamic[0])", () => {
+    // dynamicClaude[0] (opus-4-8) is in the static allow-list, so the
+    // known-good anchor resolves to it — same result as the old dynamic[0].
     expect(pickSessionDefaultModel("claude", dynamicClaude)).toBe(
       "claude-opus-4-8",
     );
+  });
+
+  // fable-5 regression: the dynamic list (sourced from the API-key /v1/models
+  // surface) can LEAD with a model the OAuth subscription can't actually run.
+  // The Claude default must skip it and land on the newest entry that IS in the
+  // hand-verified static list — otherwise a fresh session 404s on its first turn.
+  it("Claude skips a bleeding-edge dynamic[0] that is absent from the static list", () => {
+    const withFable = [
+      { value: "claude-fable-5", label: "Fable 5", icon: "" },
+      { value: "claude-opus-4-8", label: "Opus 4.8", icon: "" },
+      { value: "claude-sonnet-4-6", label: "Sonnet 4.6", icon: "" },
+    ];
+    expect(pickSessionDefaultModel("claude", withFable)).toBe("claude-opus-4-8");
+  });
+
+  it("Claude falls back to the static default when NO dynamic entry is known-good", () => {
+    const allUnknown = [
+      { value: "claude-fable-5", label: "Fable 5", icon: "" },
+      { value: "claude-myth-9", label: "Myth 9", icon: "" },
+    ];
+    expect(pickSessionDefaultModel("claude", allUnknown)).toBe(CLAUDE_MODELS[0].value);
+  });
+
+  it("Codex keeps dynamic[0] even when absent from the static list (no key/subscription split)", () => {
+    const codexDynamic = [
+      { value: "gpt-6-codex-preview", label: "GPT-6 Codex", icon: "" },
+      { value: "gpt-5.3-codex", label: "GPT-5.3 Codex", icon: "" },
+    ];
+    expect(pickSessionDefaultModel("codex", codexDynamic)).toBe("gpt-6-codex-preview");
   });
 
   it("returns the sticky preference even when it IS in the dynamic list (Frontend R1)", () => {

@@ -1004,9 +1004,18 @@ describe("handleMessage: result", () => {
     expect((state.messages.get("s1") ?? []).some((m) => m.role === "system")).toBe(false);
   });
 
-  it("does not revert on a 404 when there is no pending Claude switch", () => {
+  // Fix B: no pending switch means no model SWITCH to revert — but the session
+  // may have been LAUNCHED on an unusable model (fresh session defaulted to or
+  // picked a subscription-unavailable model). Surface a clear informational
+  // message (no set_model re-issue — there is nowhere to revert to) so the
+  // session is not silently stranded, 404-ing on every send.
+  it("surfaces an unavailable-model message (no revert) on a model 404 with no pending switch", () => {
+    useStore.setState({
+      sdkSessions: [{ sessionId: "s1", backendType: "claude", cwd: "/test", state: "running", createdAt: Date.now() }],
+    });
     wsModule.connectSession("s1");
     fireMessage({ type: "session_init", session: makeSession("s1") });
+    useStore.getState().updateSession("s1", { model: "claude-fable-5" });
     lastWs.send.mockClear();
 
     fireMessage({
@@ -1028,12 +1037,88 @@ describe("handleMessage: result", () => {
       },
     });
 
-    // No pending switch → no set_model re-issue, no synthetic revert message.
+    // No previous model → NO set_model re-issue (nothing to revert to).
     const setModelSends = lastWs.send.mock.calls
       .map((c) => JSON.parse(c[0] as string))
       .filter((m) => m.type === "set_model");
     expect(setModelSends).toEqual([]);
-    expect((useStore.getState().messages.get("s1") ?? []).some((m) => m.role === "system")).toBe(false);
+    // But an informational system message names the launched model.
+    const msgs = useStore.getState().messages.get("s1") ?? [];
+    expect(msgs.some((m) => m.role === "system" && m.content.includes("claude-fable-5"))).toBe(true);
+  });
+
+  // Guard: a 404 that is NOT a model-availability error (no "model" in the
+  // result text) must not trigger the unavailable-model message — that would
+  // misdirect the user on unrelated upstream 404s.
+  it("does not surface the unavailable-model message on a non-model 404", () => {
+    useStore.setState({
+      sdkSessions: [{ sessionId: "s1", backendType: "claude", cwd: "/test", state: "running", createdAt: Date.now() }],
+    });
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    lastWs.send.mockClear();
+
+    fireMessage({
+      type: "result",
+      data: {
+        type: "result",
+        subtype: "success",
+        is_error: true,
+        api_error_status: 404,
+        result: "Not found: the requested resource does not exist.",
+        duration_ms: 100,
+        duration_api_ms: 50,
+        num_turns: 1,
+        total_cost_usd: 0.01,
+        stop_reason: "stop_sequence",
+        usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        uuid: "u6",
+        session_id: "s1",
+      },
+    });
+
+    expect(
+      (useStore.getState().messages.get("s1") ?? []).some(
+        (m) => m.role === "system" && m.content.includes("unavailable"),
+      ),
+    ).toBe(false);
+  });
+
+  // Guard: Codex relaunches on model switch and carries a different result
+  // shape — the Claude-only unavailable-model message must not fire for it.
+  it("does not surface the unavailable-model message for a Codex session", () => {
+    useStore.setState({
+      sdkSessions: [{ sessionId: "s1", backendType: "codex", cwd: "/test", state: "running", createdAt: Date.now() }],
+    });
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    useStore.getState().updateSession("s1", { model: "gpt-fictional" });
+    lastWs.send.mockClear();
+
+    fireMessage({
+      type: "result",
+      data: {
+        type: "result",
+        subtype: "success",
+        is_error: true,
+        api_error_status: 404,
+        result: "There's an issue with the selected model (gpt-fictional).",
+        duration_ms: 100,
+        duration_api_ms: 50,
+        num_turns: 1,
+        total_cost_usd: 0.01,
+        stop_reason: "stop_sequence",
+        usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        uuid: "u7",
+        session_id: "s1",
+      },
+    });
+
+    expect(
+      (useStore.getState().messages.get("s1") ?? []).some(
+        (m) => m.role === "system" && m.content.includes("unavailable"),
+      ),
+    ).toBe(false);
   });
 });
 
