@@ -145,8 +145,14 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
       // Send set_model to CLI via WebSocket
       sendToSession(sessionId, { type: "set_model", model });
 
-      // Optimistic update: update sdkSession.model in Zustand store
-      const { sdkSessions, setSdkSessions } = useStore.getState();
+      // Optimistic update. The Claude CLI does not ack `set_model`, so the
+      // trigger label (which reads `runtimeSession?.model ?? sdkSession?.model`)
+      // would otherwise stay stale until the next `session_init`/`session_update`
+      // — i.e. only after the user sends a message. Update BOTH the runtime
+      // session (the prioritised source for the displayed label) and the
+      // sdkSession so the selection reflects immediately.
+      const { sdkSessions, setSdkSessions, updateSession } = useStore.getState();
+      updateSession(sessionId, { model });
       setSdkSessions(
         sdkSessions.map((sdk) =>
           sdk.sessionId === sessionId ? { ...sdk, model } : sdk,

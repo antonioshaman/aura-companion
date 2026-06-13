@@ -52,8 +52,9 @@ function resetStore(overrides: Partial<MockStoreState> = {}) {
   };
 }
 
-// Track setSdkSessions calls for optimistic update verification
+// Track setSdkSessions / updateSession calls for optimistic update verification
 const mockSetSdkSessions = vi.fn();
+const mockUpdateSession = vi.fn();
 
 vi.mock("../store.js", () => ({
   useStore: Object.assign(
@@ -62,6 +63,7 @@ vi.mock("../store.js", () => ({
       getState: () => ({
         ...storeState,
         setSdkSessions: mockSetSdkSessions,
+        updateSession: mockUpdateSession,
         setPendingCodexModelSwitch: vi.fn(),
         clearPendingCodexModelSwitch: vi.fn(),
       }),
@@ -130,6 +132,18 @@ describe("ModelSwitcher", () => {
     expect(mockSetSdkSessions).toHaveBeenCalledOnce();
     const updatedSessions = mockSetSdkSessions.mock.calls[0][0];
     expect(updatedSessions[0].model).toBe("claude-sonnet-4-6");
+  });
+
+  // Regression: the trigger label reads `runtimeSession?.model` first, so an
+  // optimistic write to ONLY sdkSession (the prior behaviour) stayed invisible
+  // until the next session_init/update — i.e. the selection appeared unchanged
+  // until the user sent a message. The fix also updates the runtime session.
+  it("optimistically updates the runtime session model so the label changes immediately", () => {
+    render(<ModelSwitcher sessionId="s1" />);
+    fireEvent.click(screen.getByLabelText("Switch model"));
+    fireEvent.click(screen.getByRole("option", { name: /Sonnet/ }));
+
+    expect(mockUpdateSession).toHaveBeenCalledWith("s1", { model: "claude-sonnet-4-6" });
   });
 
   it("does not send when selecting the already-active model", () => {
