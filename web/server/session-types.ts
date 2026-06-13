@@ -137,6 +137,13 @@ export interface CLIResultMessage {
   type: "result";
   subtype: "success" | "error_during_execution" | "error_max_turns" | "error_max_budget_usd" | "error_max_structured_output_retries";
   is_error: boolean;
+  /**
+   * Upstream HTTP status when the turn failed at the API layer. `404` is the
+   * model-unavailable signal: the CLI accepts `set_model` without validating,
+   * so an unusable model surfaces here on the first real turn (alongside an
+   * `assistant` frame whose `model` is `<synthetic>`).
+   */
+  api_error_status?: number;
   result?: string;
   errors?: string[];
   duration_ms: number;

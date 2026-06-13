@@ -914,6 +914,127 @@ describe("handleMessage: result", () => {
     expect(msgs[0].role).toBe("system");
     expect(msgs[0].content).toBe("Error: Something went wrong, Another error");
   });
+
+  // Claude `set_model` is optimistic + unvalidated by the CLI, so an unusable
+  // model only fails on the next turn via `api_error_status: 404`. When a
+  // pending Claude switch is present, that 404 must revert the optimistic
+  // label, re-issue set_model back to the last working model, and explain
+  // the revert in a system message — instead of stranding the session on a
+  // model that errors on every subsequent send.
+  it("reverts the optimistic model + re-issues set_model when the CLI 404s the switched model", () => {
+    useStore.setState({
+      sdkSessions: [{ sessionId: "s1", backendType: "claude", cwd: "/test", state: "running", createdAt: Date.now() }],
+    });
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+
+    // Simulate ModelSwitcher's optimistic switch to an unusable model.
+    useStore.getState().setPendingClaudeModelSwitch("s1", "claude-fable-5", "claude-opus-4-8");
+    useStore.getState().updateSession("s1", { model: "claude-fable-5" });
+    lastWs.send.mockClear();
+
+    fireMessage({
+      type: "result",
+      data: {
+        type: "result",
+        subtype: "success",
+        is_error: true,
+        api_error_status: 404,
+        result: "There's an issue with the selected model (claude-fable-5). It may not exist or you may not have access to it.",
+        duration_ms: 1000,
+        duration_api_ms: 800,
+        num_turns: 1,
+        total_cost_usd: 0.01,
+        stop_reason: "stop_sequence",
+        usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        uuid: "u3",
+        session_id: "s1",
+      },
+    });
+
+    const state = useStore.getState();
+    // Optimistic label reverted on BOTH the runtime session and the sdkSession.
+    expect(state.sessions.get("s1")!.model).toBe("claude-opus-4-8");
+    expect(state.sdkSessions.find((s) => s.sessionId === "s1")!.model).toBe("claude-opus-4-8");
+    // Pending marker cleared so a later unrelated 404 cannot trigger a stale revert.
+    expect(state.pendingClaudeModelSwitches.has("s1")).toBe(false);
+    // set_model re-issued back to the last working model.
+    const setModelSends = lastWs.send.mock.calls
+      .map((c) => JSON.parse(c[0] as string))
+      .filter((m) => m.type === "set_model");
+    // sendToSession injects a client_msg_id, so assert on the meaningful fields.
+    expect(setModelSends).toHaveLength(1);
+    expect(setModelSends[0].model).toBe("claude-opus-4-8");
+    // System message explains the revert.
+    const msgs = state.messages.get("s1")!;
+    expect(msgs.some((m) => m.role === "system" && m.content.includes("claude-fable-5") && m.content.includes("claude-opus-4-8"))).toBe(true);
+  });
+
+  it("clears a pending Claude switch without reverting when the turn succeeds", () => {
+    useStore.setState({
+      sdkSessions: [{ sessionId: "s1", backendType: "claude", cwd: "/test", state: "running", createdAt: Date.now() }],
+    });
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+
+    useStore.getState().setPendingClaudeModelSwitch("s1", "claude-sonnet-4-6", "claude-opus-4-8");
+    useStore.getState().updateSession("s1", { model: "claude-sonnet-4-6" });
+
+    fireMessage({
+      type: "result",
+      data: {
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        duration_ms: 1000,
+        duration_api_ms: 800,
+        num_turns: 1,
+        total_cost_usd: 0.05,
+        stop_reason: "end_turn",
+        usage: { input_tokens: 100, output_tokens: 50, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        uuid: "u4",
+        session_id: "s1",
+      },
+    });
+
+    const state = useStore.getState();
+    // Switch settled — model stays, marker cleared, no revert message.
+    expect(state.sessions.get("s1")!.model).toBe("claude-sonnet-4-6");
+    expect(state.pendingClaudeModelSwitches.has("s1")).toBe(false);
+    expect((state.messages.get("s1") ?? []).some((m) => m.role === "system")).toBe(false);
+  });
+
+  it("does not revert on a 404 when there is no pending Claude switch", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    lastWs.send.mockClear();
+
+    fireMessage({
+      type: "result",
+      data: {
+        type: "result",
+        subtype: "success",
+        is_error: true,
+        api_error_status: 404,
+        result: "There's an issue with the selected model (claude-fable-5).",
+        duration_ms: 100,
+        duration_api_ms: 50,
+        num_turns: 1,
+        total_cost_usd: 0.01,
+        stop_reason: "stop_sequence",
+        usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        uuid: "u5",
+        session_id: "s1",
+      },
+    });
+
+    // No pending switch → no set_model re-issue, no synthetic revert message.
+    const setModelSends = lastWs.send.mock.calls
+      .map((c) => JSON.parse(c[0] as string))
+      .filter((m) => m.type === "set_model");
+    expect(setModelSends).toEqual([]);
+    expect((useStore.getState().messages.get("s1") ?? []).some((m) => m.role === "system")).toBe(false);
+  });
 });
 
 // ===========================================================================

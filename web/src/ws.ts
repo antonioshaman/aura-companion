@@ -803,6 +803,41 @@ function handleParsedMessage(
       processedToolUseIds.delete(sessionId);
 
       const r = data.data;
+
+      // Resolve any in-flight Claude in-session model switch. ModelSwitcher
+      // writes the new model optimistically, but the Claude CLI accepts
+      // `set_model` WITHOUT validating access — an unusable model only fails
+      // here, on the first real turn, as a 404. When that happens, revert the
+      // optimistic label and re-issue `set_model` back to the last working
+      // model so the session stays usable; otherwise the turn settled the
+      // switch, so just drop the marker.
+      const pendingClaudeSwitch = store.pendingClaudeModelSwitches.get(sessionId);
+      if (pendingClaudeSwitch) {
+        store.clearPendingClaudeModelSwitch(sessionId);
+        if (r.is_error && r.api_error_status === 404) {
+          const { requestedModel, previousModel } = pendingClaudeSwitch;
+          if (previousModel && previousModel !== requestedModel) {
+            sendToSession(sessionId, { type: "set_model", model: previousModel });
+            store.updateSession(sessionId, { model: previousModel });
+            store.setSdkSessions(
+              store.sdkSessions.map((sdk) =>
+                sdk.sessionId === sessionId ? { ...sdk, model: previousModel } : sdk,
+              ),
+            );
+          }
+          store.appendMessage(sessionId, {
+            id: nextId(),
+            role: "system",
+            content: `Model "${requestedModel}" is unavailable for this session${
+              previousModel && previousModel !== requestedModel
+                ? ` — reverted to "${previousModel}"`
+                : ""
+            }. Pick a different model from the selector.`,
+            timestamp: Date.now(),
+          });
+        }
+      }
+
       const sessionUpdates: Partial<{ total_cost_usd: number; num_turns: number; context_used_percent: number; total_lines_added: number; total_lines_removed: number }> = {
         total_cost_usd: r.total_cost_usd,
         num_turns: r.num_turns,

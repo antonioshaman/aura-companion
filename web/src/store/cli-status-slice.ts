@@ -37,18 +37,36 @@ export interface PendingCodexModelSwitch {
   requestedAt: number;
 }
 
+/**
+ * In-flight Claude in-session model switch. Unlike Codex (which relaunches),
+ * the Claude `set_model` path is optimistic + fire-and-forget: the CLI accepts
+ * the model WITHOUT validating access, so an unusable model only fails on the
+ * NEXT real turn (a `result` frame with `api_error_status: 404`). We retain
+ * `previousModel` so ws.ts can revert the optimistic label AND re-issue
+ * `set_model` back to the last working model when that 404 arrives.
+ */
+export interface PendingClaudeModelSwitch {
+  requestedModel: string;
+  previousModel: string;
+  requestedAt: number;
+}
+
 export interface CliStatusSlice {
   cliFailures: Map<string, CliFailure>;
   pendingCodexModelSwitches: Map<string, PendingCodexModelSwitch>;
+  pendingClaudeModelSwitches: Map<string, PendingClaudeModelSwitch>;
   setCliFailure: (sessionId: string, failure: CliFailure) => void;
   clearCliFailure: (sessionId: string) => void;
   setPendingCodexModelSwitch: (sessionId: string, requestedModel: string) => void;
   clearPendingCodexModelSwitch: (sessionId: string) => void;
+  setPendingClaudeModelSwitch: (sessionId: string, requestedModel: string, previousModel: string) => void;
+  clearPendingClaudeModelSwitch: (sessionId: string) => void;
 }
 
 export const createCliStatusSlice: StateCreator<AppState, [], [], CliStatusSlice> = (set) => ({
   cliFailures: new Map(),
   pendingCodexModelSwitches: new Map(),
+  pendingClaudeModelSwitches: new Map(),
 
   setCliFailure: (sessionId, failure) =>
     set((s) => {
@@ -81,5 +99,24 @@ export const createCliStatusSlice: StateCreator<AppState, [], [], CliStatusSlice
       const pendingCodexModelSwitches = new Map(s.pendingCodexModelSwitches);
       pendingCodexModelSwitches.delete(sessionId);
       return { pendingCodexModelSwitches };
+    }),
+
+  setPendingClaudeModelSwitch: (sessionId, requestedModel, previousModel) =>
+    set((s) => {
+      const pendingClaudeModelSwitches = new Map(s.pendingClaudeModelSwitches);
+      pendingClaudeModelSwitches.set(sessionId, {
+        requestedModel,
+        previousModel,
+        requestedAt: Date.now(),
+      });
+      return { pendingClaudeModelSwitches };
+    }),
+
+  clearPendingClaudeModelSwitch: (sessionId) =>
+    set((s) => {
+      if (!s.pendingClaudeModelSwitches.has(sessionId)) return {};
+      const pendingClaudeModelSwitches = new Map(s.pendingClaudeModelSwitches);
+      pendingClaudeModelSwitches.delete(sessionId);
+      return { pendingClaudeModelSwitches };
     }),
 });

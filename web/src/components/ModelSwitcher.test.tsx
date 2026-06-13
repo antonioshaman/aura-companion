@@ -55,6 +55,7 @@ function resetStore(overrides: Partial<MockStoreState> = {}) {
 // Track setSdkSessions / updateSession calls for optimistic update verification
 const mockSetSdkSessions = vi.fn();
 const mockUpdateSession = vi.fn();
+const mockSetPendingClaudeModelSwitch = vi.fn();
 
 vi.mock("../store.js", () => ({
   useStore: Object.assign(
@@ -66,6 +67,7 @@ vi.mock("../store.js", () => ({
         updateSession: mockUpdateSession,
         setPendingCodexModelSwitch: vi.fn(),
         clearPendingCodexModelSwitch: vi.fn(),
+        setPendingClaudeModelSwitch: mockSetPendingClaudeModelSwitch,
       }),
     },
   ),
@@ -144,6 +146,22 @@ describe("ModelSwitcher", () => {
     fireEvent.click(screen.getByRole("option", { name: /Sonnet/ }));
 
     expect(mockUpdateSession).toHaveBeenCalledWith("s1", { model: "claude-sonnet-4-6" });
+  });
+
+  // The pending-switch record is what lets ws.ts revert the optimistic label if
+  // the CLI later 404s the model (subscription can't use a model the dropdown,
+  // sourced from the API-key /v1/models list, still offers). It must capture the
+  // PREVIOUS model so the revert + re-issued set_model land on a known-good slug.
+  it("records the pending Claude model switch with the previous model for revert", () => {
+    render(<ModelSwitcher sessionId="s1" />);
+    fireEvent.click(screen.getByLabelText("Switch model"));
+    fireEvent.click(screen.getByRole("option", { name: /Sonnet/ }));
+
+    expect(mockSetPendingClaudeModelSwitch).toHaveBeenCalledWith(
+      "s1",
+      "claude-sonnet-4-6",
+      DEFAULT_MODEL.value,
+    );
   });
 
   it("does not send when selecting the already-active model", () => {

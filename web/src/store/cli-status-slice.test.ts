@@ -108,6 +108,24 @@ describe("CliStatusSlice — setCliFailure / clearCliFailure", () => {
     expect(useStore.getState().pendingCodexModelSwitches.has("s1")).toBe(false);
   });
 
+  // The Claude variant retains BOTH the requested AND previous model so ws.ts
+  // can revert label + re-issue set_model when the CLI later 404s the model.
+  it("tracks and clears pending Claude model-switch state (keeps previousModel)", () => {
+    useStore.getState().setPendingClaudeModelSwitch("s1", "claude-fable-5", "claude-opus-4-8");
+    const pending = useStore.getState().pendingClaudeModelSwitches.get("s1");
+    expect(pending?.requestedModel).toBe("claude-fable-5");
+    expect(pending?.previousModel).toBe("claude-opus-4-8");
+
+    useStore.getState().clearPendingClaudeModelSwitch("s1");
+    expect(useStore.getState().pendingClaudeModelSwitches.has("s1")).toBe(false);
+  });
+
+  it("clearPendingClaudeModelSwitch no-ops when absent (Map identity preserved)", () => {
+    const before = useStore.getState().pendingClaudeModelSwitches;
+    useStore.getState().clearPendingClaudeModelSwitch("unknown");
+    expect(useStore.getState().pendingClaudeModelSwitches).toBe(before);
+  });
+
   // Brief: "Clears on session archive/relaunch."
   it("removeSession (archive path) drops the cliFailure entry for the session", () => {
     useStore.getState().setCliFailure("s1", failure());
@@ -137,9 +155,11 @@ describe("CliStatusSlice — setCliFailure / clearCliFailure", () => {
       total_lines_added: 0,
       total_lines_removed: 0,
     });
+    useStore.getState().setPendingClaudeModelSwitch("s1", "claude-fable-5", "claude-opus-4-8");
     useStore.getState().removeSession("s1");
     expect(useStore.getState().cliFailures.has("s1")).toBe(false);
     expect(useStore.getState().pendingCodexModelSwitches.has("s1")).toBe(false);
+    expect(useStore.getState().pendingClaudeModelSwitches.has("s1")).toBe(false);
   });
 
   // Brief: pendingDraftForNextSession round-trip - cli-failed banner stash flow.
@@ -156,10 +176,12 @@ describe("CliStatusSlice — setCliFailure / clearCliFailure", () => {
   it("reset clears pending cli-status state", () => {
     useStore.getState().setCliFailure("s1", failure());
     useStore.getState().setPendingCodexModelSwitch("s1", "gpt-5.2-codex");
+    useStore.getState().setPendingClaudeModelSwitch("s1", "claude-fable-5", "claude-opus-4-8");
 
     useStore.getState().reset();
 
     expect(useStore.getState().cliFailures.size).toBe(0);
     expect(useStore.getState().pendingCodexModelSwitches.size).toBe(0);
+    expect(useStore.getState().pendingClaudeModelSwitches.size).toBe(0);
   });
 });

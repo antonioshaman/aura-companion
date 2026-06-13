@@ -98,6 +98,7 @@ export const useStore = create<AppState>((...args) => ({
       // CLI terminal failures — reset to empty on hard store reset.
       cliFailures: new Map(),
       pendingCodexModelSwitches: new Map(),
+      pendingClaudeModelSwitches: new Map(),
     });
   },
 }));
