@@ -11,7 +11,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { Subprocess } from "bun";
-import type { IBackendAdapter } from "./backend-adapter.js";
+import type { IBackendAdapter, ServerSyntheticSendOutcome } from "./backend-adapter.js";
 import type {
   BrowserIncomingMessage,
   BrowserOutgoingMessage,
@@ -21,9 +21,10 @@ import type {
   McpServerDetail,
   McpServerConfig,
 } from "./session-types.js";
-import type { RecorderManager } from "./recorder.js";
+import type { RecorderManager, RecordingOrigin } from "./recorder.js";
 import { reportProtocolDrift } from "./protocol-monitor.js";
 import { log } from "./logger.js";
+import { companionBus } from "./event-bus.js";
 
 // ─── Codex JSON-RPC Types ─────────────────────────────────────────────────────
 
@@ -137,13 +138,18 @@ interface CodexMcpStatusListResponse {
 
 /** Abstract transport for Codex JSON-RPC communication. */
 export interface ICodexTransport {
-  call(method: string, params?: Record<string, unknown>, timeoutMs?: number): Promise<unknown>;
+  call(
+    method: string,
+    params?: Record<string, unknown>,
+    timeoutMs?: number,
+    origin?: RecordingOrigin,
+  ): Promise<unknown>;
   notify(method: string, params?: Record<string, unknown>): Promise<void>;
   respond(id: number, result: unknown): Promise<void>;
   onNotification(handler: (method: string, params: Record<string, unknown>) => void): void;
   onRequest(handler: (method: string, id: number, params: Record<string, unknown>) => void): void;
   onRawIncoming(cb: (line: string) => void): void;
-  onRawOutgoing(cb: (data: string) => void): void;
+  onRawOutgoing(cb: (data: string, origin?: RecordingOrigin) => void): void;
   onParseError(cb: (message: string) => void): void;
   isConnected(): boolean;
 }
@@ -188,7 +194,7 @@ export class StdioTransport implements ICodexTransport {
   private notificationHandler: ((method: string, params: Record<string, unknown>) => void) | null = null;
   private requestHandler: ((method: string, id: number, params: Record<string, unknown>) => void) | null = null;
   private rawInCb: ((line: string) => void) | null = null;
-  private rawOutCb: ((data: string) => void) | null = null;
+  private rawOutCb: ((data: string, origin?: RecordingOrigin) => void) | null = null;
   private parseErrorCb: ((message: string) => void) | null = null;
   private writer: WritableStreamDefaultWriter<Uint8Array>;
   private connected = true;
@@ -337,7 +343,12 @@ export class StdioTransport implements ICodexTransport {
 
   /** Send a request and wait for the matching response.
    *  Rejects with a timeout error if no response arrives within the deadline. */
-  async call(method: string, params: Record<string, unknown> = {}, timeoutMs?: number): Promise<unknown> {
+  async call(
+    method: string,
+    params: Record<string, unknown> = {},
+    timeoutMs?: number,
+    origin?: RecordingOrigin,
+  ): Promise<unknown> {
     const id = this.nextId++;
     const effectiveTimeout = timeoutMs ?? RPC_METHOD_TIMEOUTS[method] ?? DEFAULT_RPC_TIMEOUT_MS;
     return new Promise(async (resolve, reject) => {
@@ -350,7 +361,7 @@ export class StdioTransport implements ICodexTransport {
       this.pending.set(id, { resolve, reject });
       const request = JSON.stringify({ method, id, params });
       try {
-        await this.writeRaw(request + "\n");
+        await this.writeRaw(request + "\n", origin);
       } catch (err) {
         clearTimeout(timer);
         this.pendingTimers.delete(id);
@@ -392,7 +403,7 @@ export class StdioTransport implements ICodexTransport {
   }
 
   /** Register callback for raw outgoing data (before write). */
-  onRawOutgoing(cb: (data: string) => void): void {
+  onRawOutgoing(cb: (data: string, origin?: RecordingOrigin) => void): void {
     this.rawOutCb = cb;
   }
 
@@ -401,12 +412,12 @@ export class StdioTransport implements ICodexTransport {
     this.parseErrorCb = cb;
   }
 
-  private async writeRaw(data: string): Promise<void> {
+  private async writeRaw(data: string, origin?: RecordingOrigin): Promise<void> {
     if (!this.connected) {
       throw new Error("Transport closed");
     }
     // Record raw outgoing data before writing
-    this.rawOutCb?.(data);
+    this.rawOutCb?.(data, origin);
     await this.writer.write(new TextEncoder().encode(data));
   }
 }
@@ -426,6 +437,8 @@ export class CodexAdapter implements IBackendAdapter {
   // State
   private threadId: string | null = null;
   private currentTurnId: string | null = null;
+  private observerTurnState: "idle" | "in-flight" = "idle";
+  private observerWakeTurnId: string | null = null;
   private connected = false;
   private initialized = false;
   private initFailed = false;
@@ -664,6 +677,8 @@ export class CodexAdapter implements IBackendAdapter {
 
     // Clear the current turn — it's gone after reconnect
     this.currentTurnId = null;
+    this.observerTurnState = "idle";
+    this.observerWakeTurnId = null;
     // Reset so the next turn/start re-sends collaborationMode (the server
     // sees a fresh connection and won't have the previously-set mode).
     this.lastSentCollaborationModeKind = null;
@@ -710,6 +725,8 @@ export class CodexAdapter implements IBackendAdapter {
    */
   private cleanupAndDisconnect(): void {
     this.connected = false;
+    this.observerTurnState = "idle";
+    this.observerWakeTurnId = null;
     this.overloadRetryMsg = null; // No rescue needed — session is being torn down
     if (this.overloadRetryTimer) { clearTimeout(this.overloadRetryTimer); this.overloadRetryTimer = null; }
     for (const pending of this.pendingDynamicToolCalls.values()) {
@@ -760,6 +777,8 @@ export class CodexAdapter implements IBackendAdapter {
     this.planUpdateCountByTurnId.clear();
     this.streamingText = "";
     this.streamingItemId = null;
+    this.observerTurnState = "idle";
+    this.observerWakeTurnId = null;
     this.overloadRetryMsg = null; // Full relaunch — no rescue needed
     if (this.overloadRetryTimer) { clearTimeout(this.overloadRetryTimer); this.overloadRetryTimer = null; }
     this.overloadRetryCount = 0;
@@ -780,8 +799,8 @@ export class CodexAdapter implements IBackendAdapter {
       this.transport.onRawIncoming((line) => {
         recorder.record(this.sessionId, "in", line, "cli", "codex", cwd);
       });
-      this.transport.onRawOutgoing((data) => {
-        recorder.record(this.sessionId, "out", data.trimEnd(), "cli", "codex", cwd);
+      this.transport.onRawOutgoing((data, origin) => {
+        recorder.record(this.sessionId, "out", data.trimEnd(), "cli", "codex", cwd, origin);
       });
     }
 
@@ -803,6 +822,38 @@ export class CodexAdapter implements IBackendAdapter {
   /** IBackendAdapter.send() — unified entry point for browser-originated messages. */
   send(msg: BrowserOutgoingMessage): boolean {
     return this.sendBrowserMessage(msg);
+  }
+
+  sendUserFrameFromServer(content: string): ServerSyntheticSendOutcome {
+    if (this.observerTurnState === "in-flight") {
+      return { kind: "busy" };
+    }
+    if (!this.initialized || !this.threadId || this.initInProgress || !this.transport.isConnected()) {
+      return { kind: "socket_disconnected" };
+    }
+
+    this.observerTurnState = "in-flight";
+    this.observerWakeTurnId = null;
+    const input = [{ type: "text", text: content }] satisfies Array<{ type: string; text?: string; url?: string }>;
+    void this.startTurn(input, {
+      origin: "server:council-wake",
+      onSuccess: (turnId) => {
+        this.currentTurnId = turnId;
+        this.observerWakeTurnId = turnId;
+      },
+      onFailure: () => {
+        if (this.observerTurnState === "in-flight") {
+          this.observerTurnState = "idle";
+        }
+        this.observerWakeTurnId = null;
+      },
+    }).catch((err) => {
+      companionBus.emit("observer:wake-failed", {
+        sessionId: this.sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+    return { kind: "sent" };
   }
 
   /** @deprecated Use send() instead. Kept for backward compatibility during migration. */
@@ -1173,27 +1224,11 @@ export class CodexAdapter implements IBackendAdapter {
     input.push({ type: "text", text: msg.content });
 
     try {
-      // Only send collaborationMode on mode transitions — sending it every turn
-      // in "default" mode overrides approvalPolicy and re-enables permission prompts.
-      // The server persists collaborationMode across turns, so we only need to send
-      // it when switching (e.g. auto→plan or plan→auto).
-      // approvalPolicy and sandboxPolicy are static ("never" / dangerFullAccess) so
-      // resending them each turn is idempotent and ensures consistency if the server
-      // resets state. collaborationMode is only sent on transitions (see below).
-      const turnParams: Record<string, unknown> = {
-        threadId: this.threadId,
-        input,
-        cwd: this.getExecutionCwd(),
-        approvalPolicy: this.mapApprovalPolicy(this.currentPermissionMode),
-        sandboxPolicy: this.mapSandboxPolicyObject(this.currentPermissionMode),
-      };
-      if (this.currentCollaborationModeKind !== this.lastSentCollaborationModeKind) {
-        turnParams.collaborationMode = this.mapCollaborationMode(this.currentCollaborationModeKind);
-        this.lastSentCollaborationModeKind = this.currentCollaborationModeKind;
-      }
-      const result = await this.transport.call("turn/start", turnParams) as { turn: { id: string } };
-
-      this.currentTurnId = result.turn.id;
+      await this.startTurn(input, {
+        onSuccess: (turnId) => {
+          this.currentTurnId = turnId;
+        },
+      });
       this.reconnectRetryCount = 0; // Reset on success
       this.overloadRetryCount = 0; // Reset overload budget on success
     } catch (err) {
@@ -1260,6 +1295,41 @@ export class CodexAdapter implements IBackendAdapter {
       } else {
         this.emit({ type: "error", message: `Failed to start turn: ${err}` });
       }
+    }
+  }
+
+  private buildTurnStartParams(
+    input: Array<{ type: string; text?: string; url?: string }>,
+  ): Record<string, unknown> {
+    const turnParams: Record<string, unknown> = {
+      threadId: this.threadId,
+      input,
+      cwd: this.getExecutionCwd(),
+      approvalPolicy: this.mapApprovalPolicy(this.currentPermissionMode),
+      sandboxPolicy: this.mapSandboxPolicyObject(this.currentPermissionMode),
+    };
+    if (this.currentCollaborationModeKind !== this.lastSentCollaborationModeKind) {
+      turnParams.collaborationMode = this.mapCollaborationMode(this.currentCollaborationModeKind);
+      this.lastSentCollaborationModeKind = this.currentCollaborationModeKind;
+    }
+    return turnParams;
+  }
+
+  private async startTurn(
+    input: Array<{ type: string; text?: string; url?: string }>,
+    opts?: {
+      origin?: RecordingOrigin;
+      onSuccess?: (turnId: string) => void;
+      onFailure?: () => void;
+    },
+  ): Promise<void> {
+    const turnParams = this.buildTurnStartParams(input);
+    try {
+      const result = await this.transport.call("turn/start", turnParams, undefined, opts?.origin) as { turn: { id: string } };
+      opts?.onSuccess?.(result.turn.id);
+    } catch (error) {
+      opts?.onFailure?.();
+      throw error;
     }
   }
 
@@ -2613,6 +2683,7 @@ export class CodexAdapter implements IBackendAdapter {
 
   private handleTurnCompleted(params: Record<string, unknown>): void {
     const turn = params.turn as { id: string; status: string; error?: { message: string } } | undefined;
+    const completedTurnId = typeof turn?.id === "string" ? turn.id : null;
 
     // Synthesize a CLIResultMessage-like structure
     const result: CLIResultMessage = {
@@ -2638,6 +2709,15 @@ export class CodexAdapter implements IBackendAdapter {
       this.planUpdateCountByTurnId.delete(turn.id);
     }
     this.currentTurnId = null;
+    if (
+      this.observerTurnState === "in-flight"
+      && this.observerWakeTurnId !== null
+      && completedTurnId === this.observerWakeTurnId
+    ) {
+      this.observerTurnState = "idle";
+      this.observerWakeTurnId = null;
+      companionBus.emit("observer:turn-done", { sessionId: this.sessionId });
+    }
   }
 
   private updateRateLimits(data: Record<string, unknown>): void {

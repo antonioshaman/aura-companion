@@ -448,6 +448,7 @@ export class SessionOrchestrator {
    * slice already has this pattern; this is the server-side mirror.
    */
   private councilGroupBySessionId = new Map<string, string>();
+  private councilGroupDegradedReason = new Map<string, "observer_exited" | "wake_send_failed" | "reconnect_failed">();
 
   /**
    * Long-lived coordinator instance — owns the group state machine + the
@@ -559,6 +560,37 @@ export class SessionOrchestrator {
       } catch (err) {
         log.warn("session-orchestrator", "observer turn-done drain failed", {
           event: "council.wake.drain_handler_error",
+          sessionId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+    companionBus.on("observer:wake-failed", ({ sessionId, error }) => {
+      try {
+        const groupId = this.councilGroupBySessionId.get(sessionId);
+        if (!groupId) return;
+        const meta = this.councilGroupMeta.get(groupId);
+        if (!meta || meta.observerSessionId !== sessionId) return;
+        this.councilGroupDegradedReason.set(groupId, "wake_send_failed");
+        const coordinator = this.coordinator;
+        if (coordinator) {
+          coordinator.applyEvent(groupId, { type: "half_died", role: "observer" });
+        } else {
+          companionBus.emit("group:degraded", {
+            sessionGroupId: groupId,
+            deadRole: "observer",
+            reason: "wake_send_failed",
+          });
+        }
+        log.warn("session-orchestrator", "observer wake failed asynchronously", {
+          event: "group.observer_wake_failed_async",
+          sessionGroupId: groupId,
+          observerSessionId: sessionId,
+          error,
+        });
+      } catch (err) {
+        log.warn("session-orchestrator", "observer wake-failed handler crashed", {
+          event: "group.observer_wake_failed_handler_error",
           sessionId,
           error: err instanceof Error ? err.message : String(err),
         });
@@ -1220,6 +1252,7 @@ export class SessionOrchestrator {
         },
         status: "active",
       });
+      this.councilGroupDegradedReason.delete(sessionGroupId);
       this.wsBridge.broadcastToGroup([primarySessionId, observerSessionId], {
         type: "group_created",
         ...wire,
@@ -1232,11 +1265,16 @@ export class SessionOrchestrator {
         reason,
       });
     });
-    companionBus.on("group:degraded", ({ sessionGroupId, deadRole }) => {
+    companionBus.on("group:degraded", ({ sessionGroupId, deadRole, reason }) => {
+      const degradedReason = reason ?? this.councilGroupDegradedReason.get(sessionGroupId);
+      if (degradedReason) {
+        this.councilGroupDegradedReason.set(sessionGroupId, degradedReason);
+      }
       this.wsBridge.broadcastToGroup(this.getGroupMemberIds(sessionGroupId), {
         type: "group_degraded",
         sessionGroupId,
         deadRole,
+        ...(degradedReason ? { reason: degradedReason } : {}),
       });
       // Council Mode auto-wake (Task 5): drop any queued checkpoint
       // when the group falls into `degraded`. The observer half is
@@ -1715,6 +1753,7 @@ export class SessionOrchestrator {
       this.councilGroupBySessionId.delete(meta.observerSessionId);
     }
     this.councilGroupMeta.delete(sessionGroupId);
+    this.councilGroupDegradedReason.delete(sessionGroupId);
   }
 
   /**
@@ -3107,6 +3146,7 @@ export class SessionOrchestrator {
         primary: g.primary,
         observer: g.observer,
         status: g.status,
+        degradedReason: this.councilGroupDegradedReason.get(g.sessionGroupId),
       }));
     }
     return out;

@@ -139,13 +139,14 @@ export function HomePage() {
   const [councilPairing, setCouncilPairing] = useState<"claude+claude" | "claude+codex">(
     () => (localStorage.getItem("cc-council-pairing") as "claude+claude" | "claude+codex") || "claude+claude",
   );
-  // codexAvailable: backend pre-flight is wired in a later Phase F commit
-  // (PLAN T11). For now, mirror the backends listing — Codex is available
-  // when listed as a working backend by the server.
-  const codexAvailable = useMemo(
-    () => backends.some((b) => b.id === "codex" && b.available),
+  const codexBackend = useMemo(
+    () => backends.find((b) => b.id === "codex"),
     [backends],
   );
+  const codexAvailable = codexBackend?.available ?? false;
+  const codexObserverReviewAvailable = codexBackend?.councilObserverReviewAvailable ?? false;
+  const codexObserverReviewReason = codexBackend?.councilObserverReviewReason
+    ?? "Codex observer review capability is unavailable on this server.";
 
   const MODELS = backend === "codex"
     ? (dynamicModelsForBackend ?? [])
@@ -1355,7 +1356,8 @@ export function HomePage() {
                   localStorage.setItem("cc-council-pairing", p);
                 }}
                 codexAvailable={codexAvailable}
-                codexUnavailableReason="Codex CLI not detected — install or sign in."
+                codexUnavailableReason={codexObserverReviewReason}
+                codexObserverReviewAvailable={codexObserverReviewAvailable}
               />
             </div>
           )}

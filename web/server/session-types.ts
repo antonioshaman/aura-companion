@@ -441,6 +441,7 @@ export type BrowserIncomingMessageBase =
      * route through `buildBrowserGroupRecord`.
      */
     status?: "pairing" | "active" | "degraded" | "archived" | "reconnecting";
+    degradedReason?: "observer_exited" | "wake_send_failed" | "reconnect_failed";
     /**
      * Task 9: server-published auto-wake-to-review timeout in
      * milliseconds. Frontend uses this to bound the `reviewing` panel
@@ -607,6 +608,8 @@ export interface BrowserGroupRecord {
   status: "pairing" | "active" | "degraded" | "archived" | "reconnecting";
   /** Optional: which half died (populated only when status === "degraded"). */
   deadRole?: SessionGroupRole;
+  /** Optional: why the group degraded (populated only when status === "degraded"). */
+  degradedReason?: "observer_exited" | "wake_send_failed" | "reconnect_failed";
   /** Task 9 — server-published wake-to-review bound; see `group_created`. */
   wakeTimeoutMs?: number;
 }

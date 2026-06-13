@@ -1114,7 +1114,13 @@ describe("git API", () => {
 // ===========================================================================
 describe("backends API", () => {
   it("getBackends sends GET to /api/backends", async () => {
-    const backends = [{ id: "claude", name: "Claude Code", available: true }];
+    const backends = [{
+      id: "claude",
+      name: "Claude Code",
+      available: true,
+      councilObserverReviewAvailable: undefined,
+      councilObserverReviewReason: undefined,
+    }];
     mockFetch.mockResolvedValueOnce(mockResponse(backends));
 
     const result = await api.getBackends();

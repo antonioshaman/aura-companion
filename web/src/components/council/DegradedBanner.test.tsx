@@ -22,6 +22,11 @@ describe("DegradedBanner", () => {
     expect(screen.getByRole("button", { name: /Respawn orchestrator/i })).toBeInTheDocument();
   });
 
+  it("renders wake-send-failed copy when the server reports observer wake failure", () => {
+    render(<DegradedBanner deadRole="observer" reason="wake_send_failed" onRespawn={() => {}} />);
+    expect(screen.getByText(/could not wake it for review/i)).toBeInTheDocument();
+  });
+
   // PLAN T15.4: warning palette + status role + polite live region —
   // distinct from BlockerBanner which is alert + assertive.
   it("uses role=status with aria-live=polite (channel-separated from blocker)", () => {

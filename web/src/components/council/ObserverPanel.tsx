@@ -388,7 +388,7 @@ export function ObserverPanel({
 
       {/* Degraded banner — lives in the header, NOT in the composer slot. */}
       {state.name === "degraded" && onRespawnHalf && (
-        <DegradedBanner deadRole={state.deadRole} onRespawn={handleRespawn} />
+        <DegradedBanner deadRole={state.deadRole} reason={state.reason} onRespawn={handleRespawn} />
       )}
 
       {/* Council Review 2026-05-13-0150 Friedman #10: stalled state next-

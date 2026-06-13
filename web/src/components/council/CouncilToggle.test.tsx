@@ -149,6 +149,24 @@ describe("CouncilToggle", () => {
     expect(codexOpt).toHaveAttribute("title", "Codex CLI not detected.");
   });
 
+  it("disables claude+codex when Codex is installed but observer review capability is unavailable", () => {
+    render(
+      <CouncilToggle
+        enabled={true}
+        pairing="claude+claude"
+        onEnabledChange={() => {}}
+        onPairingChange={() => {}}
+        codexAvailable={true}
+        codexObserverReviewAvailable={false}
+        codexUnavailableReason="Codex observer review is unavailable on this build."
+      />,
+    );
+    fireEvent.click(screen.getByTestId("pairing-trigger"));
+    const codexOpt = screen.getByTestId("pairing-option-claude+codex");
+    expect(codexOpt).toHaveAttribute("aria-disabled", "true");
+    expect(codexOpt).toHaveAttribute("title", "Codex observer review is unavailable on this build.");
+  });
+
   it("does not call onPairingChange when the disabled claude+codex option is clicked", () => {
     const onPairingChange = vi.fn();
     render(

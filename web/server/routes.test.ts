@@ -40,8 +40,16 @@ vi.mock("node:child_process", () => ({
 }));
 
 const mockResolveBinary = vi.hoisted(() => vi.fn((_name: string) => null as string | null));
+const mockProbePairingCapability = vi.hoisted(() => vi.fn(async (): Promise<any> => ({
+  primary: { binary: "claude", available: false, reason: "Claude unavailable" },
+  observer: { binary: "codex", available: false, reason: "Codex unavailable" },
+  supported: false,
+})));
 vi.mock("./path-resolver.js", () => ({
   resolveBinary: mockResolveBinary,
+}));
+vi.mock("./preflight-probe.js", () => ({
+  probePairingCapability: mockProbePairingCapability,
 }));
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -3703,6 +3711,11 @@ describe("GET /api/backends", () => {
     mockResolveBinary
       .mockReturnValueOnce("/usr/bin/claude")
       .mockReturnValueOnce("/usr/bin/codex");
+    mockProbePairingCapability.mockResolvedValueOnce({
+      primary: { binary: "claude", available: true, version: "1.0.0" },
+      observer: { binary: "codex", available: true, version: "1.0.0" },
+      supported: true,
+    });
 
     const res = await app.request("/api/backends", { method: "GET" });
 
@@ -3710,7 +3723,12 @@ describe("GET /api/backends", () => {
     const json = await res.json();
     expect(json).toEqual([
       { id: "claude", name: "Claude Code", available: true },
-      { id: "codex", name: "Codex", available: true },
+      {
+        id: "codex",
+        name: "Codex",
+        available: true,
+        councilObserverReviewAvailable: true,
+      },
     ]);
   });
 
@@ -3719,6 +3737,11 @@ describe("GET /api/backends", () => {
     mockResolveBinary
       .mockReturnValueOnce(null)
       .mockReturnValueOnce(null);
+    mockProbePairingCapability.mockResolvedValueOnce({
+      primary: { binary: "claude", available: false, reason: "Claude unavailable" },
+      observer: { binary: "codex", available: false, reason: "Codex CLI not detected — install or sign in." },
+      supported: false,
+    });
 
     const res = await app.request("/api/backends", { method: "GET" });
 
@@ -3726,7 +3749,13 @@ describe("GET /api/backends", () => {
     const json = await res.json();
     expect(json).toEqual([
       { id: "claude", name: "Claude Code", available: false },
-      { id: "codex", name: "Codex", available: false },
+      {
+        id: "codex",
+        name: "Codex",
+        available: false,
+        councilObserverReviewAvailable: false,
+        councilObserverReviewReason: "Codex CLI not detected — install or sign in.",
+      },
     ]);
   });
 
@@ -3734,6 +3763,11 @@ describe("GET /api/backends", () => {
     mockResolveBinary
       .mockReturnValueOnce("/usr/bin/claude") // claude found
       .mockReturnValueOnce(null); // codex not found
+    mockProbePairingCapability.mockResolvedValueOnce({
+      primary: { binary: "claude", available: true, version: "1.0.0" },
+      observer: { binary: "codex", available: false, reason: "Codex CLI not detected — install or sign in." },
+      supported: false,
+    });
 
     const res = await app.request("/api/backends", { method: "GET" });
 
@@ -3741,6 +3775,8 @@ describe("GET /api/backends", () => {
     const json = await res.json();
     expect(json[0].available).toBe(true);
     expect(json[1].available).toBe(false);
+    expect(json[1].councilObserverReviewAvailable).toBe(false);
+    expect(json[1].councilObserverReviewReason).toBe("Codex CLI not detected — install or sign in.");
   });
 });
 

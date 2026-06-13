@@ -34,6 +34,8 @@ export interface CouncilToggleProps {
    * tooltip. Default `true` for tests / Playground.
    */
   codexAvailable?: boolean;
+  /** Whether the current build/server can run Codex as a real council observer. */
+  codexObserverReviewAvailable?: boolean;
   /** Optional human-readable reason when Codex is unavailable. Surfaced in tooltip + subcopy. */
   codexUnavailableReason?: string;
 }
@@ -140,11 +142,13 @@ export function CouncilToggle({
   onEnabledChange,
   onPairingChange,
   codexAvailable = true,
+  codexObserverReviewAvailable = codexAvailable,
   codexUnavailableReason = "Codex CLI not detected — install or sign in.",
 }: CouncilToggleProps) {
   const [open, setOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const mixedPairingAvailable = codexAvailable && codexObserverReviewAvailable;
   // a11y council review #10 (P2#10): roving-focus index for APG
   // `listbox` keyboard model. The currently-focused option is the one
   // SR users hear; Arrow/Home/End move it; Enter/Space activates; Escape
@@ -219,7 +223,7 @@ export function CouncilToggle({
       for (let i = 0; i < total; i++) {
         idx = (idx + delta + total) % total;
         const candidate = PAIRING_OPTIONS[idx]!;
-        const candidateAvailable = candidate.value === "claude+codex" ? codexAvailable : true;
+        const candidateAvailable = candidate.value === "claude+codex" ? mixedPairingAvailable : true;
         if (candidateAvailable) {
           setActiveIndex(idx);
           return;
@@ -242,11 +246,11 @@ export function CouncilToggle({
       event.preventDefault();
       const candidate = PAIRING_OPTIONS[activeIndex];
       if (!candidate) return;
-      const candidateAvailable = candidate.value === "claude+codex" ? codexAvailable : true;
+      const candidateAvailable = candidate.value === "claude+codex" ? mixedPairingAvailable : true;
       if (!candidateAvailable) return;
       handleSelect(candidate.value);
     }
-  }, [open, activeIndex, codexAvailable, handleSelect]);
+  }, [open, activeIndex, mixedPairingAvailable, handleSelect]);
 
   return (
     <div
@@ -352,7 +356,7 @@ export function CouncilToggle({
             className="absolute z-10 top-full left-0 right-0 mt-1 p-1 bg-cc-card border border-cc-border rounded-[10px] shadow-lg"
           >
             {PAIRING_OPTIONS.map((opt, idx) => {
-              const available = opt.value === "claude+codex" ? codexAvailable : true;
+              const available = opt.value === "claude+codex" ? mixedPairingAvailable : true;
               return (
                 <PairingDropdownItem
                   key={opt.value}

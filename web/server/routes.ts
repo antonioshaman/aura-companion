@@ -52,10 +52,34 @@ import { getClaudeSessionHistoryPage } from "./claude-session-history.js";
 import { verifyToken, getToken, regenerateToken, getAllAddresses } from "./auth-manager.js";
 import QRCode from "qrcode";
 import { VSCODE_EDITOR_CONTAINER_PORT, NOVNC_CONTAINER_PORT } from "./constants.js";
+import { probePairingCapability, type ProbeRunner } from "./preflight-probe.js";
 
 const ROUTES_DIR = dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = dirname(ROUTES_DIR);
 const VSCODE_EDITOR_HOST_PORT = Number(process.env.COMPANION_EDITOR_PORT || "13338");
+
+const runProbeCommand: ProbeRunner = async (binary, args) => {
+  const resolved = resolveBinary(binary);
+  if (!resolved) {
+    return { ok: false, stdout: "", stderr: "binary not found", exitCode: null };
+  }
+  const proc = Bun.spawn([resolved, ...args], {
+    stdout: "pipe",
+    stderr: "pipe",
+    stdin: "ignore",
+  });
+  const [stdoutBuf, stderrBuf, exitCode] = await Promise.all([
+    proc.stdout ? new Response(proc.stdout).arrayBuffer() : Promise.resolve(new ArrayBuffer(0)),
+    proc.stderr ? new Response(proc.stderr).arrayBuffer() : Promise.resolve(new ArrayBuffer(0)),
+    proc.exited,
+  ]);
+  return {
+    ok: exitCode === 0,
+    stdout: new TextDecoder().decode(stdoutBuf).trim(),
+    stderr: new TextDecoder().decode(stderrBuf).trim(),
+    exitCode,
+  };
+};
 
 function shellEscapeArg(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
@@ -1524,11 +1548,30 @@ export function createRoutes(
 
   // ─── Available backends ─────────────────────────────────────
 
-  api.get("/backends", (c) => {
-    const backends: Array<{ id: string; name: string; available: boolean }> = [];
+  api.get("/backends", async (c) => {
+    const backends: Array<{
+      id: string;
+      name: string;
+      available: boolean;
+      councilObserverReviewAvailable?: boolean;
+      councilObserverReviewReason?: string;
+    }> = [];
+    const claudeAvailable = resolveBinary("claude") !== null;
+    const codexAvailable = resolveBinary("codex") !== null;
+    const pairingCapability = await probePairingCapability("claude", "codex", runProbeCommand);
+    const codexObserverReviewAvailable = pairingCapability.supported;
+    const codexObserverReviewReason = pairingCapability.supported
+      ? undefined
+      : (pairingCapability.observer.reason ?? pairingCapability.primary.reason ?? "Mixed council pairing is unavailable.");
 
-    backends.push({ id: "claude", name: "Claude Code", available: resolveBinary("claude") !== null });
-    backends.push({ id: "codex", name: "Codex", available: resolveBinary("codex") !== null });
+    backends.push({ id: "claude", name: "Claude Code", available: claudeAvailable });
+    backends.push({
+      id: "codex",
+      name: "Codex",
+      available: codexAvailable,
+      councilObserverReviewAvailable: codexObserverReviewAvailable,
+      ...(codexObserverReviewReason ? { councilObserverReviewReason: codexObserverReviewReason } : {}),
+    });
 
     return c.json(backends);
   });

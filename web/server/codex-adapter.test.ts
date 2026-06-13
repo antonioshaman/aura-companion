@@ -3,6 +3,7 @@ import { CodexAdapter, StdioTransport } from "./codex-adapter.js";
 import type { ICodexTransport } from "./codex-adapter.js";
 import type { BrowserIncomingMessage, BrowserOutgoingMessage } from "./session-types.js";
 import { log } from "./logger.js";
+import { companionBus } from "./event-bus.js";
 
 // ─── Mock Subprocess ──────────────────────────────────────────────────────────
 
@@ -3753,6 +3754,84 @@ describe("CodexAdapter with ICodexTransport", () => {
     messages.length = 0; // clear init messages
     return { mock, adapter, messages };
   }
+
+  it("sendUserFrameFromServer starts a synthetic observer turn with council-wake provenance", async () => {
+    const { mock, adapter } = await initAdapter();
+
+    const out = adapter.sendUserFrameFromServer("wake the observer");
+    expect(out).toEqual({ kind: "sent" });
+
+    await new Promise((r) => setTimeout(r, 20));
+
+    const lastCall = (mock.transport.call as ReturnType<typeof vi.fn>).mock.calls.at(-1);
+    expect(lastCall?.[0]).toBe("turn/start");
+    expect(lastCall?.[3]).toBe("server:council-wake");
+    expect(lastCall?.[1]).toMatchObject({
+      threadId: "thr_init",
+      input: [{ type: "text", text: "wake the observer" }],
+    });
+  });
+
+  it("sendUserFrameFromServer returns busy when a prior synthetic observer wake is still in flight", async () => {
+    const { adapter } = await initAdapter();
+
+    expect(adapter.sendUserFrameFromServer("first wake")).toEqual({ kind: "sent" });
+    expect(adapter.sendUserFrameFromServer("second wake")).toEqual({ kind: "busy" });
+  });
+
+  it("emits observer:turn-done when a synthetic observer turn completes", async () => {
+    const { mock, adapter } = await initAdapter();
+    const onDone = vi.fn();
+    companionBus.on("observer:turn-done", onDone);
+
+    expect(adapter.sendUserFrameFromServer("wake")).toEqual({ kind: "sent" });
+    await new Promise((r) => setTimeout(r, 20));
+    mock.resolveCall(4, { turn: { id: "turn_obs_1" } });
+    await new Promise((r) => setTimeout(r, 20));
+
+    mock.pushNotification("turn/completed", {
+      turn: { id: "turn_obs_1", status: "completed" },
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(onDone).toHaveBeenCalledWith({ sessionId: "test-session-transport" });
+  });
+
+  it("does not emit observer:turn-done for a different completed turn id", async () => {
+    const { mock, adapter } = await initAdapter();
+    const onDone = vi.fn();
+    companionBus.on("observer:turn-done", onDone);
+
+    expect(adapter.sendUserFrameFromServer("wake")).toEqual({ kind: "sent" });
+    await new Promise((r) => setTimeout(r, 20));
+    mock.resolveCall(4, { turn: { id: "turn_obs_1" } });
+    await new Promise((r) => setTimeout(r, 20));
+
+    mock.pushNotification("turn/completed", {
+      turn: { id: "turn_other", status: "completed" },
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(onDone).not.toHaveBeenCalled();
+    expect(adapter.sendUserFrameFromServer("wake again")).toEqual({ kind: "busy" });
+  });
+
+  it("emits observer:wake-failed and releases the in-flight wake when synthetic turn/start rejects", async () => {
+    const { mock, adapter } = await initAdapter();
+    const onWakeFailed = vi.fn();
+    companionBus.on("observer:wake-failed", onWakeFailed);
+
+    expect(adapter.sendUserFrameFromServer("wake")).toEqual({ kind: "sent" });
+    await new Promise((r) => setTimeout(r, 20));
+    mock.rejectCall(4, new Error("Transport closed"));
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(onWakeFailed).toHaveBeenCalledWith({
+      sessionId: "test-session-transport",
+      error: "Transport closed",
+    });
+    expect(adapter.sendUserFrameFromServer("retry wake")).toEqual({ kind: "sent" });
+  });
 
   // ── Notification handler coverage ─────────────────────────────────────
 

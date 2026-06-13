@@ -194,6 +194,17 @@ describe("upsertGroup / removeGroup", () => {
     expect(useStore.getState().groups.get("grp_abc")?.deadRole).toBeUndefined();
   });
 
+  it("setGroupStatus stores degradedReason and clears it when the group recovers", () => {
+    useStore.getState().upsertGroup(group());
+    useStore.getState().setGroupStatus("grp_abc", "degraded", {
+      deadRole: "observer",
+      reason: "wake_send_failed",
+    });
+    expect(useStore.getState().groups.get("grp_abc")?.degradedReason).toBe("wake_send_failed");
+    useStore.getState().setGroupStatus("grp_abc", "active");
+    expect(useStore.getState().groups.get("grp_abc")?.degradedReason).toBeUndefined();
+  });
+
   it("setGroupStatus is a no-op for an unknown group id", () => {
     useStore.getState().setGroupStatus("grp_missing", "degraded", { deadRole: "observer" });
     expect(useStore.getState().groups.has("grp_missing")).toBe(false);

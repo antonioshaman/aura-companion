@@ -175,7 +175,11 @@ export interface CouncilSlice {
    */
   hydrateGroups: (groups: GroupRecord[]) => void;
   removeGroup: (sessionGroupId: string) => void;
-  setGroupStatus: (sessionGroupId: string, status: SessionGroupStatus, opts?: { deadRole?: SessionRole }) => void;
+  setGroupStatus: (
+    sessionGroupId: string,
+    status: SessionGroupStatus,
+    opts?: { deadRole?: SessionRole; reason?: "observer_exited" | "wake_send_failed" | "reconnect_failed" },
+  ) => void;
   recordCheckpoint: (args: {
     sessionGroupId: string;
     checkpointId: string;
@@ -307,8 +311,10 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
       const next: GroupRecord = { ...existing, status };
       if (status === "degraded" && opts?.deadRole) {
         next.deadRole = opts.deadRole;
+        next.degradedReason = opts.reason;
       } else if (status !== "degraded") {
         delete next.deadRole;
+        delete next.degradedReason;
       }
       groups.set(sessionGroupId, next);
       return { groups };

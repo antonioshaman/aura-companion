@@ -64,6 +64,7 @@ export interface BrowserGroupRecordParts {
   primary: { sessionId: string; backendType: BackendType | undefined };
   observer: { sessionId: string; backendType: BackendType | undefined };
   status: BrowserGroupRecord["status"];
+  degradedReason?: BrowserGroupRecord["degradedReason"];
 }
 
 /**
@@ -88,6 +89,7 @@ export function buildBrowserGroupRecord(parts: BrowserGroupRecordParts): Browser
     observerSessionId: parts.observer.sessionId,
     pairing: `${primaryBackend}+${observerBackend}`,
     status: parts.status,
+    ...(parts.degradedReason ? { degradedReason: parts.degradedReason } : {}),
     wakeTimeoutMs: OBSERVER_WAKE_TIMEOUT_MS,
   };
 }

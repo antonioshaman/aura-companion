@@ -4115,6 +4115,24 @@ describe("SessionOrchestrator", () => {
       expect(out[0]?.status).toBe("degraded");
     });
 
+    it("preserves degradedReason across bootstrap for reload truthfulness", () => {
+      orchestrator.initialize();
+      seedCoordGroup("grp_dr", "orch_dr", "obs_dr", "degraded", "codex");
+      companionBus.emit("group:degraded", {
+        sessionGroupId: "grp_dr",
+        deadRole: "observer",
+        reason: "wake_send_failed",
+      });
+
+      const out = orchestrator.getAllGroupsForBootstrap();
+      expect(out).toHaveLength(1);
+      expect(out[0]).toMatchObject({
+        sessionGroupId: "grp_dr",
+        status: "degraded",
+        degradedReason: "wake_send_failed",
+      });
+    });
+
     // Archived groups are torn down — they must not appear in the Sidebar.
     // The orchestrator filters at this boundary (the coordinator returns
     // every record including archived; the visibility policy belongs here).

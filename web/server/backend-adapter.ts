@@ -1,5 +1,12 @@
 import type { BrowserIncomingMessage, BrowserOutgoingMessage } from "./session-types.js";
 
+export type ServerSyntheticSendOutcome =
+  | { kind: "sent" }
+  | { kind: "socket_disconnected" }
+  | { kind: "busy" }
+  | { kind: "backpressure"; bufferedAmount: number }
+  | { kind: "failed"; error: string };
+
 // ─── Unified Backend Adapter Interface ───────────────────────────────────────
 // Both Claude Code (NDJSON WebSocket) and Codex (JSON-RPC stdio/WS) implement
 // this so that application code never branches on BackendType for message routing.
@@ -42,6 +49,12 @@ export interface IBackendAdapter {
   onInitError?(cb: (error: string) => void): void;
 
   // ── Optional capabilities (not all backends support these) ──
+
+  /** Send a server-synthesized user turn to the observer half. */
+  sendUserFrameFromServer?(content: string): ServerSyntheticSendOutcome;
+
+  /** Send a server-synthesized user turn to the orchestrator half. */
+  sendOrchestratorSyntheticFrame?(content: string): ServerSyntheticSendOutcome;
 
   /** Return backend-specific rate limits, if available (Codex only). */
   getRateLimits?(): {

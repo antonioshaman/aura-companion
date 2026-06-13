@@ -8,8 +8,8 @@ import type {
   McpServerConfig,
 } from "./session-types.js";
 import type { SessionStore } from "./session-store.js";
-import type { IBackendAdapter } from "./backend-adapter.js";
-import { ClaudeAdapter, type ObserverWakeSendOutcome } from "./claude-adapter.js";
+import type { IBackendAdapter, ServerSyntheticSendOutcome } from "./backend-adapter.js";
+import { ClaudeAdapter } from "./claude-adapter.js";
 import type { IdleTimerProbe } from "./idle-timer-manager.js";
 import { buildBrowserGroupRecord } from "./browser-group-record.js";
 import type { RecorderManager } from "./recorder.js";
@@ -78,7 +78,7 @@ import type { RelaunchExhaustedReason } from "./event-bus-types.js";
  * every branch to a single EC-9 structured log entry without ambiguity.
  */
 export type BridgeObserverWakeOutcome =
-  | ObserverWakeSendOutcome
+  | ServerSyntheticSendOutcome
   | { kind: "session_unknown" }
   | { kind: "adapter_missing" }
   | { kind: "unsupported_backend" };
@@ -373,17 +373,16 @@ export class WsBridge {
    * frame to a specific observer session's CLI socket via its adapter.
    *
    * The bridge is the only place that knows the sessionId → adapter map,
-   * so it owns the lookup. The Claude-instance narrowing is intentional
-   * for the current claude+claude scope; Codex pairings return
-   * `unsupported_backend` (the dispatcher in `session-orchestrator.ts`
-   * skips with that reason). When Codex pairing ships, replace the
-   * narrowing with an `IBackendAdapter`-shaped optional method.
+   * so it owns the lookup. Adapter support is capability-based: a backend
+   * that does not implement `sendUserFrameFromServer` returns
+   * `unsupported_backend` rather than forcing the orchestrator to know
+   * about concrete adapter classes.
    */
   sendObserverWakeFrame(sessionId: string, content: string): BridgeObserverWakeOutcome {
     const session = this.sessions.get(sessionId);
     if (!session) return { kind: "session_unknown" };
     if (!session.backendAdapter) return { kind: "adapter_missing" };
-    if (!(session.backendAdapter instanceof ClaudeAdapter)) {
+    if (typeof session.backendAdapter.sendUserFrameFromServer !== "function") {
       return { kind: "unsupported_backend" };
     }
     return session.backendAdapter.sendUserFrameFromServer(content);
@@ -401,7 +400,7 @@ export class WsBridge {
     const session = this.sessions.get(sessionId);
     if (!session) return { kind: "session_unknown" };
     if (!session.backendAdapter) return { kind: "adapter_missing" };
-    if (!(session.backendAdapter instanceof ClaudeAdapter)) {
+    if (typeof session.backendAdapter.sendOrchestratorSyntheticFrame !== "function") {
       return { kind: "unsupported_backend" };
     }
     return session.backendAdapter.sendOrchestratorSyntheticFrame(content);

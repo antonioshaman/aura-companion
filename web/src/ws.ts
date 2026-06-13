@@ -1406,6 +1406,7 @@ function handleParsedMessage(
         // buffers from older server versions might still exist.
         status: data.status ?? "active",
         pairing: data.pairing,
+        degradedReason: data.degradedReason,
         // Task 9: server-published wake-to-review timeout. The panel-
         // state deriver (Task 11) bounds the `reviewing` interval by
         // `lastCheckpointAt + wakeTimeoutMs`; past that, fall through
@@ -1453,7 +1454,7 @@ function handleParsedMessage(
     }
 
     case "group_degraded": {
-      store.setGroupStatus(data.sessionGroupId, "degraded", { deadRole: data.deadRole });
+      store.setGroupStatus(data.sessionGroupId, "degraded", { deadRole: data.deadRole, reason: data.reason });
       break;
     }
 
