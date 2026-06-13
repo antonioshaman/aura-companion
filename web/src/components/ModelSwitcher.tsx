@@ -142,6 +142,16 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
         return;
       }
 
+      // Record the in-flight switch BEFORE the optimistic write so ws.ts can
+      // revert if the CLI rejects the model on the next turn. The Claude
+      // `set_model` path does NOT validate access — an unusable model only
+      // fails later via a `result` frame with `api_error_status: 404`. Keep
+      // the prior (working) model so the revert can both restore the label
+      // and re-issue `set_model` back to it.
+      const { sdkSessions, setSdkSessions, updateSession, setPendingClaudeModelSwitch } =
+        useStore.getState();
+      setPendingClaudeModelSwitch(sessionId, model, currentModel);
+
       // Send set_model to CLI via WebSocket
       sendToSession(sessionId, { type: "set_model", model });
 
@@ -151,7 +161,6 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
       // — i.e. only after the user sends a message. Update BOTH the runtime
       // session (the prioritised source for the displayed label) and the
       // sdkSession so the selection reflects immediately.
-      const { sdkSessions, setSdkSessions, updateSession } = useStore.getState();
       updateSession(sessionId, { model });
       setSdkSessions(
         sdkSessions.map((sdk) =>

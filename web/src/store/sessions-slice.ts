@@ -220,6 +220,7 @@ export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> 
         // permissionPermissions cleanup above.
         cliFailures: deleteFromMap(s.cliFailures, sessionId),
         pendingCodexModelSwitches: deleteFromMap(s.pendingCodexModelSwitches, sessionId),
+        pendingClaudeModelSwitches: deleteFromMap(s.pendingClaudeModelSwitches, sessionId),
       };
     }),
 
