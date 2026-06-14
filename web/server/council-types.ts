@@ -430,8 +430,9 @@ export interface CodexObserverReviewNormalizationContext {
 /**
  * Bring a codex-native observer review up to the {@link ObserverReviewPayload}
  * schema by INJECTING the five required fields the codex CLI does not emit
- * natively: `schema_version`, `reviewed_at`, `observer_provider`,
- * `observer_model`, `observer_cli_version`.
+ * natively (`schema_version`, `reviewed_at`, `observer_provider`,
+ * `observer_model`, `observer_cli_version`) AND by mapping each finding from
+ * codex's native shape to the schema's.
  *
  * Why this exists (2026-06-14): the codex observer, even with a tightened
  * system prompt, emits a review object missing every server-mandated audit
@@ -441,6 +442,19 @@ export interface CodexObserverReviewNormalizationContext {
  * the tightened prompt still produced the native shape). Normalizing
  * server-side is the reliable path: the parser ignores unknown keys, so we
  * only need to fill the gaps, never strip codex's extras.
+ *
+ * Why findings-shape mapping was added (2026-06-14, eval-harness live probe):
+ * the original envelope-only normalizer let SPAWN acks (`findings:[]`) through
+ * but still dropped any review that actually FOUND something — codex emits
+ * findings as `{severity:"critical"|"high"|…, file, line, title, detail}`,
+ * which the parser rejects on `findings.severity` (not a STOP/WARN/NOTE/INFO
+ * tier) and `findings.evidence_path` (codex uses `file`). That made the codex
+ * observer a no-op for its entire high-value case. We now map per finding:
+ * severity critical→STOP / high→WARN / medium→NOTE / low→INFO (canonical tiers
+ * pass through; anything unrecognised defaults to NOTE so a review is never
+ * dropped on severity again); `file`→`evidence_path`; `line`→`evidence_lines`;
+ * `title`+`detail`→`claim`. Existing schema-shaped fields always win, so a
+ * finding codex happens to emit correctly is never rewritten.
  *
  * Pure + idempotent. Returns the raw string UNCHANGED when:
  *  - it does not parse as JSON, OR
@@ -472,7 +486,66 @@ export function normalizeCodexObserverReviewRaw(
   if (!("observer_provider" in out)) out.observer_provider = "codex";
   if (!("observer_model" in out)) out.observer_model = ctx.observerModel;
   if (!("observer_cli_version" in out)) out.observer_cli_version = ctx.observerCliVersion;
+  if (Array.isArray(out.findings)) {
+    out.findings = out.findings.map(normalizeCodexFinding);
+  }
   return JSON.stringify(out);
+}
+
+/**
+ * Map one codex-native severity word to the canonical STOP/WARN/NOTE/INFO
+ * tier. Canonical values (any case) pass through; the codex vocabulary maps on
+ * a monotone ladder; anything unrecognised defaults to NOTE so a review is
+ * never dropped on `findings.severity` — surfacing a finding at the wrong tier
+ * beats losing it entirely.
+ */
+function mapCodexSeverity(s: string): CouncilFindingSeverity {
+  const up = s.toUpperCase();
+  if (up === "STOP" || up === "WARN" || up === "NOTE" || up === "INFO") {
+    return up as CouncilFindingSeverity;
+  }
+  switch (s.toLowerCase()) {
+    case "critical":
+    case "blocker":
+      return "STOP";
+    case "high":
+      return "WARN";
+    case "medium":
+    case "moderate":
+      return "NOTE";
+    case "low":
+    case "minor":
+    case "trivial":
+      return "INFO";
+    default:
+      return "NOTE";
+  }
+}
+
+/**
+ * Map one codex-native finding to the {@link ObserverReviewFinding} shape.
+ * Schema-shaped fields a finding already carries always win; only the gaps are
+ * filled from codex's native keys (`file`→`evidence_path`, `line`→
+ * `evidence_lines`, `title`+`detail`→`claim`). Non-object findings pass
+ * through untouched so the parser's own per-finding drop path still fires.
+ */
+function normalizeCodexFinding(f: unknown): unknown {
+  if (!isObject(f)) return f;
+  const out: Record<string, unknown> = { ...f };
+  if (typeof f.severity === "string") out.severity = mapCodexSeverity(f.severity);
+  if (typeof out.claim !== "string" || out.claim.length === 0) {
+    const title = typeof f.title === "string" ? f.title : "";
+    const detail = typeof f.detail === "string" ? f.detail : "";
+    const combined = [title, detail].filter((s) => s.length > 0).join(" — ");
+    if (combined.length > 0) out.claim = combined;
+  }
+  if (out.evidence_path === undefined && typeof f.file === "string") {
+    out.evidence_path = f.file;
+  }
+  if (out.evidence_lines === undefined && typeof f.line === "number" && Number.isInteger(f.line)) {
+    out.evidence_lines = [f.line, f.line];
+  }
+  return out;
 }
 
 // ─── Peer-message formatter (bidirectional pipeline) ────────────────────────

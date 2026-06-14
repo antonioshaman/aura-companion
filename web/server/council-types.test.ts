@@ -352,6 +352,93 @@ describe("normalizeCodexObserverReviewRaw", () => {
     expect(parsed).not.toBeNull();
     expect(parsed!.observer_model).toBe("unknown");
   });
+
+  // ── findings-shape normalization (eval-harness live probe, 2026-06-14) ──
+  // The decisive regression: the envelope-only normalizer let spawn acks
+  // (findings:[]) through but dropped any review that actually FOUND something,
+  // because codex emits findings as {severity:"critical", file, line, title,
+  // detail} — the parser rejects on findings.severity / findings.evidence_path.
+  // This is the EXACT live shape captured from grp_41c8107e's auth.js probe.
+  function codexNativeReviewWithFindings(): Record<string, unknown> {
+    return {
+      observer_wake_payload_version_echo: 1,
+      session_group_id: "grp-abc123",
+      checkpoint_id: "chk-001",
+      phase: "council-implement",
+      review_status: "issues_found",
+      summary: "critical security issues",
+      findings: [
+        {
+          severity: "critical",
+          file: "auth.js",
+          line: 3,
+          title: "Hardcoded admin authentication bypass",
+          detail: "`login` returns true for user `admin` without checking a password.",
+        },
+        {
+          severity: "high",
+          file: "auth.js",
+          line: 5,
+          title: "Plaintext password comparison",
+          detail: "Compares supplied password directly against stored value.",
+        },
+        {
+          severity: "low",
+          file: "auth.js",
+          line: 1,
+          title: "Missing file header",
+          detail: "No license header.",
+        },
+      ],
+    };
+  }
+
+  it("maps codex-native findings so a non-empty review parses", () => {
+    const raw = JSON.stringify(codexNativeReviewWithFindings());
+    // Pre-normalization: rejected on the first finding's severity.
+    expect(parseObserverReviewPayload(raw)).toBeNull();
+
+    const parsed = parseObserverReviewPayload(normalizeCodexObserverReviewRaw(raw, ctx));
+    expect(parsed).not.toBeNull();
+    expect(parsed!.findings).toHaveLength(3);
+  });
+
+  it("maps the codex severity ladder critical→STOP, high→WARN, low→INFO", () => {
+    const raw = JSON.stringify(codexNativeReviewWithFindings());
+    const parsed = parseObserverReviewPayload(normalizeCodexObserverReviewRaw(raw, ctx))!;
+    expect(parsed.findings.map((f) => f.severity)).toEqual(["STOP", "WARN", "INFO"]);
+  });
+
+  it("maps file→evidence_path, line→evidence_lines, title+detail→claim", () => {
+    const raw = JSON.stringify(codexNativeReviewWithFindings());
+    const parsed = parseObserverReviewPayload(normalizeCodexObserverReviewRaw(raw, ctx))!;
+    const first = parsed.findings[0];
+    expect(first.evidence_path).toBe("auth.js");
+    expect(first.evidence_lines).toEqual([3, 3]);
+    expect(first.claim).toContain("Hardcoded admin authentication bypass");
+    expect(first.claim).toContain("without checking a password");
+  });
+
+  // Canonical schema-shaped findings (the shape claude emits, and the shape an
+  // already-normalized review carries) must pass through untouched — proving
+  // the mapping never clobbers a correctly-emitted finding.
+  it("leaves already-canonical findings unchanged", () => {
+    const raw = JSON.stringify(codexNativeReview()); // findings already canonical
+    const parsed = parseObserverReviewPayload(normalizeCodexObserverReviewRaw(raw, ctx))!;
+    expect(parsed.findings[0].severity).toBe("NOTE");
+    expect(parsed.findings[0].claim).toBe("Consider renaming BackendProvider");
+    expect(parsed.findings[0].evidence_path).toBe("PLAN-council.md");
+  });
+
+  // An unrecognised severity word must default to NOTE, never drop the review —
+  // surfacing a finding at a safe tier beats losing it.
+  it("defaults an unknown severity to NOTE instead of dropping", () => {
+    const p = codexNativeReviewWithFindings();
+    (p.findings as Record<string, unknown>[])[0].severity = "catastrophic";
+    const parsed = parseObserverReviewPayload(normalizeCodexObserverReviewRaw(JSON.stringify(p), ctx))!;
+    expect(parsed).not.toBeNull();
+    expect(parsed.findings[0].severity).toBe("NOTE");
+  });
 });
 
 // ── Drop-reporter (Task 13 — protocol.frame_dropped telemetry) ──────────────
