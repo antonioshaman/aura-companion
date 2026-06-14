@@ -462,6 +462,32 @@ describe("Connection lifecycle", () => {
     expect(adapter.isConnected()).toBe(false);
     expect(disconnectCb).not.toHaveBeenCalled();
   });
+
+  // ─── isReadyForServerFrame — council-wake send-readiness gate (Fix #3) ──────
+  // The Claude adapter's gate mirrors `sendUserFrameFromServer`'s transport
+  // check (socket present AND readyState OPEN), so it is strictly stronger
+  // than isConnected() (presence only) by the readyState dimension.
+  describe("isReadyForServerFrame", () => {
+    it("returns false with no socket attached", () => {
+      expect(adapter.isReadyForServerFrame()).toBe(false);
+    });
+
+    it("returns true when the socket is attached and OPEN", () => {
+      const ws = createMockSocket("sess-1");
+      adapter.attachWebSocket(ws);
+      expect(adapter.isReadyForServerFrame()).toBe(true);
+    });
+
+    it("returns false when the socket is attached but not yet OPEN", () => {
+      // A socket present-but-CONNECTING: isConnected() is true (presence) but
+      // a wake send would be rejected, so readiness must be false.
+      const ws = createMockSocket("sess-1");
+      ws.readyState = 0; // CONNECTING
+      adapter.attachWebSocket(ws);
+      expect(adapter.isConnected()).toBe(true);
+      expect(adapter.isReadyForServerFrame()).toBe(false);
+    });
+  });
 });
 
 // ─── Message queuing ────────────────────────────────────────────────────────
