@@ -3235,11 +3235,12 @@ describe("SessionOrchestrator", () => {
       });
       ws.coordinator = { get: vi.fn(() => ({ sessionGroupId: groupId, status: "active" })) };
       // Catchup dispatch is now deferred behind an adapter-ready poll
-      // (Finding #1 fix). The poll checks `getSession(observerSessionId)
-      // ?.backendAdapter` BEFORE its first await, so when the adapter is
-      // already attached the dispatch still lands synchronously inside the
-      // scan call — keeping these assertions synchronous.
-      vi.mocked(deps.wsBridge.getSession).mockReturnValue({ backendAdapter: {} } as any);
+      // (Finding #1 fix). The poll checks
+      // `getSession(observerSessionId)?.backendAdapter?.isConnected()`
+      // BEFORE its first await, so when the adapter is already attached AND
+      // connected the dispatch still lands synchronously inside the scan
+      // call — keeping these assertions synchronous.
+      vi.mocked(deps.wsBridge.getSession).mockReturnValue({ backendAdapter: { isConnected: () => true } } as any);
     }
 
     afterEach(() => {
@@ -3387,8 +3388,43 @@ describe("SessionOrchestrator", () => {
         // No synchronous dispatch — the poll is still waiting on the adapter.
         expect(deps.wsBridge.sendObserverWakeFrame).not.toHaveBeenCalled();
 
-        // Observer adapter attaches; the next poll tick should dispatch.
-        vi.mocked(deps.wsBridge.getSession).mockReturnValue({ backendAdapter: {} } as any);
+        // Observer adapter attaches AND its transport connects; the next
+        // poll tick should dispatch.
+        vi.mocked(deps.wsBridge.getSession).mockReturnValue({ backendAdapter: { isConnected: () => true } } as any);
+        await vi.advanceTimersByTimeAsync(300);
+        expect(deps.wsBridge.sendObserverWakeFrame).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+        fs.rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
+    // Finding #1 strengthening (live-test 2026-06-14): a reconnecting codex
+    // attaches its backend adapter BEFORE its WS-proxy socket finishes
+    // connecting. A presence-only gate dispatched into a `socket_disconnected`
+    // drop. The gate now requires `adapter.isConnected()`, so a present-but-
+    // disconnected adapter must keep waiting, not dispatch.
+    it("waits for adapter.isConnected() — present-but-disconnected does not dispatch", async () => {
+      vi.useFakeTimers();
+      const workspace = fs.realpathSync(fs.mkdtempSync(pathLib.join(osLib.tmpdir(), "scan-conn-")));
+      try {
+        fs.mkdirSync(pathLib.join(workspace, ".council", "checkpoints"), { recursive: true });
+        fs.writeFileSync(pathLib.join(workspace, ".council", "checkpoints", "phase-a.json"), JSON.stringify({
+          schema_version: 1, checkpoint_id: "chk_conn", phase: "phase-a", sequence: 1,
+          session_group_id: "grp_conn", emitted_at: "2026-01-01T00:00:00Z", artifact_paths: [],
+        }));
+        seedActiveGroupAt("grp_conn", workspace);
+        // Adapter is attached but the transport socket is NOT connected yet —
+        // mirrors the codex reconnect window that produced socket_disconnected.
+        vi.mocked(deps.wsBridge.getSession).mockReturnValue({ backendAdapter: { isConnected: () => false } } as any);
+
+        (orchestrator as unknown as { scanForMissedObserverWakes: () => void }).scanForMissedObserverWakes.call(orchestrator);
+        // Adapter present but disconnected — no dispatch even after poll ticks.
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(deps.wsBridge.sendObserverWakeFrame).not.toHaveBeenCalled();
+
+        // Socket connects; the next poll tick should dispatch.
+        vi.mocked(deps.wsBridge.getSession).mockReturnValue({ backendAdapter: { isConnected: () => true } } as any);
         await vi.advanceTimersByTimeAsync(300);
         expect(deps.wsBridge.sendObserverWakeFrame).toHaveBeenCalledTimes(1);
       } finally {

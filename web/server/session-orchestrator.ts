@@ -1741,6 +1741,12 @@ export class SessionOrchestrator {
    * Bounded by MAX_WAIT_MS so a never-arriving adapter (half that never
    * re-handshakes) does not leak a polling promise. On timeout we log + give
    * up; the group's reconnect grace / degrade path owns the dead-half case.
+   *
+   * The readiness gate requires `adapter.isConnected()`, NOT mere adapter
+   * presence: a reconnecting codex attaches its backend adapter before its
+   * WS-proxy socket finishes connecting, so a presence-only gate dispatched
+   * into a `socket_disconnected` drop (live-test 2026-06-14, observed ~16s
+   * into restart-catchup). Waiting for `isConnected()` closes that window.
    */
   private async scheduleCatchupWakeWhenObserverReady(
     sessionGroupId: string,
@@ -1758,7 +1764,7 @@ export class SessionOrchestrator {
     const deadline = Date.now() + MAX_WAIT_MS;
     while (Date.now() < deadline) {
       const session = this.wsBridge.getSession(observerSessionId);
-      if (session?.backendAdapter) {
+      if (session?.backendAdapter?.isConnected()) {
         this.dispatchObserverWake(sessionGroupId, payload);
         return;
       }
