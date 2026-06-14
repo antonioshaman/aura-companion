@@ -415,6 +415,66 @@ export function parseObserverReviewPayload(
   };
 }
 
+/**
+ * Context the codex-review normalizer needs to fill the audit-only fields
+ * the codex CLI does not emit. Sourced from the orchestrator's per-group
+ * metadata at review time.
+ */
+export interface CodexObserverReviewNormalizationContext {
+  /** Model id the observer half was spawned with (audit field). */
+  observerModel: string;
+  /** CLI binary version, if known (audit field). */
+  observerCliVersion: string;
+}
+
+/**
+ * Bring a codex-native observer review up to the {@link ObserverReviewPayload}
+ * schema by INJECTING the five required fields the codex CLI does not emit
+ * natively: `schema_version`, `reviewed_at`, `observer_provider`,
+ * `observer_model`, `observer_cli_version`.
+ *
+ * Why this exists (2026-06-14): the codex observer, even with a tightened
+ * system prompt, emits a review object missing every server-mandated audit
+ * field — `parseObserverReviewPayload` rejects it on the very first check
+ * (`schema_version`), so every codex review was silently dropped. Prompt-only
+ * conformance was empirically proven insufficient (a fresh-spawned codex with
+ * the tightened prompt still produced the native shape). Normalizing
+ * server-side is the reliable path: the parser ignores unknown keys, so we
+ * only need to fill the gaps, never strip codex's extras.
+ *
+ * Pure + idempotent. Returns the raw string UNCHANGED when:
+ *  - it does not parse as JSON, OR
+ *  - it is not a JSON object, OR
+ *  - `schema_version` is already present.
+ * The last guard means an already-conforming review (or one normalized once)
+ * is never double-touched, and — paired with the caller's `provider ===
+ * "codex"` gate — a genuinely-broken claude review still reaches the parser's
+ * drop path untouched.
+ *
+ * Only MISSING keys are injected; a field codex happens to emit wins over the
+ * synthesized default so real values are never clobbered.
+ */
+export function normalizeCodexObserverReviewRaw(
+  raw: string,
+  ctx: CodexObserverReviewNormalizationContext,
+): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+  if (!isObject(parsed)) return raw;
+  if ("schema_version" in parsed) return raw;
+  const out: Record<string, unknown> = { ...parsed };
+  out.schema_version = COUNCIL_SCHEMA_VERSION;
+  if (!("reviewed_at" in out)) out.reviewed_at = new Date().toISOString();
+  if (!("observer_provider" in out)) out.observer_provider = "codex";
+  if (!("observer_model" in out)) out.observer_model = ctx.observerModel;
+  if (!("observer_cli_version" in out)) out.observer_cli_version = ctx.observerCliVersion;
+  return JSON.stringify(out);
+}
+
 // ─── Peer-message formatter (bidirectional pipeline) ────────────────────────
 //
 // Story 2.3: peer findings cross-injected as inline user_messages tagged

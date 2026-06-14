@@ -101,6 +101,16 @@ export interface ReviewWatcherOptions {
   signal: AbortSignal;
   /** Optional logger for dropped events. Defaults to a structured warn log. */
   onDropped?: (reason: ReviewDropReason, filename: string, detail?: string) => void;
+  /**
+   * Optional pre-parse normalizer. Receives the raw file bytes and the
+   * provider extracted from the filename, returns a (possibly rewritten)
+   * raw string handed to {@link parseObserverReviewPayload}. Used to bring
+   * codex-native reviews up to schema — the codex CLI omits the
+   * server-mandated audit fields the parser requires. The caller owns the
+   * provider gating (claude reviews flow through untouched). Defaults to
+   * identity.
+   */
+  normalizeRaw?: (raw: string, provider: "claude" | "codex") => string;
 }
 
 /**
@@ -176,7 +186,7 @@ export async function watchReviews(opts: ReviewWatcherOptions): Promise<void> {
       const timer = setTimeout(() => {
         timers.delete(file);
         if (opts.signal.aborted) return;
-        const p = readAndEmit(opts.directory, file, seenDedupKeys, opts.onReview, onDropped, opts.signal);
+        const p = readAndEmit(opts.directory, file, seenDedupKeys, opts.onReview, onDropped, opts.signal, opts.normalizeRaw);
         inflight.add(p);
         p.finally(() => inflight.delete(p));
       }, DEBOUNCE_MS);
@@ -202,6 +212,7 @@ async function readAndEmit(
   onReview: (p: ObserverReviewPayload) => void | Promise<void>,
   onDropped: (reason: ReviewDropReason, file: string, detail?: string) => void,
   signal: AbortSignal,
+  normalizeRaw?: (raw: string, provider: "claude" | "codex") => string,
 ): Promise<void> {
   if (signal.aborted) return;
   const path = join(dir, file);
@@ -213,6 +224,15 @@ async function readAndEmit(
     return;
   }
   if (signal.aborted) return;
+  // Bring provider-specific native output up to schema before parsing. The
+  // filename already passed OBSERVER_REVIEW_FILE_PATTERN in watchReviews, so
+  // the provider capture group is present. codex omits the server-mandated
+  // audit fields the parser requires; claude reviews are handed back
+  // unchanged by the caller's normalizer.
+  if (normalizeRaw) {
+    const provider = OBSERVER_REVIEW_FILE_PATTERN.exec(file)?.[1] as "claude" | "codex" | undefined;
+    if (provider) raw = normalizeRaw(raw, provider);
+  }
   // Task 13: parser-level reason surfaces upstream observer drift via
   // structured protocol.frame_dropped log; watcher's higher-level
   // "invalid-schema" drop fires alongside for the watcher-state log.

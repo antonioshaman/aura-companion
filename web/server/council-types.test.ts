@@ -9,6 +9,7 @@ import {
   isBoundedText,
   isBoundedToken,
   isIsoTimestamp,
+  normalizeCodexObserverReviewRaw,
   parseCheckpointPayload,
   parseObserverReviewPayload,
   type CheckpointPayload,
@@ -259,6 +260,97 @@ describe("parseObserverReviewPayload", () => {
     const p = validReview();
     p.observer_provider = "claude code";
     expect(parseObserverReviewPayload(JSON.stringify(p))).toBeNull();
+  });
+});
+
+// ── normalizeCodexObserverReviewRaw (Fix #2, 2026-06-14) ────────────────────
+
+describe("normalizeCodexObserverReviewRaw", () => {
+  const ctx = { observerModel: "gpt-5-codex", observerCliVersion: "1.4.0" };
+
+  // The codex CLI emits a review object carrying the echo + identity fields
+  // and findings, but missing every server-mandated audit field. This is the
+  // exact shape observed live — the parser rejects it on `schema_version`.
+  function codexNativeReview(): Record<string, unknown> {
+    return {
+      observer_wake_payload_version_echo: 1,
+      session_group_id: "grp-abc123",
+      checkpoint_id: "chk-001",
+      phase: "council-plan",
+      // codex-only extras the parser ignores — kept to prove they survive.
+      status: "complete",
+      summary: "looks fine",
+      findings: [
+        {
+          severity: "NOTE",
+          claim: "Consider renaming BackendProvider",
+          evidence_path: "PLAN-council.md",
+        },
+      ],
+    };
+  }
+
+  // The decisive end-to-end property: a codex-native review that the parser
+  // rejects pre-normalization parses cleanly after normalization, with the
+  // five injected required fields present and codex's extras preserved.
+  it("makes a codex-native review parse, injecting the five missing fields", () => {
+    const raw = JSON.stringify(codexNativeReview());
+    expect(parseObserverReviewPayload(raw)).toBeNull();
+
+    const normalized = normalizeCodexObserverReviewRaw(raw, ctx);
+    const parsed = parseObserverReviewPayload(normalized);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.schema_version).toBe(COUNCIL_SCHEMA_VERSION);
+    expect(parsed!.observer_provider).toBe("codex");
+    expect(parsed!.observer_model).toBe("gpt-5-codex");
+    expect(parsed!.observer_cli_version).toBe("1.4.0");
+    expect(parsed!.checkpoint_id).toBe("chk-001");
+    expect(parsed!.observer_wake_payload_version_echo).toBe(1);
+    expect(parsed!.findings).toHaveLength(1);
+    // reviewed_at is synthesized as a valid ISO timestamp.
+    expect(isIsoTimestamp(parsed!.reviewed_at)).toBe(true);
+  });
+
+  // Idempotence + the no-op gate: an already-conforming review (schema_version
+  // present) is returned byte-for-byte so claude reviews and
+  // already-normalized payloads are never double-touched.
+  it("returns an already-conforming review unchanged", () => {
+    const raw = JSON.stringify(validReview());
+    expect(normalizeCodexObserverReviewRaw(raw, ctx)).toBe(raw);
+  });
+
+  // Real values win over synthesized defaults — a field codex happens to emit
+  // is never clobbered.
+  it("does not clobber fields codex already provides", () => {
+    const p = codexNativeReview();
+    p.observer_model = "gpt-6-codex";
+    p.observer_provider = "codex";
+    const normalized = normalizeCodexObserverReviewRaw(JSON.stringify(p), ctx);
+    const parsed = JSON.parse(normalized) as Record<string, unknown>;
+    expect(parsed.observer_model).toBe("gpt-6-codex");
+  });
+
+  // Non-JSON and non-object inputs pass through untouched so the parser's
+  // own drop path (json-parse-error / schema-mismatch) still fires.
+  it("returns non-JSON input unchanged", () => {
+    expect(normalizeCodexObserverReviewRaw("{not json", ctx)).toBe("{not json");
+  });
+
+  it("returns a JSON array input unchanged", () => {
+    expect(normalizeCodexObserverReviewRaw("[1,2,3]", ctx)).toBe("[1,2,3]");
+  });
+
+  // Falls back to "unknown" for audit fields when the orchestrator could not
+  // source a real model — still a valid bounded token so the payload parses.
+  it("falls back to unknown for missing model/cli, still parses", () => {
+    const raw = JSON.stringify(codexNativeReview());
+    const normalized = normalizeCodexObserverReviewRaw(raw, {
+      observerModel: "unknown",
+      observerCliVersion: "unknown",
+    });
+    const parsed = parseObserverReviewPayload(normalized);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.observer_model).toBe("unknown");
   });
 });
 

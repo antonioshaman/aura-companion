@@ -36,7 +36,7 @@ import {
   runAutoProceedBootReconcile,
 } from "./auto-proceed-orchestrator-bindings.js";
 import type { CheckpointPayload, ObserverReviewPayload } from "./council-types.js";
-import { COUNCIL_SCHEMA_VERSION, OBSERVER_WAKE_PAYLOAD_VERSION, OBSERVER_WAKE_TIMEOUT_MS, parseCheckpointPayload, parseObserverReviewPayload } from "./council-types.js";
+import { COUNCIL_SCHEMA_VERSION, OBSERVER_WAKE_PAYLOAD_VERSION, OBSERVER_WAKE_TIMEOUT_MS, normalizeCodexObserverReviewRaw, parseCheckpointPayload, parseObserverReviewPayload } from "./council-types.js";
 import { writeAtomicJson } from "./atomic-write.js";
 import { watchCheckpoints } from "./checkpoint-watcher.js";
 import { watchReviews } from "./review-watcher.js";
@@ -317,6 +317,13 @@ interface CouncilGroupMeta {
   /** Schema version parsed from the observer prompt's header at spawn time
    *  (CR-13, forward-compat for v2 migration). */
   observerPromptVersion?: number;
+  /**
+   * Model id the observer half was spawned with. Captured at spawn so the
+   * codex-review normalizer can fill the `observer_model` audit field the
+   * codex CLI does not emit natively. Undefined when the launcher reported
+   * no model (falls back to "unknown" at normalization time).
+   */
+  observerModel?: string;
   /** Wallclock (ms) when the group was created — used to compute invocation latency. */
   createdAt: number;
   /** Wallclock (ms) when the most recent checkpoint reached this orchestrator — used to compute observer wake-to-emit latency. */
@@ -1664,6 +1671,19 @@ export class SessionOrchestrator {
       directory: reviewsDir,
       signal: abort.signal,
       onReview: (payload) => this.handleCouncilReview(sessionGroupId, payload),
+      // The codex CLI emits a review object missing every server-mandated
+      // audit field — the parser rejects it on `schema_version`, dropping
+      // every codex review. Inject the missing fields server-side (prompt
+      // tightening was empirically insufficient). claude reviews flow
+      // through untouched so genuinely-broken ones still drop.
+      normalizeRaw: (raw, provider) => {
+        if (provider !== "codex") return raw;
+        const meta = this.councilGroupMeta.get(sessionGroupId);
+        return normalizeCodexObserverReviewRaw(raw, {
+          observerModel: meta?.observerModel ?? "unknown",
+          observerCliVersion: "unknown",
+        });
+      },
     }).catch((err) => {
       if (abort.signal.aborted) return;
       log.warn("session-orchestrator", "council review watcher failed", {
@@ -2687,6 +2707,7 @@ export class SessionOrchestrator {
         observerPromptSha256: observerInfo.observerPromptSha256,
         observerPromptSource: observerInfo.observerPromptSource,
         observerPromptVersion: observerInfo.observerPromptVersion,
+        observerModel: observerInfo.model,
         createdAt: Date.now(),
         lastCheckpointReceivedAt: null,
       });

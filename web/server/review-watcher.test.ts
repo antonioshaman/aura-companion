@@ -61,6 +61,75 @@ describe("watchReviews", () => {
     expect(seen[0]?.observer_provider).toBe("codex");
   });
 
+  // Fix #2 (2026-06-14): the normalizeRaw hook receives the raw bytes plus the
+  // provider extracted from the filename, and its rewritten output is what gets
+  // parsed. A codex-native review (no schema_version) that would otherwise drop
+  // now emits once the hook injects the missing fields.
+  it("applies normalizeRaw before parsing, with provider from the filename", async () => {
+    const seen: ObserverReviewPayload[] = [];
+    const seenProviders: string[] = [];
+    const watchPromise = watchReviews({
+      directory: dir,
+      signal: controller.signal,
+      onReview: (p) => { seen.push(p); },
+      normalizeRaw: (raw, provider) => {
+        seenProviders.push(provider);
+        const obj = JSON.parse(raw) as Record<string, unknown>;
+        // Mimic the production codex normalizer: inject the missing required
+        // fields the codex CLI omits.
+        return JSON.stringify({
+          schema_version: COUNCIL_SCHEMA_VERSION,
+          reviewed_at: "2026-06-14T10:00:00Z",
+          observer_provider: "codex",
+          observer_model: "gpt-5-codex",
+          observer_cli_version: "1.4.0",
+          ...obj,
+        });
+      },
+    });
+    // A codex-native file: identity + findings, no audit fields.
+    writeAtomicJson(join(dir, "council-plan-codex-observer.md"), {
+      checkpoint_id: "chk-9",
+      phase: "council-plan",
+      session_group_id: "grp_abc",
+      findings: [],
+    });
+    await new Promise((r) => setTimeout(r, 500));
+    controller.abort();
+    await watchPromise;
+    expect(seenProviders).toContain("codex");
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.checkpoint_id).toBe("chk-9");
+    expect(seen[0]?.observer_provider).toBe("codex");
+  });
+
+  // The hook is the caller's gate: a claude review handed back unchanged by
+  // normalizeRaw still flows to the parser's drop path if it is malformed.
+  it("does not rescue a malformed claude review when normalizeRaw passes it through", async () => {
+    const onDropped = vi.fn<(r: ReviewDropReason, f: string, d?: string) => void>();
+    const seen: ObserverReviewPayload[] = [];
+    const watchPromise = watchReviews({
+      directory: dir,
+      signal: controller.signal,
+      onReview: (p) => { seen.push(p); },
+      onDropped,
+      // Production gating: only codex is rewritten; claude passes through.
+      normalizeRaw: (raw, provider) => (provider === "codex" ? raw : raw),
+    });
+    // Malformed claude review (no schema_version) → must still drop.
+    writeAtomicJson(join(dir, "council-plan-claude-observer.md"), {
+      checkpoint_id: "chk-9",
+      phase: "council-plan",
+      session_group_id: "grp_abc",
+      findings: [],
+    });
+    await new Promise((r) => setTimeout(r, 500));
+    controller.abort();
+    await watchPromise;
+    expect(seen).toHaveLength(0);
+    expect(onDropped).toHaveBeenCalledWith("invalid-schema", "council-plan-claude-observer.md");
+  });
+
   // Invalid filename: missing -observer.md suffix or NUL/etc. → onDropped fires.
   it("drops files with an invalid filename pattern", async () => {
     const onDropped = vi.fn<(r: ReviewDropReason, f: string, d?: string) => void>();
