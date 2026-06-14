@@ -32,6 +32,9 @@ export interface ExtractedFinding {
   session_group_id: string;
   observer_provider: string;
   observer_model: string;
+  /** ISO timestamp the review was written — used to fetch evidence code as of
+   *  review time (the code may have drifted since). "" when absent. */
+  reviewed_at: string;
   severity: EvalFindingSeverity;
   claim: string;
   evidence_path: string;
@@ -57,6 +60,7 @@ interface ReviewDoc {
   session_group_id: string;
   observer_provider: string;
   observer_model: string;
+  reviewed_at: string;
   findings: unknown[];
 }
 
@@ -96,6 +100,7 @@ function parseReviewDoc(text: string): ReviewDoc | null {
     session_group_id: str(o.session_group_id),
     observer_provider: str(o.observer_provider),
     observer_model: str(o.observer_model),
+    reviewed_at: str(o.reviewed_at),
     findings: o.findings,
   };
 }
@@ -168,6 +173,7 @@ export function extractFindings(paths: string[]): FindingsExtract {
         session_group_id: doc.session_group_id,
         observer_provider: doc.observer_provider,
         observer_model: doc.observer_model,
+        reviewed_at: doc.reviewed_at,
         severity: sev,
         claim,
         evidence_path,
