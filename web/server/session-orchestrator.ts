@@ -1026,7 +1026,16 @@ export class SessionOrchestrator {
         // manifest context the regular flow would have populated.
         entry.previousCheckpoint = entry.lastCheckpoint;
         entry.lastCheckpoint = highest;
-        this.dispatchObserverWake(groupId, highest);
+        // Council Review 2026-06-14 (live-test Finding #1 — restart-catchup
+        // races the codex adapter attach): the catchup scan runs synchronously
+        // inside initialize(), but the codex observer's backend adapter only
+        // attaches ~16s later (thread/resume → fallback → initialized). A
+        // synchronous dispatch here returns `adapter_missing` and drops with
+        // no retry (the EC-13 5-min failsafe is not implemented). Mirror the
+        // fresh-spawn path (`scheduleSpawnCheckpointWhenObserverReady`): defer
+        // the dispatch behind an adapter-ready poll so the wake lands once the
+        // observer transport is up. Fire-and-forget — never block init.
+        void this.scheduleCatchupWakeWhenObserverReady(groupId, highest);
       } catch (err) {
         log.warn("session-orchestrator", "catchup scan failed for group", {
           event: "council.wake.restart_catchup_failed",
@@ -1715,6 +1724,52 @@ export class SessionOrchestrator {
       event: "council.spawn_checkpoint.adapter_wait_timed_out",
       sessionGroupId,
       observerSessionId,
+      waitedMs: MAX_WAIT_MS,
+    });
+  }
+
+  /**
+   * Council Review 2026-06-14 (live-test Finding #1): restart-catchup
+   * adapter-ready gate. The one-shot `scanForMissedObserverWakes` runs at
+   * `initialize()` time, but a reconnecting codex observer attaches its
+   * backend adapter only after a `thread/resume` round-trip (~16s observed
+   * on prod). Dispatching the catchup wake synchronously at scan time hit
+   * `adapter_missing` and dropped with no retry. This mirrors the fresh-
+   * spawn `scheduleSpawnCheckpointWhenObserverReady` poll so the missed
+   * wake fires the moment the observer transport is ready.
+   *
+   * Bounded by MAX_WAIT_MS so a never-arriving adapter (half that never
+   * re-handshakes) does not leak a polling promise. On timeout we log + give
+   * up; the group's reconnect grace / degrade path owns the dead-half case.
+   */
+  private async scheduleCatchupWakeWhenObserverReady(
+    sessionGroupId: string,
+    payload: CheckpointPayload,
+  ): Promise<void> {
+    const meta = this.councilGroupMeta.get(sessionGroupId);
+    if (!meta) {
+      // Group torn down between scan and poll — dispatchObserverWake would
+      // resolve observer_unknown anyway; skip the poll entirely.
+      return;
+    }
+    const observerSessionId = meta.observerSessionId;
+    const MAX_WAIT_MS = 30_000;
+    const POLL_INTERVAL_MS = 250;
+    const deadline = Date.now() + MAX_WAIT_MS;
+    while (Date.now() < deadline) {
+      const session = this.wsBridge.getSession(observerSessionId);
+      if (session?.backendAdapter) {
+        this.dispatchObserverWake(sessionGroupId, payload);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+    }
+    log.warn("session-orchestrator", "council.wake.restart_catchup_adapter_wait_timed_out", {
+      event: "council.wake.restart_catchup_adapter_wait_timed_out",
+      sessionGroupId,
+      observerSessionId,
+      checkpointId: payload.checkpoint_id,
+      sequence: payload.sequence,
       waitedMs: MAX_WAIT_MS,
     });
   }

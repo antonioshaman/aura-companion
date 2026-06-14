@@ -3234,6 +3234,12 @@ describe("SessionOrchestrator", () => {
         lastCheckpointReceivedAt: null,
       });
       ws.coordinator = { get: vi.fn(() => ({ sessionGroupId: groupId, status: "active" })) };
+      // Catchup dispatch is now deferred behind an adapter-ready poll
+      // (Finding #1 fix). The poll checks `getSession(observerSessionId)
+      // ?.backendAdapter` BEFORE its first await, so when the adapter is
+      // already attached the dispatch still lands synchronously inside the
+      // scan call — keeping these assertions synchronous.
+      vi.mocked(deps.wsBridge.getSession).mockReturnValue({ backendAdapter: {} } as any);
     }
 
     afterEach(() => {
@@ -3355,6 +3361,62 @@ describe("SessionOrchestrator", () => {
         // proof is the truncated log path was exercised.
         expect(deps.wsBridge.sendObserverWakeFrame).toHaveBeenCalled();
       } finally {
+        fs.rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
+    // Finding #1 (live-test 2026-06-14): a reconnecting codex observer
+    // attaches its backend adapter ~16s AFTER initialize() runs the catchup
+    // scan. The previous synchronous dispatch hit `adapter_missing` and
+    // dropped with no retry. The scan now defers the wake behind an
+    // adapter-ready poll so it fires the moment the transport is up.
+    it("defers the catchup wake until the observer adapter attaches", async () => {
+      vi.useFakeTimers();
+      const workspace = fs.realpathSync(fs.mkdtempSync(pathLib.join(osLib.tmpdir(), "scan-defer-")));
+      try {
+        fs.mkdirSync(pathLib.join(workspace, ".council", "checkpoints"), { recursive: true });
+        fs.writeFileSync(pathLib.join(workspace, ".council", "checkpoints", "phase-a.json"), JSON.stringify({
+          schema_version: 1, checkpoint_id: "chk_defer", phase: "phase-a", sequence: 1,
+          session_group_id: "grp_defer", emitted_at: "2026-01-01T00:00:00Z", artifact_paths: [],
+        }));
+        seedActiveGroupAt("grp_defer", workspace);
+        // Adapter NOT ready at scan time — mirrors the codex reconnect race.
+        vi.mocked(deps.wsBridge.getSession).mockReturnValue(null as any);
+
+        (orchestrator as unknown as { scanForMissedObserverWakes: () => void }).scanForMissedObserverWakes.call(orchestrator);
+        // No synchronous dispatch — the poll is still waiting on the adapter.
+        expect(deps.wsBridge.sendObserverWakeFrame).not.toHaveBeenCalled();
+
+        // Observer adapter attaches; the next poll tick should dispatch.
+        vi.mocked(deps.wsBridge.getSession).mockReturnValue({ backendAdapter: {} } as any);
+        await vi.advanceTimersByTimeAsync(300);
+        expect(deps.wsBridge.sendObserverWakeFrame).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+        fs.rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
+    // The deferred poll is bounded — a never-arriving adapter (a half that
+    // never re-handshakes) must not leak a polling promise nor dispatch.
+    it("gives up the catchup wake after the adapter-wait deadline", async () => {
+      vi.useFakeTimers();
+      const workspace = fs.realpathSync(fs.mkdtempSync(pathLib.join(osLib.tmpdir(), "scan-timeout-")));
+      try {
+        fs.mkdirSync(pathLib.join(workspace, ".council", "checkpoints"), { recursive: true });
+        fs.writeFileSync(pathLib.join(workspace, ".council", "checkpoints", "phase-a.json"), JSON.stringify({
+          schema_version: 1, checkpoint_id: "chk_to", phase: "phase-a", sequence: 1,
+          session_group_id: "grp_to", emitted_at: "2026-01-01T00:00:00Z", artifact_paths: [],
+        }));
+        seedActiveGroupAt("grp_to", workspace);
+        vi.mocked(deps.wsBridge.getSession).mockReturnValue(null as any);
+
+        (orchestrator as unknown as { scanForMissedObserverWakes: () => void }).scanForMissedObserverWakes.call(orchestrator);
+        // Advance past the 30s MAX_WAIT_MS — never dispatches.
+        await vi.advanceTimersByTimeAsync(31_000);
+        expect(deps.wsBridge.sendObserverWakeFrame).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
         fs.rmSync(workspace, { recursive: true, force: true });
       }
     });
