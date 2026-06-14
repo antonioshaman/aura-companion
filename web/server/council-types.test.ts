@@ -439,6 +439,29 @@ describe("normalizeCodexObserverReviewRaw", () => {
     expect(parsed).not.toBeNull();
     expect(parsed.findings[0].severity).toBe("NOTE");
   });
+
+  // Regression: a codex finding with `line: 0` (file-level / no specific line)
+  // used to map to evidence_lines [0,0], which parseLineRange rejects (a < 1),
+  // dropping the ENTIRE normalized review — the exact whole-review-drop vector
+  // this module exists to remove. Caught live by the observer during a
+  // comms-probe of the very fix that introduced it.
+  it("does not drop the review when a codex finding carries line 0", () => {
+    const p = codexNativeReviewWithFindings();
+    (p.findings as Record<string, unknown>[])[0].line = 0;
+    const parsed = parseObserverReviewPayload(normalizeCodexObserverReviewRaw(JSON.stringify(p), ctx))!;
+    expect(parsed).not.toBeNull();
+    // line 0 degrades to "no evidence_lines" rather than nuking the review.
+    expect(parsed.findings[0].evidence_lines).toBeUndefined();
+  });
+
+  it("maps a positive line to evidence_lines but omits it for a non-positive line", () => {
+    const p = codexNativeReviewWithFindings();
+    (p.findings as Record<string, unknown>[])[0].line = 7;
+    (p.findings as Record<string, unknown>[])[1].line = -3;
+    const parsed = parseObserverReviewPayload(normalizeCodexObserverReviewRaw(JSON.stringify(p), ctx))!;
+    expect(parsed.findings[0].evidence_lines).toEqual([7, 7]);
+    expect(parsed.findings[1].evidence_lines).toBeUndefined();
+  });
 });
 
 // ── Drop-reporter (Task 13 — protocol.frame_dropped telemetry) ──────────────

@@ -143,6 +143,35 @@ describe("hydrateObserverFinding", () => {
     expect(out).not.toHaveProperty("downgradeReason");
   });
 
+  // Real event time: when the wire finding carries a server-stamped
+  // `reviewedAt` (REST bootstrap = review file mtime), it wins over the
+  // per-batch ingestion time so a tab reload shows true event time instead
+  // of collapsing the backlog onto one page-load timestamp.
+  it("prefers wire.reviewedAt over context.receivedAt when present", () => {
+    const wire = wireFinding({ reviewedAt: 42_000 });
+    const out = hydrateObserverFinding(wire, {
+      receivedAt: 5_000,
+      checkpointId: "chk",
+      phase: "p",
+      observerModel: "m",
+      observerProvider: "claude",
+    });
+    expect(out.receivedAt).toBe(42_000);
+  });
+
+  // Without a server-stamped reviewedAt (live path), fall back to the batch
+  // ingestion time — which already approximates real event time live.
+  it("falls back to context.receivedAt when wire.reviewedAt is absent", () => {
+    const out = hydrateObserverFinding(wireFinding(), {
+      receivedAt: 7_000,
+      checkpointId: "chk",
+      phase: "p",
+      observerModel: "m",
+      observerProvider: "claude",
+    });
+    expect(out.receivedAt).toBe(7_000);
+  });
+
   // Beck F4 — the downgrade-path branch. Hydrated finding preserves the
   // server-side downgrade signal so the UI can annotate it.
   it("preserves server-side downgrade signals", () => {

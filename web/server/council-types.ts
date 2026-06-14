@@ -542,7 +542,11 @@ function normalizeCodexFinding(f: unknown): unknown {
   if (out.evidence_path === undefined && typeof f.file === "string") {
     out.evidence_path = f.file;
   }
-  if (out.evidence_lines === undefined && typeof f.line === "number" && Number.isInteger(f.line)) {
+  // `line >= 1` guard: parseLineRange rejects `a < 1`, so a codex finding with
+  // line 0 (file-level / no specific line) would map to [0,0] and drop the
+  // ENTIRE normalized review — the exact whole-review-drop vector this module
+  // exists to remove. An unknown/zero line degrades to "no evidence_lines".
+  if (out.evidence_lines === undefined && typeof f.line === "number" && Number.isInteger(f.line) && f.line >= 1) {
     out.evidence_lines = [f.line, f.line];
   }
   return out;

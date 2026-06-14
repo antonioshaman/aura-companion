@@ -4518,6 +4518,16 @@ describe("SessionOrchestrator", () => {
         expect(outOfScope.downgradeReason).toBeDefined();
         expect(result!.downgrades).toHaveLength(1);
         expect(result!.downgrades[0]!.id).toBe(outOfScope.id);
+        // Real event time is stamped from the review FILE's mtime (server-
+        // observed), NOT the observer's self-reported `reviewed_at` (which is
+        // observer-authored and unreliable). Both findings from the same file
+        // share that file's mtime.
+        const { statSync } = require("node:fs") as typeof import("node:fs");
+        const mtime = statSync(
+          pathJoin(workspace, ".council", "reviews", "council-plan-claude-observer.md"),
+        ).mtimeMs;
+        expect(inScope.reviewedAt).toBe(mtime);
+        expect(outOfScope.reviewedAt).toBe(mtime);
       } finally {
         rmSync(workspace, { recursive: true, force: true });
       }
