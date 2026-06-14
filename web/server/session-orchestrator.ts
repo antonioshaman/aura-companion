@@ -1670,7 +1670,7 @@ export class SessionOrchestrator {
     watchReviews({
       directory: reviewsDir,
       signal: abort.signal,
-      onReview: (payload) => this.handleCouncilReview(sessionGroupId, payload),
+      onReview: (payload, reviewedAt) => this.handleCouncilReview(sessionGroupId, payload, reviewedAt),
       // The codex CLI emits a review object missing every server-mandated
       // audit field — the parser rejects it on `schema_version`, dropping
       // every codex review. Inject the missing fields server-side (prompt
@@ -2453,7 +2453,7 @@ export class SessionOrchestrator {
     });
   }
 
-  private handleCouncilReview(sessionGroupId: string, payload: ObserverReviewPayload): void {
+  private handleCouncilReview(sessionGroupId: string, payload: ObserverReviewPayload, reviewedAt?: number): void {
     // Backend P1-3 (council review #L): wrap the whole handler body in a
     // try/catch so a transient throw in the grounding pipeline doesn't
     // unhook the watcher's read loop. Errors are logged structurally and
@@ -2513,6 +2513,11 @@ export class SessionOrchestrator {
           ...(f.evidence_lines !== undefined ? { evidence_lines: f.evidence_lines } : {}),
           ...(f.confidence !== undefined ? { confidence: f.confidence } : {}),
           ...(downgrade ? { wasDowngraded: true, downgradeReason: downgrade.reason } : {}),
+          // Server-observed real event time (review file mtime). Mirrors the
+          // bootstrap path so live findings carry the file's landing time, not
+          // the browser's per-batch ingestion clock. Falls back to now() if the
+          // watcher couldn't stat the file.
+          reviewedAt: reviewedAt ?? Date.now(),
         };
         return out;
       });

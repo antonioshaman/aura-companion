@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -59,6 +59,27 @@ describe("watchReviews", () => {
     expect(seen).toHaveLength(1);
     expect(seen[0]?.checkpoint_id).toBe("chk-1");
     expect(seen[0]?.observer_provider).toBe("codex");
+  });
+
+  // Live-path real event time: onReview's second arg is the review FILE's
+  // mtime (server-observed), so downstream can stamp findings with when the
+  // file actually landed instead of the per-batch ingestion clock. This is
+  // the live counterpart to the REST bootstrap statSync(mtimeMs) stamping.
+  it("passes the review file's mtime as the reviewedAt arg to onReview", async () => {
+    const seen: Array<{ reviewedAt?: number }> = [];
+    const watchPromise = watchReviews({
+      directory: dir,
+      signal: controller.signal,
+      onReview: (_p, reviewedAt) => { seen.push({ reviewedAt }); },
+    });
+    const file = join(dir, "council-plan-codex-observer.md");
+    writeAtomicJson(file, validReview());
+    await new Promise((r) => setTimeout(r, 500));
+    controller.abort();
+    await watchPromise;
+    expect(seen).toHaveLength(1);
+    const fileMtime = statSync(file).mtimeMs;
+    expect(seen[0]?.reviewedAt).toBe(fileMtime);
   });
 
   // Fix #2 (2026-06-14): the normalizeRaw hook receives the raw bytes plus the

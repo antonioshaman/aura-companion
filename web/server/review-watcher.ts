@@ -91,8 +91,13 @@ export type ReviewDropReason =
 export interface ReviewWatcherOptions {
   /** Absolute path to the directory containing review files. */
   directory: string;
-  /** Receive a validated review payload. Invalid events drop via {@link onDropped}. */
-  onReview: (payload: ObserverReviewPayload) => void | Promise<void>;
+  /**
+   * Receive a validated review payload. Invalid events drop via {@link onDropped}.
+   * `reviewedAt` is the review FILE's mtime in ms epoch — the server-observed
+   * real event time, NOT the observer's self-reported `reviewed_at` (which is
+   * observer-authored and unreliable). Absent only if the post-read stat fails.
+   */
+  onReview: (payload: ObserverReviewPayload, reviewedAt?: number) => void | Promise<void>;
   /**
    * Abort to stop the watcher. Aborting cleanly resolves the returned
    * promise; the watcher waits for any in-flight read/handler before
@@ -209,7 +214,7 @@ async function readAndEmit(
   dir: string,
   file: string,
   seen: Set<string>,
-  onReview: (p: ObserverReviewPayload) => void | Promise<void>,
+  onReview: (p: ObserverReviewPayload, reviewedAt?: number) => void | Promise<void>,
   onDropped: (reason: ReviewDropReason, file: string, detail?: string) => void,
   signal: AbortSignal,
   normalizeRaw?: (raw: string, provider: "claude" | "codex") => string,
@@ -224,6 +229,17 @@ async function readAndEmit(
     return;
   }
   if (signal.aborted) return;
+  // Server-observed real event time = the review file's mtime. Passed to
+  // the handler so the live `group:review` path stamps each finding with
+  // when the file actually landed, not when the browser ingested the batch.
+  // A stat failure degrades to undefined; the handler falls back to its own
+  // clock rather than dropping the review.
+  let reviewedAt: number | undefined;
+  try {
+    reviewedAt = (await stat(path)).mtimeMs;
+  } catch {
+    reviewedAt = undefined;
+  }
   // Bring provider-specific native output up to schema before parsing. The
   // filename already passed OBSERVER_REVIEW_FILE_PATTERN in watchReviews, so
   // the provider capture group is present. codex omits the server-mandated
@@ -268,7 +284,7 @@ async function readAndEmit(
   // retry of the same review on the next FS event surfaces normally;
   // committing before the handler poisoned the dedup forever.
   try {
-    await onReview(payload);
+    await onReview(payload, reviewedAt);
   } catch (err) {
     onDropped("handler-error", file, err instanceof Error ? err.message : String(err));
     return;
