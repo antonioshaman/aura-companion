@@ -43,7 +43,8 @@
     "test:a11y": "vitest run --testNamePattern='axe accessibility|accessible names|aria-expanded'",
     "test:codex-contract": "vitest run server/codex-protocol-*.test.ts",
     "generate-token": "bun bin/generate-token.ts",
-    "build-observer-prompt-bundle": "bun scripts/build-observer-prompt-bundle.ts"
+    "build-observer-prompt-bundle": "bun scripts/build-observer-prompt-bundle.ts",
+    "eval:replay": "bun evals/replay-runner.ts"
   },
   "dependencies": {
     "@codemirror/lang-cpp": "^6.0.3",

@@ -14,5 +14,5 @@
     "noEmit": true,
     "types": ["vitest/globals"]
   },
-  "include": ["src", "server"]
+  "include": ["src", "server", "evals"]
 }
