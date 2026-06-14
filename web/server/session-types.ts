@@ -442,6 +442,15 @@ export type BrowserIncomingMessageBase =
      */
     status?: "pairing" | "active" | "degraded" | "archived" | "reconnecting";
     /**
+     * #9: which half died — populated only when `status === "degraded"` on a
+     * degraded-on-arrival bootstrap snapshot. The deriver renders
+     * `deadRole ?? "observer"`, so without this a reconnect-failed pair whose
+     * orchestrator died would mislabel the panel "Observer offline". Carried
+     * symmetrically with `degradedReason`.
+     */
+    deadRole?: "orchestrator" | "observer";
+    degradedReason?: "observer_exited" | "wake_send_failed" | "reconnect_failed" | "wake_produced_no_review";
+    /**
      * Task 9: server-published auto-wake-to-review timeout in
      * milliseconds. Frontend uses this to bound the `reviewing` panel
      * state — past this deadline without an `observer_review` arrival,
@@ -474,7 +483,7 @@ export type BrowserIncomingMessageBase =
      * "observer exited"). Omitted field defaults to "observer_exited"
      * for back-compat with v1 clients.
      */
-    reason?: "observer_exited" | "wake_send_failed" | "reconnect_failed";
+    reason?: "observer_exited" | "wake_send_failed" | "reconnect_failed" | "wake_produced_no_review";
   }
   | {
     /**
@@ -607,6 +616,8 @@ export interface BrowserGroupRecord {
   status: "pairing" | "active" | "degraded" | "archived" | "reconnecting";
   /** Optional: which half died (populated only when status === "degraded"). */
   deadRole?: SessionGroupRole;
+  /** Optional: why the group degraded (populated only when status === "degraded"). */
+  degradedReason?: "observer_exited" | "wake_send_failed" | "reconnect_failed" | "wake_produced_no_review";
   /** Task 9 — server-published wake-to-review bound; see `group_created`. */
   wakeTimeoutMs?: number;
 }

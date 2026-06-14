@@ -1892,6 +1892,27 @@ describe("Browser message routing", () => {
     expect(queued.content).toBe("retry this");
   });
 
+  it("sendObserverWakeFrame routes to adapter capability without Claude-only narrowing", () => {
+    const browser = makeBrowserSocket("wake-s1");
+    bridge.handleBrowserOpen(browser, "wake-s1");
+    const session = bridge.getSession("wake-s1")!;
+    const sendUserFrameFromServer = vi.fn(() => ({ kind: "sent" as const }));
+    session.backendAdapter = {
+      isConnected: () => true,
+      send: () => true,
+      disconnect: async () => {},
+      onBrowserMessage: () => {},
+      onSessionMeta: () => {},
+      onDisconnect: () => {},
+      sendUserFrameFromServer,
+    } as any;
+
+    const out = bridge.sendObserverWakeFrame("wake-s1", "wake payload");
+
+    expect(out).toEqual({ kind: "sent" });
+    expect(sendUserFrameFromServer).toHaveBeenCalledWith("wake payload");
+  });
+
   it("flushes bridge-queued messages once backend becomes connected", () => {
     const browser = makeBrowserSocket("codex-s1");
     bridge.handleBrowserOpen(browser, "codex-s1");

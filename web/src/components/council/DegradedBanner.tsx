@@ -19,6 +19,8 @@ import type { SessionRole } from "../../types.js";
 export interface DegradedBannerProps {
   /** Which half of the pair died. The label changes accordingly. */
   deadRole: SessionRole;
+  /** Optional degraded reason from the server for more truthful copy. */
+  reason?: "observer_exited" | "wake_send_failed" | "reconnect_failed" | "wake_produced_no_review";
   /** Respawn the missing half. Returns a promise so the spinner reflects in-flight state. */
   onRespawn: () => void | Promise<void>;
   /** Continue solo — dismisses the degraded banner but keeps the panel visible. */
@@ -33,6 +35,7 @@ export interface DegradedBannerProps {
 
 export function DegradedBanner({
   deadRole,
+  reason,
   onRespawn,
   onContinueSolo,
   isRespawning: controlledRespawning,
@@ -63,9 +66,21 @@ export function DegradedBanner({
   };
 
   const label = deadRole === "observer" ? "Observer offline" : "Orchestrator offline";
-  const detail = deadRole === "observer"
-    ? "The orchestrator continues running solo. Respawn the observer to resume independent review."
-    : "The observer is alive but the orchestrator died. This is an unusual state — respawn or end the group.";
+  const detail = (() => {
+    if (deadRole === "observer" && reason === "wake_send_failed") {
+      return "The observer session is up, but the server could not wake it for review. Respawn the observer to restore checkpoint-driven review.";
+    }
+    if (deadRole === "observer" && reason === "reconnect_failed") {
+      return "The observer failed to reconnect after a transport interruption. Respawn it to resume independent review.";
+    }
+    if (deadRole === "observer" && reason === "wake_produced_no_review") {
+      return "The observer accepted a checkpoint but did not produce a review in time. Respawn it to resume independent review.";
+    }
+    if (deadRole === "observer") {
+      return "The orchestrator continues running solo. Respawn the observer to resume independent review.";
+    }
+    return "The observer is alive but the orchestrator died. This is an unusual state — respawn or end the group.";
+  })();
 
   // a11y council review #10 (P2#10 — A11Y-P1-3 + Saarinen P2-1/3): the
   // label and button text previously rendered as `text-cc-warning` over a

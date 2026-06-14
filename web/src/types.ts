@@ -128,6 +128,8 @@ export interface GroupRecord {
   pairing: string;
   /** Which half died — populated only when status === "degraded". */
   deadRole?: SessionRole;
+  /** Optional degraded reason published by the server for council pairs. */
+  degradedReason?: "observer_exited" | "wake_send_failed" | "reconnect_failed" | "wake_produced_no_review";
   /** Wallclock (ms) of the most recent checkpoint received. */
   lastCheckpointAt?: number;
   /** Monotonic sequence of the most recent checkpoint received. */
@@ -252,7 +254,7 @@ export type ObserverPanelState =
    */
   | { name: "converged"; cycleNumber: number; threshold: number }
   | { name: "blocker-found"; unresolvedStops: number; lastBlockerAt: number }
-  | { name: "degraded"; deadRole: SessionRole };
+  | { name: "degraded"; deadRole: SessionRole; reason?: "observer_exited" | "wake_send_failed" | "reconnect_failed" | "wake_produced_no_review" };
 
 export interface SdkSessionInfo {
   sessionId: string;

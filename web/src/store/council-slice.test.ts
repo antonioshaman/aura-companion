@@ -194,6 +194,17 @@ describe("upsertGroup / removeGroup", () => {
     expect(useStore.getState().groups.get("grp_abc")?.deadRole).toBeUndefined();
   });
 
+  it("setGroupStatus stores degradedReason and clears it when the group recovers", () => {
+    useStore.getState().upsertGroup(group());
+    useStore.getState().setGroupStatus("grp_abc", "degraded", {
+      deadRole: "observer",
+      reason: "wake_send_failed",
+    });
+    expect(useStore.getState().groups.get("grp_abc")?.degradedReason).toBe("wake_send_failed");
+    useStore.getState().setGroupStatus("grp_abc", "active");
+    expect(useStore.getState().groups.get("grp_abc")?.degradedReason).toBeUndefined();
+  });
+
   it("setGroupStatus is a no-op for an unknown group id", () => {
     useStore.getState().setGroupStatus("grp_missing", "degraded", { deadRole: "observer" });
     expect(useStore.getState().groups.has("grp_missing")).toBe(false);
@@ -503,6 +514,138 @@ describe("appendObserverReview", () => {
       timestamp: 1_000,
     });
     expect(useStore.getState().findings.has("grp_missing")).toBe(false);
+  });
+
+  // Attribution upgrade: bootstrap → live ordering.
+  //
+  // Scenario: ws.ts dispatches appendObserverReview from a REST bootstrap
+  // (GET /api/groups) when the response lacks attribution fields (e.g. older
+  // server or race before observer handshake). A subsequent live
+  // `observer_review` WS event arrives carrying the SAME finding id but with
+  // correct non-empty observerProvider/observerModel. Without the upgrade
+  // logic the dedup by id would permanently keep the empty attribution from
+  // the bootstrap. The fix: a later record with non-empty attribution UPGRADES
+  // an existing finding whose attribution is empty.
+  it("bootstrap-then-live: upgrades empty attribution to non-empty on same finding id", () => {
+    useStore.getState().upsertGroup(group());
+
+    // Step 1: Bootstrap arrives with empty attribution.
+    useStore.getState().appendObserverReview({
+      sessionGroupId: "grp_abc",
+      checkpointId: "chk_1",
+      phase: "council-plan",
+      findings: [wireFinding({ id: "fnd_upgrade" })],
+      downgrades: [],
+      observerModel: "",
+      observerProvider: "",
+      timestamp: 1_000,
+    });
+
+    // Sanity check: finding stored with empty attribution from bootstrap.
+    const afterBootstrap = useStore.getState().findings.get("grp_abc")!;
+    expect(afterBootstrap).toHaveLength(1);
+    expect(afterBootstrap[0]?.observerProvider).toBe("");
+    expect(afterBootstrap[0]?.observerModel).toBe("");
+
+    // Step 2: Live observer_review event arrives for the same finding id
+    // but carries real attribution.
+    useStore.getState().appendObserverReview({
+      sessionGroupId: "grp_abc",
+      checkpointId: "chk_1",
+      phase: "council-plan",
+      findings: [wireFinding({ id: "fnd_upgrade" })],
+      downgrades: [],
+      observerModel: "codex-1",
+      observerProvider: "codex",
+      timestamp: 2_000,
+    });
+
+    // After the upgrade: still exactly one finding (no duplicate), and the
+    // attribution fields now reflect the live event's non-empty values.
+    const afterLive = useStore.getState().findings.get("grp_abc")!;
+    expect(afterLive).toHaveLength(1);
+    expect(afterLive[0]?.id).toBe("fnd_upgrade");
+    expect(afterLive[0]?.observerProvider).toBe("codex");
+    expect(afterLive[0]?.observerModel).toBe("codex-1");
+  });
+
+  // Attribution downgrade guard: non-empty attribution must never be
+  // overwritten by a later empty-attribution arrival.
+  //
+  // Scenario: the live observer_review event arrives first (with real
+  // attribution), then a second bootstrap or stale REST re-hydration arrives
+  // with observerProvider="" / observerModel="" for the same finding id.
+  // The empty arrival must be treated as a no-op for attribution fields;
+  // the previously stored non-empty values must survive unchanged.
+  it("non-empty attribution is never downgraded by a subsequent empty-attribution arrival", () => {
+    useStore.getState().upsertGroup(group());
+
+    // Step 1: Live event with correct attribution.
+    useStore.getState().appendObserverReview({
+      sessionGroupId: "grp_abc",
+      checkpointId: "chk_1",
+      phase: "council-plan",
+      findings: [wireFinding({ id: "fnd_nodowngrade" })],
+      downgrades: [],
+      observerModel: "claude-opus-4",
+      observerProvider: "claude",
+      timestamp: 1_000,
+    });
+
+    // Step 2: Stale bootstrap re-emit with empty attribution.
+    useStore.getState().appendObserverReview({
+      sessionGroupId: "grp_abc",
+      checkpointId: "chk_1",
+      phase: "council-plan",
+      findings: [wireFinding({ id: "fnd_nodowngrade" })],
+      downgrades: [],
+      observerModel: "",
+      observerProvider: "",
+      timestamp: 2_000,
+    });
+
+    // The stored finding must still carry the original non-empty attribution.
+    const stored = useStore.getState().findings.get("grp_abc")!;
+    expect(stored).toHaveLength(1);
+    expect(stored[0]?.observerProvider).toBe("claude");
+    expect(stored[0]?.observerModel).toBe("claude-opus-4");
+  });
+
+  // Regression guard: findings with genuinely new ids are still appended
+  // normally after the dedup/upgrade logic was introduced. This ensures
+  // the upgrade path did not accidentally break the append-new path.
+  it("genuinely new finding ids are still appended (regression guard for upgrade logic)", () => {
+    useStore.getState().upsertGroup(group());
+
+    useStore.getState().appendObserverReview({
+      sessionGroupId: "grp_abc",
+      checkpointId: "chk_1",
+      phase: "council-plan",
+      findings: [wireFinding({ id: "fnd_a" })],
+      downgrades: [],
+      observerModel: "codex-1",
+      observerProvider: "codex",
+      timestamp: 1_000,
+    });
+
+    // Second call introduces an entirely different finding id — must append.
+    useStore.getState().appendObserverReview({
+      sessionGroupId: "grp_abc",
+      checkpointId: "chk_2",
+      phase: "council-implement",
+      findings: [wireFinding({ id: "fnd_b", severity: "NOTE" })],
+      downgrades: [],
+      observerModel: "codex-1",
+      observerProvider: "codex",
+      timestamp: 2_000,
+    });
+
+    const stored = useStore.getState().findings.get("grp_abc")!;
+    expect(stored).toHaveLength(2);
+    expect(stored[0]?.id).toBe("fnd_a");
+    expect(stored[1]?.id).toBe("fnd_b");
+    // Attribution on the new finding must also be correct.
+    expect(stored[1]?.observerProvider).toBe("codex");
   });
 });
 

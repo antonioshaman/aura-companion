@@ -1642,4 +1642,182 @@ describe("HomePage", () => {
       expect(screen.queryByText(/below lets you fork/)).not.toBeInTheDocument();
     });
   });
+
+  // ─── Council Mode pairing coercion (P1 fix) ──────────────────────────────────
+  //
+  // When the server reports that the claude+codex pairing is unavailable (either
+  // codexAvailable=false or codexObserverReviewAvailable=false), a stale
+  // localStorage value of "claude+codex" must be coerced to "claude+claude" in
+  // both the POST body and the CouncilToggle trigger.  The raw stored preference
+  // must NOT be overwritten (non-destructive).
+
+  describe("Council Mode pairing coercion", () => {
+    // Helper: sets up a council-enabled session with the given backend capability
+    // flags and localStorage pairing, then submits and returns the call args.
+    async function submitWithCouncilPairing({
+      storedPairing,
+      codexAvailable,
+      codexObserverReviewAvailable,
+    }: {
+      storedPairing: string;
+      codexAvailable: boolean;
+      codexObserverReviewAvailable: boolean;
+    }) {
+      localStorage.setItem("cc-council-enabled", "true");
+      localStorage.setItem("cc-council-pairing", storedPairing);
+
+      mockApi.getBackends.mockResolvedValue([
+        { id: "claude", name: "Claude", available: true },
+        {
+          id: "codex",
+          name: "Codex",
+          available: codexAvailable,
+          councilObserverReviewAvailable: codexObserverReviewAvailable,
+          councilObserverReviewReason: "Observer review unavailable.",
+        },
+      ]);
+
+      const storeMock = buildStoreMock();
+      mockStoreGetState.mockReturnValue(storeMock);
+      createSessionStreamMock.mockResolvedValue({
+        sessionId: "council-sess-1",
+        state: "starting",
+        cwd: "/repo",
+      });
+
+      render(<HomePage />);
+      await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
+
+      const textarea = screen.getByPlaceholderText("Fix a bug, build a feature, refactor code...");
+      fireEvent.change(textarea, { target: { value: "Ship it" } });
+      fireEvent.click(screen.getByTitle("Send message"));
+
+      await waitFor(() => {
+        expect(createSessionStreamMock).toHaveBeenCalled();
+      });
+
+      return createSessionStreamMock.mock.calls[0][0] as Record<string, unknown>;
+    }
+
+    it("coerces stale claude+codex to claude+claude in the POST body when codexObserverReviewAvailable=false", async () => {
+      // Core P1 regression guard: a user who previously picked claude+codex and
+      // now opens a server where the observer-review capability is gone must NOT
+      // silently spawn an unsupported pair.  The POST must carry claude+claude.
+      const args = await submitWithCouncilPairing({
+        storedPairing: "claude+codex",
+        codexAvailable: true,
+        codexObserverReviewAvailable: false,
+      });
+
+      expect(args.councilMode).toBe("council");
+      expect(args.councilPairing).toBe("claude+claude");
+    });
+
+    it("coerces stale claude+codex to claude+claude in the POST body when codexAvailable=false", async () => {
+      // When Codex CLI itself is absent the coercion must also fire — the guard
+      // mirrors CouncilToggle's own gate (codexAvailable && codexObserverReviewAvailable).
+      const args = await submitWithCouncilPairing({
+        storedPairing: "claude+codex",
+        codexAvailable: false,
+        codexObserverReviewAvailable: true, // irrelevant when CLI is absent
+      });
+
+      expect(args.councilMode).toBe("council");
+      expect(args.councilPairing).toBe("claude+claude");
+    });
+
+    it("preserves claude+codex in the POST body when mixed pairing IS available", async () => {
+      // When both capability flags are true the user's stored preference is
+      // forwarded verbatim — the coercion must not over-correct.
+      const args = await submitWithCouncilPairing({
+        storedPairing: "claude+codex",
+        codexAvailable: true,
+        codexObserverReviewAvailable: true,
+      });
+
+      expect(args.councilMode).toBe("council");
+      expect(args.councilPairing).toBe("claude+codex");
+    });
+
+    it("does not overwrite the raw localStorage preference during coercion (non-destructive)", async () => {
+      // The user's original preference must survive in localStorage so that
+      // if the server later re-enables the capability the pick comes back.
+      await submitWithCouncilPairing({
+        storedPairing: "claude+codex",
+        codexAvailable: false,
+        codexObserverReviewAvailable: false,
+      });
+
+      // Raw value must be intact — coercion only affects derive + POST, not storage.
+      expect(localStorage.getItem("cc-council-pairing")).toBe("claude+codex");
+    });
+  });
+
+  // ─── Finding #11: Council Mode unavailability reason copy ───────────────────
+  //
+  // When `codexAvailable === false`, the user reads a CLI-missing message (install/
+  // sign-in guidance). When `codexAvailable && !codexObserverReviewAvailable`, they
+  // read the observer-review-capability message. Sending the wrong copy sends the user
+  // to fix the wrong problem.
+
+  describe("Council Mode unavailability reason (#11)", () => {
+    async function renderWithCodexBackend({
+      codexAvailable,
+      codexObserverReviewAvailable,
+      councilObserverReviewReason,
+    }: {
+      codexAvailable: boolean;
+      codexObserverReviewAvailable: boolean;
+      councilObserverReviewReason?: string;
+    }) {
+      localStorage.setItem("cc-council-enabled", "true");
+      mockApi.getBackends.mockResolvedValue([
+        { id: "claude", name: "Claude", available: true },
+        {
+          id: "codex",
+          name: "Codex",
+          available: codexAvailable,
+          councilObserverReviewAvailable: codexObserverReviewAvailable,
+          councilObserverReviewReason: councilObserverReviewReason ?? "Observer review capability is unavailable on this server.",
+        },
+      ]);
+      render(<HomePage />);
+      // Wait for async getBackends to resolve and the council toggle to appear.
+      await screen.findByTestId("council-toggle");
+    }
+
+    it("shows CLI-missing copy in the disabled option when codexAvailable=false (#11)", async () => {
+      // When the CLI is missing/unauthed, the user needs 'install or sign in' guidance.
+      // The review-capability copy would misdirect them to fix the wrong thing.
+      await renderWithCodexBackend({
+        codexAvailable: false,
+        codexObserverReviewAvailable: false,
+      });
+
+      // Open the pairing dropdown to reveal the disabled option's reason text.
+      fireEvent.click(screen.getByTestId("pairing-trigger"));
+      const codexOpt = screen.getByTestId("pairing-option-claude+codex");
+      // CLI-missing copy is shown.
+      expect(codexOpt.textContent).toContain("not found or not authenticated");
+      // Review-capability copy must NOT appear (wrong problem).
+      expect(codexOpt.textContent).not.toContain("observer review capability");
+    });
+
+    it("shows review-capability copy in the disabled option when codexAvailable=true but review unavailable (#11)", async () => {
+      // When Codex is installed but the observer-review capability is off on this build,
+      // the user needs guidance about that feature specifically, not about the CLI.
+      await renderWithCodexBackend({
+        codexAvailable: true,
+        codexObserverReviewAvailable: false,
+        councilObserverReviewReason: "Observer review capability is unavailable on this server.",
+      });
+
+      fireEvent.click(screen.getByTestId("pairing-trigger"));
+      const codexOpt = screen.getByTestId("pairing-option-claude+codex");
+      // Review-capability copy is shown.
+      expect(codexOpt.textContent).toContain("Observer review capability is unavailable");
+      // CLI-missing copy must NOT appear (wrong problem).
+      expect(codexOpt.textContent).not.toContain("not found or not authenticated");
+    });
+  });
 });

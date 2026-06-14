@@ -34,6 +34,8 @@ export interface CouncilToggleProps {
    * tooltip. Default `true` for tests / Playground.
    */
   codexAvailable?: boolean;
+  /** Whether the current build/server can run Codex as a real council observer. */
+  codexObserverReviewAvailable?: boolean;
   /** Optional human-readable reason when Codex is unavailable. Surfaced in tooltip + subcopy. */
   codexUnavailableReason?: string;
 }
@@ -65,6 +67,25 @@ const PAIRING_OPTIONS: readonly PairingOption[] = Object.freeze([
  */
 export function isSupportedPairing(value: unknown): value is CouncilPairing {
   return value === "claude+claude" || value === "claude+codex";
+}
+
+/**
+ * Pure helper: coerce the user's stored pairing preference to a capability-safe
+ * effective value. When mixed pairing (claude+codex) is unavailable — because
+ * Codex CLI is absent or its observer-review capability is not supported on this
+ * server — fall back to "claude+claude" unconditionally. This mirrors CouncilToggle's
+ * own availability gate (`mixedPairingAvailable = codexAvailable && codexObserverReviewAvailable`)
+ * so the submit path and the UI trigger stay in sync even when localStorage holds
+ * a stale "claude+codex" preference from a previous session.
+ *
+ * Intentionally non-destructive: the raw localStorage preference is NOT overwritten,
+ * so if capability is restored in a later server restart the user's choice comes back.
+ */
+export function coerceCouncilPairing(
+  pairing: CouncilPairing,
+  mixedPairingAvailable: boolean,
+): CouncilPairing {
+  return mixedPairingAvailable ? pairing : "claude+claude";
 }
 
 function PairingDropdownItem({
@@ -111,7 +132,9 @@ function PairingDropdownItem({
     >
       <span className="flex flex-col items-start min-w-0">
         <span className="truncate">{option.label}</span>
-        {option.subcopy && (
+        {/* #15: only show billing subcopy when the row is enabled — suppress visual
+            noise when the row is already visually suppressed by the unavailable state. */}
+        {option.subcopy && !disabled && (
           <span className="text-[11px] text-cc-muted truncate">{option.subcopy}</span>
         )}
         {disabled && unavailableReason && (
@@ -119,7 +142,9 @@ function PairingDropdownItem({
         )}
       </span>
       <span className="flex items-center gap-1 shrink-0">
-        {option.experimental && (
+        {/* #15: suppress the exp chip when the row is disabled — the unavailable chip
+            already communicates the status; stacking both adds competing fragments. */}
+        {option.experimental && !disabled && (
           <span className="text-[10px] uppercase tracking-wide font-mono-code px-1.5 py-0.5 rounded bg-cc-info/10 text-cc-info border border-cc-info/15">
             exp
           </span>
@@ -140,11 +165,13 @@ export function CouncilToggle({
   onEnabledChange,
   onPairingChange,
   codexAvailable = true,
+  codexObserverReviewAvailable = codexAvailable,
   codexUnavailableReason = "Codex CLI not detected — install or sign in.",
 }: CouncilToggleProps) {
   const [open, setOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
+  const mixedPairingAvailable = codexAvailable && codexObserverReviewAvailable;
   // a11y council review #10 (P2#10): roving-focus index for APG
   // `listbox` keyboard model. The currently-focused option is the one
   // SR users hear; Arrow/Home/End move it; Enter/Space activates; Escape
@@ -219,7 +246,7 @@ export function CouncilToggle({
       for (let i = 0; i < total; i++) {
         idx = (idx + delta + total) % total;
         const candidate = PAIRING_OPTIONS[idx]!;
-        const candidateAvailable = candidate.value === "claude+codex" ? codexAvailable : true;
+        const candidateAvailable = candidate.value === "claude+codex" ? mixedPairingAvailable : true;
         if (candidateAvailable) {
           setActiveIndex(idx);
           return;
@@ -242,11 +269,11 @@ export function CouncilToggle({
       event.preventDefault();
       const candidate = PAIRING_OPTIONS[activeIndex];
       if (!candidate) return;
-      const candidateAvailable = candidate.value === "claude+codex" ? codexAvailable : true;
+      const candidateAvailable = candidate.value === "claude+codex" ? mixedPairingAvailable : true;
       if (!candidateAvailable) return;
       handleSelect(candidate.value);
     }
-  }, [open, activeIndex, codexAvailable, handleSelect]);
+  }, [open, activeIndex, mixedPairingAvailable, handleSelect]);
 
   return (
     <div
@@ -352,7 +379,7 @@ export function CouncilToggle({
             className="absolute z-10 top-full left-0 right-0 mt-1 p-1 bg-cc-card border border-cc-border rounded-[10px] shadow-lg"
           >
             {PAIRING_OPTIONS.map((opt, idx) => {
-              const available = opt.value === "claude+codex" ? codexAvailable : true;
+              const available = opt.value === "claude+codex" ? mixedPairingAvailable : true;
               return (
                 <PairingDropdownItem
                   key={opt.value}

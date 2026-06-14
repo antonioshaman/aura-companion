@@ -496,3 +496,27 @@ Reference: Council Review 2026-06-04-1826 P2 #10 — `signalCoalesceDegradeLogge
 
 **Rationale:** Module-scope mutable state is acceptable for the legitimate use case it serves, but it crosses the test-isolation boundary in ways that ordinary closure-scoped state does not. The three-piece bundle is the floor that keeps the legitimacy from drifting into test-pollution; without it, the next test author touching the suite inherits a hidden global with no obvious cause.
 
+---
+
+### EC-50: Observer participation visibility MUST be anchored on the review-file write within a bounded window, NOT on turn completion
+
+**Convention:** Whether a Council observer is actually doing its job is observable from exactly one fact: a `<phase>-<provider>-observer.md` review file landed under `.council/reviews/` within a bounded window `T` of the wake that should have produced it. A wake-dispatch that the backend ACCEPTS (synthetic send returns `sent`, the observer's turn starts and even completes) proves only that the transport worked — it does NOT prove a review was produced. The whole accept-but-no-review failure class (a Codex observer that handshakes, takes the wake, runs a turn, and emits nothing to disk; a prompt that replies in chat instead of `Write`-ing the file per the observer contract) is invisible to any liveness check keyed on turn state. Therefore: arm a per-wake watchdog that fires if no review file for that `checkpoint_id` appears within `T`, and surface that timeout as the `wake_produced_no_review` degraded reason — do NOT treat "turn done" or "send accepted" as evidence of participation.
+
+**How to apply:** When wiring any observer-wake path, key the success/failure decision on the review-file artifact (file present for this `checkpoint_id` within `T`), not on the turn lifecycle. The watchdog's single idempotent exit (`resolveObserverTurn`) must be reachable from BOTH the file-arrived path and the timeout path so neither leaks. A green turn with no file on disk is a degrade, not a success.
+
+**Origin:** Realtime × Subprocess — Council Review 2026-06-13-2004 (claude+codex observer parity, Findings #3/#7 — accept-but-no-review invisible to turn-keyed liveness)
+
+**Principle:** Observe the artifact, not the reporter; sibling EC-4 (watcher debounce never silently coalesces) + memory `feedback_progress_mirror_ui_reflects_reporter_not_ground_truth` (turn state mirrors the reporter, the file on disk is ground truth) + `feedback_llm_prompt_emit_ambiguous_transport` (chat-reply instead of file write).
+
+---
+
+### EC-51: Synthetic-send `sync` and `async` failure outcomes MUST converge on a single degraded channel
+
+**Convention:** A server-synthesized observer wake can fail in two clock domains: synchronously (the `sendUserFrameFromServer` / `sendOrchestratorSyntheticFrame` call returns a `failed` / `socket_disconnected` / `busy`-exhausted outcome inline) or asynchronously (the send is accepted but a later `observer:wake-failed` bus event reports the turn never reached the backend). BOTH paths describe the same operational fact — "this wake did not get through" — and they MUST funnel into ONE degrade helper (`degradeObserverWakeFailure`) that emits the SAME `group:degraded` event with the `wake_send_failed` reason. Handling only the async listener (and letting the synchronous `failed`/`default` cases fall through silently) leaves a wake that demonstrably failed at call time looking healthy until some unrelated later signal trips the group — the two outcomes must not diverge in observability just because they failed on different ticks.
+
+**How to apply:** Route every synthetic-send failure outcome — inline return value AND deferred bus event — through the single degrade helper. When you add a new `ServerSyntheticSendOutcome` variant, decide explicitly whether it is a participation failure and, if so, send it through the same helper; do not add a parallel inline degrade path. Test both the sync-return and async-event entries land identical `group:degraded` payloads.
+
+**Origin:** Backend-TS × Realtime — Council Review 2026-06-13-2004 (claude+codex observer parity, Finding #4 — synchronous wake-send `failed` bypassed the degraded channel the async listener used)
+
+**Principle:** Converge equivalent outcomes on one channel; sibling EC-8 (single idempotent exit) + memory `feedback_symmetric_path_missing_transformation` (parallel paths whose one missing branch is the bug) + `feedback_single_ack_defensive_path_first`.
+

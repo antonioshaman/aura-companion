@@ -175,7 +175,11 @@ export interface CouncilSlice {
    */
   hydrateGroups: (groups: GroupRecord[]) => void;
   removeGroup: (sessionGroupId: string) => void;
-  setGroupStatus: (sessionGroupId: string, status: SessionGroupStatus, opts?: { deadRole?: SessionRole }) => void;
+  setGroupStatus: (
+    sessionGroupId: string,
+    status: SessionGroupStatus,
+    opts?: { deadRole?: SessionRole; reason?: "observer_exited" | "wake_send_failed" | "reconnect_failed" | "wake_produced_no_review" },
+  ) => void;
   recordCheckpoint: (args: {
     sessionGroupId: string;
     checkpointId: string;
@@ -307,8 +311,10 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
       const next: GroupRecord = { ...existing, status };
       if (status === "degraded" && opts?.deadRole) {
         next.deadRole = opts.deadRole;
+        next.degradedReason = opts.reason;
       } else if (status !== "degraded") {
         delete next.deadRole;
+        delete next.degradedReason;
       }
       groups.set(sessionGroupId, next);
       return { groups };
@@ -352,19 +358,51 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
       groups.set(sessionGroupId, next);
       const findings = new Map(s.findings);
       const prior = findings.get(sessionGroupId) ?? [];
-      const seenIds = new Set(prior.map((f) => f.id));
+      // Build a mutable index so we can do O(1) upgrade lookups without
+      // a second linear scan. Keys are finding ids; values are their
+      // indices in the `prior` array.
+      const priorIdxById = new Map<string, number>(prior.map((f, i) => [f.id, i]));
       const newOnes: ObserverFinding[] = [];
+      // Track whether an attribution upgrade occurred so we can decide
+      // whether to write a fresh array reference (React #24 optimization).
+      let upgraded = false;
+      // Per-call context shared across all findings in this review batch.
+      const ctx = { receivedAt: timestamp, checkpointId, phase, observerModel, observerProvider };
       for (const wire of wireFindings) {
-        if (seenIds.has(wire.id)) continue; // server may re-emit on reconnect; dedup
-        newOnes.push(hydrateObserverFinding(wire, { receivedAt: timestamp, checkpointId, phase, observerModel, observerProvider }));
+        const existingIdx = priorIdxById.get(wire.id);
+        if (existingIdx === undefined) {
+          // Genuinely new finding — append as before.
+          newOnes.push(hydrateObserverFinding(wire, ctx));
+          continue;
+        }
+        // Finding already stored. Check for attribution upgrade:
+        // a stored finding with empty observerProvider/observerModel should
+        // be upgraded when the incoming call carries non-empty attribution.
+        // Empty never overwrites non-empty (e.g. a second bootstrap with ""
+        // must NOT downgrade a live event that arrived with real attribution).
+        const stored = prior[existingIdx]!;
+        const incomingHasAttribution = observerProvider !== "" || observerModel !== "";
+        const storedLacksAttribution = stored.observerProvider === "" || stored.observerModel === "";
+        if (incomingHasAttribution && storedLacksAttribution) {
+          // Upgrade the stored finding in-place (preserving array position
+          // and all other hydrated fields) with the now-known attribution.
+          prior[existingIdx] = {
+            ...stored,
+            observerProvider,
+            observerModel,
+          };
+          upgraded = true;
+        }
+        // Otherwise: finding exists and either already has attribution, or the
+        // incoming call is also empty — skip (server may re-emit on reconnect).
       }
       // Council Review 2026-05-13 React #24: only write a fresh array
-      // reference when there's actually new content. Server may re-emit
-      // a review on reconnect (dedupe filters everything out); writing
-      // a same-content fresh array forces every selector subscribed to
-      // findings to re-render, including the FindingsLog summary
-      // announcer's effect.
-      if (newOnes.length > 0) {
+      // reference when there's actually new content OR an upgrade happened.
+      // Server may re-emit a review on reconnect (dedupe filters everything
+      // out); writing a same-content fresh array forces every selector
+      // subscribed to findings to re-render, including the FindingsLog
+      // summary announcer's effect.
+      if (newOnes.length > 0 || upgraded) {
         findings.set(sessionGroupId, [...prior, ...newOnes]);
       }
       const groundingDowngrades = new Map(s.groundingDowngrades);

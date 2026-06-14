@@ -58,6 +58,34 @@ describe("buildBrowserGroupRecord", () => {
     expect(out.status).toBe("degraded");
   });
 
+  // #9: deadRole passthrough — when a degraded pair is snapshotted by REST
+  // bootstrap, the dead half MUST ride the wire. Without it the frontend
+  // deriver falls back to `deadRole ?? "observer"` and a pair whose
+  // ORCHESTRATOR died is mislabeled "Observer offline".
+  it("forwards deadRole when supplied (degraded-on-arrival snapshot)", () => {
+    const out = buildBrowserGroupRecord({
+      sessionGroupId: "grp_dead",
+      primary: { sessionId: "p", backendType: "claude" },
+      observer: { sessionId: "o", backendType: "claude" },
+      status: "degraded",
+      deadRole: "orchestrator",
+    });
+    expect(out.deadRole).toBe("orchestrator");
+  });
+
+  // #9: deadRole is omitted (not `undefined`) for the common active case so
+  // the wire stays minimal and `event_replay` of pre-#9 frames doesn't carry
+  // a spurious key.
+  it("omits deadRole entirely when not supplied", () => {
+    const out = buildBrowserGroupRecord({
+      sessionGroupId: "grp_nodead",
+      primary: { sessionId: "p", backendType: "claude" },
+      observer: { sessionId: "o", backendType: "claude" },
+      status: "active",
+    });
+    expect("deadRole" in out).toBe(false);
+  });
+
   // wakeTimeoutMs sourced from the server constant — frontend deriver
   // bounds the `reviewing` interval by this value. Any drift between
   // producer sites would yield different `reviewing-stalled` thresholds

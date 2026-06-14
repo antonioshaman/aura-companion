@@ -3,6 +3,7 @@ import { CodexAdapter, StdioTransport } from "./codex-adapter.js";
 import type { ICodexTransport } from "./codex-adapter.js";
 import type { BrowserIncomingMessage, BrowserOutgoingMessage } from "./session-types.js";
 import { log } from "./logger.js";
+import { companionBus } from "./event-bus.js";
 
 // ─── Mock Subprocess ──────────────────────────────────────────────────────────
 
@@ -3753,6 +3754,161 @@ describe("CodexAdapter with ICodexTransport", () => {
     messages.length = 0; // clear init messages
     return { mock, adapter, messages };
   }
+
+  it("sendUserFrameFromServer starts a synthetic observer turn with council-wake provenance", async () => {
+    const { mock, adapter } = await initAdapter();
+
+    const out = adapter.sendUserFrameFromServer("wake the observer");
+    expect(out).toEqual({ kind: "sent" });
+
+    await new Promise((r) => setTimeout(r, 20));
+
+    const lastCall = (mock.transport.call as ReturnType<typeof vi.fn>).mock.calls.at(-1);
+    expect(lastCall?.[0]).toBe("turn/start");
+    expect(lastCall?.[3]).toBe("server:council-wake");
+    expect(lastCall?.[1]).toMatchObject({
+      threadId: "thr_init",
+      input: [{ type: "text", text: "wake the observer" }],
+    });
+  });
+
+  it("sendUserFrameFromServer returns busy when a prior synthetic observer wake is still in flight", async () => {
+    const { adapter } = await initAdapter();
+
+    expect(adapter.sendUserFrameFromServer("first wake")).toEqual({ kind: "sent" });
+    expect(adapter.sendUserFrameFromServer("second wake")).toEqual({ kind: "busy" });
+  });
+
+  // #12: a codex observer-wake dispatch must register idle-kill activity
+  // unconditionally — BEFORE the in-flight gate — so a pair that keeps
+  // checkpointing while the observer runs a long review is not idle-killed at
+  // the 4h threshold. Mirrors the Claude adapter's onActivityUpdate discipline.
+  it("calls the server activity hook on a sent wake (idle-kill liveness)", async () => {
+    const { adapter } = await initAdapter();
+    const activity = vi.fn();
+    adapter.setServerActivityHook(activity);
+
+    expect(adapter.sendUserFrameFromServer("wake")).toEqual({ kind: "sent" });
+    expect(activity).toHaveBeenCalledTimes(1);
+  });
+
+  it("calls the server activity hook even when the wake is gated busy", async () => {
+    const { adapter } = await initAdapter();
+    const activity = vi.fn();
+    adapter.setServerActivityHook(activity);
+
+    // First wake occupies the single in-flight slot.
+    expect(adapter.sendUserFrameFromServer("first")).toEqual({ kind: "sent" });
+    // Second wake is gated `busy` but is still real liveness — the hook MUST
+    // fire so a steadily-checkpointing pair mid-review keeps the clock alive.
+    expect(adapter.sendUserFrameFromServer("second")).toEqual({ kind: "busy" });
+    expect(activity).toHaveBeenCalledTimes(2);
+  });
+
+  it("emits observer:turn-done when a synthetic observer turn completes", async () => {
+    const { mock, adapter } = await initAdapter();
+    const onDone = vi.fn();
+    companionBus.on("observer:turn-done", onDone);
+
+    expect(adapter.sendUserFrameFromServer("wake")).toEqual({ kind: "sent" });
+    await new Promise((r) => setTimeout(r, 20));
+    mock.resolveCall(4, { turn: { id: "turn_obs_1" } });
+    await new Promise((r) => setTimeout(r, 20));
+
+    mock.pushNotification("turn/completed", {
+      turn: { id: "turn_obs_1", status: "completed" },
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(onDone).toHaveBeenCalledWith({ sessionId: "test-session-transport" });
+  });
+
+  it("does not emit observer:turn-done for a different completed turn id", async () => {
+    const { mock, adapter } = await initAdapter();
+    const onDone = vi.fn();
+    companionBus.on("observer:turn-done", onDone);
+
+    expect(adapter.sendUserFrameFromServer("wake")).toEqual({ kind: "sent" });
+    await new Promise((r) => setTimeout(r, 20));
+    mock.resolveCall(4, { turn: { id: "turn_obs_1" } });
+    await new Promise((r) => setTimeout(r, 20));
+
+    mock.pushNotification("turn/completed", {
+      turn: { id: "turn_other", status: "completed" },
+    });
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(onDone).not.toHaveBeenCalled();
+    expect(adapter.sendUserFrameFromServer("wake again")).toEqual({ kind: "busy" });
+  });
+
+  it("emits observer:wake-failed and releases the in-flight wake when synthetic turn/start rejects", async () => {
+    const { mock, adapter } = await initAdapter();
+    const onWakeFailed = vi.fn();
+    companionBus.on("observer:wake-failed", onWakeFailed);
+
+    expect(adapter.sendUserFrameFromServer("wake")).toEqual({ kind: "sent" });
+    await new Promise((r) => setTimeout(r, 20));
+    mock.rejectCall(4, new Error("Transport closed"));
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(onWakeFailed).toHaveBeenCalledWith({
+      sessionId: "test-session-transport",
+      error: "Transport closed",
+    });
+    expect(adapter.sendUserFrameFromServer("retry wake")).toEqual({ kind: "sent" });
+  });
+
+  // #3 (council parity): codex ends a turn via paths that never emit a
+  // matching turn/completed. Before centralizing the reset, a stream/turn
+  // error left observerTurnState stranded `in-flight` forever, blocking every
+  // future checkpoint with `busy`. Assert an error releases the slot.
+  it("releases the in-flight wake slot on a codex error notification so the next wake can dispatch", async () => {
+    const { mock, adapter } = await initAdapter();
+    const onDone = vi.fn();
+    companionBus.on("observer:turn-done", onDone);
+
+    expect(adapter.sendUserFrameFromServer("wake")).toEqual({ kind: "sent" });
+    await new Promise((r) => setTimeout(r, 20));
+    mock.resolveCall(4, { turn: { id: "turn_obs_1" } });
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Codex reports an error instead of completing the turn.
+    mock.pushNotification("codex/event/error", { msg: { message: "boom" } });
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(onDone).toHaveBeenCalledWith({ sessionId: "test-session-transport" });
+    // Slot released — the next checkpoint can dispatch a fresh wake.
+    expect(adapter.sendUserFrameFromServer("next wake")).toEqual({ kind: "sent" });
+  });
+
+  // #3 same-chunk race: if turn/completed is dispatched synchronously BEFORE
+  // the turn/start reply records observerWakeTurnId (both in one TCP chunk),
+  // the old code missed the correlation and stranded the slot. The completion
+  // is now stashed and resolved the moment onSuccess learns the id.
+  it("resolves the wake when turn/completed arrives before the turn id is recorded (same-chunk race)", async () => {
+    const { mock, adapter } = await initAdapter();
+    const onDone = vi.fn();
+    companionBus.on("observer:turn-done", onDone);
+
+    expect(adapter.sendUserFrameFromServer("wake")).toEqual({ kind: "sent" });
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Completion arrives FIRST — observerWakeTurnId is still null here.
+    mock.pushNotification("turn/completed", {
+      turn: { id: "turn_obs_1", status: "completed" },
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    // Not resolved yet — the id hasn't been recorded.
+    expect(onDone).not.toHaveBeenCalled();
+
+    // Now the turn/start reply lands and records the id → resolves immediately.
+    mock.resolveCall(4, { turn: { id: "turn_obs_1" } });
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(onDone).toHaveBeenCalledWith({ sessionId: "test-session-transport" });
+    expect(adapter.sendUserFrameFromServer("next wake")).toEqual({ kind: "sent" });
+  });
 
   // ── Notification handler coverage ─────────────────────────────────────
 

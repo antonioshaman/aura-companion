@@ -190,6 +190,73 @@ describe("ObserverPanel — state pills (5 explicit states)", () => {
     expect(screen.getByTestId("degraded-banner")).toBeInTheDocument();
   });
 
+  // #14 (Finding #14): the degraded pill must carry role="status" + aria-atomic="true"
+  // matching the sibling reconnecting/reviewing-stalled branches, so screen-reader users
+  // get the degraded transition announced when the panel mounts without the banner callback.
+  it("degraded pill has role='status' and aria-atomic='true' for screen-reader announcements (#14)", () => {
+    seedGroup();
+    act(() => {
+      useStore.getState().setGroupStatus(GROUP.sessionGroupId, "degraded", { deadRole: "observer" });
+    });
+    render(<ObserverPanel sessionId={SESSION} onRespawnHalf={vi.fn()} />);
+    const pill = screen.getByTestId("status-pill");
+    // Matches sibling branches (reconnecting, reviewing-stalled) — whole pill
+    // text is read on transition, not per-render fragments.
+    expect(pill).toHaveAttribute("role", "status");
+    expect(pill).toHaveAttribute("aria-atomic", "true");
+  });
+
+  // #14: degraded label text must use text-cc-fg (WCAG AA compliant), NOT text-cc-warning
+  // (which fails ~3.3:1 on light backgrounds). The warning tint stays on the dot/border only.
+  it("degraded label uses text-cc-fg class, not text-cc-warning, for WCAG AA contrast (#14)", () => {
+    seedGroup();
+    act(() => {
+      useStore.getState().setGroupStatus(GROUP.sessionGroupId, "degraded", { deadRole: "observer" });
+    });
+    render(<ObserverPanel sessionId={SESSION} onRespawnHalf={vi.fn()} />);
+    const pill = screen.getByTestId("status-pill");
+    const label = pill.querySelector("span.text-cc-fg");
+    expect(label).not.toBeNull();
+    // The pill wrapper must NOT carry the warning tint as the text color.
+    expect(pill.className).not.toContain("text-cc-warning");
+  });
+
+  // #15 (Finding #15): the three degraded reasons produce distinguishable secondary qualifiers
+  // in the pill (·-separated sub-text) so users can diagnose the cause at a glance.
+  it.each([
+    { reason: "observer_exited" as const, expectedSub: "exited" },
+    { reason: "wake_send_failed" as const, expectedSub: "wake failed" },
+    { reason: "wake_produced_no_review" as const, expectedSub: "no review" },
+    { reason: "reconnect_failed" as const, expectedSub: "reconnect failed" },
+  ])("degraded pill shows secondary qualifier '$expectedSub' for reason $reason (#15)", ({ reason, expectedSub }) => {
+    // Each degrade reason maps to a distinct sub-label so the three causes are
+    // distinguishable without changing the stable primary label.
+    // `opts.reason` is the setGroupStatus param that maps to GroupRecord.degradedReason.
+    seedGroup();
+    act(() => {
+      useStore.getState().setGroupStatus(GROUP.sessionGroupId, "degraded", { deadRole: "observer", reason });
+    });
+    render(<ObserverPanel sessionId={SESSION} onRespawnHalf={vi.fn()} />);
+    const pill = screen.getByTestId("status-pill");
+    // Primary label is stable.
+    expect(pill).toHaveTextContent(/Observer offline/i);
+    // Secondary qualifier differentiates the cause.
+    expect(pill).toHaveTextContent(expectedSub);
+  });
+
+  it("degraded pill with no reason shows no secondary qualifier (#15)", () => {
+    // When the server doesn't provide a reason, the pill renders just the primary label.
+    seedGroup();
+    act(() => {
+      useStore.getState().setGroupStatus(GROUP.sessionGroupId, "degraded", { deadRole: "observer" });
+    });
+    render(<ObserverPanel sessionId={SESSION} onRespawnHalf={vi.fn()} />);
+    const pill = screen.getByTestId("status-pill");
+    expect(pill).toHaveTextContent(/Observer offline/i);
+    // No reason → no ·-separator in the pill text.
+    expect(pill.textContent).not.toContain("·");
+  });
+
   // Bidirectional pipeline Story 4.1.5 — convergence pill variants.
   // Each variant gets one named test asserting the data-state attribute,
   // accessible label, and color token. Axe scan is the global mandate
@@ -361,6 +428,37 @@ describe("ObserverPanel — findings list", () => {
     render(<ObserverPanel sessionId={SESSION} />);
     fireEvent.click(screen.getByRole("button", { name: /Dismiss STOP/i }));
     expect(useStore.getState().dismissedStopIds.has("f1")).toBe(true);
+  });
+});
+
+describe("ObserverPanel — reviewing-stalled banner (#14/#15)", () => {
+  // #14/#15: the reviewing-stalled banner's Relaunch button must use text-cc-fg
+  // (not text-cc-warning tint-on-tint) and the banner background must be /10 (not /5)
+  // to match DegradedBanner's elevation recipe.
+  it("renders the reviewing-stalled banner with the relaunch button using text-cc-fg class", () => {
+    // Seed a checkpoint at epoch+1s, then pass nowMs far past the default
+    // 300,000ms wakeTimeoutMs → deriver yields reviewing-stalled.
+    seedGroup();
+    seedCheckpoint({ timestamp: 1_000 });
+    // nowMs = 1_000 + 300_000 + 1 = 301_001 → past the deadline
+    render(<ObserverPanel sessionId={SESSION} onRespawnHalf={vi.fn()} nowMs={302_000} />);
+    expect(screen.getByTestId("reviewing-stalled-banner")).toBeInTheDocument();
+    const relaunchBtn = screen.getByRole("button", { name: /Relaunch observer/i });
+    expect(relaunchBtn).toBeInTheDocument();
+    // #14: button must use text-cc-fg, not text-cc-warning (which fails AA contrast on light bg).
+    expect(relaunchBtn.className).toContain("text-cc-fg");
+    expect(relaunchBtn.className).not.toContain("text-cc-warning");
+  });
+
+  it("reviewing-stalled banner background uses /10 opacity (aligned with DegradedBanner elevation)", () => {
+    // #15: the reviewing-stalled banner previously used bg-cc-warning/5 (off-scale);
+    // it must use bg-cc-warning/10 matching DegradedBanner to align visual elevation.
+    seedGroup();
+    seedCheckpoint({ timestamp: 1_000 });
+    render(<ObserverPanel sessionId={SESSION} onRespawnHalf={vi.fn()} nowMs={302_000} />);
+    const banner = screen.getByTestId("reviewing-stalled-banner");
+    expect(banner.className).toContain("bg-cc-warning/10");
+    expect(banner.className).not.toContain("bg-cc-warning/5");
   });
 });
 

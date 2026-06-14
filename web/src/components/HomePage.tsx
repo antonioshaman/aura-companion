@@ -24,7 +24,7 @@ import { FolderPicker } from "./FolderPicker.js";
 import { readFileAsBase64, type ImageAttachment } from "../utils/image.js";
 import { LinearSection } from "./home/LinearSection.js";
 import { BranchPicker } from "./home/BranchPicker.js";
-import { CouncilToggle } from "./council/index.js";
+import { CouncilToggle, coerceCouncilPairing } from "./council/index.js";
 import { MentionMenu } from "./MentionMenu.js";
 import { useMentionMenu } from "../utils/use-mention-menu.js";
 import type { SavedPrompt } from "../api.js";
@@ -139,13 +139,31 @@ export function HomePage() {
   const [councilPairing, setCouncilPairing] = useState<"claude+claude" | "claude+codex">(
     () => (localStorage.getItem("cc-council-pairing") as "claude+claude" | "claude+codex") || "claude+claude",
   );
-  // codexAvailable: backend pre-flight is wired in a later Phase F commit
-  // (PLAN T11). For now, mirror the backends listing — Codex is available
-  // when listed as a working backend by the server.
-  const codexAvailable = useMemo(
-    () => backends.some((b) => b.id === "codex" && b.available),
+  const codexBackend = useMemo(
+    () => backends.find((b) => b.id === "codex"),
     [backends],
   );
+  const codexAvailable = codexBackend?.available ?? false;
+  const codexObserverReviewAvailable = codexBackend?.councilObserverReviewAvailable ?? false;
+  const codexObserverReviewReason = codexBackend?.councilObserverReviewReason
+    ?? "Codex observer review capability is unavailable on this server.";
+
+  // #11: derive the reason surfaced to CouncilToggle based on WHICH gate failed.
+  // When the CLI itself is missing/unauthed (`!codexAvailable`), the user needs to
+  // install or sign in — not read about observer review capability (the wrong problem).
+  // When Codex is present but the review capability is off, use the capability reason.
+  const codexUnavailableReason = !codexAvailable
+    ? "Codex CLI not found or not authenticated on this server."
+    : codexObserverReviewReason;
+
+  // Mirrors CouncilToggle's own gate: mixed pairing is only valid when BOTH
+  // Codex is installed AND its observer-review capability is available on this
+  // server build.  Used to coerce a stale localStorage preference so that the
+  // UI trigger and the POST body never carry an unsupported pairing.
+  const mixedPairingAvailable = codexAvailable && codexObserverReviewAvailable;
+  // Non-destructive: raw councilPairing in localStorage is preserved so the
+  // preference reverts automatically if capability is restored on a later restart.
+  const effectiveCouncilPairing = coerceCouncilPairing(councilPairing, mixedPairingAvailable);
 
   const MODELS = backend === "codex"
     ? (dynamicModelsForBackend ?? [])
@@ -705,7 +723,10 @@ export function HomePage() {
           // server will be free to ignore these fields until the matching
           // backend commit lands.
           councilMode: councilEnabled ? "council" : undefined,
-          councilPairing: councilEnabled ? councilPairing : undefined,
+          // Hard-guard: always send the capability-coerced value, never the raw
+          // localStorage pairing, so a stale "claude+codex" preference can never
+          // create a broken pair when the capability is currently unavailable.
+          councilPairing: councilEnabled ? effectiveCouncilPairing : undefined,
         },
         (progress) => {
           useStore.getState().addCreationProgress(progress);
@@ -1345,7 +1366,7 @@ export function HomePage() {
             <div className="max-w-md mx-auto">
               <CouncilToggle
                 enabled={councilEnabled}
-                pairing={councilPairing}
+                pairing={effectiveCouncilPairing}
                 onEnabledChange={(v) => {
                   setCouncilEnabled(v);
                   localStorage.setItem("cc-council-enabled", v ? "true" : "false");
@@ -1355,7 +1376,8 @@ export function HomePage() {
                   localStorage.setItem("cc-council-pairing", p);
                 }}
                 codexAvailable={codexAvailable}
-                codexUnavailableReason="Codex CLI not detected — install or sign in."
+                codexUnavailableReason={codexUnavailableReason}
+                codexObserverReviewAvailable={codexObserverReviewAvailable}
               />
             </div>
           )}

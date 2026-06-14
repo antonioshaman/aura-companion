@@ -298,7 +298,7 @@ export class SessionGroupCoordinator {
    */
   private enactBusEvent(sessionGroupId: string, e: GroupBusSideEffect): void {
     if (e.kind === "degraded") {
-      companionBus.emit("group:degraded", { sessionGroupId, deadRole: e.deadRole });
+      companionBus.emit("group:degraded", { sessionGroupId, deadRole: e.deadRole, reason: e.reason });
       return;
     }
     if (e.kind === "exited") {

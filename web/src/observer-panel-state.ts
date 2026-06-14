@@ -54,7 +54,11 @@ export function deriveObserverPanelState(args: {
     // malformed payload reached us without it, fall back to "observer"
     // (the more common death mode) rather than crash the panel — but
     // still surface degraded so the user takes action.
-    return { name: "degraded", deadRole: group.deadRole ?? "observer" };
+    return {
+      name: "degraded",
+      deadRole: group.deadRole ?? "observer",
+      ...(group.degradedReason ? { reason: group.degradedReason } : {}),
+    };
   }
 
   const liveStops = findUnresolvedStops(findings, dismissedStopIds);

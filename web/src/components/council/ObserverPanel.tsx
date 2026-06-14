@@ -128,13 +128,38 @@ function StatusPill({ state }: { state: ObserverPanelState }) {
           </span>
         </div>
       );
-    case "degraded":
+    case "degraded": {
+      // #14: add role="status" + aria-atomic="true" matching sibling branches so
+      // screen-readers announce the degraded transition.
+      // #15: vary the secondary qualifier (·-separated) by degraded reason so the
+      // three causes are distinguishable without changing the primary label.
+      const degradedSecondary = (() => {
+        if (state.reason === "observer_exited") return "exited";
+        if (state.reason === "wake_send_failed") return "wake failed";
+        if (state.reason === "wake_produced_no_review") return "no review";
+        if (state.reason === "reconnect_failed") return "reconnect failed";
+        return null;
+      })();
       return (
-        <div data-testid="status-pill" data-state={state.name} className="flex items-center gap-2 text-cc-warning">
+        <div
+          data-testid="status-pill"
+          data-state={state.name}
+          role="status"
+          aria-atomic="true"
+          className="flex items-center gap-2"
+        >
+          {/* #14: warning dot keeps amber tint; label text uses cc-fg for WCAG AA contrast */}
           <span aria-hidden="true" className="w-2 h-2 rounded-full bg-cc-warning" />
-          <span className="text-xs font-medium">{state.deadRole === "observer" ? "Observer offline" : "Orchestrator offline"}</span>
+          <span className="text-xs font-medium text-cc-fg">{state.deadRole === "observer" ? "Observer offline" : "Orchestrator offline"}</span>
+          {degradedSecondary && (
+            <>
+              <span className="text-[10px] font-mono-code text-cc-muted">·</span>
+              <span className="text-[10px] font-mono-code text-cc-muted">{degradedSecondary}</span>
+            </>
+          )}
         </div>
       );
+    }
     // Council Review 2026-05-13 Friedman #5 (closes recovery-branch-
     // reachability cluster, convention EC-10): exhaustive case for the
     // two new state variants added in Task 11. The TS `never` check
@@ -388,7 +413,7 @@ export function ObserverPanel({
 
       {/* Degraded banner — lives in the header, NOT in the composer slot. */}
       {state.name === "degraded" && onRespawnHalf && (
-        <DegradedBanner deadRole={state.deadRole} onRespawn={handleRespawn} />
+        <DegradedBanner deadRole={state.deadRole} reason={state.reason} onRespawn={handleRespawn} />
       )}
 
       {/* Council Review 2026-05-13-0150 Friedman #10: stalled state next-
@@ -398,7 +423,7 @@ export function ObserverPanel({
       {state.name === "reviewing-stalled" && onRespawnHalf && (
         <div
           data-testid="reviewing-stalled-banner"
-          className="shrink-0 px-3 py-2.5 border-b border-cc-warning/25 bg-cc-warning/5 flex items-center gap-3"
+          className="shrink-0 px-3 py-2.5 border-b border-cc-warning/25 bg-cc-warning/10 flex items-center gap-3"
         >
           <div className="flex-1 text-xs text-cc-fg leading-snug">
             <div className="font-medium">Review stalled</div>
@@ -406,11 +431,13 @@ export function ObserverPanel({
               No review for phase {state.phase} in the expected window. Observer may be stuck.
             </div>
           </div>
+          {/* #14/#15: button text uses text-cc-fg (not text-cc-warning) to meet WCAG AA contrast;
+              warning tint stays on the background so the warning identity is preserved. */}
           <button
             type="button"
             onClick={handleRespawn}
             data-council-stalled-primary=""
-            className="text-xs font-medium px-3 py-1.5 rounded-md bg-cc-warning/15 hover:bg-cc-warning/25 text-cc-warning transition-colors cursor-pointer"
+            className="text-xs font-medium px-3 py-1.5 rounded-md bg-cc-warning/20 hover:bg-cc-warning/30 text-cc-fg border border-cc-warning/30 transition-colors cursor-pointer"
           >
             Relaunch observer
           </button>

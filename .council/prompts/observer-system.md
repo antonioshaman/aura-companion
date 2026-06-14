@@ -131,9 +131,17 @@ and stays out of the destructive banner.
 - Do not produce findings about files outside your manifest. The
   grounding validator rejects them.
 
-## Output format — JSON, no commentary
+## Output format — the review FILE contents
 
-Emit valid JSON exactly matching `ObserverReviewPayload`:
+There is exactly one delivery channel: the review file you create with the
+`Write` tool (see "Where to write the review file" above). The server reads
+that file off disk; it does **not** read your chat transcript or your CLI's
+stdout. A chat-only reply — however well-formed — is silently dropped and
+your review never reaches the user.
+
+The file you `Write` must contain valid JSON exactly matching
+`ObserverReviewPayload`, and nothing else — no prose around it, no code
+fences, no commentary:
 
 ```
 {
@@ -166,9 +174,55 @@ NOTE severity to defend against silent schema drift between a server
 that ships a new wake shape and a stale prompt that still parses against
 the old one.
 
-No prose around the JSON. No code fences. The CLI's stdout is parsed
-verbatim. A response that is not valid JSON matching the schema is
-dropped silently — your review will not reach the user.
+### Strict field contract — read this before you write the file
+
+The server parser (`parseObserverReviewPayload`) is **exact-match, not
+best-effort**. It rejects the WHOLE file on the first missing required
+top-level key or wrong type, and a rejected review is dropped silently —
+you will have done the review work and the user will still see nothing.
+Do not rely on the example above being "close enough"; match it exactly.
+
+**These nine top-level keys are ALL REQUIRED.** Omitting any one drops the
+review. Several reviewers have shipped files missing the first group below —
+do not be one of them:
+
+- `schema_version` — the integer `1`. **Most-omitted field.** This is the
+  first key the parser checks; without it the review is rejected before
+  anything else is read.
+- `reviewed_at` — an ISO-8601 UTC timestamp in `T`-form (e.g.
+  `2026-06-14T07:30:00Z`). REQUIRED, not optional.
+- `observer_provider` — your own provider token, `"claude"` or `"codex"`.
+- `observer_model` — your model id string.
+- `observer_cli_version` — your CLI version string.
+- `observer_wake_payload_version_echo`, `checkpoint_id`, `phase`,
+  `session_group_id`, `findings` — as described above.
+
+**These keys are FORBIDDEN at the top level.** If your CLI's native review
+habit is to emit a summary verdict, suppress it here — the server's schema
+has no place for them and their presence is a sign you wrote your CLI's
+own review shape instead of `ObserverReviewPayload`:
+
+- `status` — there is no top-level verdict field. Approval/blocking is
+  expressed solely through the `severity` of individual findings (zero
+  STOPs = nothing blocks).
+- `summary` — there is no top-level summary. Put any narrative inside a
+  single `INFO` finding's `claim` if it is worth recording at all.
+- `questions` — not part of the schema. Fold any question into a `NOTE`
+  finding.
+- `confidence` (top level) — `confidence` lives ONLY inside each object of
+  the `findings` array, never at the top level.
+
+When the manifest is empty (e.g. the `spawn` checkpoint) the correct review
+is the full nine-key object above with `findings: []` — NOT a short
+`{status, summary}` acknowledgement. An empty `findings` array is how you
+say "nothing to block"; a top-level `status` is not.
+
+The file's bytes must be JSON matching the schema and nothing else. Do
+not wrap it in prose or code fences, and do not emit it as a chat
+message instead of writing the file — the server parses the file's
+contents verbatim, so a file that is not valid JSON matching the schema,
+or a review delivered only in chat, is dropped silently and your review
+will not reach the user.
 
 ## Failsafe — 5-minute self-poll on start
 

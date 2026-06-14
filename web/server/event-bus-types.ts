@@ -4,6 +4,7 @@
 import type { BrowserIncomingMessage } from "./session-types.js";
 import type { CodexAdapter } from "./codex-adapter.js";
 import type { SessionPhase } from "./session-state-machine.js";
+import type { GroupDegradeReason } from "./group-state-machine.js";
 
 /**
  * Closed producer-side reason union for `session:relaunch-exhausted`.
@@ -156,6 +157,7 @@ export interface CompanionEventMap {
   "group:degraded": {
     sessionGroupId: string;
     deadRole: "orchestrator" | "observer";
+    reason?: GroupDegradeReason;
   };
 
   /** One half of a Council Mode group is reconnecting — bounded grace
@@ -193,6 +195,14 @@ export interface CompanionEventMap {
   "observer:turn-done": {
     /** Companion sessionId of the observer half (NOT cliSessionId). */
     sessionId: string;
+  };
+
+  /** Codex synthetic observer wake failed after dispatch was accepted. */
+  "observer:wake-failed": {
+    /** Companion sessionId of the observer half (NOT cliSessionId). */
+    sessionId: string;
+    /** Best-effort transport / RPC failure string for logs and degraded copy. */
+    error: string;
   };
 
   /**

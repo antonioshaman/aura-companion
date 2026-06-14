@@ -247,6 +247,9 @@ export interface BackendInfo {
   id: string;
   name: string;
   available: boolean;
+  /** Council-mode mixed pairing capability for a Codex observer, if published by the server. */
+  councilObserverReviewAvailable?: boolean;
+  councilObserverReviewReason?: string;
 }
 
 export interface BackendModelInfo {

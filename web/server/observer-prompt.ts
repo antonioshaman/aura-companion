@@ -612,8 +612,14 @@ export function buildObserverWakePayload(args: {
    *  EC-7 idiom — the filesystem-access predicate is callable only via
    *  the resolving wrapper {@link assertWakeManifestPathAllowed}. */
   workspaceRoot: string;
+  /** Observer provider token (`claude` | `codex`), the second segment of
+   *  the group pairing. Used to name the exact review-file path in the
+   *  wake terminator so the per-wake directive is transport-explicit
+   *  (Willison Council 2026-06-13 P1) — "emit X" with no Write target
+   *  named lets a model default to a chat reply the server cannot read. */
+  observerProvider: string;
 }): ObserverWakeBuildResult {
-  const { checkpoint, manifest, workspaceRoot } = args;
+  const { checkpoint, manifest, workspaceRoot, observerProvider } = args;
 
   // Per-section length caps — bounded independently. Char-level
   // validation (CR/LF/NUL/fence-triplet) happens first; realpath
@@ -695,6 +701,13 @@ export function buildObserverWakePayload(args: {
   if (!Number.isInteger(checkpoint.sequence) || checkpoint.sequence < 0) {
     throw new Error(`observer-wake: checkpoint.sequence must be a non-negative integer`);
   }
+  // Provider names the review-file path in the terminator. It is
+  // server-derived from the allowlisted pairing, but validate the shape
+  // anyway so the wake builder's contract is self-contained and a future
+  // caller cannot inject path/markdown bytes through it.
+  if (observerProvider !== "claude" && observerProvider !== "codex") {
+    throw new Error(`observer-wake: observerProvider must be "claude" or "codex"`);
+  }
 
   // Build the typed payload from the FILTERED manifest. Key order is
   // intentional and load-bearing: version first, then echo fields, then
@@ -725,7 +738,7 @@ export function buildObserverWakePayload(args: {
     jsonBlock,
     "```",
     "",
-    "Emit one review file matching the `ObserverReviewPayload` JSON schema described in your system prompt. Set `observer_wake_payload_version_echo` to the integer value of `observer_wake_payload_version` from the manifest. Echo `session_group_id`, `checkpoint_id`, and `phase` from the manifest verbatim. Begin.",
+    `You MUST use your \`Write\` tool to create the file \`.council/reviews/${checkpoint.phase}-${observerProvider}-observer.md\` (workspace-relative) containing one review matching the \`ObserverReviewPayload\` JSON schema described in your system prompt — JSON only, no prose, no code fences. The server reads that FILE off disk; a reply emitted only in chat is silently dropped and your review will not reach the user. Set \`observer_wake_payload_version_echo\` to the integer value of \`observer_wake_payload_version\` from the manifest. Echo \`session_group_id\`, \`checkpoint_id\`, and \`phase\` from the manifest verbatim. Begin.`,
     "",
   ].join("\n");
 
