@@ -2578,6 +2578,68 @@ describe("SessionOrchestrator", () => {
       }
     });
 
+    it("stamps each live finding with the reviewedAt arg (review file mtime) passed from the watcher", () => {
+      // Live counterpart to the REST bootstrap reviewedAt stamping: the
+      // review watcher stats the file's mtime and threads it through
+      // onReview → handleCouncilReview's 3rd arg, so live findings carry
+      // the file's real landing time, not the browser's per-batch clock.
+      seedGroup("grp_rt", { artifactPaths: [] });
+      const emitted: Array<{ findings: Array<{ reviewedAt?: number }> }> = [];
+      companionBus.on("group:review", (e: unknown) => { emitted.push(e as { findings: Array<{ reviewedAt?: number }> }); });
+      const handle = (orchestrator as unknown as {
+        handleCouncilReview: (g: string, p: Record<string, unknown>, reviewedAt?: number) => void;
+      }).handleCouncilReview;
+      const MTIME = 1_700_000_123_456;
+      handle.call(orchestrator, "grp_rt", {
+        schema_version: 1,
+        observer_wake_payload_version_echo: 1,
+        checkpoint_id: "chk_a",
+        phase: "council-plan",
+        session_group_id: "grp_rt",
+        reviewed_at: "2026-01-01T00:00:00Z",
+        observer_provider: "claude",
+        observer_model: "claude-opus-4-7",
+        observer_cli_version: "1.0.0",
+        findings: [
+          { severity: "INFO", claim: "noted", evidence_path: "src/a.ts" },
+        ],
+      }, MTIME);
+      expect(emitted).toHaveLength(1);
+      expect(emitted[0]!.findings[0]!.reviewedAt).toBe(MTIME);
+    });
+
+    it("falls back to a server clock for reviewedAt when the watcher passes no mtime", () => {
+      // Graceful degradation: if the watcher's post-read stat failed it
+      // passes undefined; the handler must still stamp a usable time
+      // (now()) rather than emitting an undefined event time.
+      seedGroup("grp_rt2", { artifactPaths: [] });
+      const emitted: Array<{ findings: Array<{ reviewedAt?: number }> }> = [];
+      companionBus.on("group:review", (e: unknown) => { emitted.push(e as { findings: Array<{ reviewedAt?: number }> }); });
+      const handle = (orchestrator as unknown as {
+        handleCouncilReview: (g: string, p: Record<string, unknown>, reviewedAt?: number) => void;
+      }).handleCouncilReview;
+      const before = Date.now();
+      handle.call(orchestrator, "grp_rt2", {
+        schema_version: 1,
+        observer_wake_payload_version_echo: 1,
+        checkpoint_id: "chk_a",
+        phase: "council-plan",
+        session_group_id: "grp_rt2",
+        reviewed_at: "2026-01-01T00:00:00Z",
+        observer_provider: "claude",
+        observer_model: "claude-opus-4-7",
+        observer_cli_version: "1.0.0",
+        findings: [
+          { severity: "INFO", claim: "noted", evidence_path: "src/a.ts" },
+        ],
+      });
+      const after = Date.now();
+      expect(emitted).toHaveLength(1);
+      const stamped = emitted[0]!.findings[0]!.reviewedAt!;
+      expect(stamped).toBeGreaterThanOrEqual(before);
+      expect(stamped).toBeLessThanOrEqual(after);
+    });
+
     it("is a no-op (no emission) when the group has no watcher entry", () => {
       const emitted: unknown[] = [];
       companionBus.on("group:review", (e: unknown) => { emitted.push(e); });

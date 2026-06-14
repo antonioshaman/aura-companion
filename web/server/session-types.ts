@@ -578,11 +578,13 @@ export interface BrowserObserverFinding {
   downgradeReason?: "evidence_not_in_modified_set" | "evidence_missing_on_disk" | "wake_version_mismatch";
   /**
    * Real event time (ms epoch), server-stamped from the review FILE's mtime.
-   * Used so the UI shows when the review actually landed instead of page-load
-   * time on REST bootstrap. NOT the observer's self-reported `reviewed_at` —
-   * that field is observer-authored and unreliable (observed: a hallucinated
-   * placeholder timestamp). Absent on the live path, where the batch broadcast
-   * time already approximates the real event time.
+   * Stamped on BOTH paths: REST bootstrap (`getGroupReviewsForBootstrap`) and
+   * the live `group:review` broadcast (via the review watcher's post-read stat).
+   * Used so the UI shows when the review actually landed instead of the
+   * browser's page-load / per-batch ingestion time. NOT the observer's
+   * self-reported `reviewed_at` — that field is observer-authored and
+   * unreliable (observed: a hallucinated placeholder timestamp). Optional only
+   * for backward-compatible decode of any pre-fix persisted findings.
    */
   reviewedAt?: number;
 }
