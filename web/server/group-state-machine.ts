@@ -20,6 +20,21 @@ export type GroupStatus = "pairing" | "active" | "degraded" | "archived" | "reco
 export type GroupRole = SessionGroupRole;
 
 /**
+ * Why a group degraded. Single source of truth for the reason union — the
+ * bus payload (`event-bus-types.ts:group:degraded.reason`) and the orchestrator's
+ * bootstrap-reason cache both reference THIS type, so the four values cannot
+ * drift apart. A `half_died` event may carry an explicit reason (the
+ * orchestrator's wake-failure / no-review paths); when absent the side-effect
+ * table derives `observer_exited` (plain crash) or `reconnect_failed`
+ * (grace-window expiry).
+ */
+export type GroupDegradeReason =
+  | "observer_exited"
+  | "wake_send_failed"
+  | "reconnect_failed"
+  | "wake_produced_no_review";
+
+/**
  * `reconnect_started` carries the surviving role: the half whose ws is still
  * up and whose browser is the one that will actually receive the wire
  * frame. UI uses this to render "your X is still here, waiting for Y"
@@ -32,7 +47,7 @@ export type GroupRole = SessionGroupRole;
  */
 export type GroupEvent =
   | { type: "both_ready" }
-  | { type: "half_died"; role: GroupRole }
+  | { type: "half_died"; role: GroupRole; reason?: GroupDegradeReason }
   | { type: "half_respawned"; role: GroupRole }
   | { type: "reconnect_started"; survivingRole: GroupRole; deadlineMs: number }
   | { type: "reconnect_ok"; role: GroupRole }
@@ -151,7 +166,7 @@ export function isObserverHealthy(state: GroupStatus): boolean {
  * role we're waiting on to come back; absent on `reconnected` / `archived`.
  */
 export type GroupBusSideEffect =
-  | { kind: "degraded"; deadRole: GroupRole }
+  | { kind: "degraded"; deadRole: GroupRole; reason: GroupDegradeReason }
   | { kind: "exited"; reason: "user_archived" | "shutdown" | "both_halves_died" }
   | { kind: "reconnecting"; survivingRole: GroupRole; deadlineMs: number }
   | { kind: "reconnected" };
@@ -353,7 +368,19 @@ export function deriveSideEffects(
       event.type === "half_died" || event.type === "reconnect_failed" || event.type === "reconnect_ok"
         ? event.role
         : "observer";
-    busEvents.push({ kind: "degraded", deadRole });
+    // Discriminate the reason at the transition so EVERY degrade carries one
+    // on the wire (Council Review 2026-06-13 P2 #7). `reconnect_failed`
+    // grace-expiry → `reconnect_failed`; a `half_died` defaults to the plain
+    // crash reason `observer_exited` UNLESS the caller threaded a more
+    // specific one (the orchestrator's wake-failure / no-review paths pass
+    // `wake_send_failed` / `wake_produced_no_review`).
+    const reason: GroupDegradeReason =
+      event.type === "reconnect_failed"
+        ? "reconnect_failed"
+        : event.type === "half_died"
+          ? (event.reason ?? "observer_exited")
+          : "observer_exited";
+    busEvents.push({ kind: "degraded", deadRole, reason });
     if (event.type === "reconnect_failed") {
       logEntries.push({
         event: "group.reconnect_failed",

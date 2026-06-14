@@ -131,9 +131,17 @@ and stays out of the destructive banner.
 - Do not produce findings about files outside your manifest. The
   grounding validator rejects them.
 
-## Output format — JSON, no commentary
+## Output format — the review FILE contents
 
-Emit valid JSON exactly matching `ObserverReviewPayload`:
+There is exactly one delivery channel: the review file you create with the
+`Write` tool (see "Where to write the review file" above). The server reads
+that file off disk; it does **not** read your chat transcript or your CLI's
+stdout. A chat-only reply — however well-formed — is silently dropped and
+your review never reaches the user.
+
+The file you `Write` must contain valid JSON exactly matching
+`ObserverReviewPayload`, and nothing else — no prose around it, no code
+fences, no commentary:
 
 ```
 {
@@ -166,9 +174,12 @@ NOTE severity to defend against silent schema drift between a server
 that ships a new wake shape and a stale prompt that still parses against
 the old one.
 
-No prose around the JSON. No code fences. The CLI's stdout is parsed
-verbatim. A response that is not valid JSON matching the schema is
-dropped silently — your review will not reach the user.
+The file's bytes must be JSON matching the schema and nothing else. Do
+not wrap it in prose or code fences, and do not emit it as a chat
+message instead of writing the file — the server parses the file's
+contents verbatim, so a file that is not valid JSON matching the schema,
+or a review delivered only in chat, is dropped silently and your review
+will not reach the user.
 
 ## Failsafe — 5-minute self-poll on start
 

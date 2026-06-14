@@ -273,7 +273,7 @@ vi.mock("./image-pull-manager.js", () => ({
 import { Hono } from "hono";
 import { execSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { createRoutes } from "./routes.js";
+import { createRoutes, getCachedPairingCapability, __resetPairingCacheForTests } from "./routes.js";
 import * as envManager from "./env-manager.js";
 import * as sandboxManager from "./sandbox-manager.js";
 import * as promptManager from "./prompt-manager.js";
@@ -374,6 +374,10 @@ beforeEach(() => {
   vi.clearAllMocks();
   // Re-establish default return value for resolveApiKey after clearAllMocks
   vi.mocked(resolveApiKey).mockReturnValue({ apiKey: "lin_api_123", connectionId: "test-conn" });
+  // Reset the pairing capability cache between tests so that cached results
+  // from one test (e.g. the "both available" case) do not bleed into the next
+  // test which may mock probePairingCapability to return a different value.
+  __resetPairingCacheForTests();
   mockDiscoverClaudeSessions.mockReturnValue([]);
   mockGetClaudeSessionHistoryPage.mockReturnValue(null);
   orchestrator = createMockOrchestrator();
@@ -5189,5 +5193,119 @@ describe("POST /api/sessions/:id/council/checkpoint", () => {
     const fsp = await import("node:fs/promises");
     const writtenRaw = await fsp.readFile(expectedPath, "utf8");
     expect(JSON.parse(writtenRaw)).toEqual(payload);
+  });
+});
+
+// ─── Pairing capability cache (getCachedPairingCapability) ───────────────────
+//
+// These tests exercise the caching and in-flight coalescing added in Part B of
+// the /backends fix. They use getCachedPairingCapability's dependency-injection
+// seam (probeFn + now) so no real subprocesses are spawned, and a fake
+// monotonic clock controls TTL expiry without any real timers or sleeps.
+
+describe("getCachedPairingCapability cache behaviour", () => {
+  // Minimal PairingCapability fixture used across all cases.
+  const supported: import("./preflight-probe.js").PairingCapability = {
+    primary: { binary: "claude", available: true, version: "1.0.0" },
+    observer: { binary: "codex", available: true, version: "1.0.0" },
+    supported: true,
+  };
+  const unsupported: import("./preflight-probe.js").PairingCapability = {
+    primary: { binary: "claude", available: false, reason: "not installed" },
+    observer: { binary: "codex", available: false, reason: "not installed" },
+    supported: false,
+  };
+
+  beforeEach(() => {
+    // Wipe both the cache Map and the in-flight Map before every test so tests
+    // are fully isolated from each other regardless of suite ordering.
+    __resetPairingCacheForTests();
+  });
+
+  it("calls the probe exactly once for two calls within the TTL window", async () => {
+    // Prove that the second call within the TTL window hits the in-memory cache
+    // and does NOT invoke the probe function a second time.
+    let callCount = 0;
+    const probe = vi.fn(async () => { callCount++; return supported; });
+    let fakeNow = 1_000;
+    const now = () => fakeNow;
+
+    const first = await getCachedPairingCapability({ probeFn: probe, now });
+    expect(callCount).toBe(1);
+
+    // Advance clock by 30 s — well within the 60 s TTL.
+    fakeNow += 30_000;
+    const second = await getCachedPairingCapability({ probeFn: probe, now });
+    expect(callCount).toBe(1); // <-- probe was NOT called again
+    expect(first).toEqual(second);
+  });
+
+  it("re-probes after the TTL expires", async () => {
+    // After the 60 s TTL window the cache is stale and a fresh probe must run.
+    let callCount = 0;
+    const probe = vi.fn(async () => { callCount++; return supported; });
+    let fakeNow = 1_000;
+    const now = () => fakeNow;
+
+    await getCachedPairingCapability({ probeFn: probe, now });
+    expect(callCount).toBe(1);
+
+    // Jump past the TTL boundary (60 001 ms).
+    fakeNow += 60_001;
+    await getCachedPairingCapability({ probeFn: probe, now });
+    expect(callCount).toBe(2); // <-- probe was called again after TTL
+  });
+
+  it("coalesces concurrent calls to a single in-flight probe", async () => {
+    // If multiple callers arrive simultaneously (cache cold, no in-flight yet)
+    // only ONE underlying probe should be dispatched and both callers should
+    // receive the same result — the core in-flight dedup guarantee.
+    let resolveProbe!: (v: import("./preflight-probe.js").PairingCapability) => void;
+    let callCount = 0;
+    const probe = vi.fn(() => {
+      callCount++;
+      // Return a promise that we control so we can verify coalescing before it
+      // settles — both concurrent callers must be waiting on the same promise.
+      return new Promise<import("./preflight-probe.js").PairingCapability>((res) => {
+        resolveProbe = res;
+      });
+    });
+    const now = () => 0;
+
+    // Fire two concurrent calls BEFORE resolving the probe.
+    const p1 = getCachedPairingCapability({ probeFn: probe, now });
+    const p2 = getCachedPairingCapability({ probeFn: probe, now });
+
+    // Probe must have been called only once — p2 is piggybacking on p1's promise.
+    expect(callCount).toBe(1);
+
+    // Settle the in-flight probe and await both callers.
+    resolveProbe(supported);
+    const [r1, r2] = await Promise.all([p1, p2]);
+
+    // Both callers received the same result, still only one probe invocation.
+    expect(callCount).toBe(1);
+    expect(r1).toEqual(supported);
+    expect(r2).toEqual(supported);
+  });
+
+  it("caches a failure result within the TTL (avoids hammering a broken box)", async () => {
+    // Even when the probe returns an `unsupported` result (e.g. codex not
+    // installed), that result should be cached so the UI doesn't fork fresh
+    // subprocesses on every poll during an error state.
+    let callCount = 0;
+    const probe = vi.fn(async () => { callCount++; return unsupported; });
+    let fakeNow = 1_000;
+    const now = () => fakeNow;
+
+    const first = await getCachedPairingCapability({ probeFn: probe, now });
+    expect(callCount).toBe(1);
+    expect(first.supported).toBe(false);
+
+    // Second call within TTL — must return cached failure, not re-probe.
+    fakeNow += 10_000;
+    const second = await getCachedPairingCapability({ probeFn: probe, now });
+    expect(callCount).toBe(1); // <-- still only one probe call
+    expect(second.supported).toBe(false);
   });
 });

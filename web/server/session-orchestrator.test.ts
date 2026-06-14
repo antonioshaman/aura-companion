@@ -142,6 +142,8 @@ import { hasContainerClaudeAuth } from "./claude-container-auth.js";
 import { hasContainerCodexAuth } from "./codex-container-auth.js";
 import { generateSessionTitle } from "./auto-namer.js";
 import { companionBus } from "./event-bus.js";
+import { WsBridge } from "./ws-bridge.js";
+import { CodexAdapter, type ICodexTransport } from "./codex-adapter.js";
 
 // ── Mock factories ──────────────────────────────────────────────────────────
 
@@ -2789,12 +2791,26 @@ describe("SessionOrchestrator", () => {
     });
 
     // Bridge throws → failed outcome with error string.
-    it("returns failed with error message on bridge send-throw", () => {
-      seedActiveGroup("grp_d_fail");
+    //
+    // #4 (Council Review 2026-06-13): a SYNCHRONOUS `failed` outcome (the
+    // Claude adapter path + the default coercion) previously logged and
+    // returned, leaving the group falsely `active` with zero reviews. It now
+    // converges onto the SAME degraded channel the async codex
+    // `observer:wake-failed` listener uses — reason `wake_send_failed`.
+    it("returns failed AND degrades the group with wake_send_failed on a synchronous send failure", () => {
+      const { ws } = seedActiveGroupWithApplyEvent("grp_d_fail", { observer: "sess_obs_fail" });
       vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "failed", error: "socket-write-EPIPE" });
       const out = callDispatch("grp_d_fail", validPayload("grp_d_fail"));
       expect(out.kind).toBe("failed");
       expect(out.error).toBe("socket-write-EPIPE");
+      // Converged degrade path fired synchronously. P2 #7/#8: the reason
+      // rides the event, and the map is NOT pre-set — it is persisted by the
+      // group:degraded listener only when the (here mocked) coordinator emits.
+      expect(ws.coordinator.applyEvent).toHaveBeenCalledWith("grp_d_fail", { type: "half_died", role: "observer", reason: "wake_send_failed" });
+      const reasonMap = (orchestrator as unknown as {
+        councilGroupDegradedReason: Map<string, string>;
+      }).councilGroupDegradedReason;
+      expect(reasonMap.has("grp_d_fail")).toBe(false);
     });
 
     // Sentinel idempotency: a second dispatch for the same checkpoint id skips.
@@ -2855,6 +2871,338 @@ describe("SessionOrchestrator", () => {
       handle.call(orchestrator, "grp_fg_a", validPayload("grp_fg_OTHER"));
       // Cross-group filter at handler head: no dispatch, no state mutation.
       expect(deps.wsBridge.sendObserverWakeFrame).not.toHaveBeenCalled();
+    });
+
+    // ── Fix #1 (Council Review 2026-06-13 P1 #1): the wake→review watchdog ──
+    //
+    // A wake the transport ACCEPTS but the observer never answers with a
+    // review file produced zero server-side signal before this work — the
+    // group stayed falsely `active` forever (the accept-but-no-review ghost
+    // that motivated the codex-observer-parity branch). These tests pin the
+    // arm → fire → degrade wire and its disarm/re-arm guards.
+    function seedActiveGroupWithApplyEvent(groupId: string, opts: { observer?: string } = {}) {
+      const cwd = seedActiveGroup(groupId, { observer: opts.observer });
+      const ws = orchestrator as unknown as { coordinator: { get: ReturnType<typeof vi.fn>; applyEvent: ReturnType<typeof vi.fn> } };
+      ws.coordinator.applyEvent = vi.fn();
+      return { cwd, ws };
+    }
+
+    it("arms a wake→review watchdog on dispatch; firing it degrades the group with reason wake_produced_no_review", async () => {
+      const { OBSERVER_WAKE_TIMEOUT_MS } = await import("./council-types.js");
+      vi.useFakeTimers();
+      try {
+        const { ws } = seedActiveGroupWithApplyEvent("grp_wd_fire", { observer: "sess_obs_wd" });
+        vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "sent" });
+        const out = callDispatch("grp_wd_fire", validPayload("grp_wd_fire", { checkpointId: "chk_wd_1" }));
+        expect(out.kind).toBe("dispatched");
+        // Watchdog armed but not yet fired.
+        expect(ws.coordinator.applyEvent).not.toHaveBeenCalled();
+        // Elapse the full timeout — no review arrived.
+        vi.advanceTimersByTime(OBSERVER_WAKE_TIMEOUT_MS + 1);
+        // P2 #7/#8: reason rides the event; map not pre-set (mocked coordinator).
+        expect(ws.coordinator.applyEvent).toHaveBeenCalledWith("grp_wd_fire", { type: "half_died", role: "observer", reason: "wake_produced_no_review" });
+        const reasonMap = (orchestrator as unknown as {
+          councilGroupDegradedReason: Map<string, string>;
+        }).councilGroupDegradedReason;
+        expect(reasonMap.has("grp_wd_fire")).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("disarms the watchdog when a matching review arrives, so no degrade fires", async () => {
+      const { OBSERVER_WAKE_TIMEOUT_MS } = await import("./council-types.js");
+      vi.useFakeTimers();
+      try {
+        const { ws } = seedActiveGroupWithApplyEvent("grp_wd_clear", { observer: "sess_obs_clear" });
+        vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "sent" });
+        callDispatch("grp_wd_clear", validPayload("grp_wd_clear", { checkpointId: "chk_wd_clear" }));
+        // A review for the armed checkpoint lands before the deadline.
+        const handle = (orchestrator as unknown as {
+          handleCouncilReview: (g: string, p: Record<string, unknown>) => void;
+        }).handleCouncilReview;
+        handle.call(orchestrator, "grp_wd_clear", {
+          schema_version: 1,
+          observer_wake_payload_version_echo: 1,
+          checkpoint_id: "chk_wd_clear",
+          phase: "council-plan",
+          session_group_id: "grp_wd_clear",
+          reviewed_at: "2026-01-01T00:00:00Z",
+          observer_provider: "claude",
+          observer_model: "m",
+          observer_cli_version: "1",
+          findings: [],
+        });
+        const entry = (orchestrator as unknown as {
+          councilWatchers: Map<string, { pendingReviewDeadline: unknown }>;
+        }).councilWatchers.get("grp_wd_clear");
+        expect(entry?.pendingReviewDeadline).toBeNull();
+        vi.advanceTimersByTime(OBSERVER_WAKE_TIMEOUT_MS + 1);
+        expect(ws.coordinator.applyEvent).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("re-arms the watchdog for the newest dispatched checkpoint (single-slot supersede)", () => {
+      const ws = orchestrator as unknown as {
+        councilWatchers: Map<string, { pendingReviewDeadline: { checkpointId: string } | null }>;
+      };
+      seedActiveGroupWithApplyEvent("grp_wd_rearm");
+      vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "sent" });
+      callDispatch("grp_wd_rearm", validPayload("grp_wd_rearm", { checkpointId: "chk_wd_old", sequence: 1 }));
+      expect(ws.councilWatchers.get("grp_wd_rearm")?.pendingReviewDeadline?.checkpointId).toBe("chk_wd_old");
+      callDispatch("grp_wd_rearm", validPayload("grp_wd_rearm", { checkpointId: "chk_wd_new", sequence: 2 }));
+      // Slot now tracks the newer checkpoint — the older deadline was cleared.
+      expect(ws.councilWatchers.get("grp_wd_rearm")?.pendingReviewDeadline?.checkpointId).toBe("chk_wd_new");
+    });
+
+    it("stopCouncilWatchers clears the watchdog so a torn-down group cannot fire a late degrade", async () => {
+      const { OBSERVER_WAKE_TIMEOUT_MS } = await import("./council-types.js");
+      vi.useFakeTimers();
+      try {
+        const { ws } = seedActiveGroupWithApplyEvent("grp_wd_teardown");
+        vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "sent" });
+        callDispatch("grp_wd_teardown", validPayload("grp_wd_teardown", { checkpointId: "chk_wd_td" }));
+        (orchestrator as unknown as { stopCouncilWatchers: (g: string) => void }).stopCouncilWatchers.call(orchestrator, "grp_wd_teardown");
+        vi.advanceTimersByTime(OBSERVER_WAKE_TIMEOUT_MS + 1);
+        expect(ws.coordinator.applyEvent).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  // ── Fix #6 (Council Review 2026-06-13 P1 #6): EC-6 wire coverage ─────────
+  //
+  // The single most important behaviour this branch claims — a codex
+  // observer wake failure becomes a VISIBLE degraded state — was only ever
+  // asserted by emitting `group:degraded` DIRECTLY (getAllGroupsForBootstrap
+  // test), which bypasses the entire listener body: the reverse-index
+  // lookup, the observer-half guard, `applyEvent`, and the reason-map write.
+  // These tests drive the REAL companionBus event the way the codex adapter
+  // does in prod (through `initialize()`-wired listeners), so a regression
+  // anywhere in that chain — not just its downstream effect — fails here.
+  describe("observer:wake-failed listener wire (EC-6)", () => {
+    function seedListenerGroup(groupId: string, primary: string, observer: string) {
+      // initialize() wires the companionBus listener; beforeEach calls
+      // companionBus.clear() so each test must re-wire it.
+      orchestrator.initialize();
+      const applyEvent = vi.fn();
+      const ws = orchestrator as unknown as {
+        councilGroupMeta: Map<string, {
+          primarySessionId: string;
+          observerSessionId: string;
+          pairing: string;
+          createdAt: number;
+          lastCheckpointReceivedAt: number | null;
+        }>;
+        councilGroupBySessionId: Map<string, string>;
+        coordinator: unknown;
+      };
+      ws.councilGroupMeta.set(groupId, {
+        primarySessionId: primary,
+        observerSessionId: observer,
+        pairing: "claude+codex",
+        createdAt: Date.now(),
+        lastCheckpointReceivedAt: null,
+      });
+      // Both halves resolve to the group via the reverse index — the guard,
+      // not the index, is what distinguishes them.
+      ws.councilGroupBySessionId.set(primary, groupId);
+      ws.councilGroupBySessionId.set(observer, groupId);
+      ws.coordinator = { applyEvent };
+      return { applyEvent };
+    }
+
+    function reasonFor(groupId: string): string | undefined {
+      return (orchestrator as unknown as {
+        councilGroupDegradedReason: Map<string, string>;
+      }).councilGroupDegradedReason.get(groupId);
+    }
+
+    it("degrades with wake_send_failed when the observer half emits observer:wake-failed", () => {
+      const { applyEvent } = seedListenerGroup("grp_wf_wire", "sess_orch_wire", "sess_obs_wire");
+      companionBus.emit("observer:wake-failed", {
+        sessionId: "sess_obs_wire",
+        error: "codex turn/run rejected: transport closed",
+      });
+      // P2 #7/#8: the reason rides the `half_died` event into the state
+      // machine's side-effect table (and onto the bus), NOT a parallel
+      // pre-set map. The map is persisted only by the `group:degraded`
+      // listener when the transition actually emits — which is the
+      // (mocked-out) coordinator here, so the map stays empty.
+      expect(applyEvent).toHaveBeenCalledWith("grp_wf_wire", { type: "half_died", role: "observer", reason: "wake_send_failed" });
+      expect(reasonFor("grp_wf_wire")).toBeUndefined();
+    });
+
+    // Orchestrator-half guard: a wake-failed carrying the PRIMARY session id
+    // resolves to the same group via the reverse index, but only the
+    // observer's non-participation is the degrade trigger. The orchestrator
+    // half never wakes; a stray event for it must be a no-op.
+    it("ignores observer:wake-failed for the orchestrator (primary) half", () => {
+      const { applyEvent } = seedListenerGroup("grp_wf_guard", "sess_orch_guard", "sess_obs_guard");
+      companionBus.emit("observer:wake-failed", {
+        sessionId: "sess_orch_guard",
+        error: "should be ignored",
+      });
+      expect(applyEvent).not.toHaveBeenCalled();
+      expect(reasonFor("grp_wf_guard")).toBeUndefined();
+    });
+
+    // Unknown session id (absent from the reverse index) is a silent no-op —
+    // covers the early `if (!groupId) return` guard.
+    it("ignores observer:wake-failed for a session id not in any group", () => {
+      const { applyEvent } = seedListenerGroup("grp_wf_unknown", "sess_orch_unk", "sess_obs_unk");
+      companionBus.emit("observer:wake-failed", {
+        sessionId: "sess_total_stranger",
+        error: "nobody",
+      });
+      expect(applyEvent).not.toHaveBeenCalled();
+      expect(reasonFor("grp_wf_unknown")).toBeUndefined();
+    });
+  });
+
+  // ── Fix #6 (Council Review 2026-06-13 P1 #6) part (b): checkpoint → codex ─
+  //
+  // The precise dispatch that silently no-op'd in prod was a real
+  // CheckpointPayload failing to reach the codex observer's transport. Every
+  // other test stubs `wsBridge.sendObserverWakeFrame`, so the manifest never
+  // crosses a real bridge into a real codex adapter. This integration wires
+  // BOTH (real WsBridge + real CodexAdapter over a controllable JSON-RPC
+  // transport) and drives `handleCouncilCheckpoint` end-to-end: a regression
+  // dropping the manifest anywhere along `dispatchObserverWake →
+  // sendObserverWakeFrame → adapter.sendUserFrameFromServer → turn/start`
+  // fails here, not silently in prod.
+  describe("checkpoint → codex observer turn/start (EC-6 integration)", () => {
+    function createMockTransport() {
+      let nextCallId = 0;
+      const pendingCalls = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+      const transport: ICodexTransport = {
+        call: vi.fn(async () => {
+          const id = ++nextCallId;
+          return new Promise((resolve, reject) => {
+            pendingCalls.set(id, { resolve, reject });
+          });
+        }),
+        notify: vi.fn(async () => {}),
+        respond: vi.fn(async () => {}),
+        onNotification: vi.fn(),
+        onRequest: vi.fn(),
+        onRawIncoming: vi.fn(),
+        onRawOutgoing: vi.fn(),
+        onParseError: vi.fn(),
+        isConnected: vi.fn(() => true),
+      };
+      return {
+        transport,
+        resolveCall(n: number, result: unknown) {
+          const pending = pendingCalls.get(n);
+          if (pending) {
+            pendingCalls.delete(n);
+            pending.resolve(result);
+          }
+        },
+      };
+    }
+
+    // Stand up a fully-initialised codex adapter (handshake complete) over a
+    // controllable transport, the way the WS path constructs it.
+    async function initCodexObserver(sessionId: string, cwd: string) {
+      const mock = createMockTransport();
+      const adapter = new CodexAdapter(mock.transport, sessionId, { model: "o4-mini", cwd });
+      await new Promise((r) => setTimeout(r, 50));
+      mock.resolveCall(1, { userAgent: "codex" }); // initialize
+      await new Promise((r) => setTimeout(r, 20));
+      mock.resolveCall(2, { thread: { id: "thr_obs" } }); // thread/start
+      await new Promise((r) => setTimeout(r, 50));
+      mock.resolveCall(3, {}); // rateLimits (best-effort)
+      await new Promise((r) => setTimeout(r, 20));
+      return { mock, adapter };
+    }
+
+    it("drives a real CheckpointPayload through to a codex turn/start carrying the wake manifest", async () => {
+      const fs = require("node:fs") as typeof import("node:fs");
+      const pathLib = require("node:path") as typeof import("node:path");
+      const osLib = require("node:os") as typeof import("node:os");
+      const cwd = fs.realpathSync(fs.mkdtempSync(pathLib.join(osLib.tmpdir(), "council-e2e-")));
+
+      try {
+        // Real bridge + real codex adapter standing in as the observer half.
+        const bridge = new WsBridge();
+        const observerSessionId = "sess_obs_e2e";
+        const { mock, adapter } = await initCodexObserver(observerSessionId, cwd);
+        // attachBackendAdapter creates the bridge session and wires the
+        // adapter — the same seam the live codex spawn path uses.
+        bridge.attachBackendAdapter(observerSessionId, adapter as any, "codex");
+
+        // Orchestrator wired to the REAL bridge (inherits this file's module
+        // mocks for everything except the bridge under test).
+        const e2eDeps = createDeps({ wsBridge: bridge as any });
+        const e2eOrch = new SessionOrchestrator(e2eDeps);
+
+        const groupId = "grp_e2e";
+        const ws = e2eOrch as unknown as {
+          councilWatchers: Map<string, {
+            cwd: string; abort: AbortController; lastCheckpoint: unknown;
+            previousCheckpoint: unknown; pendingCheckpoint: unknown; supersededCheckpointIds: string[];
+          }>;
+          councilGroupMeta: Map<string, {
+            primarySessionId: string; observerSessionId: string; pairing: string;
+            createdAt: number; lastCheckpointReceivedAt: number | null;
+          }>;
+          coordinator: unknown;
+          handleCouncilCheckpoint: (g: string, p: any) => void;
+        };
+        ws.councilWatchers.set(groupId, {
+          cwd,
+          abort: new AbortController(),
+          lastCheckpoint: null,
+          previousCheckpoint: null,
+          pendingCheckpoint: null,
+          supersededCheckpointIds: [],
+        });
+        ws.councilGroupMeta.set(groupId, {
+          primarySessionId: "sess_orch_e2e",
+          observerSessionId,
+          pairing: "claude+codex",
+          createdAt: Date.now(),
+          lastCheckpointReceivedAt: null,
+        });
+        ws.coordinator = { get: vi.fn(() => ({ sessionGroupId: groupId, status: "active" })) };
+
+        const payload = {
+          schema_version: 1,
+          checkpoint_id: "chk_e2e_42",
+          phase: "council-plan",
+          sequence: 1,
+          session_group_id: groupId,
+          emitted_at: "2026-06-13T00:00:00Z",
+          artifact_paths: ["src/parity.ts"],
+        };
+
+        ws.handleCouncilCheckpoint.call(e2eOrch, groupId, payload);
+        // The synthetic turn dispatches in a microtask after sendUserFrameFromServer.
+        await new Promise((r) => setTimeout(r, 20));
+
+        const calls = (mock.transport.call as ReturnType<typeof vi.fn>).mock.calls;
+        const turnStart = calls.find((c) => c[0] === "turn/start");
+        expect(turnStart).toBeDefined();
+        const wakeText = (turnStart![1] as { input: Array<{ text: string }> }).input[0].text;
+        // The wake body built from the REAL CheckpointPayload carries the
+        // checkpoint identity AND the manifest delta path verbatim — proof
+        // the manifest survived the entire wire, not just a stubbed string.
+        expect(wakeText).toContain("chk_e2e_42");
+        expect(wakeText).toContain("council-plan");
+        expect(wakeText).toContain("src/parity.ts");
+        // Provenance tag proves it dispatched as a server council-wake, not a
+        // browser-relayed user frame.
+        expect(turnStart![3]).toBe("server:council-wake");
+
+        await adapter.disconnect();
+      } finally {
+        fs.rmSync(cwd, { recursive: true, force: true });
+      }
     });
   });
 
@@ -4130,6 +4478,31 @@ describe("SessionOrchestrator", () => {
         sessionGroupId: "grp_dr",
         status: "degraded",
         degradedReason: "wake_send_failed",
+      });
+    });
+
+    // #9 regression: the dead half MUST survive bootstrap. The frontend
+    // deriver renders `deadRole ?? "observer"`, so a degraded-on-arrival pair
+    // whose ORCHESTRATOR died would mislabel the panel "Observer offline"
+    // unless the snapshot carries the real dead half. Emit with
+    // deadRole: "orchestrator" (the non-default path) so a regression that
+    // drops the deadRole map can't pass on the lucky default.
+    it("preserves deadRole across bootstrap when the orchestrator half died", () => {
+      orchestrator.initialize();
+      seedCoordGroup("grp_ddr", "orch_ddr", "obs_ddr", "degraded", "claude");
+      companionBus.emit("group:degraded", {
+        sessionGroupId: "grp_ddr",
+        deadRole: "orchestrator",
+        reason: "reconnect_failed",
+      });
+
+      const out = orchestrator.getAllGroupsForBootstrap();
+      expect(out).toHaveLength(1);
+      expect(out[0]).toMatchObject({
+        sessionGroupId: "grp_ddr",
+        status: "degraded",
+        deadRole: "orchestrator",
+        degradedReason: "reconnect_failed",
       });
     });
 

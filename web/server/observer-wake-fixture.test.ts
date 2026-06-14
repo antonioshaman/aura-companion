@@ -109,6 +109,7 @@ describe("observer wake fixture (EC-6 replay)", () => {
         },
         manifest: { delta: ["src/foo.ts"], carried: [], dropped: [] },
         workspaceRoot: tmp,
+        observerProvider: "claude",
       });
       expect(result.textBody).toContain("# Council Checkpoint — council-plan");
       expect(result.textBody).toContain("```json");
@@ -142,6 +143,7 @@ describe("observer wake fixture (EC-6 replay)", () => {
         },
         manifest: { delta: ["src/foo.ts"], carried: [], dropped: [] },
         workspaceRoot: tmp,
+        observerProvider: "claude",
       });
       // Wrap the body in the exact NDJSON envelope the adapter would
       // build at send time (see claude-adapter.ts sendUserFrameFromServer).

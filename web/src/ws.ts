@@ -1406,6 +1406,10 @@ function handleParsedMessage(
         // buffers from older server versions might still exist.
         status: data.status ?? "active",
         pairing: data.pairing,
+        // #9: server carries the dead half on a degraded-on-arrival
+        // bootstrap snapshot so the deriver labels the correct half
+        // instead of falling back to `deadRole ?? "observer"`.
+        deadRole: data.deadRole,
         degradedReason: data.degradedReason,
         // Task 9: server-published wake-to-review timeout. The panel-
         // state deriver (Task 11) bounds the `reviewing` interval by

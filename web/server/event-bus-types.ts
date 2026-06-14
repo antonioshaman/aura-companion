@@ -4,6 +4,7 @@
 import type { BrowserIncomingMessage } from "./session-types.js";
 import type { CodexAdapter } from "./codex-adapter.js";
 import type { SessionPhase } from "./session-state-machine.js";
+import type { GroupDegradeReason } from "./group-state-machine.js";
 
 /**
  * Closed producer-side reason union for `session:relaunch-exhausted`.
@@ -156,7 +157,7 @@ export interface CompanionEventMap {
   "group:degraded": {
     sessionGroupId: string;
     deadRole: "orchestrator" | "observer";
-    reason?: "observer_exited" | "wake_send_failed" | "reconnect_failed";
+    reason?: GroupDegradeReason;
   };
 
   /** One half of a Council Mode group is reconnecting — bounded grace

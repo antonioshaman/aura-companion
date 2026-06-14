@@ -2,7 +2,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import "@testing-library/jest-dom";
-import { CouncilToggle, isSupportedPairing } from "./CouncilToggle.js";
+import { CouncilToggle, isSupportedPairing, coerceCouncilPairing } from "./CouncilToggle.js";
 
 describe("isSupportedPairing", () => {
   it.each(["claude+claude", "claude+codex"])("accepts: %s", (v) => {
@@ -11,6 +11,34 @@ describe("isSupportedPairing", () => {
 
   it.each(["codex+claude", "claude", "", null, undefined, 42, "claude+gpt"])("rejects: %s", (v) => {
     expect(isSupportedPairing(v as unknown)).toBe(false);
+  });
+});
+
+describe("coerceCouncilPairing", () => {
+  // P1 fix — the core requirement: when mixed pairing capability is unavailable
+  // (codexAvailable=false OR codexObserverReviewAvailable=false), any stored
+  // "claude+codex" preference must be coerced to "claude+claude" so neither the
+  // UI trigger nor the POST body carries an unsupported pairing.
+
+  it("returns claude+claude unchanged when mixedPairingAvailable=true", () => {
+    // When the user chose claude+claude and capability is available, no coercion needed.
+    expect(coerceCouncilPairing("claude+claude", true)).toBe("claude+claude");
+  });
+
+  it("preserves claude+codex when mixedPairingAvailable=true", () => {
+    // When capability is available, the user's preference is respected verbatim.
+    expect(coerceCouncilPairing("claude+codex", true)).toBe("claude+codex");
+  });
+
+  it("coerces claude+codex to claude+claude when mixedPairingAvailable=false (Codex unavailable)", () => {
+    // Core bug fix: stale localStorage "claude+codex" must never reach the POST when
+    // Codex CLI is absent or its observer-review capability is disabled on this server.
+    expect(coerceCouncilPairing("claude+codex", false)).toBe("claude+claude");
+  });
+
+  it("keeps claude+claude when mixedPairingAvailable=false (no change needed)", () => {
+    // claude+claude is always valid — coercion is a no-op here.
+    expect(coerceCouncilPairing("claude+claude", false)).toBe("claude+claude");
   });
 });
 
@@ -181,6 +209,96 @@ describe("CouncilToggle", () => {
     fireEvent.click(screen.getByTestId("pairing-trigger"));
     fireEvent.click(screen.getByTestId("pairing-option-claude+codex"));
     expect(onPairingChange).not.toHaveBeenCalled();
+  });
+
+  // #11 (Finding #11): CouncilToggle shows CLI-missing copy when codexAvailable=false,
+  // not the observer-review-capability copy. The reason string derives from the outer
+  // layer (HomePage) via the codexUnavailableReason prop.
+  it("shows CLI-missing reason text when codexAvailable=false (not review-capability text)", () => {
+    // When the CLI itself is missing, the user needs 'install or sign in' guidance.
+    // The review-capability copy is irrelevant and would send the user to fix the wrong thing.
+    render(
+      <CouncilToggle
+        enabled={true}
+        pairing="claude+claude"
+        onEnabledChange={() => {}}
+        onPairingChange={() => {}}
+        codexAvailable={false}
+        codexUnavailableReason="Codex CLI not found or not authenticated on this server."
+      />,
+    );
+    fireEvent.click(screen.getByTestId("pairing-trigger"));
+    const codexOpt = screen.getByTestId("pairing-option-claude+codex");
+    // The CLI-missing copy must appear, not the review-capability copy.
+    expect(codexOpt.textContent).toContain("Codex CLI not found or not authenticated");
+    expect(codexOpt.textContent).not.toContain("observer review capability");
+  });
+
+  it("shows review-capability reason text when codexAvailable=true but codexObserverReviewAvailable=false", () => {
+    // When the CLI exists but observer review is off on this build, show the review-capability copy.
+    render(
+      <CouncilToggle
+        enabled={true}
+        pairing="claude+claude"
+        onEnabledChange={() => {}}
+        onPairingChange={() => {}}
+        codexAvailable={true}
+        codexObserverReviewAvailable={false}
+        codexUnavailableReason="Codex observer review capability is unavailable on this server."
+      />,
+    );
+    fireEvent.click(screen.getByTestId("pairing-trigger"));
+    const codexOpt = screen.getByTestId("pairing-option-claude+codex");
+    // The review-capability copy must appear, not the CLI-missing copy.
+    expect(codexOpt.textContent).toContain("observer review capability");
+    expect(codexOpt.textContent).not.toContain("not found or not authenticated");
+  });
+
+  // #15 (Finding #15): when claude+codex is disabled, the exp chip and billing
+  // subcopy are suppressed to reduce visual noise — the unavailable chip already
+  // communicates the relevant status.
+  it("suppresses exp chip when claude+codex is disabled (codexAvailable=false)", () => {
+    // Stacking exp + unavailable chips on a disabled row adds competing fragments.
+    // Only the unavailable chip should be present; exp is only meaningful when the row is selectable.
+    render(
+      <CouncilToggle
+        enabled={true}
+        pairing="claude+claude"
+        onEnabledChange={() => {}}
+        onPairingChange={() => {}}
+        codexAvailable={false}
+      />,
+    );
+    fireEvent.click(screen.getByTestId("pairing-trigger"));
+    const codexOpt = screen.getByTestId("pairing-option-claude+codex");
+    // Should have unavailable chip but NOT the exp chip.
+    expect(codexOpt.textContent).toMatch(/unavailable/i);
+    // The exp text should not appear in the option when disabled.
+    // (It appears inside the option button when the row is available — not here.)
+    const expChip = Array.from(codexOpt.querySelectorAll("span")).find(
+      (s) => s.textContent?.trim() === "exp",
+    );
+    expect(expChip).toBeUndefined();
+  });
+
+  it("suppresses billing subcopy when claude+codex is disabled (codexObserverReviewAvailable=false)", () => {
+    // The 'billed separately' subcopy is only meaningful when the user can actually select the row.
+    // When disabled, that copy is visual noise alongside the reason line.
+    render(
+      <CouncilToggle
+        enabled={true}
+        pairing="claude+claude"
+        onEnabledChange={() => {}}
+        onPairingChange={() => {}}
+        codexAvailable={true}
+        codexObserverReviewAvailable={false}
+        codexUnavailableReason="Observer review unavailable."
+      />,
+    );
+    fireEvent.click(screen.getByTestId("pairing-trigger"));
+    const codexOpt = screen.getByTestId("pairing-option-claude+codex");
+    // The billing subcopy must not appear when the row is disabled.
+    expect(codexOpt.textContent).not.toContain("billed separately");
   });
 
   it("passes accessibility scan (off)", async () => {

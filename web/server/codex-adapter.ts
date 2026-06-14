@@ -166,6 +166,20 @@ const RPC_METHOD_TIMEOUTS: Record<string, number> = {
   "thread/resume": 30_000,
 };
 
+/**
+ * Backstop for the 1-slot observer-wake guard. Codex ends a wake turn via
+ * several paths (turn/completed, error, interrupt) that {@link CodexAdapter.resolveObserverTurn}
+ * now centralizes — but if NONE of them ever arrive (a truly dead turn that
+ * emits no terminal RPC event), the slot would strand `in-flight` forever and
+ * block every future checkpoint with `busy`. This watchdog force-releases the
+ * slot so the orchestrator can dispatch the next wake. It is intentionally
+ * larger than the orchestrator's review deadline (`OBSERVER_WAKE_TIMEOUT_MS`,
+ * 300s) so a legitimately long review turn is never cut short here; degrading
+ * a review-less group is owned solely by the orchestrator (single degrade
+ * authority), so this path only releases — it never degrades.
+ */
+const OBSERVER_WAKE_COMPLETION_WATCHDOG_MS = 360_000;
+
 // ─── Adapter Options ──────────────────────────────────────────────────────────
 
 export interface CodexAdapterOptions {
@@ -439,6 +453,21 @@ export class CodexAdapter implements IBackendAdapter {
   private currentTurnId: string | null = null;
   private observerTurnState: "idle" | "in-flight" = "idle";
   private observerWakeTurnId: string | null = null;
+  /** Same-chunk race buffer: a `turn/completed` whose id arrived BEFORE the
+   *  `turn/start` reply recorded `observerWakeTurnId` (both in one TCP chunk).
+   *  Stashed here so onSuccess can resolve the turn once it learns the id. */
+  private observerPendingCompletedTurnId: string | null = null;
+  /** Backstop timer that force-releases a stranded in-flight wake slot. */
+  private observerWakeWatchdog: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * #12: idle-kill activity hook, wired by the bridge at attach time.
+   * `sendUserFrameFromServer` calls it unconditionally so a checkpoint-driven
+   * wake counts as group liveness even when the send is gated `busy`
+   * (observer mid-review) — mirrors the Claude adapter's
+   * `onActivityUpdate` discipline so a steadily-checkpointing codex pair
+   * with a long-running review is not idle-killed at the 4h threshold.
+   */
+  private onActivityUpdate: (() => void) | null = null;
   private connected = false;
   private initialized = false;
   private initFailed = false;
@@ -677,8 +706,10 @@ export class CodexAdapter implements IBackendAdapter {
 
     // Clear the current turn — it's gone after reconnect
     this.currentTurnId = null;
+    this.clearObserverWakeWatchdog();
     this.observerTurnState = "idle";
     this.observerWakeTurnId = null;
+    this.observerPendingCompletedTurnId = null;
     // Reset so the next turn/start re-sends collaborationMode (the server
     // sees a fresh connection and won't have the previously-set mode).
     this.lastSentCollaborationModeKind = null;
@@ -725,8 +756,10 @@ export class CodexAdapter implements IBackendAdapter {
    */
   private cleanupAndDisconnect(): void {
     this.connected = false;
+    this.clearObserverWakeWatchdog();
     this.observerTurnState = "idle";
     this.observerWakeTurnId = null;
+    this.observerPendingCompletedTurnId = null;
     this.overloadRetryMsg = null; // No rescue needed — session is being torn down
     if (this.overloadRetryTimer) { clearTimeout(this.overloadRetryTimer); this.overloadRetryTimer = null; }
     for (const pending of this.pendingDynamicToolCalls.values()) {
@@ -777,8 +810,10 @@ export class CodexAdapter implements IBackendAdapter {
     this.planUpdateCountByTurnId.clear();
     this.streamingText = "";
     this.streamingItemId = null;
+    this.clearObserverWakeWatchdog();
     this.observerTurnState = "idle";
     this.observerWakeTurnId = null;
+    this.observerPendingCompletedTurnId = null;
     this.overloadRetryMsg = null; // Full relaunch — no rescue needed
     if (this.overloadRetryTimer) { clearTimeout(this.overloadRetryTimer); this.overloadRetryTimer = null; }
     this.overloadRetryCount = 0;
@@ -824,7 +859,24 @@ export class CodexAdapter implements IBackendAdapter {
     return this.sendBrowserMessage(msg);
   }
 
+  /**
+   * #12: register the idle-kill activity hook. Wired by the bridge in
+   * `attachBackendAdapter` for non-Claude adapters (the Claude adapter wires
+   * the equivalent `onActivityUpdate` at construction). Idempotent — last
+   * writer wins, matching re-attach on reconnect.
+   */
+  setServerActivityHook(cb: () => void): void {
+    this.onActivityUpdate = cb;
+  }
+
   sendUserFrameFromServer(content: string): ServerSyntheticSendOutcome {
+    // #12: register idle-kill activity unconditionally, BEFORE the gates —
+    // mirrors the Claude adapter. A wake-dispatch attempt is real group
+    // liveness even when gated out (observer mid-turn, transport not ready),
+    // so a long-running review with intervening busy-gated checkpoints does
+    // not tick a steadily-checkpointing codex pair toward idle-kill.
+    this.onActivityUpdate?.();
+
     if (this.observerTurnState === "in-flight") {
       return { kind: "busy" };
     }
@@ -834,18 +886,25 @@ export class CodexAdapter implements IBackendAdapter {
 
     this.observerTurnState = "in-flight";
     this.observerWakeTurnId = null;
+    this.observerPendingCompletedTurnId = null;
+    this.armObserverWakeWatchdog();
     const input = [{ type: "text", text: content }] satisfies Array<{ type: string; text?: string; url?: string }>;
     void this.startTurn(input, {
       origin: "server:council-wake",
       onSuccess: (turnId) => {
         this.currentTurnId = turnId;
         this.observerWakeTurnId = turnId;
+        // Same-chunk race: a turn/completed for this id may already have been
+        // dispatched synchronously before this callback ran. If so, resolve now.
+        if (this.observerPendingCompletedTurnId === turnId) {
+          this.resolveObserverTurn();
+        }
       },
       onFailure: () => {
-        if (this.observerTurnState === "in-flight") {
-          this.observerTurnState = "idle";
-        }
-        this.observerWakeTurnId = null;
+        // Send rejected — release the slot WITHOUT draining (the .catch below
+        // routes this through the degraded channel; draining into a degrading
+        // group is moot).
+        this.resolveObserverTurn({ emitDrain: false });
       },
     }).catch((err) => {
       companionBus.emit("observer:wake-failed", {
@@ -854,6 +913,52 @@ export class CodexAdapter implements IBackendAdapter {
       });
     });
     return { kind: "sent" };
+  }
+
+  /**
+   * Single idempotent exit for an in-flight observer wake turn. Called from
+   * EVERY turn-terminating path — completed, error, interrupt, the send-failure
+   * callback, and the completion watchdog. Releases the 1-slot in-flight guard
+   * and the watchdog timer so a future checkpoint is never permanently blocked
+   * (the `observerTurnState` permanent-strand bug).
+   *
+   * Does NOT emit any degrade event: degradation is owned solely by the
+   * orchestrator (its review watchdog + the converged wake-send failure
+   * channel), keeping a single degrade authority. By default it emits
+   * `observer:turn-done` so the orchestrator drains its queued checkpoint;
+   * pass `emitDrain: false` for the send-failure path where a separate
+   * `observer:wake-failed` is already firing.
+   */
+  private resolveObserverTurn(opts?: { emitDrain?: boolean }): void {
+    if (this.observerTurnState !== "in-flight") return;
+    this.clearObserverWakeWatchdog();
+    this.observerTurnState = "idle";
+    this.observerWakeTurnId = null;
+    this.observerPendingCompletedTurnId = null;
+    if (opts?.emitDrain !== false) {
+      companionBus.emit("observer:turn-done", { sessionId: this.sessionId });
+    }
+  }
+
+  private armObserverWakeWatchdog(): void {
+    this.clearObserverWakeWatchdog();
+    const timer = setTimeout(() => {
+      log.warn("codex-adapter", "observer wake turn never terminated — force-releasing slot", {
+        event: "council.observer_wake_completion_watchdog",
+        sessionId: this.sessionId,
+        timeoutMs: OBSERVER_WAKE_COMPLETION_WATCHDOG_MS,
+      });
+      this.resolveObserverTurn();
+    }, OBSERVER_WAKE_COMPLETION_WATCHDOG_MS);
+    if (typeof timer.unref === "function") timer.unref();
+    this.observerWakeWatchdog = timer;
+  }
+
+  private clearObserverWakeWatchdog(): void {
+    if (this.observerWakeWatchdog) {
+      clearTimeout(this.observerWakeWatchdog);
+      this.observerWakeWatchdog = null;
+    }
   }
 
   /** @deprecated Use send() instead. Kept for backward compatibility during migration. */
@@ -1446,6 +1551,11 @@ export class CodexAdapter implements IBackendAdapter {
   private async handleOutgoingInterrupt(): Promise<void> {
     if (!this.threadId || !this.currentTurnId) return;
 
+    // An interrupt terminates the current turn; if it is an in-flight observer
+    // wake, release the slot so a future checkpoint isn't blocked (no-op for a
+    // normal browser-driven turn).
+    this.resolveObserverTurn();
+
     try {
       await this.transport.call("turn/interrupt", {
         threadId: this.threadId,
@@ -1720,6 +1830,9 @@ export class CodexAdapter implements IBackendAdapter {
         if (msg?.message) {
           console.log(`[codex-adapter] Stream error: ${msg.message}`);
         }
+        // A stream error ends the turn without a matching turn/completed —
+        // release any in-flight observer wake slot (no-op for normal turns).
+        this.resolveObserverTurn();
         break;
       }
       case "codex/event/error": {
@@ -1728,6 +1841,7 @@ export class CodexAdapter implements IBackendAdapter {
           console.error(`[codex-adapter] Codex error: ${msg.message}`);
           this.emit({ type: "error", message: msg.message });
         }
+        this.resolveObserverTurn();
         break;
       }
       case "error":
@@ -1735,6 +1849,7 @@ export class CodexAdapter implements IBackendAdapter {
         // through to protocol drift — that masks the real cause behind a
         // generic "Companion may need an update" banner.
         this.handleErrorNotification(params);
+        this.resolveObserverTurn();
         break;
       case "companion/wsReconnected":
         this.handleWsReconnected();
@@ -2709,14 +2824,15 @@ export class CodexAdapter implements IBackendAdapter {
       this.planUpdateCountByTurnId.delete(turn.id);
     }
     this.currentTurnId = null;
-    if (
-      this.observerTurnState === "in-flight"
-      && this.observerWakeTurnId !== null
-      && completedTurnId === this.observerWakeTurnId
-    ) {
-      this.observerTurnState = "idle";
-      this.observerWakeTurnId = null;
-      companionBus.emit("observer:turn-done", { sessionId: this.sessionId });
+    if (this.observerTurnState === "in-flight") {
+      if (this.observerWakeTurnId === null) {
+        // The turn/start reply hasn't recorded the wake turn id yet (it and
+        // this completion arrived in one TCP chunk). Stash the completion so
+        // onSuccess resolves the slot the moment it learns the id.
+        if (completedTurnId) this.observerPendingCompletedTurnId = completedTurnId;
+      } else if (completedTurnId === this.observerWakeTurnId) {
+        this.resolveObserverTurn();
+      }
     }
   }
 

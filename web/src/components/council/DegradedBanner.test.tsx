@@ -27,6 +27,23 @@ describe("DegradedBanner", () => {
     expect(screen.getByText(/could not wake it for review/i)).toBeInTheDocument();
   });
 
+  // Council Review 2026-06-13 P3 #15: the reconnect_failed copy branch was
+  // shipped but never asserted — a copy regression or fall-through to the
+  // generic message would have gone unnoticed.
+  it("renders reconnect-failed copy when the server reports a reconnect failure", () => {
+    render(<DegradedBanner deadRole="observer" reason="reconnect_failed" onRespawn={() => {}} />);
+    expect(screen.getByText(/failed to reconnect after a transport interruption/i)).toBeInTheDocument();
+  });
+
+  // Council Review 2026-06-13 P1 #1: the accept-but-no-review watchdog
+  // degrades the group with reason `wake_produced_no_review`; assert it
+  // gets its own truthful copy rather than falling through to the generic
+  // "continues running solo" message.
+  it("renders wake-produced-no-review copy when the observer accepted a wake but produced no review", () => {
+    render(<DegradedBanner deadRole="observer" reason="wake_produced_no_review" onRespawn={() => {}} />);
+    expect(screen.getByText(/did not produce a review in time/i)).toBeInTheDocument();
+  });
+
   // PLAN T15.4: warning palette + status role + polite live region —
   // distinct from BlockerBanner which is alert + assertive.
   it("uses role=status with aria-live=polite (channel-separated from blocker)", () => {

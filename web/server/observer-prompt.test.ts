@@ -502,10 +502,12 @@ describe("buildObserverWakePayload", () => {
       },
       manifest: { delta: ["a.ts"], carried: ["b.ts"], dropped: [] },
       workspaceRoot,
+      observerProvider: "claude",
     });
     expect(result.textBody.startsWith("# Council Checkpoint — council-implement")).toBe(true);
     expect(result.textBody).toContain("```json");
-    expect(result.textBody).toContain("```\n\nEmit one review file");
+    expect(result.textBody).toContain("You MUST use your `Write` tool to create the file");
+    expect(result.textBody).toContain(".council/reviews/council-implement-claude-observer.md");
     expect(result.droppedPaths).toEqual([]);
     expect(result.sha256).toMatch(/^[0-9a-f]{64}$/);
   });
@@ -520,6 +522,7 @@ describe("buildObserverWakePayload", () => {
       },
       manifest: { delta: ["a.ts"], carried: [], dropped: [] },
       workspaceRoot,
+      observerProvider: "claude",
     });
     // Extract the fenced JSON block and assert key order via stringified
     // representation — first occurrence of each key in textual order
@@ -552,6 +555,7 @@ describe("buildObserverWakePayload", () => {
         },
         manifest: { delta: ["a\nb.ts"], carried: [], dropped: [] },
         workspaceRoot,
+        observerProvider: "claude",
       })
     ).toThrow(/CR\/LF\/NUL/);
   });
@@ -567,6 +571,7 @@ describe("buildObserverWakePayload", () => {
         },
         manifest: { delta: ["foo```.ts"], carried: [], dropped: [] },
         workspaceRoot,
+        observerProvider: "claude",
       })
     ).toThrow(/triplet/);
   });
@@ -586,6 +591,7 @@ describe("buildObserverWakePayload", () => {
         },
         manifest: { delta: overflow, carried: [], dropped: [] },
         workspaceRoot,
+        observerProvider: "claude",
       })
     ).toThrow(/OBSERVER_WAKE_MAX_PATHS_PER_SECTION/);
   });
@@ -606,6 +612,7 @@ describe("buildObserverWakePayload", () => {
         dropped: [],
       },
       workspaceRoot,
+      observerProvider: "claude",
     });
     expect(result.droppedPaths.length).toBeGreaterThan(0);
     // The traversal path is excluded from the serialised body — observer
@@ -625,6 +632,7 @@ describe("buildObserverWakePayload", () => {
       },
       manifest: { delta: ["a.ts"], carried: ["b.ts"], dropped: [] },
       workspaceRoot,
+      observerProvider: "claude" as const,
     };
     const r1 = buildObserverWakePayload(inputs);
     const r2 = buildObserverWakePayload(inputs);

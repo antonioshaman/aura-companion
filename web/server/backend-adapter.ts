@@ -50,6 +50,13 @@ export interface IBackendAdapter {
 
   // ── Optional capabilities (not all backends support these) ──
 
+  /**
+   * Register the idle-kill activity hook (#12). The Claude adapter wires the
+   * equivalent at construction; Codex wires it here at attach time so a
+   * server-synthesized wake counts as group liveness even when gated `busy`.
+   */
+  setServerActivityHook?(cb: () => void): void;
+
   /** Send a server-synthesized user turn to the observer half. */
   sendUserFrameFromServer?(content: string): ServerSyntheticSendOutcome;
 

@@ -52,11 +52,27 @@ import { getClaudeSessionHistoryPage } from "./claude-session-history.js";
 import { verifyToken, getToken, regenerateToken, getAllAddresses } from "./auth-manager.js";
 import QRCode from "qrcode";
 import { VSCODE_EDITOR_CONTAINER_PORT, NOVNC_CONTAINER_PORT } from "./constants.js";
-import { probePairingCapability, type ProbeRunner } from "./preflight-probe.js";
+import { probePairingCapability, type ProbeRunner, type PairingCapability } from "./preflight-probe.js";
 
 const ROUTES_DIR = dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = dirname(ROUTES_DIR);
 const VSCODE_EDITOR_HOST_PORT = Number(process.env.COMPANION_EDITOR_PORT || "13338");
+
+/**
+ * Maximum wall-clock age of a cached pairing-capability result. Within this
+ * window repeated GET /api/backends calls return the cached result without
+ * forking any subprocesses. Chosen at 60 s — short enough that a user who
+ * installs Codex mid-session sees it within a minute, long enough to absorb
+ * high-frequency UI focus/navigation polls.
+ */
+const PROBE_CACHE_TTL_MS = 60_000;
+
+/**
+ * Spawn timeout for a single `<binary> --version` call. Keeps a wedged binary
+ * from stalling the GET /api/backends request indefinitely. On expiry the
+ * child is killed and the result is treated as `available: false`.
+ */
+const PROBE_SPAWN_TIMEOUT_MS = 5_000;
 
 const runProbeCommand: ProbeRunner = async (binary, args) => {
   const resolved = resolveBinary(binary);
@@ -68,18 +84,151 @@ const runProbeCommand: ProbeRunner = async (binary, args) => {
     stderr: "pipe",
     stdin: "ignore",
   });
-  const [stdoutBuf, stderrBuf, exitCode] = await Promise.all([
-    proc.stdout ? new Response(proc.stdout).arrayBuffer() : Promise.resolve(new ArrayBuffer(0)),
-    proc.stderr ? new Response(proc.stderr).arrayBuffer() : Promise.resolve(new ArrayBuffer(0)),
-    proc.exited,
-  ]);
-  return {
-    ok: exitCode === 0,
-    stdout: new TextDecoder().decode(stdoutBuf).trim(),
-    stderr: new TextDecoder().decode(stderrBuf).trim(),
-    exitCode,
-  };
+
+  // Part A: bounded spawn timeout — kill the child and return a failure result
+  // if `--version` hasn't finished within PROBE_SPAWN_TIMEOUT_MS. Without this
+  // a hung binary stalls the GET /api/backends request indefinitely.
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<"timeout">((resolve) => {
+    timeoutHandle = setTimeout(() => resolve("timeout"), PROBE_SPAWN_TIMEOUT_MS);
+  });
+
+  try {
+    const race = await Promise.race([
+      Promise.all([
+        proc.stdout ? new Response(proc.stdout).arrayBuffer() : Promise.resolve(new ArrayBuffer(0)),
+        proc.stderr ? new Response(proc.stderr).arrayBuffer() : Promise.resolve(new ArrayBuffer(0)),
+        proc.exited,
+      ]).then(([stdoutBuf, stderrBuf, exitCode]) => ({ kind: "done" as const, stdoutBuf, stderrBuf, exitCode })),
+      timeoutPromise,
+    ]);
+
+    if (race === "timeout") {
+      try { proc.kill(); } catch { /* ignore kill errors on already-exited processes */ }
+      return {
+        ok: false,
+        stdout: "",
+        stderr: `probe timed out after ${PROBE_SPAWN_TIMEOUT_MS}ms`,
+        exitCode: null,
+      };
+    }
+
+    return {
+      ok: race.exitCode === 0,
+      stdout: new TextDecoder().decode(race.stdoutBuf).trim(),
+      stderr: new TextDecoder().decode(race.stderrBuf).trim(),
+      exitCode: race.exitCode,
+    };
+  } finally {
+    // P5 hygiene: clear timer on every exit path so it doesn't fire against a
+    // settled promise and trigger a spurious kill on a finished process.
+    clearTimeout(timeoutHandle);
+  }
 };
+
+// ── Pairing-capability cache (Part B) ────────────────────────────────────────
+//
+// GET /api/backends is polled on every focus/navigation event by the UI. Each
+// uncached call forks TWO subprocesses (`claude --version` + `codex --version`).
+// This module-scope cache gates all callers through a single in-flight promise
+// and reuses the result for PROBE_CACHE_TTL_MS, eliminating redundant spawns.
+//
+// Design mirrors anthropic-models-cache.ts (in-memory + single-flight).
+// Caching is a wiring concern — probePairingCapability stays pure/injectable.
+
+interface ProbeCacheEntry {
+  result: PairingCapability;
+  cachedAt: number;
+}
+
+/**
+ * In-memory cache keyed by pairing string (e.g. "claude+codex").
+ * Single-entry in practice; Map used for extension symmetry with the
+ * anthropic-models-cache pattern.
+ */
+const pairingCapabilityCache = new Map<string, ProbeCacheEntry>();
+
+/**
+ * In-flight coalescing map. If a probe is already running for the key,
+ * concurrent callers await the same Promise rather than each spawning.
+ * Entry is deleted in `finally` on both resolve and reject so subsequent
+ * callers never inherit a dead promise.
+ */
+const pairingCapabilityInflight = new Map<string, Promise<PairingCapability>>();
+
+/**
+ * Test-only resets. Clears both the cache and the in-flight map so tests
+ * that exercise cold-cache vs warm-cache paths start from a known state.
+ * Named with `__` prefix (house convention from anthropic-models-cache.ts)
+ * to signal test-only usage.
+ */
+export function __resetPairingCacheForTests(nowFn: () => number = Date.now): void {
+  // nowFn is accepted for symmetry with injected-clock tests but unused here —
+  // we just need to wipe state. The parameter keeps the signature consistent
+  // with the reset helpers in anthropic-models-cache.ts for discoverability.
+  void nowFn;
+  pairingCapabilityCache.clear();
+  pairingCapabilityInflight.clear();
+}
+
+/**
+ * Dependency-injection seam for `getCachedPairingCapability`. Tests pass a
+ * fake probe function and a fake clock; production callers omit both and get
+ * the real `probePairingCapability` + `Date.now`.
+ */
+export interface PairingProbeDeps {
+  probeFn?: () => Promise<PairingCapability>;
+  now?: () => number;
+}
+
+/**
+ * Return the cached `claude+codex` pairing capability, re-probing at most
+ * once per PROBE_CACHE_TTL_MS. Concurrent callers within a cold-cache window
+ * share a single in-flight promise (coalescing), spawning exactly one pair of
+ * subprocesses.
+ *
+ * On probe failure (timeout/error) the failure result still caches for the
+ * TTL — avoids hammering a broken box; self-heals after TTL.
+ *
+ * @param deps Dependency-injection seam for testing (fake probe + fake clock).
+ */
+export async function getCachedPairingCapability(
+  deps?: PairingProbeDeps,
+): Promise<PairingCapability> {
+  const key = "claude+codex";
+  const nowFn = deps?.now ?? Date.now;
+  const probe = deps?.probeFn ?? (() => probePairingCapability("claude", "codex", runProbeCommand));
+  const now = nowFn();
+
+  // Cache hit — return without spawning.
+  const cached = pairingCapabilityCache.get(key);
+  if (cached !== undefined && now - cached.cachedAt < PROBE_CACHE_TTL_MS) {
+    return cached.result;
+  }
+
+  // In-flight coalescing — piggyback on an existing probe.
+  const inflight = pairingCapabilityInflight.get(key);
+  if (inflight !== undefined) {
+    return inflight;
+  }
+
+  // Cold-cache: launch the probe, coalesce concurrent callers.
+  const promise = (async (): Promise<PairingCapability> => {
+    try {
+      const result = await probe();
+      // Cache even failure results — avoids repeated spawns on a broken box.
+      pairingCapabilityCache.set(key, { result, cachedAt: nowFn() });
+      return result;
+    } finally {
+      // Always clear the in-flight entry so subsequent callers don't inherit
+      // a dead promise after the TTL window opens again.
+      pairingCapabilityInflight.delete(key);
+    }
+  })();
+
+  pairingCapabilityInflight.set(key, promise);
+  return promise;
+}
 
 function shellEscapeArg(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
@@ -1558,7 +1707,7 @@ export function createRoutes(
     }> = [];
     const claudeAvailable = resolveBinary("claude") !== null;
     const codexAvailable = resolveBinary("codex") !== null;
-    const pairingCapability = await probePairingCapability("claude", "codex", runProbeCommand);
+    const pairingCapability = await getCachedPairingCapability();
     const codexObserverReviewAvailable = pairingCapability.supported;
     const codexObserverReviewReason = pairingCapability.supported
       ? undefined

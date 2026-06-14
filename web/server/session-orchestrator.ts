@@ -36,7 +36,7 @@ import {
   runAutoProceedBootReconcile,
 } from "./auto-proceed-orchestrator-bindings.js";
 import type { CheckpointPayload, ObserverReviewPayload } from "./council-types.js";
-import { COUNCIL_SCHEMA_VERSION, OBSERVER_WAKE_PAYLOAD_VERSION, parseCheckpointPayload, parseObserverReviewPayload } from "./council-types.js";
+import { COUNCIL_SCHEMA_VERSION, OBSERVER_WAKE_PAYLOAD_VERSION, OBSERVER_WAKE_TIMEOUT_MS, parseCheckpointPayload, parseObserverReviewPayload } from "./council-types.js";
 import { writeAtomicJson } from "./atomic-write.js";
 import { watchCheckpoints } from "./checkpoint-watcher.js";
 import { watchReviews } from "./review-watcher.js";
@@ -247,6 +247,17 @@ interface CouncilWatcherEntry {
    * emit.
    */
   supersededCheckpointIds: string[];
+  /**
+   * Council Review 2026-06-13 (P1 #1 — accept-but-no-review ghost): the
+   * wake→review watchdog. Armed when a wake is successfully dispatched
+   * (`dispatchObserverWake` returns `dispatched`), cleared when a matching
+   * review file arrives in `handleCouncilReview`, and fired after
+   * `OBSERVER_WAKE_TIMEOUT_MS` if no review landed — degrading the group
+   * with reason `wake_produced_no_review`. Single-slot: arming a new
+   * checkpoint's watchdog clears the prior one (newest checkpoint is the
+   * one the observer is now expected to review). Cleared on teardown.
+   */
+  pendingReviewDeadline: { checkpointId: string; timer: ReturnType<typeof setTimeout> } | null;
 }
 
 /**
@@ -448,7 +459,17 @@ export class SessionOrchestrator {
    * slice already has this pattern; this is the server-side mirror.
    */
   private councilGroupBySessionId = new Map<string, string>();
-  private councilGroupDegradedReason = new Map<string, "observer_exited" | "wake_send_failed" | "reconnect_failed">();
+  private councilGroupDegradedReason = new Map<string, "observer_exited" | "wake_send_failed" | "reconnect_failed" | "wake_produced_no_review">();
+  /**
+   * #9: which half died, persisted symmetrically with
+   * `councilGroupDegradedReason` so a degraded-on-arrival bootstrap snapshot
+   * (`getAllGroupsForBootstrap`) can label the correct dead half. Without it
+   * the frontend deriver falls back to `deadRole ?? "observer"` and a
+   * reconnect-failed pair whose ORCHESTRATOR died is mislabeled
+   * "Observer offline". Sole writer is the `group:degraded` listener; cleared
+   * at the same sites as the reason map.
+   */
+  private councilGroupDeadRole = new Map<string, SessionGroupRole>();
 
   /**
    * Long-lived coordinator instance — owns the group state machine + the
@@ -571,23 +592,7 @@ export class SessionOrchestrator {
         if (!groupId) return;
         const meta = this.councilGroupMeta.get(groupId);
         if (!meta || meta.observerSessionId !== sessionId) return;
-        this.councilGroupDegradedReason.set(groupId, "wake_send_failed");
-        const coordinator = this.coordinator;
-        if (coordinator) {
-          coordinator.applyEvent(groupId, { type: "half_died", role: "observer" });
-        } else {
-          companionBus.emit("group:degraded", {
-            sessionGroupId: groupId,
-            deadRole: "observer",
-            reason: "wake_send_failed",
-          });
-        }
-        log.warn("session-orchestrator", "observer wake failed asynchronously", {
-          event: "group.observer_wake_failed_async",
-          sessionGroupId: groupId,
-          observerSessionId: sessionId,
-          error,
-        });
+        this.degradeObserverWakeFailure(groupId, sessionId, error, "async");
       } catch (err) {
         log.warn("session-orchestrator", "observer wake-failed handler crashed", {
           event: "group.observer_wake_failed_handler_error",
@@ -1253,6 +1258,7 @@ export class SessionOrchestrator {
         status: "active",
       });
       this.councilGroupDegradedReason.delete(sessionGroupId);
+      this.councilGroupDeadRole.delete(sessionGroupId);
       this.wsBridge.broadcastToGroup([primarySessionId, observerSessionId], {
         type: "group_created",
         ...wire,
@@ -1270,6 +1276,9 @@ export class SessionOrchestrator {
       if (degradedReason) {
         this.councilGroupDegradedReason.set(sessionGroupId, degradedReason);
       }
+      // #9: persist the dead half symmetrically with the reason so a
+      // bootstrap snapshot of a degraded pair labels the correct half.
+      this.councilGroupDeadRole.set(sessionGroupId, deadRole);
       this.wsBridge.broadcastToGroup(this.getGroupMemberIds(sessionGroupId), {
         type: "group_degraded",
         sessionGroupId,
@@ -1606,6 +1615,7 @@ export class SessionOrchestrator {
       previousCheckpoint: null,
       pendingCheckpoint: null,
       supersededCheckpointIds: [],
+      pendingReviewDeadline: null,
     };
     this.councilWatchers.set(sessionGroupId, entry);
 
@@ -1754,6 +1764,7 @@ export class SessionOrchestrator {
     }
     this.councilGroupMeta.delete(sessionGroupId);
     this.councilGroupDegradedReason.delete(sessionGroupId);
+    this.councilGroupDeadRole.delete(sessionGroupId);
   }
 
   /**
@@ -1792,6 +1803,12 @@ export class SessionOrchestrator {
     const entry = this.councilWatchers.get(sessionGroupId);
     if (!entry) return;
     entry.abort.abort();
+    // Council Review 2026-06-13 (P1 #1): clear the wake→review watchdog so a
+    // torn-down group cannot fire a late degrade against a stale group id.
+    if (entry.pendingReviewDeadline) {
+      clearTimeout(entry.pendingReviewDeadline.timer);
+      entry.pendingReviewDeadline = null;
+    }
     this.councilWatchers.delete(sessionGroupId);
   }
 
@@ -1866,10 +1883,13 @@ export class SessionOrchestrator {
    * an unhandled-rejection surface on every throwing send.
    *
    * Failure-mode discipline (Subprocess Council Rec 6): on `failed`,
-   * do NOT synthesise a fake `session:exited` or mark the half
-   * degraded directly. The natural socket-close handler in `ws-bridge.ts`
-   * will fire `session:exited` and the existing `armReconnect` path
-   * takes over the lifecycle.
+   * do NOT synthesise a fake `session:exited`. The natural socket-close
+   * handler in `ws-bridge.ts` will fire `session:exited` and the existing
+   * `armReconnect` path takes over the transport lifecycle. The group IS,
+   * however, marked degraded via {@link degradeObserverWakeFailure} (#4) so
+   * a synchronous send failure no longer leaves the pair falsely `active`
+   * with zero reviews — this converges with the async codex wake-failed
+   * channel onto one degraded path.
    */
   private dispatchObserverWake(
     sessionGroupId: string,
@@ -1975,6 +1995,7 @@ export class SessionOrchestrator {
         checkpoint: payload,
         manifest,
         workspaceRoot: entry.cwd,
+        observerProvider: meta.pairing.split("+")[1] ?? "claude",
       });
     } catch (err) {
       const outcome: WakeDispatchOutcome = { kind: "skipped", reason: "build_error" };
@@ -2043,6 +2064,13 @@ export class SessionOrchestrator {
             incident: "second_restart_double_wake_possible",
           });
         }
+        // Council Review 2026-06-13 (P1 #1 — accept-but-no-review ghost):
+        // arm the wake→review watchdog. A wake that the transport accepts
+        // but that the observer never answers with a review file produced
+        // no server-side signal before this — the group stayed `active`
+        // forever. The watchdog degrades the group if no matching review
+        // arrives within OBSERVER_WAKE_TIMEOUT_MS.
+        this.armReviewDeadline(sessionGroupId, entry, payload.checkpoint_id);
         const outcome: WakeDispatchOutcome = {
           kind: "dispatched",
           checkpointId: payload.checkpoint_id,
@@ -2141,6 +2169,12 @@ export class SessionOrchestrator {
           sequence: payload.sequence,
           error: bridgeOutcome.error,
         });
+        // #4: a synchronous send failure (the Claude adapter path + the
+        // default coercion) previously logged and returned, leaving the
+        // group falsely `active` with zero reviews. Converge it onto the
+        // SAME degraded channel the async codex `observer:wake-failed`
+        // listener uses — one logical event, one degrade path.
+        this.degradeObserverWakeFailure(sessionGroupId, observerSessionId, bridgeOutcome.error, "sync");
         return outcome;
       }
       default: {
@@ -2156,6 +2190,7 @@ export class SessionOrchestrator {
           kind: "failed",
           error: `unknown bridge outcome: ${JSON.stringify(bridgeOutcome)}`,
         };
+        this.degradeObserverWakeFailure(sessionGroupId, observerSessionId, outcome.error, "sync");
         return outcome;
       }
     }
@@ -2189,6 +2224,134 @@ export class SessionOrchestrator {
     this.dispatchObserverWake(sessionGroupId, queued);
   }
 
+  /**
+   * Council Review 2026-06-13 (P1 #1 — accept-but-no-review ghost): arm the
+   * single-slot wake→review watchdog for `checkpointId`. Clears any prior
+   * deadline first — the newest dispatched checkpoint is the one the
+   * observer is now expected to answer, so an older pending deadline would
+   * fire spuriously even though the observer is correctly working the newer
+   * checkpoint. Cleared by `handleCouncilReview` on a matching review or by
+   * `stopCouncilWatchers` on teardown.
+   */
+  private armReviewDeadline(
+    sessionGroupId: string,
+    entry: CouncilWatcherEntry,
+    checkpointId: string,
+  ): void {
+    if (entry.pendingReviewDeadline) {
+      clearTimeout(entry.pendingReviewDeadline.timer);
+    }
+    const timer = setTimeout(() => {
+      this.handleReviewDeadlineExpired(sessionGroupId, checkpointId);
+    }, OBSERVER_WAKE_TIMEOUT_MS);
+    // Do not keep the event loop alive solely for this watchdog — a process
+    // that is otherwise idle should still be allowed to exit.
+    if (typeof timer.unref === "function") timer.unref();
+    entry.pendingReviewDeadline = { checkpointId, timer };
+  }
+
+  /**
+   * Council Review 2026-06-13 (P1 #1): the wake→review watchdog elapsed —
+   * the observer accepted a wake but never produced a review file within
+   * OBSERVER_WAKE_TIMEOUT_MS. Surface this as a visible `degraded` state
+   * (reason `wake_produced_no_review`) instead of leaving the group falsely
+   * `active`. Mirrors the synchronous `observer:wake-failed` listener so
+   * both non-participation modes converge on one degraded channel.
+   */
+  private handleReviewDeadlineExpired(sessionGroupId: string, checkpointId: string): void {
+    try {
+      const entry = this.councilWatchers.get(sessionGroupId);
+      // Stale fire guard: the entry may have been torn down, or a newer
+      // checkpoint may have re-armed the slot, between the timer firing and
+      // this callback running. Only act if the slot still tracks THIS
+      // checkpoint.
+      if (!entry || entry.pendingReviewDeadline?.checkpointId !== checkpointId) return;
+      entry.pendingReviewDeadline = null;
+
+      const meta = this.councilGroupMeta.get(sessionGroupId);
+      if (!meta) return;
+      // Idempotence: a group already past this checkpoint's review (the
+      // review landed but the disarm raced) should not be degraded.
+      if (meta.lastReviewedCheckpointId === checkpointId) return;
+
+      // Council Review 2026-06-13 P2 #8: do NOT pre-set the reason map here.
+      // The reason rides the `half_died` event into `deriveSideEffects` and is
+      // persisted by the `group:degraded` listener ONLY when the transition
+      // actually emits — so a no-op transition (already degraded/reconnecting/
+      // archived) leaves no orphan reason that bootstrap would later
+      // broadcast without the browser ever having seen the frame.
+      const coordinator = this.coordinator;
+      if (coordinator) {
+        coordinator.applyEvent(sessionGroupId, {
+          type: "half_died",
+          role: "observer",
+          reason: "wake_produced_no_review",
+        });
+      } else {
+        companionBus.emit("group:degraded", {
+          sessionGroupId,
+          deadRole: "observer",
+          reason: "wake_produced_no_review",
+        });
+      }
+      log.warn("session-orchestrator", "observer accepted wake but produced no review", {
+        event: "group.observer_wake_produced_no_review",
+        sessionGroupId,
+        observerSessionId: meta.observerSessionId,
+        checkpointId,
+        timeoutMs: OBSERVER_WAKE_TIMEOUT_MS,
+      });
+    } catch (err) {
+      log.warn("session-orchestrator", "review-deadline handler crashed", {
+        event: "group.observer_wake_produced_no_review_handler_error",
+        sessionGroupId,
+        checkpointId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Council Review 2026-06-13 (P1 #4): single converge point for "the wake
+   * did not reach the observer". BOTH the synchronous `failed` outcome of
+   * {@link dispatchObserverWake} (Claude adapter + the default coercion) AND
+   * the async `observer:wake-failed` bus emit (codex adapter) route here, so
+   * one logical event has exactly one degraded channel instead of two
+   * divergent paths kept in lockstep only by prose. Callers resolve the
+   * observer half themselves; this method only enacts the degrade.
+   */
+  private degradeObserverWakeFailure(
+    sessionGroupId: string,
+    observerSessionId: string,
+    error: string,
+    source: "sync" | "async",
+  ): void {
+    // Council Review 2026-06-13 P2 #8: reason rides the event, not a pre-set
+    // map write. The `group:degraded` listener persists it from the bus
+    // payload only when the transition emits — no orphan reason on a no-op.
+    const coordinator = this.coordinator;
+    if (coordinator) {
+      coordinator.applyEvent(sessionGroupId, {
+        type: "half_died",
+        role: "observer",
+        reason: "wake_send_failed",
+      });
+    } else {
+      companionBus.emit("group:degraded", {
+        sessionGroupId,
+        deadRole: "observer",
+        reason: "wake_send_failed",
+      });
+    }
+    log.warn("session-orchestrator", "observer wake failed — degrading group", {
+      event: "group.observer_wake_failed_degraded",
+      sessionGroupId,
+      observerSessionId,
+      error,
+      source,
+    });
+  }
+
   private handleCouncilReview(sessionGroupId: string, payload: ObserverReviewPayload): void {
     // Backend P1-3 (council review #L): wrap the whole handler body in a
     // try/catch so a transient throw in the grounding pipeline doesn't
@@ -2198,6 +2361,18 @@ export class SessionOrchestrator {
     try {
       const entry = this.councilWatchers.get(sessionGroupId);
       if (!entry) return;
+
+      // Council Review 2026-06-13 (P1 #1): a review arrived — disarm the
+      // wake→review watchdog if it was tracking this checkpoint. A review
+      // for an older checkpoint than the armed one leaves the watchdog
+      // intact (the newest dispatched wake is still owed its review).
+      if (
+        entry.pendingReviewDeadline &&
+        entry.pendingReviewDeadline.checkpointId === payload.checkpoint_id
+      ) {
+        clearTimeout(entry.pendingReviewDeadline.timer);
+        entry.pendingReviewDeadline = null;
+      }
 
       // Phase E delta manifest (Willison P1-4 item 1; council review #2):
       // when a previous checkpoint exists, modifiedFiles is the DELTA
@@ -3146,6 +3321,7 @@ export class SessionOrchestrator {
         primary: g.primary,
         observer: g.observer,
         status: g.status,
+        deadRole: this.councilGroupDeadRole.get(g.sessionGroupId),
         degradedReason: this.councilGroupDegradedReason.get(g.sessionGroupId),
       }));
     }

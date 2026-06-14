@@ -922,6 +922,11 @@ export class WsBridge {
       }
       // starting → initializing (or reconnecting → initializing)
       session.stateMachine.transition("initializing", "adapter_attached");
+      // #12: wire the idle-kill activity hook so a codex observer-wake
+      // dispatch counts as group liveness even when gated `busy` mid-review.
+      // The Claude adapter wires the equivalent `onActivityUpdate` at
+      // construction (handleCLIOpen); non-Claude adapters wire it here.
+      adapter.setServerActivityHook?.(() => { this.noteCliActivity(session); });
     }
 
     // ── onBrowserMessage — messages from backend → browsers ──────────────

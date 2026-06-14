@@ -220,14 +220,18 @@ describe("deriveSideEffects", () => {
   // role + attempts=1.
   function degradedFromHalfDied(role: "observer" | "orchestrator"): GroupTransitionSideEffects {
     return {
-      busEvents: [{ kind: "degraded", deadRole: role }],
+      // Council Review 2026-06-13 P2 #7: a plain crash carries the default
+      // `observer_exited` reason on the wire so the browser can render the
+      // correct copy instead of a bare "degraded".
+      busEvents: [{ kind: "degraded", deadRole: role, reason: "observer_exited" }],
       logEntries: [{ event: "group.degraded", role }],
       idleTimerEffects: [],
     };
   }
   function degradedFromReconnectFailed(role: "observer" | "orchestrator"): GroupTransitionSideEffects {
     return {
-      busEvents: [{ kind: "degraded", deadRole: role }],
+      // Grace-window expiry maps to the `reconnect_failed` reason (P2 #7).
+      busEvents: [{ kind: "degraded", deadRole: role, reason: "reconnect_failed" }],
       logEntries: [{ event: "group.reconnect_failed", role, attempts: 1 }],
       idleTimerEffects: [],
     };
@@ -335,6 +339,55 @@ describe("deriveSideEffects", () => {
     expect(result.busEvents).toEqual(expected.busEvents);
     expect(result.logEntries).toEqual(expected.logEntries);
     expect(result.idleTimerEffects).toEqual(expected.idleTimerEffects);
+  });
+
+  // Council Review 2026-06-13 P2 #7/#8: every degrade transition must carry a
+  // discriminating reason on the bus side-effect so the browser renders the
+  // right DegradedBanner copy. Three production reasons reach `degraded`:
+  // a plain crash (default `observer_exited`), grace expiry (`reconnect_failed`),
+  // and the orchestrator's wake paths threading an explicit reason on `half_died`.
+  describe("degrade reason threading (P2 #7/#8)", () => {
+    it("half_died with no explicit reason defaults to observer_exited", () => {
+      const ev: GroupEvent = { type: "half_died", role: "observer" };
+      const next = transition("active", ev);
+      const result = deriveSideEffects("active", next, ev);
+      expect(result.busEvents).toEqual([
+        { kind: "degraded", deadRole: "observer", reason: "observer_exited" },
+      ]);
+    });
+
+    it("reconnect_failed maps to the reconnect_failed reason", () => {
+      const ev: GroupEvent = { type: "reconnect_failed", role: "orchestrator" };
+      const next = transition("reconnecting", ev);
+      const result = deriveSideEffects("reconnecting", next, ev);
+      expect(result.busEvents[0]).toMatchObject({ kind: "degraded", reason: "reconnect_failed" });
+    });
+
+    it.each([
+      "wake_send_failed",
+      "wake_produced_no_review",
+    ] as const)("half_died carrying an explicit %s reason threads it to the bus verbatim", (reason) => {
+      // The orchestrator's wake-failure / no-review paths pass these so the
+      // reason no longer needs a parallel hand-maintained map (the #8 fix).
+      const ev: GroupEvent = { type: "half_died", role: "observer", reason };
+      const next = transition("active", ev);
+      const result = deriveSideEffects("active", next, ev);
+      expect(result.busEvents).toEqual([
+        { kind: "degraded", deadRole: "observer", reason },
+      ]);
+    });
+
+    it("an explicit reason on a NO-OP half_died (already degraded) produces no bus event — nothing to persist", () => {
+      // This is the structural guarantee behind #8: a degrade event that does
+      // not transition emits nothing, so the listener never persists a reason
+      // the browser was not told about.
+      const ev: GroupEvent = { type: "half_died", role: "observer", reason: "wake_send_failed" };
+      const next = transition("degraded", ev);
+      expect(next).toBe("degraded");
+      const result = deriveSideEffects("degraded", next, ev);
+      expect(result.busEvents).toEqual([]);
+      expect(result.logEntries).toEqual([]);
+    });
   });
 
   // Inventory tests — the matrix above is the canonical truth, but these

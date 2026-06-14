@@ -2,7 +2,7 @@
 // components are used together (App, Playground, HomePage wiring).
 export { BlockerBanner } from "./BlockerBanner.js";
 export type { BlockerBannerProps } from "./BlockerBanner.js";
-export { CouncilToggle, isSupportedPairing } from "./CouncilToggle.js";
+export { CouncilToggle, isSupportedPairing, coerceCouncilPairing } from "./CouncilToggle.js";
 export type { CouncilPairing, CouncilToggleProps } from "./CouncilToggle.js";
 export { DegradedBanner } from "./DegradedBanner.js";
 export type { DegradedBannerProps } from "./DegradedBanner.js";
