@@ -29,7 +29,7 @@ import { SessionGroupCoordinator } from "./session-group-coordinator.js";
 import { isSupportedPairing as _isSupportedPairing } from "./backend-provider.js";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import { mkdirSync, readdirSync, readFileSync, existsSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, existsSync, statSync } from "node:fs";
 import { IdleTimerManager } from "./idle-timer-manager.js";
 import {
   buildNoopIdleTimerManager,
@@ -3494,6 +3494,17 @@ export class SessionOrchestrator {
       const payload = parseObserverReviewPayload(raw);
       if (!payload) continue;
       reviewCount++;
+      // Real event time = the review FILE's mtime (server-observed), NOT the
+      // observer's self-reported `reviewed_at` (observer-authored, unreliable —
+      // observed as a hallucinated placeholder). Stamped per-finding so the UI
+      // shows when each review actually landed instead of one page-load time
+      // for the whole backlog.
+      let reviewedAt: number;
+      try {
+        reviewedAt = statSync(filePath).mtimeMs;
+      } catch {
+        reviewedAt = Date.now();
+      }
       observerProvider = observerProvider ?? payload.observer_provider;
       observerModel = observerModel ?? payload.observer_model;
       // Apply same grounding validation as the WS path so REST-bootstrapped
@@ -3525,6 +3536,7 @@ export class SessionOrchestrator {
           ...(f.evidence_lines !== undefined ? { evidence_lines: f.evidence_lines } : {}),
           ...(f.confidence !== undefined ? { confidence: f.confidence } : {}),
           ...(downgrade ? { wasDowngraded: true, downgradeReason: downgrade.reason } : {}),
+          reviewedAt,
         };
         allFindings.push(out);
         if (downgrade) {

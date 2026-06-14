@@ -576,6 +576,15 @@ export interface BrowserObserverFinding {
   wasDowngraded?: boolean;
   /** Why grounding downgraded this finding. Set iff wasDowngraded. */
   downgradeReason?: "evidence_not_in_modified_set" | "evidence_missing_on_disk" | "wake_version_mismatch";
+  /**
+   * Real event time (ms epoch), server-stamped from the review FILE's mtime.
+   * Used so the UI shows when the review actually landed instead of page-load
+   * time on REST bootstrap. NOT the observer's self-reported `reviewed_at` —
+   * that field is observer-authored and unreliable (observed: a hallucinated
+   * placeholder timestamp). Absent on the live path, where the batch broadcast
+   * time already approximates the real event time.
+   */
+  reviewedAt?: number;
 }
 
 export interface BrowserObserverDowngrade {

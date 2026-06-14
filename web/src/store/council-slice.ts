@@ -120,7 +120,10 @@ export function hydrateObserverFinding(
     evidence_path: wire.evidence_path,
     ...(wire.evidence_lines !== undefined ? { evidence_lines: wire.evidence_lines } : {}),
     ...(wire.confidence !== undefined ? { confidence: wire.confidence } : {}),
-    receivedAt: context.receivedAt,
+    // Prefer the server-stamped real event time (review file mtime, set on the
+    // REST bootstrap path) over the per-batch ingestion time. Without this, a
+    // tab reload collapses the entire backlog onto one page-load timestamp.
+    receivedAt: wire.reviewedAt ?? context.receivedAt,
     checkpointId: context.checkpointId,
     phase: context.phase,
     ...(wire.wasDowngraded === true ? { wasDowngraded: true } : {}),
