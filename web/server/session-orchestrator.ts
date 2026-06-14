@@ -1709,15 +1709,35 @@ export class SessionOrchestrator {
    * move on.
    */
   /**
+   * Council-wake send-readiness gate. Returns true only when the observer's
+   * bridge adapter would actually accept a synthetic wake frame RIGHT NOW.
+   *
+   * Prefers the adapter's {@link IBackendAdapter.isReadyForServerFrame}
+   * (full transport + protocol readiness — e.g. codex requires its
+   * `threadId` assigned, not just `connected`), falling back to
+   * {@link IBackendAdapter.isConnected} for adapters that do not implement
+   * the predicate. Codex flips `connected` true ~16s before `threadId`
+   * lands, so a plain `isConnected()` gate dispatched into a
+   * `socket_disconnected` drop (live-test 2026-06-14, both the spawn and
+   * restart-catchup wakes). This predicate closes that window for both.
+   */
+  private observerReadyForWake(observerSessionId: string): boolean {
+    const adapter = this.wsBridge.getSession(observerSessionId)?.backendAdapter;
+    if (!adapter) return false;
+    return adapter.isReadyForServerFrame?.() ?? adapter.isConnected();
+  }
+
+  /**
    * Fire-and-forget poll: wait until the observer's bridge adapter is
-   * attached on `wsBridge`, then call `emitSpawnCheckpoint`. The naive
-   * "emit immediately after group:created" approach races against the
-   * observer CLI subprocess's WebSocket handshake — the file lands +
-   * watcher fires + `dispatchObserverWake` returns `adapter_missing`
-   * because the bridge session has no adapter yet — and the wake is
-   * dropped silently. Polling closes that window without coupling to
-   * a specific bus event (Claude's adapter is attached by `handleCLIOpen`
-   * inside the bridge, not via a fan-out bus emit like Codex's).
+   * send-ready (see {@link observerReadyForWake}), then call
+   * `emitSpawnCheckpoint`. The naive "emit immediately after group:created"
+   * approach races against the observer CLI subprocess's WebSocket
+   * handshake — the file lands + watcher fires + `dispatchObserverWake`
+   * returns `adapter_missing`/`socket_disconnected` because the bridge
+   * session has no (ready) adapter yet — and the wake is dropped silently.
+   * Polling on readiness closes that window without coupling to a specific
+   * bus event (Claude's adapter is attached by `handleCLIOpen` inside the
+   * bridge, not via a fan-out bus emit like Codex's).
    *
    * Bounded by `MAX_WAIT_MS` so a never-arriving adapter (spawn that
    * crashed pre-WS-handshake) does not leak a polling promise. On
@@ -1733,8 +1753,7 @@ export class SessionOrchestrator {
     const POLL_INTERVAL_MS = 250;
     const deadline = Date.now() + MAX_WAIT_MS;
     while (Date.now() < deadline) {
-      const session = this.wsBridge.getSession(observerSessionId);
-      if (session?.backendAdapter) {
+      if (this.observerReadyForWake(observerSessionId)) {
         this.emitSpawnCheckpoint(sessionGroupId, workspaceCwd);
         return;
       }
@@ -1762,11 +1781,13 @@ export class SessionOrchestrator {
    * re-handshakes) does not leak a polling promise. On timeout we log + give
    * up; the group's reconnect grace / degrade path owns the dead-half case.
    *
-   * The readiness gate requires `adapter.isConnected()`, NOT mere adapter
-   * presence: a reconnecting codex attaches its backend adapter before its
-   * WS-proxy socket finishes connecting, so a presence-only gate dispatched
-   * into a `socket_disconnected` drop (live-test 2026-06-14, observed ~16s
-   * into restart-catchup). Waiting for `isConnected()` closes that window.
+   * The readiness gate is {@link observerReadyForWake} (send-readiness, NOT
+   * mere adapter presence): a reconnecting codex attaches its backend
+   * adapter and even flips `connected` true BEFORE its `thread/resume`
+   * round-trip assigns `threadId`, so both a presence-only AND an
+   * `isConnected()`-only gate dispatched into a `socket_disconnected` drop
+   * (live-test 2026-06-14, observed ~16s into restart-catchup). Polling on
+   * `isReadyForServerFrame()` (threadId-aware) closes that window.
    */
   private async scheduleCatchupWakeWhenObserverReady(
     sessionGroupId: string,
@@ -1783,8 +1804,7 @@ export class SessionOrchestrator {
     const POLL_INTERVAL_MS = 250;
     const deadline = Date.now() + MAX_WAIT_MS;
     while (Date.now() < deadline) {
-      const session = this.wsBridge.getSession(observerSessionId);
-      if (session?.backendAdapter?.isConnected()) {
+      if (this.observerReadyForWake(observerSessionId)) {
         this.dispatchObserverWake(sessionGroupId, payload);
         return;
       }

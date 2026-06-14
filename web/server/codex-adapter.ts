@@ -1087,6 +1087,24 @@ export class CodexAdapter implements IBackendAdapter {
     return this.connected;
   }
 
+  /**
+   * Send-readiness gate for council wakes — the exact negation of the
+   * `socket_disconnected` guard in {@link sendUserFrameFromServer}. Codex
+   * sets `connected = true` after the `initialized` notification but only
+   * assigns `threadId` once the later `thread/resume`/`thread/start`
+   * round-trip resolves (~16s on prod), so `isConnected()` alone returns
+   * true during a window where a wake send is still rejected. Poll gates
+   * use this so the wake fires only when the turn actually lands.
+   */
+  isReadyForServerFrame(): boolean {
+    return (
+      this.initialized &&
+      this.threadId !== null &&
+      !this.initInProgress &&
+      this.transport.isConnected()
+    );
+  }
+
   async disconnect(): Promise<void> {
     this.connected = false;
     if (this.options.killProcess) {

@@ -3433,6 +3433,43 @@ describe("SessionOrchestrator", () => {
       }
     });
 
+    // Fix #3 (live-test 2026-06-14): the codex adapter flips `connected` true
+    // ~16s BEFORE its thread/resume round-trip assigns a threadId, so an
+    // `isConnected()`-only gate dispatched into a `socket_disconnected` drop.
+    // The gate now prefers `isReadyForServerFrame()` — an adapter that reports
+    // connected but not-send-ready must keep waiting, not dispatch.
+    it("waits for isReadyForServerFrame() — connected-but-not-ready does not dispatch", async () => {
+      vi.useFakeTimers();
+      const workspace = fs.realpathSync(fs.mkdtempSync(pathLib.join(osLib.tmpdir(), "scan-ready-")));
+      try {
+        fs.mkdirSync(pathLib.join(workspace, ".council", "checkpoints"), { recursive: true });
+        fs.writeFileSync(pathLib.join(workspace, ".council", "checkpoints", "phase-a.json"), JSON.stringify({
+          schema_version: 1, checkpoint_id: "chk_ready", phase: "phase-a", sequence: 1,
+          session_group_id: "grp_ready", emitted_at: "2026-01-01T00:00:00Z", artifact_paths: [],
+        }));
+        seedActiveGroupAt("grp_ready", workspace);
+        // Adapter attached + transport connected, but NOT send-ready yet
+        // (codex pre-threadId window). isReadyForServerFrame() gates the wake.
+        vi.mocked(deps.wsBridge.getSession).mockReturnValue({
+          backendAdapter: { isConnected: () => true, isReadyForServerFrame: () => false },
+        } as any);
+
+        (orchestrator as unknown as { scanForMissedObserverWakes: () => void }).scanForMissedObserverWakes.call(orchestrator);
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(deps.wsBridge.sendObserverWakeFrame).not.toHaveBeenCalled();
+
+        // threadId lands → send-ready; the next poll tick dispatches.
+        vi.mocked(deps.wsBridge.getSession).mockReturnValue({
+          backendAdapter: { isConnected: () => true, isReadyForServerFrame: () => true },
+        } as any);
+        await vi.advanceTimersByTimeAsync(300);
+        expect(deps.wsBridge.sendObserverWakeFrame).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+        fs.rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
     // The deferred poll is bounded — a never-arriving adapter (a half that
     // never re-handshakes) must not leak a polling promise nor dispatch.
     it("gives up the catchup wake after the adapter-wait deadline", async () => {
@@ -3765,7 +3802,11 @@ describe("SessionOrchestrator", () => {
         let returnAdapter = false;
         obs.wsBridge.getSession = (id: string) => {
           if (id === observerId) {
-            return { backendAdapter: returnAdapter ? {} : null } as { backendAdapter: unknown };
+            // Attached + send-ready adapter once `returnAdapter` flips; the
+            // spawn gate now polls observerReadyForWake (isReadyForServerFrame).
+            return {
+              backendAdapter: returnAdapter ? { isReadyForServerFrame: () => true } : null,
+            } as { backendAdapter: unknown };
           }
           return originalGetSession(id);
         };

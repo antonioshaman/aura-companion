@@ -339,6 +339,17 @@ export class ClaudeAdapter implements IBackendAdapter {
     return this.cliSocket !== null;
   }
 
+  /**
+   * Send-readiness gate for council wakes — mirrors the transport guard in
+   * {@link sendUserFrameFromServer} (socket present AND OPEN). Stricter than
+   * {@link isConnected} (which only checks presence) by the readyState
+   * check, so a socket attached but not yet OPEN is correctly treated as
+   * not-ready. See {@link IBackendAdapter.isReadyForServerFrame}.
+   */
+  isReadyForServerFrame(): boolean {
+    return this.cliSocket !== null && this.cliSocket.readyState === 1;
+  }
+
   async disconnect(): Promise<void> {
     // Clear pending control requests to prevent memory leaks from
     // unresolved promises (CLI won't respond after disconnect)

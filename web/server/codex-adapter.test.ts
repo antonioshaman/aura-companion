@@ -3755,6 +3755,55 @@ describe("CodexAdapter with ICodexTransport", () => {
     return { mock, adapter, messages };
   }
 
+  // ─── isReadyForServerFrame — council-wake send-readiness gate (Fix #3) ──────
+  // Regression for the live-test 2026-06-14 failure: codex flips `connected`
+  // true after the `initialize` round-trip but BEFORE `thread/start` assigns a
+  // threadId, so `isConnected()` returns true during a window where a wake send
+  // is still rejected with `socket_disconnected`. The council poll gates must
+  // poll on `isReadyForServerFrame()` (threadId-aware), not `isConnected()`.
+  describe("isReadyForServerFrame", () => {
+    it("is false while connected-but-pre-threadId, then true after full init", async () => {
+      const mock = createMockTransport();
+      const adapter = new CodexAdapter(mock.transport, "ready-gate-session", {
+        model: "o4-mini",
+        cwd: "/tmp",
+      });
+
+      // Step 1: resolve `initialize` → adapter flips `connected` true and
+      // sends the `initialized` notification, but thread/start has NOT yet
+      // returned a threadId. This is the exact window the bug lived in.
+      await new Promise((r) => setTimeout(r, 50));
+      mock.resolveCall(1, { userAgent: "codex" });
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(adapter.isConnected()).toBe(true);
+      // Pre-threadId: a wake send would be rejected, so readiness must be false.
+      expect(adapter.isReadyForServerFrame()).toBe(false);
+      // And it agrees with the actual send gate (the contract it mirrors).
+      expect(adapter.sendUserFrameFromServer("early wake")).toEqual({
+        kind: "socket_disconnected",
+      });
+
+      // Step 2: resolve thread/start + rateLimits → init completes, threadId set.
+      mock.resolveCall(2, { thread: { id: "thr_ready" } });
+      await new Promise((r) => setTimeout(r, 50));
+      mock.resolveCall(3, {});
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(adapter.isReadyForServerFrame()).toBe(true);
+      expect(adapter.sendUserFrameFromServer("ready wake")).toEqual({ kind: "sent" });
+    });
+
+    it("returns false once the transport disconnects after a full init", async () => {
+      const { mock, adapter } = await initAdapter();
+      expect(adapter.isReadyForServerFrame()).toBe(true);
+
+      // Transport drop flips the gate false even though threadId is still set.
+      (mock.transport.isConnected as ReturnType<typeof vi.fn>).mockReturnValue(false);
+      expect(adapter.isReadyForServerFrame()).toBe(false);
+    });
+  });
+
   it("sendUserFrameFromServer starts a synthetic observer turn with council-wake provenance", async () => {
     const { mock, adapter } = await initAdapter();
 
