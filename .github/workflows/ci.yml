@@ -30,6 +30,16 @@ jobs:
         working-directory: web
         run: bun run dry:check
 
+      # Council Eval Harness L1 gate. Scores the checked-in synthetic fixtures
+      # (web/evals/__fixtures__/) against the committed baseline
+      # (web/evals/ci-baseline.json) with a load-bearing exit code — zero LLM
+      # calls, no network, no secrets. A scorer change that drifts from the
+      # baseline (or a stale baseline) fails here rather than shipping.
+      # Regenerate intentionally with `bun run eval:replay --ci --update-baseline`.
+      - name: Eval replay L1 gate (no regression vs baseline)
+        working-directory: web
+        run: bun run eval:replay --ci
+
   test:
     strategy:
       matrix:
