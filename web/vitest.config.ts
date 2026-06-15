@@ -25,6 +25,7 @@ export default defineConfig({
       "src/**/*.test.ts",
       "src/**/*.test.tsx",
       "scripts/**/*.test.ts",
+      "evals/**/*.test.ts",
     ],
     environmentMatchGlobs: [
       ["src/**/*.test.ts", "jsdom"],

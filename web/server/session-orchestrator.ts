@@ -41,6 +41,7 @@ import { writeAtomicJson } from "./atomic-write.js";
 import { watchCheckpoints } from "./checkpoint-watcher.js";
 import { watchReviews } from "./review-watcher.js";
 import { validateObserverFindings } from "./observer-grounding.js";
+import { maybeEmitEvalSidecar } from "./eval-sidecar.js";
 import { buildObserverContextManifest, buildObserverWakePayload } from "./observer-prompt.js";
 import type { BridgeObserverWakeOutcome } from "./ws-bridge.js";
 import {
@@ -2614,6 +2615,19 @@ export class SessionOrchestrator {
       if (meta) {
         meta.lastReviewedCheckpointId = payload.checkpoint_id;
       }
+
+      // Eval Harness (opt-in, default OFF): freeze the grounding gate's inputs
+      // into `.council/eval/<checkpoint>.json` for post-hoc recall scoring and
+      // a hermetic grounding rerun. Self-contained error handling — a sidecar
+      // failure can never break the live review fanout below.
+      maybeEmitEvalSidecar({
+        workspaceRoot: entry.cwd,
+        sessionGroupId,
+        payload,
+        manifest,
+        grounding: result,
+        observerPromptSha256: meta?.observerPromptSha256 ?? "",
+      });
 
       companionBus.emit("group:review", {
         sessionGroupId,

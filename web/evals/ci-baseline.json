@@ -1,0 +1,58 @@
+[
+  {
+    "file": "claude-basic.jsonl",
+    "backend": "claude",
+    "recognized": true,
+    "total_tokens": 222,
+    "cost_usd": 0.75,
+    "wall_clock_ms": 2000,
+    "api_ms": 1500,
+    "frames": {
+      "result": 2,
+      "token_usage_updated": 0,
+      "unhandled": 0
+    }
+  },
+  {
+    "file": "codex-basic.jsonl",
+    "backend": "codex",
+    "recognized": true,
+    "total_tokens": 250,
+    "cost_usd": "unavailable",
+    "wall_clock_ms": 1000,
+    "api_ms": "unavailable",
+    "frames": {
+      "result": 0,
+      "token_usage_updated": 3,
+      "unhandled": 0
+    }
+  },
+  {
+    "file": "truncated-tail.jsonl",
+    "backend": "claude",
+    "recognized": true,
+    "total_tokens": 3,
+    "cost_usd": 0.1,
+    "wall_clock_ms": 0,
+    "api_ms": 200,
+    "frames": {
+      "result": 1,
+      "token_usage_updated": 0,
+      "unhandled": 0
+    }
+  },
+  {
+    "file": "unknown-backend.jsonl",
+    "backend": "gemini",
+    "recognized": false,
+    "total_tokens": "unavailable",
+    "cost_usd": "unavailable",
+    "wall_clock_ms": 1000,
+    "api_ms": "unavailable",
+    "frames": {
+      "result": 0,
+      "token_usage_updated": 0,
+      "unhandled": 2
+    }
+  }
+]
