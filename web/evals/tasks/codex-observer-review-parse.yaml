@@ -1,0 +1,35 @@
+# Golden task: Codex observer reviews must normalize server-side so non-empty
+# reviews parse. Pins the bug class where a claude+codex pair's observer emits a
+# review whose finding shape diverges from the Claude shape and is silently
+# dropped. start_commit is the pre-fix (buggy) state; the agent must reproduce
+# the server-side normalization landed in #120/#122.
+golden_task_version: 1
+id: codex-observer-review-parse
+title: "Codex observer reviews normalize server-side so non-empty reviews parse"
+start_commit: 82d855a051dbae7395a98d30c681d1597242e6ac
+prompt: >
+  In a claude+codex Council pair, the Codex observer emits review files whose
+  finding objects use a different shape than the Claude observer, so
+  validateObserverFindings drops them and the orchestrator never sees the STOPs.
+  Normalize the Codex finding shape server-side before validation so a non-empty
+  Codex review surfaces its findings, without weakening grounding.
+expected_files:
+  - web/server/session-orchestrator.ts
+  - web/server/codex-envelope.ts
+expected_tests:
+  - web/server/session-orchestrator.test.ts
+  - web/server/codex-envelope.test.ts
+failure_modes:
+  - "codex review parses but findings array is empty (shape mismatch swallowed)"
+  - "grounding gate bypassed to force findings through"
+  - "claude observer review path regresses"
+rubric:
+  - id: findings-surface
+    description: "A non-empty Codex review yields findings in the orchestrator UI"
+    weight: 3
+  - id: grounding-intact
+    description: "STOP grounding gate still downgrades ungrounded STOPs to NOTE"
+    weight: 2
+  - id: claude-parity
+    description: "Claude observer review path is unchanged (no regression)"
+    weight: 1
