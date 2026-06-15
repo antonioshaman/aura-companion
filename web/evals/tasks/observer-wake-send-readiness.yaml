@@ -1,0 +1,35 @@
+# Golden task: observer wakes must gate on send-readiness, not isConnected().
+# Pins the bug class where the server synthesises an observer wake the instant a
+# socket reports connected — before the send path's actual prerequisites
+# (threadId / session id / adapter) are ready — so the wake frame drops into a
+# silent window. start_commit is the pre-fix (buggy) state landed by #121.
+golden_task_version: 1
+id: observer-wake-send-readiness
+title: "Observer wakes gate on send-readiness, not a bare isConnected() flag"
+start_commit: 49643d60a8e3d23eae5b582dd924c5992dc6da59
+prompt: >
+  The Council auto-wake dispatcher fires an observer wake as soon as the CLI
+  socket reports connected. But isConnected() flips true before the send path's
+  real prerequisites (the CLI session id / backend adapter) are attached, so the
+  synthesised wake frame is silently dropped and the observer never reviews the
+  checkpoint. Gate the wake on a send-readiness predicate that is the exact
+  negation of the send gate, kept next to it — not on bare liveness.
+expected_files:
+  - web/server/session-orchestrator.ts
+  - web/server/ws-bridge.ts
+expected_tests:
+  - web/server/session-orchestrator.test.ts
+failure_modes:
+  - "wake fires on isConnected() and drops as socket_disconnected/adapter_missing"
+  - "wake never fires because the readiness predicate is too strict"
+  - "readiness check drifts from the send gate it is meant to mirror"
+rubric:
+  - id: wake-lands
+    description: "A checkpoint after spawn produces a delivered observer wake"
+    weight: 3
+  - id: no-silent-drop
+    description: "No socket_disconnected/adapter_missing drop in the wake path"
+    weight: 2
+  - id: predicate-colocated
+    description: "Readiness predicate lives next to the send gate it negates"
+    weight: 1
