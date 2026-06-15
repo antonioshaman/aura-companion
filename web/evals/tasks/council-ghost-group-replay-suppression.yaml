@@ -1,0 +1,42 @@
+# Golden task: a browser reconnecting to an ARCHIVED council half must not be
+# told the group is active. On reconnect the server replays a synthetic
+# status:active frame from persisted bridge state; for a half whose group was
+# already archived this resurrects a "ghost" group in the client store — the UI
+# shows reconnecting/active for a session that is gone, flickers back after the
+# user closes it, and emits repeated REST 4xx for the dead group's sub-resources.
+# The fix gates the reconnect replay on an archived guard so dead groups stay dead.
+# start_commit is the pre-fix (buggy) state — the parent of #107.
+golden_task_version: 1
+id: council-ghost-group-replay-suppression
+title: "Reconnecting to an archived council half does not replay a ghost active group"
+start_commit: 136bb55
+prompt: >
+  When a browser reconnects, the server replays persisted session/group state so the
+  UI rehydrates. For a council half whose group has already been archived, this
+  replay synthesises a status:active frame and the client resurrects a group that no
+  longer exists — the panel shows active/reconnecting, flickers back after the user
+  closes it, and the client keeps polling the dead group's sub-resources (repeated
+  REST 4xx). Suppress the active-state replay for archived halves so a closed group
+  stays closed in the UI, while keeping the replay intact for genuinely live groups.
+expected_files:
+  - web/server/ws-bridge.ts
+  - web/server/ws-bridge-persist.ts
+  - web/server/session-orchestrator.ts
+expected_tests:
+  - web/server/ws-bridge.test.ts
+  - web/server/ws-bridge-persist.test.ts
+  - web/server/session-orchestrator.test.ts
+failure_modes:
+  - "reconnect replays status:active for a half whose group was archived"
+  - "archived guard over-applied so live groups stop rehydrating on reconnect"
+  - "client keeps polling a dead group's sub-resources after close (REST 4xx loop)"
+rubric:
+  - id: archived-half-no-replay
+    description: "Reconnecting to an archived half does not emit a synthetic active-group frame"
+    weight: 3
+  - id: live-group-still-replays
+    description: "A genuinely active group still rehydrates correctly on reconnect"
+    weight: 2
+  - id: no-ghost-poll-loop
+    description: "No repeated sub-resource requests are issued for the archived group"
+    weight: 1

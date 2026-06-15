@@ -1,0 +1,41 @@
+# Golden task: a stale per-session Codex auth.json copy must be re-seeded, and a
+# Codex `error` notification must surface instead of being masked. Codex sessions
+# run against a per-session copy of ~/.codex/auth.json; when that copy is stale the
+# token refresh fails and the real auth error arrives as a JSON-RPC `error`
+# notification — which the bridge previously rejected as "unsupported incoming
+# notification 'error'" / "protocol drift", hiding the true cause from the user. The
+# fix re-seeds the stale auth copy at launch and forwards the error frame's payload
+# as a visible error. start_commit is the pre-fix (buggy) state — the parent of #112.
+golden_task_version: 1
+id: codex-reseed-auth-surface-errors
+title: "Codex re-seeds a stale auth.json copy and surfaces error notifications instead of masking them"
+start_commit: b92d65d
+prompt: >
+  Codex runs against a per-session copy of the user's ~/.codex/auth.json. When that
+  copy is stale the token refresh fails and Codex emits a JSON-RPC `error`
+  notification carrying the real auth failure. The bridge currently treats an
+  incoming `error` notification as an unknown frame ("protocol drift"), so the user
+  only sees a generic drift message and never the actual auth error. Re-seed the
+  per-session auth.json copy from the current source at launch so a fresh token is
+  used, and parse the `error` notification so its message reaches the user as a
+  real error. Keep rejecting genuinely unknown frame shapes.
+expected_files:
+  - web/server/codex-adapter.ts
+  - web/server/cli-launcher.ts
+expected_tests:
+  - web/server/codex-adapter.test.ts
+  - web/server/cli-launcher.test.ts
+failure_modes:
+  - "incoming `error` notification rejected as unknown drift, masking the real auth message"
+  - "stale per-session auth.json copy reused so the refresh keeps failing"
+  - "fix admits arbitrary unknown notification methods, weakening frame validation"
+rubric:
+  - id: error-notification-surfaced
+    description: "A Codex `error` notification's payload reaches the user as a real error, not a drift message"
+    weight: 3
+  - id: auth-copy-reseeded
+    description: "The per-session auth.json copy is refreshed from source at launch"
+    weight: 2
+  - id: validation-intact
+    description: "Genuinely unknown frame methods/shapes are still rejected"
+    weight: 1

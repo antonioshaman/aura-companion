@@ -23,23 +23,40 @@
  * the baseline from the current scores (run deliberately when a scorer change
  * is intended).
  *
+ * `--record-regressions[=<path>]` is OPT-IN and off by default: when a drift is
+ * detected it appends a record to the eval-memory regression log
+ * (`web/evals/memory/regressions.jsonl` by default). It is deliberately NOT part
+ * of the default `--ci` path so the gate stays pure — no clock, no writes —
+ * keeping the exit code the only side effect CI depends on. The append failure
+ * is swallowed so logging can never flip the verdict.
+ *
  * The single-recording / `--all` modes are deliberately NOT wired into the
  * vitest glob (they read real recordings off disk); the `--ci` fixture gate is
  * the only mode the automated suite exercises.
  */
 
+import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadRecording } from "./recording/read-recording.js";
 import { scoreCostLatency, type CostLatencyScore, type Metric } from "./scorers/cost-latency.js";
+import {
+  DEFAULT_REGRESSION_LOG,
+  appendRegressionRecord,
+  buildRegressionRecord,
+} from "./memory/regression-log.js";
 
 interface ParsedArgs {
   recording?: string;
   all: boolean;
   ci: boolean;
   updateBaseline: boolean;
+  /** Opt-in: when set, a regression appends a record to the eval-memory log.
+   *  Off by default so the load-bearing gate stays pure (no clock, no writes).
+   *  `true` ⇒ default log path; a string ⇒ explicit path. */
+  recordRegressions?: string | boolean;
   dir?: string;
   help: boolean;
 }
@@ -52,12 +69,24 @@ function parseArgs(argv: string[]): ParsedArgs {
     else if (a === "--all") out.all = true;
     else if (a === "--ci") out.ci = true;
     else if (a === "--update-baseline") out.updateBaseline = true;
+    else if (a === "--record-regressions") out.recordRegressions = true;
+    else if (a.startsWith("--record-regressions="))
+      out.recordRegressions = a.slice("--record-regressions=".length);
     else if (a === "--recording" || a === "-r") out.recording = argv[++i];
     else if (a.startsWith("--recording=")) out.recording = a.slice("--recording=".length);
     else if (a === "--dir") out.dir = argv[++i];
     else if (a.startsWith("--dir=")) out.dir = a.slice("--dir=".length);
   }
   return out;
+}
+
+/** Best-effort repo HEAD for tagging a regression record; never throws. */
+function currentGitSha(): string | undefined {
+  try {
+    return execFileSync("git", ["rev-parse", "--short", "HEAD"], { encoding: "utf8" }).trim();
+  } catch {
+    return undefined;
+  }
 }
 
 export function resolveRecordingsDir(envDir?: string): string {
@@ -323,13 +352,33 @@ function runCi(args: ParsedArgs): number {
   process.stderr.write(
     `  If this drift is intended, re-baseline with: bun run eval:replay --ci --update-baseline\n`,
   );
+  if (args.recordRegressions) {
+    const logPath =
+      typeof args.recordRegressions === "string"
+        ? args.recordRegressions
+        : DEFAULT_REGRESSION_LOG;
+    try {
+      const sha = currentGitSha();
+      const record = buildRegressionRecord({
+        fixturesScored: scores.length,
+        diffs,
+        nowMs: Date.now(),
+        ...(sha ? { gitSha: sha } : {}),
+      });
+      appendRegressionRecord(logPath, record);
+      process.stderr.write(`  Recorded regression ${record.id} → ${logPath}\n`);
+    } catch (e) {
+      // A logging failure must never change the gate's load-bearing verdict.
+      process.stderr.write(`  (could not record regression: ${(e as Error).message})\n`);
+    }
+  }
   return 1;
 }
 
 const USAGE =
   "usage: bun run eval:replay --recording <path-to-recording.jsonl>\n" +
   "       bun run eval:replay --all [--dir <recordings-dir>]\n" +
-  "       bun run eval:replay --ci [--update-baseline]";
+  "       bun run eval:replay --ci [--update-baseline] [--record-regressions[=<path>]]";
 
 function runAll(args: ParsedArgs): number {
   const dir = resolveRecordingsDir(args.dir ?? process.env.COMPANION_RECORDINGS_DIR);
