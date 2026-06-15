@@ -711,6 +711,62 @@ describe("HomePage", () => {
     });
   });
 
+  it("does not send council fields for a mono Codex session even if council was enabled on the Claude tab", async () => {
+    // Regression: `councilEnabled` persists across a backend tab switch and the
+    // CouncilToggle is hidden (not reset) on the Codex tab. Without re-gating on
+    // `backend === "claude"` at submit, the create payload would still carry
+    // councilMode/councilPairing and the server would spawn an orchestrator+
+    // observer PAIR instead of the requested mono Codex session.
+    localStorage.setItem("cc-council-enabled", "true");
+    const storeMock = buildStoreMock();
+    mockStoreGetState.mockReturnValue(storeMock);
+    mockApi.getBackends.mockResolvedValue([
+      { id: "claude", name: "Claude", available: true },
+      { id: "codex", name: "Codex", available: true },
+    ]);
+    mockApi.getBackendModels.mockResolvedValue([]);
+    // Codex submit hard-requires a non-empty dynamic model list (doCreateSession
+    // throws otherwise), so seed one to reach the createSessionStream call.
+    mockStoreState.dynamicBackendModels = {
+      codex: [{ value: "gpt-custom", label: "GPT Custom", icon: "" }],
+    };
+    createSessionStreamMock.mockResolvedValue({
+      sessionId: "codex-session-1",
+      state: "starting",
+      cwd: "/repo",
+      backendType: "codex",
+    });
+
+    render(<HomePage />);
+    await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
+
+    // Switch to Codex — CouncilToggle disappears but councilEnabled stays true.
+    fireEvent.click(await screen.findByRole("button", { name: "Codex" }));
+    await waitFor(() => {
+      const logo = screen.getByAltText("Aura Companion");
+      expect(logo).toHaveAttribute("src", "/logo-codex.svg");
+    });
+
+    const textarea = screen.getByPlaceholderText("Fix a bug, build a feature, refactor code...");
+    fireEvent.change(textarea, { target: { value: "Run a codex task" } });
+    fireEvent.click(screen.getByTitle("Send message"));
+
+    await waitFor(() => {
+      expect(createSessionStreamMock).toHaveBeenCalled();
+    });
+    const payload = createSessionStreamMock.mock.calls[0]![0] as {
+      backend?: string;
+      councilMode?: string;
+      councilPairing?: string;
+    };
+    expect(payload.backend).toBe("codex");
+    expect(payload.councilMode).toBeUndefined();
+    expect(payload.councilPairing).toBeUndefined();
+
+    // Cleanup — keep test isolation (sibling tests assert the empty map).
+    mockStoreState.dynamicBackendModels = {};
+  });
+
   it("displays an error when session creation fails", async () => {
     // When createSessionStream throws, the error should be displayed in the UI
     // and setCreationError should be called on the store.

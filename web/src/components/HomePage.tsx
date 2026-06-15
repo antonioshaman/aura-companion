@@ -719,14 +719,17 @@ export function HomePage() {
             teamName: selectedLinearIssue.teamName,
             url: selectedLinearIssue.url,
           } : undefined,
-          // Council Mode — backend route handler wiring is deferred; the
-          // server will be free to ignore these fields until the matching
-          // backend commit lands.
-          councilMode: councilEnabled ? "council" : undefined,
+          // Council Mode — the orchestrator half is always Claude, so council
+          // is only valid from the Claude backend tab. The CouncilToggle is
+          // hidden on non-Claude backends but `councilEnabled` persists, so we
+          // MUST re-gate on `backend === "claude"` here: otherwise enabling
+          // council on the Claude tab then switching to Codex would silently
+          // spawn a pair instead of the requested mono Codex session.
+          councilMode: backend === "claude" && councilEnabled ? "council" : undefined,
           // Hard-guard: always send the capability-coerced value, never the raw
           // localStorage pairing, so a stale "claude+codex" preference can never
           // create a broken pair when the capability is currently unavailable.
-          councilPairing: councilEnabled ? effectiveCouncilPairing : undefined,
+          councilPairing: backend === "claude" && councilEnabled ? effectiveCouncilPairing : undefined,
         },
         (progress) => {
           useStore.getState().addCreationProgress(progress);
