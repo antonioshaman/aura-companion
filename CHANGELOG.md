@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.11.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.10.0...aura-companion-v1.11.0) (2026-06-15)
+
+
+### Features
+
+* **evals:** Council Eval Harness Phase 1 — L1 Evaluator, replay CI gate, eval sidecar ([#126](https://github.com/antonioshaman/aura-companion/issues/126)) ([e703d3f](https://github.com/antonioshaman/aura-companion/commit/e703d3f9fa8e70c7bde00cc2ccc32b2fc852cf7d))
+
+
+### Bug Fixes
+
+* **cli-launcher:** kill restart-survived CLI process on archive/delete ([#114](https://github.com/antonioshaman/aura-companion/issues/114)) ([60e9125](https://github.com/antonioshaman/aura-companion/commit/60e9125c44ca0506272f92fd81790384f2f2833b))
+* **codex:** surface error notifications and re-seed stale auth.json copies ([#112](https://github.com/antonioshaman/aura-companion/issues/112)) ([1bb028f](https://github.com/antonioshaman/aura-companion/commit/1bb028fd9c61b163396333d07f3a57b042bc2741))
+* **council:** close line-zero review-drop vector and show real event time ([#123](https://github.com/antonioshaman/aura-companion/issues/123)) ([35eb5b9](https://github.com/antonioshaman/aura-companion/commit/35eb5b94ad671207c6376666cfc5920494dee7e6))
+* **council:** complete claude+codex observer parity end-to-end ([#118](https://github.com/antonioshaman/aura-companion/issues/118)) ([3b41085](https://github.com/antonioshaman/aura-companion/commit/3b41085bc0f2e80241e1c7941916c64c64f1b241))
+* **council:** don't spawn a pair when council was toggled on the claude tab ([#125](https://github.com/antonioshaman/aura-companion/issues/125)) ([f0d10e8](https://github.com/antonioshaman/aura-companion/commit/f0d10e8d8a7042f4201e3436a5a2da93a5287088))
+* **council:** gate observer wakes on send-readiness, not isConnected() ([#121](https://github.com/antonioshaman/aura-companion/issues/121)) ([82d855a](https://github.com/antonioshaman/aura-companion/commit/82d855a051dbae7395a98d30c681d1597242e6ac))
+* **council:** normalize codex finding shape so non-empty reviews parse ([#122](https://github.com/antonioshaman/aura-companion/issues/122)) ([9b98563](https://github.com/antonioshaman/aura-companion/commit/9b98563ea566ba122820c3678ff2813393e6ae15))
+* **council:** normalize codex observer reviews server-side so they parse ([#120](https://github.com/antonioshaman/aura-companion/issues/120)) ([49643d6](https://github.com/antonioshaman/aura-companion/commit/49643d60a8e3d23eae5b582dd924c5992dc6da59))
+* **council:** require observer adapter isConnected() before restart-catchup wake ([#119](https://github.com/antonioshaman/aura-companion/issues/119)) ([21eb3b7](https://github.com/antonioshaman/aura-companion/commit/21eb3b771857ff53a9cf20c51f251e08afe52b17))
+* **council:** stamp live observer findings with real event time ([#124](https://github.com/antonioshaman/aura-companion/issues/124)) ([3db1ff8](https://github.com/antonioshaman/aura-companion/commit/3db1ff86ef2f4150eb2f5e27081a57bf557c43a8))
+* **model-switch:** auto-revert Claude model when CLI 404s on next turn ([#116](https://github.com/antonioshaman/aura-companion/issues/116)) ([455bb17](https://github.com/antonioshaman/aura-companion/commit/455bb17b01372e2bca3707fcc59d4e4289a00634))
+* **model-switcher:** reflect Claude model selection in the trigger immediately ([#115](https://github.com/antonioshaman/aura-companion/issues/115)) ([01f144b](https://github.com/antonioshaman/aura-companion/commit/01f144b93b79c61efcbb51aff731c578163ee49c))
+* **model:** anchor new-session Claude default to a known-good model and surface launch 404s ([#117](https://github.com/antonioshaman/aura-companion/issues/117)) ([3faf120](https://github.com/antonioshaman/aura-companion/commit/3faf1204781470b6a7320c3b4c84498a7b61939c))
+
 ## [1.10.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.9.0...aura-companion-v1.10.0) (2026-06-12)
 
 
