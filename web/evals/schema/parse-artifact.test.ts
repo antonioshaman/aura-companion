@@ -161,9 +161,38 @@ describe("parseLabelRecord", () => {
   });
 
   it("rejects an empty required field", () => {
-    const r = parseLabelRecord({ ...goodLabel(), issue_class: "" });
+    const r = parseLabelRecord({ ...goodLabel(), evidence_path: "" });
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.reason).toContain("issue_class");
+    if (!r.ok) expect(r.reason).toContain("evidence_path");
+  });
+
+  it("tolerates an absent/empty issue_class (now optional metadata)", () => {
+    const { issue_class: _drop, ...noClass } = goodLabel();
+    const r = parseLabelRecord(noClass);
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.issue_class).toBeUndefined();
+  });
+
+  it("round-trips a tp verdict carrying its finding_id join key", () => {
+    const r = parseLabelRecord({
+      ...goodLabel(),
+      verdict: "true_positive",
+      finding_id: "efnd_abc123",
+    });
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.value.finding_id).toBe("efnd_abc123");
+  });
+
+  it("rejects a tp/fp verdict with no finding_id (would never join)", () => {
+    const r = parseLabelRecord({ ...goodLabel(), verdict: "false_positive" });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain("finding_id");
+  });
+
+  it("rejects an expected_blocker_missed that wrongly carries a finding_id", () => {
+    const r = parseLabelRecord({ ...goodLabel(), finding_id: "efnd_should_not_be_here" });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.reason).toContain("finding_id");
   });
 });
 
@@ -180,8 +209,8 @@ describe("parseLabelLog", () => {
   });
 
   it("dedups by id with last-write-wins", () => {
-    const first = JSON.stringify({ ...goodLabel(), verdict: "true_positive" });
-    const second = JSON.stringify({ ...goodLabel(), verdict: "false_positive" });
+    const first = JSON.stringify({ ...goodLabel(), verdict: "true_positive", finding_id: "efnd_x" });
+    const second = JSON.stringify({ ...goodLabel(), verdict: "false_positive", finding_id: "efnd_x" });
     const out = parseLabelLog([first, second].join("\n"));
     expect(out.records).toHaveLength(1);
     expect(out.records[0].verdict).toBe("false_positive");

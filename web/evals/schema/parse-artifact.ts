@@ -235,7 +235,6 @@ export function parseLabelRecord(v: unknown): ParseResult<EvalLabelRecord> {
     "session_group_id",
     "checkpoint_id",
     "evidence_path",
-    "issue_class",
   ] as const;
   for (const f of stringFields) {
     if (typeof v[f] !== "string" || v[f] === "") return fail(`label.${f} is missing`);
@@ -243,15 +242,26 @@ export function parseLabelRecord(v: unknown): ParseResult<EvalLabelRecord> {
   if (typeof v.verdict !== "string" || !VERDICTS.has(v.verdict)) {
     return fail("label.verdict is not a valid verdict");
   }
+  // A tp/fp verdict joins to an emitted finding by `finding_id`; require it so a
+  // verdict can never silently fail to join. `expected_blocker_missed` has no
+  // finding by construction, so it must NOT carry one.
+  if (v.verdict === "true_positive" || v.verdict === "false_positive") {
+    if (typeof v.finding_id !== "string" || v.finding_id === "") {
+      return fail("label.finding_id is missing for a tp/fp verdict");
+    }
+  } else if (v.finding_id !== undefined) {
+    return fail("label.finding_id must be absent for expected_blocker_missed");
+  }
   const record: EvalLabelRecord = {
     eval_label_version: v.eval_label_version,
     id: v.id as string,
     session_group_id: v.session_group_id as string,
     checkpoint_id: v.checkpoint_id as string,
     evidence_path: v.evidence_path as string,
-    issue_class: v.issue_class as string,
     verdict: v.verdict as EvalLabelVerdict,
   };
+  if (typeof v.finding_id === "string") record.finding_id = v.finding_id;
+  if (typeof v.issue_class === "string" && v.issue_class !== "") record.issue_class = v.issue_class;
   if (typeof v.labeler === "string") record.labeler = v.labeler;
   if (typeof v.labeled_at === "string") record.labeled_at = v.labeled_at;
   if (typeof v.note === "string") record.note = v.note;

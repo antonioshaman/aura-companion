@@ -46,7 +46,8 @@
     "build-observer-prompt-bundle": "bun scripts/build-observer-prompt-bundle.ts",
     "eval:replay": "bun evals/replay-runner.ts",
     "eval:findings": "bun evals/findings-runner.ts",
-    "eval:label-sheet": "bun evals/label-sheet-runner.ts"
+    "eval:label-sheet": "bun evals/label-sheet-runner.ts",
+    "eval:label-ingest": "bun evals/label-ingest-runner.ts"
   },
   "dependencies": {
     "@codemirror/lang-cpp": "^6.0.3",
