@@ -134,13 +134,19 @@ export interface EvalLabelRecord {
   /** Deterministic content-derived id for first/last-write-wins dedup across
    *  the append-only label log (set by the writer, see Risks/Persistence). */
   id: string;
+  /** The emitted finding this verdict attaches to — the exact `id` produced by
+   *  the findings extractor (`efnd_<hex>`). This is the finding↔label join key
+   *  for `true_positive`/`false_positive` verdicts. Absent for
+   *  `expected_blocker_missed`, which by construction has no emitted finding. */
+  finding_id?: string;
   session_group_id: string;
   checkpoint_id: string;
   /** Workspace-relative path the label is about. */
   evidence_path: string;
-  /** Stable issue class — the third component of the finding↔label join key
-   *  `(checkpoint_id, evidence_path, issue_class)`. */
-  issue_class: string;
+  /** Human-readable problem category. Descriptive metadata only — the join is
+   *  by `finding_id`. Most meaningful on `expected_blocker_missed` rows, which
+   *  name the should-have-caught category. Optional. */
+  issue_class?: string;
   verdict: EvalLabelVerdict;
   /** Who/what produced the label (human handle, or a calibration source). */
   labeler?: string;

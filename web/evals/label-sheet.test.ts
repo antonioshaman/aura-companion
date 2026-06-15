@@ -11,6 +11,7 @@ import { renderLabelSheet, headlineOf, type LabelSheetItem } from "./label-sheet
 function item(over: Partial<LabelSheetItem>): LabelSheetItem {
   return {
     id: "efnd_abc123",
+    session_group_id: "grp_abc",
     index: 1,
     severity: "STOP",
     workspace: "aura-companion",
@@ -53,6 +54,16 @@ describe("renderLabelSheet", () => {
     const md = renderLabelSheet([item({ snippet: null, snippet_note: "not found" })]);
     expect(md).toContain("source not available");
     expect(md).not.toContain("```\nnull");
+  });
+
+  it("embeds a hidden machine-key comment carrying the round-trip coordinates", () => {
+    const md = renderLabelSheet([
+      item({ id: "efnd_abc123", session_group_id: "grp_abc", checkpoint_id: "phase-a", evidence_path: "web/server/x.ts" }),
+    ]);
+    // HTML comment → invisible in a rendered viewer, but parseable on ingest.
+    expect(md).toContain(
+      '<!-- eval-label {"finding_id":"efnd_abc123","session_group_id":"grp_abc","checkpoint_id":"phase-a","evidence_path":"web/server/x.ts"} -->',
+    );
   });
 
   it("tallies findings by severity in the header", () => {

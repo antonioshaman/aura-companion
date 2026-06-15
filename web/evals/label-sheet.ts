@@ -16,6 +16,9 @@
 
 export interface LabelSheetItem {
   id: string;
+  /** Council group the finding belongs to — carried into the round-trip
+   *  machine-key so the parsed label can be a complete EvalLabelRecord. */
+  session_group_id: string;
   /** 1-based position in the sheet. */
   index: number;
   severity: string;
@@ -46,8 +49,26 @@ export function headlineOf(claim: string, maxLen = 200): string {
   return head.trim();
 }
 
+/**
+ * Hidden machine-readable coordinate block for the ingest round-trip. An HTML
+ * comment does NOT render in a markdown viewer, so the human still sees a clean
+ * sheet; the ingest parser reads the JSON to reconstruct a full EvalLabelRecord
+ * (the join key `finding_id` + the record's required identity fields). JSON is
+ * used so paths/ids with awkward characters survive without per-field escaping.
+ */
+function machineKey(it: LabelSheetItem): string {
+  const coords = {
+    finding_id: it.id,
+    session_group_id: it.session_group_id,
+    checkpoint_id: it.checkpoint_id,
+    evidence_path: it.evidence_path,
+  };
+  return `<!-- eval-label ${JSON.stringify(coords)} -->`;
+}
+
 function renderItem(it: LabelSheetItem): string {
   const L: string[] = [];
+  L.push(machineKey(it));
   L.push(`## ${it.index}. [${it.severity}] ${it.evidence_path}`);
   L.push("");
   L.push(`**Headline:** ${headlineOf(it.claim)}`);
