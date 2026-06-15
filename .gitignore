@@ -36,6 +36,7 @@ coverage/
 .council/harness-logs/
 .council/review-output/
 .council/reviews/*-observer.md
+.council/eval/
 # Local self-improvement learnings store
 .learnings/
 # Local backup snapshots

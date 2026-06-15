@@ -3,40 +3,55 @@
  *
  *   bun run eval:replay --recording <path-to-recording.jsonl>
  *   bun run eval:replay --all [--dir <recordings-dir>]
+ *   bun run eval:replay --ci [--update-baseline]
  *
  * Single-recording mode loads one session recording and prints a cost/latency
  * scorecard. `--all` scans every *.jsonl in the recordings directory
  * (~/.companion/recordings by default, override via --dir or
  * COMPANION_RECORDINGS_DIR) and prints a per-session table plus aggregate
  * totals — the cheap, zero-LLM-cost way to see spend across all sessions that
- * already exist on disk. Exit code is load-bearing — 0 when at least one
- * recording was scored, 2 on a usage/IO error — so Phase 3 can wrap it in a
- * CI step without reshaping it. The "no regression vs main" comparison verb
- * lands on top of this in a later task.
+ * already exist on disk.
  *
- * Deliberately NOT wired into the vitest glob: it reads real recordings off
- * disk, while the automated suite scores only checked-in synthetic fixtures.
+ * `--ci` is the CI-gate verb: it scores ONLY the checked-in synthetic fixtures
+ * under `web/evals/__fixtures__/` (never ~/.companion/recordings), in sorted
+ * order, and diffs the result against the committed `ci-baseline.json`. It
+ * makes zero network calls, reads no secrets, uses no wall-clock/random (the
+ * scores derive purely from recorded frame timestamps), and its EXIT CODE is
+ * load-bearing — 0 when the corpus matches the baseline, 1 on a regression
+ * (any score drift), 2 on an IO/usage error. This leaves Phase 3 free to wrap
+ * it in a GHA step with no new secret plumbing. `--update-baseline` rewrites
+ * the baseline from the current scores (run deliberately when a scorer change
+ * is intended).
+ *
+ * The single-recording / `--all` modes are deliberately NOT wired into the
+ * vitest glob (they read real recordings off disk); the `--ci` fixture gate is
+ * the only mode the automated suite exercises.
  */
 
-import { readdirSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadRecording } from "./recording/read-recording.js";
 import { scoreCostLatency, type CostLatencyScore, type Metric } from "./scorers/cost-latency.js";
 
 interface ParsedArgs {
   recording?: string;
   all: boolean;
+  ci: boolean;
+  updateBaseline: boolean;
   dir?: string;
   help: boolean;
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
-  const out: ParsedArgs = { help: false, all: false };
+  const out: ParsedArgs = { help: false, all: false, ci: false, updateBaseline: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--help" || a === "-h") out.help = true;
     else if (a === "--all") out.all = true;
+    else if (a === "--ci") out.ci = true;
+    else if (a === "--update-baseline") out.updateBaseline = true;
     else if (a === "--recording" || a === "-r") out.recording = argv[++i];
     else if (a.startsWith("--recording=")) out.recording = a.slice("--recording=".length);
     else if (a === "--dir") out.dir = argv[++i];
@@ -187,9 +202,134 @@ export function renderAggregate(agg: AggregateResult, dir: string): string {
   return L.join("\n");
 }
 
+/**
+ * The committed fixture corpus and its expected-score baseline. Resolved
+ * relative to THIS module so the gate is location-stable regardless of cwd —
+ * it never consults ~/.companion/recordings or any path outside the repo.
+ */
+export const CI_FIXTURES_DIR = fileURLToPath(new URL("./__fixtures__", import.meta.url));
+export const CI_BASELINE_PATH = fileURLToPath(new URL("./ci-baseline.json", import.meta.url));
+
+/** A score reduced to the comparable, serialization-stable subset the CI gate
+ *  diffs. `unavailable` is kept distinct from a numeric 0 (absent-vs-zero). */
+export interface FixtureScore {
+  file: string;
+  backend: string;
+  recognized: boolean;
+  total_tokens: number | "unavailable";
+  cost_usd: number | "unavailable";
+  wall_clock_ms: number | "unavailable";
+  api_ms: number | "unavailable";
+  frames: { result: number; token_usage_updated: number; unhandled: number };
+}
+
+const metricBase = (m: Metric): number | "unavailable" =>
+  m.kind === "value" ? m.value : "unavailable";
+
+/**
+ * Score every `*.jsonl` fixture under `fixturesDir` in sorted (byte-stable)
+ * order. Pure + deterministic: the cost/latency scores derive only from
+ * recorded frame contents and timestamps — no wall-clock, no randomness — so
+ * the same fixtures always yield the same corpus score.
+ */
+export function scoreFixtureCorpus(fixturesDir: string): FixtureScore[] {
+  const files = readdirSync(fixturesDir)
+    .filter((f) => f.endsWith(".jsonl"))
+    .sort();
+  return files.map((f) => {
+    const s = scoreCostLatency(loadRecording(join(fixturesDir, f)));
+    return {
+      file: f,
+      backend: s.backend,
+      recognized: s.recognized,
+      total_tokens: metricBase(s.tokens.total),
+      cost_usd: metricBase(s.cost_usd),
+      wall_clock_ms: metricBase(s.latency.wall_clock_ms),
+      api_ms: metricBase(s.latency.api_ms),
+      frames: s.frames,
+    };
+  });
+}
+
+/** Field-level per-fixture diff between the freshly-scored corpus and the
+ *  committed baseline. Empty array ⇔ no regression. */
+export function diffAgainstBaseline(
+  current: FixtureScore[],
+  baseline: FixtureScore[],
+): string[] {
+  const diffs: string[] = [];
+  const cur = new Map(current.map((s) => [s.file, s]));
+  const base = new Map(baseline.map((s) => [s.file, s]));
+  const files = [...new Set([...cur.keys(), ...base.keys()])].sort();
+  for (const file of files) {
+    const c = cur.get(file);
+    const b = base.get(file);
+    if (c && !b) {
+      diffs.push(`${file}: present in corpus but absent from baseline (run --update-baseline)`);
+      continue;
+    }
+    if (!c && b) {
+      diffs.push(`${file}: in baseline but missing from corpus`);
+      continue;
+    }
+    if (!c || !b) continue;
+    const cs = JSON.stringify(c);
+    const bs = JSON.stringify(b);
+    if (cs !== bs) {
+      diffs.push(`${file}: score drift\n      baseline=${bs}\n      current =${cs}`);
+    }
+  }
+  return diffs;
+}
+
+function runCi(args: ParsedArgs): number {
+  let scores: FixtureScore[];
+  try {
+    scores = scoreFixtureCorpus(CI_FIXTURES_DIR);
+  } catch (e) {
+    process.stderr.write(`eval:replay --ci: cannot score fixtures in ${CI_FIXTURES_DIR}: ${(e as Error).message}\n`);
+    return 2;
+  }
+  if (scores.length === 0) {
+    process.stderr.write(`eval:replay --ci: no *.jsonl fixtures under ${CI_FIXTURES_DIR}\n`);
+    return 2;
+  }
+  if (args.updateBaseline) {
+    writeFileSync(CI_BASELINE_PATH, JSON.stringify(scores, null, 2) + "\n");
+    process.stdout.write(`eval:replay --ci: baseline updated — ${scores.length} fixtures → ${basename(CI_BASELINE_PATH)}\n`);
+    return 0;
+  }
+  let baseline: FixtureScore[];
+  try {
+    baseline = JSON.parse(readFileSync(CI_BASELINE_PATH, "utf8")) as FixtureScore[];
+  } catch (e) {
+    process.stderr.write(
+      `eval:replay --ci: cannot read baseline ${CI_BASELINE_PATH}: ${(e as Error).message}\n` +
+        `  seed it with: bun run eval:replay --ci --update-baseline\n`,
+    );
+    return 2;
+  }
+  const diffs = diffAgainstBaseline(scores, baseline);
+  if (diffs.length === 0) {
+    process.stdout.write(
+      `eval:replay --ci: OK — ${scores.length} fixtures match baseline (zero LLM calls)\n`,
+    );
+    return 0;
+  }
+  process.stderr.write(
+    `eval:replay --ci: REGRESSION — ${diffs.length} fixture(s) drifted from baseline:\n`,
+  );
+  for (const d of diffs) process.stderr.write(`  • ${d}\n`);
+  process.stderr.write(
+    `  If this drift is intended, re-baseline with: bun run eval:replay --ci --update-baseline\n`,
+  );
+  return 1;
+}
+
 const USAGE =
   "usage: bun run eval:replay --recording <path-to-recording.jsonl>\n" +
-  "       bun run eval:replay --all [--dir <recordings-dir>]";
+  "       bun run eval:replay --all [--dir <recordings-dir>]\n" +
+  "       bun run eval:replay --ci [--update-baseline]";
 
 function runAll(args: ParsedArgs): number {
   const dir = resolveRecordingsDir(args.dir ?? process.env.COMPANION_RECORDINGS_DIR);
@@ -218,6 +358,7 @@ function main(): number {
     process.stdout.write(USAGE + "\n");
     return 0;
   }
+  if (args.ci) return runCi(args);
   if (args.all) return runAll(args);
   if (!args.recording) {
     process.stderr.write(USAGE + "\n");

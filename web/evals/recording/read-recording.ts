@@ -90,3 +90,24 @@ export function parseRecording(text: string): LoadedRecording {
 export function loadRecording(path: string): LoadedRecording {
   return parseRecording(readFileSync(path, "utf8"));
 }
+
+/**
+ * Refuse-by-default gate for importing a REAL recording into the eval corpus.
+ * Real recordings (`~/.companion/recordings/`) may carry live credentials in
+ * raw frames; only the recorder's v3+ redaction pass (`redactionApplied:true`
+ * on the header) guarantees they were scrubbed at write time. A recording
+ * whose header lacks that marker is rejected — never silently ingested — so a
+ * pre-v3 or hand-dropped file can't smuggle a secret into a committed fixture.
+ *
+ * Synthetic `__fixtures__/` recordings deliberately do NOT carry this marker;
+ * they are hand-authored and instead guarded by the fixture secret-scanner
+ * test. This gate is for the real-recording import path only.
+ */
+export function assertRedactedForImport(rec: LoadedRecording, label = "recording"): void {
+  if (rec.header?.redactionApplied !== true) {
+    throw new Error(
+      `${label}: refusing to import — header.redactionApplied is not true. ` +
+        `Real recordings must be redacted (recorder v3+) before entering the eval corpus.`,
+    );
+  }
+}

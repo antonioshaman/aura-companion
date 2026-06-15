@@ -151,6 +151,18 @@ Each entry captures:
 
 **Code**: `web/server/recorder.ts` (recorder + manager), `web/server/replay.ts` (load & filter utilities).
 
+### Eval Sidecar (opt-in, default OFF)
+
+The Council Eval Harness (`web/evals/`) can score observer recall and re-run the grounding gate hermetically only if it has the grounding gate's **inputs** at review time — the raw pre-grounding findings, the `{delta, carried, dropped}` manifest partition that was the modified set, and the per-path existence answers the gate consulted. The WebSocket recording does not carry these, so an opt-in **eval sidecar** freezes them.
+
+- **Enable**: set `COMPANION_EVAL_SIDECAR=1` (or `=true`). Parsing mirrors the strict, fail-closed family (`isRecordingHubEnabled`) — only the literal `"1"`/`"true"` enable it; any other value (typo, `yes`, `0`) fails CLOSED to OFF. **Production leaves it unset.**
+- **Default**: OFF. `maybeEmitEvalSidecar` hard early-returns before any write when the flag is unset, so production never accumulates sidecar artifacts an operator didn't ask for.
+- **Location**: `<workspace>/.council/eval/<checkpoint_id>.json`, one file per observer review, written via `writeAtomicJson` (tmp+rename+fsync) with a `EVAL_SIDECAR_MAX_BYTES` cap. `emitted_at` is the **server clock**, never the model's self-reported review time.
+- **Isolation**: every failure is swallowed with a structured `council.eval.sidecar.write_failed` (EC-9) log — a sidecar problem can NEVER break the live review fanout. Emitted for new sessions only; no retrofit/backfill of existing groups.
+- **Scope**: diagnostics side-channel for the post-hoc Evaluator, NOT a load-bearing live path. The protocol recording is left untouched.
+
+**Code**: `web/server/eval-sidecar.ts` (emitter), `web/evals/schema/eval-artifact.ts` (versioned format), `web/evals/scorers/grounding-rerun.ts` (hermetic rerun oracle). The `eval:replay --ci` script scores only checked-in synthetic fixtures (`web/evals/__fixtures__/`) against `web/evals/ci-baseline.json` with a load-bearing exit code (zero LLM calls).
+
 ### Council Mode (paired orchestrator + observer sessions)
 
 A user-opt-in flag on the New Session form (`councilMode: "council"` + `councilPairing: "claude+claude" | "claude+codex"`) spawns two linked CLI sessions sharing one workspace — an **orchestrator** that the user drives via the main chat surface, and an **observer** that wakes on filesystem checkpoint sentinels, reads a manifest of paths, emits a structured review file, and the server fans grounded findings back into the orchestrator's UI as `BlockerBanner` + side-panel `ObserverPanel`.

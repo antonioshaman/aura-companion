@@ -7,8 +7,16 @@
  */
 
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { aggregateRecordings } from "./replay-runner.js";
+import {
+  aggregateRecordings,
+  scoreFixtureCorpus,
+  diffAgainstBaseline,
+  CI_FIXTURES_DIR,
+  CI_BASELINE_PATH,
+  type FixtureScore,
+} from "./replay-runner.js";
 
 const FX = join(__dirname, "__fixtures__");
 
@@ -62,5 +70,63 @@ describe("aggregateRecordings", () => {
     expect(agg.totals.recognized).toBe(0);
     expect(agg.totals.cost_files).toBe(0);
     expect(agg.totals.token_files).toBe(0);
+  });
+});
+
+/**
+ * The CI gate (`eval:replay --ci`) is the load-bearing verb Phase 3 wraps in a
+ * GHA step. These pin its determinism + regression sensitivity:
+ *   - scoring the committed fixture corpus is sorted + deterministic (same
+ *     bytes in, same scores out — no wall-clock/random)
+ *   - the freshly-scored corpus EQUALS the committed baseline (so a drift
+ *     between a scorer change and the baseline is caught here, not in prod)
+ *   - a regression (any score drift, or a missing/extra fixture) produces a
+ *     non-empty diff — which is what makes the runner's exit code non-zero
+ */
+describe("eval:replay --ci fixture gate", () => {
+  it("scores the corpus deterministically and in sorted order", () => {
+    const a = scoreFixtureCorpus(CI_FIXTURES_DIR);
+    const b = scoreFixtureCorpus(CI_FIXTURES_DIR);
+    // Byte-stable across runs: no wall-clock, no randomness in the score path.
+    expect(JSON.stringify(a)).toBe(JSON.stringify(b));
+    // Sorted by filename so the baseline diff is order-stable.
+    const files = a.map((s) => s.file);
+    expect(files).toEqual([...files].sort());
+    expect(a.length).toBeGreaterThan(0);
+  });
+
+  it("the committed baseline matches the current corpus (zero drift)", () => {
+    const current = scoreFixtureCorpus(CI_FIXTURES_DIR);
+    const baseline = JSON.parse(readFileSync(CI_BASELINE_PATH, "utf8")) as FixtureScore[];
+    expect(diffAgainstBaseline(current, baseline)).toEqual([]);
+  });
+
+  it("preserves absent-vs-zero in the baseline (codex cost is unavailable, not 0)", () => {
+    const baseline = JSON.parse(readFileSync(CI_BASELINE_PATH, "utf8")) as FixtureScore[];
+    const codex = baseline.find((s) => s.file === "codex-basic.jsonl")!;
+    expect(codex.cost_usd).toBe("unavailable");
+    expect(codex.total_tokens).not.toBe("unavailable");
+  });
+
+  it("flags a numeric score regression as a diff (drives non-zero exit)", () => {
+    const current = scoreFixtureCorpus(CI_FIXTURES_DIR);
+    // Simulate a scorer regression: one fixture's tokens collapse to 0.
+    const regressed = current.map((s) =>
+      s.file === "claude-basic.jsonl" ? { ...s, total_tokens: 0 } : s,
+    );
+    const diffs = diffAgainstBaseline(regressed, current);
+    expect(diffs.length).toBe(1);
+    expect(diffs[0]).toContain("claude-basic.jsonl");
+    expect(diffs[0]).toContain("score drift");
+  });
+
+  it("flags an added or removed fixture against the baseline", () => {
+    const current = scoreFixtureCorpus(CI_FIXTURES_DIR);
+    const dropped = current.slice(1); // baseline has one the corpus lost
+    const removed = diffAgainstBaseline(dropped, current);
+    expect(removed.some((d) => d.includes("missing from corpus"))).toBe(true);
+
+    const extra = diffAgainstBaseline(current, dropped); // corpus has a new one
+    expect(extra.some((d) => d.includes("absent from baseline"))).toBe(true);
   });
 });
