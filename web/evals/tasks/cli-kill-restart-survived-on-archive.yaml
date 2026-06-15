@@ -1,0 +1,37 @@
+# Golden task: archiving or deleting a session must kill its CLI subprocess even
+# when that process survived a server restart. With KillMode=process the long-lived
+# `claude --sdk-url` / `codex` child is reparented to PID 1 and reconnects after a
+# bun restart; the in-memory child handle is gone, so the naive archive/delete path
+# (which kills via the handle it no longer holds) leaks the process — it stays alive
+# for weeks consuming a subscription seat. The fix resolves the live PID and SIGTERMs
+# it on archive/delete. start_commit is the pre-fix (buggy) state — the parent of #114.
+golden_task_version: 1
+id: cli-kill-restart-survived-on-archive
+title: "Archiving/deleting a session kills its CLI process even after a server restart"
+start_commit: 1bb028f
+prompt: >
+  When a session is archived or deleted, its Claude/Codex CLI subprocess must be
+  terminated. After a server restart the child has been reparented (PPID 1) and the
+  in-memory child handle is no longer held, so terminating only via that handle
+  leaves the process running indefinitely. Resolve the surviving process by its
+  persisted PID and SIGTERM it on archive/delete, so no orphaned CLI lingers. Guard
+  against killing an unrelated process if the PID has been recycled, and degrade
+  safely if the process is already gone.
+expected_files:
+  - web/server/cli-launcher.ts
+expected_tests:
+  - web/server/cli-launcher.test.ts
+failure_modes:
+  - "kill only attempted via the in-memory handle, which is absent after a restart"
+  - "a recycled PID is killed without confirming it is the session's own CLI"
+  - "an already-dead PID throws instead of being treated as a no-op"
+rubric:
+  - id: restart-survived-killed
+    description: "A CLI that survived a restart (handle-less) is terminated on archive/delete by its persisted PID"
+    weight: 3
+  - id: pid-ownership-checked
+    description: "The PID is confirmed to be the session's CLI before SIGTERM (no recycled-PID kill)"
+    weight: 2
+  - id: degrades-on-dead-pid
+    description: "An already-exited process is a safe no-op, not a throw"
+    weight: 1

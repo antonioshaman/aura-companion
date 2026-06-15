@@ -1,0 +1,37 @@
+# Golden task: a finding whose evidence_lines start at 0 must not be silently
+# dropped. Pins the bug class where the review pipeline treats line 0 as a
+# falsy/invalid sentinel and discards an otherwise-valid STOP, so a real blocker
+# anchored at the top of a file never reaches the orchestrator. start_commit is
+# the pre-fix (buggy) state landed by #123.
+golden_task_version: 1
+id: council-line-zero-review-drop
+title: "Line-zero evidence does not drop an observer finding"
+start_commit: 9b98563
+prompt: >
+  An observer review carries a STOP whose evidence_lines begin at 0 (a finding
+  anchored at the very top of a file). The review-handling path treats the
+  zero as falsy and drops the finding, so a real blocker silently never surfaces
+  in the orchestrator UI. Make line 0 a valid anchor end-to-end (server
+  validation + the council slice) without weakening any other validation.
+expected_files:
+  - web/server/council-types.ts
+  - web/server/session-orchestrator.ts
+  - web/src/store/council-slice.ts
+expected_tests:
+  - web/server/council-types.test.ts
+  - web/server/session-orchestrator.test.ts
+  - web/src/store/council-slice.test.ts
+failure_modes:
+  - "line-0 finding dropped because 0 is treated as falsy/missing"
+  - "fix admits genuinely malformed line ranges (negative / non-numeric)"
+  - "off-by-one introduced so line 1 now collides with the 0 sentinel"
+rubric:
+  - id: line-zero-surfaces
+    description: "A STOP with evidence_lines starting at 0 reaches the orchestrator UI"
+    weight: 3
+  - id: validation-intact
+    description: "Negative / non-numeric line ranges are still rejected"
+    weight: 2
+  - id: no-off-by-one
+    description: "Existing non-zero line ranges are unchanged (no off-by-one)"
+    weight: 1

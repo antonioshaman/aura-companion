@@ -1,0 +1,37 @@
+# Golden task: an observer finding's event time must come from the SERVER clock
+# (file mtime / receipt time), never the model's self-reported timestamp. Pins
+# the bug class where the review JSON's `reviewed_at` is a hallucinated
+# placeholder (observed ~22h off) and the UI shows that fiction as the event
+# time. start_commit is the pre-fix (buggy) state landed by #124.
+golden_task_version: 1
+id: council-observer-real-event-time
+title: "Observer findings are stamped with the server clock, not the model's self-report"
+start_commit: 35eb5b9
+prompt: >
+  The observer writes a review file containing a model-authored `reviewed_at`
+  timestamp. That value is unreliable — the model can emit a placeholder that is
+  hours off — yet the server forwards it as the finding's event time and the UI
+  renders it verbatim. Stamp each surfaced finding with a server-observed time
+  (the review file's mtime / server receipt time) instead, so the displayed
+  event time reflects reality. Do not trust the model's self-reported clock.
+expected_files:
+  - web/server/review-watcher.ts
+  - web/server/session-orchestrator.ts
+  - web/server/session-types.ts
+expected_tests:
+  - web/server/review-watcher.test.ts
+  - web/server/session-orchestrator.test.ts
+failure_modes:
+  - "model-reported reviewed_at still used as the event time"
+  - "server time captured but never propagated to the finding shown in the UI"
+  - "a missing review file mtime crashes the review handler instead of degrading"
+rubric:
+  - id: server-clock-used
+    description: "The finding's event time derives from a server-observed clock"
+    weight: 3
+  - id: model-time-ignored
+    description: "A wildly-off model reviewed_at does not change the displayed time"
+    weight: 2
+  - id: degrades-safely
+    description: "An unavailable mtime degrades without throwing in the review path"
+    weight: 1

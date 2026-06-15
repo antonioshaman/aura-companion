@@ -1,0 +1,43 @@
+# Golden task: switching the Claude model in-session must NOT strand the session
+# on a model the OAuth subscription can't run. The model dropdown is sourced from
+# the API-key `/v1/models` list, but sessions run on an OAuth subscription, so a
+# selectable model can 404 on the very next turn (`is_error` +
+# `api_error_status === 404`). The fix records the prior model and auto-reverts
+# when that 404 arrives, so the session keeps working instead of wedging.
+# start_commit is the pre-fix (buggy) state — the parent of #116.
+golden_task_version: 1
+id: model-switch-404-autorevert
+title: "A set_model that the subscription rejects auto-reverts instead of wedging the session"
+start_commit: 01f144b
+prompt: >
+  The model switcher lets the user pick any model from the API-key model list,
+  but the running session is on an OAuth subscription that may not be entitled to
+  that model. When the user switches, the next turn can come back as an error with
+  api_error_status 404 — and the session is now stuck on a model it can never use.
+  Capture the previously-active model before applying a switch and, when the next
+  turn 404s on the just-selected model, auto-revert to the prior model and surface
+  that the switch was rejected. Do not silently swallow the 404, and do not revert
+  on unrelated errors.
+expected_files:
+  - web/server/session-types.ts
+  - web/src/ws.ts
+  - web/src/store/cli-status-slice.ts
+  - web/src/components/ModelSwitcher.tsx
+expected_tests:
+  - web/src/ws.test.ts
+  - web/src/store/cli-status-slice.test.ts
+  - web/src/components/ModelSwitcher.test.tsx
+failure_modes:
+  - "set_model applied with no record of the prior model, so revert has nothing to fall back to"
+  - "404 treated as a dead session rather than a model-entitlement rejection"
+  - "revert fires on any error, not specifically the just-switched model's 404"
+rubric:
+  - id: autorevert-on-404
+    description: "A 404 on the just-selected model reverts the active model to the prior one"
+    weight: 3
+  - id: prior-model-captured
+    description: "The previously-active model is recorded at switch time so revert is possible"
+    weight: 2
+  - id: scoped-to-switch
+    description: "Unrelated errors (and non-switch turns) do not trigger a revert"
+    weight: 1
