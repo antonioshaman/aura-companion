@@ -75,9 +75,18 @@ export function buildScorecard(
   return { rows, scoreableInputs, noScoreableInputs, passed };
 }
 
+/** Display-format a metric number: integers verbatim, otherwise rounded to 4
+ *  decimals with trailing zeros trimmed (0.6666666666666666 → "0.6667"). The
+ *  rounding is DISPLAY-ONLY — pass/fail in {@link evaluateRow} uses the raw
+ *  value, so a near-threshold metric is never flattered across the line. */
+function fmtNum(n: number): string {
+  if (Number.isInteger(n)) return String(n);
+  return parseFloat(n.toFixed(4)).toString();
+}
+
 function fmtValue(m: ScorecardMetricInput): string {
   if (m.value === "unavailable") return "n/a";
-  return `${m.value}${m.unit ?? ""}`;
+  return `${fmtNum(m.value)}${m.unit ?? ""}`;
 }
 
 function fmtThreshold(m: ScorecardMetricInput): string {
