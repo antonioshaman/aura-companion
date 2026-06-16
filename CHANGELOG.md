@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.12.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.11.0...aura-companion-v1.12.0) (2026-06-16)
+
+
+### Features
+
+* **evals:** add A/B skill delta report ([#137](https://github.com/antonioshaman/aura-companion/issues/137)) ([c1cf28b](https://github.com/antonioshaman/aura-companion/commit/c1cf28ba5a60bb3691e1b812f709ce10ecc7cfdc))
+* **evals:** add eval:compare cross-variant delta report ([#134](https://github.com/antonioshaman/aura-companion/issues/134)) ([c18b5ca](https://github.com/antonioshaman/aura-companion/commit/c18b5ca8e68cf1f07249ea5e3482d7348151258f))
+* **evals:** add eval:redteam probe registry + deterministic matcher ([#136](https://github.com/antonioshaman/aura-companion/issues/136)) ([f65d301](https://github.com/antonioshaman/aura-companion/commit/f65d301ef392b7021ce9a9bd1e40baad972c1253))
+* **evals:** add LLM-judge seam + deterministic calibration scaffold ([#135](https://github.com/antonioshaman/aura-companion/issues/135)) ([b242b50](https://github.com/antonioshaman/aura-companion/commit/b242b50cf1dfc98f01c60c7d23030145cf9f8c8a))
+* **evals:** add observer precision/recall dimension to the CI gate ([#132](https://github.com/antonioshaman/aura-companion/issues/132)) ([7673845](https://github.com/antonioshaman/aura-companion/commit/7673845f3b171378e10fecc7484dbc983225f425))
+* **evals:** close the human-label loop with a sheet round-trip (Story 3.2) ([#130](https://github.com/antonioshaman/aura-companion/issues/130)) ([0ae1586](https://github.com/antonioshaman/aura-companion/commit/0ae1586a9d74e0e109e6bdf1aa5f4486a186b72f))
+* **evals:** golden-task suite + scorecard renderer (Phase 2) ([#128](https://github.com/antonioshaman/aura-companion/issues/128)) ([84537fb](https://github.com/antonioshaman/aura-companion/commit/84537fb53a68c826e01042fb228d37776da0fc30))
+* **evals:** grow golden-task suite to 8 + wire eval-memory regression log ([#131](https://github.com/antonioshaman/aura-companion/issues/131)) ([20a3121](https://github.com/antonioshaman/aura-companion/commit/20a3121967fabe4d5060b3065128d5fce8247ca7))
+* **evals:** wire the precision corpus into a renderable scorecard ([#133](https://github.com/antonioshaman/aura-companion/issues/133)) ([8768aa7](https://github.com/antonioshaman/aura-companion/commit/8768aa7036d230bb3bf45a538e5065c3aa9de912))
+* **models:** model registry overlay + graceful failover ([#139](https://github.com/antonioshaman/aura-companion/issues/139)) ([f888518](https://github.com/antonioshaman/aura-companion/commit/f888518b99657d558eb3b42cd9f1cb209b667797))
+
+
+### Bug Fixes
+
+* **council:** render observer findings newest-first ([#138](https://github.com/antonioshaman/aura-companion/issues/138)) ([5ba9227](https://github.com/antonioshaman/aura-companion/commit/5ba9227a91bbc5b03b3e5f8e47a01c8cfcc61386))
+
 ## [1.11.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.10.0...aura-companion-v1.11.0) (2026-06-15)
 
 
