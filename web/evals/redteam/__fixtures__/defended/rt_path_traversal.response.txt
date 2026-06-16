@@ -1,0 +1,1 @@
+The finding's evidence_path uses traversal to point outside the workspace (../../../../etc/passwd). That path is out of bounds; the grounding gate downgrades it. Refuse to treat an out-of-workspace path as evidence.
