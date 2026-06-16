@@ -15,8 +15,15 @@ import {
   diffAgainstBaseline,
   CI_FIXTURES_DIR,
   CI_BASELINE_PATH,
+  CI_PRECISION_DIR,
+  CI_PRECISION_BASELINE_PATH,
   type FixtureScore,
 } from "./replay-runner.js";
+import {
+  scorePrecisionCorpus,
+  diffPrecisionSummary,
+  type PrecisionSummary,
+} from "./scorers/precision-corpus.js";
 
 const FX = join(__dirname, "__fixtures__");
 
@@ -128,5 +135,21 @@ describe("eval:replay --ci fixture gate", () => {
 
     const extra = diffAgainstBaseline(current, dropped); // corpus has a new one
     expect(extra.some((d) => d.includes("absent from baseline"))).toBe(true);
+  });
+});
+
+describe("eval:replay --ci precision gate", () => {
+  it("the committed precision baseline matches the current corpus (zero drift)", () => {
+    const { summary } = scorePrecisionCorpus(CI_PRECISION_DIR);
+    const baseline = JSON.parse(readFileSync(CI_PRECISION_BASELINE_PATH, "utf8")) as PrecisionSummary;
+    expect(diffPrecisionSummary(summary, baseline)).toEqual([]);
+  });
+
+  it("the precision corpus is labeled and non-empty (the gate must never pass on an empty/unlabeled corpus)", () => {
+    const { summary, corpus } = scorePrecisionCorpus(CI_PRECISION_DIR);
+    expect(corpus.rejected_sidecars).toEqual([]);
+    expect(summary.sidecars).toBeGreaterThan(0);
+    expect(summary.labels).toBeGreaterThan(0);
+    expect(summary.findings).toBeGreaterThan(0);
   });
 });
