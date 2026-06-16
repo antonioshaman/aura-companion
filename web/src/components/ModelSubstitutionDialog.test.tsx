@@ -94,6 +94,48 @@ describe("ModelSubstitutionDialog", () => {
     trigger.remove();
   });
 
+  // APG modal focus-trap: Tab from the last focusable wraps to the first, and
+  // Shift+Tab from the first wraps to the last, so keyboard focus can never
+  // escape the modal while it is open. The handler reads document.activeElement,
+  // so we focus the relevant edge button before dispatching the key.
+  it("traps Tab from the last focusable back to the first", () => {
+    render(
+      <ModelSubstitutionDialog fromModel="A" toModel="B" onConfirm={() => {}} onCancel={() => {}} />,
+    );
+    const keep = screen.getByRole("button", { name: /Keep current model/i });
+    const confirm = screen.getByRole("button", { name: /Switch to B/ });
+    confirm.focus();
+    expect(confirm).toHaveFocus();
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Tab" });
+    expect(keep).toHaveFocus();
+  });
+
+  it("traps Shift+Tab from the first focusable forward to the last", () => {
+    render(
+      <ModelSubstitutionDialog fromModel="A" toModel="B" onConfirm={() => {}} onCancel={() => {}} />,
+    );
+    const keep = screen.getByRole("button", { name: /Keep current model/i });
+    const confirm = screen.getByRole("button", { name: /Switch to B/ });
+    keep.focus();
+    expect(keep).toHaveFocus();
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Tab", shiftKey: true });
+    expect(confirm).toHaveFocus();
+  });
+
+  // A Tab while focus rests in the interior (neither edge) must NOT be hijacked
+  // — the browser's natural tab order handles it. We assert focus is unchanged.
+  it("does not trap Tab when focus is not on an edge focusable", () => {
+    render(
+      <ModelSubstitutionDialog fromModel="A" toModel="B" onConfirm={() => {}} onCancel={() => {}} />,
+    );
+    const keep = screen.getByRole("button", { name: /Keep current model/i });
+    keep.focus();
+    // Forward Tab from the FIRST element is a natural move (not an edge wrap),
+    // so the handler leaves focus where the browser would put it.
+    fireEvent.keyDown(screen.getByRole("dialog"), { key: "Tab" });
+    expect(keep).toHaveFocus();
+  });
+
   it("passes axe accessibility checks", async () => {
     const { axe } = await import("vitest-axe");
     const { container } = render(
