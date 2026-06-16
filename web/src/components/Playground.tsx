@@ -3211,12 +3211,15 @@ function CouncilModeSection() {
         </Card>
         <Card label="FindingsLog — full mix (STOP / WARN / NOTE / INFO / downgraded)">
           <FindingsLog
+            // Append-ordered (index 0 = oldest), matching the council slice's
+            // push-onto-end convention; FindingsLog renders newest-first, so
+            // "e" (10s ago) surfaces at the top of the rail.
             findings={[
-              mockFinding({ id: "a", severity: "STOP", claim: "Race condition in session-orchestrator.ts", receivedAt: Date.now() - 10_000 }),
-              mockFinding({ id: "b", severity: "WARN", claim: "Helper has no negative-path test", receivedAt: Date.now() - 60_000 }),
+              mockFinding({ id: "a", severity: "STOP", claim: "Race condition in session-orchestrator.ts", receivedAt: Date.now() - 240_000 }),
+              mockFinding({ id: "b", severity: "WARN", claim: "Helper has no negative-path test", receivedAt: Date.now() - 180_000 }),
               mockFinding({ id: "c", severity: "NOTE", claim: "Consider renaming BackendProvider", receivedAt: Date.now() - 120_000 }),
-              mockFinding({ id: "d", severity: "STOP", claim: "Suspicious cast — downgraded by grounding", receivedAt: Date.now() - 180_000, wasDowngraded: true, downgradeReason: "evidence_not_in_modified_set" }),
-              mockFinding({ id: "e", severity: "INFO", claim: "Spec coverage matches phase A boundaries", receivedAt: Date.now() - 240_000 }),
+              mockFinding({ id: "d", severity: "STOP", claim: "Suspicious cast — downgraded by grounding", receivedAt: Date.now() - 60_000, wasDowngraded: true, downgradeReason: "evidence_not_in_modified_set" }),
+              mockFinding({ id: "e", severity: "INFO", claim: "Spec coverage matches phase A boundaries", receivedAt: Date.now() - 10_000 }),
             ]}
             onDismissStop={() => {}}
             nowMs={Date.now()}

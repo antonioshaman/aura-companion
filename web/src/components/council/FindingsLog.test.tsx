@@ -89,6 +89,26 @@ describe("FindingsLog", () => {
     expect(screen.getByTestId("finding-row-b")).toHaveAttribute("data-severity", "NOTE");
   });
 
+  // Newest-first ordering: the source `findings` array is append-ordered
+  // (council slice pushes each review batch onto the end), so the most
+  // recent finding is last. The rail renders a reversed copy so fresh
+  // findings appear at the top. This pins the DOM order independent of the
+  // (possibly stale) per-finding receivedAt timestamps.
+  it("renders findings newest-first (reverses the append-ordered source array)", () => {
+    const findings = [
+      finding({ id: "oldest", claim: "first appended" }),
+      finding({ id: "middle", claim: "second appended" }),
+      finding({ id: "newest", claim: "last appended" }),
+    ];
+    const { container } = render(<FindingsLog findings={findings} nowMs={2_000} />);
+    const rows = Array.from(container.querySelectorAll("li[data-testid^='finding-row-']"));
+    expect(rows.map((r) => r.getAttribute("data-testid"))).toEqual([
+      "finding-row-newest",
+      "finding-row-middle",
+      "finding-row-oldest",
+    ]);
+  });
+
   // Task 12 (a11y cadence response): the row container keeps `role="log"`
   // for landmark navigation but `aria-live` is OFF — per-row polite
   // announcements at auto-wake cadence (3-8 findings per phase, every
