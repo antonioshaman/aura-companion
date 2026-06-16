@@ -14,14 +14,22 @@
  *
  * `--ci` is the CI-gate verb: it scores ONLY the checked-in synthetic fixtures
  * under `web/evals/__fixtures__/` (never ~/.companion/recordings), in sorted
- * order, and diffs the result against the committed `ci-baseline.json`. It
- * makes zero network calls, reads no secrets, uses no wall-clock/random (the
- * scores derive purely from recorded frame timestamps), and its EXIT CODE is
- * load-bearing — 0 when the corpus matches the baseline, 1 on a regression
- * (any score drift), 2 on an IO/usage error. This leaves Phase 3 free to wrap
- * it in a GHA step with no new secret plumbing. `--update-baseline` rewrites
- * the baseline from the current scores (run deliberately when a scorer change
- * is intended).
+ * order, across TWO dimensions and diffs each against its committed baseline:
+ *   1. cost/latency  — `__fixtures__/*.jsonl` vs `ci-baseline.json`.
+ *   2. observer STOP precision/recall — the labeled corpus under
+ *      `__fixtures__/precision/` (synthetic sidecars + labels.jsonl) vs
+ *      `ci-precision-baseline.json`. Grounded severity is RECOMPUTED through
+ *      the live grounding gate, so a grounding-logic regression that drops
+ *      stop_precision/stop_recall trips the gate (launch criterion #1 /
+ *      Story 3.1). An empty or UNLABELED precision corpus is a hard failure —
+ *      it may never produce a passing result.
+ * It makes zero network calls, reads no secrets, uses no wall-clock/random (the
+ * scores derive purely from recorded frame contents), and its EXIT CODE is
+ * load-bearing — 0 when both corpora match baseline, 1 on a regression (any
+ * score drift), 2 on an IO/usage error (incl. an empty/unlabeled corpus). This
+ * leaves Phase 3 free to wrap it in a GHA step with no new secret plumbing.
+ * `--update-baseline` rewrites BOTH baselines from the current scores (run
+ * deliberately when a scorer or grounding change is intended).
  *
  * `--record-regressions[=<path>]` is OPT-IN and off by default: when a drift is
  * detected it appends a record to the eval-memory regression log
@@ -47,6 +55,11 @@ import {
   appendRegressionRecord,
   buildRegressionRecord,
 } from "./memory/regression-log.js";
+import {
+  diffPrecisionSummary,
+  scorePrecisionCorpus,
+  type PrecisionSummary,
+} from "./scorers/precision-corpus.js";
 
 interface ParsedArgs {
   recording?: string;
@@ -239,6 +252,52 @@ export function renderAggregate(agg: AggregateResult, dir: string): string {
 export const CI_FIXTURES_DIR = fileURLToPath(new URL("./__fixtures__", import.meta.url));
 export const CI_BASELINE_PATH = fileURLToPath(new URL("./ci-baseline.json", import.meta.url));
 
+/** The labeled precision corpus (sidecars + labels.jsonl) and its baseline.
+ *  Separate from the cost/latency corpus: precision needs human labels, which
+ *  cost/latency fixtures don't carry. */
+export const CI_PRECISION_DIR = fileURLToPath(
+  new URL("./__fixtures__/precision", import.meta.url),
+);
+export const CI_PRECISION_BASELINE_PATH = fileURLToPath(
+  new URL("./ci-precision-baseline.json", import.meta.url),
+);
+
+/** Outcome of scoring the precision corpus under the CI gate's guards. A
+ *  `kind:"error"` is a setup failure (corrupt or unlabeled corpus) that must
+ *  make the gate exit non-zero — an unlabeled/empty corpus may NEVER pass. */
+type PrecisionScoreOutcome =
+  | { kind: "ok"; summary: PrecisionSummary }
+  | { kind: "error"; message: string };
+
+/**
+ * Score the precision corpus, enforcing the "never pass on an empty or
+ * unlabeled corpus" invariant: a corrupt sidecar, zero sidecars, or zero
+ * labels are all setup errors, not a clean score of nothing.
+ */
+function scorePrecisionForCi(dir: string): PrecisionScoreOutcome {
+  let result: ReturnType<typeof scorePrecisionCorpus>;
+  try {
+    result = scorePrecisionCorpus(dir);
+  } catch (e) {
+    return { kind: "error", message: `cannot score precision corpus in ${dir}: ${(e as Error).message}` };
+  }
+  const { summary, corpus } = result;
+  if (corpus.rejected_sidecars.length > 0) {
+    const detail = corpus.rejected_sidecars.map((r) => `${r.file} (${r.reason})`).join(", ");
+    return { kind: "error", message: `precision corpus has unparseable sidecar(s): ${detail}` };
+  }
+  if (summary.sidecars === 0) {
+    return { kind: "error", message: `precision corpus has no *.sidecar.json fixtures under ${dir}` };
+  }
+  if (summary.labels === 0) {
+    return {
+      kind: "error",
+      message: `precision corpus has no labels in ${dir}/labels.jsonl — an unlabeled corpus must not pass CI`,
+    };
+  }
+  return { kind: "ok", summary };
+}
+
 /** A score reduced to the comparable, serialization-stable subset the CI gate
  *  diffs. `unavailable` is kept distinct from a numeric 0 (absent-vs-zero). */
 export interface FixtureScore {
@@ -323,9 +382,21 @@ function runCi(args: ParsedArgs): number {
     process.stderr.write(`eval:replay --ci: no *.jsonl fixtures under ${CI_FIXTURES_DIR}\n`);
     return 2;
   }
+  // Score the labeled precision corpus too. A setup error here (corrupt /
+  // empty / unlabeled corpus) is fatal BEFORE update-baseline, so we never
+  // bless an empty baseline that would then always pass.
+  const precision = scorePrecisionForCi(CI_PRECISION_DIR);
+  if (precision.kind === "error") {
+    process.stderr.write(`eval:replay --ci: ${precision.message}\n`);
+    return 2;
+  }
   if (args.updateBaseline) {
     writeFileSync(CI_BASELINE_PATH, JSON.stringify(scores, null, 2) + "\n");
-    process.stdout.write(`eval:replay --ci: baseline updated — ${scores.length} fixtures → ${basename(CI_BASELINE_PATH)}\n`);
+    writeFileSync(CI_PRECISION_BASELINE_PATH, JSON.stringify(precision.summary, null, 2) + "\n");
+    process.stdout.write(
+      `eval:replay --ci: baseline updated — ${scores.length} cost/latency fixtures → ${basename(CI_BASELINE_PATH)}; ` +
+        `precision (${precision.summary.findings} findings, ${precision.summary.labels} labels) → ${basename(CI_PRECISION_BASELINE_PATH)}\n`,
+    );
     return 0;
   }
   let baseline: FixtureScore[];
@@ -338,15 +409,30 @@ function runCi(args: ParsedArgs): number {
     );
     return 2;
   }
-  const diffs = diffAgainstBaseline(scores, baseline);
+  let precisionBaseline: PrecisionSummary;
+  try {
+    precisionBaseline = JSON.parse(readFileSync(CI_PRECISION_BASELINE_PATH, "utf8")) as PrecisionSummary;
+  } catch (e) {
+    process.stderr.write(
+      `eval:replay --ci: cannot read precision baseline ${CI_PRECISION_BASELINE_PATH}: ${(e as Error).message}\n` +
+        `  seed it with: bun run eval:replay --ci --update-baseline\n`,
+    );
+    return 2;
+  }
+  const costDiffs = diffAgainstBaseline(scores, baseline);
+  const precisionDiffs = diffPrecisionSummary(precision.summary, precisionBaseline).map(
+    (d) => `precision · ${d}`,
+  );
+  const diffs = [...costDiffs, ...precisionDiffs];
   if (diffs.length === 0) {
     process.stdout.write(
-      `eval:replay --ci: OK — ${scores.length} fixtures match baseline (zero LLM calls)\n`,
+      `eval:replay --ci: OK — ${scores.length} cost/latency fixtures + precision corpus ` +
+        `(${precision.summary.findings} findings, ${precision.summary.labels} labels) match baseline (zero LLM calls)\n`,
     );
     return 0;
   }
   process.stderr.write(
-    `eval:replay --ci: REGRESSION — ${diffs.length} fixture(s) drifted from baseline:\n`,
+    `eval:replay --ci: REGRESSION — ${diffs.length} metric(s) drifted from baseline:\n`,
   );
   for (const d of diffs) process.stderr.write(`  • ${d}\n`);
   process.stderr.write(

@@ -1,0 +1,56 @@
+{
+  "eval_artifact_version": 1,
+  "session_group_id": "grp_pre01",
+  "checkpoint_id": "council-implement-0",
+  "phase": "council-implement",
+  "observer_provider": "claude",
+  "observer_model": "claude-opus-4-7",
+  "observer_cli_version": "1.0.0-synthetic",
+  "observer_prompt_sha256": "sha256:synthetic-prompt-grp-pre01",
+  "emitted_at": "2026-06-15T00:00:00Z",
+  "manifest_partition": {
+    "delta": ["web/server/ws-bridge.ts", "web/src/ws.ts"],
+    "carried": [],
+    "dropped": []
+  },
+  "raw_findings": [
+    {
+      "severity": "STOP",
+      "claim": "broadcastToGroup replays an archived half's active frame on reconnect, resurrecting a ghost group",
+      "evidence_path": "web/server/ws-bridge.ts",
+      "confidence": "high"
+    },
+    {
+      "severity": "STOP",
+      "claim": "the grounding gate can be bypassed by a symlink escaping the workspace",
+      "evidence_path": "web/server/observer-grounding.ts",
+      "confidence": "medium"
+    },
+    {
+      "severity": "STOP",
+      "claim": "the set_model 404 handler reverts on every error, not only the just-switched model",
+      "evidence_path": "web/src/ws.ts",
+      "confidence": "high"
+    },
+    {
+      "severity": "WARN",
+      "claim": "consider extracting the revert helper for readability",
+      "evidence_path": "web/src/ws.ts",
+      "confidence": "low"
+    }
+  ],
+  "grounding_downgrades": [
+    {
+      "index": 1,
+      "original_severity": "STOP",
+      "reason": "evidence_not_in_modified_set"
+    }
+  ],
+  "grounding_inputs": {
+    "existence_by_path": {
+      "web/server/ws-bridge.ts": true,
+      "web/src/ws.ts": true,
+      "web/server/observer-grounding.ts": true
+    }
+  }
+}

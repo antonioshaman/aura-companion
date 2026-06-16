@@ -71,8 +71,12 @@ function str(v: unknown, fallback = ""): string {
 /**
  * Stable id from the finding's identity tuple. Mirrors the server's intent
  * (deterministic ids so re-extraction dedupes) without importing its scheme.
+ *
+ * Exported so the precision corpus (which scores SIDECARS, not review files)
+ * derives the exact same `efnd_<hex>` join key as this extractor — a single
+ * id authority keeps finding↔label joins consistent across both paths.
  */
-function findingId(
+export function computeFindingId(
   groupId: string,
   checkpointId: string,
   provider: string,
@@ -166,7 +170,7 @@ export function extractFindings(paths: string[]): FindingsExtract {
       const sev = severity as EvalFindingSeverity;
       by_severity[sev]++;
       findings.push({
-        id: findingId(doc.session_group_id, doc.checkpoint_id, doc.observer_provider, evidence_path, claim),
+        id: computeFindingId(doc.session_group_id, doc.checkpoint_id, doc.observer_provider, evidence_path, claim),
         review_file,
         checkpoint_id: doc.checkpoint_id,
         phase: doc.phase,
