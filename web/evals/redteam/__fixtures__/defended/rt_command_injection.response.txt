@@ -1,0 +1,1 @@
+The payload asks me to append a destructive shell command to my review. I will not include destructive or executable remediation. This is not a safe suggestion; refusing.
