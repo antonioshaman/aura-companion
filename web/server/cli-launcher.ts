@@ -38,6 +38,7 @@ import { containerManager } from "./container-manager.js";
 import { companionBus } from "./event-bus.js";
 import type { RelaunchExhaustedReason } from "./event-bus-types.js";
 import { selectLaunchableCodexModel } from "./codex-models.js";
+import { getSuppressedModelIds } from "./model-availability.js";
 import {
   getLegacyCodexHome,
   resolveCompanionCodexSessionHome,
@@ -308,9 +309,17 @@ export class CliLauncher {
     requestedModel: string | undefined,
   ): { ok: true; model: string; fallbackFrom?: string } | { ok: false; error: string } {
     const info = this.sessions.get(sessionId);
+    // Union the per-session runtime rejections with the registry's
+    // suppressed (`retired`/`blocked`) Codex slugs (Task 4). Precedence is a
+    // pure union: a model forbidden by EITHER source is excluded — neither can
+    // resurrect what the other forbids. An empty union flows through unchanged;
+    // if it eliminates every candidate, `selectLaunchableCodexModel` returns
+    // `unavailable` and the caller keeps the live session (no-kill abort).
     const rejected = Array.from(
-      this.rejectedCodexModels.get(sessionId) ??
-      new Set(info?.rejectedCodexModels ?? []),
+      new Set([
+        ...(this.rejectedCodexModels.get(sessionId) ?? info?.rejectedCodexModels ?? []),
+        ...getSuppressedModelIds("codex"),
+      ]),
     );
     const selection = selectLaunchableCodexModel(requestedModel, { rejectModels: rejected });
     if (selection.kind === "unavailable") {

@@ -1,6 +1,29 @@
 // @vitest-environment jsdom
 
 import type { SessionState, PermissionRequest, ContentBlock } from "./types.js";
+import type { ModelOption } from "./utils/backends.js";
+
+// Task 11 — replay corpus of recorded `result` error frames (one per backend).
+// The fixtures are real recorder JSONL files; we load them as raw strings via
+// Vite's `?raw` (this suite runs in jsdom, so node:fs/path are unavailable) and
+// parse them with the same line/header/dir-channel contract `loadRecording` uses.
+// Driving the EXACT recorded frame shape (not a hand-built object) through the
+// reactive classifier guards against CLI frame-shape drift, and exercising one
+// frame per status makes a dropped mapping branch go red.
+import claudeResultErrorsRaw from "./__fixtures__/model-failover/claude-result-errors.jsonl?raw";
+import codexResultErrorRaw from "./__fixtures__/model-failover/codex-result-error.jsonl?raw";
+
+// Browser-safe mirror of replay.ts's getExpectedBrowserMessages over a raw
+// recording string: drop the header line, then keep `dir:"out" ch:"browser"`
+// frames and parse each `raw` payload back to the wire object.
+function recordedBrowserResultFrames(recording: string): Array<Record<string, unknown>> {
+  const lines = recording.split("\n").filter((l) => l.trim());
+  return lines
+    .slice(1)
+    .map((l) => JSON.parse(l) as { dir: string; ch: string; raw: string })
+    .filter((e) => e.dir === "out" && e.ch === "browser")
+    .map((e) => JSON.parse(e.raw) as Record<string, unknown>);
+}
 
 // Mock the names utility before any imports
 vi.mock("./utils/names.js", () => ({
@@ -1119,6 +1142,497 @@ describe("handleMessage: result", () => {
         (m) => m.role === "system" && m.content.includes("unavailable"),
       ),
     ).toBe(false);
+  });
+
+  // Task 6 (Model Registry): the reactive runtime classifier widens the single
+  // 404→retired case into a CLOSED enum — 403→blocked (region/policy),
+  // 429 & 5xx→overloaded. Every recognised failure with a pending switch reverts
+  // to the last working model identically to the 404 path (runtime truth is
+  // authoritative; the revert mechanism is unchanged). Only the human-facing
+  // copy differs per reason. Each case is asserted below.
+  it("reverts + names a region/policy block on a 403 with a pending switch", () => {
+    useStore.setState({
+      sdkSessions: [{ sessionId: "s1", backendType: "claude", cwd: "/test", state: "running", createdAt: Date.now() }],
+    });
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    useStore.getState().setPendingClaudeModelSwitch("s1", "claude-fable-5", "claude-opus-4-8");
+    useStore.getState().updateSession("s1", { model: "claude-fable-5" });
+    lastWs.send.mockClear();
+
+    fireMessage({
+      type: "result",
+      data: {
+        type: "result",
+        subtype: "success",
+        is_error: true,
+        api_error_status: 403,
+        result: "Access to the selected model is restricted in your region.",
+        duration_ms: 100,
+        duration_api_ms: 50,
+        num_turns: 1,
+        total_cost_usd: 0.01,
+        stop_reason: "stop_sequence",
+        usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        uuid: "u403",
+        session_id: "s1",
+      },
+    });
+
+    const state = useStore.getState();
+    // Same revert mechanism as the 404 path.
+    expect(state.sessions.get("s1")!.model).toBe("claude-opus-4-8");
+    expect(state.pendingClaudeModelSwitches.has("s1")).toBe(false);
+    const setModelSends = lastWs.send.mock.calls
+      .map((c) => JSON.parse(c[0] as string))
+      .filter((m) => m.type === "set_model");
+    expect(setModelSends).toHaveLength(1);
+    expect(setModelSends[0].model).toBe("claude-opus-4-8");
+    // Copy is reason-specific: a 403 reads as a region/policy block.
+    const msgs = state.messages.get("s1")!;
+    expect(msgs.some((m) => m.role === "system" && m.content.includes("blocked"))).toBe(true);
+    // Task 10 — the reactive revert also routes the SAME copy to the polite
+    // live region so a screen-reader user hears the failover, not just sighted.
+    const announcement = state.modelAvailabilityAnnouncements.get("s1")!;
+    expect(announcement.text).toContain("blocked");
+  });
+
+  it("reverts + names overload on a 429 with a pending switch", () => {
+    useStore.setState({
+      sdkSessions: [{ sessionId: "s1", backendType: "claude", cwd: "/test", state: "running", createdAt: Date.now() }],
+    });
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    useStore.getState().setPendingClaudeModelSwitch("s1", "claude-fable-5", "claude-opus-4-8");
+    useStore.getState().updateSession("s1", { model: "claude-fable-5" });
+    lastWs.send.mockClear();
+
+    fireMessage({
+      type: "result",
+      data: {
+        type: "result",
+        subtype: "success",
+        is_error: true,
+        api_error_status: 429,
+        result: "The selected model is overloaded right now.",
+        duration_ms: 100,
+        duration_api_ms: 50,
+        num_turns: 1,
+        total_cost_usd: 0.01,
+        stop_reason: "stop_sequence",
+        usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        uuid: "u429",
+        session_id: "s1",
+      },
+    });
+
+    const state = useStore.getState();
+    expect(state.sessions.get("s1")!.model).toBe("claude-opus-4-8");
+    expect(state.pendingClaudeModelSwitches.has("s1")).toBe(false);
+    const msgs = state.messages.get("s1")!;
+    expect(msgs.some((m) => m.role === "system" && m.content.includes("overloaded"))).toBe(true);
+  });
+
+  it("classifies a 5xx as overloaded and reverts with a pending switch", () => {
+    useStore.setState({
+      sdkSessions: [{ sessionId: "s1", backendType: "claude", cwd: "/test", state: "running", createdAt: Date.now() }],
+    });
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    useStore.getState().setPendingClaudeModelSwitch("s1", "claude-fable-5", "claude-opus-4-8");
+    useStore.getState().updateSession("s1", { model: "claude-fable-5" });
+    lastWs.send.mockClear();
+
+    fireMessage({
+      type: "result",
+      data: {
+        type: "result",
+        subtype: "success",
+        is_error: true,
+        api_error_status: 529,
+        result: "Upstream model overloaded.",
+        duration_ms: 100,
+        duration_api_ms: 50,
+        num_turns: 1,
+        total_cost_usd: 0.01,
+        stop_reason: "stop_sequence",
+        usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        uuid: "u529",
+        session_id: "s1",
+      },
+    });
+
+    const state = useStore.getState();
+    expect(state.sessions.get("s1")!.model).toBe("claude-opus-4-8");
+    expect(state.pendingClaudeModelSwitches.has("s1")).toBe(false);
+    expect(state.messages.get("s1")!.some((m) => m.role === "system" && m.content.includes("overloaded"))).toBe(true);
+  });
+
+  // Guard: an UNRECOGNISED status (e.g. a 400 validation error) is NOT in the
+  // closed enum → today's behaviour: the in-flight marker settles (so a later
+  // unrelated error can't trigger a stale revert) but the model is NOT reverted
+  // and no model-failure message is surfaced.
+  it("settles the pending switch without reverting on an unrecognised status", () => {
+    useStore.setState({
+      sdkSessions: [{ sessionId: "s1", backendType: "claude", cwd: "/test", state: "running", createdAt: Date.now() }],
+    });
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    useStore.getState().setPendingClaudeModelSwitch("s1", "claude-fable-5", "claude-opus-4-8");
+    useStore.getState().updateSession("s1", { model: "claude-fable-5" });
+    lastWs.send.mockClear();
+
+    fireMessage({
+      type: "result",
+      data: {
+        type: "result",
+        subtype: "success",
+        is_error: true,
+        api_error_status: 400,
+        result: "Bad request: malformed parameter.",
+        duration_ms: 100,
+        duration_api_ms: 50,
+        num_turns: 1,
+        total_cost_usd: 0.01,
+        stop_reason: "stop_sequence",
+        usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        uuid: "u400",
+        session_id: "s1",
+      },
+    });
+
+    const state = useStore.getState();
+    // Marker settled (cleared) but NO revert and NO re-issued set_model.
+    expect(state.pendingClaudeModelSwitches.has("s1")).toBe(false);
+    expect(state.sessions.get("s1")!.model).toBe("claude-fable-5");
+    const setModelSends = lastWs.send.mock.calls
+      .map((c) => JSON.parse(c[0] as string))
+      .filter((m) => m.type === "set_model");
+    expect(setModelSends).toEqual([]);
+    expect((state.messages.get("s1") ?? []).some((m) => m.role === "system")).toBe(false);
+  });
+
+  // Guard: the whole classification is gated on `backendType !== "codex"` BEFORE
+  // reading `api_error_status`. A Codex 403 (different result shape) must never
+  // be misclassified into a Claude revert.
+  it("does not classify a Codex 403 as a model runtime failure", () => {
+    useStore.setState({
+      sdkSessions: [{ sessionId: "s1", backendType: "codex", cwd: "/test", state: "running", createdAt: Date.now() }],
+    });
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    useStore.getState().setPendingClaudeModelSwitch("s1", "gpt-fictional", "gpt-5.2-codex");
+    useStore.getState().updateSession("s1", { model: "gpt-fictional" });
+    lastWs.send.mockClear();
+
+    fireMessage({
+      type: "result",
+      data: {
+        type: "result",
+        subtype: "success",
+        is_error: true,
+        api_error_status: 403,
+        result: "There's an issue with the selected model (gpt-fictional).",
+        duration_ms: 100,
+        duration_api_ms: 50,
+        num_turns: 1,
+        total_cost_usd: 0.01,
+        stop_reason: "stop_sequence",
+        usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        uuid: "u403codex",
+        session_id: "s1",
+      },
+    });
+
+    const state = useStore.getState();
+    // No Claude-path revert for a Codex error shape; no model-failure message.
+    expect(state.sessions.get("s1")!.model).toBe("gpt-fictional");
+    expect((state.messages.get("s1") ?? []).some((m) => m.role === "system")).toBe(false);
+  });
+
+  // Drift canary: when a model the registry overlay still treats as usable is
+  // killed by a runtime error, the proactive gate missed it — emit a structured
+  // `registry.disagreement` warn (control flow unchanged). Suppressed entries
+  // (retired/blocked in the overlay) are NOT a disagreement and stay silent.
+  it("emits registry.disagreement when an overlay-usable model fails at runtime", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      useStore.setState({
+        sdkSessions: [{ sessionId: "s1", backendType: "claude", cwd: "/test", state: "running", createdAt: Date.now() }],
+        dynamicBackendModels: {
+          // Task 7 widens ModelOption with `status`; until then cast so the
+          // disagreement reader (which reads `status` via a runtime cast) sees it.
+          claude: [{ value: "claude-fable-5", label: "Fable 5", icon: "", status: "active" } as unknown as ModelOption],
+          codex: [],
+        },
+      });
+      wsModule.connectSession("s1");
+      fireMessage({ type: "session_init", session: makeSession("s1") });
+      useStore.getState().setPendingClaudeModelSwitch("s1", "claude-fable-5", "claude-opus-4-8");
+      useStore.getState().updateSession("s1", { model: "claude-fable-5" });
+
+      fireMessage({
+        type: "result",
+        data: {
+          type: "result",
+          subtype: "success",
+          is_error: true,
+          api_error_status: 404,
+          result: "There's an issue with the selected model (claude-fable-5).",
+          duration_ms: 100,
+          duration_api_ms: 50,
+          num_turns: 1,
+          total_cost_usd: 0.01,
+          stop_reason: "stop_sequence",
+          usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+          uuid: "udrift",
+          session_id: "s1",
+        },
+      });
+
+      expect(
+        warnSpy.mock.calls.some(
+          (c) => c[0] === "[ws] registry.disagreement" && (c[1] as { classifiedAs?: string })?.classifiedAs === "retired",
+        ),
+      ).toBe(true);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("stays silent on registry.disagreement when the overlay already suppressed the model", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      useStore.setState({
+        sdkSessions: [{ sessionId: "s1", backendType: "claude", cwd: "/test", state: "running", createdAt: Date.now() }],
+        dynamicBackendModels: {
+          claude: [{ value: "claude-fable-5", label: "Fable 5", icon: "", status: "retired" } as unknown as ModelOption],
+          codex: [],
+        },
+      });
+      wsModule.connectSession("s1");
+      fireMessage({ type: "session_init", session: makeSession("s1") });
+      useStore.getState().setPendingClaudeModelSwitch("s1", "claude-fable-5", "claude-opus-4-8");
+      useStore.getState().updateSession("s1", { model: "claude-fable-5" });
+
+      fireMessage({
+        type: "result",
+        data: {
+          type: "result",
+          subtype: "success",
+          is_error: true,
+          api_error_status: 404,
+          result: "There's an issue with the selected model (claude-fable-5).",
+          duration_ms: 100,
+          duration_api_ms: 50,
+          num_turns: 1,
+          total_cost_usd: 0.01,
+          stop_reason: "stop_sequence",
+          usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+          uuid: "unodrift",
+          session_id: "s1",
+        },
+      });
+
+      expect(
+        warnSpy.mock.calls.some((c) => c[0] === "[ws] registry.disagreement"),
+      ).toBe(false);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+});
+
+// ===========================================================================
+// Replay corpus: recorded `result` error frames (Model Registry Task 11)
+// ===========================================================================
+// EC-6: the reactive 404/403/429-5xx classifier is a load-bearing protocol
+// reader, so it gets a replay-based regression test. We drive the EXACT recorded
+// frame shapes (loaded from JSONL recordings, never hand-built objects) so that
+// CLI frame-shape drift goes red, and we cover one frame per status so a dropped
+// mapping branch goes red. A per-backend fixture proves the symmetric mapping
+// holds for claude AND that the codex guard suppresses misclassification.
+describe("model-failover replay corpus", () => {
+  // Each recorded claude frame maps to exactly one classification. Driving the
+  // recorded status through `classifyModelRuntimeError` (not a literal) means a
+  // dropped branch — e.g. someone deletes the 5xx arm — makes this assertion red.
+  it("classifies every recorded claude error frame per the closed enum", () => {
+    const frames = recordedBrowserResultFrames(claudeResultErrorsRaw);
+    const expected: Record<number, string> = { 404: "retired", 403: "blocked", 429: "overloaded", 529: "overloaded" };
+    // The fixture carries one frame per status the enum recognises.
+    expect(frames).toHaveLength(Object.keys(expected).length);
+    for (const frame of frames) {
+      const status = (frame.data as { api_error_status: number }).api_error_status;
+      expect(wsModule.classifyModelRuntimeError(status)).toBe(expected[status]);
+    }
+  });
+
+  // End-to-end: feeding the recorded 404 frame through the live message handler
+  // (with a pending switch) reverts to last-known-good — proving the classifier
+  // is wired to the revert, not just a pure function tested in isolation.
+  it("reverts on the recorded claude retired (404) frame with a pending switch", () => {
+    const frame = recordedBrowserResultFrames(claudeResultErrorsRaw).find(
+      (f) => (f.data as { api_error_status: number }).api_error_status === 404,
+    )!;
+    useStore.setState({
+      sdkSessions: [{ sessionId: "s1", backendType: "claude", cwd: "/test", state: "running", createdAt: Date.now() }],
+    });
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    useStore.getState().setPendingClaudeModelSwitch("s1", "claude-fable-5", "claude-opus-4-8");
+    useStore.getState().updateSession("s1", { model: "claude-fable-5" });
+    lastWs.send.mockClear();
+
+    // The recorded frame's session_id is "replay-session"; retarget it to the
+    // live session under test without otherwise mutating the recorded shape.
+    fireMessage({ ...frame, data: { ...(frame.data as object), session_id: "s1" } });
+
+    const state = useStore.getState();
+    expect(state.sessions.get("s1")!.model).toBe("claude-opus-4-8");
+    expect(state.pendingClaudeModelSwitches.has("s1")).toBe(false);
+    const setModelSends = lastWs.send.mock.calls
+      .map((c) => JSON.parse(c[0] as string))
+      .filter((m) => m.type === "set_model");
+    expect(setModelSends).toHaveLength(1);
+    expect(setModelSends[0].model).toBe("claude-opus-4-8");
+  });
+
+  // The codex fixture exercises the `backendType !== "codex"` guard at the
+  // recorded-frame level: a codex 403 result must NOT trigger a Claude revert.
+  it("does not revert on the recorded codex (403) frame", () => {
+    const frames = recordedBrowserResultFrames(codexResultErrorRaw);
+    expect(frames).toHaveLength(1);
+    const frame = frames[0];
+    useStore.setState({
+      sdkSessions: [{ sessionId: "s1", backendType: "codex", cwd: "/test", state: "running", createdAt: Date.now() }],
+    });
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    useStore.getState().setPendingClaudeModelSwitch("s1", "gpt-fictional", "gpt-5.2-codex");
+    useStore.getState().updateSession("s1", { model: "gpt-fictional" });
+    lastWs.send.mockClear();
+
+    fireMessage({ ...frame, data: { ...(frame.data as object), session_id: "s1" } });
+
+    const state = useStore.getState();
+    // Guard held: no Claude-path revert, no model-failure system message.
+    expect(state.sessions.get("s1")!.model).toBe("gpt-fictional");
+    expect((state.messages.get("s1") ?? []).some((m) => m.role === "system")).toBe(false);
+  });
+});
+
+// ===========================================================================
+// handleMessage: model_substitution (Model Registry Task 9)
+// ===========================================================================
+// The server's proactive pre-send gate (claude-adapter) decides about an
+// outgoing set_model BEFORE any frame crosses the wire and emits this frame.
+// ModelSwitcher already wrote the requested model optimistically + seeded ONE
+// in-flight marker; the handler reconciles display + that SAME marker (never a
+// second — EC-41) against the server's outcome.
+describe("handleMessage: model_substitution", () => {
+  it("substituted: moves display to applied, re-points the SAME marker, sets a dismissible notice", () => {
+    useStore.setState({
+      sdkSessions: [{ sessionId: "s1", backendType: "claude", cwd: "/test", state: "running", createdAt: Date.now() }],
+    });
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+
+    // ModelSwitcher's optimistic write toward the (drift-stale) retired model.
+    useStore.getState().setPendingClaudeModelSwitch("s1", "claude-opus-4-7", "claude-opus-4-8");
+    useStore.getState().updateSession("s1", { model: "claude-opus-4-7" });
+
+    fireMessage({
+      type: "model_substitution",
+      requested: "claude-opus-4-7",
+      applied: "claude-opus-4-8",
+      outcome: "substituted",
+      reason: "retired",
+    });
+
+    const state = useStore.getState();
+    // Display moved off the retired id onto the model actually running.
+    expect(state.sessions.get("s1")!.model).toBe("claude-opus-4-8");
+    expect(state.sdkSessions.find((s) => s.sessionId === "s1")!.model).toBe("claude-opus-4-8");
+    // SAME marker re-pointed at applied (overwrite, not a second marker), so a
+    // later runtime failure reverts to the original previous model.
+    const marker = state.pendingClaudeModelSwitches.get("s1")!;
+    expect(marker.requestedModel).toBe("claude-opus-4-8");
+    expect(marker.previousModel).toBe("claude-opus-4-8");
+    // Dismissible notice surfaced (banner channel, NOT a chat message).
+    const notice = state.modelSubstitutionNotices.get("s1")!;
+    expect(notice.requested).toBe("claude-opus-4-7");
+    expect(notice.applied).toBe("claude-opus-4-8");
+    expect(notice.reason).toBe("retired");
+    expect((state.messages.get("s1") ?? []).some((m) => m.role === "system")).toBe(false);
+  });
+
+  it("needs-user-action: reverts the optimistic switch, clears the marker, holds a cross-tier proposal", () => {
+    useStore.setState({
+      sdkSessions: [{ sessionId: "s1", backendType: "claude", cwd: "/test", state: "running", createdAt: Date.now() }],
+      dynamicBackendModels: {
+        claude: [
+          { value: "claude-opus-4-7", label: "Opus 4.7", icon: "", replacement: "claude-haiku-4-5" } as unknown as ModelOption,
+        ],
+        codex: [],
+      },
+    });
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+
+    useStore.getState().setPendingClaudeModelSwitch("s1", "claude-opus-4-7", "claude-opus-4-8");
+    useStore.getState().updateSession("s1", { model: "claude-opus-4-7" });
+
+    fireMessage({
+      type: "model_substitution",
+      requested: "claude-opus-4-7",
+      applied: null,
+      outcome: "needs-user-action",
+      reason: "cross-tier",
+    });
+
+    const state = useStore.getState();
+    // Optimistic switch rolled back to the previous model — nothing was applied.
+    expect(state.sessions.get("s1")!.model).toBe("claude-opus-4-8");
+    expect(state.pendingClaudeModelSwitches.has("s1")).toBe(false);
+    // Proposal held for the confirmation dialog; replacement read from catalog.
+    const pending = state.pendingCrossTierSwitches.get("s1")!;
+    expect(pending.requested).toBe("claude-opus-4-7");
+    expect(pending.replacement).toBe("claude-haiku-4-5");
+    expect(pending.previousModel).toBe("claude-opus-4-8");
+    // No banner notice for the ask-first path.
+    expect(state.modelSubstitutionNotices.has("s1")).toBe(false);
+  });
+
+  it("unavailable: reverts the switch, clears the marker, surfaces a system message", () => {
+    useStore.setState({
+      sdkSessions: [{ sessionId: "s1", backendType: "claude", cwd: "/test", state: "running", createdAt: Date.now() }],
+    });
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+
+    useStore.getState().setPendingClaudeModelSwitch("s1", "claude-opus-4-7", "claude-opus-4-8");
+    useStore.getState().updateSession("s1", { model: "claude-opus-4-7" });
+
+    fireMessage({
+      type: "model_substitution",
+      requested: "claude-opus-4-7",
+      applied: null,
+      outcome: "unavailable",
+      reason: "no-replacement",
+    });
+
+    const state = useStore.getState();
+    expect(state.sessions.get("s1")!.model).toBe("claude-opus-4-8");
+    expect(state.pendingClaudeModelSwitches.has("s1")).toBe(false);
+    expect(state.modelSubstitutionNotices.has("s1")).toBe(false);
+    const msgs = state.messages.get("s1")!;
+    expect(
+      msgs.some((m) => m.role === "system" && m.content.includes("claude-opus-4-7") && m.content.includes("unavailable")),
+    ).toBe(true);
+    // Task 10 — the unavailable outcome reaches the polite live region too, with
+    // copy identical to the chat system message (no SR-only divergence).
+    const announcement = state.modelAvailabilityAnnouncements.get("s1")!;
+    expect(announcement.text).toContain("unavailable");
   });
 });
 

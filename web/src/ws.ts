@@ -583,6 +583,86 @@ function upsertAssistantMessage(sessionId: string, incoming: ChatMessage) {
   store.setMessages(sessionId, messages);
 }
 
+/**
+ * Reactive runtime classification (Model Registry Task 6). The Claude CLI
+ * accepts `set_model` without validating access, so an unusable model only
+ * fails on the first real turn — surfaced here as the `result` frame's
+ * `api_error_status`. Map that status onto a closed enum of failure reasons.
+ * An unrecognised status returns `null` → today's behaviour (settle the
+ * in-flight marker, no revert).
+ */
+export type ModelRuntimeFailure = "retired" | "blocked" | "overloaded";
+
+export function classifyModelRuntimeError(status: number | undefined): ModelRuntimeFailure | null {
+  if (status === 404) return "retired";
+  if (status === 403) return "blocked";
+  if (status === 429 || (typeof status === "number" && status >= 500 && status <= 599)) return "overloaded";
+  return null;
+}
+
+/** Human-facing copy per failure reason. Mirrors the proactive-substitution
+ * copy (Task 9) so reactive-revert and proactive paths read identically. */
+function modelFailureNotice(
+  reason: ModelRuntimeFailure,
+  model: string | undefined,
+  revertedTo: string | null,
+): string {
+  const named = model ? ` "${model}"` : "";
+  const tail = revertedTo ? ` — reverted to "${revertedTo}"` : "";
+  switch (reason) {
+    case "retired":
+      return `Model${named} is unavailable for this session${tail}. Pick a different model from the selector.`;
+    case "blocked":
+      return `Model${named} is blocked for this session (region or policy)${tail}. Pick a different model from the selector.`;
+    case "overloaded":
+      return `Model${named} is temporarily overloaded${tail}. Try again shortly or pick a different model.`;
+  }
+}
+
+/**
+ * Drift canary: runtime truth is authoritative over the registry. When a model
+ * the registry overlay still considers usable (`active`/`degraded`/unknown —
+ * i.e. NOT pre-suppressed) is killed by a runtime error, the proactive gate
+ * missed it. Emit a structured log so the gap is visible without changing any
+ * control flow. Best-effort: reads the optional registry status carried on the
+ * cached model list (Task 7); absent status reads as "active" (= disagreement).
+ */
+function logRegistryDisagreementIfActive(
+  sessionId: string,
+  backend: string | undefined,
+  model: string | undefined,
+  apiErrorStatus: number | undefined,
+  classifiedAs: ModelRuntimeFailure,
+): void {
+  if (!model) return;
+  const store = useStore.getState();
+  const list = backend === "codex" ? store.dynamicBackendModels.codex : store.dynamicBackendModels.claude;
+  const entry = list?.find((m) => m.value === model) as { status?: string } | undefined;
+  const registryStatus = entry?.status ?? "active";
+  if (registryStatus === "retired" || registryStatus === "blocked") return;
+  console.warn("[ws] registry.disagreement", {
+    event: "registry.disagreement",
+    sessionId,
+    backend,
+    model,
+    apiErrorStatus,
+    classifiedAs,
+    registryStatus,
+  });
+}
+
+/**
+ * Map the server's proactive-substitution wire reason onto the banner's
+ * runtime-failure enum (Task 9). `substituted` always carries a suppression
+ * status; the `overloaded` arm exists only for parity with the reactive copy
+ * and is never produced by the proactive gate.
+ */
+function substitutionNoticeReason(reason: string): "retired" | "blocked" | "overloaded" {
+  if (reason === "blocked") return "blocked";
+  if (reason === "overloaded") return "overloaded";
+  return "retired";
+}
+
 function handleMessage(sessionId: string, event: MessageEvent) {
   let data: BrowserIncomingMessage;
   try {
@@ -666,6 +746,90 @@ function handleParsedMessage(
 
     case "session_update": {
       store.updateSession(sessionId, data.session);
+      break;
+    }
+
+    case "model_substitution": {
+      // Model Registry Task 9 — the server's proactive pre-send gate (Claude
+      // only) decided about an outgoing `set_model` BEFORE any frame crossed
+      // the wire. ModelSwitcher already wrote the requested model optimistically
+      // and seeded a single in-flight marker; reconcile the display + that SAME
+      // marker against the server's decision (never seed a second — EC-41).
+      const subBackend = store.sdkSessions.find((s) => s.sessionId === sessionId)?.backendType;
+      const pendingSwitch = store.pendingClaudeModelSwitches.get(sessionId);
+      const previousModel = pendingSwitch?.previousModel ?? store.sessions.get(sessionId)?.model ?? "";
+
+      const applyOptimisticModel = (model: string) => {
+        store.updateSession(sessionId, { model });
+        store.setSdkSessions(
+          store.sdkSessions.map((sdk) =>
+            sdk.sessionId === sessionId ? { ...sdk, model } : sdk,
+          ),
+        );
+      };
+
+      switch (data.outcome) {
+        case "substituted": {
+          // The server already sent `set_model` to `applied`. Move the
+          // optimistic display off the (retired/blocked) requested id onto the
+          // model actually running, and re-point the existing marker at
+          // `applied` (Map overwrite — same key, not a second marker) so a
+          // later runtime failure reverts to the correct previous model.
+          if (data.applied) {
+            applyOptimisticModel(data.applied);
+            store.setPendingClaudeModelSwitch(sessionId, data.applied, previousModel);
+            store.setModelSubstitutionNotice(sessionId, {
+              requested: data.requested,
+              applied: data.applied,
+              reason: substitutionNoticeReason(data.reason),
+            });
+          }
+          break;
+        }
+        case "needs-user-action": {
+          // Cross-tier swap — never silent (it changes cost). The server sent
+          // NO frame, so roll the optimistic switch back to the previous model
+          // and clear the in-flight marker (nothing is actually in flight),
+          // then hold the proposal for an explicit confirmation dialog. The
+          // proposed replacement is the requested model's registry replacement,
+          // carried on the frontend catalog (Task 7).
+          store.clearPendingClaudeModelSwitch(sessionId);
+          if (previousModel) applyOptimisticModel(previousModel);
+          const list =
+            subBackend === "codex"
+              ? store.dynamicBackendModels.codex
+              : store.dynamicBackendModels.claude;
+          const replacement = list?.find((m) => m.value === data.requested)?.replacement ?? null;
+          if (replacement) {
+            store.setPendingCrossTierSwitch(sessionId, {
+              requested: data.requested,
+              replacement,
+              previousModel,
+            });
+          }
+          break;
+        }
+        case "unavailable": {
+          // No usable replacement — keep the current model. Roll the optimistic
+          // switch back, clear the marker, and surface a single system message
+          // (same channel + phrasing as the reactive-revert path).
+          store.clearPendingClaudeModelSwitch(sessionId);
+          if (previousModel) applyOptimisticModel(previousModel);
+          const unavailableNotice = `Model "${data.requested}" is unavailable for this session — keeping the current model. Pick a different model from the selector.`;
+          store.appendMessage(sessionId, {
+            id: nextId(),
+            role: "system",
+            content: unavailableNotice,
+            timestamp: Date.now(),
+          });
+          // Task 10: the system message renders in MessageFeed (no live region),
+          // so announce it through the dedicated polite region. (`substituted`
+          // is NOT announced here — the ModelFallbackBanner's own role="status"
+          // already speaks it; double-announcing would be a P2 over-announce.)
+          store.announceModelAvailability(sessionId, unavailableNotice);
+          break;
+        }
+      }
       break;
     }
 
@@ -807,38 +971,48 @@ function handleParsedMessage(
       // Resolve any in-flight Claude in-session model switch. ModelSwitcher
       // writes the new model optimistically, but the Claude CLI accepts
       // `set_model` WITHOUT validating access — an unusable model only fails
-      // here, on the first real turn, as a 404. When that happens, revert the
-      // optimistic label and re-issue `set_model` back to the last working
-      // model so the session stays usable; otherwise the turn settled the
-      // switch, so just drop the marker.
+      // here, on the first real turn, as an HTTP error. Classify that status
+      // into a closed enum (Task 6) and, on a recognised failure, revert the
+      // optimistic label to the last working model so the session stays usable.
+      //
+      // The classification is gated on `backendType !== "codex"` BEFORE reading
+      // `api_error_status` — a Codex session relaunches on switch and carries a
+      // different result shape, so its error statuses must never be read here.
+      // An unrecognised status leaves `runtimeFailure` null → today's behaviour
+      // (settle the marker, no revert).
+      const resultBackend = store.sdkSessions.find((s) => s.sessionId === sessionId)?.backendType;
+      const runtimeFailure =
+        resultBackend !== "codex" && r.is_error ? classifyModelRuntimeError(r.api_error_status) : null;
+
       const pendingClaudeSwitch = store.pendingClaudeModelSwitches.get(sessionId);
       if (pendingClaudeSwitch) {
         store.clearPendingClaudeModelSwitch(sessionId);
-        if (r.is_error && r.api_error_status === 404) {
+        if (runtimeFailure) {
           const { requestedModel, previousModel } = pendingClaudeSwitch;
-          if (previousModel && previousModel !== requestedModel) {
-            sendToSession(sessionId, { type: "set_model", model: previousModel });
-            store.updateSession(sessionId, { model: previousModel });
+          const revertedTo = previousModel && previousModel !== requestedModel ? previousModel : null;
+          logRegistryDisagreementIfActive(sessionId, resultBackend, requestedModel, r.api_error_status, runtimeFailure);
+          if (revertedTo) {
+            sendToSession(sessionId, { type: "set_model", model: revertedTo });
+            store.updateSession(sessionId, { model: revertedTo });
             store.setSdkSessions(
               store.sdkSessions.map((sdk) =>
-                sdk.sessionId === sessionId ? { ...sdk, model: previousModel } : sdk,
+                sdk.sessionId === sessionId ? { ...sdk, model: revertedTo } : sdk,
               ),
             );
           }
+          const revertNotice = modelFailureNotice(runtimeFailure, requestedModel, revertedTo);
           store.appendMessage(sessionId, {
             id: nextId(),
             role: "system",
-            content: `Model "${requestedModel}" is unavailable for this session${
-              previousModel && previousModel !== requestedModel
-                ? ` — reverted to "${previousModel}"`
-                : ""
-            }. Pick a different model from the selector.`,
+            content: revertNotice,
             timestamp: Date.now(),
           });
+          // Task 10: announce the reactive revert through the dedicated polite
+          // region — the system message itself reaches no live region.
+          store.announceModelAvailability(sessionId, revertNotice);
         }
       } else if (
-        r.is_error &&
-        r.api_error_status === 404 &&
+        runtimeFailure &&
         typeof r.result === "string" &&
         r.result.toLowerCase().includes("model")
       ) {
@@ -846,18 +1020,19 @@ function handleParsedMessage(
         // the subscription can't use (dropdown sourced from the API-key
         // /v1/models list; sessions run on OAuth). There is no previous model
         // to fall back to, so surface a clear, non-silent message rather than
-        // letting every turn 404 in silence. Claude-only — Codex relaunches on
-        // switch and carries a different result shape.
-        const sdk = store.sdkSessions.find((s) => s.sessionId === sessionId);
-        if (sdk?.backendType !== "codex") {
-          const launchedModel = store.sessions.get(sessionId)?.model;
-          store.appendMessage(sessionId, {
-            id: nextId(),
-            role: "system",
-            content: `Model${launchedModel ? ` "${launchedModel}"` : ""} is unavailable for this session. Pick a different model from the selector.`,
-            timestamp: Date.now(),
-          });
-        }
+        // letting every turn fail in silence. Already Claude-gated via
+        // `runtimeFailure`.
+        const launchedModel = store.sessions.get(sessionId)?.model;
+        logRegistryDisagreementIfActive(sessionId, resultBackend, launchedModel, r.api_error_status, runtimeFailure);
+        const launchFailNotice = modelFailureNotice(runtimeFailure, launchedModel, null);
+        store.appendMessage(sessionId, {
+          id: nextId(),
+          role: "system",
+          content: launchFailNotice,
+          timestamp: Date.now(),
+        });
+        // Task 10: launched-on-unusable-model has no live region either.
+        store.announceModelAvailability(sessionId, launchFailNotice);
       }
 
       const sessionUpdates: Partial<{ total_cost_usd: number; num_turns: number; context_used_percent: number; total_lines_added: number; total_lines_removed: number }> = {

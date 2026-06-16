@@ -20,6 +20,33 @@ function tierOf(value: string): "opus" | "sonnet" | "haiku" | "unknown" {
   return "unknown";
 }
 
+/**
+ * Human label for a non-active registry status (Task 8), rendered as a QUIET
+ * NEUTRAL text-tag in the same slot/style as the "Latest" badge — never a row
+ * recolour (Saarinen P1/P5: the version label stays the primary differentiator;
+ * status is metadata, not a hotspot). `active`/absent → `null` (no tag), so a
+ * registry-unannotated model (and the static-fallback path when the registry is
+ * unreachable) renders exactly as it did before — never a broken picker.
+ */
+function statusTagLabel(status: ModelOption["status"]): string | null {
+  switch (status) {
+    case "degraded":
+      return "Degraded";
+    case "retired":
+      return "Retired";
+    case "blocked":
+      return "Blocked";
+    default:
+      return null; // active / undefined
+  }
+}
+
+/** A model the registry has taken out of service. Cannot be selected directly
+ * (would strand the session); the replacement-substitution flow is Task 9. */
+function isUnavailableStatus(status: ModelOption["status"]): boolean {
+  return status === "retired" || status === "blocked";
+}
+
 export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
   const [open, setOpen] = useState(false);
   // APG listbox keyboard model — `activeIndex` tracks the roving
@@ -126,10 +153,24 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
   const isStickyStale =
     currentOption !== null && !models.some((m) => m.value === currentModel);
 
+  // Task 8 — if the session's CURRENT model is one the registry marked
+  // retired/blocked, annotate the trigger so the recorded preference is shown
+  // as honoured-but-unavailable ("currently unavailable, using Y") rather than
+  // silently overwritten. The substitution itself is Task 9; this is the copy.
+  const currentUnavailable =
+    currentOption !== null && isUnavailableStatus(currentOption.status);
+
   const handleSelect = useCallback(
     async (model: string) => {
       setOpen(false);
       if (model === currentModel || !cliConnected) return;
+
+      // Task 8 — a retired/blocked model can't be selected directly; doing so
+      // would strand the session on a model the registry already knows fails.
+      // The substitute-to-replacement flow (auto-hop to `model.replacement`) is
+      // Task 9; here we simply no-op so the picker never commits a known-bad id.
+      const target = models.find((m) => m.value === model);
+      if (target && isUnavailableStatus(target.status)) return;
 
       if (backendType === "codex") {
         const store = useStore.getState();
@@ -168,7 +209,7 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
         ),
       );
     },
-    [backendType, cliConnected, currentModel, sessionId],
+    [backendType, cliConnected, currentModel, sessionId, models],
   );
 
   // Close on click outside
@@ -326,7 +367,11 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
             ? `Restarting session with ${pendingCodexSwitch.requestedModel}`
             : backendType === "codex" && models.length === 0
               ? "No verified Codex models are available yet"
-              : isStickyStale
+              : currentUnavailable
+            ? currentOption.replacement
+              ? `${currentOption.label} is currently unavailable — using ${currentOption.replacement}`
+              : `${currentOption.label} is currently unavailable`
+            : isStickyStale
             ? `Model "${currentModel}" not in current available list — preserved from your saved preference`
             : `Current model: ${currentOption.label}`
         }
@@ -379,21 +424,43 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
             const isSelected = model.value === currentModel;
             const isActive = index === activeIndex;
             const isLatest = latestPerTier.has(model.value);
+            // Task 8 — registry status overlay. The neutral text-tag replaces
+            // the "Latest" badge in the same slot (a model can't be both the
+            // newest AND retired in a way worth advertising — status wins).
+            const statusLabel = statusTagLabel(model.status);
+            const unavailable = isUnavailableStatus(model.status);
+            // Why-disclosure (Friedman): a retired/blocked row explains the dim
+            // state instead of silently looking broken. The replacement (when
+            // the registry names one) is the actionable part — surface it.
+            const unavailableReason = unavailable
+              ? model.replacement
+                ? `${model.label} is ${model.status} — use ${model.replacement} instead`
+                : `${model.label} is ${model.status} and can't be selected`
+              : null;
             return (
               <div
                 key={model.value}
                 id={`${idPrefix}-option-${index}`}
                 onClick={() => handleSelect(model.value)}
-                title={model.label}
-                className={`w-full flex items-center gap-2 px-3 min-h-[44px] text-[13px] transition-colors cursor-pointer ${
-                  isSelected
-                    ? "text-cc-fg bg-cc-active font-medium"
-                    : isActive
-                      ? "text-cc-fg bg-cc-hover"
-                      : "text-cc-muted hover:text-cc-fg hover:bg-cc-hover"
+                title={unavailableReason ?? model.label}
+                // Task 10 (a11y P5): fold the suppression reason into the
+                // accessible NAME of the disabled option — `title` alone is only
+                // an accessible *description* and many SRs skip it. `aria-label`
+                // overrides name-from-content so the row announces e.g. "Opus 4.7
+                // is retired — use Haiku 4.5 instead" rather than just "Opus 4.7".
+                aria-label={unavailableReason ?? undefined}
+                className={`w-full flex items-center gap-2 px-3 min-h-[44px] text-[13px] transition-colors ${
+                  unavailable
+                    ? "opacity-60 cursor-not-allowed text-cc-muted"
+                    : "cursor-pointer " + (isSelected
+                      ? "text-cc-fg bg-cc-active font-medium"
+                      : isActive
+                        ? "text-cc-fg bg-cc-hover"
+                        : "text-cc-muted hover:text-cc-fg hover:bg-cc-hover")
                 }`}
                 role="option"
                 aria-selected={isSelected}
+                aria-disabled={unavailable || undefined}
               >
                 {model.icon && (
                   <span className="text-[14px] leading-none w-5 text-center shrink-0">
@@ -401,11 +468,15 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
                   </span>
                 )}
                 <span className="flex-1 text-left truncate">{model.label}</span>
-                {isLatest && !isSelected && (
+                {statusLabel ? (
+                  <span className="shrink-0 text-[10px] uppercase tracking-wide text-cc-muted px-1.5 py-0.5 rounded border border-cc-separator">
+                    {statusLabel}
+                  </span>
+                ) : isLatest && !isSelected ? (
                   <span className="shrink-0 text-[10px] uppercase tracking-wide text-cc-muted px-1.5 py-0.5 rounded border border-cc-separator">
                     Latest
                   </span>
-                )}
+                ) : null}
                 {isSelected && (
                   <svg
                     viewBox="0 0 16 16"

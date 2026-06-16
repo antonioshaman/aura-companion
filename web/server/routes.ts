@@ -46,7 +46,8 @@ import { registerLinearConnectionRoutes } from "./routes/linear-connection-route
 import { getConnection, resolveApiKey } from "./linear-connections.js";
 import { registerLinearOAuthConnectionRoutes } from "./routes/linear-oauth-connection-routes.js";
 import { getSettings } from "./settings-manager.js";
-import { getAnthropicModels } from "./anthropic-models-cache.js";
+import { getAnthropicModels, type BackendModelInfo } from "./anthropic-models-cache.js";
+import { lookupModel } from "./model-registry.js";
 import { discoverClaudeSessions } from "./claude-session-discovery.js";
 import { getClaudeSessionHistoryPage } from "./claude-session-history.js";
 import { verifyToken, getToken, regenerateToken, getAllAddresses } from "./auth-manager.js";
@@ -232,6 +233,27 @@ export async function getCachedPairingCapability(
 
 function shellEscapeArg(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * Overlay the registry's per-model annotations onto the served catalog. The
+ * server is the sole substitution-decision owner; the client only learns
+ * whether a model is `status`/`replacement`-annotated so it can render a tag.
+ *
+ * Additive merge (Task 3): a model absent from the registry passes through
+ * untouched, so an old frontend still parses the payload. Hunt REC-4: only
+ * `status` and `replacement` cross the wire — `riskFlags`, `tier`, and the
+ * on-disk file path stay operator-internal.
+ */
+function enrichModelsWithRegistry(
+  backend: "claude" | "codex",
+  models: BackendModelInfo[],
+): BackendModelInfo[] {
+  return models.map((m) => {
+    const entry = lookupModel(backend, m.value);
+    if (entry === null) return m;
+    return { ...m, status: entry.status, replacement: entry.replacement };
+  });
 }
 
 export function createRoutes(
@@ -1754,7 +1776,7 @@ export function createRoutes(
             label: m.display_name || m.slug,
             description: m.description || "",
           }));
-        return c.json(models);
+        return c.json(enrichModelsWithRegistry("codex", models));
       } catch (e) {
         return c.json({ error: "Failed to parse Codex models cache" }, 500);
       }
@@ -1791,7 +1813,7 @@ export function createRoutes(
       });
       switch (result.kind) {
         case "ok":
-          return c.json(result.models);
+          return c.json(enrichModelsWithRegistry("claude", result.models));
         case "no-key":
           return c.json({ error: "no_key_configured" }, 404);
         case "upstream-auth":

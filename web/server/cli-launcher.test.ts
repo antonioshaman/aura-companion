@@ -101,6 +101,20 @@ vi.mock("./codex-models.js", () => ({
   },
 }));
 
+// Model-registry Task 4: control the registry's suppressed-slug set without
+// touching ~/.companion/models.json. Default empty → the union is a no-op so
+// every pre-existing Codex-resolution test stays green; a test that wants to
+// prove suppression mutates the hoisted set before resolving.
+const mockSuppressedCodexModels = vi.hoisted(() => new Set<string>());
+vi.mock("./model-availability.js", async (importOriginal) => {
+  const actual = (await importOriginal()) as typeof import("./model-availability.js");
+  return {
+    ...actual,
+    getSuppressedModelIds: (backend: string) =>
+      backend === "codex" ? new Set(mockSuppressedCodexModels) : new Set<string>(),
+  };
+});
+
 // Mock the legacy Codex home (~/.codex) so prepareCodexHome seeding tests are
 // deterministic and never read the host machine's real auth/config files.
 // Default points at a nonexistent dir → prepareCodexHome no-ops for tests that
@@ -1678,6 +1692,37 @@ describe("codex model-rejection helpers", () => {
 
     expect(resolved.ok).toBe(true);
     expect(resolved.model).toBe("gpt-5.1-codex-mini");
+  });
+
+  // Task 4: a registry-suppressed (retired/blocked) slug is unioned into the
+  // rejection set even when the per-session runtime set is empty — the scorer
+  // never lands on a registry-dead model.
+  it("resolveCodexLaunchModel excludes a registry-suppressed slug (union with runtime rejections)", () => {
+    seedCodexSession();
+    mockSuppressedCodexModels.add("gpt-5.2-codex");
+    try {
+      const resolved = (launcher as any).resolveCodexLaunchModel(SID, "gpt-5.2-codex");
+      expect(resolved.ok).toBe(true);
+      expect(resolved.model).toBe("gpt-5.1-codex-mini");
+    } finally {
+      mockSuppressedCodexModels.clear();
+    }
+  });
+
+  // Task 4: when the registry suppresses EVERY launchable slug, the union
+  // empties the candidate set → unavailable → caller keeps the live session
+  // (no-kill abort at relaunch).
+  it("resolveCodexLaunchModel returns unavailable when the registry suppresses all candidates", () => {
+    seedCodexSession();
+    mockSuppressedCodexModels.add("gpt-5.2-codex");
+    mockSuppressedCodexModels.add("gpt-5.1-codex-mini");
+    try {
+      const resolved = (launcher as any).resolveCodexLaunchModel(SID, "gpt-5.2-codex");
+      expect(resolved.ok).toBe(false);
+      expect(resolved.error).toMatch(/no launchable/i);
+    } finally {
+      mockSuppressedCodexModels.clear();
+    }
   });
 
   it("isCodexModelAvailabilityError distinguishes availability errors from generic failures", () => {

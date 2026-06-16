@@ -256,6 +256,14 @@ export interface BackendModelInfo {
   value: string;
   label: string;
   description: string;
+  /**
+   * Registry annotations the server overlays onto the catalog (Task 3).
+   * Optional + additive: a backend/model absent from the registry omits them,
+   * so older payloads still parse. Operator-internal fields (riskFlags, tier,
+   * file path) never cross the wire — only these two reach the client.
+   */
+  status?: "active" | "degraded" | "retired" | "blocked";
+  replacement?: string | null;
 }
 
 export interface RelaunchSessionOpts {

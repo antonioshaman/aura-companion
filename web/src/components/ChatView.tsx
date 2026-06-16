@@ -8,8 +8,13 @@ import { PermissionBanner } from "./PermissionBanner.js";
 import { AiValidationBadge } from "./AiValidationBadge.js";
 import { BlockerBanner } from "./council/index.js";
 import { CliFailedBanner } from "./CliFailedBanner.js";
+import { ModelFallbackBanner } from "./ModelFallbackBanner.js";
+import { ModelSubstitutionDialog } from "./ModelSubstitutionDialog.js";
+import { ModelAvailabilityAnnouncer } from "./ModelAvailabilityAnnouncer.js";
 import { navigateHome } from "../utils/routing.js";
 import { findUnresolvedStops } from "../observer-panel-state.js";
+import { getModelsForBackend } from "../utils/backends.js";
+import { sendToSession } from "../ws.js";
 
 export function ChatView({ sessionId }: { sessionId: string }) {
   const sessionPerms = useStore((s) => s.pendingPermissions.get(sessionId));
@@ -102,6 +107,64 @@ export function ChatView({ sessionId }: { sessionId: string }) {
   const showCliBanner =
     connStatus === "connected" && !cliConnected && !cliFailure;
 
+  // Model Registry Task 9 — proactive-substitution surfaces. The server's
+  // pre-send gate emits `model_substitution`; ws.ts records either a calm
+  // dismissible notice (same-tier auto-swap) or a pending cross-tier proposal
+  // (never silent). Resolve model ids → human labels via the same catalog the
+  // ModelSwitcher reads (dynamic list, falling back to the static set).
+  const substitutionNotice = useStore((s) => s.modelSubstitutionNotices.get(sessionId));
+  const crossTierSwitch = useStore((s) => s.pendingCrossTierSwitches.get(sessionId));
+  const clearModelSubstitutionNotice = useStore((s) => s.clearModelSubstitutionNotice);
+  const clearPendingCrossTierSwitch = useStore((s) => s.clearPendingCrossTierSwitch);
+  const setPendingClaudeModelSwitch = useStore((s) => s.setPendingClaudeModelSwitch);
+  const updateSession = useStore((s) => s.updateSession);
+  const setSdkSessions = useStore((s) => s.setSdkSessions);
+  const sdkSessions = useStore((s) => s.sdkSessions);
+  const subSdkBackend = useStore((s) => s.sdkSessions.find((sdk) => sdk.sessionId === sessionId)?.backendType);
+  const subRuntimeBackend = useStore((s) => s.sessions.get(sessionId)?.backend_type);
+  const subBackendType = subSdkBackend ?? subRuntimeBackend ?? "claude";
+  const subDynamicModels = useStore((s) => s.dynamicBackendModels[subBackendType]);
+  const modelLabel = useCallback(
+    (id: string): string => {
+      const list = subDynamicModels ?? getModelsForBackend(subBackendType);
+      return list.find((m) => m.value === id)?.label ?? id;
+    },
+    [subDynamicModels, subBackendType],
+  );
+
+  const handleCrossTierConfirm = useCallback(() => {
+    if (!crossTierSwitch) return;
+    const { replacement, previousModel } = crossTierSwitch;
+    clearPendingCrossTierSwitch(sessionId);
+    // Re-run the switch through the normal optimistic path toward the
+    // replacement (now an explicit user choice). The server's gate re-resolves
+    // `replacement` — which is usable — so exactly one frame crosses.
+    setPendingClaudeModelSwitch(sessionId, replacement, previousModel);
+    sendToSession(sessionId, { type: "set_model", model: replacement });
+    updateSession(sessionId, { model: replacement });
+    setSdkSessions(
+      sdkSessions.map((sdk) =>
+        sdk.sessionId === sessionId ? { ...sdk, model: replacement } : sdk,
+      ),
+    );
+  }, [
+    crossTierSwitch,
+    sessionId,
+    clearPendingCrossTierSwitch,
+    setPendingClaudeModelSwitch,
+    updateSession,
+    setSdkSessions,
+    sdkSessions,
+  ]);
+
+  const handleCrossTierCancel = useCallback(() => {
+    clearPendingCrossTierSwitch(sessionId);
+  }, [clearPendingCrossTierSwitch, sessionId]);
+
+  const handleSubstitutionDismiss = useCallback(() => {
+    clearModelSubstitutionNotice(sessionId);
+  }, [clearModelSubstitutionNotice, sessionId]);
+
   // Council Mode: observer half has its permission-mode locked at spawn
   // (EC-1, applyCouncilObserverSpawnConfig). Mounting Composer under the
   // observer would expose a toggle that the server-side gate (ws-bridge)
@@ -162,6 +225,11 @@ export function ChatView({ sessionId }: { sessionId: string }) {
         </div>
       )}
 
+      {/* Model Registry Task 10 — sr-only polite live region announcing the
+          reactive-revert and unavailable events (the substituted event is
+          announced by the ModelFallbackBanner's own role="status"). */}
+      <ModelAvailabilityAnnouncer sessionId={sessionId} />
+
       {/* Message feed */}
       <MessageFeed sessionId={sessionId} />
 
@@ -198,11 +266,36 @@ export function ChatView({ sessionId }: { sessionId: string }) {
         </div>
       ) : null}
 
+      {/* Model Registry Task 9 — proactive same-tier substitution notice. A
+          calm, additive warning banner (NOT priority-gated like the slot above):
+          a model fallback is infrastructure info, never a blocker, so it sits in
+          its own slot and coexists with the chat. */}
+      {substitutionNotice && (
+        <div className="shrink-0 border-t border-cc-border bg-cc-card">
+          <ModelFallbackBanner
+            fromModel={modelLabel(substitutionNotice.requested)}
+            toModel={modelLabel(substitutionNotice.applied)}
+            reason={substitutionNotice.reason}
+            onDismiss={handleSubstitutionDismiss}
+          />
+        </div>
+      )}
+
       {/* Composer — suppressed for the observer half of a Council pair.
           The toggle's set_permission_mode would be rejected server-side
           (ws-bridge observer-guard) and the observer has no user-driven
           chat input by design. */}
       {!isObserver && <Composer sessionId={sessionId} onTextChange={handleComposerText} />}
+
+      {/* Model Registry Task 9 — cross-tier swap requires explicit consent. */}
+      {crossTierSwitch && (
+        <ModelSubstitutionDialog
+          fromModel={modelLabel(crossTierSwitch.requested)}
+          toModel={modelLabel(crossTierSwitch.replacement)}
+          onConfirm={handleCrossTierConfirm}
+          onCancel={handleCrossTierCancel}
+        />
+      )}
     </div>
   );
 }

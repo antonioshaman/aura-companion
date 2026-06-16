@@ -383,6 +383,22 @@ export type BrowserIncomingMessageBase =
   | { type: "status_change"; status: "compacting" | "idle" | "running" | null }
   | { type: "auth_status"; isAuthenticating: boolean; output: string[]; error?: string }
   | { type: "error"; message: string }
+  // Model Registry + Failover Task 5 — proactive pre-send gate decision.
+  // The server is the sole substitution-decision owner: when an outgoing
+  // `set_model` targets a registry-`retired`/`blocked` model, the server
+  // either rewrote the frame to the same-tier replacement (`substituted`,
+  // `applied` = the model actually sent) or suppressed it entirely
+  // (`needs-user-action` for a cross-tier swap, `unavailable` otherwise;
+  // `applied` = null, current model retained). The frontend renders the
+  // inform-vs-ask UX from this (Tasks 8/9). Claude-only — Codex gates at
+  // launch (Task 4).
+  | {
+    type: "model_substitution";
+    requested: string;
+    applied: string | null;
+    outcome: "substituted" | "needs-user-action" | "unavailable";
+    reason: string;
+  }
   | { type: "cli_disconnected" }
   | { type: "cli_connected" }
   // Terminal frame for the session-map eviction sweep (Realtime finding #1).

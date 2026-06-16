@@ -220,19 +220,32 @@ describe("watchReviews", () => {
   it("logs `superseded` when two distinct writes land on the same path inside the debounce window", async () => {
     const seen: ObserverReviewPayload[] = [];
     const onDropped = vi.fn<(r: ReviewDropReason, f: string, d?: string) => void>();
+    // Raise the debounce far above the inter-write gap (test seam). This
+    // decouples "time for the first fs.watch event to be observed" from
+    // "time before the debounce timer flushes": the first event is reliably
+    // seen at chk-Z1's mtime, the timer does not fire mid-gap, and the
+    // second write's distinct mtime deterministically triggers `superseded`.
+    // The original 80 ms gap raced fs.watch delivery latency on loaded CI
+    // runners (delivery > 80 ms → first event observed AFTER chk-Z2 landed →
+    // no superseded; events spread > 150 ms → premature flush → the second
+    // event degraded to `duplicate-review`).
+    const SUPERSEDE_DEBOUNCE_MS = 600;
     const watchPromise = watchReviews({
       directory: dir,
       signal: controller.signal,
       onReview: (p) => { seen.push(p); },
       onDropped,
+      debounceMs: SUPERSEDE_DEBOUNCE_MS,
     });
     const path = join(dir, "phase-z-codex-observer.md");
     writeAtomicJson(path, validReview({ checkpoint_id: "chk-Z1", phase: "phase-z" }));
-    // Force a distinct mtime by waiting a few ms — atomic writes within
-    // the same millisecond can produce identical mtime on some FSes.
-    await new Promise((r) => setTimeout(r, 80));
+    // Gap >> fs.watch delivery latency (typically single/double-digit ms) so
+    // the first event is processed at chk-Z1's mtime, yet << the debounce so
+    // the timer has not flushed when the distinct second write lands.
+    await new Promise((r) => setTimeout(r, 250));
     writeAtomicJson(path, validReview({ checkpoint_id: "chk-Z2", phase: "phase-z" }));
-    await new Promise((r) => setTimeout(r, 500));
+    // Wait out the (rearmed) debounce so the surviving chk-Z2 read flushes.
+    await new Promise((r) => setTimeout(r, SUPERSEDE_DEBOUNCE_MS + 300));
     controller.abort();
     await watchPromise;
     // The second payload still surfaces. The first is no longer

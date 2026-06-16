@@ -5,6 +5,15 @@ export interface ModelOption {
   value: string;
   label: string;
   icon: string;
+  /**
+   * Registry annotations the server overlays onto the served catalog (Task 3),
+   * carried through `toModelOptions` so UI affordances are render-time
+   * derivations from the existing `dynamicBackendModels[backend]` array — NOT a
+   * parallel model-id-keyed client copy (the drift bug, plan Task 7). Optional +
+   * additive: a model absent from the registry omits them and renders as today.
+   */
+  status?: "active" | "degraded" | "retired" | "blocked";
+  replacement?: string | null;
 }
 
 export interface ModeOption {
@@ -44,6 +53,11 @@ export function toModelOptions(models: BackendModelInfo[]): ModelOption[] {
     value: m.value,
     label: m.label || m.value,
     icon: pickIcon(m.value, i),
+    // Carry registry annotations through verbatim. Conditional spread keeps the
+    // object shape identical to pre-registry when the server omits them, so the
+    // common (un-annotated) path stays byte-for-byte the same.
+    ...(m.status !== undefined ? { status: m.status } : {}),
+    ...(m.replacement !== undefined ? { replacement: m.replacement } : {}),
   }));
 }
 

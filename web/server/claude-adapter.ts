@@ -50,6 +50,7 @@ import type { CLIDedupState } from "./ws-bridge-cli-ingest.js";
 import { reportProtocolDrift } from "./protocol-monitor.js";
 import { companionBus } from "./event-bus.js";
 import { isToolUseDeniedForSynthetic, denialMessageForSynthetic } from "./auto-proceed-permissions.js";
+import { resolveModelAvailability } from "./model-availability.js";
 
 // --- Constants ----------------------------------------------------------------
 
@@ -569,6 +570,50 @@ export class ClaudeAdapter implements IBackendAdapter {
   }
 
   private handleOutgoingSetModel(model: string): boolean {
+    // Task 5 — proactive pre-send gate. The server is the substitution-decision
+    // owner: a `retired`/`blocked` target is swapped for its registry
+    // replacement (cap 1 hop, same tier) or suppressed entirely BEFORE any
+    // control_request crosses the wire. This is a PURE pre-send check — no
+    // process kill, no relaunch; idle-kill / auto-relaunch / --resume / PID
+    // reconnect are all untouched. Exactly one frame (or none) reaches the CLI,
+    // so no second in-flight marker is ever seeded.
+    const resolution = resolveModelAvailability({ backend: "claude", requested: model });
+    switch (resolution.kind) {
+      case "ok":
+        return this.emitSetModel(resolution.model);
+      case "substituted":
+        this.browserMessageCb?.({
+          type: "model_substitution",
+          requested: resolution.from,
+          applied: resolution.to,
+          outcome: "substituted",
+          reason: resolution.reason,
+        });
+        return this.emitSetModel(resolution.to);
+      case "needs-user-action":
+        // Cross-tier swap — never silent. Keep the current model and let the
+        // frontend raise an explicit confirmation (Task 9). No frame crosses.
+        this.browserMessageCb?.({
+          type: "model_substitution",
+          requested: resolution.from,
+          applied: null,
+          outcome: "needs-user-action",
+          reason: resolution.reason,
+        });
+        return false;
+      case "unavailable":
+        this.browserMessageCb?.({
+          type: "model_substitution",
+          requested: model,
+          applied: null,
+          outcome: "unavailable",
+          reason: resolution.reason,
+        });
+        return false;
+    }
+  }
+
+  private emitSetModel(model: string): boolean {
     const ndjson = JSON.stringify({
       type: "control_request",
       request_id: randomUUID(),

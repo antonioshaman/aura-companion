@@ -52,6 +52,7 @@ import { join, resolve as resolvePath, sep } from "node:path";
 import { COMPANION_HOME } from "./paths.js";
 import { writeAtomicJson } from "./atomic-write.js";
 import { log } from "./logger.js";
+import type { ModelStatus } from "./model-registry.js";
 
 // ── Schema versioning (Persistence P8) ──────────────────────────────────────
 
@@ -181,6 +182,15 @@ export interface BackendModelInfo {
   value: string;
   label: string;
   description: string;
+  /**
+   * Registry overlay enrichment (Task 3). OPTIONAL + additive — an entry not
+   * carried by the registry omits these, and an older client that ignores them
+   * still parses the payload. Operator-internal fields (`riskFlags`, `tier`,
+   * file path) are NEVER projected here (Hunt REC-4): only the lifecycle
+   * `status` and the single direct `replacement` id reach the client.
+   */
+  status?: ModelStatus;
+  replacement?: string | null;
 }
 
 // ── Per-request result discriminated union (Backend R1 + Fowler R1) ─────────

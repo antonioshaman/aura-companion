@@ -659,4 +659,115 @@ describe("ModelSwitcher", () => {
       expect(screen.queryByRole("listbox")).not.toBeInTheDocument();
     });
   });
+
+  // ── PLAN-aura-model-registry Task 8 — registry status affordances ───────
+  //
+  // The dynamic list now carries optional `status`/`replacement` overlaid by
+  // the server from the model registry. These render as QUIET NEUTRAL text-
+  // tags (never a row recolour) and gate selection of retired/blocked models.
+  describe("registry status affordances (Task 8)", () => {
+    // current model is opus-4-8 (DEFAULT_MODEL) and stays selectable; the
+    // annotated entries are the others.
+    const annotatedClaude = [
+      { value: "claude-opus-4-8", label: "Opus 4.8", icon: "" },
+      { value: "claude-opus-4-7", label: "Opus 4.7", icon: "", status: "retired", replacement: "claude-opus-4-8" },
+      { value: "claude-sonnet-4-6", label: "Sonnet 4.6", icon: "", status: "blocked" },
+      { value: "claude-haiku-4-5-20251001", label: "Haiku 4.5", icon: "", status: "degraded" },
+    ];
+
+    it("renders a quiet neutral status tag for each annotated status", () => {
+      resetStore({ dynamicBackendModels: { claude: annotatedClaude } });
+      render(<ModelSwitcher sessionId="s1" />);
+      fireEvent.click(screen.getByLabelText("Switch model"));
+      expect(screen.getByText("Retired")).toBeInTheDocument();
+      expect(screen.getByText("Blocked")).toBeInTheDocument();
+      expect(screen.getByText("Degraded")).toBeInTheDocument();
+    });
+
+    it("status tag takes precedence over the 'Latest' badge in the shared slot", () => {
+      // sonnet-4-6 is the newest sonnet (would normally carry 'Latest') AND
+      // blocked. The status tag must win so we never advertise a dead model
+      // as the freshest pick.
+      resetStore({ dynamicBackendModels: { claude: annotatedClaude } });
+      render(<ModelSwitcher sessionId="s1" />);
+      fireEvent.click(screen.getByLabelText("Switch model"));
+      const sonnet = screen.getByRole("option", { name: /Sonnet/ });
+      expect(within(sonnet).getByText("Blocked")).toBeInTheDocument();
+      expect(within(sonnet).queryByText("Latest")).not.toBeInTheDocument();
+    });
+
+    it("marks retired/blocked options aria-disabled and does not commit on click", () => {
+      resetStore({ dynamicBackendModels: { claude: annotatedClaude } });
+      render(<ModelSwitcher sessionId="s1" />);
+      fireEvent.click(screen.getByLabelText("Switch model"));
+      const retired = screen.getByRole("option", { name: /Opus 4\.7/ });
+      expect(retired).toHaveAttribute("aria-disabled", "true");
+      fireEvent.click(retired);
+      // Selection is a no-op — no WS send, no optimistic store write, no
+      // pending-switch record. The session is never stranded on a known-bad id.
+      expect(mockSendToSession).not.toHaveBeenCalled();
+      expect(mockSetSdkSessions).not.toHaveBeenCalled();
+      expect(mockSetPendingClaudeModelSwitch).not.toHaveBeenCalled();
+    });
+
+    it("folds the suppression reason + replacement into the disabled option's accessible name (Task 10)", () => {
+      // aria-label overrides name-from-content so a screen reader announces WHY
+      // the row is disabled and where to go instead — not just the model label.
+      resetStore({ dynamicBackendModels: { claude: annotatedClaude } });
+      render(<ModelSwitcher sessionId="s1" />);
+      fireEvent.click(screen.getByLabelText("Switch model"));
+      // Retired with a named replacement → reason + redirect.
+      expect(
+        screen.getByRole("option", { name: "Opus 4.7 is retired — use claude-opus-4-8 instead" }),
+      ).toBeInTheDocument();
+      // Blocked with no replacement → reason + can't-select.
+      expect(
+        screen.getByRole("option", { name: "Sonnet 4.6 is blocked and can't be selected" }),
+      ).toBeInTheDocument();
+    });
+
+    it("a degraded (but available) option stays selectable", () => {
+      resetStore({ dynamicBackendModels: { claude: annotatedClaude } });
+      render(<ModelSwitcher sessionId="s1" />);
+      fireEvent.click(screen.getByLabelText("Switch model"));
+      const haiku = screen.getByRole("option", { name: /Haiku/ });
+      expect(haiku).not.toHaveAttribute("aria-disabled", "true");
+      fireEvent.click(haiku);
+      expect(mockSendToSession).toHaveBeenCalledWith("s1", {
+        type: "set_model",
+        model: "claude-haiku-4-5-20251001",
+      });
+    });
+
+    it("annotates the trigger when the CURRENT model is retired, naming the replacement", () => {
+      // The session is running on a model the registry has since retired. The
+      // recorded preference must be shown as honoured-but-unavailable, never
+      // silently overwritten.
+      resetStore({
+        dynamicBackendModels: {
+          claude: [
+            { value: "claude-opus-4-7", label: "Opus 4.7", icon: "", status: "retired", replacement: "claude-opus-4-8" },
+            { value: "claude-opus-4-8", label: "Opus 4.8", icon: "" },
+          ],
+        },
+        sdkSessions: [{ sessionId: "s1", model: "claude-opus-4-7", backendType: "claude", cwd: "/repo" }],
+        sessions: new Map([["s1", { model: "claude-opus-4-7" }]]),
+      });
+      render(<ModelSwitcher sessionId="s1" />);
+      const trigger = screen.getByLabelText("Switch model");
+      expect(trigger).toHaveAttribute(
+        "title",
+        "Opus 4.7 is currently unavailable — using claude-opus-4-8",
+      );
+    });
+
+    it("passes axe checks with status-annotated options rendered", async () => {
+      resetStore({ dynamicBackendModels: { claude: annotatedClaude } });
+      const { axe } = await import("vitest-axe");
+      const { container } = render(<ModelSwitcher sessionId="s1" />);
+      fireEvent.click(screen.getByLabelText("Switch model"));
+      const results = await axe(container);
+      expect(results).toHaveNoViolations();
+    });
+  });
 });
