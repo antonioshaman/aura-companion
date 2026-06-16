@@ -307,6 +307,13 @@ export function FindingsLog({
       </>
     );
   }
+  // Newest-first display: the source `findings` array is append-ordered
+  // (each review batch pushed onto the end by the council slice), so the
+  // most recent finding is last. Render a reversed copy so fresh findings
+  // surface at the top of the rail. The reversal is display-only — the
+  // announcer effect above still reads the original array (order-independent,
+  // keyed by a Set of ids).
+  const orderedFindings = [...findings].reverse();
   // role="log" must live on a generic container (axe aria-allowed-role —
   // role=log on <ul> is rejected). Wrap the list in a div that owns the
   // log semantics; the inner <ul> retains its native list semantics.
@@ -318,7 +325,7 @@ export function FindingsLog({
         aria-label="Observer findings"
       >
         <ul className="border-t border-cc-border bg-cc-card list-none">
-          {findings.map((f) => (
+          {orderedFindings.map((f) => (
             <FindingRow
               key={f.id}
               finding={f}
