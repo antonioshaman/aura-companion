@@ -116,6 +116,15 @@ export interface ReviewWatcherOptions {
    * identity.
    */
   normalizeRaw?: (raw: string, provider: "claude" | "codex") => string;
+  /**
+   * Debounce window in ms before a settled file is read. Defaults to
+   * {@link DEBOUNCE_MS}. A test seam only: production callers leave it unset.
+   * Tests that exercise the mtime-supersede path raise it so the first
+   * fs.watch event is reliably observed at the intermediate mtime before the
+   * timer flushes — decoupling "time for the event to be seen" from "time
+   * before the timer fires" removes the real-fs.watch timing flake.
+   */
+  debounceMs?: number;
 }
 
 /**
@@ -133,6 +142,7 @@ export async function watchReviews(opts: ReviewWatcherOptions): Promise<void> {
   const timers = new Map<string, { timer: ReturnType<typeof setTimeout>; observedMtimeNs: bigint | null }>();
   const inflight = new Set<Promise<void>>();
   const seenDedupKeys = new Set<string>();
+  const debounceMs = opts.debounceMs ?? DEBOUNCE_MS;
   const onDropped =
     opts.onDropped ??
     ((reason: ReviewDropReason, file: string, detail?: string) =>
@@ -194,7 +204,7 @@ export async function watchReviews(opts: ReviewWatcherOptions): Promise<void> {
         const p = readAndEmit(opts.directory, file, seenDedupKeys, opts.onReview, onDropped, opts.signal, opts.normalizeRaw);
         inflight.add(p);
         p.finally(() => inflight.delete(p));
-      }, DEBOUNCE_MS);
+      }, debounceMs);
       timers.set(file, { timer, observedMtimeNs });
     }
   } catch (err) {

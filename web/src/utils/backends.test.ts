@@ -95,6 +95,38 @@ describe("toModelOptions", () => {
   it("handles empty array", () => {
     expect(toModelOptions([])).toEqual([]);
   });
+
+  // Task 7 (Model Registry): registry annotations the server overlays
+  // (`status`/`replacement`) must survive `toModelOptions` so UI affordances
+  // derive from the existing `dynamicBackendModels[backend]` array rather than a
+  // parallel model-id-keyed copy (the drift bug).
+  it("carries registry status + replacement through verbatim", () => {
+    const options = toModelOptions([
+      { value: "claude-fable-5", label: "Fable 5", description: "", status: "retired", replacement: "claude-opus-4-8" },
+    ]);
+    expect(options[0].status).toBe("retired");
+    expect(options[0].replacement).toBe("claude-opus-4-8");
+  });
+
+  it("carries a null replacement (no suggested target) distinctly from absent", () => {
+    const options = toModelOptions([
+      { value: "claude-blocked", label: "Blocked", description: "", status: "blocked", replacement: null },
+    ]);
+    expect(options[0].status).toBe("blocked");
+    expect(options[0].replacement).toBeNull();
+  });
+
+  // Backward-compat: a model the registry doesn't annotate keeps the exact
+  // pre-registry object shape — the `status`/`replacement` keys are ABSENT (not
+  // `undefined`), so the common un-annotated path is byte-for-byte unchanged.
+  it("omits status/replacement keys entirely when the server sends none", () => {
+    const options = toModelOptions([
+      { value: "gpt-5.2-codex", label: "GPT-5.2 Codex", description: "" },
+    ]);
+    expect(options[0]).not.toHaveProperty("status");
+    expect(options[0]).not.toHaveProperty("replacement");
+    expect(Object.keys(options[0]).sort()).toEqual(["icon", "label", "value"]);
+  });
 });
 
 describe("getModelsForBackend", () => {

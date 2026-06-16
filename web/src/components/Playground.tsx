@@ -25,6 +25,7 @@ import type {
 } from "../types.js";
 import { AiValidationBadge } from "./AiValidationBadge.js";
 import { AiValidationToggle } from "./AiValidationToggle.js";
+import { ModelFallbackBanner } from "./ModelFallbackBanner.js";
 import {
   BlockerBanner,
   CouncilToggle,
@@ -3164,6 +3165,18 @@ function CouncilModeSection() {
         </Card>
         <Card label="DegradedBanner — controlled respawning state">
           <DegradedBanner deadRole="observer" onRespawn={() => {}} isRespawning={true} />
+        </Card>
+
+        {/* PLAN-aura-model-registry Task 8 — model fallback notice. Warning
+            channel (reuses the DegradedBanner recipe), one card per reason. */}
+        <Card label="ModelFallbackBanner — retired model">
+          <ModelFallbackBanner fromModel="Opus 4.7" toModel="Opus 4.8" reason="retired" onDismiss={() => {}} />
+        </Card>
+        <Card label="ModelFallbackBanner — blocked (region/policy)">
+          <ModelFallbackBanner fromModel="Fable 5" toModel="Opus 4.8" reason="blocked" onDismiss={() => {}} />
+        </Card>
+        <Card label="ModelFallbackBanner — temporarily overloaded">
+          <ModelFallbackBanner fromModel="Opus 4.8" toModel="Sonnet 4.6" reason="overloaded" />
         </Card>
 
         {/* PLAN T12 (Phase G) - per-variant CliFailedBanner mocks. Five

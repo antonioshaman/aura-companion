@@ -91,6 +91,15 @@ vi.mock("./anthropic-models-cache.js", () => ({
   getAnthropicModels: vi.fn(async () => ({ kind: "no-key" as const })),
 }));
 
+// Model-registry Task 3: mock the pure registry lookup so the `/models`
+// enrichment is deterministic and decoupled from disk (no ~/.companion read on
+// the test box). Default returns null = "not in registry" so the pre-existing
+// catalog assertions stay unenriched; per-test `mockReturnValueOnce` injects an
+// annotated entry to exercise the additive status/replacement overlay.
+vi.mock("./model-registry.js", () => ({
+  lookupModel: vi.fn(() => null),
+}));
+
 vi.mock("./settings-manager.js", () => ({
   DEFAULT_ANTHROPIC_MODEL: "claude-sonnet-4-6",
   getSettings: vi.fn(() => ({
@@ -281,6 +290,7 @@ import * as gitUtils from "./git-utils.js";
 import * as sessionNames from "./session-names.js";
 import * as settingsManager from "./settings-manager.js";
 import * as anthropicModelsCache from "./anthropic-models-cache.js";
+import * as modelRegistry from "./model-registry.js";
 import * as linearProjectManager from "./linear-project-manager.js";
 import { resolveApiKey } from "./linear-connections.js";
 import { containerManager } from "./container-manager.js";
@@ -3893,6 +3903,86 @@ describe("GET /api/backends/:id/models", () => {
     expect(res.status).toBe(404);
     const body = await res.json();
     expect(body.error).toContain("frontend defaults");
+  });
+
+  // ─── Model-registry Task 3: additive status/replacement enrichment ───
+
+  it("overlays registry status/replacement onto codex models (additive, operator-internal fields stripped)", async () => {
+    const cacheContent = JSON.stringify({
+      models: [
+        { slug: "gpt-5.2-codex", display_name: "gpt-5.2-codex", description: "Frontier model", visibility: "list", priority: 0 },
+      ],
+    });
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue(cacheContent);
+    // Annotate this single slug as retired with a same-tier replacement, plus
+    // operator-internal fields that MUST NOT cross the wire (Hunt REC-4).
+    vi.mocked(modelRegistry.lookupModel).mockReturnValueOnce({
+      id: "gpt-5.2-codex",
+      backend: "codex",
+      status: "retired",
+      replacement: "gpt-5.3-codex",
+      tier: "max",
+      riskFlags: ["export_control_sensitive"],
+    });
+
+    const res = await app.request("/api/backends/codex/models", { method: "GET" });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toEqual([
+      {
+        value: "gpt-5.2-codex",
+        label: "gpt-5.2-codex",
+        description: "Frontier model",
+        status: "retired",
+        replacement: "gpt-5.3-codex",
+      },
+    ]);
+    // tier + riskFlags are operator-internal — they never appear in the payload.
+    expect(json[0]).not.toHaveProperty("tier");
+    expect(json[0]).not.toHaveProperty("riskFlags");
+  });
+
+  it("leaves a model untouched when the registry does not annotate it (backward-compatible passthrough)", async () => {
+    const cacheContent = JSON.stringify({
+      models: [
+        { slug: "gpt-5.2-codex", display_name: "gpt-5.2-codex", description: "Frontier model", visibility: "list", priority: 0 },
+      ],
+    });
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue(cacheContent);
+    // Default mock already returns null; assert no status/replacement is added.
+    const res = await app.request("/api/backends/codex/models", { method: "GET" });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json).toEqual([
+      { value: "gpt-5.2-codex", label: "gpt-5.2-codex", description: "Frontier model" },
+    ]);
+  });
+
+  it("overlays registry annotations onto claude models (claude branch)", async () => {
+    vi.mocked(anthropicModelsCache.getAnthropicModels).mockResolvedValueOnce({
+      kind: "ok",
+      source: "network",
+      fetched_at: 1_000_000_000_000,
+      models: [{ value: "claude-opus-4-8", label: "Opus 4.8", description: "Claude Opus 4.8" }],
+    });
+    vi.mocked(modelRegistry.lookupModel).mockReturnValueOnce({
+      id: "claude-opus-4-8",
+      backend: "claude",
+      status: "degraded",
+      replacement: null,
+      tier: "max",
+    });
+
+    const res = await app.request("/api/backends/claude/models", { method: "GET" });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual([
+      { value: "claude-opus-4-8", label: "Opus 4.8", description: "Claude Opus 4.8", status: "degraded", replacement: null },
+    ]);
   });
 
   it("threads parentSignal (c.req.raw.signal) into getAnthropicModels — browser-cancel propagation", async () => {

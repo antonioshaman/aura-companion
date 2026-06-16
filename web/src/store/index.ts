@@ -99,6 +99,9 @@ export const useStore = create<AppState>((...args) => ({
       cliFailures: new Map(),
       pendingCodexModelSwitches: new Map(),
       pendingClaudeModelSwitches: new Map(),
+      modelSubstitutionNotices: new Map(),
+      pendingCrossTierSwitches: new Map(),
+      modelAvailabilityAnnouncements: new Map(),
     });
   },
 }));

@@ -221,6 +221,9 @@ export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> 
         cliFailures: deleteFromMap(s.cliFailures, sessionId),
         pendingCodexModelSwitches: deleteFromMap(s.pendingCodexModelSwitches, sessionId),
         pendingClaudeModelSwitches: deleteFromMap(s.pendingClaudeModelSwitches, sessionId),
+        modelSubstitutionNotices: deleteFromMap(s.modelSubstitutionNotices, sessionId),
+        pendingCrossTierSwitches: deleteFromMap(s.pendingCrossTierSwitches, sessionId),
+        modelAvailabilityAnnouncements: deleteFromMap(s.modelAvailabilityAnnouncements, sessionId),
       };
     }),
 

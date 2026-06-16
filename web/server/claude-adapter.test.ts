@@ -33,6 +33,20 @@ vi.mock("./settings-manager.js", () => ({
   DEFAULT_ANTHROPIC_MODEL: "claude-sonnet-4-6",
 }));
 
+// Model Registry Task 5: isolate the adapter's pre-send wiring from the
+// failover POLICY (which is exhaustively covered in model-availability.test.ts).
+// Default passes the requested model through unchanged (`ok`); a test that
+// exercises substitution/rejection sets `mockResolution` before calling send().
+const mockResolveModelAvailability = vi.hoisted(() => ({
+  impl: null as null | ((opts: { backend: string; requested: string }) => unknown),
+}));
+vi.mock("./model-availability.js", () => ({
+  resolveModelAvailability: (opts: { backend: string; requested: string }) =>
+    mockResolveModelAvailability.impl
+      ? mockResolveModelAvailability.impl(opts)
+      : { kind: "ok", model: opts.requested },
+}));
+
 import { ClaudeAdapter } from "./claude-adapter.js";
 import { log } from "./logger.js";
 
@@ -188,6 +202,7 @@ let onActivityUpdate: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
   uuidCounter = 0;
+  mockResolveModelAvailability.impl = null;
   onActivityUpdate = vi.fn();
   adapter = new ClaudeAdapter("sess-1", { onActivityUpdate: onActivityUpdate as unknown as () => void });
   browserMessageCb = vi.fn();
@@ -678,6 +693,76 @@ describe("send() — outgoing message translation", () => {
     expect(sent.type).toBe("control_request");
     expect(sent.request.subtype).toBe("set_model");
     expect(sent.request.model).toBe("claude-opus-4-6");
+  });
+
+  it("set_model (proactive gate: substituted) → sends ONE frame for the replacement + emits model_substitution", () => {
+    // Task 5: a retired target is swapped for its same-tier replacement BEFORE
+    // the frame crosses the wire. Exactly one control_request is sent, carrying
+    // the replacement — no second in-flight marker.
+    mockResolveModelAvailability.impl = () => ({
+      kind: "substituted",
+      from: "claude-opus-4-8",
+      to: "claude-opus-4-7",
+      reason: "retired",
+    });
+
+    const result = adapter.send({ type: "set_model", model: "claude-opus-4-8" });
+
+    expect(result).toBe(true);
+    const sent = getLastSent();
+    expect(sent.request.subtype).toBe("set_model");
+    expect(sent.request.model).toBe("claude-opus-4-7");
+    expect(browserMessageCb).toHaveBeenCalledWith({
+      type: "model_substitution",
+      requested: "claude-opus-4-8",
+      applied: "claude-opus-4-7",
+      outcome: "substituted",
+      reason: "retired",
+    });
+  });
+
+  it("set_model (proactive gate: needs-user-action) → sends NO frame + emits model_substitution", () => {
+    // Cross-tier swap requires explicit user action. The current model is
+    // retained: no control_request is emitted and the decision is surfaced.
+    mockResolveModelAvailability.impl = () => ({
+      kind: "needs-user-action",
+      from: "claude-opus-4-8",
+      to: "claude-sonnet-4-6",
+      reason: "cross-tier",
+      suppressed: "retired",
+    });
+
+    const result = adapter.send({ type: "set_model", model: "claude-opus-4-8" });
+
+    expect(result).toBe(false);
+    expect(ws.send).not.toHaveBeenCalled();
+    expect(browserMessageCb).toHaveBeenCalledWith({
+      type: "model_substitution",
+      requested: "claude-opus-4-8",
+      applied: null,
+      outcome: "needs-user-action",
+      reason: "cross-tier",
+    });
+  });
+
+  it("set_model (proactive gate: unavailable) → sends NO frame + emits model_substitution", () => {
+    mockResolveModelAvailability.impl = () => ({
+      kind: "unavailable",
+      model: "claude-opus-4-8",
+      reason: "no-replacement",
+    });
+
+    const result = adapter.send({ type: "set_model", model: "claude-opus-4-8" });
+
+    expect(result).toBe(false);
+    expect(ws.send).not.toHaveBeenCalled();
+    expect(browserMessageCb).toHaveBeenCalledWith({
+      type: "model_substitution",
+      requested: "claude-opus-4-8",
+      applied: null,
+      outcome: "unavailable",
+      reason: "no-replacement",
+    });
   });
 
   it("set_permission_mode → sends control_request with subtype 'set_permission_mode'", () => {
