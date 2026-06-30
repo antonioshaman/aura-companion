@@ -44,49 +44,12 @@ import {
   getLegacyCodexHome,
   resolveCompanionCodexSessionHome,
 } from "./codex-home.js";
+import { reconcileProviderAuthForRelaunch } from "./provider-auth-env.js";
 
 /** Whether WebSocket transport is enabled for Codex sessions. */
 function isCodexWsTransportEnabled(): boolean {
   const val = (process.env.COMPANION_CODEX_TRANSPORT || "ws").toLowerCase();
   return val === "ws" || val === "websocket";
-}
-
-function hasNonEmptyEnvVar(env: Record<string, string> | undefined, key: string): boolean {
-  const value = env?.[key];
-  return typeof value === "string" && value.trim().length > 0;
-}
-
-function hasAnyClaudeAuthEnv(env: Record<string, string> | undefined): boolean {
-  return hasNonEmptyEnvVar(env, "CLAUDE_CODE_OAUTH_TOKEN")
-    || hasNonEmptyEnvVar(env, "ANTHROPIC_API_KEY")
-    || hasNonEmptyEnvVar(env, "ANTHROPIC_AUTH_TOKEN")
-    || hasNonEmptyEnvVar(env, "CLAUDE_CODE_AUTH_TOKEN");
-}
-
-function injectGlobalProviderAuth(
-  env: Record<string, string> | undefined,
-  backendType: BackendType | undefined,
-): Record<string, string> | undefined {
-  const baseEnv = env ? { ...env } : {};
-  const settings = getSettings();
-
-  if (backendType === "claude") {
-    if (!settings.claudeCodeOAuthToken && !settings.anthropicApiKey) {
-      delete baseEnv.ANTHROPIC_API_KEY;
-      delete baseEnv.ANTHROPIC_AUTH_TOKEN;
-      delete baseEnv.CLAUDE_CODE_AUTH_TOKEN;
-    } else if (settings.claudeCodeOAuthToken && !hasNonEmptyEnvVar(baseEnv, "CLAUDE_CODE_OAUTH_TOKEN")) {
-      baseEnv.CLAUDE_CODE_OAUTH_TOKEN = settings.claudeCodeOAuthToken;
-    } else if (settings.anthropicApiKey && !hasAnyClaudeAuthEnv(baseEnv)) {
-      baseEnv.ANTHROPIC_API_KEY = settings.anthropicApiKey;
-    }
-  }
-
-  if (backendType === "codex" && settings.openaiApiKey && !hasNonEmptyEnvVar(baseEnv, "OPENAI_API_KEY")) {
-    baseEnv.OPENAI_API_KEY = settings.openaiApiKey;
-  }
-
-  return Object.keys(baseEnv).length > 0 ? baseEnv : undefined;
 }
 
 /** Find a free TCP port in the given range by attempting to listen on each. */
@@ -248,7 +211,13 @@ export interface LaunchOptions {
   /** When set, Claude `--resume <id>` is passed to restore conversation
    *  context on relaunch. Internal to launcher relaunch path. */
   resumeSessionId?: string;
-  env?: Record<string, string>;
+  /**
+   * Spawn env overrides. Values may be `undefined` to explicitly UNSET an
+   * inherited var: the spawn merge (`{ ...process.env, ...options.env }`) lets
+   * Bun.spawn drop `undefined` keys, which is how the relaunch reconcile clears
+   * a stale auth var that lives on the server's own process.env (P2 #7).
+   */
+  env?: Record<string, string | undefined>;
   backendType?: BackendType;
   /** Codex sandbox mode. */
   codexSandbox?: "workspace-write" | "danger-full-access";
@@ -302,7 +271,7 @@ export class CliLauncher {
   /** Account- or runtime-rejected Codex models, remembered per session to avoid retry loops. */
   private rejectedCodexModels = new Map<string, Set<string>>();
   /** Runtime-only env vars per session (kept out of persisted launcher state). */
-  private sessionEnvs = new Map<string, Record<string, string>>();
+  private sessionEnvs = new Map<string, Record<string, string | undefined>>();
   private port: number;
   private store: SessionStore | null = null;
   private recorder: RecorderManager | null = null;
@@ -1081,7 +1050,11 @@ export class CliLauncher {
       info.model = validatedCodexModel;
     }
 
-    const runtimeEnv = injectGlobalProviderAuth(this.sessionEnvs.get(sessionId), info.backendType);
+    const runtimeEnv = reconcileProviderAuthForRelaunch(
+      this.sessionEnvs.get(sessionId),
+      info.backendType,
+      getSettings(),
+    );
 
     // Subprocess P1#4: pass council context back into the relaunch
     // options so the observer prompt + tool restrictions get re-applied
@@ -1354,7 +1327,9 @@ export class CliLauncher {
       // Pass env vars via -e flags
       if (options.env) {
         for (const [k, v] of Object.entries(options.env)) {
-          dockerArgs.push("-e", `${k}=${v}`);
+          // undefined value = explicit unset (P2 #7): pass `KEY=` so the
+          // container does not inherit a stale value either.
+          dockerArgs.push("-e", v === undefined ? `${k}=` : `${k}=${v}`);
         }
       }
       // Ensure CLAUDECODE is unset inside container
@@ -1585,7 +1560,9 @@ export class CliLauncher {
       const dockerArgs = ["docker", "exec", "-d"];
       if (options.env) {
         for (const [k, v] of Object.entries(options.env)) {
-          dockerArgs.push("-e", `${k}=${v}`);
+          // undefined value = explicit unset (P2 #7): pass `KEY=` so the
+          // container does not inherit a stale value either.
+          dockerArgs.push("-e", v === undefined ? `${k}=` : `${k}=${v}`);
         }
       }
       dockerArgs.push("-e", "CLAUDECODE=");
@@ -1855,7 +1832,9 @@ export class CliLauncher {
       const dockerArgs = ["docker", "exec", "-i"];
       if (options.env) {
         for (const [k, v] of Object.entries(options.env)) {
-          dockerArgs.push("-e", `${k}=${v}`);
+          // undefined value = explicit unset (P2 #7): pass `KEY=` so the
+          // container does not inherit a stale value either.
+          dockerArgs.push("-e", v === undefined ? `${k}=` : `${k}=${v}`);
         }
       }
       dockerArgs.push("-e", "CLAUDECODE=");

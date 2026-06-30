@@ -1052,7 +1052,11 @@ describe("relaunch", () => {
     expect(session?.state).toBe("starting");
   });
 
-  it("reuses launch env variables during relaunch", async () => {
+  // Non-auth launch env vars must survive relaunch untouched. (Claude AUTH
+  // vars are deliberately NOT reused — they are reconciled from global settings
+  // at relaunch, covered separately. We assert a neutral var here so this test
+  // exercises generic env reuse without colliding with the auth-var policy.)
+  it("reuses non-auth launch env variables during relaunch", async () => {
     let resolveFirst: (code: number) => void;
     const firstProc = {
       pid: 12345,
@@ -1067,7 +1071,7 @@ describe("relaunch", () => {
       cwd: "/tmp/project",
       containerId: "abc123def456",
       containerName: "companion-test",
-      env: { CLAUDE_CODE_OAUTH_TOKEN: "tok-test" },
+      env: { MY_CUSTOM_VAR: "custom-value" },
     });
 
     const secondProc = createMockProc(54321);
@@ -1078,7 +1082,7 @@ describe("relaunch", () => {
 
     const [relaunchCmd] = mockSpawn.mock.calls[1];
     expect(relaunchCmd).toContain("-e");
-    expect(relaunchCmd).toContain("CLAUDE_CODE_OAUTH_TOKEN=tok-test");
+    expect(relaunchCmd).toContain("MY_CUSTOM_VAR=custom-value");
   });
 
   it("injects Anthropic API key into claude relaunch when runtime env has no auth", async () => {

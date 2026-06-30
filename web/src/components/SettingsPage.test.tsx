@@ -19,6 +19,9 @@ interface MockStoreState {
   diffBase: string;
   publicUrl: string;
   sdkSessions: Array<{ sessionId: string; archived?: boolean; backendType?: "claude" | "codex" }>;
+  // Council groups carry the authoritative observer identity; SettingsPage
+  // reads `observerSessionId` off each to exclude observer halves from relaunch.
+  groups: Map<string, { observerSessionId: string }>;
   toggleDarkMode: ReturnType<typeof vi.fn>;
   toggleNotificationSound: ReturnType<typeof vi.fn>;
   setNotificationDesktop: ReturnType<typeof vi.fn>;
@@ -40,6 +43,7 @@ function createMockState(overrides: Partial<MockStoreState> = {}): MockStoreStat
     diffBase: "last-commit",
     publicUrl: "",
     sdkSessions: [],
+    groups: new Map(),
     toggleDarkMode: vi.fn(),
     toggleNotificationSound: vi.fn(),
     setNotificationDesktop: vi.fn(),
@@ -1024,7 +1028,10 @@ describe("SettingsPage", () => {
     });
   });
 
-  it("relaunches matching active sessions after saving provider settings", async () => {
+  // Credential-only save (Friedman F1 / #3): saving must NOT silently relaunch
+  // live sessions. Instead it discloses how many still run on the old creds so
+  // the user can apply them via the explicit Relaunch button(s).
+  it("does not auto-relaunch on save; discloses affected sessions instead", async () => {
     mockState = createMockState({
       sdkSessions: [
         { sessionId: "claude-live", backendType: "claude" },
@@ -1057,14 +1064,17 @@ describe("SettingsPage", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Save Provider Settings" }));
 
-    await waitFor(() => {
-      expect(mockApi.relaunchSession).toHaveBeenCalledTimes(1);
-      expect(mockApi.relaunchSession).toHaveBeenCalledWith("codex-live");
-    });
-    expect(screen.getByText(/Relaunched 1 session\(s\)/)).toBeInTheDocument();
+    await screen.findByText("Provider settings saved.");
+    // No relaunch happens on save.
+    expect(mockApi.relaunchSession).not.toHaveBeenCalled();
+    // Only the active codex session (codex-live) is affected; the archived one
+    // is excluded.
+    expect(
+      screen.getByText(/1 active session\(s\) still use the previous credentials/),
+    ).toBeInTheDocument();
   });
 
-  it("allows manual relaunch of active claude sessions without resaving tokens", async () => {
+  it("manually relaunches active claude sessions via the explicit button", async () => {
     mockState = createMockState({
       sdkSessions: [
         { sessionId: "claude-live", backendType: "claude" },
@@ -1083,7 +1093,8 @@ describe("SettingsPage", () => {
     render(<SettingsPage />);
     await screen.findByText("Claude Code token configured");
 
-    fireEvent.click(screen.getByRole("button", { name: "Relaunch Active Claude Sessions" }));
+    // Label carries the live count of affected sessions (P3 #15).
+    fireEvent.click(screen.getByRole("button", { name: "Relaunch 1 Active Claude Session(s)" }));
 
     await waitFor(() => {
       expect(mockApi.relaunchSession).toHaveBeenCalledTimes(1);
@@ -1092,7 +1103,106 @@ describe("SettingsPage", () => {
     expect(screen.getByText("Relaunched 1 session(s) to apply credentials.")).toBeInTheDocument();
   });
 
-  it("disables manual relaunch button when there are no active sessions for that provider", async () => {
+  // The codex relaunch button is independently wired to the codex session set.
+  it("manually relaunches active codex sessions via the explicit button", async () => {
+    mockState = createMockState({
+      sdkSessions: [
+        { sessionId: "claude-live", backendType: "claude" },
+        { sessionId: "codex-live", backendType: "codex" },
+      ],
+    });
+    mockApi.getSettings.mockResolvedValueOnce({
+      anthropicApiKeyConfigured: true,
+      anthropicModel: "claude-sonnet-4-6",
+      claudeCodeOAuthTokenConfigured: true,
+      openaiApiKeyConfigured: true,
+      updateChannel: "stable",
+      publicUrl: "",
+    });
+
+    render(<SettingsPage />);
+    await screen.findByText("Claude Code token configured");
+
+    fireEvent.click(screen.getByRole("button", { name: "Relaunch 1 Active Codex Session(s)" }));
+
+    await waitFor(() => {
+      expect(mockApi.relaunchSession).toHaveBeenCalledTimes(1);
+      expect(mockApi.relaunchSession).toHaveBeenCalledWith("codex-live");
+    });
+    expect(screen.getByText("Relaunched 1 session(s) to apply credentials.")).toBeInTheDocument();
+  });
+
+  // Council OBSERVER halves are server-managed companions; the relaunch filter
+  // must exclude them so Settings never restarts an observer mid-review (#2).
+  it("excludes council observer sessions from the relaunch count", async () => {
+    mockState = createMockState({
+      sdkSessions: [
+        { sessionId: "claude-orchestrator", backendType: "claude" },
+        { sessionId: "claude-observer", backendType: "claude" },
+      ],
+      groups: new Map([
+        ["grp_1", { observerSessionId: "claude-observer" }],
+      ]),
+    });
+    mockApi.getSettings.mockResolvedValueOnce({
+      anthropicApiKeyConfigured: true,
+      anthropicModel: "claude-sonnet-4-6",
+      claudeCodeOAuthTokenConfigured: true,
+      openaiApiKeyConfigured: true,
+      updateChannel: "stable",
+      publicUrl: "",
+    });
+
+    render(<SettingsPage />);
+    await screen.findByText("Claude Code token configured");
+
+    // Two claude sessions exist but one is an observer → count is 1.
+    fireEvent.click(screen.getByRole("button", { name: "Relaunch 1 Active Claude Session(s)" }));
+
+    await waitFor(() => {
+      expect(mockApi.relaunchSession).toHaveBeenCalledTimes(1);
+      expect(mockApi.relaunchSession).toHaveBeenCalledWith("claude-orchestrator");
+    });
+  });
+
+  // Promise.allSettled partial-failure surfaces ONE error message rather than a
+  // conflicting info+error pair (Friedman F5 / #11).
+  it("surfaces a single error message on partial relaunch failure", async () => {
+    mockState = createMockState({
+      sdkSessions: [
+        { sessionId: "claude-a", backendType: "claude" },
+        { sessionId: "claude-b", backendType: "claude" },
+      ],
+    });
+    mockApi.getSettings.mockResolvedValueOnce({
+      anthropicApiKeyConfigured: true,
+      anthropicModel: "claude-sonnet-4-6",
+      claudeCodeOAuthTokenConfigured: true,
+      openaiApiKeyConfigured: true,
+      updateChannel: "stable",
+      publicUrl: "",
+    });
+    mockApi.relaunchSession
+      .mockResolvedValueOnce({ ok: true })
+      .mockRejectedValueOnce(new Error("boom"));
+
+    render(<SettingsPage />);
+    await screen.findByText("Claude Code token configured");
+
+    fireEvent.click(screen.getByRole("button", { name: "Relaunch 2 Active Claude Session(s)" }));
+
+    await waitFor(() => {
+      expect(mockApi.relaunchSession).toHaveBeenCalledTimes(2);
+    });
+    expect(
+      await screen.findByText(/Relaunched 1 of 2 session\(s\); 1 could not be relaunched/),
+    ).toBeInTheDocument();
+  });
+
+  // When no active sessions match a provider, the relaunch button is disabled
+  // via aria-disabled (kept focusable for SR users, a11y F3) and labelled so the
+  // disabled reason is self-evident (#12).
+  it("aria-disables relaunch buttons with an explanatory label when no sessions match", async () => {
     mockState = createMockState({
       sdkSessions: [
         { sessionId: "codex-archived", backendType: "codex", archived: true },
@@ -1110,8 +1220,14 @@ describe("SettingsPage", () => {
     render(<SettingsPage />);
     await screen.findByText("Claude Code token configured");
 
-    expect(screen.getByRole("button", { name: "Relaunch Active Claude Sessions" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Relaunch Active Codex Sessions" })).toBeDisabled();
+    const claudeBtn = screen.getByRole("button", { name: "No Active Claude Sessions" });
+    const codexBtn = screen.getByRole("button", { name: "No Active Codex Sessions" });
+    expect(claudeBtn).toHaveAttribute("aria-disabled", "true");
+    expect(codexBtn).toHaveAttribute("aria-disabled", "true");
+
+    // The guard prevents the API call even if a click lands on the control.
+    fireEvent.click(claudeBtn);
+    expect(mockApi.relaunchSession).not.toHaveBeenCalled();
   });
 
   // Verifies that the save button is disabled when both provider inputs are empty

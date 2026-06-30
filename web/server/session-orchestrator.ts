@@ -56,20 +56,9 @@ import type {
   BrowserObserverFinding,
 } from "./session-types.js";
 import { buildBrowserGroupRecord } from "./browser-group-record.js";
+import { hasNonEmptyEnvVar, hasAnyClaudeAuthEnv } from "./provider-auth-env.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
-
-function hasNonEmptyEnvVar(env: Record<string, string> | undefined, key: string): boolean {
-  const value = env?.[key];
-  return typeof value === "string" && value.trim().length > 0;
-}
-
-function hasAnyClaudeAuthEnv(env: Record<string, string> | undefined): boolean {
-  return hasNonEmptyEnvVar(env, "CLAUDE_CODE_OAUTH_TOKEN")
-    || hasNonEmptyEnvVar(env, "ANTHROPIC_API_KEY")
-    || hasNonEmptyEnvVar(env, "ANTHROPIC_AUTH_TOKEN")
-    || hasNonEmptyEnvVar(env, "CLAUDE_CODE_AUTH_TOKEN");
-}
 
 const MAX_AUTO_RELAUNCHES = 3;
 const RELAUNCH_GRACE_MS = 10_000;
@@ -3224,7 +3213,19 @@ export class SessionOrchestrator {
     if (session?.stateMachine) {
       session.stateMachine.transition("starting", "relaunch_initiated");
     }
-    return this.launcher.relaunch(sessionId, opts);
+    // EC-2 / CR-12: a manually-triggered relaunch (Settings "apply
+    // credentials", explicit relaunch button) SIGTERMs the old proc exactly
+    // like the auto-relaunch path. For a council half that intentional kill
+    // would otherwise be seen as a real death by the `session:exited` listener
+    // → `armReconnect` → transient reconnecting/degraded flicker on a healthy
+    // pair. Mark intentional BEFORE the kill and ALWAYS clear in finally (a
+    // stale mark would lock `scheduleProactiveRelaunch` out of recovery).
+    this.intentionalKills.add(sessionId);
+    try {
+      return await this.launcher.relaunch(sessionId, opts);
+    } finally {
+      this.intentionalKills.delete(sessionId);
+    }
   }
 
   // ── Archive ────────────────────────────────────────────────────────────────

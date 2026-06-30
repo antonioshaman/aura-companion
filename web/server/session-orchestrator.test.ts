@@ -1251,6 +1251,41 @@ describe("SessionOrchestrator", () => {
       expect(result.ok).toBe(false);
       expect(result.error).toContain("Container removed externally");
     });
+
+    // EC-2: a manual relaunch SIGTERMs the old proc; for a council half that
+    // intentional kill must be visible in `intentionalKills` AT KILL TIME so the
+    // `session:exited` listener does not arm reconnect/degraded on a healthy pair.
+    it("marks the session intentional during the kill, then clears it (EC-2)", async () => {
+      let intentionalDuringRelaunch = false;
+      deps.launcher.relaunch.mockImplementation(async () => {
+        intentionalDuringRelaunch = (
+          orchestrator as unknown as { intentionalKills: Set<string> }
+        ).intentionalKills.has("s1");
+        return { ok: true };
+      });
+
+      const result = await orchestrator.relaunchSession("s1");
+
+      expect(result.ok).toBe(true);
+      // Present DURING the relaunch...
+      expect(intentionalDuringRelaunch).toBe(true);
+      // ...cleared AFTER, so a later real death can still drive recovery.
+      expect(
+        (orchestrator as unknown as { intentionalKills: Set<string> }).intentionalKills.has("s1"),
+      ).toBe(false);
+    });
+
+    // The intentional mark must be cleared even when the relaunch throws — a
+    // stale mark would lock `scheduleProactiveRelaunch` out of recovery forever.
+    it("clears the intentional mark even if launcher.relaunch throws (EC-2)", async () => {
+      deps.launcher.relaunch.mockRejectedValueOnce(new Error("spawn failed"));
+
+      await expect(orchestrator.relaunchSession("s1")).rejects.toThrow("spawn failed");
+
+      expect(
+        (orchestrator as unknown as { intentionalKills: Set<string> }).intentionalKills.has("s1"),
+      ).toBe(false);
+    });
   });
 
   // ── Archive ───────────────────────────────────────────────────────────────
