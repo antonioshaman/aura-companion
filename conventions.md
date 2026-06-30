@@ -520,3 +520,27 @@ Reference: Council Review 2026-06-04-1826 P2 #10 — `signalCoalesceDegradeLogge
 
 **Principle:** Converge equivalent outcomes on one channel; sibling EC-8 (single idempotent exit) + memory `feedback_symmetric_path_missing_transformation` (parallel paths whose one missing branch is the bug) + `feedback_single_ack_defensive_path_first`.
 
+---
+
+### EC-52: A manually-triggered relaunch MUST mark the session intentional BEFORE the kill and ALWAYS clear it in `finally` — same EC-2 discipline as the auto-relaunch path
+
+**Convention:** EC-2 (group-aware kills mark both ids intentional before either kill) is not limited to archive/delete. ANY relaunch that SIGTERMs a live process — the Settings "apply provider credentials" action, the explicit per-session relaunch button, the model-override relaunch — destroys and respawns a process. For a Council half that intentional kill is otherwise indistinguishable from a real death to the `session:exited` listener, which drives `armReconnect` → a transient `reconnecting`/`degraded` flicker on a perfectly healthy pair. Therefore `relaunchSession` MUST add the session id to `intentionalKills` BEFORE invoking `launcher.relaunch`, and MUST remove it in a `finally` block so a stale mark can never lock `scheduleProactiveRelaunch` out of genuine recovery later.
+
+**How to apply:** Mark-before-kill, clear-in-finally is the shape for every code path that intentionally tears down a live CLI process and expects it back. The `finally` is non-negotiable: a relaunch that throws must not leave the id marked, or the next real death is silently swallowed. Test both the during-relaunch presence (mark visible at kill time) and the after/throw absence (mark cleared on success AND on exception).
+
+**Origin:** Subprocess × Realtime — Council Review (PR #142, provider-credential relaunch, Finding #2 — manual relaunch flapped a healthy council pair to degraded)
+
+**Principle:** Extend the intentional-kill boundary to every deliberate teardown, not just lifecycle archive; sibling EC-2 (group-aware kills mark intentional first) + EC-8 (single idempotent exit) + memory `feedback_validate_replacement_before_destroying_working_resource`.
+
+---
+
+### AP-19: Provider auth env at relaunch is reconciled through ONE module with global-authoritative Claude semantics; Codex stays inject-if-absent
+
+**Pattern:** Auth environment variables for a relaunch are NOT carried forward verbatim from the previous spawn env — they are reconciled from the current global provider settings through a single shared module (`provider-auth-env.ts` → `reconcileProviderAuthForRelaunch`). For Claude the global settings are AUTHORITATIVE: clear ALL Claude auth vars (`CLAUDE_AUTH_ENV_VARS` — OAuth token + the three API/auth-token keys) by setting each to explicit `undefined` (NOT `delete`), then set exactly the one chosen credential (OAuth preferred over API key). The explicit `undefined` matters because the Bun spawn-env merge is `{...process.env, ...options.env}` — a `delete`d key would let an inherited `process.env` value shadow the intended state, so the var must be present-and-undefined to win the merge. When global settings carry NO Claude credential, ALL Claude auth vars are cleared symmetrically (deliberate de-auth, not a no-op). Codex is the asymmetric case: `OPENAI_API_KEY` is injected ONLY if absent, because an explicit env-profile key legitimately outranks the global default (precedence-skip).
+
+**How to apply:** Never hand-roll auth-var manipulation at a spawn/relaunch site; route through `reconcileProviderAuthForRelaunch`. Claude = full clear-then-set (explicit undefined, OAuth>key, symmetric de-auth on empty). Codex = inject-if-absent. Non-auth env vars pass through untouched. New backends that gain a credential pick their side of the precedence model explicitly and add a test asserting it.
+
+**Origin:** Hunt × Backend-TS — Council Review (PR #142, provider-credential relaunch, Findings #1/#7/#10b — stale auth var shadowing the chosen credential; inherited `process.env` surviving a `delete`)
+
+**Rationale:** A relaunch is the moment the operator's current credential intent must take effect; reusing the old spawn env strands a session on a revoked/rotated key. Centralizing the precedence model in one module keeps the four-way Claude var interaction and the Codex asymmetry from drifting per call site; sibling memory `feedback_validate_replacement_before_destroying_working_resource` + `feedback_symmetric_path_missing_transformation`.
+
