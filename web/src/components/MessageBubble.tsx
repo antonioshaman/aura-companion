@@ -1,4 +1,4 @@
-import { useState, useMemo, type ComponentProps } from "react";
+import { useState, useMemo, useId, type ComponentProps } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { ChatMessage, ContentBlock } from "../types.js";
@@ -60,6 +60,16 @@ interface ToolUseInfo {
   input: Record<string, unknown>;
 }
 
+interface ParsedToolAuthError {
+  message: string;
+  requestId?: string;
+  statusCode?: string;
+  /** Original tool-result body, kept so the auth-error card never discards the
+   *  developer's real output — it stays available behind a "show raw" toggle
+   *  (council review 2026-06-30 P1 #4). */
+  raw: string;
+}
+
 type GroupedBlock =
   | { kind: "content"; block: ContentBlock }
   | { kind: "tool_group"; name: string; items: ToolGroupItem[] };
@@ -95,6 +105,104 @@ function mapToolUsesById(blocks: ContentBlock[]): Map<string, ToolUseInfo> {
     }
   }
   return map;
+}
+
+// Local filesystem/search tools never cross a provider auth boundary; their
+// bodies are the main false-positive source (a grep over source that mentions
+// "authentication_error", a failing assertion on "Invalid API key"). The
+// auth-error reframing is reserved for tools that actually hit a provider API
+// (council review 2026-06-30 P1 #4 / P2 #8).
+const NON_PROVIDER_TOOLS = new Set([
+  "Read", "Write", "Edit", "MultiEdit", "NotebookEdit",
+  "Grep", "Glob", "LS", "TodoWrite",
+]);
+
+// High-signal, full-phrase auth markers a real provider emits in plaintext
+// (claude + OpenAI/codex shapes). Deliberately NOT short fragments like
+// "invalid api key" that legitimately appear in source or test output — those
+// only count inside a structured error envelope.
+const PROVIDER_AUTH_PHRASES = [
+  "failed to authenticate",
+  "incorrect api key provided",
+  "you didn't provide an api key",
+  "oauth token has expired",
+  "invalid x-api-key",
+  "could not resolve authentication method",
+];
+
+const AUTH_ERROR_TYPE_RE =
+  /(authentication|unauthorized|permission|invalid[_-]?(?:x[_-]?)?api[_-]?key|oauth)/i;
+
+/** Best-effort extraction of an embedded JSON object (handles a "API Error: 401
+ *  {…}" prefix and a trailing-garbage suffix). Two bounded parse attempts, no
+ *  ReDoS. */
+function extractJsonObject(text: string): Record<string, unknown> | null {
+  const start = text.indexOf("{");
+  const lastEnd = text.lastIndexOf("}");
+  if (start === -1 || lastEnd <= start) return null;
+  const tryParse = (s: string): Record<string, unknown> | null => {
+    try {
+      const p = JSON.parse(s) as unknown;
+      return p && typeof p === "object" ? (p as Record<string, unknown>) : null;
+    } catch {
+      return null;
+    }
+  };
+  const whole = tryParse(text.slice(start, lastEnd + 1));
+  if (whole) return whole;
+  let depth = 0;
+  for (let i = start; i <= lastEnd; i++) {
+    if (text[i] === "{") depth++;
+    else if (text[i] === "}") {
+      depth--;
+      if (depth === 0) return tryParse(text.slice(start, i + 1));
+    }
+  }
+  return null;
+}
+
+function parseToolAuthError(content: string, toolName?: string): ParsedToolAuthError | null {
+  if (toolName && NON_PROVIDER_TOOLS.has(toolName)) return null;
+  const trimmed = content.trim();
+  if (!trimmed) return null;
+
+  // Structured oracle first: a provider error envelope { type:"error",
+  // error:{ type, message } } or an explicit 401/403 status. This is what
+  // distinguishes a real auth failure from arbitrary tool output that merely
+  // mentions auth.
+  const obj = extractJsonObject(trimmed);
+  const errEnvelope =
+    obj && typeof obj.error === "object" && obj.error
+      ? (obj.error as Record<string, unknown>)
+      : obj;
+  const errorType = typeof errEnvelope?.type === "string" ? errEnvelope.type : undefined;
+  const envelopeMessage =
+    typeof errEnvelope?.message === "string" ? errEnvelope.message : undefined;
+  const requestId =
+    (typeof obj?.request_id === "string" ? obj.request_id : undefined)
+    ?? trimmed.match(/"request_id"\s*:\s*"([^"\\]+)"/)?.[1];
+
+  const numericStatus =
+    (typeof obj?.api_error_status === "number" ? String(obj.api_error_status) : undefined)
+    ?? (typeof obj?.status === "number" ? String(obj.status) : undefined)
+    ?? trimmed.match(/\b(?:API Error|status(?:Code)?|HTTP)\b[^0-9]{0,12}(\d{3})/i)?.[1];
+
+  const statusIsAuth = numericStatus === "401" || numericStatus === "403";
+  const typeIsAuth = errorType ? AUTH_ERROR_TYPE_RE.test(errorType) : false;
+
+  // Fallback for bodies with no JSON envelope (e.g. an OpenAI plaintext key
+  // error): require a high-signal full phrase, never a bare fragment.
+  const lower = trimmed.toLowerCase();
+  const phraseIsAuth = PROVIDER_AUTH_PHRASES.some((p) => lower.includes(p));
+
+  if (!statusIsAuth && !typeIsAuth && !phraseIsAuth) return null;
+
+  let message = envelopeMessage || "Authentication failed";
+  if (numericStatus) {
+    message = `${message} (API ${numericStatus})`;
+  }
+
+  return { message, requestId, statusCode: numericStatus, raw: trimmed };
 }
 
 function AssistantMessage({ message }: { message: ChatMessage }) {
@@ -304,8 +412,16 @@ function ContentBlockRenderer({
     const linkedTool = toolUseById.get(block.tool_use_id);
     const toolName = linkedTool?.name;
     const isError = block.is_error ?? false;
+    const authError = isError ? parseToolAuthError(content, toolName) : null;
+    // Bash output is shown raw BEFORE the auth-error check on purpose: a Bash
+    // step (e.g. `curl https://api…` returning 401) is exactly where the body
+    // is most likely to contain auth phrases the user wants to see verbatim, so
+    // it is never reframed into the auth-error card.
     if (toolName === "Bash") {
       return <BashResultBlock text={content} isError={isError} />;
+    }
+    if (authError) {
+      return <ToolAuthErrorBlock error={authError} />;
     }
     return (
       <div className="rounded-lg bg-cc-code-bg overflow-hidden">
@@ -347,6 +463,47 @@ function BashResultBlock({ text, isError }: { text: string; isError: boolean }) 
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+function ToolAuthErrorBlock({ error }: { error: ParsedToolAuthError }) {
+  const [showRaw, setShowRaw] = useState(false);
+  const headingId = useId();
+  return (
+    // role="status" + aria-labelledby make the error nature explicit to AT
+    // without relying on the red token alone (council review P2 #9 / a11y F6).
+    <div
+      role="status"
+      aria-labelledby={headingId}
+      className="rounded-lg border border-cc-error/25 bg-cc-error/8 px-3 py-2"
+    >
+      <div id={headingId} className="text-[12px] font-medium text-cc-error">
+        Authentication failed
+      </div>
+      <div className="mt-1 text-[12px] leading-relaxed text-cc-fg">
+        {error.message}
+      </div>
+      {error.requestId ? (
+        // Full cc-muted (no opacity) at 11px to clear WCAG 1.4.3 AA in both
+        // themes (a11y F5 — the prior text-[10px] cc-muted/70 failed contrast).
+        <div className="mt-1 text-[11px] font-mono-code text-cc-muted">
+          Request ID: {error.requestId}
+        </div>
+      ) : null}
+      <button
+        type="button"
+        onClick={() => setShowRaw((v) => !v)}
+        aria-expanded={showRaw}
+        className="mt-1.5 text-[10px] text-cc-muted hover:text-cc-fg transition-colors cursor-pointer"
+      >
+        {showRaw ? "Hide raw" : "Show raw"}
+      </button>
+      {showRaw ? (
+        <pre className="mt-1 text-[11px] font-mono-code px-2 py-1.5 rounded bg-cc-code-bg text-cc-code-fg/70 whitespace-pre-wrap leading-relaxed max-h-60 overflow-y-auto">
+          {error.raw}
+        </pre>
+      ) : null}
     </div>
   );
 }

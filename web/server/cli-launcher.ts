@@ -39,10 +39,12 @@ import { companionBus } from "./event-bus.js";
 import type { RelaunchExhaustedReason } from "./event-bus-types.js";
 import { selectLaunchableCodexModel } from "./codex-models.js";
 import { getSuppressedModelIds } from "./model-availability.js";
+import { getSettings } from "./settings-manager.js";
 import {
   getLegacyCodexHome,
   resolveCompanionCodexSessionHome,
 } from "./codex-home.js";
+import { reconcileProviderAuthForRelaunch } from "./provider-auth-env.js";
 
 /** Whether WebSocket transport is enabled for Codex sessions. */
 function isCodexWsTransportEnabled(): boolean {
@@ -209,7 +211,13 @@ export interface LaunchOptions {
   /** When set, Claude `--resume <id>` is passed to restore conversation
    *  context on relaunch. Internal to launcher relaunch path. */
   resumeSessionId?: string;
-  env?: Record<string, string>;
+  /**
+   * Spawn env overrides. Values may be `undefined` to explicitly UNSET an
+   * inherited var: the spawn merge (`{ ...process.env, ...options.env }`) lets
+   * Bun.spawn drop `undefined` keys, which is how the relaunch reconcile clears
+   * a stale auth var that lives on the server's own process.env (P2 #7).
+   */
+  env?: Record<string, string | undefined>;
   backendType?: BackendType;
   /** Codex sandbox mode. */
   codexSandbox?: "workspace-write" | "danger-full-access";
@@ -263,7 +271,7 @@ export class CliLauncher {
   /** Account- or runtime-rejected Codex models, remembered per session to avoid retry loops. */
   private rejectedCodexModels = new Map<string, Set<string>>();
   /** Runtime-only env vars per session (kept out of persisted launcher state). */
-  private sessionEnvs = new Map<string, Record<string, string>>();
+  private sessionEnvs = new Map<string, Record<string, string | undefined>>();
   private port: number;
   private store: SessionStore | null = null;
   private recorder: RecorderManager | null = null;
@@ -1042,7 +1050,11 @@ export class CliLauncher {
       info.model = validatedCodexModel;
     }
 
-    const runtimeEnv = this.sessionEnvs.get(sessionId);
+    const runtimeEnv = reconcileProviderAuthForRelaunch(
+      this.sessionEnvs.get(sessionId),
+      info.backendType,
+      getSettings(),
+    );
 
     // Subprocess P1#4: pass council context back into the relaunch
     // options so the observer prompt + tool restrictions get re-applied
@@ -1315,7 +1327,9 @@ export class CliLauncher {
       // Pass env vars via -e flags
       if (options.env) {
         for (const [k, v] of Object.entries(options.env)) {
-          dockerArgs.push("-e", `${k}=${v}`);
+          // undefined value = explicit unset (P2 #7): pass `KEY=` so the
+          // container does not inherit a stale value either.
+          dockerArgs.push("-e", v === undefined ? `${k}=` : `${k}=${v}`);
         }
       }
       // Ensure CLAUDECODE is unset inside container
@@ -1546,7 +1560,9 @@ export class CliLauncher {
       const dockerArgs = ["docker", "exec", "-d"];
       if (options.env) {
         for (const [k, v] of Object.entries(options.env)) {
-          dockerArgs.push("-e", `${k}=${v}`);
+          // undefined value = explicit unset (P2 #7): pass `KEY=` so the
+          // container does not inherit a stale value either.
+          dockerArgs.push("-e", v === undefined ? `${k}=` : `${k}=${v}`);
         }
       }
       dockerArgs.push("-e", "CLAUDECODE=");
@@ -1816,7 +1832,9 @@ export class CliLauncher {
       const dockerArgs = ["docker", "exec", "-i"];
       if (options.env) {
         for (const [k, v] of Object.entries(options.env)) {
-          dockerArgs.push("-e", `${k}=${v}`);
+          // undefined value = explicit unset (P2 #7): pass `KEY=` so the
+          // container does not inherit a stale value either.
+          dockerArgs.push("-e", v === undefined ? `${k}=` : `${k}=${v}`);
         }
       }
       dockerArgs.push("-e", "CLAUDECODE=");

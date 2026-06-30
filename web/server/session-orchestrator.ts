@@ -56,6 +56,7 @@ import type {
   BrowserObserverFinding,
 } from "./session-types.js";
 import { buildBrowserGroupRecord } from "./browser-group-record.js";
+import { hasNonEmptyEnvVar, hasAnyClaudeAuthEnv } from "./provider-auth-env.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -2838,10 +2839,12 @@ export class SessionOrchestrator {
       // global onboarding tokens serve as defaults for all session types, including
       // containers, so that container auth preflight checks pass automatically.
       const globalSettings = getSettings();
-      if (backend === "claude" && globalSettings.claudeCodeOAuthToken && !("CLAUDE_CODE_OAUTH_TOKEN" in (envVars ?? {}))) {
+      if (backend === "claude" && globalSettings.claudeCodeOAuthToken && !hasNonEmptyEnvVar(envVars, "CLAUDE_CODE_OAUTH_TOKEN")) {
         envVars = { ...envVars, CLAUDE_CODE_OAUTH_TOKEN: globalSettings.claudeCodeOAuthToken };
+      } else if (backend === "claude" && globalSettings.anthropicApiKey && !hasAnyClaudeAuthEnv(envVars)) {
+        envVars = { ...envVars, ANTHROPIC_API_KEY: globalSettings.anthropicApiKey };
       }
-      if (backend === "codex" && globalSettings.openaiApiKey && !("OPENAI_API_KEY" in (envVars ?? {}))) {
+      if (backend === "codex" && globalSettings.openaiApiKey && !hasNonEmptyEnvVar(envVars, "OPENAI_API_KEY")) {
         envVars = { ...envVars, OPENAI_API_KEY: globalSettings.openaiApiKey };
       }
 
@@ -3210,7 +3213,19 @@ export class SessionOrchestrator {
     if (session?.stateMachine) {
       session.stateMachine.transition("starting", "relaunch_initiated");
     }
-    return this.launcher.relaunch(sessionId, opts);
+    // EC-2 / CR-12: a manually-triggered relaunch (Settings "apply
+    // credentials", explicit relaunch button) SIGTERMs the old proc exactly
+    // like the auto-relaunch path. For a council half that intentional kill
+    // would otherwise be seen as a real death by the `session:exited` listener
+    // → `armReconnect` → transient reconnecting/degraded flicker on a healthy
+    // pair. Mark intentional BEFORE the kill and ALWAYS clear in finally (a
+    // stale mark would lock `scheduleProactiveRelaunch` out of recovery).
+    this.intentionalKills.add(sessionId);
+    try {
+      return await this.launcher.relaunch(sessionId, opts);
+    } finally {
+      this.intentionalKills.delete(sessionId);
+    }
   }
 
   // ── Archive ────────────────────────────────────────────────────────────────

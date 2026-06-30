@@ -602,6 +602,22 @@ describe("SessionOrchestrator", () => {
       );
     });
 
+    it("falls back to ANTHROPIC_API_KEY for claude backend when oauth token is absent", async () => {
+      vi.mocked(settingsManager.getSettings).mockReturnValue({
+        ...settingsManager.getSettings(),
+        claudeCodeOAuthToken: "",
+        anthropicApiKey: "sk-ant-fallback",
+      });
+
+      await orchestrator.createSession({ cwd: "/test", backend: "claude" });
+
+      expect(deps.launcher.launch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          env: expect.objectContaining({ ANTHROPIC_API_KEY: "sk-ant-fallback" }),
+        }),
+      );
+    });
+
     // Verifies that OPENAI_API_KEY is injected from global settings
     // when the session backend is "codex" and no key is already set
     it("injects OPENAI_API_KEY from global settings for codex backend", async () => {
@@ -638,6 +654,69 @@ describe("SessionOrchestrator", () => {
       expect(deps.launcher.launch).toHaveBeenCalledWith(
         expect.objectContaining({
           env: expect.objectContaining({ CLAUDE_CODE_OAUTH_TOKEN: "env-profile-token" }),
+        }),
+      );
+    });
+
+    it("replaces blank CLAUDE_CODE_OAUTH_TOKEN from env profile with global settings token", async () => {
+      vi.mocked(settingsManager.getSettings).mockReturnValue({
+        ...settingsManager.getSettings(),
+        claudeCodeOAuthToken: "global-token",
+      });
+      vi.mocked(envManager.getEnv).mockReturnValue({
+        name: "Custom",
+        slug: "custom",
+        variables: { CLAUDE_CODE_OAUTH_TOKEN: "   " },
+        createdAt: 1000,
+        updatedAt: 1000,
+      });
+
+      await orchestrator.createSession({ cwd: "/test", backend: "claude", envSlug: "custom" });
+
+      expect(deps.launcher.launch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          env: expect.objectContaining({ CLAUDE_CODE_OAUTH_TOKEN: "global-token" }),
+        }),
+      );
+    });
+
+    it("does not inject ANTHROPIC_API_KEY when explicit claude auth env is already present", async () => {
+      vi.mocked(settingsManager.getSettings).mockReturnValue({
+        ...settingsManager.getSettings(),
+        claudeCodeOAuthToken: "",
+        anthropicApiKey: "sk-ant-fallback",
+      });
+
+      await orchestrator.createSession({
+        cwd: "/test",
+        backend: "claude",
+        env: { ANTHROPIC_AUTH_TOKEN: "env-auth-token" },
+      });
+
+      expect(deps.launcher.launch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          env: expect.objectContaining({ ANTHROPIC_AUTH_TOKEN: "env-auth-token" }),
+        }),
+      );
+      const launchCall = vi.mocked(deps.launcher.launch).mock.calls.at(-1)?.[0];
+      expect(launchCall?.env?.ANTHROPIC_API_KEY).toBeUndefined();
+    });
+
+    it("replaces blank OPENAI_API_KEY in explicit env with global settings key", async () => {
+      vi.mocked(settingsManager.getSettings).mockReturnValue({
+        ...settingsManager.getSettings(),
+        openaiApiKey: "sk-global-key",
+      });
+
+      await orchestrator.createSession({
+        cwd: "/test",
+        backend: "codex",
+        env: { OPENAI_API_KEY: "" },
+      });
+
+      expect(deps.launcher.launch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          env: expect.objectContaining({ OPENAI_API_KEY: "sk-global-key" }),
         }),
       );
     });
@@ -1171,6 +1250,41 @@ describe("SessionOrchestrator", () => {
 
       expect(result.ok).toBe(false);
       expect(result.error).toContain("Container removed externally");
+    });
+
+    // EC-2: a manual relaunch SIGTERMs the old proc; for a council half that
+    // intentional kill must be visible in `intentionalKills` AT KILL TIME so the
+    // `session:exited` listener does not arm reconnect/degraded on a healthy pair.
+    it("marks the session intentional during the kill, then clears it (EC-2)", async () => {
+      let intentionalDuringRelaunch = false;
+      deps.launcher.relaunch.mockImplementation(async () => {
+        intentionalDuringRelaunch = (
+          orchestrator as unknown as { intentionalKills: Set<string> }
+        ).intentionalKills.has("s1");
+        return { ok: true };
+      });
+
+      const result = await orchestrator.relaunchSession("s1");
+
+      expect(result.ok).toBe(true);
+      // Present DURING the relaunch...
+      expect(intentionalDuringRelaunch).toBe(true);
+      // ...cleared AFTER, so a later real death can still drive recovery.
+      expect(
+        (orchestrator as unknown as { intentionalKills: Set<string> }).intentionalKills.has("s1"),
+      ).toBe(false);
+    });
+
+    // The intentional mark must be cleared even when the relaunch throws — a
+    // stale mark would lock `scheduleProactiveRelaunch` out of recovery forever.
+    it("clears the intentional mark even if launcher.relaunch throws (EC-2)", async () => {
+      deps.launcher.relaunch.mockRejectedValueOnce(new Error("spawn failed"));
+
+      await expect(orchestrator.relaunchSession("s1")).rejects.toThrow("spawn failed");
+
+      expect(
+        (orchestrator as unknown as { intentionalKills: Set<string> }).intentionalKills.has("s1"),
+      ).toBe(false);
     });
   });
 
