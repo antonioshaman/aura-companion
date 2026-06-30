@@ -14,6 +14,10 @@
  *                    with a 30-day expirationTtl. Presence == "active in the
  *                    last 30 days". The key auto-expires, so the active count
  *                    is self-pruning with no cron sweep.
+ *   online:<id>    — one key per instance that currently has a human at the UI,
+ *                    written on each presence ping with a short expirationTtl
+ *                    (minutes). Presence == "active in the last few minutes".
+ *                    Self-pruning like instance:, just a far shorter window.
  *   meta:total     — cumulative monotonic counter, bumped once the first time
  *                    an instance id is ever seen. Never decremented.
  *
@@ -32,11 +36,18 @@ export interface Env {
 // heartbeat within this window. KV expirationTtl prunes stale keys for us.
 const ACTIVE_TTL_SECONDS = 30 * 24 * 60 * 60;
 
+// 5 minutes in seconds — an instance counts as "online" if it has sent a
+// presence ping within this window. The app pings every ~2 min while a human
+// has the UI open, so this tolerates one missed beat before dropping off.
+const ONLINE_TTL_SECONDS = 5 * 60;
+
 // Cache the /stats/global response at the edge to bound KV list cost under a
-// burst of landing-page loads.
-const STATS_CACHE_SECONDS = 300;
+// burst of landing-page loads. Kept short so the "online now" count stays
+// reasonably fresh (it's the most time-sensitive field in the response).
+const STATS_CACHE_SECONDS = 30;
 
 const INSTANCE_PREFIX = "instance:";
+const ONLINE_PREFIX = "online:";
 const TOTAL_KEY = "meta:total";
 
 // Instance ids are opaque random tokens generated client-side. Bound shape to
@@ -102,11 +113,37 @@ async function handleHeartbeat(request: Request, env: Env): Promise<Response> {
   return jsonResponse({ ok: true });
 }
 
-async function countActiveInstances(env: Env): Promise<number> {
+/**
+ * Presence ping — the app sends this every couple of minutes ONLY while a human
+ * has the UI open. It refreshes a short-lived online:<id> key so GET
+ * /stats/global can report "people online right now" without any cron sweep.
+ * Distinct from the 6-hourly heartbeat (which only proves the install exists).
+ */
+async function handlePresence(request: Request, env: Env): Promise<Response> {
+  let body: HeartbeatBody;
+  try {
+    body = (await request.json()) as HeartbeatBody;
+  } catch {
+    return jsonResponse({ error: "Invalid JSON body" }, 400);
+  }
+
+  const instanceId = typeof body.instanceId === "string" ? body.instanceId : "";
+  if (!INSTANCE_ID_RE.test(instanceId)) {
+    return jsonResponse({ error: "Invalid instanceId" }, 400);
+  }
+
+  await env.STATS_KV.put(ONLINE_PREFIX + instanceId, String(Date.now()), {
+    expirationTtl: ONLINE_TTL_SECONDS,
+  });
+
+  return jsonResponse({ ok: true });
+}
+
+async function countByPrefix(env: Env, prefix: string): Promise<number> {
   let count = 0;
   let cursor: string | undefined;
   do {
-    const page = await env.STATS_KV.list({ prefix: INSTANCE_PREFIX, cursor });
+    const page = await env.STATS_KV.list({ prefix, cursor });
     count += page.keys.length;
     cursor = page.list_complete ? undefined : page.cursor;
   } while (cursor);
@@ -119,14 +156,15 @@ async function handleGlobalStats(env: Env, ctx: ExecutionContext): Promise<Respo
   const cached = await cache.match(cacheKey);
   if (cached) return cached;
 
-  const [activeInstances30d, totalRaw] = await Promise.all([
-    countActiveInstances(env),
+  const [activeInstances30d, onlineNow, totalRaw] = await Promise.all([
+    countByPrefix(env, INSTANCE_PREFIX),
+    countByPrefix(env, ONLINE_PREFIX),
     env.STATS_KV.get(TOTAL_KEY),
   ]);
   const totalInstances = Math.max(parseInt(totalRaw ?? "0", 10) || 0, activeInstances30d);
 
   const response = new Response(
-    JSON.stringify({ activeInstances30d, totalInstances, generatedAt: Date.now() }),
+    JSON.stringify({ activeInstances30d, onlineNow, totalInstances, generatedAt: Date.now() }),
     {
       status: 200,
       headers: {
@@ -150,6 +188,9 @@ export default {
 
     if (url.pathname === "/telemetry/heartbeat" && request.method === "POST") {
       return handleHeartbeat(request, env);
+    }
+    if (url.pathname === "/telemetry/presence" && request.method === "POST") {
+      return handlePresence(request, env);
     }
     if (url.pathname === "/stats/global" && request.method === "GET") {
       return handleGlobalStats(env, ctx);

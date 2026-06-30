@@ -776,6 +776,20 @@ export class WsBridge {
     }));
   }
 
+  /**
+   * Total number of browser WebSockets connected across all sessions right now.
+   * Used by the presence-ping loop to decide whether a human currently has the
+   * UI open — zero means the install is up but nobody is looking, so it should
+   * NOT count toward the global "online now" figure.
+   */
+  countConnectedBrowsers(): number {
+    let total = 0;
+    for (const session of this.sessions.values()) {
+      total += session.browserSockets.size;
+    }
+    return total;
+  }
+
   /** Return current phase for each session (for metrics gauges). */
   getSessionPhases(): Map<string, import("./session-state-machine.js").SessionPhase> {
     const phases = new Map<string, import("./session-state-machine.js").SessionPhase>();

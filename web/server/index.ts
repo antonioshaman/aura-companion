@@ -21,7 +21,7 @@ import { WorktreeTracker } from "./worktree-tracker.js";
 import { containerManager } from "./container-manager.js";
 import { join } from "node:path";
 import { COMPANION_HOME } from "./paths.js";
-import { startTelemetryHeartbeat } from "./telemetry.js";
+import { startTelemetryHeartbeat, startPresencePing } from "./telemetry.js";
 import { TerminalManager } from "./terminal-manager.js";
 import { PRPoller } from "./pr-poller.js";
 import { RecorderManager } from "./recorder.js";
@@ -249,6 +249,9 @@ function readPackageVersion(): string {
   }
 }
 startTelemetryHeartbeat(readPackageVersion());
+// Presence ping — feeds the global "N online" figure. Only beats while a human
+// actually has the UI open (≥1 connected browser socket).
+startPresencePing(() => wsBridge.countConnectedBrowsers());
 
 // AURA-LOCAL: PPID=1 orphan reaper — PLAN T8. Runs ONCE at server-init
 // AFTER bridge + orchestrator wiring (so the launcher's restored

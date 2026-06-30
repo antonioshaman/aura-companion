@@ -8,6 +8,7 @@ import {
   getStatsBaseUrl,
   isTelemetryEnabled,
   startTelemetryHeartbeat,
+  startPresencePing,
 } from "./telemetry.js";
 
 let tempDir: string;
@@ -77,6 +78,37 @@ describe("startTelemetryHeartbeat", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const [url, init] = fetchSpy.mock.calls[0];
     expect(String(url)).toContain("/telemetry/heartbeat");
+    expect((init as RequestInit).method).toBe("POST");
+    stop();
+  });
+});
+
+describe("startPresencePing", () => {
+  it("is a no-op (no fetch) when telemetry is disabled", () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}"));
+    const stop = startPresencePing(() => 5);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    stop();
+  });
+
+  it("does NOT ping when enabled but no browser is connected", () => {
+    process.env.COMPANION_TELEMETRY = "1";
+    process.env.COMPANION_HOME = tempDir;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}"));
+    // Zero connected browsers → install is up but nobody is looking.
+    const stop = startPresencePing(() => 0);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    stop();
+  });
+
+  it("pings the presence endpoint when enabled and a browser is connected", () => {
+    process.env.COMPANION_TELEMETRY = "1";
+    process.env.COMPANION_HOME = tempDir;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}"));
+    const stop = startPresencePing(() => 1);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchSpy.mock.calls[0];
+    expect(String(url)).toContain("/telemetry/presence");
     expect((init as RequestInit).method).toBe("POST");
     stop();
   });

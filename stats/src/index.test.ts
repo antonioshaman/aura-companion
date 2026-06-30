@@ -53,6 +53,14 @@ function heartbeat(body: unknown): Request {
   });
 }
 
+function presence(body: unknown): Request {
+  return new Request("https://stats.example/telemetry/presence", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
 describe("stats worker", () => {
   let env: Env;
   let kv: FakeKV;
@@ -108,6 +116,43 @@ describe("stats worker", () => {
     expect(body.activeInstances30d).toBe(2);
     expect(body.totalInstances).toBe(2);
     expect(typeof body.generatedAt).toBe("number");
+  });
+
+  it("rejects a presence ping with a malformed instanceId", async () => {
+    const res = await worker.fetch(presence({ instanceId: "short" }), env, ctx);
+    expect(res.status).toBe(400);
+  });
+
+  it("records a presence ping without bumping the cumulative total", async () => {
+    const id = "instance_online111111";
+    const res = await worker.fetch(presence({ instanceId: id }), env, ctx);
+    expect(res.status).toBe(200);
+    // Presence writes only the short-lived online: key — never instance:/meta:.
+    expect(kv.store.has("online:" + id)).toBe(true);
+    expect(kv.store.has("instance:" + id)).toBe(false);
+    expect(await kv.get("meta:total")).toBeNull();
+  });
+
+  it("reports onlineNow distinctly from active30d via GET /stats/global", async () => {
+    // Two installs are "active" (heartbeat in last 30d) but only one currently
+    // has a human at the UI (presence ping in last few minutes).
+    await worker.fetch(heartbeat({ instanceId: "instance_aaaaaa111111" }), env, ctx);
+    await worker.fetch(heartbeat({ instanceId: "instance_bbbbbb222222" }), env, ctx);
+    await worker.fetch(presence({ instanceId: "instance_aaaaaa111111" }), env, ctx);
+
+    const res = await worker.fetch(
+      new Request("https://stats.example/stats/global"),
+      env,
+      ctx,
+    );
+    const body = (await res.json()) as {
+      activeInstances30d: number;
+      onlineNow: number;
+      totalInstances: number;
+    };
+    expect(body.activeInstances30d).toBe(2);
+    expect(body.onlineNow).toBe(1);
+    expect(body.totalInstances).toBe(2);
   });
 
   it("answers CORS preflight with permissive headers", async () => {
