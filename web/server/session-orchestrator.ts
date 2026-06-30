@@ -59,6 +59,18 @@ import { buildBrowserGroupRecord } from "./browser-group-record.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
+function hasNonEmptyEnvVar(env: Record<string, string> | undefined, key: string): boolean {
+  const value = env?.[key];
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function hasAnyClaudeAuthEnv(env: Record<string, string> | undefined): boolean {
+  return hasNonEmptyEnvVar(env, "CLAUDE_CODE_OAUTH_TOKEN")
+    || hasNonEmptyEnvVar(env, "ANTHROPIC_API_KEY")
+    || hasNonEmptyEnvVar(env, "ANTHROPIC_AUTH_TOKEN")
+    || hasNonEmptyEnvVar(env, "CLAUDE_CODE_AUTH_TOKEN");
+}
+
 const MAX_AUTO_RELAUNCHES = 3;
 const RELAUNCH_GRACE_MS = 10_000;
 const RELAUNCH_COOLDOWN_MS = 5_000;
@@ -2838,10 +2850,12 @@ export class SessionOrchestrator {
       // global onboarding tokens serve as defaults for all session types, including
       // containers, so that container auth preflight checks pass automatically.
       const globalSettings = getSettings();
-      if (backend === "claude" && globalSettings.claudeCodeOAuthToken && !("CLAUDE_CODE_OAUTH_TOKEN" in (envVars ?? {}))) {
+      if (backend === "claude" && globalSettings.claudeCodeOAuthToken && !hasNonEmptyEnvVar(envVars, "CLAUDE_CODE_OAUTH_TOKEN")) {
         envVars = { ...envVars, CLAUDE_CODE_OAUTH_TOKEN: globalSettings.claudeCodeOAuthToken };
+      } else if (backend === "claude" && globalSettings.anthropicApiKey && !hasAnyClaudeAuthEnv(envVars)) {
+        envVars = { ...envVars, ANTHROPIC_API_KEY: globalSettings.anthropicApiKey };
       }
-      if (backend === "codex" && globalSettings.openaiApiKey && !("OPENAI_API_KEY" in (envVars ?? {}))) {
+      if (backend === "codex" && globalSettings.openaiApiKey && !hasNonEmptyEnvVar(envVars, "OPENAI_API_KEY")) {
         envVars = { ...envVars, OPENAI_API_KEY: globalSettings.openaiApiKey };
       }
 

@@ -3,6 +3,7 @@ import { api } from "../api.js";
 import { useStore } from "../store.js";
 import { getTelemetryPreferenceEnabled, setTelemetryPreferenceEnabled } from "../analytics.js";
 import { navigateToSession, navigateHome } from "../utils/routing.js";
+import type { SdkSessionInfo } from "../types.js";
 
 interface SettingsPageProps {
   embedded?: boolean;
@@ -63,6 +64,7 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
   // the test mock upgraded to support Zustand-style subscriptions.
   const hydrateSettingsSlice = useStore((s) => s.hydrateSettings);
   const setProviderConfiguredSlice = useStore((s) => s.setProviderConfigured);
+  const sdkSessions = useStore((s) => s.sdkSessions);
   // PLAN-aura-dynamic-model-list Task 8: re-fetch the dynamic Claude
   // model list after a successful Anthropic API key save. The store
   // action is idempotent + inflight-token-guarded so the trigger is safe
@@ -70,7 +72,9 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
   const loadBackendModelsSlice = useStore((s) => s.loadBackendModels);
   const [providerSaving, setProviderSaving] = useState(false);
   const [providerSaved, setProviderSaved] = useState(false);
+  const [providerRelaunchNotice, setProviderRelaunchNotice] = useState("");
   const [providerError, setProviderError] = useState("");
+  const [providerRelaunching, setProviderRelaunching] = useState<null | "claude" | "codex">(null);
 
   // Auth section state
   const [authToken, setAuthToken] = useState<string | null>(null);
@@ -233,6 +237,48 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
       if (field === "aiValidationEnabled") setAiValidationEnabled(current);
       else if (field === "aiValidationAutoApprove") setAiValidationAutoApprove(current);
       else setAiValidationAutoDeny(current);
+    }
+  }
+
+  function getSessionsToRelaunchForProviders(
+    sessions: SdkSessionInfo[],
+    providers: Array<"claude" | "codex">,
+  ): SdkSessionInfo[] {
+    const wanted = new Set(providers);
+    return sessions.filter((session) => {
+      if (session.archived) return false;
+      const backend = session.backendType === "codex" ? "codex" : "claude";
+      return wanted.has(backend);
+    });
+  }
+
+  async function relaunchProviderSessions(
+    providers: Array<"claude" | "codex">,
+    options: { showNoSessionsNotice?: boolean } = {},
+  ): Promise<void> {
+    const sessionsToRelaunch = getSessionsToRelaunchForProviders(sdkSessions, providers);
+    if (sessionsToRelaunch.length === 0) {
+      if (options.showNoSessionsNotice) {
+        const label = providers.length === 1 ? providers[0] : "selected";
+        setProviderRelaunchNotice(`No active ${label} sessions to relaunch.`);
+      }
+      return;
+    }
+
+    const results = await Promise.allSettled(
+      sessionsToRelaunch.map((session) => api.relaunchSession(session.sessionId)),
+    );
+    const failedCount = results.filter((result) => result.status === "rejected").length;
+    const relaunchedCount = sessionsToRelaunch.length - failedCount;
+    if (relaunchedCount > 0) {
+      setProviderRelaunchNotice(
+        failedCount > 0
+          ? `Relaunched ${relaunchedCount} session(s); ${failedCount} failed.`
+          : `Relaunched ${relaunchedCount} session(s) to apply credentials.`,
+      );
+    }
+    if (failedCount > 0) {
+      setProviderError("Some active sessions could not be relaunched automatically.");
     }
   }
 
@@ -656,6 +702,12 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                   </div>
                 )}
 
+                {providerRelaunchNotice && (
+                  <div className="px-3 py-2 rounded-lg bg-cc-info/10 border border-cc-info/20 text-xs text-cc-info">
+                    {providerRelaunchNotice}
+                  </div>
+                )}
+
                 <button
                   type="button"
                   disabled={providerSaving || (!claudeCodeToken.trim() && !openaiApiKey.trim())}
@@ -663,6 +715,7 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                     setProviderSaving(true);
                     setProviderError("");
                     setProviderSaved(false);
+                    setProviderRelaunchNotice("");
                     try {
                       const payload: { claudeCodeOAuthToken?: string; openaiApiKey?: string } = {};
                       if (claudeCodeToken.trim()) payload.claudeCodeOAuthToken = claudeCodeToken.trim();
@@ -682,6 +735,15 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                       setOpenaiApiKey("");
                       setProviderSaved(true);
                       setTimeout(() => setProviderSaved(false), 1800);
+                      const changedProviders: Array<"claude" | "codex"> = [];
+                      if (payload.claudeCodeOAuthToken) changedProviders.push("claude");
+                      if (payload.openaiApiKey) changedProviders.push("codex");
+                      if (changedProviders.length > 0) {
+                        await relaunchProviderSessions(changedProviders);
+                        setProviderRelaunchNotice((prev) =>
+                          prev ? `Provider settings saved. ${prev}` : prev,
+                        );
+                      }
                     } catch (err: unknown) {
                       setProviderError(err instanceof Error ? err.message : String(err));
                     } finally {
@@ -696,6 +758,57 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                 >
                   {providerSaving ? "Saving..." : "Save Provider Settings"}
                 </button>
+
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <button
+                    type="button"
+                    disabled={providerRelaunching !== null || getSessionsToRelaunchForProviders(sdkSessions, ["claude"]).length === 0}
+                    onClick={async () => {
+                      setProviderError("");
+                      setProviderSaved(false);
+                      setProviderRelaunchNotice("");
+                      setProviderRelaunching("claude");
+                      try {
+                        await relaunchProviderSessions(["claude"], { showNoSessionsNotice: true });
+                      } catch (err: unknown) {
+                        setProviderError(err instanceof Error ? err.message : String(err));
+                      } finally {
+                        setProviderRelaunching(null);
+                      }
+                    }}
+                    className={`px-4 py-2 min-h-[44px] rounded-lg text-sm font-medium transition-colors ${
+                      providerRelaunching !== null || getSessionsToRelaunchForProviders(sdkSessions, ["claude"]).length === 0
+                        ? "bg-cc-hover text-cc-muted cursor-not-allowed"
+                        : "bg-cc-hover hover:bg-cc-active text-cc-fg cursor-pointer"
+                    }`}
+                  >
+                    {providerRelaunching === "claude" ? "Relaunching Claude..." : "Relaunch Active Claude Sessions"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={providerRelaunching !== null || getSessionsToRelaunchForProviders(sdkSessions, ["codex"]).length === 0}
+                    onClick={async () => {
+                      setProviderError("");
+                      setProviderSaved(false);
+                      setProviderRelaunchNotice("");
+                      setProviderRelaunching("codex");
+                      try {
+                        await relaunchProviderSessions(["codex"], { showNoSessionsNotice: true });
+                      } catch (err: unknown) {
+                        setProviderError(err instanceof Error ? err.message : String(err));
+                      } finally {
+                        setProviderRelaunching(null);
+                      }
+                    }}
+                    className={`px-4 py-2 min-h-[44px] rounded-lg text-sm font-medium transition-colors ${
+                      providerRelaunching !== null || getSessionsToRelaunchForProviders(sdkSessions, ["codex"]).length === 0
+                        ? "bg-cc-hover text-cc-muted cursor-not-allowed"
+                        : "bg-cc-hover hover:bg-cc-active text-cc-fg cursor-pointer"
+                    }`}
+                  >
+                    {providerRelaunching === "codex" ? "Relaunching Codex..." : "Relaunch Active Codex Sessions"}
+                  </button>
+                </div>
               </div>
             </section>
 

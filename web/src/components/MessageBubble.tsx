@@ -60,6 +60,12 @@ interface ToolUseInfo {
   input: Record<string, unknown>;
 }
 
+interface ParsedToolAuthError {
+  message: string;
+  requestId?: string;
+  statusCode?: string;
+}
+
 type GroupedBlock =
   | { kind: "content"; block: ContentBlock }
   | { kind: "tool_group"; name: string; items: ToolGroupItem[] };
@@ -95,6 +101,32 @@ function mapToolUsesById(blocks: ContentBlock[]): Map<string, ToolUseInfo> {
     }
   }
   return map;
+}
+
+function parseToolAuthError(content: string): ParsedToolAuthError | null {
+  const trimmed = content.trim();
+  if (!trimmed) return null;
+
+  const lower = trimmed.toLowerCase();
+  const looksLikeAuthError =
+    lower.includes("failed to authenticate")
+    || lower.includes("authentication_error")
+    || lower.includes("invalid authentication credentials")
+    || lower.includes("invalid api key")
+    || lower.includes("token expired");
+
+  if (!looksLikeAuthError) return null;
+
+  const statusCode = trimmed.match(/\bAPI Error:\s*(\d{3})\b/i)?.[1];
+  const requestId = trimmed.match(/"request_id"\s*:\s*"([^"]+)"/)?.[1];
+  const jsonMessage = trimmed.match(/"message"\s*:\s*"([^"]+)"/)?.[1];
+
+  let message = jsonMessage || "Authentication failed";
+  if (statusCode) {
+    message = `${message} (API ${statusCode})`;
+  }
+
+  return { message, requestId, statusCode };
 }
 
 function AssistantMessage({ message }: { message: ChatMessage }) {
@@ -304,8 +336,12 @@ function ContentBlockRenderer({
     const linkedTool = toolUseById.get(block.tool_use_id);
     const toolName = linkedTool?.name;
     const isError = block.is_error ?? false;
+    const authError = isError ? parseToolAuthError(content) : null;
     if (toolName === "Bash") {
       return <BashResultBlock text={content} isError={isError} />;
+    }
+    if (authError) {
+      return <ToolAuthErrorBlock error={authError} />;
     }
     return (
       <div className="rounded-lg bg-cc-code-bg overflow-hidden">
@@ -347,6 +383,22 @@ function BashResultBlock({ text, isError }: { text: string; isError: boolean }) 
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+function ToolAuthErrorBlock({ error }: { error: ParsedToolAuthError }) {
+  return (
+    <div className="rounded-lg border border-cc-error/25 bg-cc-error/8 px-3 py-2">
+      <div className="text-[12px] font-medium text-cc-error">Authentication failed</div>
+      <div className="mt-1 text-[12px] leading-relaxed text-cc-fg">
+        {error.message}
+      </div>
+      {error.requestId ? (
+        <div className="mt-1 text-[10px] font-mono-code text-cc-muted/70">
+          Request ID: {error.requestId}
+        </div>
+      ) : null}
     </div>
   );
 }

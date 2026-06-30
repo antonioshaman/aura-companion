@@ -602,6 +602,22 @@ describe("SessionOrchestrator", () => {
       );
     });
 
+    it("falls back to ANTHROPIC_API_KEY for claude backend when oauth token is absent", async () => {
+      vi.mocked(settingsManager.getSettings).mockReturnValue({
+        ...settingsManager.getSettings(),
+        claudeCodeOAuthToken: "",
+        anthropicApiKey: "sk-ant-fallback",
+      });
+
+      await orchestrator.createSession({ cwd: "/test", backend: "claude" });
+
+      expect(deps.launcher.launch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          env: expect.objectContaining({ ANTHROPIC_API_KEY: "sk-ant-fallback" }),
+        }),
+      );
+    });
+
     // Verifies that OPENAI_API_KEY is injected from global settings
     // when the session backend is "codex" and no key is already set
     it("injects OPENAI_API_KEY from global settings for codex backend", async () => {
@@ -638,6 +654,69 @@ describe("SessionOrchestrator", () => {
       expect(deps.launcher.launch).toHaveBeenCalledWith(
         expect.objectContaining({
           env: expect.objectContaining({ CLAUDE_CODE_OAUTH_TOKEN: "env-profile-token" }),
+        }),
+      );
+    });
+
+    it("replaces blank CLAUDE_CODE_OAUTH_TOKEN from env profile with global settings token", async () => {
+      vi.mocked(settingsManager.getSettings).mockReturnValue({
+        ...settingsManager.getSettings(),
+        claudeCodeOAuthToken: "global-token",
+      });
+      vi.mocked(envManager.getEnv).mockReturnValue({
+        name: "Custom",
+        slug: "custom",
+        variables: { CLAUDE_CODE_OAUTH_TOKEN: "   " },
+        createdAt: 1000,
+        updatedAt: 1000,
+      });
+
+      await orchestrator.createSession({ cwd: "/test", backend: "claude", envSlug: "custom" });
+
+      expect(deps.launcher.launch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          env: expect.objectContaining({ CLAUDE_CODE_OAUTH_TOKEN: "global-token" }),
+        }),
+      );
+    });
+
+    it("does not inject ANTHROPIC_API_KEY when explicit claude auth env is already present", async () => {
+      vi.mocked(settingsManager.getSettings).mockReturnValue({
+        ...settingsManager.getSettings(),
+        claudeCodeOAuthToken: "",
+        anthropicApiKey: "sk-ant-fallback",
+      });
+
+      await orchestrator.createSession({
+        cwd: "/test",
+        backend: "claude",
+        env: { ANTHROPIC_AUTH_TOKEN: "env-auth-token" },
+      });
+
+      expect(deps.launcher.launch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          env: expect.objectContaining({ ANTHROPIC_AUTH_TOKEN: "env-auth-token" }),
+        }),
+      );
+      const launchCall = vi.mocked(deps.launcher.launch).mock.calls.at(-1)?.[0];
+      expect(launchCall?.env?.ANTHROPIC_API_KEY).toBeUndefined();
+    });
+
+    it("replaces blank OPENAI_API_KEY in explicit env with global settings key", async () => {
+      vi.mocked(settingsManager.getSettings).mockReturnValue({
+        ...settingsManager.getSettings(),
+        openaiApiKey: "sk-global-key",
+      });
+
+      await orchestrator.createSession({
+        cwd: "/test",
+        backend: "codex",
+        env: { OPENAI_API_KEY: "" },
+      });
+
+      expect(deps.launcher.launch).toHaveBeenCalledWith(
+        expect.objectContaining({
+          env: expect.objectContaining({ OPENAI_API_KEY: "sk-global-key" }),
         }),
       );
     });

@@ -434,6 +434,29 @@ const MSG_TOOL_ERROR: ChatMessage = {
   timestamp: Date.now() - 20000,
 };
 
+const MSG_TOOL_AUTH_ERROR: ChatMessage = {
+  id: "msg-7b",
+  role: "assistant",
+  content: "",
+  contentBlocks: [
+    { type: "text", text: "I'll run a web search for the latest API guidance." },
+    {
+      type: "tool_use",
+      id: "tu-auth-error",
+      name: "WebSearch",
+      input: { query: "latest API guidance" },
+    },
+    {
+      type: "tool_result",
+      tool_use_id: "tu-auth-error",
+      content:
+        'Failed to authenticate. API Error: 401 {"type":"error","error":{"type":"authentication_error","message":"Invalid authentication credentials"},"request_id":"req_123"}',
+      is_error: true,
+    },
+  ],
+  timestamp: Date.now() - 19000,
+};
+
 // PLAN Task 12 — interrupted-stream variant. Mirrors a synthesised assistant
 // message produced by the server after a CLI disconnect mid-stream. The bubble
 // renders the partial text plus the warning badge so playground reviewers can
@@ -1086,6 +1109,9 @@ export function Playground() {
             </Card>
             <Card label="Tool result with error">
               <MessageBubble message={MSG_TOOL_ERROR} />
+            </Card>
+            <Card label="Tool result with auth error">
+              <MessageBubble message={MSG_TOOL_AUTH_ERROR} />
             </Card>
             <Card label="Assistant message (interrupted)">
               <MessageBubble message={MSG_ASSISTANT_INTERRUPTED} />

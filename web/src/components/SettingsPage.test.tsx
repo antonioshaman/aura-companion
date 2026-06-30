@@ -18,12 +18,16 @@ interface MockStoreState {
   notificationDesktop: boolean;
   diffBase: string;
   publicUrl: string;
+  sdkSessions: Array<{ sessionId: string; archived?: boolean; backendType?: "claude" | "codex" }>;
   toggleDarkMode: ReturnType<typeof vi.fn>;
   toggleNotificationSound: ReturnType<typeof vi.fn>;
   setNotificationDesktop: ReturnType<typeof vi.fn>;
   setDiffBase: ReturnType<typeof vi.fn>;
   setPublicUrl: ReturnType<typeof vi.fn>;
   setEditorTabEnabled: ReturnType<typeof vi.fn>;
+  hydrateSettings: ReturnType<typeof vi.fn>;
+  setProviderConfigured: ReturnType<typeof vi.fn>;
+  loadBackendModels: ReturnType<typeof vi.fn>;
 }
 
 let mockState: MockStoreState;
@@ -35,12 +39,16 @@ function createMockState(overrides: Partial<MockStoreState> = {}): MockStoreStat
     notificationDesktop: false,
     diffBase: "last-commit",
     publicUrl: "",
+    sdkSessions: [],
     toggleDarkMode: vi.fn(),
     toggleNotificationSound: vi.fn(),
     setNotificationDesktop: vi.fn(),
     setDiffBase: vi.fn(),
     setPublicUrl: vi.fn(),
     setEditorTabEnabled: vi.fn(),
+    hydrateSettings: vi.fn(),
+    setProviderConfigured: vi.fn(),
+    loadBackendModels: vi.fn(),
     ...overrides,
   };
 }
@@ -52,6 +60,7 @@ const mockApi = {
   regenerateAuthToken: vi.fn(),
   getAuthQr: vi.fn(),
   verifyAnthropicKey: vi.fn(),
+  relaunchSession: vi.fn(),
 };
 
 const mockTelemetry = {
@@ -67,6 +76,7 @@ vi.mock("../api.js", () => ({
     regenerateAuthToken: (...args: unknown[]) => mockApi.regenerateAuthToken(...args),
     getAuthQr: (...args: unknown[]) => mockApi.getAuthQr(...args),
     verifyAnthropicKey: (...args: unknown[]) => mockApi.verifyAnthropicKey(...args),
+    relaunchSession: (...args: unknown[]) => mockApi.relaunchSession(...args),
   },
 }));
 
@@ -113,6 +123,7 @@ beforeEach(() => {
       { label: "Tailscale", url: "http://100.118.112.23:3456", qrDataUrl: "data:image/png;base64,TS_QR" },
     ],
   });
+  mockApi.relaunchSession.mockResolvedValue({ ok: true });
   mockTelemetry.getTelemetryPreferenceEnabled.mockReturnValue(true);
 });
 
@@ -1011,6 +1022,96 @@ describe("SettingsPage", () => {
       expect(claudeInput.placeholder).toContain("••••••••••••••••");
       expect(openaiInput.placeholder).toContain("••••••••••••••••");
     });
+  });
+
+  it("relaunches matching active sessions after saving provider settings", async () => {
+    mockState = createMockState({
+      sdkSessions: [
+        { sessionId: "claude-live", backendType: "claude" },
+        { sessionId: "codex-live", backendType: "codex" },
+        { sessionId: "codex-archived", backendType: "codex", archived: true },
+      ],
+    });
+    mockApi.getSettings.mockResolvedValueOnce({
+      anthropicApiKeyConfigured: true,
+      anthropicModel: "claude-sonnet-4-6",
+      claudeCodeOAuthTokenConfigured: false,
+      openaiApiKeyConfigured: false,
+      updateChannel: "stable",
+      publicUrl: "",
+    });
+    mockApi.updateSettings.mockResolvedValueOnce({
+      anthropicApiKeyConfigured: true,
+      anthropicModel: "claude-sonnet-4-6",
+      claudeCodeOAuthTokenConfigured: false,
+      openaiApiKeyConfigured: true,
+      updateChannel: "stable",
+      publicUrl: "",
+    });
+
+    render(<SettingsPage />);
+    await screen.findByText("Claude Code token not configured");
+
+    fireEvent.change(screen.getByLabelText("OpenAI API Key (Codex)"), {
+      target: { value: "sk-test-key" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save Provider Settings" }));
+
+    await waitFor(() => {
+      expect(mockApi.relaunchSession).toHaveBeenCalledTimes(1);
+      expect(mockApi.relaunchSession).toHaveBeenCalledWith("codex-live");
+    });
+    expect(screen.getByText(/Relaunched 1 session\(s\)/)).toBeInTheDocument();
+  });
+
+  it("allows manual relaunch of active claude sessions without resaving tokens", async () => {
+    mockState = createMockState({
+      sdkSessions: [
+        { sessionId: "claude-live", backendType: "claude" },
+        { sessionId: "codex-live", backendType: "codex" },
+      ],
+    });
+    mockApi.getSettings.mockResolvedValueOnce({
+      anthropicApiKeyConfigured: true,
+      anthropicModel: "claude-sonnet-4-6",
+      claudeCodeOAuthTokenConfigured: true,
+      openaiApiKeyConfigured: true,
+      updateChannel: "stable",
+      publicUrl: "",
+    });
+
+    render(<SettingsPage />);
+    await screen.findByText("Claude Code token configured");
+
+    fireEvent.click(screen.getByRole("button", { name: "Relaunch Active Claude Sessions" }));
+
+    await waitFor(() => {
+      expect(mockApi.relaunchSession).toHaveBeenCalledTimes(1);
+      expect(mockApi.relaunchSession).toHaveBeenCalledWith("claude-live");
+    });
+    expect(screen.getByText("Relaunched 1 session(s) to apply credentials.")).toBeInTheDocument();
+  });
+
+  it("disables manual relaunch button when there are no active sessions for that provider", async () => {
+    mockState = createMockState({
+      sdkSessions: [
+        { sessionId: "codex-archived", backendType: "codex", archived: true },
+      ],
+    });
+    mockApi.getSettings.mockResolvedValueOnce({
+      anthropicApiKeyConfigured: true,
+      anthropicModel: "claude-sonnet-4-6",
+      claudeCodeOAuthTokenConfigured: true,
+      openaiApiKeyConfigured: true,
+      updateChannel: "stable",
+      publicUrl: "",
+    });
+
+    render(<SettingsPage />);
+    await screen.findByText("Claude Code token configured");
+
+    expect(screen.getByRole("button", { name: "Relaunch Active Claude Sessions" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Relaunch Active Codex Sessions" })).toBeDisabled();
   });
 
   // Verifies that the save button is disabled when both provider inputs are empty

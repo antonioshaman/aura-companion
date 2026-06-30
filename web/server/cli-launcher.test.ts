@@ -128,6 +128,36 @@ vi.mock("./codex-home.js", async (importOriginal) => {
   };
 });
 
+vi.mock("./settings-manager.js", () => ({
+  getSettings: vi.fn(() => ({
+    anthropicApiKey: "",
+    anthropicModel: "claude-sonnet-4-6",
+    claudeCodeOAuthToken: "",
+    openaiApiKey: "",
+    onboardingCompleted: false,
+    linearApiKey: "",
+    linearAutoTransition: false,
+    linearAutoTransitionStateId: "",
+    linearAutoTransitionStateName: "",
+    linearArchiveTransition: false,
+    linearArchiveTransitionStateId: "",
+    linearArchiveTransitionStateName: "",
+    linearOAuthClientId: "",
+    linearOAuthClientSecret: "",
+    linearOAuthWebhookSecret: "",
+    linearOAuthAccessToken: "",
+    linearOAuthRefreshToken: "",
+    aiValidationEnabled: false,
+    aiValidationAutoApprove: true,
+    aiValidationAutoDeny: false,
+    publicUrl: "",
+    updateChannel: "stable",
+    dockerAutoUpdate: false,
+    telemetryEnabled: false,
+    updatedAt: 0,
+  })),
+}));
+
 // ─── Imports (after mocks) ───────────────────────────────────────────────────
 
 import { SessionStore } from "./session-store.js";
@@ -135,6 +165,7 @@ import { CliLauncher } from "./cli-launcher.js";
 import { readLaunchableCodexModels } from "./codex-models.js";
 import { companionBus } from "./event-bus.js";
 import { log } from "./logger.js";
+import * as settingsManager from "./settings-manager.js";
 import {
   writeRuntimeSidecar,
   sidecarPath,
@@ -1048,6 +1079,73 @@ describe("relaunch", () => {
     const [relaunchCmd] = mockSpawn.mock.calls[1];
     expect(relaunchCmd).toContain("-e");
     expect(relaunchCmd).toContain("CLAUDE_CODE_OAUTH_TOKEN=tok-test");
+  });
+
+  it("injects Anthropic API key into claude relaunch when runtime env has no auth", async () => {
+    vi.mocked(settingsManager.getSettings).mockReturnValue({
+      ...vi.mocked(settingsManager.getSettings)(),
+      anthropicApiKey: "sk-ant-fallback",
+      claudeCodeOAuthToken: "",
+    });
+
+    let resolveFirst: (code: number) => void;
+    const firstProc = {
+      pid: 12345,
+      kill: vi.fn(() => { resolveFirst(0); }),
+      exited: new Promise<number>((r) => { resolveFirst = r; }),
+      stdout: null,
+      stderr: null,
+    };
+    mockSpawn.mockReturnValueOnce(firstProc);
+
+    launcher.launch({
+      cwd: "/tmp/project",
+      env: {},
+    });
+
+    const secondProc = createMockProc(54321);
+    mockSpawn.mockReturnValueOnce(secondProc);
+
+    const result = await launcher.relaunch("test-session-id");
+    expect(result).toEqual({ ok: true });
+
+    const [, options] = mockSpawn.mock.calls[1];
+    expect(options.env.ANTHROPIC_API_KEY).toBe("sk-ant-fallback");
+  });
+
+  it("removes stale Claude auth env on relaunch when global Claude credentials are unset", async () => {
+    vi.mocked(settingsManager.getSettings).mockReturnValue({
+      ...vi.mocked(settingsManager.getSettings)(),
+      anthropicApiKey: "",
+      claudeCodeOAuthToken: "",
+    });
+
+    let resolveFirst: (code: number) => void;
+    const firstProc = {
+      pid: 12345,
+      kill: vi.fn(() => { resolveFirst(0); }),
+      exited: new Promise<number>((r) => { resolveFirst = r; }),
+      stdout: null,
+      stderr: null,
+    };
+    mockSpawn.mockReturnValueOnce(firstProc);
+
+    launcher.launch({
+      cwd: "/tmp/project",
+      env: {
+        ANTHROPIC_API_KEY: "stale-api-key",
+      },
+    });
+
+    const secondProc = createMockProc(54321);
+    mockSpawn.mockReturnValueOnce(secondProc);
+
+    const result = await launcher.relaunch("test-session-id");
+    expect(result).toEqual({ ok: true });
+
+    const [, options] = mockSpawn.mock.calls[1];
+    expect(options.env.ANTHROPIC_API_KEY).toBeUndefined();
+    expect(options.env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
   });
 
   it("returns error for unknown session", async () => {

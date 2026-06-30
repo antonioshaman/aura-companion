@@ -39,6 +39,7 @@ import { companionBus } from "./event-bus.js";
 import type { RelaunchExhaustedReason } from "./event-bus-types.js";
 import { selectLaunchableCodexModel } from "./codex-models.js";
 import { getSuppressedModelIds } from "./model-availability.js";
+import { getSettings } from "./settings-manager.js";
 import {
   getLegacyCodexHome,
   resolveCompanionCodexSessionHome,
@@ -48,6 +49,44 @@ import {
 function isCodexWsTransportEnabled(): boolean {
   const val = (process.env.COMPANION_CODEX_TRANSPORT || "ws").toLowerCase();
   return val === "ws" || val === "websocket";
+}
+
+function hasNonEmptyEnvVar(env: Record<string, string> | undefined, key: string): boolean {
+  const value = env?.[key];
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function hasAnyClaudeAuthEnv(env: Record<string, string> | undefined): boolean {
+  return hasNonEmptyEnvVar(env, "CLAUDE_CODE_OAUTH_TOKEN")
+    || hasNonEmptyEnvVar(env, "ANTHROPIC_API_KEY")
+    || hasNonEmptyEnvVar(env, "ANTHROPIC_AUTH_TOKEN")
+    || hasNonEmptyEnvVar(env, "CLAUDE_CODE_AUTH_TOKEN");
+}
+
+function injectGlobalProviderAuth(
+  env: Record<string, string> | undefined,
+  backendType: BackendType | undefined,
+): Record<string, string> | undefined {
+  const baseEnv = env ? { ...env } : {};
+  const settings = getSettings();
+
+  if (backendType === "claude") {
+    if (!settings.claudeCodeOAuthToken && !settings.anthropicApiKey) {
+      delete baseEnv.ANTHROPIC_API_KEY;
+      delete baseEnv.ANTHROPIC_AUTH_TOKEN;
+      delete baseEnv.CLAUDE_CODE_AUTH_TOKEN;
+    } else if (settings.claudeCodeOAuthToken && !hasNonEmptyEnvVar(baseEnv, "CLAUDE_CODE_OAUTH_TOKEN")) {
+      baseEnv.CLAUDE_CODE_OAUTH_TOKEN = settings.claudeCodeOAuthToken;
+    } else if (settings.anthropicApiKey && !hasAnyClaudeAuthEnv(baseEnv)) {
+      baseEnv.ANTHROPIC_API_KEY = settings.anthropicApiKey;
+    }
+  }
+
+  if (backendType === "codex" && settings.openaiApiKey && !hasNonEmptyEnvVar(baseEnv, "OPENAI_API_KEY")) {
+    baseEnv.OPENAI_API_KEY = settings.openaiApiKey;
+  }
+
+  return Object.keys(baseEnv).length > 0 ? baseEnv : undefined;
 }
 
 /** Find a free TCP port in the given range by attempting to listen on each. */
@@ -1042,7 +1081,7 @@ export class CliLauncher {
       info.model = validatedCodexModel;
     }
 
-    const runtimeEnv = this.sessionEnvs.get(sessionId);
+    const runtimeEnv = injectGlobalProviderAuth(this.sessionEnvs.get(sessionId), info.backendType);
 
     // Subprocess P1#4: pass council context back into the relaunch
     // options so the observer prompt + tool restrictions get re-applied
