@@ -18,6 +18,11 @@ export const DEFAULT_STATS_URL = "https://companion-stats.antonshmonin.workers.d
 // far more often than needed to stay "active" while surviving daily restarts.
 const HEARTBEAT_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
+// Presence ping every 2 minutes; the Worker's online window is 5 minutes, so a
+// single missed beat (restart, transient network) doesn't flap the "online"
+// count. Only fires while a human actually has the UI open (see startPresencePing).
+const PRESENCE_INTERVAL_MS = 2 * 60 * 1000;
+
 export function getStatsBaseUrl(): string {
   const raw = process.env.COMPANION_STATS_URL?.trim();
   return (raw && raw.replace(/\/+$/, "")) || DEFAULT_STATS_URL;
@@ -35,19 +40,27 @@ export function isTelemetryEnabled(): boolean {
   return getSettings().telemetryEnabled === true;
 }
 
-async function sendHeartbeat(instanceId: string, version: string): Promise<void> {
+async function postTelemetry(path: string, body: Record<string, unknown>): Promise<void> {
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 5000);
-    await fetch(`${getStatsBaseUrl()}/telemetry/heartbeat`, {
+    await fetch(`${getStatsBaseUrl()}${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ instanceId, version }),
+      body: JSON.stringify(body),
       signal: controller.signal,
     }).finally(() => clearTimeout(timer));
   } catch {
     // Telemetry is best-effort; a failed beat must never surface to the user.
   }
+}
+
+async function sendHeartbeat(instanceId: string, version: string): Promise<void> {
+  await postTelemetry("/telemetry/heartbeat", { instanceId, version });
+}
+
+async function sendPresence(instanceId: string): Promise<void> {
+  await postTelemetry("/telemetry/presence", { instanceId });
 }
 
 /**
@@ -68,6 +81,30 @@ export function startTelemetryHeartbeat(version: string): () => void {
   const interval = setInterval(() => {
     void sendHeartbeat(instanceId, version);
   }, HEARTBEAT_INTERVAL_MS);
+  if (typeof interval.unref === "function") interval.unref();
+
+  return () => clearInterval(interval);
+}
+
+/**
+ * Start the presence-ping loop if telemetry is enabled at boot. Unlike the
+ * heartbeat (which only proves the install exists), this reports "a human has
+ * the UI open right now" and feeds the global "N online" figure.
+ *
+ * `getConnectedBrowsers` is polled on each tick; a ping is sent ONLY when it
+ * returns > 0, so an idle server with no open tabs never counts as online. The
+ * interval is unref'd so it never keeps the process alive. Returns a stop fn.
+ */
+export function startPresencePing(getConnectedBrowsers: () => number): () => void {
+  if (!isTelemetryEnabled()) return () => {};
+
+  const instanceId = getOrCreateInstanceId();
+  const tick = () => {
+    if (getConnectedBrowsers() > 0) void sendPresence(instanceId);
+  };
+  tick();
+
+  const interval = setInterval(tick, PRESENCE_INTERVAL_MS);
   if (typeof interval.unref === "function") interval.unref();
 
   return () => clearInterval(interval);

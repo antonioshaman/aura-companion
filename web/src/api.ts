@@ -842,6 +842,7 @@ export async function autoAuth(): Promise<string | null> {
 
 export interface GlobalUsageStats {
   activeInstances30d: number | null;
+  onlineNow: number | null;
   totalInstances: number | null;
   generatedAt: number;
 }
@@ -859,6 +860,7 @@ export async function fetchGlobalStats(): Promise<GlobalUsageStats | null> {
     return {
       activeInstances30d:
         typeof data.activeInstances30d === "number" ? data.activeInstances30d : null,
+      onlineNow: typeof data.onlineNow === "number" ? data.onlineNow : null,
       totalInstances: typeof data.totalInstances === "number" ? data.totalInstances : null,
       generatedAt: typeof data.generatedAt === "number" ? data.generatedAt : Date.now(),
     };

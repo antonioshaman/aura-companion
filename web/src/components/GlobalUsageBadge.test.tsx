@@ -11,8 +11,9 @@ beforeEach(() => {
 });
 
 describe("GlobalUsageBadge", () => {
-  it("renders active + total counts once stats resolve", async () => {
+  it("renders online + active + total counts once stats resolve", async () => {
     vi.spyOn(apiModule, "fetchGlobalStats").mockResolvedValue({
+      onlineNow: 3,
       activeInstances30d: 1234,
       totalInstances: 5678,
       generatedAt: Date.now(),
@@ -22,8 +23,24 @@ describe("GlobalUsageBadge", () => {
 
     expect(await screen.findByText("1,234")).toBeInTheDocument();
     expect(screen.getByText("5,678")).toBeInTheDocument();
+    expect(screen.getByText("3")).toBeInTheDocument();
+    expect(screen.getByText(/online/)).toBeInTheDocument();
     expect(screen.getByText(/active/)).toBeInTheDocument();
     expect(screen.getByText(/total/)).toBeInTheDocument();
+  });
+
+  it("omits the online segment when onlineNow is null", async () => {
+    // A reachable aggregator that reports no one online yet still shows
+    // active/total — the online segment simply hides rather than rendering 0.
+    vi.spyOn(apiModule, "fetchGlobalStats").mockResolvedValue({
+      onlineNow: null,
+      activeInstances30d: 9,
+      totalInstances: 12,
+      generatedAt: Date.now(),
+    });
+    render(<GlobalUsageBadge />);
+    expect(await screen.findByText("9")).toBeInTheDocument();
+    expect(screen.queryByText(/online/)).not.toBeInTheDocument();
   });
 
   it("renders nothing when stats are unavailable", async () => {
@@ -35,6 +52,7 @@ describe("GlobalUsageBadge", () => {
 
   it("renders only active when total is null", async () => {
     vi.spyOn(apiModule, "fetchGlobalStats").mockResolvedValue({
+      onlineNow: null,
       activeInstances30d: 7,
       totalInstances: null,
       generatedAt: Date.now(),
@@ -46,6 +64,7 @@ describe("GlobalUsageBadge", () => {
 
   it("passes axe accessibility checks", async () => {
     vi.spyOn(apiModule, "fetchGlobalStats").mockResolvedValue({
+      onlineNow: 2,
       activeInstances30d: 10,
       totalInstances: 20,
       generatedAt: Date.now(),

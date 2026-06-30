@@ -16,11 +16,15 @@ import { getStatsBaseUrl } from "../telemetry.js";
 
 interface GlobalStats {
   activeInstances30d: number | null;
+  onlineNow: number | null;
   totalInstances: number | null;
   generatedAt: number;
 }
 
-const CACHE_TTL_MS = 5 * 60 * 1000;
+// Short proxy cache: the "online now" field is time-sensitive, so we keep this
+// well under the Worker's 5-minute online window rather than the long landing
+// cache. Still long enough to absorb a burst of UI loads.
+const CACHE_TTL_MS = 30 * 1000;
 
 let cached: { value: GlobalStats; fetchedAt: number } | null = null;
 
@@ -36,6 +40,7 @@ async function fetchGlobalStats(): Promise<GlobalStats> {
     return {
       activeInstances30d:
         typeof body.activeInstances30d === "number" ? body.activeInstances30d : null,
+      onlineNow: typeof body.onlineNow === "number" ? body.onlineNow : null,
       totalInstances: typeof body.totalInstances === "number" ? body.totalInstances : null,
       generatedAt: Date.now(),
     };
@@ -57,6 +62,7 @@ export function registerStatsRoutes(api: Hono): void {
     } catch {
       const fallback: GlobalStats = {
         activeInstances30d: null,
+        onlineNow: null,
         totalInstances: null,
         generatedAt: now,
       };

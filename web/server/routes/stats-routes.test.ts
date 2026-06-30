@@ -18,19 +18,37 @@ afterEach(() => {
 });
 
 describe("GET /api/stats/global", () => {
-  it("proxies the upstream stats Worker payload", async () => {
+  it("proxies the upstream stats Worker payload including onlineNow", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
-      new Response(JSON.stringify({ activeInstances30d: 42, totalInstances: 99 }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      }),
+      new Response(
+        JSON.stringify({ activeInstances30d: 42, onlineNow: 3, totalInstances: 99 }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      ),
     );
 
     const res = await app.request("/api/stats/global");
     expect(res.status).toBe(200);
-    const json = (await res.json()) as { activeInstances30d: number; totalInstances: number };
+    const json = (await res.json()) as {
+      activeInstances30d: number;
+      onlineNow: number;
+      totalInstances: number;
+    };
     expect(json.activeInstances30d).toBe(42);
+    expect(json.onlineNow).toBe(3);
     expect(json.totalInstances).toBe(99);
+  });
+
+  it("coerces a missing onlineNow to null (older Worker without presence)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ activeInstances30d: 5, totalInstances: 5 }), { status: 200 }),
+    );
+
+    const res = await app.request("/api/stats/global");
+    const json = (await res.json()) as { onlineNow: number | null };
+    expect(json.onlineNow).toBeNull();
   });
 
   it("serves a cached value without a second upstream fetch", async () => {
