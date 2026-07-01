@@ -6,6 +6,7 @@ import { connectAllSessions, disconnectSession } from "../ws.js";
 import { navigateToSession, navigateHome, parseHash } from "../utils/routing.js";
 import { ProjectGroup } from "./ProjectGroup.js";
 import { GlobalUsageBadge } from "./GlobalUsageBadge.js";
+import { TelemetryNudge } from "./TelemetryNudge.js";
 import { SessionItem } from "./SessionItem.js";
 import { groupSessionsByProject, type SessionItem as SessionItemType } from "../utils/project-grouping.js";
 
@@ -990,6 +991,7 @@ export function Sidebar() {
           </div>
         </div>
         <GlobalUsageBadge />
+        <TelemetryNudge />
       </div>
 
       {/* Delete confirmation modal */}
