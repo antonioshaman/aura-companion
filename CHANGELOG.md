@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.14.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.13.0...aura-companion-v1.14.0) (2026-07-01)
+
+
+### Features
+
+* **telemetry:** add footer nudge to opt into the global usage counter ([#147](https://github.com/antonioshaman/aura-companion/issues/147)) ([77879e5](https://github.com/antonioshaman/aura-companion/commit/77879e5d29246037de7ccc0a7e33b536e8db025b))
+
 ## [1.13.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.12.0...aura-companion-v1.13.0) (2026-07-01)
 
 
