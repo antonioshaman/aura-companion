@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.13.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.12.0...aura-companion-v1.13.0) (2026-07-01)
+
+
+### Features
+
+* **cleanup:** reclaim leaked CLI processes from archived sessions ([#145](https://github.com/antonioshaman/aura-companion/issues/145)) ([292fc89](https://github.com/antonioshaman/aura-companion/commit/292fc896b3b525d90182efee5eca45cefd34fcfb))
+* **settings:** apply provider credentials to running sessions + render auth errors ([#142](https://github.com/antonioshaman/aura-companion/issues/142)) ([b63698c](https://github.com/antonioshaman/aura-companion/commit/b63698cbfa8887581e048d0e87eff5ed0ddf3f76))
+* **telemetry:** add live "online now" presence counter ([#141](https://github.com/antonioshaman/aura-companion/issues/141)) ([386007d](https://github.com/antonioshaman/aura-companion/commit/386007d6f37da85ec65c9fc732139512c393d338))
+* **telemetry:** default the anonymous usage counter on with an in-app opt-out ([#146](https://github.com/antonioshaman/aura-companion/issues/146)) ([634b198](https://github.com/antonioshaman/aura-companion/commit/634b198fb5fa06a75d2f6dc1cb4f10f1926c3008))
+
 ## [1.12.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.11.0...aura-companion-v1.12.0) (2026-06-16)
 
 
