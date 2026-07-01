@@ -41,6 +41,7 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
   const setNotificationDesktop = useStore((s) => s.setNotificationDesktop);
   const notificationApiAvailable = typeof Notification !== "undefined";
   const [telemetryEnabled, setTelemetryEnabled] = useState(getTelemetryPreferenceEnabled());
+  const [usageCounterEnabled, setUsageCounterEnabled] = useState(true);
   const [aiValidationEnabled, setAiValidationEnabled] = useState(false);
   const [aiValidationAutoApprove, setAiValidationAutoApprove] = useState(true);
   const [aiValidationAutoDeny, setAiValidationAutoDeny] = useState(false);
@@ -167,6 +168,7 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
           });
         }
         setAnthropicModel(s.anthropicModel || "claude-sonnet-4-6");
+        if (typeof s.telemetryEnabled === "boolean") setUsageCounterEnabled(s.telemetryEnabled);
         if (typeof s.aiValidationEnabled === "boolean") setAiValidationEnabled(s.aiValidationEnabled);
         if (typeof s.aiValidationAutoApprove === "boolean") setAiValidationAutoApprove(s.aiValidationAutoApprove);
         if (typeof s.aiValidationAutoDeny === "boolean") setAiValidationAutoDeny(s.aiValidationAutoDeny);
@@ -1093,6 +1095,30 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                 <p className="text-xs text-cc-muted">
                   Browser Do Not Track is respected automatically.
                 </p>
+                <p className="text-xs text-cc-muted pt-1">
+                  Anonymous usage counter — a random install id and an online/heartbeat
+                  ping (no prompts, code, or session content) that powers the global
+                  "online · active · total" count. On by default; turn it off here to stop
+                  reporting.
+                </p>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const next = !usageCounterEnabled;
+                    setUsageCounterEnabled(next);
+                    try {
+                      await api.updateSettings({ telemetryEnabled: next });
+                    } catch (e: unknown) {
+                      setUsageCounterEnabled(!next);
+                      setError(e instanceof Error ? e.message : String(e));
+                    }
+                  }}
+                  aria-pressed={usageCounterEnabled}
+                  className="w-full flex items-center justify-between px-3 py-3 min-h-[44px] rounded-lg text-sm bg-cc-hover text-cc-fg hover:bg-cc-active transition-colors cursor-pointer"
+                >
+                  <span>Anonymous usage counter</span>
+                  <span className="text-xs text-cc-muted">{usageCounterEnabled ? "On" : "Off"}</span>
+                </button>
               </div>
             </section>
 

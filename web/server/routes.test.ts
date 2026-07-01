@@ -150,6 +150,7 @@ vi.mock("./settings-manager.js", () => ({
     publicUrl: patch.publicUrl ?? "",
     updateChannel: patch.updateChannel ?? "stable",
     dockerAutoUpdate: patch.dockerAutoUpdate ?? false,
+    telemetryEnabled: patch.telemetryEnabled ?? true,
     updatedAt: Date.now(),
   })),
 }));
@@ -1755,6 +1756,7 @@ describe("GET /api/settings", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telemetryEnabled: false,
     });
   });
 
@@ -1812,6 +1814,7 @@ describe("GET /api/settings", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telemetryEnabled: false,
     });
   });
 
@@ -1930,6 +1933,7 @@ describe("PUT /api/settings", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
+      telemetryEnabled: false,
     });
   });
 

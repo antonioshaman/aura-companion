@@ -41,13 +41,13 @@ describe("getStatsBaseUrl", () => {
 });
 
 describe("isTelemetryEnabled", () => {
-  it("is off by default", () => {
-    expect(isTelemetryEnabled()).toBe(false);
+  it("is on by default (opt-out model)", () => {
+    expect(isTelemetryEnabled()).toBe(true);
   });
 
-  it("follows the opt-in setting when no env override", () => {
-    updateSettings({ telemetryEnabled: true });
-    expect(isTelemetryEnabled()).toBe(true);
+  it("follows the opt-out setting when no env override", () => {
+    updateSettings({ telemetryEnabled: false });
+    expect(isTelemetryEnabled()).toBe(false);
   });
 
   it("env override forces off even when the setting is on", () => {
@@ -57,6 +57,7 @@ describe("isTelemetryEnabled", () => {
   });
 
   it("env override forces on even when the setting is off", () => {
+    updateSettings({ telemetryEnabled: false });
     process.env.COMPANION_TELEMETRY = "1";
     expect(isTelemetryEnabled()).toBe(true);
   });
@@ -64,6 +65,7 @@ describe("isTelemetryEnabled", () => {
 
 describe("startTelemetryHeartbeat", () => {
   it("is a no-op (no fetch) when telemetry is disabled", () => {
+    updateSettings({ telemetryEnabled: false });
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}"));
     const stop = startTelemetryHeartbeat("1.8.0");
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -85,6 +87,7 @@ describe("startTelemetryHeartbeat", () => {
 
 describe("startPresencePing", () => {
   it("is a no-op (no fetch) when telemetry is disabled", () => {
+    updateSettings({ telemetryEnabled: false });
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}"));
     const stop = startPresencePing(() => 5);
     expect(fetchSpy).not.toHaveBeenCalled();

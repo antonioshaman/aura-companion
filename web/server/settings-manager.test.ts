@@ -48,7 +48,7 @@ describe("settings-manager", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
-      telemetryEnabled: false,
+      telemetryEnabled: true,
       updatedAt: 0,
     });
   });
@@ -104,7 +104,7 @@ describe("settings-manager", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
-      telemetryEnabled: false,
+      telemetryEnabled: true,
       updatedAt: 123,
     });
   });
@@ -184,7 +184,7 @@ describe("settings-manager", () => {
       publicUrl: "",
       updateChannel: "stable",
       dockerAutoUpdate: false,
-      telemetryEnabled: false,
+      telemetryEnabled: true,
       updatedAt: 0,
     });
   });

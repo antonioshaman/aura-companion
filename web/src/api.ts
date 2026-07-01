@@ -432,6 +432,7 @@ export interface AppSettings {
   publicUrl: string;
   updateChannel: "stable" | "prerelease";
   dockerAutoUpdate: boolean;
+  telemetryEnabled: boolean;
 }
 
 export interface LinearOAuthConnectionSummary {
@@ -1058,6 +1059,7 @@ export const api = {
     publicUrl?: string;
     updateChannel?: "stable" | "prerelease";
     dockerAutoUpdate?: boolean;
+    telemetryEnabled?: boolean;
   }) => put<AppSettings>("/settings", data),
   verifyAnthropicKey: (apiKey: string) =>
     post<{ valid: boolean; error?: string }>("/settings/anthropic/verify", { apiKey }),
