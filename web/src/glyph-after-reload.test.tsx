@@ -69,6 +69,9 @@ const mockApi = vi.hoisted(() => ({
   unarchiveSession: vi.fn().mockResolvedValue({}),
   renameSession: vi.fn().mockResolvedValue({}),
   getArchiveInfo: vi.fn().mockResolvedValue({ hasLinkedIssue: false, issueNotDone: false }),
+  // TelemetryNudge in the sidebar footer reads/writes telemetryEnabled on mount.
+  getSettings: vi.fn().mockResolvedValue({ telemetryEnabled: true }),
+  updateSettings: vi.fn().mockResolvedValue({ telemetryEnabled: true }),
 }));
 
 vi.mock("./api.js", () => ({

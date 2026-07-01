@@ -22,6 +22,9 @@ const mockApi = {
   unarchiveSession: vi.fn().mockResolvedValue({}),
   renameSession: vi.fn().mockResolvedValue({}),
   getArchiveInfo: vi.fn().mockResolvedValue({ hasLinkedIssue: false, issueNotDone: false }),
+  // TelemetryNudge (rendered in the sidebar footer) reads/writes telemetryEnabled on mount.
+  getSettings: vi.fn().mockResolvedValue({ telemetryEnabled: true }),
+  updateSettings: vi.fn().mockResolvedValue({ telemetryEnabled: true }),
 };
 
 vi.mock("../api.js", () => ({
@@ -32,6 +35,8 @@ vi.mock("../api.js", () => ({
     unarchiveSession: (...args: unknown[]) => mockApi.unarchiveSession(...args),
     renameSession: (...args: unknown[]) => mockApi.renameSession(...args),
     getArchiveInfo: (...args: unknown[]) => mockApi.getArchiveInfo(...args),
+    getSettings: (...args: unknown[]) => mockApi.getSettings(...args),
+    updateSettings: (...args: unknown[]) => mockApi.updateSettings(...args),
   },
   fetchGlobalStats: () => Promise.resolve(null),
 }));
