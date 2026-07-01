@@ -35,6 +35,7 @@ describe("index.ts diagnostic-emit — EC-19 literal-string canary", () => {
     "drainedPendingLastHour",
     "recordingsSoftArchivedLastHour",
     "recordingsHardDeletedLastHour",
+    "archivedProcessReclaimedLastHour",
   ] as const;
 
   it.each(COUNTER_KEYS)("emits cleanup counter key '%s' literally in the diagnostic snapshot", (key) => {
