@@ -633,6 +633,7 @@ import { sweepRetention } from "./cleanup/retention-sweeper.js";
 // convention as Phase E (registerSweep) plus the new registerReconcile
 // seam for the EC-8 sentinel-recovery half of the contract.
 import { sweepEviction, reconcileEvictionSentinels } from "./cleanup/eviction-sweeper.js";
+import { sweepArchivedProcesses } from "./cleanup/archived-process-reclaim.js";
 import { reconcileStaleReapingMarkers } from "./cleanup/sentinel-markers.js";
 import { readdirSync as nodeReaddirSync, statSync as nodeStatSync, unlinkSync as nodeUnlinkSync } from "node:fs";
 
@@ -733,6 +734,27 @@ cleanupScheduler.registerSweep("eviction-sweep", async () => {
       };
     },
     notifyArchived: (sid) => idleTimerManager.setArchived(sid),
+  });
+});
+
+// AURA-LOCAL: archived-session process reclamation. Closes the leak
+// eviction-sweep leaves open — an ARCHIVED session whose Companion-spawned
+// CLI process is still ALIVE (state != exited, identity matches). eviction
+// only reclaims the Map/disk row for archived+exited rows and deliberately
+// RETAINS a live matching process; this tier kills that process via
+// launcher.kill (EC-45 identity-verify inside), after which the eviction
+// tier reclaims the now-exited row on a later tick. Gated on the same
+// evictionGrace rubicon.
+cleanupScheduler.registerSweep("archived-process-reclaim", async () => {
+  await sweepArchivedProcesses(diagnosticsCleanupConfig, {
+    getLauncherSessions: () =>
+      launcher.listSessions().map((info) => ({
+        sessionId: info.sessionId,
+        pid: info.pid,
+        archived: info.archived,
+        state: info.state,
+      })),
+    killSession: (sid) => launcher.kill(sid),
   });
 });
 
@@ -879,6 +901,7 @@ const diagnosticsTimer = setInterval(() => {
     // by the EC-19 canary alongside the cleanup counters.
     terminalCount: terminalManager.activeTerminalIds().length,
     terminalReapedLastHour: metricsCollector.getTerminalReapedLastHour(),
+    archivedProcessReclaimedLastHour: metricsCollector.getArchivedProcessReclaimedLastHour(),
     // ── PLAN T6: sweep-status fields (Phase C accessors on the scheduler) ──
     lastSweepCompletedAt: cleanupScheduler.getLastSweepCompletedAt(),
     lastSweepDurationMs: cleanupScheduler.getLastSweepDurationMs(),
