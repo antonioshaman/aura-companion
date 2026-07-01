@@ -334,6 +334,19 @@ describe("SettingsPage", () => {
     expect(mockTelemetry.setTelemetryPreferenceEnabled).toHaveBeenCalledWith(false);
   });
 
+  // The anonymous usage counter is a SEPARATE, server-side opt-out (persisted
+  // via PUT /settings telemetryEnabled) distinct from the PostHog preference
+  // above. It defaults On (opt-out model); clicking turns it off and writes
+  // the change to the server so the install stops reporting to the global
+  // usage aggregator.
+  it("toggles the anonymous usage counter and persists to the server", async () => {
+    render(<SettingsPage />);
+    await screen.findByText("Anthropic key configured");
+
+    fireEvent.click(screen.getByRole("button", { name: /Anonymous usage counter/i }));
+    expect(mockApi.updateSettings).toHaveBeenCalledWith({ telemetryEnabled: false });
+  });
+
   it("navigates to environments page from settings", async () => {
     render(<SettingsPage />);
     await screen.findByText("Anthropic key configured");

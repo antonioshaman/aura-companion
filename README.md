@@ -197,6 +197,22 @@ web/
 └── reviews/<phase>-<provider>-observer.md
 ```
 
+## Telemetry & privacy
+
+Aura Companion reports an **anonymous usage counter** — a random install id plus a
+periodic heartbeat/online ping — to a Cloudflare aggregator so the footer badge can
+show the global "online · active · total" install count. It never sends your prompts,
+code, file contents, session transcripts, or any personally identifying data.
+
+This is **on by default (opt-out)**. To turn it off, either:
+
+- toggle **Settings → Telemetry → Anonymous usage counter** off, or
+- set the environment variable `COMPANION_TELEMETRY=0` (the env override always wins).
+
+A separate, independently-toggled setting (**Settings → Telemetry → Usage analytics and
+errors**) controls optional PostHog product analytics / crash reporting and respects your
+browser's Do Not Track.
+
 ## Contributing
 
 1. Fork the repo

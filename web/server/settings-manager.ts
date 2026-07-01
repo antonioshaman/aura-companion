@@ -76,7 +76,7 @@ let settings: CompanionSettings = {
   publicUrl: "",
   updateChannel: "stable",
   dockerAutoUpdate: false,
-  telemetryEnabled: false,
+  telemetryEnabled: true,
   updatedAt: 0,
 };
 
@@ -108,7 +108,7 @@ function normalize(raw: Partial<CompanionSettings> | null | undefined): Companio
     publicUrl: typeof raw?.publicUrl === "string" ? raw.publicUrl.trim().replace(/\/+$/, "") : "",
     updateChannel: raw?.updateChannel === "prerelease" ? "prerelease" : "stable",
     dockerAutoUpdate: typeof raw?.dockerAutoUpdate === "boolean" ? raw.dockerAutoUpdate : false,
-    telemetryEnabled: typeof raw?.telemetryEnabled === "boolean" ? raw.telemetryEnabled : false,
+    telemetryEnabled: typeof raw?.telemetryEnabled === "boolean" ? raw.telemetryEnabled : true,
     updatedAt: typeof raw?.updatedAt === "number" ? raw.updatedAt : 0,
   };
 }

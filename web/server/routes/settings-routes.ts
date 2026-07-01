@@ -29,6 +29,7 @@ export function registerSettingsRoutes(api: Hono): void {
       publicUrl: settings.publicUrl,
       updateChannel: settings.updateChannel,
       dockerAutoUpdate: settings.dockerAutoUpdate,
+      telemetryEnabled: settings.telemetryEnabled,
     });
   });
 
@@ -103,6 +104,9 @@ export function registerSettingsRoutes(api: Hono): void {
     if (body.dockerAutoUpdate !== undefined && typeof body.dockerAutoUpdate !== "boolean") {
       return c.json({ error: "dockerAutoUpdate must be a boolean" }, 400);
     }
+    if (body.telemetryEnabled !== undefined && typeof body.telemetryEnabled !== "boolean") {
+      return c.json({ error: "telemetryEnabled must be a boolean" }, 400);
+    }
     const hasAnyField = body.anthropicApiKey !== undefined || body.anthropicModel !== undefined
       || body.claudeCodeOAuthToken !== undefined || body.openaiApiKey !== undefined
       || body.onboardingCompleted !== undefined
@@ -116,7 +120,8 @@ export function registerSettingsRoutes(api: Hono): void {
       || body.aiValidationAutoDeny !== undefined
       || body.publicUrl !== undefined
       || body.updateChannel !== undefined
-      || body.dockerAutoUpdate !== undefined;
+      || body.dockerAutoUpdate !== undefined
+      || body.telemetryEnabled !== undefined;
     if (!hasAnyField) {
       return c.json({ error: "At least one settings field is required" }, 400);
     }
@@ -210,6 +215,10 @@ export function registerSettingsRoutes(api: Hono): void {
         typeof body.dockerAutoUpdate === "boolean"
           ? body.dockerAutoUpdate
           : undefined,
+      telemetryEnabled:
+        typeof body.telemetryEnabled === "boolean"
+          ? body.telemetryEnabled
+          : undefined,
     });
 
     const connectionsAfterUpdate = listConnections();
@@ -234,6 +243,7 @@ export function registerSettingsRoutes(api: Hono): void {
       publicUrl: settings.publicUrl,
       updateChannel: settings.updateChannel,
       dockerAutoUpdate: settings.dockerAutoUpdate,
+      telemetryEnabled: settings.telemetryEnabled,
     });
   });
 
