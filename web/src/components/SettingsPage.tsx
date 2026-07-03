@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
-import { api } from "../api.js";
+import { api, type ModelDiagnostics } from "../api.js";
 import { useStore } from "../store.js";
 import { getTelemetryPreferenceEnabled, setTelemetryPreferenceEnabled } from "../analytics.js";
 import { navigateToSession, navigateHome } from "../utils/routing.js";
@@ -22,6 +22,15 @@ const CATEGORIES = [
 ] as const;
 
 type CategoryId = (typeof CATEGORIES)[number]["id"];
+
+// Format a cache timestamp for the model-diagnostics panel. Accepts epoch ms
+// (Anthropic cache) or an ISO string (Codex cache); returns a locale string or
+// "unknown" when the value is missing/unparseable.
+function formatCacheTs(value: number | string | null): string {
+  if (value === null || value === "") return "unknown";
+  const date = typeof value === "number" ? new Date(value) : new Date(value);
+  return Number.isNaN(date.getTime()) ? "unknown" : date.toLocaleString();
+}
 
 export function SettingsPage({ embedded = false }: SettingsPageProps) {
   const [anthropicApiKey, setAnthropicApiKey] = useState("");
@@ -50,6 +59,16 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
   const [apiKeyFocused, setApiKeyFocused] = useState(false);
   const [verifying, setVerifying] = useState(false);
   const [verifyResult, setVerifyResult] = useState<{ valid: boolean; error?: string } | null>(null);
+
+  // Model source diagnostics + manual refresh. The dropdown model lists are
+  // server-owned caches (Anthropic /v1/models keyed by API key; Codex
+  // ~/.codex/models_cache.json). This surfaces which COMPANION_HOME the server
+  // reads config from and lets the user force a fresh fetch when they've rotated
+  // a key or updated the Codex CLI out-of-band.
+  const [diagnostics, setDiagnostics] = useState<ModelDiagnostics | null>(null);
+  const [diagnosticsError, setDiagnosticsError] = useState("");
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshResult, setRefreshResult] = useState<{ claude: string; codex: string } | null>(null);
 
   // Provider tokens state
   const [claudeCodeToken, setClaudeCodeToken] = useState("");
@@ -183,6 +202,42 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
     // Fetch auth token in parallel (non-blocking)
     api.getAuthToken().then((res) => setAuthToken(res.token)).catch(() => {});
   }, []);
+
+  const loadDiagnostics = useCallback(async () => {
+    setDiagnosticsError("");
+    try {
+      const d = await api.getModelDiagnostics();
+      setDiagnostics(d);
+    } catch (e: unknown) {
+      setDiagnosticsError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadDiagnostics();
+  }, [loadDiagnostics]);
+
+  async function onRefreshModels() {
+    setRefreshing(true);
+    setRefreshResult(null);
+    setDiagnosticsError("");
+    try {
+      const result = await api.refreshModels();
+      setRefreshResult(result);
+      setTimeout(() => setRefreshResult(null), 5000);
+      // Repopulate the dropdowns from the freshly-primed caches. Both are
+      // idempotent + inflight-guarded in the store, safe to fire together.
+      if (typeof loadBackendModelsSlice === "function") {
+        void loadBackendModelsSlice("claude");
+        void loadBackendModelsSlice("codex");
+      }
+      await loadDiagnostics();
+    } catch (e: unknown) {
+      setDiagnosticsError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRefreshing(false);
+    }
+  }
 
   async function onSave(e: React.FormEvent) {
     e.preventDefault();
@@ -1005,6 +1060,70 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                   </div>
                 )}
               </form>
+
+              <div className="mt-6 pt-5 border-t border-cc-border">
+                <div className="flex items-center justify-between mb-3">
+                  <div>
+                    <h3 className="text-sm font-medium text-cc-fg">Model list</h3>
+                    <p className="mt-0.5 text-xs text-cc-muted">
+                      Refresh the available models if you rotated a key or updated a CLI.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={onRefreshModels}
+                    disabled={refreshing}
+                    className={`px-3 py-2 min-h-[44px] rounded-lg text-sm font-medium transition-colors ${
+                      refreshing
+                        ? "bg-cc-hover text-cc-muted cursor-not-allowed"
+                        : "bg-cc-hover hover:bg-cc-active text-cc-fg cursor-pointer"
+                    }`}
+                  >
+                    {refreshing ? "Refreshing..." : "Refresh models"}
+                  </button>
+                </div>
+
+                {refreshResult && (
+                  <div className="mb-3 px-3 py-2 rounded-lg bg-cc-success/10 border border-cc-success/20 text-xs text-cc-success">
+                    Refreshed — Claude: {refreshResult.claude}, Codex: {refreshResult.codex}.
+                  </div>
+                )}
+
+                {diagnosticsError && (
+                  <div className="mb-3 px-3 py-2 rounded-lg bg-cc-error/10 border border-cc-error/20 text-xs text-cc-error">
+                    {diagnosticsError}
+                  </div>
+                )}
+
+                {diagnostics && (
+                  <dl className="space-y-1.5 text-xs">
+                    <div className="flex justify-between gap-4">
+                      <dt className="text-cc-muted shrink-0">Config home</dt>
+                      <dd className="text-cc-fg font-mono truncate" title={diagnostics.companionHome}>
+                        {diagnostics.companionHome}
+                      </dd>
+                    </div>
+                    <div className="flex justify-between gap-4">
+                      <dt className="text-cc-muted shrink-0">Anthropic cache</dt>
+                      <dd className="text-cc-fg text-right">
+                        {diagnostics.anthropic.cachePresent
+                          ? `${diagnostics.anthropic.cacheModelCount ?? "?"} models · ${formatCacheTs(diagnostics.anthropic.cacheFetchedAt)}`
+                          : diagnostics.anthropic.keyConfigured
+                            ? "no cache yet"
+                            : "no key configured"}
+                      </dd>
+                    </div>
+                    <div className="flex justify-between gap-4">
+                      <dt className="text-cc-muted shrink-0">Codex cache</dt>
+                      <dd className="text-cc-fg text-right">
+                        {diagnostics.codex.present
+                          ? `${diagnostics.codex.listedModelCount ?? "?"} models${diagnostics.codex.clientVersion ? ` · v${diagnostics.codex.clientVersion}` : ""} · ${formatCacheTs(diagnostics.codex.fetchedAt)}`
+                          : "not installed"}
+                      </dd>
+                    </div>
+                  </dl>
+                )}
+              </div>
             </section>
 
             {/* AI Validation */}

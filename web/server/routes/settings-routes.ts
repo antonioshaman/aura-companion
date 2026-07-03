@@ -1,8 +1,18 @@
 import type { Hono } from "hono";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { DEFAULT_ANTHROPIC_MODEL, getSettings, updateSettings, type UpdateChannel } from "../settings-manager.js";
 import { linearCache } from "../linear-cache.js";
 import { listConnections } from "../linear-connections.js";
 import { hasContainerCodexAuth } from "../codex-container-auth.js";
+import { COMPANION_HOME } from "../paths.js";
+import { getAnthropicModels, readAnthropicCacheFileMeta } from "../anthropic-models-cache.js";
+
+/** Path to the Codex CLI's own model cache — mirrors routes.ts:/backends/:id/models. */
+function codexModelsCachePath(): string {
+  return join(homedir(), ".codex", "models_cache.json");
+}
 
 export function registerSettingsRoutes(api: Hono): void {
   api.get("/settings", (c) => {
@@ -276,5 +286,87 @@ export function registerSettingsRoutes(api: Hono): void {
     } finally {
       clearTimeout(timer);
     }
+  });
+
+  // Operator-triggered model-list refresh. The GET /backends/:id/models
+  // handler is deliberately cache-honest (Hunt R4 — no `?force=1` escape
+  // hatch), so an explicit refresh is a distinct POST intent: force a fresh
+  // Anthropic /v1/models fetch (repopulating the server cache) so the next
+  // GET returns the latest catalogue. Codex has no server-side cache to bust
+  // — its list is read straight from the CLI's own models_cache.json on
+  // every GET — so we only report whether that file is present.
+  api.post("/settings/models/refresh", async (c) => {
+    const settings = getSettings();
+    const key = settings.anthropicApiKey.trim();
+    let claude: "ok" | "no-key" | "unavailable";
+    if (!key) {
+      claude = "no-key";
+    } else {
+      const result = await getAnthropicModels(key, {
+        forceRefresh: true,
+        parentSignal: c.req.raw.signal,
+      });
+      claude = result.kind === "ok" ? "ok" : result.kind === "no-key" ? "no-key" : "unavailable";
+    }
+    const codex = existsSync(codexModelsCachePath()) ? "ok" : "absent";
+    return c.json({ claude, codex });
+  });
+
+  // Config/cache diagnostics for the Settings panel. Surfaces WHICH
+  // COMPANION_HOME the running server reads (so a key saved under a diverging
+  // home is diagnosable, not a mystery) and the freshness of both model
+  // caches. This is an authenticated operator-only response body — the raw
+  // home path is the feature's whole point here, not a log-line leak (EC-23
+  // governs logs, not this response).
+  api.get("/settings/diagnostics", (c) => {
+    const settings = getSettings();
+    const anthropicMeta = readAnthropicCacheFileMeta();
+
+    const codexPath = codexModelsCachePath();
+    let codex:
+      | { present: false }
+      | {
+          present: true;
+          fetchedAt: string | null;
+          clientVersion: string | null;
+          listedModelCount: number | null;
+        };
+    if (!existsSync(codexPath)) {
+      codex = { present: false };
+    } else {
+      try {
+        const parsed = JSON.parse(readFileSync(codexPath, "utf-8")) as {
+          fetched_at?: unknown;
+          client_version?: unknown;
+          models?: unknown;
+        };
+        const listedModelCount = Array.isArray(parsed.models)
+          ? parsed.models.filter(
+              (m): m is { visibility?: unknown } =>
+                typeof m === "object" && m !== null && (m as { visibility?: unknown }).visibility === "list",
+            ).length
+          : null;
+        codex = {
+          present: true,
+          fetchedAt: typeof parsed.fetched_at === "string" ? parsed.fetched_at : null,
+          clientVersion: typeof parsed.client_version === "string" ? parsed.client_version : null,
+          listedModelCount,
+        };
+      } catch {
+        codex = { present: true, fetchedAt: null, clientVersion: null, listedModelCount: null };
+      }
+    }
+
+    return c.json({
+      companionHome: COMPANION_HOME,
+      anthropic: {
+        keyConfigured: !!settings.anthropicApiKey.trim(),
+        cachePresent: anthropicMeta.present,
+        // epoch ms (server clock at last successful fetch); null when absent.
+        cacheFetchedAt: anthropicMeta.fetchedAt,
+        cacheModelCount: anthropicMeta.modelCount,
+      },
+      codex,
+    });
   });
 }

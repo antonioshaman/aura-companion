@@ -65,6 +65,8 @@ const mockApi = {
   getAuthQr: vi.fn(),
   verifyAnthropicKey: vi.fn(),
   relaunchSession: vi.fn(),
+  refreshModels: vi.fn(),
+  getModelDiagnostics: vi.fn(),
 };
 
 const mockTelemetry = {
@@ -81,6 +83,8 @@ vi.mock("../api.js", () => ({
     getAuthQr: (...args: unknown[]) => mockApi.getAuthQr(...args),
     verifyAnthropicKey: (...args: unknown[]) => mockApi.verifyAnthropicKey(...args),
     relaunchSession: (...args: unknown[]) => mockApi.relaunchSession(...args),
+    refreshModels: (...args: unknown[]) => mockApi.refreshModels(...args),
+    getModelDiagnostics: (...args: unknown[]) => mockApi.getModelDiagnostics(...args),
   },
 }));
 
@@ -128,6 +132,22 @@ beforeEach(() => {
     ],
   });
   mockApi.relaunchSession.mockResolvedValue({ ok: true });
+  mockApi.refreshModels.mockResolvedValue({ claude: "ok", codex: "ok" });
+  mockApi.getModelDiagnostics.mockResolvedValue({
+    companionHome: "/home/tester/.companion",
+    anthropic: {
+      keyConfigured: true,
+      cachePresent: true,
+      cacheFetchedAt: 1_700_000_000_000,
+      cacheModelCount: 12,
+    },
+    codex: {
+      present: true,
+      fetchedAt: "2026-07-01T10:00:00.000Z",
+      clientVersion: "0.9.1",
+      listedModelCount: 4,
+    },
+  });
   mockTelemetry.getTelemetryPreferenceEnabled.mockReturnValue(true);
 });
 
@@ -1113,7 +1133,10 @@ describe("SettingsPage", () => {
       expect(mockApi.relaunchSession).toHaveBeenCalledTimes(1);
       expect(mockApi.relaunchSession).toHaveBeenCalledWith("claude-live");
     });
-    expect(screen.getByText("Relaunched 1 session(s) to apply credentials.")).toBeInTheDocument();
+    // findByText (not getByText): the notice is set after `await Promise.allSettled`
+    // resolves, one microtask AFTER the awaited relaunchSession call the waitFor
+    // above gates on — so a synchronous getByText races the state update.
+    expect(await screen.findByText("Relaunched 1 session(s) to apply credentials.")).toBeInTheDocument();
   });
 
   // The codex relaunch button is independently wired to the codex session set.
@@ -1142,7 +1165,10 @@ describe("SettingsPage", () => {
       expect(mockApi.relaunchSession).toHaveBeenCalledTimes(1);
       expect(mockApi.relaunchSession).toHaveBeenCalledWith("codex-live");
     });
-    expect(screen.getByText("Relaunched 1 session(s) to apply credentials.")).toBeInTheDocument();
+    // findByText (not getByText): the notice is set after `await Promise.allSettled`
+    // resolves, one microtask AFTER the awaited relaunchSession call the waitFor
+    // above gates on — so a synchronous getByText races the state update.
+    expect(await screen.findByText("Relaunched 1 session(s) to apply credentials.")).toBeInTheDocument();
   });
 
   // Council OBSERVER halves are server-managed companions; the relaunch filter
@@ -1281,6 +1307,112 @@ describe("SettingsPage", () => {
     expect(providersSection).toBeInTheDocument();
 
     const results = await axe(providersSection!);
+    expect(results).toHaveNoViolations();
+  });
+
+  // ─── Model list / diagnostics section tests ──────────────────────────────
+  //
+  // The Model list panel force-refreshes the Anthropic + Codex model caches and
+  // surfaces which COMPANION_HOME the running server reads plus per-cache
+  // freshness — so a key saved under a diverging home (the original bug that
+  // made fable-5 appear billable) is diagnosable rather than a mystery.
+
+  // On mount the panel fetches diagnostics and renders the config home + both
+  // cache summaries from the GET /settings/diagnostics response.
+  it("loads and renders model diagnostics on mount", async () => {
+    render(<SettingsPage />);
+    await screen.findByText("Anthropic key configured");
+
+    await waitFor(() => {
+      expect(mockApi.getModelDiagnostics).toHaveBeenCalled();
+    });
+
+    // Config home path is surfaced verbatim (feature's whole point).
+    expect(await screen.findByText("/home/tester/.companion")).toBeInTheDocument();
+    // Anthropic cache summary: "<count> models · <formatted ts>".
+    expect(screen.getByText(/12 models/)).toBeInTheDocument();
+    // Codex cache summary: "<count> models · v<version> · <formatted ts>".
+    expect(screen.getByText(/4 models · v0\.9\.1/)).toBeInTheDocument();
+  });
+
+  // Clicking "Refresh models" calls the force-refresh endpoint, repopulates
+  // BOTH backend dropdowns from the store, re-fetches diagnostics, and shows the
+  // per-backend result banner.
+  it("refreshes models and shows the result banner", async () => {
+    render(<SettingsPage />);
+    await screen.findByText("Anthropic key configured");
+    // Clear the mount-time diagnostics call so we can assert the refresh re-fetch.
+    mockApi.getModelDiagnostics.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh models" }));
+
+    await waitFor(() => {
+      expect(mockApi.refreshModels).toHaveBeenCalledTimes(1);
+    });
+    // Both dropdowns repopulate from the freshly-primed caches.
+    expect(mockState.loadBackendModels).toHaveBeenCalledWith("claude");
+    expect(mockState.loadBackendModels).toHaveBeenCalledWith("codex");
+    // Diagnostics are re-fetched after the refresh so the panel reflects new mtimes.
+    await waitFor(() => {
+      expect(mockApi.getModelDiagnostics).toHaveBeenCalled();
+    });
+    // The per-backend outcome banner is shown.
+    expect(await screen.findByText(/Refreshed — Claude: ok, Codex: ok\./)).toBeInTheDocument();
+  });
+
+  // A failing refresh surfaces the error message in the panel rather than
+  // silently swallowing it, and the button returns to its idle label.
+  it("shows an error when refresh fails and re-enables the button", async () => {
+    mockApi.refreshModels.mockRejectedValueOnce(new Error("refresh boom"));
+
+    render(<SettingsPage />);
+    await screen.findByText("Anthropic key configured");
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh models" }));
+
+    expect(await screen.findByText("refresh boom")).toBeInTheDocument();
+    // Button label reverts from "Refreshing..." back to the idle state.
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Refresh models" })).toBeEnabled();
+    });
+  });
+
+  // When the Codex CLI is not installed the diagnostics response carries
+  // { present: false } and the panel shows the "not installed" fallback rather
+  // than a malformed summary string.
+  it("shows 'not installed' when the Codex model cache is absent", async () => {
+    mockApi.getModelDiagnostics.mockResolvedValue({
+      companionHome: "/home/tester/.companion",
+      anthropic: {
+        keyConfigured: false,
+        cachePresent: false,
+        cacheFetchedAt: null,
+        cacheModelCount: null,
+      },
+      codex: { present: false },
+    });
+
+    render(<SettingsPage />);
+    await screen.findByText("Anthropic key configured");
+
+    expect(await screen.findByText("not installed")).toBeInTheDocument();
+    // With no key and no cache, the anthropic row shows the "no key" fallback.
+    expect(screen.getByText("no key configured")).toBeInTheDocument();
+  });
+
+  // Axe accessibility scan for the Model list panel (button + dl/dt/dd list).
+  it("passes axe accessibility checks for the Model list panel", async () => {
+    const { axe } = await import("vitest-axe");
+
+    render(<SettingsPage />);
+    await screen.findByText("Anthropic key configured");
+    // Ensure the diagnostics have loaded so the dl is present in the scan.
+    await screen.findByText("/home/tester/.companion");
+
+    const anthropicSection = document.getElementById("anthropic");
+    expect(anthropicSection).toBeInTheDocument();
+
+    const results = await axe(anthropicSection!);
     expect(results).toHaveNoViolations();
   });
 });
