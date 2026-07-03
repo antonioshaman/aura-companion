@@ -1020,6 +1020,38 @@ export function writeDiskCache(
   writeAtomicJson(ANTHROPIC_MODELS_CACHE_PATH, record);
 }
 
+/**
+ * Read lightweight cache metadata for the operator diagnostics surface
+ * (Settings panel "model cache" indicator). Unlike {@link readDiskCache}
+ * this deliberately does NOT check the key fingerprint or the TTL — it only
+ * answers "is there a cache file, and how old is it?" and never gates a live
+ * decision, so it needs no `currentFingerprint`. Never throws; a
+ * missing/corrupt file degrades to nulls.
+ */
+export function readAnthropicCacheFileMeta(): {
+  present: boolean;
+  fetchedAt: number | null;
+  modelCount: number | null;
+} {
+  let raw: string;
+  try {
+    raw = readFileSync(ANTHROPIC_MODELS_CACHE_PATH, "utf8");
+  } catch {
+    return { present: false, fetchedAt: null, modelCount: null };
+  }
+  try {
+    const parsed = JSON.parse(raw) as Partial<CachedModelsRecord>;
+    const fetchedAt =
+      typeof parsed.fetched_at === "number" && Number.isFinite(parsed.fetched_at)
+        ? parsed.fetched_at
+        : null;
+    const modelCount = Array.isArray(parsed.models) ? parsed.models.length : null;
+    return { present: true, fetchedAt, modelCount };
+  } catch {
+    return { present: true, fetchedAt: null, modelCount: null };
+  }
+}
+
 // ── Orchestrator (Task 5, Hunt R4 + Backend R1 single-flight) ──────────────
 
 /**
@@ -1073,8 +1105,17 @@ export function __deleteDiskCacheForTests(): void {
 /**
  * Combined dependency-injection seam for the orchestrator + nested
  * fetch. Tests pass `fetch` + `now` mocks; production omits.
+ *
+ * `forceRefresh` bypasses the memory + disk read tiers so the request goes
+ * straight to the network (used by the operator-triggered "Refresh models"
+ * button — Hunt R4 keeps the GET handler cache-honest, so an explicit
+ * refresh is a distinct POST intent, never a `?force=1` escape hatch on the
+ * GET). The network result still persists to both cache tiers, and the
+ * upstream-failure path still falls back to the last-known disk record
+ * (availability beats freshness) — a force-refresh that fails upstream does
+ * NOT wipe a usable cache.
  */
-export type GetModelsDeps = AnthropicFetchDeps;
+export type GetModelsDeps = AnthropicFetchDeps & { forceRefresh?: boolean };
 
 /**
  * Resolve the dynamic Claude model list for a given API key.
@@ -1121,35 +1162,44 @@ export async function getAnthropicModels(
   const fingerprint = computeKeyFingerprint(apiKey);
   const nowImpl = deps?.now ?? Date.now;
   const currentTime = nowImpl();
+  const forceRefresh = deps?.forceRefresh === true;
 
-  // Memory hit — zero-IO fast path.
-  const memHit = readMemoryCache(fingerprint, currentTime);
-  if (memHit !== null) {
-    log.info("anthropic-models-cache", "cache.hit.memory", {
-      event: "anthropic-models.cache.hit",
-      source: "memory",
-      key_fingerprint: fingerprint,
-      model_count: memHit.models.length,
-      cache_age_ms: currentTime - memHit.fetched_at,
-    });
-    return {
-      kind: "ok",
-      source: "memory",
-      models: memHit.models,
-      fetched_at: memHit.fetched_at,
-    };
-  }
+  // Memory hit — zero-IO fast path. Skipped on force-refresh so the
+  // operator's explicit "Refresh" reaches the network, not a warm tier.
+  if (!forceRefresh) {
+    const memHit = readMemoryCache(fingerprint, currentTime);
+    if (memHit !== null) {
+      log.info("anthropic-models-cache", "cache.hit.memory", {
+        event: "anthropic-models.cache.hit",
+        source: "memory",
+        key_fingerprint: fingerprint,
+        model_count: memHit.models.length,
+        cache_age_ms: currentTime - memHit.fetched_at,
+      });
+      return {
+        kind: "ok",
+        source: "memory",
+        models: memHit.models,
+        fetched_at: memHit.fetched_at,
+      };
+    }
 
-  // Single-flight: piggyback on existing in-flight fetch for this key.
-  const existing = inflightFetches.get(fingerprint);
-  if (existing !== undefined) {
-    return existing;
+    // Single-flight: piggyback on existing in-flight fetch for this key.
+    // A force-refresh does NOT piggyback — an in-flight call may itself be
+    // resolving from a warm disk tier, which would defeat the refresh
+    // intent; force always allocates its own network fetch.
+    const existing = inflightFetches.get(fingerprint);
+    if (existing !== undefined) {
+      return existing;
+    }
   }
 
   const promise = (async (): Promise<AnthropicModelsResult> => {
     try {
-      // Disk hit — warm-start on bun cold restart.
-      const diskHit = readDiskCache(fingerprint, currentTime);
+      // Disk hit — warm-start on bun cold restart. Skipped on force-refresh.
+      const diskHit = forceRefresh
+        ? ({ ok: false, reason: "enoent" } as const)
+        : readDiskCache(fingerprint, currentTime);
       if (diskHit.ok) {
         writeMemoryCache(diskHit.record);
         log.info("anthropic-models-cache", "cache.hit.disk", {

@@ -26,6 +26,7 @@ import {
   isCacheRecordValid,
   fetchAnthropicModelsRaw,
   getAnthropicModels,
+  readAnthropicCacheFileMeta,
   readMemoryCache,
   writeMemoryCache,
   __resetMemoryCacheForTests,
@@ -658,6 +659,130 @@ describe("getAnthropicModels orchestrator", () => {
     // Rotating to a new key — different fingerprint → memory cache lookup
     // returns null (not the old record).
     expect(readMemoryCache(computeKeyFingerprint("sk-new"), Date.now())).toBeNull();
+  });
+});
+
+// ── FORCE-REFRESH (operator "Refresh models" button) ──────────────────────
+
+describe("getAnthropicModels — forceRefresh", () => {
+  beforeEach(() => {
+    __resetMemoryCacheForTests();
+    __resetInflightForTests();
+    __deleteDiskCacheForTests();
+    __resetSignalCoalesceFlagForTests();
+  });
+
+  afterEach(() => {
+    __resetMemoryCacheForTests();
+    __resetInflightForTests();
+    __deleteDiskCacheForTests();
+    __resetSignalCoalesceFlagForTests();
+  });
+
+  // The whole point of the button: a fresh in-memory hit must NOT short-circuit
+  // a force-refresh — the network is consulted so a newly-published model shows
+  // up without waiting for the TTL to expire.
+  it("bypasses a fresh memory hit and re-fetches upstream", async () => {
+    const fp = computeKeyFingerprint("sk-test");
+    writeMemoryCache({
+      schema_version: SCHEMA_VERSION,
+      fetched_at: Date.now(),
+      key_fingerprint: fp,
+      models: [{ value: "claude-opus-4-7", label: "Opus 4.7", description: "" }],
+    });
+    const fakeFetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          data: [{ type: "model", id: "claude-sonnet-4-6", display_name: "Claude Sonnet 4.6" }],
+        }),
+        { status: 200 },
+      ),
+    );
+    const r = await getAnthropicModels("sk-test", { fetch: fakeFetch, forceRefresh: true });
+    // Memory hit did NOT short-circuit the fetch.
+    expect(fakeFetch).toHaveBeenCalledTimes(1);
+    expect(r.kind).toBe("ok");
+    if (r.kind === "ok") {
+      expect(r.source).toBe("network");
+      expect(r.models.map((m) => m.value)).toContain("claude-sonnet-4-6");
+    }
+  });
+
+  // Availability beats freshness: a force-refresh that fails upstream must still
+  // fall back to the last-known disk record rather than stranding the dropdown.
+  it("falls back to the stale disk record when the forced refresh fails upstream", async () => {
+    // Prime the disk cache with a successful (non-force) fetch.
+    const okFetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          data: [{ type: "model", id: "claude-opus-4-7", display_name: "Claude Opus 4.7" }],
+        }),
+        { status: 200 },
+      ),
+    );
+    const primed = await getAnthropicModels("sk-test", { fetch: okFetch });
+    expect(primed.kind).toBe("ok");
+    // Clear memory so only the disk record can satisfy the next call.
+    __resetMemoryCacheForTests();
+    __resetInflightForTests();
+
+    const failFetch = vi.fn().mockResolvedValue(new Response("", { status: 500 }));
+    const r = await getAnthropicModels("sk-test", { fetch: failFetch, forceRefresh: true });
+    expect(failFetch).toHaveBeenCalledTimes(1);
+    expect(r.kind).toBe("ok");
+    if (r.kind === "ok") {
+      expect(r.source).toBe("disk");
+      expect(r.models.map((m) => m.value)).toContain("claude-opus-4-7");
+    }
+  });
+});
+
+// ── DIAGNOSTICS META READER ────────────────────────────────────────────────
+
+describe("readAnthropicCacheFileMeta", () => {
+  beforeEach(() => {
+    __resetMemoryCacheForTests();
+    __resetInflightForTests();
+    __deleteDiskCacheForTests();
+    __resetSignalCoalesceFlagForTests();
+  });
+
+  afterEach(() => {
+    __resetMemoryCacheForTests();
+    __resetInflightForTests();
+    __deleteDiskCacheForTests();
+    __resetSignalCoalesceFlagForTests();
+  });
+
+  it("reports absent when no cache file exists", () => {
+    const meta = readAnthropicCacheFileMeta();
+    expect(meta).toEqual({ present: false, fetchedAt: null, modelCount: null });
+  });
+
+  // After a successful fetch the orchestrator persists a disk record; the meta
+  // reader must surface its freshness + model count WITHOUT any fingerprint/TTL
+  // gate (it is a diagnostics side-channel, not a cache-validity check).
+  it("reports present + fetchedAt + modelCount after a successful fetch persists a record", async () => {
+    const okFetch = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          data: [
+            { type: "model", id: "claude-opus-4-7", display_name: "Claude Opus 4.7" },
+            { type: "model", id: "claude-sonnet-4-6", display_name: "Claude Sonnet 4.6" },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+    const before = Date.now();
+    const r = await getAnthropicModels("sk-test", { fetch: okFetch });
+    expect(r.kind).toBe("ok");
+
+    const meta = readAnthropicCacheFileMeta();
+    expect(meta.present).toBe(true);
+    expect(meta.modelCount).toBe(2);
+    expect(typeof meta.fetchedAt).toBe("number");
+    expect(meta.fetchedAt).toBeGreaterThanOrEqual(before);
   });
 });
 

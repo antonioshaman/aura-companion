@@ -266,6 +266,31 @@ export interface BackendModelInfo {
   replacement?: string | null;
 }
 
+/**
+ * Config + model-cache diagnostics for the Settings panel. `companionHome`
+ * is the resolved directory the running server reads settings/caches from —
+ * surfaced so a key saved under a diverging home is diagnosable. Cache
+ * timestamps differ by source: `anthropic.cacheFetchedAt` is epoch ms
+ * (server clock), `codex.fetchedAt` is the ISO string the Codex CLI wrote.
+ */
+export interface ModelDiagnostics {
+  companionHome: string;
+  anthropic: {
+    keyConfigured: boolean;
+    cachePresent: boolean;
+    cacheFetchedAt: number | null;
+    cacheModelCount: number | null;
+  };
+  codex:
+    | { present: false }
+    | {
+        present: true;
+        fetchedAt: string | null;
+        clientVersion: string | null;
+        listedModelCount: number | null;
+      };
+}
+
 export interface RelaunchSessionOpts {
   model?: string;
 }
@@ -1063,6 +1088,11 @@ export const api = {
   }) => put<AppSettings>("/settings", data),
   verifyAnthropicKey: (apiKey: string) =>
     post<{ valid: boolean; error?: string }>("/settings/anthropic/verify", { apiKey }),
+  refreshModels: () =>
+    post<{ claude: "ok" | "no-key" | "unavailable"; codex: "ok" | "absent" }>(
+      "/settings/models/refresh",
+    ),
+  getModelDiagnostics: () => get<ModelDiagnostics>("/settings/diagnostics"),
 
   // Tailscale
   getTailscaleStatus: () => get<TailscaleStatus>("/tailscale/status"),

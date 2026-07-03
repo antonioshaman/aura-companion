@@ -71,7 +71,7 @@ export function TelemetryNudge() {
   };
 
   return (
-    <div className="mt-1.5 rounded-lg border border-cc-border/30 bg-cc-card/20 px-2 py-1.5 flex items-center gap-2">
+    <div className="mt-2 rounded-lg border border-cc-primary/25 bg-cc-primary/5 px-2 py-1.5 flex items-center gap-2">
       <p className="text-[11px] leading-tight text-cc-muted flex-1">
         Join the global usage counter?
       </p>
@@ -80,7 +80,11 @@ export function TelemetryNudge() {
         onClick={toggle}
         aria-pressed={enabled}
         aria-label={`Global usage counter: ${enabled ? "on" : "off"}`}
-        className="shrink-0 px-2 py-0.5 rounded-md text-[11px] font-medium bg-cc-hover text-cc-fg hover:bg-cc-active transition-colors cursor-pointer tabular-nums"
+        className={`shrink-0 px-2 py-0.5 rounded-md text-[11px] font-medium transition-colors cursor-pointer tabular-nums ${
+          enabled
+            ? "bg-cc-primary text-white hover:bg-cc-primary-hover"
+            : "bg-cc-hover text-cc-fg hover:bg-cc-active"
+        }`}
       >
         {enabled ? "On" : "Off"}
       </button>
