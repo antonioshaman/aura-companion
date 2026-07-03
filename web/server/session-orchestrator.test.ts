@@ -4740,6 +4740,51 @@ describe("SessionOrchestrator", () => {
       expect(orchestrator.getAllGroupsForBootstrap()).toEqual([]);
     });
 
+    it("lazily reconciles launcher-persisted pairs when coordinator is empty", async () => {
+      const fs = await import("node:fs");
+      const os = await import("node:os");
+      const path = await import("node:path");
+      const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "council-lazy-bootstrap-")));
+      try {
+        (deps.launcher.listSessions as any).mockReturnValue([
+          {
+            sessionId: "lazy-orch",
+            sessionGroupId: "grp_lazy_bootstrap",
+            sessionGroupRole: "orchestrator",
+            backendType: "claude",
+            cwd: ws,
+            archived: false,
+            createdAt: 1000,
+            state: "connected",
+          },
+          {
+            sessionId: "lazy-obs",
+            sessionGroupId: "grp_lazy_bootstrap",
+            sessionGroupRole: "observer",
+            backendType: "claude",
+            cwd: ws,
+            archived: false,
+            createdAt: 1001,
+            state: "connected",
+          },
+        ]);
+
+        const out = orchestrator.getAllGroupsForBootstrap();
+
+        expect(out).toHaveLength(1);
+        expect(out[0]).toMatchObject({
+          sessionGroupId: "grp_lazy_bootstrap",
+          primarySessionId: "lazy-orch",
+          observerSessionId: "lazy-obs",
+          pairing: "claude+claude",
+          status: "active",
+        });
+        (orchestrator as any).stopCouncilWatchers("grp_lazy_bootstrap");
+      } finally {
+        fs.rmSync(ws, { recursive: true, force: true });
+      }
+    });
+
     it("returns one wire-shape record per active group, with status + pairing label", () => {
       seedCoordGroup("grp_b1", "orch_b1", "obs_b1", "active", "claude");
       seedCoordGroup("grp_b2", "orch_b2", "obs_b2", "active", "codex");

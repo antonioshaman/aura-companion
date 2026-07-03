@@ -1800,6 +1800,13 @@ export class CodexAdapter implements IBackendAdapter {
       case "thread/started":
         // Thread started after init — nothing to emit.
         break;
+      case "thread/name/updated":
+      case "thread/settings/updated":
+      case "thread/goal/cleared":
+      case "thread/goal/updated":
+      case "thread/compacted":
+        // Thread metadata changed upstream; Aura keeps its own session labels.
+        break;
       case "thread/status/changed":
         this.handleThreadStatusChanged(params);
         break;
@@ -1808,10 +1815,23 @@ export class CodexAdapter implements IBackendAdapter {
         break;
       case "account/updated":
       case "account/login/completed":
+      case "authStatusChange":
+      case "loginChatGptComplete":
         // Auth events
         break;
       case "account/rateLimits/updated":
         this.updateRateLimits(params);
+        break;
+      case "app/list/updated":
+      case "configWarning":
+      case "deprecationNotice":
+      case "fuzzyFileSearch/sessionUpdated":
+      case "mcpServer/oauthLogin/completed":
+      case "mcpServer/startupStatus/updated":
+      case "remoteControl/status/changed":
+      case "sessionConfigured":
+      case "windows/worldWritableWarning":
+        // Informational app-server notifications; not user-actionable here.
         break;
       // Legacy codex/event/* notifications forwarded by newer Codex runtimes.
       // token_count is still useful for metrics, but the streaming deltas are
