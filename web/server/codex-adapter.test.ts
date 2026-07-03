@@ -4097,6 +4097,35 @@ describe("CodexAdapter with ICodexTransport", () => {
     warnSpy.mockRestore();
   });
 
+  it("accepts current app-server informational notifications without protocol drift", async () => {
+    const { mock, messages } = await initAdapter();
+    const warnSpy = vi.spyOn(log, "warn").mockImplementation(() => {});
+
+    const informationalNotifications: Array<{ method: string; params: Record<string, unknown> }> = [
+      { method: "configWarning", params: { message: "ignored warning" } },
+      { method: "remoteControl/status/changed", params: { status: "disabled" } },
+      { method: "mcpServer/startupStatus/updated", params: { status: "ready" } },
+      { method: "thread/settings/updated", params: { threadId: "thr_init" } },
+      { method: "thread/goal/cleared", params: { threadId: "thr_init" } },
+    ];
+
+    for (const notification of informationalNotifications) {
+      mock.pushNotification(notification.method, notification.params);
+    }
+    await new Promise((r) => setTimeout(r, 20));
+
+    for (const notification of informationalNotifications) {
+      expect(warnSpy).not.toHaveBeenCalledWith(
+        "protocol-monitor",
+        "Backend protocol drift detected",
+        expect.objectContaining({ messageName: notification.method }),
+      );
+    }
+    expect(messages.some((m) => m.type === "error" && `${m.message}`.includes("protocol drift"))).toBe(false);
+
+    warnSpy.mockRestore();
+  });
+
   it("logs and surfaces unknown notification methods as protocol drift", async () => {
     // Unknown notifications should be elevated as compatibility warnings so
     // backend protocol drift is visible in logs and in the session UI.

@@ -3443,6 +3443,9 @@ export class SessionOrchestrator {
    * they should not appear in the Sidebar list of active pairs.
    */
   getAllGroupsForBootstrap(): BrowserGroupRecord[] {
+    if (!this.coordinator || this.coordinator.listAll().length === 0) {
+      this.reconcileCouncilGroups();
+    }
     if (!this.coordinator) return [];
     const records = this.coordinator.listAll();
     const out: BrowserGroupRecord[] = [];
