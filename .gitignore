@@ -37,6 +37,7 @@ coverage/
 .council/review-output/
 .council/reviews/*-observer.md
 .council/eval/
+.council/state/
 # Local self-improvement learnings store
 .learnings/
 # Local backup snapshots
