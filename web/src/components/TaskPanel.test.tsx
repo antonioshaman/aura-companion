@@ -59,6 +59,7 @@ interface TaskItemMock {
 interface MockStoreState {
   sessionTasks: Map<string, TaskItemMock[]>;
   sessionTasksUpdatedAt: Map<string, number>;
+  sessionStatus: Map<string, "idle" | "running" | "compacting" | null>;
   sessions: Map<string, {
     backend_type?: string;
     cwd?: string;
@@ -97,6 +98,7 @@ function resetStore(overrides: Partial<MockStoreState> = {}) {
   mockState = {
     sessionTasks: new Map(),
     sessionTasksUpdatedAt: new Map(),
+    sessionStatus: new Map(),
     sessions: new Map([["s1", { backend_type: "codex" }]]),
     sdkSessions: [],
     taskPanelOpen: true,
@@ -640,6 +642,69 @@ describe("TasksSection (Claude Code sessions)", () => {
     });
     render(<TaskPanel sessionId="s1" />);
     expect(screen.queryByText(/Snapshot · updated/)).not.toBeInTheDocument();
+  });
+
+  it("names the 'agent active but not reporting' state when stale AND the session is running", () => {
+    // The frozen-panel confusion: the agent is provably doing work (sessionStatus
+    // "running") yet the list hasn't refreshed past the 5-min staleness window.
+    // This must read as "agent working, not reporting" — NOT the neutral "Snapshot"
+    // wording used for an idle/final list — so a user does not mistake it for a hang.
+    resetStore({
+      sessions: new Map([["s1", { backend_type: "claude" }]]),
+      sessionTasks: new Map([["s1", [{ id: "t1", status: "in_progress", subject: "Work" }]]]),
+      sessionTasksUpdatedAt: new Map([["s1", Date.now() - 6 * 60 * 1000]]),
+      sessionStatus: new Map([["s1", "running"]]),
+    });
+    render(<TaskPanel sessionId="s1" />);
+    const hint = screen.getByText(/Agent active · list not updated/);
+    expect(hint.className).toContain("text-cc-warning");
+    // The neutral snapshot wording must be gone in this state.
+    expect(screen.queryByText(/Snapshot · updated/)).not.toBeInTheDocument();
+  });
+
+  it("treats 'compacting' as active too (still an in-flight agent, list behind)", () => {
+    // compacting is a live server-side state — the agent has not gone idle, so a
+    // stale list is still 'active but not reporting', not a final snapshot.
+    resetStore({
+      sessions: new Map([["s1", { backend_type: "claude" }]]),
+      sessionTasks: new Map([["s1", [{ id: "t1", status: "in_progress", subject: "Work" }]]]),
+      sessionTasksUpdatedAt: new Map([["s1", Date.now() - 6 * 60 * 1000]]),
+      sessionStatus: new Map([["s1", "compacting"]]),
+    });
+    render(<TaskPanel sessionId="s1" />);
+    expect(screen.getByText(/Agent active · list not updated/)).toBeInTheDocument();
+  });
+
+  it("keeps neutral 'Snapshot' wording when stale but the session is idle (final/abandoned list)", () => {
+    // Stale + idle is the abandoned-list case: the agent stopped without a closing
+    // TodoWrite. It stays warning-colored but keeps the neutral wording because no
+    // work is in flight — there is nothing 'active' to attribute the lag to.
+    resetStore({
+      sessions: new Map([["s1", { backend_type: "claude" }]]),
+      sessionTasks: new Map([["s1", [{ id: "t1", status: "in_progress", subject: "Work" }]]]),
+      sessionTasksUpdatedAt: new Map([["s1", Date.now() - 6 * 60 * 1000]]),
+      sessionStatus: new Map([["s1", "idle"]]),
+    });
+    render(<TaskPanel sessionId="s1" />);
+    const hint = screen.getByText(/Snapshot · updated/);
+    expect(hint.className).toContain("text-cc-warning");
+    expect(screen.queryByText(/Agent active/)).not.toBeInTheDocument();
+  });
+
+  it("does NOT flag active-not-reporting when the session is running but the list is fresh", () => {
+    // Running alone must not trigger the warning — a fresh list is being kept
+    // current, which is exactly the healthy case. Only stale AND running qualifies.
+    resetStore({
+      sessions: new Map([["s1", { backend_type: "claude" }]]),
+      sessionTasks: new Map([["s1", [{ id: "t1", status: "in_progress", subject: "Work" }]]]),
+      sessionTasksUpdatedAt: new Map([["s1", Date.now()]]),
+      sessionStatus: new Map([["s1", "running"]]),
+    });
+    render(<TaskPanel sessionId="s1" />);
+    const hint = screen.getByText(/Snapshot · updated/);
+    expect(hint.className).toContain("text-cc-muted");
+    expect(hint.className).not.toContain("text-cc-warning");
+    expect(screen.queryByText(/Agent active/)).not.toBeInTheDocument();
   });
 });
 
@@ -1393,6 +1458,21 @@ describe("TaskPanel accessibility", () => {
           { id: "t3", status: "pending", subject: "Upcoming task" },
         ]],
       ]),
+    });
+    const { container } = render(<TaskPanel sessionId="s1" />);
+    const results = await axe(container);
+    expect(results).toHaveNoViolations();
+  });
+
+  it("passes axe in the stale-while-running state (pulsing dot is aria-hidden)", async () => {
+    // The active-not-reporting badge adds a decorative pulsing dot — assert it
+    // introduces no accessibility violation (it must be aria-hidden, text carries meaning).
+    const { axe } = await import("vitest-axe");
+    resetStore({
+      sessions: new Map([["s1", { backend_type: "claude" }]]),
+      sessionTasks: new Map([["s1", [{ id: "t1", status: "in_progress", subject: "Work" }]]]),
+      sessionTasksUpdatedAt: new Map([["s1", Date.now() - 6 * 60 * 1000]]),
+      sessionStatus: new Map([["s1", "running"]]),
     });
     const { container } = render(<TaskPanel sessionId="s1" />);
     const results = await axe(container);

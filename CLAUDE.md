@@ -51,6 +51,19 @@ cd web && bun run test:watch
 - **Never remove or delete existing tests.** If a test is failing, fix the code or the test. If you believe a test should be removed, you must first explain to the user why and get explicit approval before removing it.
 - When creating test, make sure to document what the test is validating, and any important context or edge cases in comments within the test code.
 
+## Task reporting discipline (keeps the Task Panel honest)
+
+The Task Panel is a **mirror of your last `TodoWrite`**, never live ground truth — it
+cannot know your progress until you emit a `TodoWrite`. Its staleness badge now flags
+`Agent active · list not updated …` whenever the session is running but the list has not
+refreshed in 5 min, so a lagging list is visibly attributed to reporting cadence.
+
+To keep that badge green, when working in this repo: **call `TodoWrite` on every task state
+transition — as soon as a task starts and the moment it completes — do not batch updates.**
+A single long-running step with no interim `TodoWrite` is what makes the panel look frozen.
+This is a reporting-discipline convention, not something the panel can enforce; the UI can
+only surface the staleness, not manufacture the update.
+
 ## Component Playground
 
 All UI components used in the message/chat flow **must** be represented in the Playground page (`web/src/components/Playground.tsx`, accessible at `#/playground`). When adding or modifying a message-related component (e.g. `MessageBubble`, `ToolBlock`, `PermissionBanner`, `Composer`, streaming indicators, tool groups, subagent groups), update the Playground to include a mock of the new or changed state.

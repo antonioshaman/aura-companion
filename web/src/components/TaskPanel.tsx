@@ -901,6 +901,7 @@ const TASKS_STALE_AFTER_MS = 5 * 60 * 1000;
 function TasksSection({ sessionId }: { sessionId: string }) {
   const tasks = useStore((s) => s.sessionTasks.get(sessionId) || EMPTY_TASKS);
   const updatedAt = useStore((s) => s.sessionTasksUpdatedAt.get(sessionId));
+  const runState = useStore((s) => s.sessionStatus.get(sessionId));
   const session = useStore((s) => s.sessions.get(sessionId));
   const sdk = useSdkSession(sessionId);
   const isCodex = (session?.backend_type || sdk?.backendType) === "codex";
@@ -917,6 +918,13 @@ function TasksSection({ sessionId }: { sessionId: string }) {
   if (!session || isCodex) return null;
 
   const isStale = updatedAt != null && Date.now() - updatedAt > TASKS_STALE_AFTER_MS;
+  // The panel can only ever mirror the agent's last TodoWrite; it is never live
+  // ground truth. When the session is actively producing frames but the list is
+  // stale, the snapshot isn't merely old — it is provably behind in-flight work.
+  // Name that state explicitly so a "frozen" panel reads as "agent working, not
+  // reporting" rather than a UI hang.
+  const isRunning = runState === "running" || runState === "compacting";
+  const staleWhileRunning = isStale && isRunning;
 
   return (
     <div className="px-3 py-2">
@@ -926,10 +934,19 @@ function TasksSection({ sessionId }: { sessionId: string }) {
         <>
           {updatedAt != null && (
             <p
-              className={`mb-1.5 px-2.5 text-[10px] ${isStale ? "text-cc-warning" : "text-cc-muted"}`}
-              title="The task list mirrors the agent's last TodoWrite — it may lag behind actual progress until the agent updates it."
+              className={`mb-1.5 px-2.5 text-[10px] flex items-center gap-1 ${isStale ? "text-cc-warning" : "text-cc-muted"}`}
+              title={
+                staleWhileRunning
+                  ? "The agent is actively working but hasn't refreshed its task list — this snapshot is behind live progress until the next TodoWrite."
+                  : "The task list mirrors the agent's last TodoWrite — it may lag behind actual progress until the agent updates it."
+              }
             >
-              Snapshot · updated {timeAgo(updatedAt)}
+              {staleWhileRunning && (
+                <span aria-hidden className="inline-block w-1.5 h-1.5 rounded-full bg-cc-warning animate-pulse" />
+              )}
+              {staleWhileRunning
+                ? `Agent active · list not updated ${timeAgo(updatedAt)}`
+                : `Snapshot · updated ${timeAgo(updatedAt)}`}
             </p>
           )}
           <div className="space-y-0.5">
