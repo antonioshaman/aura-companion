@@ -901,6 +901,7 @@ const TASKS_STALE_AFTER_MS = 5 * 60 * 1000;
 function TasksSection({ sessionId }: { sessionId: string }) {
   const tasks = useStore((s) => s.sessionTasks.get(sessionId) || EMPTY_TASKS);
   const updatedAt = useStore((s) => s.sessionTasksUpdatedAt.get(sessionId));
+  const runState = useStore((s) => s.sessionStatus.get(sessionId));
   const session = useStore((s) => s.sessions.get(sessionId));
   const sdk = useSdkSession(sessionId);
   const isCodex = (session?.backend_type || sdk?.backendType) === "codex";
@@ -917,6 +918,47 @@ function TasksSection({ sessionId }: { sessionId: string }) {
   if (!session || isCodex) return null;
 
   const isStale = updatedAt != null && Date.now() - updatedAt > TASKS_STALE_AFTER_MS;
+  const isRunning = runState === "running" || runState === "compacting";
+  // A single long-running in-progress step (big build, long test, deep-thinking
+  // turn) has NO task-state transition to report, so wall-clock staleness alone
+  // is not evidence the list is behind — the agent already told us what it is
+  // doing. Reserve the amber "may be behind" framing for the one state that is
+  // provably behind: running, stale, and nothing in-flight to explain the
+  // silence (Council Review 2026-07-05 #6 — avoid warning-fatigue on healthy
+  // long steps).
+  const hasInProgress = tasks.some((t) => t.status === "in_progress");
+  const listBehind = isStale && isRunning && !hasInProgress;
+
+  // Four honest states, each with its own sentence so a stale panel is never
+  // ambiguous between "agent crashed", "agent finished and abandoned the list",
+  // and "agent idle waiting for me" (Council Review 2026-07-05 #5/#7). The
+  // visible copy carries the "mirror, not ground truth" mental model directly —
+  // it does not depend on the hover tooltip to be understood.
+  let badgeTone: "behind" | "active" | "idle-stale" | "fresh";
+  let badgeCopy = "";
+  let badgeAnnounce = "";
+  if (updatedAt != null) {
+    const ago = timeAgo(updatedAt);
+    if (listBehind) {
+      badgeTone = "behind";
+      badgeCopy = `Agent active · list may be behind · ${ago}`;
+      badgeAnnounce = "Task list may be behind the agent's live progress";
+    } else if (isRunning) {
+      badgeTone = "active";
+      badgeCopy = `Agent active · updated ${ago}`;
+      badgeAnnounce = "Agent active";
+    } else if (isStale) {
+      badgeTone = "idle-stale";
+      badgeCopy = `Idle · list last updated ${ago}`;
+      badgeAnnounce = "Session idle, task list last updated a while ago";
+    } else {
+      badgeTone = "fresh";
+      badgeCopy = `Updated ${ago}`;
+      badgeAnnounce = "";
+    }
+  } else {
+    badgeTone = "fresh";
+  }
 
   return (
     <div className="px-3 py-2">
@@ -925,12 +967,31 @@ function TasksSection({ sessionId }: { sessionId: string }) {
       ) : (
         <>
           {updatedAt != null && (
-            <p
-              className={`mb-1.5 px-2.5 text-[10px] ${isStale ? "text-cc-warning" : "text-cc-muted"}`}
-              title="The task list mirrors the agent's last TodoWrite — it may lag behind actual progress until the agent updates it."
-            >
-              Snapshot · updated {timeAgo(updatedAt)}
-            </p>
+            <>
+              <p
+                className={`mb-1.5 px-2.5 text-[10px] flex items-center gap-1 ${badgeTone === "behind" ? "text-cc-warning" : "text-cc-muted"}`}
+                title={
+                  badgeTone === "behind"
+                    ? "The agent is actively working but hasn't refreshed its task list — this snapshot is behind live progress until the next TodoWrite."
+                    : "The task list mirrors the agent's last TodoWrite — it may lag behind actual progress until the agent updates it."
+                }
+              >
+                {badgeTone === "behind" && (
+                  // Static, damped dot — the state is a heads-up, not an alarm.
+                  // An infinite full-saturation pulse read as alarm-grade
+                  // (Council Review 2026-07-05 #8).
+                  <span aria-hidden className="inline-block w-1.5 h-1.5 rounded-full bg-cc-warning/70" />
+                )}
+                {badgeCopy}
+              </p>
+              {/* Polite live region announces discrete state transitions to
+                  screen readers. It carries the state phrase WITHOUT the
+                  relative timestamp so the 30s "N ago" ticks do not re-announce
+                  (Council Review 2026-07-05 #13). */}
+              <span className="sr-only" aria-live="polite">
+                {badgeAnnounce}
+              </span>
+            </>
           )}
           <div className="space-y-0.5">
             {tasks.map((task) => (

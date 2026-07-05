@@ -167,4 +167,100 @@ describe("abortableSleep", () => {
     await p;
     expect(Date.now() - start).toBeLessThan(1_000);
   });
+
+  it("resolves after the delay elapses when never aborted (timer path)", async () => {
+    // Council Review 2026-07-05 Beck #2: the two early-abort tests both assert
+    // the short-circuit; neither exercises the production default's actual
+    // setTimeout branch (fire + listener cleanup). This covers the timer-resolve
+    // path so a mutation that drops the timer (or its listener removal) is caught.
+    const controller = new AbortController();
+    const start = Date.now();
+    await abortableSleep(20, controller.signal);
+    // The real timer must have fired (≥ ~15ms, allowing scheduler slack).
+    expect(Date.now() - start).toBeGreaterThanOrEqual(15);
+    // Aborting AFTER a normal resolve must be a no-op (listener already removed):
+    // if the abort listener leaked, this would throw on a settled promise's
+    // resolve — it must not.
+    expect(() => controller.abort()).not.toThrow();
+  });
+});
+
+describe("runResilientWatch — escalating backoff (#11)", () => {
+  it("backs off exponentially (capped) across a failing streak instead of a flat delay", async () => {
+    // A watch that dies on every re-arm previously re-armed at a flat 1s — an
+    // ERROR every second forever. Assert the injected sleep receives a growing,
+    // capped delay across consecutive deaths (Council Review 2026-07-05 #11).
+    vi.spyOn(log, "error").mockImplementation(() => {});
+    const controller = new AbortController();
+    const sleepDelays: number[] = [];
+    // Record each backoff, resolve instantly. `now` is frozen so every
+    // generation has 0 uptime → the healthy-reset never fires → the streak grows.
+    const recordingSleep = (ms: number, signal: AbortSignal): Promise<void> => {
+      sleepDelays.push(ms);
+      return signal.aborted ? Promise.resolve() : Promise.resolve();
+    };
+    let calls = 0;
+    const start = vi.fn(async () => {
+      calls += 1;
+      if (calls >= 4) {
+        controller.abort();
+        return;
+      }
+      throw new Error(`boom ${calls}`);
+    });
+
+    await runResilientWatch({
+      kind: "checkpoint",
+      signal: controller.signal,
+      start,
+      sleep: recordingSleep,
+      rearmDelayMs: 1_000,
+      maxRearmDelayMs: 3_000,
+      now: () => 0, // frozen clock → 0 uptime each generation → streak grows
+    });
+
+    // Three deaths → three backoffs: 1000, 2000, then capped at 3000 (not 4000).
+    expect(sleepDelays).toEqual([1_000, 2_000, 3_000]);
+  });
+
+  it("resets the backoff after a generation that stayed up long enough to be healthy", async () => {
+    // A death after a long-lived generation is a fresh blip, not part of a
+    // failing streak — the counter (and thus the backoff) must reset to base.
+    vi.spyOn(log, "error").mockImplementation(() => {});
+    const controller = new AbortController();
+    const sleepDelays: number[] = [];
+    const recordingSleep = (ms: number): Promise<void> => {
+      sleepDelays.push(ms);
+      return Promise.resolve();
+    };
+    // Advance the clock by a full healthy-uptime window on each `now()` read so
+    // every generation looks healthy → each death resets the streak to base.
+    let clock = 0;
+    const now = () => {
+      clock += 60_000; // >= REARM_HEALTHY_UPTIME_MS between start and death
+      return clock;
+    };
+    let calls = 0;
+    const start = vi.fn(async () => {
+      calls += 1;
+      if (calls >= 3) {
+        controller.abort();
+        return;
+      }
+      throw new Error(`boom ${calls}`);
+    });
+
+    await runResilientWatch({
+      kind: "checkpoint",
+      signal: controller.signal,
+      start,
+      sleep: recordingSleep,
+      rearmDelayMs: 1_000,
+      maxRearmDelayMs: 30_000,
+      now,
+    });
+
+    // Both deaths followed healthy generations → both back off at base 1000.
+    expect(sleepDelays).toEqual([1_000, 1_000]);
+  });
 });

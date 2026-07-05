@@ -46,16 +46,35 @@ export interface ResilientWatchOptions {
    * schedules a catch-up scan for files missed during the downtime.
    */
   onDeath?: (death: ResilientWatchDeath) => void;
-  /** Backoff before re-arming. Defaults to {@link DEFAULT_REARM_DELAY_MS}. */
+  /** Base backoff before re-arming. Defaults to {@link DEFAULT_REARM_DELAY_MS}. */
   rearmDelayMs?: number;
+  /**
+   * Ceiling for the escalating backoff. Defaults to {@link DEFAULT_MAX_REARM_DELAY_MS}.
+   */
+  maxRearmDelayMs?: number;
   /**
    * Injectable delay (test seam). Must resolve early if the signal aborts.
    * Defaults to a real timer that also resolves on abort.
    */
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
+  /**
+   * Injectable clock (test seam) for measuring generation uptime. Defaults to
+   * {@link Date.now}.
+   */
+  now?: () => number;
 }
 
 export const DEFAULT_REARM_DELAY_MS = 1_000;
+/** Ceiling for the exponential re-arm backoff (Council Review 2026-07-05 #11). */
+export const DEFAULT_MAX_REARM_DELAY_MS = 30_000;
+/**
+ * A generation that stayed up at least this long before dying is treated as
+ * "healthy" — the consecutive-death counter (and thus the backoff) resets. This
+ * distinguishes a transient blip mid-uptime from a watch that dies on every
+ * re-arm attempt (removed dir, permission loss), which must back off instead of
+ * logging an ERROR every second forever.
+ */
+export const REARM_HEALTHY_UPTIME_MS = 60_000;
 
 /** Real-timer sleep that resolves early when the signal aborts. */
 export function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
@@ -78,11 +97,20 @@ export function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
 
 export async function runResilientWatch(opts: ResilientWatchOptions): Promise<void> {
   const rearmDelayMs = opts.rearmDelayMs ?? DEFAULT_REARM_DELAY_MS;
+  const maxRearmDelayMs = opts.maxRearmDelayMs ?? DEFAULT_MAX_REARM_DELAY_MS;
   const sleep = opts.sleep ?? abortableSleep;
+  const now = opts.now ?? Date.now;
   const base = { event: "council.watcher.died", kind: opts.kind, ...opts.logContext };
+
+  // Council Review 2026-07-05 #11: a watch that dies on every re-arm (removed
+  // dir, permission loss) previously re-armed at a fixed 1s — an ERROR log every
+  // second forever. Track consecutive deaths and back off exponentially up to a
+  // cap; a generation that stayed up (>= REARM_HEALTHY_UPTIME_MS) resets the run.
+  let consecutiveDeaths = 0;
 
   while (!opts.signal.aborted) {
     let death: ResilientWatchDeath | null = null;
+    const generationStart = now();
     try {
       await opts.start();
       // Resolved. A clean abort exits the loop below; a resolve WITHOUT an
@@ -96,11 +124,25 @@ export async function runResilientWatch(opts: ResilientWatchOptions): Promise<vo
     if (opts.signal.aborted) return;
     if (!death) return;
 
+    const uptimeMs = now() - generationStart;
+    if (uptimeMs >= REARM_HEALTHY_UPTIME_MS) {
+      // The generation ran long enough to be considered healthy — this death is
+      // a fresh blip, not part of a failing streak. Reset the backoff.
+      consecutiveDeaths = 0;
+    }
+    consecutiveDeaths += 1;
+    const backoffMs = Math.min(
+      rearmDelayMs * 2 ** (consecutiveDeaths - 1),
+      maxRearmDelayMs,
+    );
+
     log.error("resilient-watch", "council watcher died — re-arming", {
       ...base,
       deathKind: death.kind,
       error: death.error instanceof Error ? death.error.message : death.error != null ? String(death.error) : undefined,
-      rearmDelayMs,
+      consecutiveDeaths,
+      uptimeMs,
+      rearmDelayMs: backoffMs,
     });
     try {
       opts.onDeath?.(death);
@@ -111,6 +153,6 @@ export async function runResilientWatch(opts: ResilientWatchOptions): Promise<vo
       });
     }
 
-    await sleep(rearmDelayMs, opts.signal);
+    await sleep(backoffMs, opts.signal);
   }
 }

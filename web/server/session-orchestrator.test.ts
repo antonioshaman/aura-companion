@@ -127,7 +127,12 @@ vi.mock("./container-manager.js", () => ({
 
 // ── Imports (after mocks) ───────────────────────────────────────────────────
 
-import { SessionOrchestrator, deterministicFindingId } from "./session-orchestrator.js";
+import {
+  SessionOrchestrator,
+  deterministicFindingId,
+  parseFailsafeTickMs,
+  OBSERVER_FAILSAFE_FALLBACK_MS,
+} from "./session-orchestrator.js";
 import type { SessionOrchestratorDeps } from "./session-orchestrator.js";
 import { containerManager } from "./container-manager.js";
 import * as envManager from "./env-manager.js";
@@ -551,13 +556,16 @@ describe("SessionOrchestrator", () => {
         expect(scanSpy).toHaveBeenCalledWith();
         const callsAfterInit = scanSpy.mock.calls.length;
 
-        // Advance past one 5-min failsafe interval → one extra scan, tagged.
-        vi.advanceTimersByTime(300_000);
+        // Advance past one failsafe interval → one extra scan, tagged.
+        // Derive the interval from the exported constant, not a copied literal
+        // (Council Review 2026-07-05 Beck #3): no env override in tests, so the
+        // armed interval equals the fallback.
+        vi.advanceTimersByTime(OBSERVER_FAILSAFE_FALLBACK_MS);
         expect(scanSpy.mock.calls.length).toBe(callsAfterInit + 1);
         expect(scanSpy).toHaveBeenLastCalledWith("failsafe");
 
         // A second interval fires again (recurring, not one-shot).
-        vi.advanceTimersByTime(300_000);
+        vi.advanceTimersByTime(OBSERVER_FAILSAFE_FALLBACK_MS);
         expect(scanSpy.mock.calls.length).toBe(callsAfterInit + 2);
       } finally {
         orchestrator.shutdown();
@@ -565,35 +573,79 @@ describe("SessionOrchestrator", () => {
       }
     });
 
-    it("shutdown() clears the failsafe interval so it stops ticking", () => {
+    it("shutdown() stops the failsafe interval from ticking", () => {
+      // Behaviour, not structure (Council Review 2026-07-05 Beck #4): assert the
+      // scan no longer fires after shutdown rather than peeking the private timer
+      // handle — a refactor of the field must not break this test.
       vi.useFakeTimers();
       try {
         orchestrator.initialize();
-        expect((orchestrator as any).observerFailsafeTimer).not.toBeNull();
-
         const scanSpy = vi.spyOn(orchestrator as any, "scanForMissedObserverWakes");
         orchestrator.shutdown();
-        expect((orchestrator as any).observerFailsafeTimer).toBeNull();
-
-        // No further ticks after shutdown.
-        vi.advanceTimersByTime(600_000);
+        vi.advanceTimersByTime(OBSERVER_FAILSAFE_FALLBACK_MS * 2);
         expect(scanSpy).not.toHaveBeenCalled();
       } finally {
         vi.useRealTimers();
       }
     });
 
-    it("is idempotent — a second startObserverFailsafe keeps the same timer", () => {
+    it("is idempotent — a second start does not double the tick rate", () => {
+      // Assert the observable behaviour (one scan per interval, not two) rather
+      // than timer-handle ref-equality (Council Review 2026-07-05 Beck #4): a
+      // variant that dedups the handle but still schedules a second interval
+      // would pass a ref-equality check yet fail this.
       vi.useFakeTimers();
       try {
         orchestrator.initialize();
-        const first = (orchestrator as any).observerFailsafeTimer;
+        const scanSpy = vi.spyOn(orchestrator as any, "scanForMissedObserverWakes");
         (orchestrator as any).startObserverFailsafe();
-        expect((orchestrator as any).observerFailsafeTimer).toBe(first);
+        vi.advanceTimersByTime(OBSERVER_FAILSAFE_FALLBACK_MS);
+        // Exactly one failsafe scan for the single interval — not two.
+        const failsafeCalls = scanSpy.mock.calls.filter((c) => c[0] === "failsafe");
+        expect(failsafeCalls.length).toBe(1);
       } finally {
         orchestrator.shutdown();
         vi.useRealTimers();
       }
+    });
+  });
+
+  // ── parseFailsafeTickMs — bounded env-parse (Council Review Beck #3) ────────
+  // The tick interval is env-overridable but clamped to [10s, 1h] with a
+  // warn-on-invalid fallback. These exercise every branch of that idiom — the
+  // part most likely to hide an off-by-unit bug — rather than only the happy
+  // default tick.
+  describe("parseFailsafeTickMs", () => {
+    it("returns the fallback for an absent value without warning", () => {
+      const onInvalid = vi.fn();
+      expect(parseFailsafeTickMs(undefined, onInvalid)).toBe(OBSERVER_FAILSAFE_FALLBACK_MS);
+      expect(parseFailsafeTickMs("", onInvalid)).toBe(OBSERVER_FAILSAFE_FALLBACK_MS);
+      // Absent is the normal case — it must NOT log an invalid-value warning.
+      expect(onInvalid).not.toHaveBeenCalled();
+    });
+
+    it("accepts a valid in-bounds override", () => {
+      expect(parseFailsafeTickMs("120000")).toBe(120_000);
+    });
+
+    it("clamps a below-floor value to the fallback and warns", () => {
+      const onInvalid = vi.fn();
+      // 5s is below the 10s floor.
+      expect(parseFailsafeTickMs("5000", onInvalid)).toBe(OBSERVER_FAILSAFE_FALLBACK_MS);
+      expect(onInvalid).toHaveBeenCalledWith("5000");
+    });
+
+    it("clamps an above-ceiling value to the fallback and warns", () => {
+      const onInvalid = vi.fn();
+      // 2h is above the 1h ceiling.
+      expect(parseFailsafeTickMs("7200000", onInvalid)).toBe(OBSERVER_FAILSAFE_FALLBACK_MS);
+      expect(onInvalid).toHaveBeenCalledWith("7200000");
+    });
+
+    it("falls back and warns on a garbage value", () => {
+      const onInvalid = vi.fn();
+      expect(parseFailsafeTickMs("banana", onInvalid)).toBe(OBSERVER_FAILSAFE_FALLBACK_MS);
+      expect(onInvalid).toHaveBeenCalledWith("banana");
     });
   });
 
@@ -3959,6 +4011,32 @@ describe("SessionOrchestrator", () => {
       } finally {
         fs.rmSync(ws, { recursive: true, force: true });
       }
+    });
+
+    // Council Review 2026-07-05 Beck #1 (Issue #86 integration seam): the whole
+    // point of the fix is "dead watcher → catch-up scan re-dispatches the missed
+    // wake". `runResilientWatch` (unit-tested) proves onDeath fires on a death;
+    // the scan (unit-tested) proves it re-dispatches. NOTHING otherwise ties the
+    // two together — a refactor that dropped the `onDeath` prop from either
+    // `runResilientWatch` call, or wired it to the wrong trigger, would pass
+    // every behavioural test. `fs.watch` deaths are not injectable into the real
+    // `watchCheckpoints`/`watchReviews` from here, so this static canary guards
+    // the exact wiring literal: both watchers pass `onDeath:
+    // scheduleCatchupAfterRearm`, and that closure dispatches the `watcher-rearm`
+    // trigger (which appears in ZERO other source location).
+    it("wires both watchers' onDeath to a catch-up scan tagged 'watcher-rearm'", async () => {
+      const fs = await import("node:fs");
+      const path = await import("node:path");
+      const url = await import("node:url");
+      const src = fs.readFileSync(
+        path.join(path.dirname(url.fileURLToPath(import.meta.url)), "session-orchestrator.ts"),
+        "utf-8",
+      );
+      // The re-arm closure must dispatch the watcher-rearm trigger.
+      expect(src).toMatch(/scanForMissedObserverWakes\("watcher-rearm"\)/);
+      // Both runResilientWatch calls (checkpoint + review) must wire onDeath to it.
+      const onDeathWirings = src.match(/onDeath:\s*scheduleCatchupAfterRearm/g) ?? [];
+      expect(onDeathWirings.length).toBe(2);
     });
   });
 
