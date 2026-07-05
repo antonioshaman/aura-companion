@@ -40,6 +40,7 @@ import { COUNCIL_SCHEMA_VERSION, OBSERVER_WAKE_PAYLOAD_VERSION, OBSERVER_WAKE_TI
 import { writeAtomicJson } from "./atomic-write.js";
 import { watchCheckpoints } from "./checkpoint-watcher.js";
 import { watchReviews } from "./review-watcher.js";
+import { DEFAULT_REARM_DELAY_MS, runResilientWatch } from "./resilient-watch.js";
 import { validateObserverFindings } from "./observer-grounding.js";
 import { maybeEmitEvalSidecar } from "./eval-sidecar.js";
 import { buildObserverContextManifest, buildObserverWakePayload } from "./observer-prompt.js";
@@ -85,6 +86,34 @@ const GROUP_RECONNECT_GRACE_MS = (() => {
   if (!Number.isFinite(parsed) || parsed <= 0 || parsed > 600_000) {
     log.warn("session-orchestrator", "invalid COMPANION_GROUP_RECONNECT_GRACE_MS, using fallback", {
       event: "config.grace_ms.invalid",
+      raw,
+      fallbackMs: fallback,
+    });
+    return fallback;
+  }
+  return parsed;
+})();
+
+/**
+ * EC-13 observer failsafe tick. `fs.watch` is the live checkpoint→wake
+ * channel, but it can silently die (Issue #86) or never fire at all in
+ * environments where inotify is unavailable (Docker bind-mounts, NFS/SMB).
+ * This recurring tick re-runs {@link SessionOrchestrator.scanForMissedObserverWakes}
+ * — a direct read of each group's `.council/checkpoints/` — so an unprocessed
+ * checkpoint still wakes the observer even when the watcher is gone. The scan
+ * is idempotent (Gate 0 sentinel), so a redundant tick is a cheap no-op.
+ *
+ * Default 5 min; env-overridable, bounded to [10s, 1h] to catch operator
+ * typos. Read once at module load (never in a hot path).
+ */
+const OBSERVER_FAILSAFE_TICK_MS = (() => {
+  const raw = process.env.COMPANION_OBSERVER_FAILSAFE_MS;
+  const fallback = 300_000;
+  if (raw === undefined || raw === "") return fallback;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 10_000 || parsed > 3_600_000) {
+    log.warn("session-orchestrator", "invalid COMPANION_OBSERVER_FAILSAFE_MS, using fallback", {
+      event: "config.observer_failsafe_ms.invalid",
       raw,
       fallbackMs: fallback,
     });
@@ -451,6 +480,8 @@ export class SessionOrchestrator {
   // feeds `buildObserverContextManifest` so grounding uses the DELTA
   // since the previous phase, not the cumulative manifest.
   private councilWatchers = new Map<string, CouncilWatcherEntry>();
+  /** EC-13 observer failsafe recurring tick handle (see {@link startObserverFailsafe}). */
+  private observerFailsafeTimer: ReturnType<typeof setInterval> | null = null;
   /**
    * Council Mode — per-group spawn metadata captured at pair creation
    * time so listeners running outside the spawn context (group:review
@@ -886,6 +917,11 @@ export class SessionOrchestrator {
     // are armed for any wake we dispatch here.
     this.scanForMissedObserverWakes();
 
+    // EC-13: arm the recurring failsafe so a checkpoint whose watcher died
+    // (or never fired — Docker/NFS) still wakes the observer within one tick,
+    // not only at the next server restart.
+    this.startObserverFailsafe();
+
     // PLAN-aura-orchestrator-idle-auto-proceed Task 9: rehydrate the idle
     // timer manager's per-session iteration counters from on-disk traces.
     // Must run AFTER `reconcileCouncilGroups` (which populates
@@ -942,7 +978,7 @@ export class SessionOrchestrator {
    * absorbs double-invocations. Failures are logged + non-fatal — a
    * bad checkpoint file should not crash initialize().
    */
-  private scanForMissedObserverWakes(): void {
+  private scanForMissedObserverWakes(trigger: "init" | "failsafe" | "watcher-rearm" = "init"): void {
     // Council Review 2026-05-13-0150 Backend × Hunt #11: bounded
     // iteration. Without a cap, a hostile or runaway workspace with
     // thousands of .json files in `.council/checkpoints/` blocks
@@ -966,6 +1002,7 @@ export class SessionOrchestrator {
         if (files.length > SCAN_MAX_FILES_PER_GROUP) {
           log.warn("session-orchestrator", "catchup scan capped by SCAN_MAX_FILES_PER_GROUP", {
             event: "council.wake.restart_catchup_truncated",
+            trigger,
             sessionGroupId: groupId,
             totalFiles: files.length,
             cap: SCAN_MAX_FILES_PER_GROUP,
@@ -1024,6 +1061,7 @@ export class SessionOrchestrator {
         }
         log.info("session-orchestrator", "catchup wake fired for missed checkpoint", {
           event: "council.wake.restart_catchup",
+          trigger,
           sessionGroupId: groupId,
           checkpointId: highest.checkpoint_id,
           sequence: highest.sequence,
@@ -1040,7 +1078,8 @@ export class SessionOrchestrator {
         // inside initialize(), but the codex observer's backend adapter only
         // attaches ~16s later (thread/resume → fallback → initialized). A
         // synchronous dispatch here returns `adapter_missing` and drops with
-        // no retry (the EC-13 5-min failsafe is not implemented). Mirror the
+        // no immediate retry (the EC-13 recurring failsafe — startObserverFailsafe
+        // — would eventually re-dispatch, but that is a coarse safety net). Mirror the
         // fresh-spawn path (`scheduleSpawnCheckpointWhenObserverReady`): defer
         // the dispatch behind an adapter-ready poll so the wake lands once the
         // observer transport is up. Fire-and-forget — never block init.
@@ -1048,11 +1087,34 @@ export class SessionOrchestrator {
       } catch (err) {
         log.warn("session-orchestrator", "catchup scan failed for group", {
           event: "council.wake.restart_catchup_failed",
+          trigger,
           sessionGroupId: groupId,
           error: err instanceof Error ? err.message : String(err),
         });
       }
     }
+  }
+
+  /**
+   * EC-13: arm the recurring observer failsafe tick. Idempotent — a second
+   * call while already armed is a no-op. The interval is `unref`'d so it
+   * never keeps the process alive on its own; {@link shutdown} clears it for
+   * deterministic teardown in tests.
+   */
+  private startObserverFailsafe(): void {
+    if (this.observerFailsafeTimer) return;
+    const timer = setInterval(() => {
+      try {
+        this.scanForMissedObserverWakes("failsafe");
+      } catch (err) {
+        log.warn("session-orchestrator", "observer failsafe tick failed", {
+          event: "council.wake.failsafe_tick_failed",
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }, OBSERVER_FAILSAFE_TICK_MS);
+    timer.unref?.();
+    this.observerFailsafeTimer = timer;
   }
 
   /**
@@ -1657,41 +1719,62 @@ export class SessionOrchestrator {
       return;
     }
 
-    watchCheckpoints({
-      directory: checkpointsDir,
+    // Both watchers run under `runResilientWatch` (Issue #86): a watcher that
+    // dies mid-uptime is re-armed instead of leaving the pair functionally
+    // dead until a server restart. `onDeath` schedules a catch-up scan a beat
+    // after the re-arm attaches, because `fs.watch` never replays files
+    // written while it was down — the delayed `scanForMissedObserverWakes`
+    // reads `.council/checkpoints/` directly and re-dispatches any missed
+    // wake (idempotent: the dispatcher's Gate 0 sentinel absorbs overlap with
+    // the freshly re-armed live watcher).
+    const scheduleCatchupAfterRearm = () => {
+      const t = setTimeout(
+        () => this.scanForMissedObserverWakes("watcher-rearm"),
+        DEFAULT_REARM_DELAY_MS + 250,
+      );
+      t.unref?.();
+    };
+
+    void runResilientWatch({
+      kind: "checkpoint",
+      logContext: { sessionGroupId },
       signal: abort.signal,
-      onCheckpoint: (payload) => this.handleCouncilCheckpoint(sessionGroupId, payload),
-    }).catch((err) => {
-      if (abort.signal.aborted) return;
-      log.warn("session-orchestrator", "council checkpoint watcher failed", {
-        sessionGroupId,
-        error: err instanceof Error ? err.message : String(err),
-      });
+      start: () =>
+        watchCheckpoints({
+          directory: checkpointsDir,
+          signal: abort.signal,
+          onCheckpoint: (payload) => this.handleCouncilCheckpoint(sessionGroupId, payload),
+        }),
+      onDeath: scheduleCatchupAfterRearm,
     });
 
-    watchReviews({
-      directory: reviewsDir,
+    void runResilientWatch({
+      kind: "review",
+      logContext: { sessionGroupId },
       signal: abort.signal,
-      onReview: (payload, reviewedAt) => this.handleCouncilReview(sessionGroupId, payload, reviewedAt),
-      // The codex CLI emits a review object missing every server-mandated
-      // audit field — the parser rejects it on `schema_version`, dropping
-      // every codex review. Inject the missing fields server-side (prompt
-      // tightening was empirically insufficient). claude reviews flow
-      // through untouched so genuinely-broken ones still drop.
-      normalizeRaw: (raw, provider) => {
-        if (provider !== "codex") return raw;
-        const meta = this.councilGroupMeta.get(sessionGroupId);
-        return normalizeCodexObserverReviewRaw(raw, {
-          observerModel: meta?.observerModel ?? "unknown",
-          observerCliVersion: "unknown",
-        });
-      },
-    }).catch((err) => {
-      if (abort.signal.aborted) return;
-      log.warn("session-orchestrator", "council review watcher failed", {
-        sessionGroupId,
-        error: err instanceof Error ? err.message : String(err),
-      });
+      start: () =>
+        watchReviews({
+          directory: reviewsDir,
+          signal: abort.signal,
+          onReview: (payload, reviewedAt) => this.handleCouncilReview(sessionGroupId, payload, reviewedAt),
+          // The codex CLI emits a review object missing every server-mandated
+          // audit field — the parser rejects it on `schema_version`, dropping
+          // every codex review. Inject the missing fields server-side (prompt
+          // tightening was empirically insufficient). claude reviews flow
+          // through untouched so genuinely-broken ones still drop.
+          normalizeRaw: (raw, provider) => {
+            if (provider !== "codex") return raw;
+            const meta = this.councilGroupMeta.get(sessionGroupId);
+            return normalizeCodexObserverReviewRaw(raw, {
+              observerModel: meta?.observerModel ?? "unknown",
+              observerCliVersion: "unknown",
+            });
+          },
+        }),
+      // A dead review watcher can only be recovered by re-waking the observer
+      // (it re-writes its review on the next wake), which the checkpoint
+      // catch-up scan triggers — so the same scan covers both channels.
+      onDeath: scheduleCatchupAfterRearm,
     });
   }
 
@@ -3594,7 +3677,13 @@ export class SessionOrchestrator {
   // ── Cleanup ────────────────────────────────────────────────────────────────
 
   shutdown(): void {
-    // Timers are owned by the process lifecycle
+    // Most timers are owned by the process lifecycle; the EC-13 failsafe
+    // interval is explicitly cleared so shutdown is deterministic (and tests
+    // don't leak a live interval across cases).
+    if (this.observerFailsafeTimer) {
+      clearInterval(this.observerFailsafeTimer);
+      this.observerFailsafeTimer = null;
+    }
   }
 
   // ── Private: Auto-relaunch ─────────────────────────────────────────────────

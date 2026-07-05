@@ -535,6 +535,68 @@ describe("SessionOrchestrator", () => {
     });
   });
 
+  // ── EC-13 observer failsafe tick ──────────────────────────────────────────
+  // The recurring failsafe re-runs the missed-checkpoint scan so an observer
+  // still wakes even when its fs.watch died (Issue #86) or never fired at all
+  // (Docker/NFS). These verify the interval is armed on init, ticks with the
+  // "failsafe" trigger, and is cleared on shutdown (no leaked interval).
+  describe("EC-13 observer failsafe", () => {
+    it("arms a recurring tick that re-runs the scan with trigger=failsafe", () => {
+      vi.useFakeTimers();
+      try {
+        const scanSpy = vi.spyOn(orchestrator as any, "scanForMissedObserverWakes");
+        orchestrator.initialize();
+
+        // The init-time scan ran once with the default "init" trigger.
+        expect(scanSpy).toHaveBeenCalledWith();
+        const callsAfterInit = scanSpy.mock.calls.length;
+
+        // Advance past one 5-min failsafe interval → one extra scan, tagged.
+        vi.advanceTimersByTime(300_000);
+        expect(scanSpy.mock.calls.length).toBe(callsAfterInit + 1);
+        expect(scanSpy).toHaveBeenLastCalledWith("failsafe");
+
+        // A second interval fires again (recurring, not one-shot).
+        vi.advanceTimersByTime(300_000);
+        expect(scanSpy.mock.calls.length).toBe(callsAfterInit + 2);
+      } finally {
+        orchestrator.shutdown();
+        vi.useRealTimers();
+      }
+    });
+
+    it("shutdown() clears the failsafe interval so it stops ticking", () => {
+      vi.useFakeTimers();
+      try {
+        orchestrator.initialize();
+        expect((orchestrator as any).observerFailsafeTimer).not.toBeNull();
+
+        const scanSpy = vi.spyOn(orchestrator as any, "scanForMissedObserverWakes");
+        orchestrator.shutdown();
+        expect((orchestrator as any).observerFailsafeTimer).toBeNull();
+
+        // No further ticks after shutdown.
+        vi.advanceTimersByTime(600_000);
+        expect(scanSpy).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("is idempotent — a second startObserverFailsafe keeps the same timer", () => {
+      vi.useFakeTimers();
+      try {
+        orchestrator.initialize();
+        const first = (orchestrator as any).observerFailsafeTimer;
+        (orchestrator as any).startObserverFailsafe();
+        expect((orchestrator as any).observerFailsafeTimer).toBe(first);
+      } finally {
+        orchestrator.shutdown();
+        vi.useRealTimers();
+      }
+    });
+  });
+
   // ── Session Creation ──────────────────────────────────────────────────────
 
   describe("createSession()", () => {
