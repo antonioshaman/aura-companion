@@ -106,21 +106,44 @@ const GROUP_RECONNECT_GRACE_MS = (() => {
  * Default 5 min; env-overridable, bounded to [10s, 1h] to catch operator
  * typos. Read once at module load (never in a hot path).
  */
-const OBSERVER_FAILSAFE_TICK_MS = (() => {
-  const raw = process.env.COMPANION_OBSERVER_FAILSAFE_MS;
-  const fallback = 300_000;
-  if (raw === undefined || raw === "") return fallback;
+export const OBSERVER_FAILSAFE_FALLBACK_MS = 300_000;
+export const OBSERVER_FAILSAFE_MIN_MS = 10_000;
+export const OBSERVER_FAILSAFE_MAX_MS = 3_600_000;
+
+/**
+ * Pure parse of the failsafe-tick env value. Exported so the bounds/clamp/
+ * warn-on-invalid branches are testable without reaching through the module
+ * IIFE (Council Review 2026-07-05 Beck #3). Returns the fallback for absent,
+ * empty, non-finite, or out-of-bounds input; invokes `onInvalid` (log side
+ * channel) only for a present-but-invalid value, never for the absent case.
+ */
+export function parseFailsafeTickMs(
+  raw: string | undefined,
+  onInvalid?: (raw: string) => void,
+): number {
+  if (raw === undefined || raw === "") return OBSERVER_FAILSAFE_FALLBACK_MS;
   const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed) || parsed < 10_000 || parsed > 3_600_000) {
+  if (
+    !Number.isFinite(parsed) ||
+    parsed < OBSERVER_FAILSAFE_MIN_MS ||
+    parsed > OBSERVER_FAILSAFE_MAX_MS
+  ) {
+    onInvalid?.(raw);
+    return OBSERVER_FAILSAFE_FALLBACK_MS;
+  }
+  return parsed;
+}
+
+const OBSERVER_FAILSAFE_TICK_MS = parseFailsafeTickMs(
+  process.env.COMPANION_OBSERVER_FAILSAFE_MS,
+  (raw) => {
     log.warn("session-orchestrator", "invalid COMPANION_OBSERVER_FAILSAFE_MS, using fallback", {
       event: "config.observer_failsafe_ms.invalid",
       raw,
-      fallbackMs: fallback,
+      fallbackMs: OBSERVER_FAILSAFE_FALLBACK_MS,
     });
-    return fallback;
-  }
-  return parsed;
-})();
+  },
+);
 
 // Proactive keepalive: base delay before relaunching a crashed CLI (doubles per attempt)
 const KEEPALIVE_BASE_DELAY_MS = 3_000;
@@ -482,6 +505,18 @@ export class SessionOrchestrator {
   private councilWatchers = new Map<string, CouncilWatcherEntry>();
   /** EC-13 observer failsafe recurring tick handle (see {@link startObserverFailsafe}). */
   private observerFailsafeTimer: ReturnType<typeof setInterval> | null = null;
+
+  /**
+   * In-flight catch-up wake dedup keyed `${sessionGroupId}:${checkpointId}`
+   * (Council Review 2026-07-05 Subprocess #2). The durable wake sentinel is
+   * written only AFTER a poll returns "sent" — up to 30s later — so without a
+   * live in-flight lock every scan trigger (init / failsafe every 5 min /
+   * watcher-rearm) that runs while the observer adapter is not yet ready would
+   * pass the stale sentinel check and stack another 30s poller for the SAME
+   * checkpoint, racing a duplicate send. A key is added before launching the
+   * poll and cleared in its `finally`.
+   */
+  private readonly catchupWakesInFlight = new Set<string>();
   /**
    * Council Mode — per-group spawn metadata captured at pair creation
    * time so listeners running outside the spawn context (group:review
@@ -988,6 +1023,16 @@ export class SessionOrchestrator {
     const SCAN_MAX_FILES_PER_GROUP = 200;
     for (const [groupId, entry] of this.councilWatchers) {
       try {
+        // Council Review 2026-07-05 Subprocess #2: fail fast at scan time for a
+        // conceptually-dead group. Without this, a degraded/archived group whose
+        // watcher entry is still live passes the checks below and launches a full
+        // 30s poll that only discovers `group_not_active` at the very end (Gate 1)
+        // — and the failsafe re-does it every 5 min. `reconnecting` legitimately
+        // queues, so it is allowed through alongside `active`.
+        const status = this.coordinator?.get(groupId)?.status;
+        if (status !== undefined && status !== "active" && status !== "reconnecting") {
+          continue;
+        }
         const checkpointsDir = join(entry.cwd, ".council", "checkpoints");
         let files: string[];
         try {
@@ -1007,13 +1052,28 @@ export class SessionOrchestrator {
             totalFiles: files.length,
             cap: SCAN_MAX_FILES_PER_GROUP,
           });
-          // Sort by name so the highest-sequence checkpoint (orchestrator
-          // emits with sequence-prefixed phase names typically) tends to
-          // sort last; take the tail of the list. Not perfect — a
-          // workspace with adversarial filenames could mask the real
-          // highest — but the seq check inside the loop is the actual
-          // monotonicity guard, not the iteration order.
-          files = files.sort().slice(-SCAN_MAX_FILES_PER_GROUP);
+          // Council Review 2026-07-05 Subprocess #4: select survivors by
+          // recency (mtime desc), NOT lexical filename. Phase filenames are
+          // not zero-padded sequence prefixes (`phase-9.json` sorts after
+          // `phase-10.json`), so a name-sort tail can slice away the true
+          // highest-sequence checkpoint — silently defeating the exact
+          // "watcher died / never fired" case EC-13 exists to cover. mtime
+          // is monotonic with emission order; a file we can't stat sinks to
+          // the bottom (mtime 0) rather than throwing. The in-loop
+          // `sequence > highest.sequence` guard still picks the true highest
+          // among survivors.
+          const mtimeOf = (f: string): number => {
+            try {
+              return statSync(join(checkpointsDir, f)).mtimeMs;
+            } catch {
+              return 0;
+            }
+          };
+          files = files
+            .map((f) => ({ f, m: mtimeOf(f) }))
+            .sort((a, b) => b.m - a.m)
+            .slice(0, SCAN_MAX_FILES_PER_GROUP)
+            .map((e) => e.f);
         }
         let highest: CheckpointPayload | null = null;
         for (const file of files) {
@@ -1067,12 +1127,32 @@ export class SessionOrchestrator {
           sequence: highest.sequence,
           lastWokenSequence: sentinel?.last_woken_sequence ?? null,
         });
+        // Council Review 2026-07-05 Subprocess #2: collapse N concurrent
+        // pollers to one. Skip if a catch-up for this exact checkpoint is
+        // already in flight (the durable sentinel is only written post-send,
+        // so it can't dedup a poll that's mid-wait). The key is cleared in the
+        // poll's `finally`.
+        const inFlightKey = `${groupId}:${highest.checkpoint_id}`;
+        if (this.catchupWakesInFlight.has(inFlightKey)) continue;
+
         // Drive through the standard dispatcher so all gates apply
         // (sentinel idempotency, group_status, build validation, etc.).
         // Also seed `lastCheckpoint` so subsequent grounding has the
         // manifest context the regular flow would have populated.
-        entry.previousCheckpoint = entry.lastCheckpoint;
-        entry.lastCheckpoint = highest;
+        //
+        // Council Review 2026-07-05 Subprocess #3: only advance the shared
+        // manifest-delta base when the scan is genuinely AHEAD of the live
+        // watcher. The live `handleCouncilCheckpoint` writes these same two
+        // fields; an unconditional overwrite by a background failsafe tick that
+        // re-reads the current `lastCheckpoint` from disk would collapse the
+        // delta base to N-vs-N (previous = current), losing the true N-1 and
+        // handing the observer an empty/wrong modified-file set → grounded STOPs
+        // spuriously downgraded. Advancing only when strictly newer keeps the
+        // live-populated base intact.
+        if (!entry.lastCheckpoint || highest.sequence > entry.lastCheckpoint.sequence) {
+          entry.previousCheckpoint = entry.lastCheckpoint;
+          entry.lastCheckpoint = highest;
+        }
         // Council Review 2026-06-14 (live-test Finding #1 — restart-catchup
         // races the codex adapter attach): the catchup scan runs synchronously
         // inside initialize(), but the codex observer's backend adapter only
@@ -1728,10 +1808,22 @@ export class SessionOrchestrator {
     // wake (idempotent: the dispatcher's Gate 0 sentinel absorbs overlap with
     // the freshly re-armed live watcher).
     const scheduleCatchupAfterRearm = () => {
-      const t = setTimeout(
-        () => this.scanForMissedObserverWakes("watcher-rearm"),
-        DEFAULT_REARM_DELAY_MS + 250,
-      );
+      const t = setTimeout(() => {
+        // Council Review 2026-07-05 Subprocess #12: a `setTimeout` callback that
+        // throws is an unhandled exception — under Bun that is fatal to the whole
+        // server. `scanForMissedObserverWakes` is defensively try/caught per group
+        // internally, but guard the boundary anyway for crash-safety symmetry with
+        // the failsafe interval tick.
+        try {
+          this.scanForMissedObserverWakes("watcher-rearm");
+        } catch (err) {
+          log.warn("session-orchestrator", "watcher-rearm catchup scan threw", {
+            event: "council.wake.watcher_rearm_scan_failed",
+            sessionGroupId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }, DEFAULT_REARM_DELAY_MS + 250);
       t.unref?.();
     };
 
@@ -1878,31 +1970,63 @@ export class SessionOrchestrator {
     sessionGroupId: string,
     payload: CheckpointPayload,
   ): Promise<void> {
-    const meta = this.councilGroupMeta.get(sessionGroupId);
-    if (!meta) {
-      // Group torn down between scan and poll — dispatchObserverWake would
-      // resolve observer_unknown anyway; skip the poll entirely.
-      return;
-    }
-    const observerSessionId = meta.observerSessionId;
-    const MAX_WAIT_MS = 30_000;
-    const POLL_INTERVAL_MS = 250;
-    const deadline = Date.now() + MAX_WAIT_MS;
-    while (Date.now() < deadline) {
-      if (this.observerReadyForWake(observerSessionId)) {
-        this.dispatchObserverWake(sessionGroupId, payload);
+    // Council Review 2026-07-05 Subprocess #2: mark this (group, checkpoint) as
+    // having a live catch-up in flight so overlapping scan triggers (init /
+    // failsafe / watcher-rearm) don't each stack a duplicate 30s poller. Set
+    // synchronously at entry (the caller's `.has()` check precedes an
+    // await-free `void this.schedule(...)`), cleared in the `finally` that
+    // covers every exit including the meta-null early return.
+    const inFlightKey = `${sessionGroupId}:${payload.checkpoint_id}`;
+    this.catchupWakesInFlight.add(inFlightKey);
+    try {
+      const meta = this.councilGroupMeta.get(sessionGroupId);
+      if (!meta) {
+        // Group torn down between scan and poll — dispatchObserverWake would
+        // resolve observer_unknown anyway; skip the poll entirely.
         return;
       }
-      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+      const observerSessionId = meta.observerSessionId;
+      const MAX_WAIT_MS = 30_000;
+      const POLL_INTERVAL_MS = 250;
+      const deadline = Date.now() + MAX_WAIT_MS;
+      // Council Review 2026-07-05 Backend #1: this poll is dispatched
+      // fire-and-forget (`void this.scheduleCatchupWakeWhenObserverReady`), so a
+      // throw from `dispatchObserverWake` (e.g. a transient FS error reading the
+      // wake sentinel, or a backend adapter that throws mid-teardown during the
+      // up-to-30s poll) would surface as an UNHANDLED rejection on a later
+      // microtask and Bun treats that as fatal, taking down the whole server and
+      // every live session. A watcher gap must degrade, never crash: swallow to
+      // a structured WARN and give up (the recurring EC-13 failsafe re-attempts
+      // on its next tick).
+      try {
+        while (Date.now() < deadline) {
+          if (this.observerReadyForWake(observerSessionId)) {
+            this.dispatchObserverWake(sessionGroupId, payload);
+            return;
+          }
+          await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+        }
+        log.warn("session-orchestrator", "council.wake.restart_catchup_adapter_wait_timed_out", {
+          event: "council.wake.restart_catchup_adapter_wait_timed_out",
+          sessionGroupId,
+          observerSessionId,
+          checkpointId: payload.checkpoint_id,
+          sequence: payload.sequence,
+          waitedMs: MAX_WAIT_MS,
+        });
+      } catch (err) {
+        log.warn("session-orchestrator", "council.wake.restart_catchup_dispatch_failed", {
+          event: "council.wake.restart_catchup_dispatch_failed",
+          sessionGroupId,
+          observerSessionId,
+          checkpointId: payload.checkpoint_id,
+          sequence: payload.sequence,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    } finally {
+      this.catchupWakesInFlight.delete(inFlightKey);
     }
-    log.warn("session-orchestrator", "council.wake.restart_catchup_adapter_wait_timed_out", {
-      event: "council.wake.restart_catchup_adapter_wait_timed_out",
-      sessionGroupId,
-      observerSessionId,
-      checkpointId: payload.checkpoint_id,
-      sequence: payload.sequence,
-      waitedMs: MAX_WAIT_MS,
-    });
   }
 
   private emitSpawnCheckpoint(sessionGroupId: string, workspaceCwd: string): void {
@@ -2107,7 +2231,25 @@ export class SessionOrchestrator {
     // a match here is the second-line defence against double-wakes
     // across restarts. Misses (no sentinel, or older sequence) fall
     // through.
-    const sentinel = readCouncilWakeSentinel(entry.cwd, sessionGroupId);
+    // Council Review 2026-07-05 Backend #1: this read is on the fire-and-forget
+    // catch-up path; a corrupt/half-written sentinel (the exact stale-artifact
+    // the catch-up scan exists to recover from) must not throw through the wake
+    // path. Treat a read/parse failure as "no sentinel" and fall through —
+    // Gate 0 idempotency downstream plus the observer's own dedup still guard
+    // against a double-wake — so this method honours its never-throws contract.
+    let sentinel: ReturnType<typeof readCouncilWakeSentinel>;
+    try {
+      sentinel = readCouncilWakeSentinel(entry.cwd, sessionGroupId);
+    } catch (err) {
+      sentinel = null;
+      log.warn("session-orchestrator", "observer wake sentinel read failed", {
+        event: "council.wake.sentinel_read_failed",
+        sessionGroupId,
+        observerSessionId,
+        checkpointId: payload.checkpoint_id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
     if (sentinel && sentinel.last_woken_checkpoint_id === payload.checkpoint_id) {
       const outcome: WakeDispatchOutcome = { kind: "skipped", reason: "already_woken" };
       log.info("session-orchestrator", "observer wake skipped (already woken)", {

@@ -54,15 +54,26 @@ cd web && bun run test:watch
 ## Task reporting discipline (keeps the Task Panel honest)
 
 The Task Panel is a **mirror of your last `TodoWrite`**, never live ground truth — it
-cannot know your progress until you emit a `TodoWrite`. Its staleness badge now flags
-`Agent active · list not updated …` whenever the session is running but the list has not
-refreshed in 5 min, so a lagging list is visibly attributed to reporting cadence.
+cannot know your progress until you emit a `TodoWrite`. The staleness badge is designed so
+the **UI carries the honesty, not your diligence**: it describes the reporter's cadence
+neutrally rather than implying you did something wrong. Its states:
 
-To keep that badge green, when working in this repo: **call `TodoWrite` on every task state
-transition — as soon as a task starts and the moment it completes — do not batch updates.**
-A single long-running step with no interim `TodoWrite` is what makes the panel look frozen.
-This is a reporting-discipline convention, not something the panel can enforce; the UI can
-only surface the staleness, not manufacture the update.
+- **`Updated {ago}`** / **`Idle · list last updated {ago}`** — neutral, muted. A recent or
+  simply-old snapshot.
+- **`Agent active · updated {ago}`** — muted. The session is running; the list is either
+  fresh, or there is an `in_progress` task that already explains what's in flight. A single
+  long step (big build, long test) will NOT trip a warning — there is no transition to emit,
+  so staleness alone is not treated as fault.
+- **`Agent active · list may be behind · {ago}`** — amber, the only warning state. Reserved
+  for the one case that is *provably* behind: running, stale (>5 min), and **no** `in_progress`
+  task to account for the silence.
+
+Because the amber state is gated on evidence (not flat wall-clock age), it does not cry wolf
+during healthy long-running work. Calling `TodoWrite` on every task-state transition — as
+soon as a task starts and the moment it completes — is still the right habit (it keeps the
+panel maximally useful), but it is a **nudge, not an SLA**: the badge stays truthful whether
+or not you are perfectly diligent. This is a reporting-cadence convention; the UI surfaces
+cadence honestly, it does not manufacture updates.
 
 ## Component Playground
 

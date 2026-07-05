@@ -544,3 +544,27 @@ Reference: Council Review 2026-06-04-1826 P2 #10 — `signalCoalesceDegradeLogge
 
 **Rationale:** A relaunch is the moment the operator's current credential intent must take effect; reusing the old spawn env strands a session on a revoked/rotated key. Centralizing the precedence model in one module keeps the four-way Claude var interaction and the Codex asymmetry from drifting per call site; sibling memory `feedback_validate_replacement_before_destroying_working_resource` + `feedback_symmetric_path_missing_transformation`.
 
+---
+
+### EC-53: Every fire-and-forget async dispatch AND every `setTimeout`/`setInterval` callback MUST have a top-level `try/catch` — an unhandled rejection is fatal under Bun
+
+**Convention:** Bun terminates the entire process on an unhandled promise rejection or an uncaught timer-callback throw — there is no per-request isolation as in a browser. So any `void somethingAsync()` (a deferred poll like `scheduleCatchupWakeWhenObserverReady`, a fanout), and any `setTimeout`/`setInterval` body (the EC-13 failsafe tick, the watcher re-arm catch-up `scheduleCatchupAfterRearm`), MUST wrap its work so a throw inside cannot escape. The failsafe interval and the re-arm timer are siblings: both re-run `scanForMissedObserverWakes` off a timer, so both carry the same guard. Swallow to a structured WARN (EC-9 shape), never let it propagate.
+
+**How to apply:** At every `void <async call>` site and inside every timer callback that touches app state, the outermost statement is a `try { … } catch (err) { log.warn(..., { event: "…_failed", error: … }) }`. A helper that reads the filesystem or the sentinel (`readCouncilWakeSentinel`) from inside such a path must itself be guarded at the call boundary even if it "can't fail" — a corrupt file or an EACCES turns a benign scan into a server crash. Test the throw path: inject a failing dependency and assert the process-equivalent (the promise resolves / the interval keeps ticking) rather than rejecting.
+
+**Origin:** Subprocess × Backend-TS — Council Review (PR #158, Findings #1/#12 — the void'd catch-up poll and the `scheduleCatchupAfterRearm` timer both lacked a top-level catch; a sentinel-read throw mid-poll could crash the Bun server)
+
+**Principle:** The runtime has no blast-radius containment for async escapes; the code must provide it at each boundary. Sibling EC-9 (structured lifecycle logs) + memory `feedback_no_reissue_sideeffecting_op_on_autocontinue`.
+
+---
+
+### EC-54: A background/periodic scan MUST NOT unconditionally mutate shared live state — advance the shared manifest base only when genuinely ahead, or carry the base into the deferred dispatch
+
+**Convention:** `scanForMissedObserverWakes` runs on three triggers (`init` / `failsafe` every 5 min / `watcher-rearm` per death) and shares `entry.lastCheckpoint` / `entry.previousCheckpoint` — the manifest-delta base read by `dispatchObserverWake` — with the live `handleCouncilCheckpoint` watcher. If the scan overwrites those fields unconditionally from a stale disk read, a concurrent live checkpoint at sequence N gets clobbered to `previous = current = N`, collapsing the `{delta, carried, dropped}` partition and silently under-reporting a checkpoint's modified-file set (which degrades the grounding gate). The scan MUST guard the mutation: only advance when it is strictly ahead of the live watcher (`!entry.lastCheckpoint || highest.sequence > entry.lastCheckpoint.sequence`). Likewise, a periodic scan MUST fail fast on conceptually-dead groups (status not `active`/`reconnecting`) and MUST de-duplicate in-flight catch-ups (an in-flight `Set` keyed `${groupId}:${checkpoint_id}`, cleared in `finally`) so overlapping triggers cannot stack N concurrent 30s pollers or double-send a wake.
+
+**How to apply:** Any timer- or event-driven background pass that touches state a live path also writes: (a) gate every write behind a "am I actually ahead?" check, or thread the value through the deferred call as an argument instead of the shared entry; (b) pre-filter dead entities at scan time, not after a 30s poll; (c) hold an in-flight key for the duration of the async dispatch so concurrent triggers collapse to one. Test the concurrent-clobber case explicitly (live advances to N, then a scan re-reads N from disk → base must remain N-1→N, not N→N).
+
+**Origin:** Subprocess — Council Review (PR #158, Findings #2/#3 — the failsafe/rearm scan clobbered the manifest base and stacked duplicate pollers with no in-flight guard or status pre-filter)
+
+**Principle:** Canonical live state must not be corrupted by a stale background reader; a periodic re-check is a no-op only when it refuses to write unless strictly newer. Sibling EC-4 (watcher debounce never coalesces distinct payloads) + memory `feedback_progress_mirror_ui_reflects_reporter_not_ground_truth`.
+
