@@ -444,10 +444,34 @@ const IDEMPOTENT_OUTGOING_TYPES = new Set<BrowserOutgoingMessage["type"]>([
   "set_ai_validation",
 ]);
 
+/**
+ * A stable, anonymous per-browser id persisted in localStorage. Sent on every
+ * browser WS connect so the server can dedupe "one human with N sessions open"
+ * (N sockets) down to a single presence headcount. Carries no PII — a random
+ * UUID scoped to this browser profile. Survives reloads; a fresh profile or a
+ * cleared storage simply starts a new anonymous id.
+ */
+function getClientId(): string {
+  const KEY = "companion_client_id";
+  try {
+    let id = localStorage.getItem(KEY);
+    if (!id) {
+      id = crypto.randomUUID();
+      localStorage.setItem(KEY, id);
+    }
+    return id;
+  } catch {
+    // Storage unavailable (private mode / disabled) — fall back to an ephemeral
+    // id so the socket still connects; it just won't dedupe across reloads.
+    return "eph-" + Math.random().toString(36).slice(2);
+  }
+}
+
 function getWsUrl(sessionId: string): string {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const token = localStorage.getItem("companion_auth_token") || "";
-  return `${proto}//${location.host}/ws/browser/${sessionId}?token=${encodeURIComponent(token)}`;
+  const clientId = getClientId();
+  return `${proto}//${location.host}/ws/browser/${sessionId}?token=${encodeURIComponent(token)}&clientId=${encodeURIComponent(clientId)}`;
 }
 
 function getLastSeqStorageKey(sessionId: string): string {

@@ -59,8 +59,8 @@ async function sendHeartbeat(instanceId: string, version: string): Promise<void>
   await postTelemetry("/telemetry/heartbeat", { instanceId, version });
 }
 
-async function sendPresence(instanceId: string): Promise<void> {
-  await postTelemetry("/telemetry/presence", { instanceId });
+async function sendPresence(instanceId: string, count: number): Promise<void> {
+  await postTelemetry("/telemetry/presence", { instanceId, count });
 }
 
 /**
@@ -88,19 +88,23 @@ export function startTelemetryHeartbeat(version: string): () => void {
 
 /**
  * Start the presence-ping loop if telemetry is enabled at boot. Unlike the
- * heartbeat (which only proves the install exists), this reports "a human has
- * the UI open right now" and feeds the global "N online" figure.
+ * heartbeat (which only proves the install exists), this reports "how many
+ * humans have the UI open right now" and feeds the global "N online" figure.
  *
- * `getConnectedBrowsers` is polled on each tick; a ping is sent ONLY when it
+ * `getDistinctBrowsers` is polled on each tick and returns the count of DISTINCT
+ * browsers (deduped by clientId) with the UI open; a ping is sent ONLY when it
  * returns > 0, so an idle server with no open tabs never counts as online. The
- * interval is unref'd so it never keeps the process alive. Returns a stop fn.
+ * count travels in the payload so the aggregator sums people across installs
+ * rather than counting installs. The interval is unref'd so it never keeps the
+ * process alive. Returns a stop fn.
  */
-export function startPresencePing(getConnectedBrowsers: () => number): () => void {
+export function startPresencePing(getDistinctBrowsers: () => number): () => void {
   if (!isTelemetryEnabled()) return () => {};
 
   const instanceId = getOrCreateInstanceId();
   const tick = () => {
-    if (getConnectedBrowsers() > 0) void sendPresence(instanceId);
+    const count = getDistinctBrowsers();
+    if (count > 0) void sendPresence(instanceId, count);
   };
   tick();
 

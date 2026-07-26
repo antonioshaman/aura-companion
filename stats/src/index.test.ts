@@ -6,24 +6,26 @@ import worker, { type Env } from "./index.js";
 // list/get/put surface the Worker uses.
 class FakeKV {
   store = new Map<string, string>();
+  meta = new Map<string, unknown>();
 
   async get(key: string): Promise<string | null> {
     return this.store.has(key) ? this.store.get(key)! : null;
   }
 
-  async put(key: string, value: string): Promise<void> {
+  async put(key: string, value: string, opts?: { metadata?: unknown }): Promise<void> {
     this.store.set(key, value);
+    if (opts?.metadata !== undefined) this.meta.set(key, opts.metadata);
   }
 
   async list(opts: { prefix?: string; cursor?: string }): Promise<{
-    keys: { name: string }[];
+    keys: { name: string; metadata?: unknown }[];
     list_complete: boolean;
     cursor?: string;
   }> {
     const prefix = opts.prefix ?? "";
     const keys = [...this.store.keys()]
       .filter((k) => k.startsWith(prefix))
-      .map((name) => ({ name }));
+      .map((name) => ({ name, metadata: this.meta.get(name) }));
     return { keys, list_complete: true };
   }
 }
@@ -153,6 +155,40 @@ describe("stats worker", () => {
     expect(body.activeInstances30d).toBe(2);
     expect(body.onlineNow).toBe(1);
     expect(body.totalInstances).toBe(2);
+  });
+
+  // Variant-2 headcount: onlineNow is the SUM of each install's distinct-browser
+  // count, not the number of online installs. Two installs reporting 3 and 2
+  // humans => 5 people online, not 2.
+  it("sums the distinct-browser headcount across installs for onlineNow", async () => {
+    await worker.fetch(presence({ instanceId: "instance_aaaaaa111111", count: 3 }), env, ctx);
+    await worker.fetch(presence({ instanceId: "instance_bbbbbb222222", count: 2 }), env, ctx);
+
+    const res = await worker.fetch(new Request("https://stats.example/stats/global"), env, ctx);
+    const body = (await res.json()) as { onlineNow: number };
+    expect(body.onlineNow).toBe(5);
+  });
+
+  // A legacy client that pings without a count still contributes exactly 1.
+  it("counts a countless (legacy) presence ping as a single person", async () => {
+    await worker.fetch(presence({ instanceId: "instance_legacy111111" }), env, ctx);
+    await worker.fetch(presence({ instanceId: "instance_counted11111", count: 4 }), env, ctx);
+
+    const res = await worker.fetch(new Request("https://stats.example/stats/global"), env, ctx);
+    const body = (await res.json()) as { onlineNow: number };
+    expect(body.onlineNow).toBe(5);
+  });
+
+  // Guard against a runaway/hostile client inflating the global sum: the count
+  // is clamped to [1, MAX_PRESENCE_COUNT] and non-finite/absurd values collapse.
+  it("clamps an out-of-range headcount to the [1, MAX] window", async () => {
+    await worker.fetch(presence({ instanceId: "instance_toolow111111", count: 0 }), env, ctx);
+    await worker.fetch(presence({ instanceId: "instance_toohigh11111", count: 1e9 }), env, ctx);
+
+    const res = await worker.fetch(new Request("https://stats.example/stats/global"), env, ctx);
+    const body = (await res.json()) as { onlineNow: number };
+    // 0 -> clamped up to 1; 1e9 -> clamped down to MAX_PRESENCE_COUNT (10000).
+    expect(body.onlineNow).toBe(1 + 10000);
   });
 
   it("answers CORS preflight with permissive headers", async () => {

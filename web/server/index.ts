@@ -251,7 +251,7 @@ function readPackageVersion(): string {
 startTelemetryHeartbeat(readPackageVersion());
 // Presence ping — feeds the global "N online" figure. Only beats while a human
 // actually has the UI open (≥1 connected browser socket).
-startPresencePing(() => wsBridge.countConnectedBrowsers());
+startPresencePing(() => wsBridge.countDistinctBrowsers());
 
 // AURA-LOCAL: PPID=1 orphan reaper — PLAN T8. Runs ONCE at server-init
 // AFTER bridge + orchestrator wiring (so the launcher's restored
@@ -463,8 +463,9 @@ const server = Bun.serve<SocketData>({
         }
       }
       const sessionId = browserMatch[1];
+      const clientId = url.searchParams.get("clientId")?.slice(0, 128) || undefined;
       const upgraded = server.upgrade(req, {
-        data: { kind: "browser" as const, sessionId },
+        data: { kind: "browser" as const, sessionId, clientId },
       });
       if (upgraded) return undefined;
       return new Response("WebSocket upgrade failed", { status: 400 });

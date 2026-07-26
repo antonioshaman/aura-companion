@@ -18,6 +18,10 @@
  *                    written on each presence ping with a short expirationTtl
  *                    (minutes). Presence == "active in the last few minutes".
  *                    Self-pruning like instance:, just a far shorter window.
+ *                    The ping's headcount (distinct browsers at that install) is
+ *                    stored in the key's KV metadata so GET /stats/global can SUM
+ *                    people across installs without an extra read per key. Legacy
+ *                    pings without a count fall back to 1.
  *   meta:total     — cumulative monotonic counter, bumped once the first time
  *                    an instance id is ever seen. Never decremented.
  *
@@ -74,6 +78,18 @@ function jsonResponse(body: Record<string, unknown>, status = 200): Response {
 interface HeartbeatBody {
   instanceId?: unknown;
   version?: unknown;
+  count?: unknown;
+}
+
+// Upper bound on a single install's reported headcount — rejects a
+// runaway/hostile client from dominating the global sum. A real install with
+// thousands of concurrent humans behind one instance id is not a case we serve.
+const MAX_PRESENCE_COUNT = 10000;
+
+// Metadata shape stored on each online:<id> key — the distinct-browser headcount
+// reported by that install's most recent presence ping.
+interface OnlineMeta {
+  count?: number;
 }
 
 async function handleHeartbeat(request: Request, env: Env): Promise<Response> {
@@ -132,8 +148,16 @@ async function handlePresence(request: Request, env: Env): Promise<Response> {
     return jsonResponse({ error: "Invalid instanceId" }, 400);
   }
 
+  // Distinct-browser headcount for this install; clamp to [1, MAX]. Legacy
+  // clients omit it → count as a single presence.
+  const rawCount = typeof body.count === "number" ? body.count : 1;
+  const count = Number.isFinite(rawCount)
+    ? Math.min(Math.max(Math.floor(rawCount), 1), MAX_PRESENCE_COUNT)
+    : 1;
+
   await env.STATS_KV.put(ONLINE_PREFIX + instanceId, String(Date.now()), {
     expirationTtl: ONLINE_TTL_SECONDS,
+    metadata: { count } satisfies OnlineMeta,
   });
 
   return jsonResponse({ ok: true });
@@ -150,6 +174,26 @@ async function countByPrefix(env: Env, prefix: string): Promise<number> {
   return count;
 }
 
+/**
+ * Sum the distinct-browser headcount across all currently-online installs. Each
+ * online:<id> key carries its install's count in KV metadata (populated by the
+ * presence handler), so `list` returns it inline — no extra read per key. A key
+ * missing/with an invalid count (legacy ping) contributes 1.
+ */
+async function sumOnlineHeadcount(env: Env): Promise<number> {
+  let total = 0;
+  let cursor: string | undefined;
+  do {
+    const page = await env.STATS_KV.list<OnlineMeta>({ prefix: ONLINE_PREFIX, cursor });
+    for (const key of page.keys) {
+      const c = key.metadata?.count;
+      total += typeof c === "number" && Number.isFinite(c) && c > 0 ? Math.floor(c) : 1;
+    }
+    cursor = page.list_complete ? undefined : page.cursor;
+  } while (cursor);
+  return total;
+}
+
 async function handleGlobalStats(env: Env, ctx: ExecutionContext): Promise<Response> {
   const cache = caches.default;
   const cacheKey = new Request("https://stats.invalid/stats/global");
@@ -158,7 +202,7 @@ async function handleGlobalStats(env: Env, ctx: ExecutionContext): Promise<Respo
 
   const [activeInstances30d, onlineNow, totalRaw] = await Promise.all([
     countByPrefix(env, INSTANCE_PREFIX),
-    countByPrefix(env, ONLINE_PREFIX),
+    sumOnlineHeadcount(env),
     env.STATS_KV.get(TOTAL_KEY),
   ]);
   const totalInstances = Math.max(parseInt(totalRaw ?? "0", 10) || 0, activeInstances30d);
