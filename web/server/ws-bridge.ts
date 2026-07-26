@@ -795,21 +795,23 @@ export class WsBridge {
    * the anonymous per-browser `clientId`. A single person viewing N sessions
    * holds N browser sockets (one per session) but sends the same clientId on
    * each, so they collapse to 1 here — unlike `countConnectedBrowsers`, which
-   * sums raw sockets. Sockets missing a clientId (legacy clients) each count
-   * individually via a unique synthetic key. Feeds the global "online now"
-   * headcount.
+   * sums raw sockets. Feeds the global "online now" headcount.
+   *
+   * Sockets WITHOUT a clientId are excluded, not counted. Only real browsers
+   * mint a clientId (localStorage, appended to the WS URL); clientId-less
+   * connections are non-human server-side consumers of the browser WS surface
+   * (Council orchestrator/observer halves, agent sessions), and counting them
+   * as people inflated the headcount above the real number of humans.
    */
   countDistinctBrowsers(): number {
     const ids = new Set<string>();
-    let legacy = 0;
     for (const session of this.sessions.values()) {
       for (const ws of session.browserSockets) {
         const clientId = (ws.data as { clientId?: string }).clientId;
         if (clientId) ids.add(clientId);
-        else legacy++;
       }
     }
-    return ids.size + legacy;
+    return ids.size;
   }
 
   /** Return current phase for each session (for metrics gauges). */

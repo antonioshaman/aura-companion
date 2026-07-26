@@ -5873,14 +5873,26 @@ describe("countDistinctBrowsers", () => {
     expect(bridge.countDistinctBrowsers()).toBe(2);
   });
 
-  // Legacy clients that don't send a clientId can't be deduped, so each such
-  // socket counts on its own — never silently dropped from the headcount.
-  it("counts each clientId-less (legacy) socket individually", () => {
+  // Sockets without a clientId are non-human server-side consumers of the
+  // browser WS surface (Council orchestrator/observer, agent sessions) — only
+  // real browsers mint a clientId. They must be EXCLUDED so agent connections
+  // don't inflate the global "people online" headcount above real humans.
+  it("excludes clientId-less (agent/non-browser) sockets from the headcount", () => {
     bridge.handleBrowserOpen(makeBrowserSocketWithClient("s1"), "s1");
     bridge.handleBrowserOpen(makeBrowserSocketWithClient("s2"), "s2");
     bridge.handleBrowserOpen(makeBrowserSocketWithClient("s3", "human-A"), "s3");
 
-    // 2 legacy + 1 identified = 3.
-    expect(bridge.countDistinctBrowsers()).toBe(3);
+    // 2 clientId-less agents excluded, only the 1 real browser counts.
+    expect(bridge.countDistinctBrowsers()).toBe(1);
+  });
+
+  // With no real browsers at all (only agent connections), the headcount is 0 —
+  // the presence-ping loop then treats the install as "nobody looking" and
+  // sends nothing, so agent-only installs don't appear in the global count.
+  it("returns 0 when only clientId-less agent sockets are connected", () => {
+    bridge.handleBrowserOpen(makeBrowserSocketWithClient("s1"), "s1");
+    bridge.handleBrowserOpen(makeBrowserSocketWithClient("s2"), "s2");
+
+    expect(bridge.countDistinctBrowsers()).toBe(0);
   });
 });
