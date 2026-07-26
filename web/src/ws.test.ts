@@ -134,7 +134,12 @@ describe("connectSession", () => {
   it("creates a WebSocket with the correct URL", () => {
     wsModule.connectSession("s1");
 
-    expect(lastWs.url).toBe("ws://localhost:3456/ws/browser/s1?token=");
+    // URL carries the session path + auth token, plus an anonymous per-browser
+    // clientId (random UUID from localStorage) used for the online-headcount
+    // presence dedupe. Match structurally so the random id doesn't make this brittle.
+    expect(lastWs.url).toMatch(
+      /^ws:\/\/localhost:3456\/ws\/browser\/s1\?token=&clientId=.+$/,
+    );
     expect(useStore.getState().connectionStatus.get("s1")).toBe("connecting");
   });
 
