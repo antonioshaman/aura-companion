@@ -790,6 +790,28 @@ export class WsBridge {
     return total;
   }
 
+  /**
+   * Approximate number of DISTINCT humans with the UI open right now, deduped by
+   * the anonymous per-browser `clientId`. A single person viewing N sessions
+   * holds N browser sockets (one per session) but sends the same clientId on
+   * each, so they collapse to 1 here — unlike `countConnectedBrowsers`, which
+   * sums raw sockets. Sockets missing a clientId (legacy clients) each count
+   * individually via a unique synthetic key. Feeds the global "online now"
+   * headcount.
+   */
+  countDistinctBrowsers(): number {
+    const ids = new Set<string>();
+    let legacy = 0;
+    for (const session of this.sessions.values()) {
+      for (const ws of session.browserSockets) {
+        const clientId = (ws.data as { clientId?: string }).clientId;
+        if (clientId) ids.add(clientId);
+        else legacy++;
+      }
+    }
+    return ids.size + legacy;
+  }
+
   /** Return current phase for each session (for metrics gauges). */
   getSessionPhases(): Map<string, import("./session-state-machine.js").SessionPhase> {
     const phases = new Map<string, import("./session-state-machine.js").SessionPhase>();

@@ -115,4 +115,23 @@ describe("startPresencePing", () => {
     expect((init as RequestInit).method).toBe("POST");
     stop();
   });
+
+  // The distinct-browser headcount must travel in the payload so the aggregator
+  // can SUM people across installs rather than counting installs. Regression
+  // guard for the Variant-2 headcount telemetry.
+  it("sends the distinct-browser count in the presence body", () => {
+    process.env.COMPANION_TELEMETRY = "1";
+    process.env.COMPANION_HOME = tempDir;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("{}"));
+    const stop = startPresencePing(() => 3);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    const [, init] = fetchSpy.mock.calls[0];
+    const body = JSON.parse((init as RequestInit).body as string) as {
+      instanceId: string;
+      count: number;
+    };
+    expect(body.count).toBe(3);
+    expect(typeof body.instanceId).toBe("string");
+    stop();
+  });
 });

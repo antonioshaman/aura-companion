@@ -5840,3 +5840,47 @@ describe("flushInterruptedStreamsForShutdown", () => {
     expect(interruptedFrames).toHaveLength(1);
   });
 });
+
+// ─── countDistinctBrowsers (Variant-2 presence headcount) ─────────────────────
+
+describe("countDistinctBrowsers", () => {
+  function makeBrowserSocketWithClient(sessionId: string, clientId?: string) {
+    return createMockSocket({ kind: "browser", sessionId, clientId });
+  }
+
+  it("returns 0 when no browser is connected", () => {
+    expect(bridge.countDistinctBrowsers()).toBe(0);
+  });
+
+  // The whole point of Variant-2: one human viewing N sessions holds N sockets
+  // (one per session) but sends the SAME clientId, so they must collapse to 1 —
+  // unlike countConnectedBrowsers which sums the raw sockets.
+  it("collapses one human's N session-sockets (same clientId) to 1", () => {
+    bridge.handleBrowserOpen(makeBrowserSocketWithClient("s1", "human-A"), "s1");
+    bridge.handleBrowserOpen(makeBrowserSocketWithClient("s2", "human-A"), "s2");
+    bridge.handleBrowserOpen(makeBrowserSocketWithClient("s3", "human-A"), "s3");
+
+    expect(bridge.countConnectedBrowsers()).toBe(3);
+    expect(bridge.countDistinctBrowsers()).toBe(1);
+  });
+
+  it("counts distinct clientIds as distinct people", () => {
+    bridge.handleBrowserOpen(makeBrowserSocketWithClient("s1", "human-A"), "s1");
+    bridge.handleBrowserOpen(makeBrowserSocketWithClient("s1", "human-B"), "s1");
+    bridge.handleBrowserOpen(makeBrowserSocketWithClient("s2", "human-A"), "s2");
+
+    // A + B distinct; A's second socket dedupes → 2 people.
+    expect(bridge.countDistinctBrowsers()).toBe(2);
+  });
+
+  // Legacy clients that don't send a clientId can't be deduped, so each such
+  // socket counts on its own — never silently dropped from the headcount.
+  it("counts each clientId-less (legacy) socket individually", () => {
+    bridge.handleBrowserOpen(makeBrowserSocketWithClient("s1"), "s1");
+    bridge.handleBrowserOpen(makeBrowserSocketWithClient("s2"), "s2");
+    bridge.handleBrowserOpen(makeBrowserSocketWithClient("s3", "human-A"), "s3");
+
+    // 2 legacy + 1 identified = 3.
+    expect(bridge.countDistinctBrowsers()).toBe(3);
+  });
+});

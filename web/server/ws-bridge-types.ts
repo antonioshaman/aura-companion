@@ -29,6 +29,13 @@ export interface BrowserSocketData {
   sessionId: string;
   subscribed?: boolean;
   lastAckSeq?: number;
+  /**
+   * Anonymous per-browser id (localStorage `companion_client_id`), captured
+   * from the WS connect query. Lets `countDistinctBrowsers` collapse "one human
+   * with N sessions open" (N sockets) into a single presence headcount. Absent
+   * for legacy clients that don't send it — such sockets each count on their own.
+   */
+  clientId?: string;
 }
 
 export interface TerminalSocketData {
