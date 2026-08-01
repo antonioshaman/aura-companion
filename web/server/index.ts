@@ -418,7 +418,18 @@ const server = Bun.serve<SocketData>({
   port,
   idleTimeout: 0, // Disable top-level idle timeout — it kills idle browser WebSockets (code 1006)
   async fetch(req, server) {
-    const url = new URL(req.url);
+    // Guard against malformed request-lines from port scanners / malformed
+    // proxies. `new URL(req.url)` throws `TypeError [ERR_INVALID_URL]` on
+    // inputs like `/nice%20ports%2C/Tri%6Eity.txt%2ebak` or bare `/`; an
+    // uncaught throw inside the handler leaves the underlying socket in
+    // CLOSE_WAIT, and enough of them accumulate to distort the process's
+    // memory footprint over a long uptime. Return a bounded 400 instead.
+    let url: URL;
+    try {
+      url = new URL(req.url);
+    } catch {
+      return new Response("Bad Request", { status: 400 });
+    }
 
     // ── CLI WebSocket — Claude Code CLI connects here via --sdk-url ────
     const cliMatch = url.pathname.match(/^\/ws\/cli\/([a-f0-9-]+)$/);
