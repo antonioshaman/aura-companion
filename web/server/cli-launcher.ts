@@ -6,6 +6,8 @@ import {
   cpSync,
   realpathSync,
   statSync,
+  lstatSync,
+  symlinkSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1429,20 +1431,35 @@ export class CliLauncher {
         const src = join(legacyHome, name);
         const dest = join(codexHome, name);
         if (!existsSync(src)) continue;
-        // auth.json: OAuth refresh tokens are single-use, so a stale
-        // per-session copy fails with "refresh token was already used" after
-        // the user re-logs-in (which only rewrites the legacy file). Re-seed
-        // whenever the legacy copy is newer; never clobber a fresher
-        // session copy (the live CLI may have refreshed it itself).
-        const reseedNewerAuth =
-          name === "auth.json" &&
-          existsSync(dest) &&
-          statSync(src).mtimeMs > statSync(dest).mtimeMs;
-        if (!existsSync(dest) || reseedNewerAuth) {
-          copyFileSync(src, dest);
-          if (reseedNewerAuth) {
-            console.log(`[cli-launcher] Re-seeded ${name} from legacy home (legacy copy is newer)`);
+
+        // auth.json is SHARED, not copied. OAuth refresh tokens are single-use
+        // and rotating: whichever home refreshes writes the new token only into
+        // itself, so any per-session copy inevitably goes stale and fails with
+        // "refresh token was already used" for every subsequently-spawned
+        // session. A symlink to the one legacy file makes all sessions read and
+        // refresh the same canonical token (codex serialises writes with its
+        // own file lock), and a manual `codex login` — which only rewrites the
+        // legacy file — heals every session at once. Only symlink FRESH homes;
+        // never disturb a live session's existing auth.json.
+        if (name === "auth.json") {
+          const destInfo = lstatSync(dest, { throwIfNoEntry: false });
+          if (!destInfo) {
+            symlinkSync(resolve(src), dest);
+          } else if (
+            !destInfo.isSymbolicLink() &&
+            statSync(src).mtimeMs > statSync(dest).mtimeMs
+          ) {
+            // Back-compat: an older regular-file copy predating the symlink
+            // scheme. Keep re-seed-when-legacy-newer so a re-login still heals
+            // it without converting a possibly-live file mid-flight.
+            copyFileSync(src, dest);
+            console.log(`[cli-launcher] Re-seeded auth.json from legacy home (legacy copy is newer)`);
           }
+          continue;
+        }
+
+        if (!existsSync(dest)) {
+          copyFileSync(src, dest);
         }
       } catch (e) {
         console.warn(`[cli-launcher] Failed to bootstrap ${name} from legacy home:`, e);

@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import { mkdtempSync, rmSync, realpathSync, writeFileSync, mkdirSync, readFileSync, utimesSync } from "node:fs";
+import { mkdtempSync, rmSync, realpathSync, writeFileSync, mkdirSync, readFileSync, utimesSync, lstatSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -2931,13 +2931,29 @@ describe("prepareCodexHome auth.json seeding", () => {
     (launcher as unknown as { prepareCodexHome(home: string): void }).prepareCodexHome(codexHome);
   }
 
-  it("seeds auth.json into an empty session home", () => {
+  it("shares auth.json with the legacy home via symlink for a fresh session home", () => {
+    // A fresh home must SHARE the one canonical auth.json rather than copy it,
+    // so single-use OAuth refresh-token rotation done by any session stays
+    // consistent for all. The content is still readable through the link.
     writeFileSync(join(legacyDir, "auth.json"), '{"token":"fresh"}');
     callPrepare();
-    expect(readFileSync(join(codexHome, "auth.json"), "utf-8")).toBe('{"token":"fresh"}');
+    const dest = join(codexHome, "auth.json");
+    expect(lstatSync(dest).isSymbolicLink()).toBe(true);
+    expect(readFileSync(dest, "utf-8")).toBe('{"token":"fresh"}');
   });
 
-  it("re-seeds auth.json when the legacy copy is newer than the session copy", () => {
+  it("propagates a refresh written through the shared auth.json back to the legacy file", () => {
+    // Because the session auth.json is a symlink, a token rotation performed by
+    // the live CLI reaches the legacy file, so the NEXT new session seeds the
+    // live token instead of a stale copy — this is the fix for the recurring
+    // "refresh token was already used" failure on freshly-spawned sessions.
+    writeFileSync(join(legacyDir, "auth.json"), '{"token":"t0"}');
+    callPrepare();
+    writeFileSync(join(codexHome, "auth.json"), '{"token":"rotated"}');
+    expect(readFileSync(join(legacyDir, "auth.json"), "utf-8")).toBe('{"token":"rotated"}');
+  });
+
+  it("re-seeds a legacy-newer REGULAR-FILE auth.json copy (pre-symlink back-compat)", () => {
     mkdirSync(codexHome, { recursive: true });
     writeFileSync(join(codexHome, "auth.json"), '{"token":"stale"}');
     writeFileSync(join(legacyDir, "auth.json"), '{"token":"fresh"}');
