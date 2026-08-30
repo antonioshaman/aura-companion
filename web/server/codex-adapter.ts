@@ -1448,7 +1448,10 @@ export class CodexAdapter implements IBackendAdapter {
   ): Promise<void> {
     const turnParams = this.buildTurnStartParams(input);
     try {
-      const result = await this.transport.call("turn/start", turnParams, undefined, opts?.origin) as { turn: { id: string } };
+      const result = await this.callAfterNotInitializedRetry(
+        "turn/start",
+        () => this.transport.call("turn/start", turnParams, undefined, opts?.origin) as Promise<{ turn: { id: string } }>,
+      );
       opts?.onSuccess?.(result.turn.id);
     } catch (error) {
       opts?.onFailure?.();
@@ -1611,8 +1614,14 @@ export class CodexAdapter implements IBackendAdapter {
 
   private async handleOutgoingMcpGetStatus(): Promise<void> {
     try {
-      const statusEntries = await this.listAllMcpServerStatuses();
-      const configMap = await this.readMcpServersConfig();
+      const statusEntries = await this.callAfterNotInitializedRetry(
+        "mcp_get_status",
+        () => this.listAllMcpServerStatuses(),
+      );
+      const configMap = await this.callAfterNotInitializedRetry(
+        "mcp_get_status",
+        () => this.readMcpServersConfig(),
+      );
 
       const names = new Set<string>([
         ...statusEntries.map((s) => s.name),
@@ -3200,6 +3209,36 @@ export class CodexAdapter implements IBackendAdapter {
 
   private mapCollaborationMode(kind: "default" | "plan"): { mode: "default" | "plan"; settings: { model: string } } {
     return { mode: kind, settings: { model: this.options.model || "" } };
+  }
+
+  private isNotInitializedError(err: unknown): boolean {
+    const msg = err instanceof Error ? err.message : String(err);
+    return msg === "Not initialized" || msg.includes("Not initialized");
+  }
+
+  private async reinitializeAfterNotInitialized(label: string): Promise<void> {
+    if (!this.transport.isConnected()) {
+      throw new Error("Transport closed");
+    }
+    console.warn(`[codex-adapter] Session ${this.sessionId}: ${label} hit Not initialized — re-running Codex initialize handshake`);
+    this.initEpoch++;
+    this.initialized = false;
+    this.initFailed = false;
+    this.initInProgress = false;
+    if (!this.options.threadId && this.threadId) {
+      this.options.threadId = this.threadId;
+    }
+    await this.initialize();
+  }
+
+  private async callAfterNotInitializedRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (err) {
+      if (!this.isNotInitializedError(err)) throw err;
+      await this.reinitializeAfterNotInitialized(label);
+      return await fn();
+    }
   }
 
   private async listAllMcpServerStatuses(): Promise<CodexMcpServerStatus[]> {
