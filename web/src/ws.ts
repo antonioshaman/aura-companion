@@ -696,9 +696,11 @@ function handleMessage(sessionId: string, event: MessageEvent) {
     return;
   }
 
-  // Promote to "connected" on first valid message (proves subscription succeeded)
+  // Promote to "connected" on any valid message. A stale close/recovery path can
+  // leave the UI marked disconnected even after a replacement socket starts
+  // receiving frames; a parseable frame proves the subscription is live.
   const store = useStore.getState();
-  if (store.connectionStatus.get(sessionId) === "connecting") {
+  if (store.connectionStatus.get(sessionId) !== "connected") {
     store.setConnectionStatus(sessionId, "connected");
   }
 

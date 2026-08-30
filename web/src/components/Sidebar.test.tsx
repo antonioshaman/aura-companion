@@ -69,6 +69,9 @@ interface MockStoreState {
   markRecentlyRenamed: ReturnType<typeof vi.fn>;
   clearRecentlyRenamed: ReturnType<typeof vi.fn>;
   setSdkSessions: ReturnType<typeof vi.fn>;
+  setConnectionStatus: ReturnType<typeof vi.fn>;
+  setCliConnected: ReturnType<typeof vi.fn>;
+  setCliReconnecting: ReturnType<typeof vi.fn>;
   // Council Mode slice — Sidebar reads these to render per-session
   // pairing badge + unread STOP counter; empty maps mean no badges.
   groupBySessionId: Map<string, string>;
@@ -144,6 +147,9 @@ function createMockState(overrides: Partial<MockStoreState> = {}): MockStoreStat
     markRecentlyRenamed: vi.fn(),
     clearRecentlyRenamed: vi.fn(),
     setSdkSessions: vi.fn(),
+    setConnectionStatus: vi.fn(),
+    setCliConnected: vi.fn(),
+    setCliReconnecting: vi.fn(),
     groupBySessionId: new Map(),
     groups: new Map(),
     findings: new Map(),

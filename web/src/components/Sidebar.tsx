@@ -306,6 +306,13 @@ export function Sidebar() {
         if (active) {
           const store = useStore.getState();
           store.setSdkSessions(list);
+          for (const s of list) {
+            if (s.archived) continue;
+            if (s.state !== "connected") continue;
+            store.setCliConnected(s.sessionId, true);
+            store.setCliReconnecting(s.sessionId, false);
+            store.setConnectionStatus(s.sessionId, "connected");
+          }
           // Remove client-side sessions the server no longer knows about.
           // Re-read state AFTER setSdkSessions so we get the freshest snapshot —
           // a session_init WebSocket message may have arrived while listSessions()
