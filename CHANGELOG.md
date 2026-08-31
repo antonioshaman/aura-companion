@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.15.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.14.0...aura-companion-v1.15.0) (2026-08-31)
+
+
+### Features
+
+* **codex:** absorb newer app-server notifications without protocol drift ([#151](https://github.com/antonioshaman/aura-companion/issues/151)) ([3c72c99](https://github.com/antonioshaman/aura-companion/commit/3c72c99255a2b97f00a861e541071558ca8e8c51))
+* **settings:** add model-list refresh + cache/config diagnostics ([#149](https://github.com/antonioshaman/aura-companion/issues/149)) ([aff7fcf](https://github.com/antonioshaman/aura-companion/commit/aff7fcfccb8bea6c030b7647c228c626c809b9ee))
+* **task-panel:** flag 'agent active but not reporting' when task list is stale ([#158](https://github.com/antonioshaman/aura-companion/issues/158)) ([f20db3a](https://github.com/antonioshaman/aura-companion/commit/f20db3acebab181fcb0cc9dac486aadbb5053d65))
+* **telemetry:** count distinct humans online, not installs ([#159](https://github.com/antonioshaman/aura-companion/issues/159)) ([fd2f61d](https://github.com/antonioshaman/aura-companion/commit/fd2f61d389d40077e9d7d558d69e127527a6813d))
+
+
+### Bug Fixes
+
+* **app:** PWA update prompt + council review & codex/auth/sidebar fixes ([#162](https://github.com/antonioshaman/aura-companion/issues/162)) ([6cacd74](https://github.com/antonioshaman/aura-companion/commit/6cacd74b9bc900f361a8688a7bfc67dbe6501f43))
+* **council:** re-arm dead fs.watch watchers + implement EC-13 failsafe tick ([#157](https://github.com/antonioshaman/aura-companion/issues/157)) ([f0c4fd7](https://github.com/antonioshaman/aura-companion/commit/f0c4fd7868bf1f4610800b3b680e9f3d439da433))
+* **server:** guard `new URL(req.url)` against malformed request-lines ([#161](https://github.com/antonioshaman/aura-companion/issues/161)) ([adab701](https://github.com/antonioshaman/aura-companion/commit/adab701aa5a4b9b3593be42f6d32b8a50f94ab60))
+* **telemetry:** count online people not agent sockets; label install units in badge ([#160](https://github.com/antonioshaman/aura-companion/issues/160)) ([c8e7c8d](https://github.com/antonioshaman/aura-companion/commit/c8e7c8d8a5e154a24c55b1802f20bed645c79516))
+
 ## [1.14.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.13.0...aura-companion-v1.14.0) (2026-07-01)
 
 
