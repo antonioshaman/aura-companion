@@ -69,6 +69,9 @@ interface MockStoreState {
   markRecentlyRenamed: ReturnType<typeof vi.fn>;
   clearRecentlyRenamed: ReturnType<typeof vi.fn>;
   setSdkSessions: ReturnType<typeof vi.fn>;
+  setConnectionStatus: ReturnType<typeof vi.fn>;
+  setCliConnected: ReturnType<typeof vi.fn>;
+  setCliReconnecting: ReturnType<typeof vi.fn>;
   // Council Mode slice — Sidebar reads these to render per-session
   // pairing badge + unread STOP counter; empty maps mean no badges.
   groupBySessionId: Map<string, string>;
@@ -144,6 +147,9 @@ function createMockState(overrides: Partial<MockStoreState> = {}): MockStoreStat
     markRecentlyRenamed: vi.fn(),
     clearRecentlyRenamed: vi.fn(),
     setSdkSessions: vi.fn(),
+    setConnectionStatus: vi.fn(),
+    setCliConnected: vi.fn(),
+    setCliReconnecting: vi.fn(),
     groupBySessionId: new Map(),
     groups: new Map(),
     findings: new Map(),
@@ -969,6 +975,68 @@ describe("Sidebar", () => {
     });
     // No random name existed, so markRecentlyRenamed should not be called
     expect(mockState.markRecentlyRenamed).not.toHaveBeenCalled();
+  });
+
+  it("poll hydrates cli/connection status for a connected non-archived session", async () => {
+    // The poll optimistically seeds connection state so a session that IS
+    // connected doesn't flash as disconnected before the WS handshake lands.
+    const serverSessions = [makeSdkSession("s1", { state: "connected", archived: false })];
+    mockApi.listSessions.mockResolvedValueOnce(serverSessions);
+    mockState = createMockState({ connectionStatus: new Map() });
+
+    render(<Sidebar />);
+
+    await vi.waitFor(() => {
+      expect(mockState.setCliConnected).toHaveBeenCalledWith("s1", true);
+    });
+    expect(mockState.setCliReconnecting).toHaveBeenCalledWith("s1", false);
+    expect(mockState.setConnectionStatus).toHaveBeenCalledWith("s1", "connected");
+  });
+
+  it("poll does NOT hydrate connection status for archived sessions", async () => {
+    const serverSessions = [makeSdkSession("s1", { state: "connected", archived: true })];
+    mockApi.listSessions.mockResolvedValueOnce(serverSessions);
+    mockState = createMockState({ connectionStatus: new Map() });
+
+    render(<Sidebar />);
+
+    await vi.waitFor(() => {
+      expect(mockState.setSdkSessions).toHaveBeenCalledWith(serverSessions);
+    });
+    expect(mockState.setCliConnected).not.toHaveBeenCalled();
+    expect(mockState.setConnectionStatus).not.toHaveBeenCalled();
+  });
+
+  it("poll does NOT hydrate connection status when server state is not connected", async () => {
+    const serverSessions = [makeSdkSession("s1", { state: "starting", archived: false })];
+    mockApi.listSessions.mockResolvedValueOnce(serverSessions);
+    mockState = createMockState({ connectionStatus: new Map() });
+
+    render(<Sidebar />);
+
+    await vi.waitFor(() => {
+      expect(mockState.setSdkSessions).toHaveBeenCalledWith(serverSessions);
+    });
+    expect(mockState.setCliConnected).not.toHaveBeenCalled();
+  });
+
+  it("poll does NOT re-assert connected over a live WS (masking guard)", async () => {
+    // Once the browser WS is live (connectionStatus === "connected"), it owns CLI
+    // liveness. A stale REST snapshot must not re-assert connected and mask a
+    // WS-observed disconnect — Composer gates sending on cliConnected.
+    const serverSessions = [makeSdkSession("s1", { state: "connected", archived: false })];
+    mockApi.listSessions.mockResolvedValueOnce(serverSessions);
+    mockState = createMockState({
+      connectionStatus: new Map([["s1", "connected"]]),
+    });
+
+    render(<Sidebar />);
+
+    await vi.waitFor(() => {
+      expect(mockState.setSdkSessions).toHaveBeenCalledWith(serverSessions);
+    });
+    expect(mockState.setCliConnected).not.toHaveBeenCalled();
+    expect(mockState.setConnectionStatus).not.toHaveBeenCalled();
   });
 
   it("poll gracefully handles API errors", async () => {

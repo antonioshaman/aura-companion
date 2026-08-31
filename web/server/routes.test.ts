@@ -4408,6 +4408,35 @@ describe("POST /api/auth/verify", () => {
     const data = await res.json();
     expect(data.error).toContain("Invalid token");
   });
+
+  // Council F10: the auth cookie must NOT carry Secure over plain http, or the
+  // browser drops it and LAN/localhost auth silently breaks.
+  it("omits Secure on the auth cookie over plain http", async () => {
+    const res = await app.request("/api/auth/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token: "test-token-for-routes" }),
+    });
+    expect(res.status).toBe(200);
+    const setCookie = res.headers.get("set-cookie") ?? "";
+    expect(setCookie).toContain("companion_auth=");
+    expect(setCookie.toLowerCase()).not.toContain("secure");
+  });
+
+  // Council F10: behind an HTTPS-terminating proxy the cookie MUST be Secure.
+  it("marks the auth cookie Secure when x-forwarded-proto is https", async () => {
+    const res = await app.request("/api/auth/verify", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-forwarded-proto": "https",
+      },
+      body: JSON.stringify({ token: "test-token-for-routes" }),
+    });
+    expect(res.status).toBe(200);
+    const setCookie = res.headers.get("set-cookie") ?? "";
+    expect(setCookie.toLowerCase()).toContain("secure");
+  });
 });
 
 // ---------------------------------------------------------------------------

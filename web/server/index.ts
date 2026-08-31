@@ -455,6 +455,30 @@ const server = Bun.serve<SocketData>({
     // not browser) is excluded — it carries no Origin header by design.
     const reqOrigin = req.headers.get("origin");
     const originOk = isOriginAllowed({ origin: reqOrigin, localhost: isLocalhost });
+    const getRequestCookie = (name: string): string | null => {
+      const cookieHeader = req.headers.get("cookie");
+      if (!cookieHeader) return null;
+      for (const part of cookieHeader.split(";")) {
+        const [rawName, ...rawValue] = part.trim().split("=");
+        if (rawName === name) {
+          const raw = rawValue.join("=");
+          // A malformed percent-escape (e.g. a lone "%") makes decodeURIComponent
+          // throw; a bad cookie must degrade to "no token" (→ 401), never a 500.
+          try {
+            return decodeURIComponent(raw);
+          } catch {
+            return raw;
+          }
+        }
+      }
+      return null;
+    };
+    const verifyLegacyWebSocketAuth = (): boolean => {
+      if (isLocalhost) return true;
+      const queryToken = url.searchParams.get("token");
+      const cookieToken = getRequestCookie("companion_auth");
+      return verifyToken(queryToken) || verifyToken(cookieToken);
+    };
 
     // ── Browser WebSocket — connects to a specific session ─────────────
     const browserMatch = url.pathname.match(/^\/ws\/browser\/([a-f0-9-]+)$/);
@@ -468,8 +492,7 @@ const server = Bun.serve<SocketData>({
           return new Response(auth.body || "Unauthorized", { status: auth.status });
         }
       } else {
-        const wsToken = url.searchParams.get("token");
-        if (!isLocalhost && !verifyToken(wsToken)) {
+        if (!verifyLegacyWebSocketAuth()) {
           return new Response("Unauthorized", { status: 401 });
         }
       }
@@ -494,8 +517,7 @@ const server = Bun.serve<SocketData>({
           return new Response(auth.body || "Unauthorized", { status: auth.status });
         }
       } else {
-        const wsToken = url.searchParams.get("token");
-        if (!isLocalhost && !verifyToken(wsToken)) {
+        if (!verifyLegacyWebSocketAuth()) {
           return new Response("Unauthorized", { status: 401 });
         }
       }
@@ -519,8 +541,7 @@ const server = Bun.serve<SocketData>({
           return new Response(auth.body || "Unauthorized", { status: auth.status });
         }
       } else {
-        const wsToken = url.searchParams.get("token");
-        if (!isLocalhost && !verifyToken(wsToken)) {
+        if (!verifyLegacyWebSocketAuth()) {
           return new Response("Unauthorized", { status: 401 });
         }
       }
@@ -1042,4 +1063,3 @@ async function gracefulShutdown() {
 }
 process.on("SIGTERM", gracefulShutdown);
 process.on("SIGINT", gracefulShutdown);
-

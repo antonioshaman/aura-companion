@@ -120,6 +120,25 @@ function PanelSection({
 
 // ─── Shared progress meter ──────────────────────────────────────────────────
 
+// Utilization from /api/oauth/usage is a 0–100 percentage. Clamp to that range
+// and treat non-finite values as 0 so a bad number never yields "NaN%" width.
+function safePct(v: number): number {
+  if (!Number.isFinite(v)) return 0;
+  return Math.max(0, Math.min(v, 100));
+}
+
+// Human-readable label for extra_usage.disabled_reason (verbatim API tokens).
+function extraDisabledLabel(reason: string): string {
+  switch (reason) {
+    case "out_of_credits":
+      return "Out of credits";
+    case "not_configured":
+      return "Not configured";
+    default:
+      return reason.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
+  }
+}
+
 function barColor(pct: number): string {
   if (pct > 80) return "bg-cc-error";
   if (pct > 50) return "bg-cc-warning";
@@ -133,26 +152,27 @@ function barLevel(pct: number): string {
 }
 
 function ProgressMeter({ label, pct, detail }: { label: string; pct: number; detail?: string }) {
+  const p = safePct(pct);
   return (
     <div className="space-y-1">
       <div className="flex items-center justify-between">
         <span className="text-[11px] text-cc-muted uppercase tracking-wider">{label}</span>
         <span className="text-[11px] text-cc-muted tabular-nums">
-          {Math.round(pct)}%
+          {Math.round(p)}%
           {detail && <span className="ml-1 text-cc-muted">({detail})</span>}
         </span>
       </div>
       <div
         role="meter"
-        aria-label={`${label} usage — ${barLevel(pct)}`}
-        aria-valuenow={Math.round(pct)}
+        aria-label={`${label} usage — ${barLevel(p)}`}
+        aria-valuenow={Math.round(p)}
         aria-valuemin={0}
         aria-valuemax={100}
         className="w-full h-1.5 rounded-full bg-cc-hover overflow-hidden"
       >
         <div
-          className={`h-full rounded-full transition-all duration-500 ${barColor(pct)}`}
-          style={{ width: `${Math.min(pct, 100)}%` }}
+          className={`h-full rounded-full transition-all duration-500 ${barColor(p)}`}
+          style={{ width: `${p}%` }}
         />
       </div>
     </div>
@@ -191,7 +211,15 @@ function UsageLimitsSection({ sessionId }: { sessionId: string }) {
 
   const has5h = limits.five_hour !== null;
   const has7d = limits.seven_day !== null;
-  const hasExtra = !has5h && !has7d && limits.extra_usage?.is_enabled;
+  const extra = limits.extra_usage;
+  // Enabled overage meter stays low-clutter: only when there's no 5h/7d bar.
+  const showExtraMeter = !has5h && !has7d && extra?.is_enabled === true;
+  // But surface the overage-DISABLED state (e.g. out_of_credits) even alongside
+  // 5h/7d. That is the exact condition behind an "out of extra usage" 429, so
+  // hiding it makes the panel silently contradict a truthful rejection.
+  const showExtraDisabled =
+    extra != null && extra.is_enabled === false && !!extra.disabled_reason;
+  const hasExtra = showExtraMeter || showExtraDisabled;
 
   if (!has5h && !has7d && !hasExtra) return null;
 
@@ -211,29 +239,37 @@ function UsageLimitsSection({ sessionId }: { sessionId: string }) {
           detail={limits.seven_day.resets_at ? formatResetTime(limits.seven_day.resets_at) : undefined}
         />
       )}
-      {hasExtra && limits.extra_usage && (
+      {showExtraMeter && extra && (
         <div className="space-y-1">
           <div className="flex items-center justify-between">
             <span className="text-[11px] text-cc-muted uppercase tracking-wider">Extra</span>
             <span className="text-[11px] text-cc-muted tabular-nums">
-              ${limits.extra_usage.used_credits.toFixed(2)} / ${limits.extra_usage.monthly_limit}
+              ${extra.used_credits.toFixed(2)} / ${extra.monthly_limit}
             </span>
           </div>
-          {limits.extra_usage.utilization !== null && (
+          {extra.utilization !== null && (
             <div
               role="meter"
-              aria-label={`Extra usage — ${barLevel(limits.extra_usage.utilization)}`}
-              aria-valuenow={Math.round(limits.extra_usage.utilization)}
+              aria-label={`Extra usage — ${barLevel(safePct(extra.utilization))}`}
+              aria-valuenow={Math.round(safePct(extra.utilization))}
               aria-valuemin={0}
               aria-valuemax={100}
               className="w-full h-1.5 rounded-full bg-cc-hover overflow-hidden"
             >
               <div
-                className={`h-full rounded-full transition-all duration-500 ${barColor(limits.extra_usage.utilization)}`}
-                style={{ width: `${Math.min(limits.extra_usage.utilization, 100)}%` }}
+                className={`h-full rounded-full transition-all duration-500 ${barColor(safePct(extra.utilization))}`}
+                style={{ width: `${safePct(extra.utilization)}%` }}
               />
             </div>
           )}
+        </div>
+      )}
+      {showExtraDisabled && extra?.disabled_reason && (
+        <div className="flex items-center justify-between">
+          <span className="text-[11px] text-cc-muted uppercase tracking-wider">Extra</span>
+          <span className="text-[11px] text-cc-warning tabular-nums">
+            Disabled · {extraDisabledLabel(extra.disabled_reason)}
+          </span>
         </div>
       )}
     </div>

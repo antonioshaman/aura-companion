@@ -327,6 +327,43 @@ describe("handleMessage: user_message", () => {
 });
 
 // ===========================================================================
+// handleMessage: connection promotion (Council review F11)
+// ===========================================================================
+// The promotion guard was widened from `=== "connecting"` to `!== "connected"`
+// so a replacement socket that starts receiving frames heals ANY non-connected
+// state, not just the initial "connecting" one. These tests pin that branch.
+describe("handleMessage: connection promotion", () => {
+  it("promotes a connecting session to connected on any parseable frame", () => {
+    wsModule.connectSession("s1");
+    useStore.getState().setConnectionStatus("s1", "connecting");
+
+    fireMessage({ type: "keep_alive" });
+
+    expect(useStore.getState().connectionStatus.get("s1")).toBe("connected");
+  });
+
+  it("promotes a disconnected session to connected on any parseable frame", () => {
+    wsModule.connectSession("s1");
+    useStore.getState().setConnectionStatus("s1", "disconnected");
+
+    fireMessage({ type: "keep_alive" });
+
+    expect(useStore.getState().connectionStatus.get("s1")).toBe("connected");
+  });
+
+  it("does not re-write connection status when already connected", () => {
+    wsModule.connectSession("s1");
+    useStore.getState().setConnectionStatus("s1", "connected");
+    const spy = vi.spyOn(useStore.getState(), "setConnectionStatus");
+
+    fireMessage({ type: "keep_alive" });
+
+    expect(spy).not.toHaveBeenCalled();
+    expect(useStore.getState().connectionStatus.get("s1")).toBe("connected");
+  });
+});
+
+// ===========================================================================
 // disconnectSession
 // ===========================================================================
 describe("disconnectSession", () => {

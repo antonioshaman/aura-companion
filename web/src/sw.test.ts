@@ -2,7 +2,8 @@
  * @vitest-environment node
  *
  * Validates the generated service worker bootstrap:
- * - it claims control and skips waiting immediately
+ * - it claims control but does NOT skipWaiting at load (prompt mode)
+ * - it skips waiting only when the page posts a SKIP_WAITING message
  * - it precaches the injected manifest and cleans up stale caches
  * - it registers a navigation fallback that excludes API and WebSocket paths
  */
@@ -11,6 +12,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 type MockServiceWorkerScope = {
   __WB_MANIFEST: Array<{ revision: string | null; url: string }>;
   skipWaiting: ReturnType<typeof vi.fn>;
+  addEventListener: ReturnType<typeof vi.fn>;
 };
 
 const clientsClaim = vi.fn();
@@ -58,6 +60,7 @@ describe("sw", () => {
       value: {
         __WB_MANIFEST: [{ revision: "123", url: "/assets/app.js" }],
         skipWaiting: vi.fn(),
+        addEventListener: vi.fn(),
       },
       configurable: true,
       writable: true,
@@ -68,7 +71,9 @@ describe("sw", () => {
     await import("./sw.js");
     const serviceWorkerScope = globalThis.self as unknown as MockServiceWorkerScope;
 
-    expect(serviceWorkerScope.skipWaiting).toHaveBeenCalledOnce();
+    // Prompt mode: skipWaiting is message-gated, NOT called at module load.
+    expect(serviceWorkerScope.skipWaiting).not.toHaveBeenCalled();
+    expect(serviceWorkerScope.addEventListener).toHaveBeenCalledWith("message", expect.any(Function));
     expect(clientsClaim).toHaveBeenCalledOnce();
     expect(precacheAndRoute).toHaveBeenCalledWith(serviceWorkerScope.__WB_MANIFEST);
     expect(cleanupOutdatedCaches).toHaveBeenCalledOnce();
@@ -85,5 +90,23 @@ describe("sw", () => {
     expect(route?.options.denylist?.[0]?.test("/chat")).toBe(false);
     expect(route?.options.denylist?.[1]?.test("/ws/browser/123")).toBe(true);
     expect(route?.options.denylist?.[1]?.test("/dashboard")).toBe(false);
+  });
+
+  // Prompt mode contract: the waiting SW activates only when the open page
+  // explicitly asks (via the update toaster posting SKIP_WAITING), and ignores
+  // any other message type.
+  it("skips waiting only on a SKIP_WAITING message", async () => {
+    await import("./sw.js");
+    const serviceWorkerScope = globalThis.self as unknown as MockServiceWorkerScope;
+
+    const messageCall = serviceWorkerScope.addEventListener.mock.calls.find((c) => c[0] === "message");
+    expect(messageCall).toBeDefined();
+    const handler = messageCall![1] as (event: { data?: unknown }) => void;
+
+    handler({ data: { type: "SOMETHING_ELSE" } });
+    expect(serviceWorkerScope.skipWaiting).not.toHaveBeenCalled();
+
+    handler({ data: { type: "SKIP_WAITING" } });
+    expect(serviceWorkerScope.skipWaiting).toHaveBeenCalledOnce();
   });
 });

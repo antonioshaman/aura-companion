@@ -6,6 +6,9 @@ import {
   cpSync,
   realpathSync,
   statSync,
+  lstatSync,
+  symlinkSync,
+  unlinkSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1429,20 +1432,55 @@ export class CliLauncher {
         const src = join(legacyHome, name);
         const dest = join(codexHome, name);
         if (!existsSync(src)) continue;
-        // auth.json: OAuth refresh tokens are single-use, so a stale
-        // per-session copy fails with "refresh token was already used" after
-        // the user re-logs-in (which only rewrites the legacy file). Re-seed
-        // whenever the legacy copy is newer; never clobber a fresher
-        // session copy (the live CLI may have refreshed it itself).
-        const reseedNewerAuth =
-          name === "auth.json" &&
-          existsSync(dest) &&
-          statSync(src).mtimeMs > statSync(dest).mtimeMs;
-        if (!existsSync(dest) || reseedNewerAuth) {
-          copyFileSync(src, dest);
-          if (reseedNewerAuth) {
-            console.log(`[cli-launcher] Re-seeded ${name} from legacy home (legacy copy is newer)`);
+
+        // auth.json is SHARED, not copied. OAuth refresh tokens are single-use
+        // and rotating: whichever home refreshes writes the new token only into
+        // itself, so any per-session copy inevitably goes stale and fails with
+        // "refresh token was already used" for every subsequently-spawned
+        // session. A symlink to the one legacy file makes fresh spawns read the
+        // current canonical token at open time.
+        //
+        // LIMITATION (empirically confirmed via the codex binary string
+        // "failed to atomically replace secrets file at"): codex refreshes the
+        // token by writing a tmp file and rename(2)-ing it over auth.json.
+        // rename does NOT follow the destination symlink — it REPLACES the
+        // symlink with an independent regular file inside this session's home.
+        // So the symlink does not survive the first in-session refresh, and a
+        // token rotated by one session is NOT propagated to the legacy file.
+        // Full propagation would require a single shared refresher (server- or
+        // legacy-owned); that is deliberate future work, not done here because
+        // it means the server writing the fleet's shared credential on a live
+        // box. What we CAN do safely at spawn is reconverge toward the symlink:
+        if (name === "auth.json") {
+          const destInfo = lstatSync(dest, { throwIfNoEntry: false });
+          if (!destInfo) {
+            // Fresh home → share the canonical token.
+            symlinkSync(resolve(src), dest);
+          } else if (!destInfo.isSymbolicLink()) {
+            // A regular file: either a pre-symlink copy, or a symlink that a
+            // prior in-session refresh replaced via atomic rename.
+            if (statSync(src).mtimeMs >= statSync(dest).mtimeMs) {
+              // Legacy is same-or-newer, so this copy is stale (e.g. a re-login
+              // rewrote legacy). Drop the stale copy and re-share the legacy
+              // file so this home benefits from live legacy reads again. Safe:
+              // no legacy write, and the dropped copy held an older token.
+              unlinkSync(dest);
+              symlinkSync(resolve(src), dest);
+              console.log(`[cli-launcher] Reconverged auth.json to legacy symlink (legacy copy is same-or-newer)`);
+            } else {
+              // dest is strictly newer → it holds a token this session rotated
+              // that legacy does not have. Preserve it (clobbering would strand
+              // the session), and do NOT write the shared legacy file from here.
+              // This is the known non-propagation limitation above.
+              console.warn(`[cli-launcher] Session auth.json is newer than legacy and will NOT propagate (single-shared-refresher not yet implemented)`);
+            }
           }
+          // destInfo.isSymbolicLink() → already shared; leave untouched.
+          continue;
+        }
+
+        if (!existsSync(dest)) {
+          copyFileSync(src, dest);
         }
       } catch (e) {
         console.warn(`[cli-launcher] Failed to bootstrap ${name} from legacy home:`, e);

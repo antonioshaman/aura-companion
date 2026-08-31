@@ -5269,6 +5269,61 @@ describe("CodexAdapter WS reconnection handling", () => {
     expect(turnStartCalls.length).toBeGreaterThanOrEqual(1);
   });
 
+  it("coalesces concurrent Not-initialized recoveries into a single re-init", async () => {
+    // Regression (council F6): two in-flight ops (a turn and an mcp query) that
+    // BOTH reject with "Not initialized" must trigger exactly ONE re-init. The
+    // old code let the second recovery bump initEpoch and reset initInProgress
+    // out from under the first, letting an extra initialize() run concurrently.
+    let serverInit = false;
+
+    const transport: ICodexTransport = {
+      call: vi.fn(async (method: string) => {
+        if (method === "initialize") return { userAgent: "codex" };
+        if (method === "thread/start" || method === "thread/create") return { thread: { id: "thr_1" } };
+        if (method === "account/rateLimits/read") return {};
+        if (method === "turn/start") {
+          if (!serverInit) throw new Error("Not initialized");
+          return { turn: { id: "turn_1" } };
+        }
+        if (method === "mcpServerStatus/list") {
+          if (!serverInit) throw new Error("Not initialized");
+          return { data: [] };
+        }
+        if (method === "config/read") return { config: {} };
+        return {};
+      }),
+      notify: vi.fn(async (method: string) => {
+        if (method === "initialized") serverInit = true;
+      }),
+      respond: vi.fn(async () => {}),
+      onNotification: vi.fn(),
+      onRequest: vi.fn(),
+      onRawIncoming: vi.fn(),
+      onRawOutgoing: vi.fn(),
+      onParseError: vi.fn(),
+      isConnected: vi.fn(() => true),
+    };
+
+    const adapter = new CodexAdapter(transport, "coalesce-reinit-test", { model: "o4-mini", cwd: "/tmp" });
+
+    // Let the initial handshake complete (initialize call #1).
+    await new Promise((r) => setTimeout(r, 100));
+    expect(serverInit).toBe(true);
+
+    // Simulate the server losing its init state, then fire two ops in the same
+    // tick so both are awaiting transport.call when the rejections arrive.
+    serverInit = false;
+    adapter.sendBrowserMessage({ type: "user_message", content: "hi" });
+    adapter.sendBrowserMessage({ type: "mcp_get_status" });
+
+    await new Promise((r) => setTimeout(r, 150));
+
+    // Exactly one recovery: initialize should have run twice total (initial + 1).
+    const initializeCalls = (transport.call as ReturnType<typeof vi.fn>).mock.calls
+      .filter((args: unknown[]) => args[0] === "initialize");
+    expect(initializeCalls.length).toBe(2);
+  });
+
   it("resets overloadRetryCount on companion/wsReconnected", async () => {
     let notifHandler: ((m: string, p: Record<string, unknown>) => void) | null = null;
 
