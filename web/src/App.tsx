@@ -6,6 +6,9 @@ import { capturePageView } from "./analytics.js";
 import { parseHash, navigateToSession } from "./utils/routing.js";
 import { useBrowserTitleAlert } from "./use-browser-title-alert.js";
 import { useCouncilShortcuts } from "./use-council-shortcuts.js";
+import { useSwUpdate } from "./use-sw-update.js";
+import { applyUpdate } from "./sw-register.js";
+import { UpdateAvailableBanner } from "./components/UpdateAvailableBanner.js";
 import { LoginPage } from "./components/LoginPage.js";
 import { Sidebar } from "./components/Sidebar.js";
 import { ChatView } from "./components/ChatView.js";
@@ -88,6 +91,12 @@ export default function App() {
   // Global Council Mode keyboard shortcuts (Cmd/Ctrl+Shift+O / +B). Same
   // single-mount discipline — multiple instances would double-fire toggle.
   useCouncilShortcuts();
+
+  // PWA update prompt: when a new SW has installed and is waiting, surface an
+  // unobtrusive toaster so the user can reload onto the fresh bundle instead of
+  // silently running stale cached code after a frontend deploy.
+  const updateReady = useSwUpdate();
+  const [updateDismissed, setUpdateDismissed] = useState(false);
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", darkMode);
@@ -219,6 +228,9 @@ export default function App() {
 
       {/* Main area */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
+        {updateReady && !updateDismissed && (
+          <UpdateAvailableBanner onUpdate={applyUpdate} onDismiss={() => setUpdateDismissed(true)} />
+        )}
         <TopBar />
         <div className="flex-1 overflow-hidden relative">
           {isSettingsPage && (

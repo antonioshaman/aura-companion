@@ -12,7 +12,7 @@ export default defineConfig({
       manifest: false,
       srcDir: "src",
       filename: "sw.ts",
-      registerType: "autoUpdate",
+      registerType: "prompt",
       strategies: "injectManifest",
       injectManifest: {
         // Precache all build output: JS chunks (incl. lazy-loaded), CSS, HTML,

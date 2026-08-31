@@ -26,6 +26,7 @@ import type {
 import { AiValidationBadge } from "./AiValidationBadge.js";
 import { AiValidationToggle } from "./AiValidationToggle.js";
 import { ModelFallbackBanner } from "./ModelFallbackBanner.js";
+import { UpdateAvailableBanner } from "./UpdateAvailableBanner.js";
 import {
   BlockerBanner,
   CouncilToggle,
@@ -3203,6 +3204,12 @@ function CouncilModeSection() {
         </Card>
         <Card label="ModelFallbackBanner — temporarily overloaded">
           <ModelFallbackBanner fromModel="Opus 4.8" toModel="Sonnet 4.6" reason="overloaded" />
+        </Card>
+
+        {/* PWA update prompt — info-tone toaster shown when a new Service
+            Worker version is waiting to activate after a frontend deploy. */}
+        <Card label="UpdateAvailableBanner — new version ready">
+          <UpdateAvailableBanner onUpdate={() => {}} onDismiss={() => {}} />
         </Card>
 
         {/* PLAN T12 (Phase G) - per-variant CliFailedBanner mocks. Five
