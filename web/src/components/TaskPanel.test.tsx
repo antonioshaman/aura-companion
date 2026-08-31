@@ -1168,6 +1168,51 @@ describe("UsageLimitsSection (Claude Code sessions)", () => {
     expect(screen.queryByText("Extra")).not.toBeInTheDocument();
   });
 
+  it("surfaces the overage-disabled state alongside 5h/7d bars", async () => {
+    // Regression: the panel used to hide extra_usage whenever a 5h/7d bar existed,
+    // which is exactly the condition behind an "out of extra usage" 429. The
+    // disabled reason must now be shown so the panel stops contradicting a
+    // truthful rejection.
+    mockApi.getSessionUsageLimits.mockResolvedValueOnce({
+      five_hour: { utilization: 99, resets_at: null },
+      seven_day: { utilization: 62, resets_at: null },
+      extra_usage: {
+        is_enabled: false,
+        monthly_limit: 100,
+        used_credits: 0,
+        utilization: null,
+        disabled_reason: "out_of_credits",
+      },
+    });
+    resetStore({
+      sessions: new Map([["s1", { backend_type: "claude" }]]),
+    });
+    render(<TaskPanel sessionId="s1" />);
+    expect(await screen.findByText("5h Limit")).toBeInTheDocument();
+    // The disabled reason renders in human-readable form.
+    expect(screen.getByText(/Disabled · Out of credits/)).toBeInTheDocument();
+  });
+
+  it("does not surface extra when disabled with no reason", async () => {
+    // is_enabled false but no disabled_reason → nothing actionable to show.
+    mockApi.getSessionUsageLimits.mockResolvedValueOnce({
+      five_hour: { utilization: 20, resets_at: null },
+      seven_day: null,
+      extra_usage: {
+        is_enabled: false,
+        monthly_limit: 100,
+        used_credits: 0,
+        utilization: null,
+      },
+    });
+    resetStore({
+      sessions: new Map([["s1", { backend_type: "claude" }]]),
+    });
+    render(<TaskPanel sessionId="s1" />);
+    expect(await screen.findByText("5h Limit")).toBeInTheDocument();
+    expect(screen.queryByText("Extra")).not.toBeInTheDocument();
+  });
+
   it("renders nothing when API returns all null limits", async () => {
     // When none of the limits have data, the section renders nothing
     mockApi.getSessionUsageLimits.mockResolvedValueOnce({

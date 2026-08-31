@@ -476,6 +476,11 @@ export class CodexAdapter implements IBackendAdapter {
    *  resetForReconnect so that a stale in-flight initialize() can detect that
    *  a newer one has been triggered and bail out early. */
   private initEpoch = 0;
+  /** In-flight recovery from a "Not initialized" error. Concurrent turns that
+   *  each hit the error coalesce onto this single promise instead of each
+   *  bumping the epoch and clobbering the running initialize()'s in-progress
+   *  flag (which would let an extra initialize() slip past the guard). */
+  private reinitPromise: Promise<void> | null = null;
   /** Guard against multiple cleanupAndDisconnect() calls firing disconnectCb twice. */
   private disconnectFired = false;
 
@@ -3212,23 +3217,44 @@ export class CodexAdapter implements IBackendAdapter {
   }
 
   private isNotInitializedError(err: unknown): boolean {
+    // Substring match, not equality: Codex has emitted this both as a bare
+    // "Not initialized" and wrapped (e.g. "Error: Not initialized"). This is a
+    // brittle string contract with the CLI — if Codex ever renames the message
+    // the retry silently stops firing. There is no structured error code to key
+    // on today; revisit if the JSON-RPC error surface gains one.
     const msg = err instanceof Error ? err.message : String(err);
-    return msg === "Not initialized" || msg.includes("Not initialized");
+    return msg.includes("Not initialized");
   }
 
   private async reinitializeAfterNotInitialized(label: string): Promise<void> {
+    // Coalesce concurrent recoveries: if a reinit is already running, await it
+    // rather than starting a second one. Two turns hitting "Not initialized"
+    // back-to-back would otherwise each bump initEpoch and reset initInProgress,
+    // letting a stale initialize() reset the flag out from under a live one.
+    if (this.reinitPromise) {
+      await this.reinitPromise;
+      return;
+    }
     if (!this.transport.isConnected()) {
       throw new Error("Transport closed");
     }
-    console.warn(`[codex-adapter] Session ${this.sessionId}: ${label} hit Not initialized — re-running Codex initialize handshake`);
-    this.initEpoch++;
-    this.initialized = false;
-    this.initFailed = false;
-    this.initInProgress = false;
-    if (!this.options.threadId && this.threadId) {
-      this.options.threadId = this.threadId;
+    const run = (async () => {
+      console.warn(`[codex-adapter] Session ${this.sessionId}: ${label} hit Not initialized — re-running Codex initialize handshake`);
+      this.initEpoch++;
+      this.initialized = false;
+      this.initFailed = false;
+      this.initInProgress = false;
+      if (!this.options.threadId && this.threadId) {
+        this.options.threadId = this.threadId;
+      }
+      await this.initialize();
+    })();
+    this.reinitPromise = run;
+    try {
+      await run;
+    } finally {
+      this.reinitPromise = null;
     }
-    await this.initialize();
   }
 
   private async callAfterNotInitializedRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {

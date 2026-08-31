@@ -405,6 +405,7 @@ export interface UsageLimits {
     monthly_limit: number;
     used_credits: number;
     utilization: number | null;
+    disabled_reason?: string | null;
   } | null;
 }
 

@@ -309,6 +309,14 @@ export function Sidebar() {
           for (const s of list) {
             if (s.archived) continue;
             if (s.state !== "connected") continue;
+            // Once the browser WS is live for this session it is the authoritative
+            // source of CLI liveness (cli_connected / cli_disconnected /
+            // session_phase in ws.ts). A REST snapshot can be up to one poll
+            // interval stale, so re-asserting "connected" here would override a
+            // fresher WS-observed disconnect and mask a dead socket (Composer
+            // gates sending on cliConnected). Only hydrate optimistically BEFORE
+            // the WS connects; after that, defer to the WS.
+            if (store.connectionStatus.get(s.sessionId) === "connected") continue;
             store.setCliConnected(s.sessionId, true);
             store.setCliReconnecting(s.sessionId, false);
             store.setConnectionStatus(s.sessionId, "connected");

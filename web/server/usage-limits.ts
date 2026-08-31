@@ -1,7 +1,9 @@
 import { execSync, execFileSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { writeAtomicJson } from "./atomic-write.js";
+import { log } from "./logger.js";
 
 export interface UsageLimits {
   five_hour: { utilization: number; resets_at: string | null } | null;
@@ -11,6 +13,7 @@ export interface UsageLimits {
     monthly_limit: number;
     used_credits: number;
     utilization: number | null;
+    disabled_reason?: string | null;
   } | null;
 }
 
@@ -90,24 +93,33 @@ function readRawCredentials(): RawCredentials | null {
 
 function writeCredentials(creds: Record<string, unknown>, sourcePath?: string): void {
   try {
-    const json = JSON.stringify(creds);
     if (process.platform === "darwin") {
+      const json = JSON.stringify(creds);
       execFileSync(
         "security",
         ["add-generic-password", "-U", "-s", "Claude Code-credentials", "-a", "Claude Code", "-w", json],
         { timeout: 5000, stdio: ["pipe", "pipe", "pipe"] },
       );
-    } else {
-      // Write back to the same file that was read, or default to .credentials.json
-      const credPath = sourcePath ?? join(
-        process.env.USERPROFILE || process.env.HOME || homedir() || "",
-        ".claude",
-        ".credentials.json",
-      );
-      writeFileSync(credPath, json, "utf-8");
+      return;
     }
-  } catch {
-    // best-effort
+    // Write back to the same file that was read, or default to .credentials.json.
+    // Atomic (tmp+fsync+rename) so a crash or concurrent read never leaves a
+    // truncated .credentials.json — a torn creds file fails to parse and breaks
+    // both the usage panel AND the CLI's own auth. No size cap: credentials are
+    // small and auth-critical, so a cap must never silently drop the writeback.
+    const credPath = sourcePath ?? join(
+      process.env.USERPROFILE || process.env.HOME || homedir() || "",
+      ".claude",
+      ".credentials.json",
+    );
+    writeAtomicJson(credPath, creds, { maxBytes: Number.POSITIVE_INFINITY });
+  } catch (e) {
+    // Surface the failure: silently losing a just-refreshed token forces a
+    // re-refresh next call, and single-use refresh tokens can rotate out from
+    // under us, permanently breaking refresh.
+    log.warn("usage-limits", "Failed to persist refreshed OAuth credentials", {
+      error: e instanceof Error ? e.message : String(e),
+    });
   }
 }
 

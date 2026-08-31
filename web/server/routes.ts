@@ -272,6 +272,17 @@ export function createRoutes(
 
   // ─── Auth endpoints (exempt from auth middleware) ──────────────────
 
+  // Secure attribute is opt-in on HTTPS only: this server is routinely reached
+  // over plain http:// on LAN/localhost, where Secure would suppress the cookie
+  // entirely and break auth. Honour a reverse proxy's x-forwarded-proto too.
+  function isHttpsRequest(c: { req: { url: string; header: (n: string) => string | undefined } }): boolean {
+    try {
+      if (new URL(c.req.url).protocol === "https:") return true;
+    } catch { /* malformed url — fall through to header check */ }
+    const proto = c.req.header("x-forwarded-proto");
+    return typeof proto === "string" && proto.split(",")[0]!.trim() === "https";
+  }
+
   api.post("/auth/verify", async (c) => {
     const body = await c.req.json().catch(() => ({} as { token?: string }));
     if (verifyToken(body.token)) {
@@ -281,6 +292,7 @@ export function createRoutes(
         path: "/",
         httpOnly: true,
         sameSite: "Strict",
+        secure: isHttpsRequest(c),
         maxAge: 365 * 24 * 60 * 60,
       });
       return c.json({ ok: true });
@@ -335,6 +347,7 @@ export function createRoutes(
         path: "/",
         httpOnly: true,
         sameSite: "Strict",
+        secure: isHttpsRequest(c),
         maxAge: 365 * 24 * 60 * 60,
       });
       return c.json({ ok: true, token });

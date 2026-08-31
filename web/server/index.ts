@@ -449,7 +449,16 @@ const server = Bun.serve<SocketData>({
       if (!cookieHeader) return null;
       for (const part of cookieHeader.split(";")) {
         const [rawName, ...rawValue] = part.trim().split("=");
-        if (rawName === name) return decodeURIComponent(rawValue.join("="));
+        if (rawName === name) {
+          const raw = rawValue.join("=");
+          // A malformed percent-escape (e.g. a lone "%") makes decodeURIComponent
+          // throw; a bad cookie must degrade to "no token" (→ 401), never a 500.
+          try {
+            return decodeURIComponent(raw);
+          } catch {
+            return raw;
+          }
+        }
       }
       return null;
     };

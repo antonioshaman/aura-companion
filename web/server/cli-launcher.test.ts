@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import { mkdtempSync, rmSync, realpathSync, writeFileSync, mkdirSync, readFileSync, utimesSync, lstatSync } from "node:fs";
+import { mkdtempSync, rmSync, realpathSync, writeFileSync, mkdirSync, readFileSync, utimesSync, lstatSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -2942,32 +2942,57 @@ describe("prepareCodexHome auth.json seeding", () => {
     expect(readFileSync(dest, "utf-8")).toBe('{"token":"fresh"}');
   });
 
-  it("propagates a refresh written through the shared auth.json back to the legacy file", () => {
-    // Because the session auth.json is a symlink, a token rotation performed by
-    // the live CLI reaches the legacy file, so the NEXT new session seeds the
-    // live token instead of a stale copy — this is the fix for the recurring
-    // "refresh token was already used" failure on freshly-spawned sessions.
+  it("propagates an IN-PLACE write through the shared symlink to the legacy file", () => {
+    // A write that follows the symlink (in-place, O_TRUNC) reaches the legacy
+    // file, so the NEXT new session seeds the live token. NOTE: this is NOT how
+    // codex actually refreshes — see the atomic-rename test below.
     writeFileSync(join(legacyDir, "auth.json"), '{"token":"t0"}');
     callPrepare();
     writeFileSync(join(codexHome, "auth.json"), '{"token":"rotated"}');
     expect(readFileSync(join(legacyDir, "auth.json"), "utf-8")).toBe('{"token":"rotated"}');
   });
 
-  it("re-seeds a legacy-newer REGULAR-FILE auth.json copy (pre-symlink back-compat)", () => {
+  it("does NOT propagate a token rotated via atomic rename (codex's real write path)", () => {
+    // Empirically confirmed via the codex binary string "failed to atomically
+    // replace secrets file at": codex refreshes by writing a tmp file and
+    // rename(2)-ing it over auth.json. rename does NOT follow the destination
+    // symlink — it replaces the symlink with an independent regular file in the
+    // session home, so the rotated token never reaches legacy. This is the known
+    // non-propagation limitation documented in prepareCodexHome.
+    writeFileSync(join(legacyDir, "auth.json"), '{"token":"t0"}');
+    callPrepare();
+    const dest = join(codexHome, "auth.json");
+    expect(lstatSync(dest).isSymbolicLink()).toBe(true);
+    // Simulate codex's atomic replace: tmp + rename over the symlink path.
+    const tmp = join(codexHome, "auth.json.tmp");
+    writeFileSync(tmp, '{"token":"rotated"}');
+    renameSync(tmp, dest);
+    expect(lstatSync(dest).isSymbolicLink()).toBe(false);
+    expect(readFileSync(join(legacyDir, "auth.json"), "utf-8")).toBe('{"token":"t0"}');
+  });
+
+  it("reconverges a stale regular-file auth.json back to a symlink when legacy is same-or-newer", () => {
+    // After an atomic-rename refresh replaced the symlink with a regular file, a
+    // later `codex login` rewrites legacy (newer). The next spawn drops the stale
+    // copy and re-shares legacy so idle sessions read the live token again.
     mkdirSync(codexHome, { recursive: true });
     writeFileSync(join(codexHome, "auth.json"), '{"token":"stale"}');
-    writeFileSync(join(legacyDir, "auth.json"), '{"token":"fresh"}');
+    writeFileSync(join(legacyDir, "auth.json"), '{"token":"relogin"}');
     // legacy newer by 1 hour
     const now = Date.now() / 1000;
     utimesSync(join(codexHome, "auth.json"), now - 3600, now - 3600);
     utimesSync(join(legacyDir, "auth.json"), now, now);
 
     callPrepare();
-    expect(readFileSync(join(codexHome, "auth.json"), "utf-8")).toBe('{"token":"fresh"}');
+    const dest = join(codexHome, "auth.json");
+    expect(lstatSync(dest).isSymbolicLink()).toBe(true);
+    expect(readFileSync(dest, "utf-8")).toBe('{"token":"relogin"}');
   });
 
   it("does NOT clobber a session auth.json that is newer than the legacy file", () => {
-    // The live CLI refreshes its own copy; an older legacy file must not win.
+    // The live CLI refreshes its own copy via atomic rename (regular file newer
+    // than legacy). Clobbering it would strand the session, and the server must
+    // not write the shared legacy credential, so it is preserved untouched.
     mkdirSync(codexHome, { recursive: true });
     writeFileSync(join(codexHome, "auth.json"), '{"token":"session-refreshed"}');
     writeFileSync(join(legacyDir, "auth.json"), '{"token":"older-legacy"}');
@@ -2976,7 +3001,11 @@ describe("prepareCodexHome auth.json seeding", () => {
     utimesSync(join(legacyDir, "auth.json"), now - 3600, now - 3600);
 
     callPrepare();
-    expect(readFileSync(join(codexHome, "auth.json"), "utf-8")).toBe('{"token":"session-refreshed"}');
+    const dest = join(codexHome, "auth.json");
+    expect(lstatSync(dest).isSymbolicLink()).toBe(false);
+    expect(readFileSync(dest, "utf-8")).toBe('{"token":"session-refreshed"}');
+    // legacy must remain untouched (no server-side write of the shared credential)
+    expect(readFileSync(join(legacyDir, "auth.json"), "utf-8")).toBe('{"token":"older-legacy"}');
   });
 
   it("does NOT re-seed non-auth files even when the legacy copy is newer", () => {
