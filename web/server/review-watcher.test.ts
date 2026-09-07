@@ -7,6 +7,7 @@ import {
   type ReviewDropReason,
   OBSERVER_REVIEW_FILE_PATTERN,
   buildObserverReviewFilename,
+  findReviewForCheckpointSync,
 } from "./review-watcher.js";
 import { writeAtomicJson } from "./atomic-write.js";
 import { COUNCIL_SCHEMA_VERSION, type ObserverReviewPayload } from "./council-types.js";
@@ -371,5 +372,87 @@ describe("buildObserverReviewFilename — producer-side helper", () => {
 
   it("throws on unknown provider", () => {
     expect(() => buildObserverReviewFilename("council-plan", "gpt" as never)).toThrow(/claude.*codex/);
+  });
+});
+
+// ── findReviewForCheckpointSync ──
+//
+// The live watcher is the only thing that ever reads `.council/reviews/`, so a
+// single dropped `fs.watch` event both degraded the pair and discarded the
+// findings forever (observed in prod 2026-09-07: review on disk 3.5 min before
+// the wake→review deadline fired, watcher logged neither success nor drop).
+// This is the recovery read the deadline handler performs before declaring the
+// observer silent — it must accept exactly what the watcher would have accepted.
+describe("findReviewForCheckpointSync", () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), "rev-rescan-"));
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("finds a review on disk matching the checkpoint id, with the file's mtime as reviewedAt", () => {
+    const file = join(dir, "council-plan-claude-observer.md");
+    writeFileSync(file, JSON.stringify(validReview({ checkpoint_id: "chk-hit", observer_provider: "claude" })));
+    const found = findReviewForCheckpointSync({ directory: dir, checkpointId: "chk-hit" });
+    expect(found?.payload.checkpoint_id).toBe("chk-hit");
+    expect(found?.file).toBe("council-plan-claude-observer.md");
+    // reviewedAt must be the server-observed file mtime, never the model's
+    // self-reported `reviewed_at` (which is routinely a hallucinated value).
+    expect(found?.reviewedAt).toBe(statSync(file).mtimeMs);
+  });
+
+  it("returns null when a review exists but answers a different checkpoint", () => {
+    writeFileSync(
+      join(dir, "council-plan-claude-observer.md"),
+      JSON.stringify(validReview({ checkpoint_id: "chk-other", observer_provider: "claude" })),
+    );
+    expect(findReviewForCheckpointSync({ directory: dir, checkpointId: "chk-wanted" })).toBeNull();
+  });
+
+  it("returns null for a missing directory rather than throwing", () => {
+    expect(findReviewForCheckpointSync({ directory: join(dir, "nope"), checkpointId: "chk-1" })).toBeNull();
+  });
+
+  it("skips files that do not match the review filename pattern", () => {
+    // A stray note in the reviews dir must not be parsed as a review even if
+    // its contents happen to be a valid payload.
+    writeFileSync(join(dir, "notes.md"), JSON.stringify(validReview({ checkpoint_id: "chk-hit" })));
+    expect(findReviewForCheckpointSync({ directory: dir, checkpointId: "chk-hit" })).toBeNull();
+  });
+
+  it("skips a corrupt sibling and still finds the valid review", () => {
+    // A single unparseable file must not mask a real review — otherwise one
+    // bad write permanently blocks recovery for every checkpoint.
+    writeFileSync(join(dir, "aaa-broken-claude-observer.md"), "{ not json");
+    writeFileSync(
+      join(dir, "zzz-good-claude-observer.md"),
+      JSON.stringify(validReview({ checkpoint_id: "chk-hit", observer_provider: "claude" })),
+    );
+    const found = findReviewForCheckpointSync({ directory: dir, checkpointId: "chk-hit" });
+    expect(found?.file).toBe("zzz-good-claude-observer.md");
+  });
+
+  it("applies normalizeRaw with the provider from the filename before parsing", () => {
+    // Mirrors the watcher: a provider-native review that would fail the parser
+    // raw must still be recoverable, or the rescan would reject reviews the
+    // live path accepts.
+    const native = JSON.stringify({ checkpoint_id: "chk-hit", findings: [] });
+    writeFileSync(join(dir, "council-plan-codex-observer.md"), native);
+    const providers: string[] = [];
+    const found = findReviewForCheckpointSync({
+      directory: dir,
+      checkpointId: "chk-hit",
+      normalizeRaw: (raw, provider) => {
+        providers.push(provider);
+        expect(raw).toBe(native);
+        return JSON.stringify(validReview({ checkpoint_id: "chk-hit" }));
+      },
+    });
+    expect(providers).toEqual(["codex"]);
+    expect(found?.payload.checkpoint_id).toBe("chk-hit");
   });
 });
