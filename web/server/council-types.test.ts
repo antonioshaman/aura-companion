@@ -10,6 +10,7 @@ import {
   isBoundedToken,
   isIsoTimestamp,
   normalizeCodexObserverReviewRaw,
+  normalizeObserverFindingShapeRaw,
   parseCheckpointPayload,
   parseObserverReviewPayload,
   type CheckpointPayload,
@@ -461,6 +462,126 @@ describe("normalizeCodexObserverReviewRaw", () => {
     const parsed = parseObserverReviewPayload(normalizeCodexObserverReviewRaw(JSON.stringify(p), ctx))!;
     expect(parsed.findings[0].evidence_lines).toEqual([7, 7]);
     expect(parsed.findings[1].evidence_lines).toBeUndefined();
+  });
+});
+
+// ── normalizeObserverFindingShapeRaw (2026-09-06 live-probe regression) ──────
+//
+// The gap these cover was found by probing all three live council pairs at
+// once. A `claude` observer (opus-4-5) wrote a review whose ENVELOPE was
+// perfect — all nine required keys — but whose FINDINGS were codex-native
+// (`severity:"low"`, `file`, `line`, `title`, `description`). The server logged
+// `protocol.frame_dropped … field=findings.severity` and the review never
+// reached the UI, so the pair looked silent while the observer had actually
+// done the work.
+//
+// Two independent guards had to be crossed for that to happen, and each is
+// asserted separately below, because either one alone still loses the review:
+//   1. the caller's `provider === "codex"` gate — the producer was claude;
+//   2. `normalizeCodexObserverReviewRaw`'s `"schema_version" in parsed` early
+//      return — written as an idempotency guard, it conflates "envelope already
+//      filled" with "already normalized" and skips the findings mapping.
+// Guard 2 is not codex-vs-claude at all: it also swallows a codex observer that
+// learned to emit `schema_version` (the prompt calls it the "most-omitted
+// field"), which means tightening the prompt can REGRESS delivery.
+
+describe("normalizeObserverFindingShapeRaw", () => {
+  const ctx = { observerModel: "gpt-5-codex", observerCliVersion: "1.4.0" };
+
+  /** Envelope absent, findings native — what a codex observer actually emits. */
+  function codexNativeReview(): Record<string, unknown> {
+    return {
+      observer_wake_payload_version_echo: 1,
+      session_group_id: "grp-abc123",
+      checkpoint_id: "chk-001",
+      phase: "council-implement",
+      review_status: "issues_found",
+      summary: "critical security issues",
+      findings: [
+        { severity: "critical", file: "auth.js", line: 3, title: "Auth bypass", detail: "admin shortcut" },
+        { severity: "high", file: "auth.js", line: 5, title: "Plaintext compare", detail: "no hashing" },
+        { severity: "low", file: "auth.js", line: 1, title: "Missing header", detail: "no license" },
+      ],
+    };
+  }
+
+  /** Envelope conforming, findings native — the exact shape observed live. */
+  function conformingEnvelopeNativeFindings() {
+    return {
+      schema_version: 1,
+      observer_wake_payload_version_echo: 1,
+      checkpoint_id: "probe-observer-1-70e96604",
+      phase: "probe-observer",
+      session_group_id: "grp_ff7602185b81fabf206a0ec4db443edf",
+      reviewed_at: "2026-09-06T00:00:00Z",
+      observer_provider: "claude",
+      observer_model: "claude-opus-4-5",
+      observer_cli_version: "claude-code",
+      findings: [
+        {
+          severity: "low",
+          category: "documentation",
+          title: "Release-gate deploy sequence omits the mandatory VERSION bump",
+          file: "CLAUDE.md",
+          line: 43,
+          description: "A reader following only CLAUDE.md ships an unversioned deploy.",
+        },
+      ],
+    };
+  }
+
+  // Documents guard 2 in isolation: the codex normalizer is a NO-OP here, so
+  // ungating the provider check alone would not have saved this review.
+  it("codex normalizer alone cannot rescue a conforming envelope with native findings", () => {
+    const raw = JSON.stringify(conformingEnvelopeNativeFindings());
+    expect(normalizeCodexObserverReviewRaw(raw, ctx)).toBe(raw);
+    expect(parseObserverReviewPayload(normalizeCodexObserverReviewRaw(raw, ctx))).toBeNull();
+  });
+
+  it("rescues the review the server dropped on findings.severity", () => {
+    const raw = JSON.stringify(conformingEnvelopeNativeFindings());
+    const drops: string[] = [];
+    expect(parseObserverReviewPayload(raw, (reason, field) => drops.push(`${reason}:${field}`))).toBeNull();
+    expect(drops).toContain("invalid-field:findings.severity");
+
+    const parsed = parseObserverReviewPayload(normalizeObserverFindingShapeRaw(raw));
+    expect(parsed).not.toBeNull();
+    expect(parsed!.findings[0].severity).toBe("INFO");
+    expect(parsed!.findings[0].evidence_path).toBe("CLAUDE.md");
+    expect(parsed!.findings[0].evidence_lines).toEqual([43, 43]);
+  });
+
+  // Ordering safety: the orchestrator runs this AFTER the codex normalizer, so
+  // codex payloads pass through both. A second application must change nothing.
+  it("is idempotent and composes after the codex normalizer", () => {
+    const once = normalizeObserverFindingShapeRaw(JSON.stringify(conformingEnvelopeNativeFindings()));
+    expect(normalizeObserverFindingShapeRaw(once)).toBe(once);
+
+    const codexRaw = JSON.stringify(codexNativeReview());
+    const both = normalizeObserverFindingShapeRaw(normalizeCodexObserverReviewRaw(codexRaw, ctx));
+    const parsed = parseObserverReviewPayload(both)!;
+    expect(parsed.findings.map((f) => f.severity)).toEqual(["STOP", "WARN", "INFO"]);
+  });
+
+  // A correctly-emitted review must survive untouched — the mapping exists to
+  // fill gaps, never to rewrite a finding the observer got right.
+  it("leaves a fully canonical review's severities unchanged", () => {
+    const canonical = {
+      ...conformingEnvelopeNativeFindings(),
+      findings: [
+        { severity: "STOP", claim: "Contract drift", evidence_path: "a.ts", evidence_lines: [1, 2] },
+        { severity: "NOTE", claim: "Naming", evidence_path: "b.ts" },
+      ],
+    };
+    const parsed = parseObserverReviewPayload(normalizeObserverFindingShapeRaw(JSON.stringify(canonical)))!;
+    expect(parsed.findings.map((f) => f.severity)).toEqual(["STOP", "NOTE"]);
+    expect(parsed.findings[0].claim).toBe("Contract drift");
+  });
+
+  it("returns the raw string unchanged when there is nothing to map", () => {
+    expect(normalizeObserverFindingShapeRaw("{not json")).toBe("{not json");
+    expect(normalizeObserverFindingShapeRaw("[1,2,3]")).toBe("[1,2,3]");
+    expect(normalizeObserverFindingShapeRaw('{"phase":"x"}')).toBe('{"phase":"x"}');
   });
 });
 

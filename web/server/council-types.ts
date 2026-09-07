@@ -552,6 +552,48 @@ function normalizeCodexFinding(f: unknown): unknown {
   return out;
 }
 
+/**
+ * Map native-shaped FINDINGS to the schema's shape, leaving the envelope alone.
+ *
+ * Why this is separate from {@link normalizeCodexObserverReviewRaw} (2026-09-06,
+ * live probe across three council pairs): envelope-conformance and
+ * findings-conformance are independent axes, and the codex normalizer conflates
+ * them. It early-returns on `"schema_version" in parsed` as an idempotency
+ * guard, so a review with a CORRECT envelope and NATIVE findings is never
+ * touched — and then drops on `findings.severity`.
+ *
+ * That combination is not hypothetical and not codex-specific. A `claude`
+ * observer (opus-4-5, workspace `/root/razumai_space_bot`) emitted exactly it:
+ * all nine envelope keys correct, findings as
+ * `{severity:"low", file, line, title, description}`. The review file landed on
+ * disk and the server dropped it — `protocol.frame_dropped … field=findings.severity`
+ * — so the pair looked silent while the observer was doing real work. The same
+ * hole swallows a codex observer that learned to emit `schema_version` (which
+ * the system prompt loudly demands, calling it the "most-omitted field"), which
+ * makes prompt-tightening actively able to REGRESS delivery.
+ *
+ * So severity mapping runs for every provider. Envelope synthesis deliberately
+ * does not: it stamps `observer_provider: "codex"`, which would misattribute a
+ * claude review. Provider-specific identity stays provider-gated; a shape the
+ * parser rejects does not.
+ *
+ * Pure and idempotent — canonical severities pass through untouched and
+ * schema-shaped fields always win, so applying this after the codex normalizer
+ * is a no-op. Returns the raw string unchanged when it does not parse as JSON,
+ * is not a JSON object, or carries no `findings` array.
+ */
+export function normalizeObserverFindingShapeRaw(raw: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+  if (!isObject(parsed)) return raw;
+  if (!Array.isArray(parsed.findings)) return raw;
+  return JSON.stringify({ ...parsed, findings: parsed.findings.map(normalizeCodexFinding) });
+}
+
 // ─── Peer-message formatter (bidirectional pipeline) ────────────────────────
 //
 // Story 2.3: peer findings cross-injected as inline user_messages tagged

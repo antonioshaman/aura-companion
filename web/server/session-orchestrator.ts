@@ -36,7 +36,7 @@ import {
   runAutoProceedBootReconcile,
 } from "./auto-proceed-orchestrator-bindings.js";
 import type { CheckpointPayload, ObserverReviewPayload } from "./council-types.js";
-import { COUNCIL_SCHEMA_VERSION, OBSERVER_WAKE_PAYLOAD_VERSION, OBSERVER_WAKE_TIMEOUT_MS, normalizeCodexObserverReviewRaw, parseCheckpointPayload, parseObserverReviewPayload } from "./council-types.js";
+import { COUNCIL_SCHEMA_VERSION, OBSERVER_WAKE_PAYLOAD_VERSION, OBSERVER_WAKE_TIMEOUT_MS, normalizeCodexObserverReviewRaw, normalizeObserverFindingShapeRaw, parseCheckpointPayload, parseObserverReviewPayload } from "./council-types.js";
 import { writeAtomicJson } from "./atomic-write.js";
 import { watchCheckpoints } from "./checkpoint-watcher.js";
 import { watchReviews } from "./review-watcher.js";
@@ -1849,18 +1849,25 @@ export class SessionOrchestrator {
           directory: reviewsDir,
           signal: abort.signal,
           onReview: (payload, reviewedAt) => this.handleCouncilReview(sessionGroupId, payload, reviewedAt),
-          // The codex CLI emits a review object missing every server-mandated
-          // audit field — the parser rejects it on `schema_version`, dropping
-          // every codex review. Inject the missing fields server-side (prompt
-          // tightening was empirically insufficient). claude reviews flow
-          // through untouched so genuinely-broken ones still drop.
+          // Two independent normalizations, deliberately gated differently.
+          // Envelope synthesis is codex-only because it stamps codex identity:
+          // the codex CLI emits a review missing every server-mandated audit
+          // field, so the parser rejects it on `schema_version` and every codex
+          // review drops (prompt tightening was empirically insufficient).
+          // Findings-shape mapping runs for EVERY provider — a claude observer
+          // emitting `{severity:"low", file, line}` under a correct envelope is
+          // observed behaviour, not a codex quirk, and it drops on
+          // `findings.severity` with the review already written to disk.
           normalizeRaw: (raw, provider) => {
-            if (provider !== "codex") return raw;
-            const meta = this.councilGroupMeta.get(sessionGroupId);
-            return normalizeCodexObserverReviewRaw(raw, {
-              observerModel: meta?.observerModel ?? "unknown",
-              observerCliVersion: "unknown",
-            });
+            let out = raw;
+            if (provider === "codex") {
+              const meta = this.councilGroupMeta.get(sessionGroupId);
+              out = normalizeCodexObserverReviewRaw(out, {
+                observerModel: meta?.observerModel ?? "unknown",
+                observerCliVersion: "unknown",
+              });
+            }
+            return normalizeObserverFindingShapeRaw(out);
           },
         }),
       // A dead review watcher can only be recovered by re-waking the observer
