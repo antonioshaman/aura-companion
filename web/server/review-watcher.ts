@@ -15,6 +15,7 @@
  * was killed, restarted, re-emitted on re-read).
  */
 
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { readFile, stat, watch } from "node:fs/promises";
 import { join } from "node:path";
 import { type ObserverReviewPayload, parseObserverReviewPayload } from "./council-types.js";
@@ -74,6 +75,66 @@ export function buildObserverReviewFilename(
     );
   }
   return filename;
+}
+
+/**
+ * Synchronously scan a reviews directory for a review answering `checkpointId`.
+ *
+ * `watchReviews` is the live path, but a single dropped `fs.watch` event is
+ * unrecoverable: nothing else ever re-reads `.council/reviews/`. Checkpoints
+ * already have the mirror-image failsafe (`scanForMissedObserverWakes` re-reads
+ * `.council/checkpoints/` from disk on a tick); reviews had no equivalent, so a
+ * lost event degraded the pair AND discarded the findings permanently. This is
+ * the read half of that missing failsafe — EC-8's sentinel-before-sweep applied
+ * to the wake→review watchdog: look at the disk before declaring absence.
+ *
+ * Deliberately synchronous. The caller is a `setTimeout` watchdog whose degrade
+ * decision must stay in one turn; the directory holds a handful of small files.
+ *
+ * Returns the FIRST matching payload, or null when no file on disk answers the
+ * checkpoint. Per-file read/parse failures are skipped, not thrown — a single
+ * corrupt sibling must not mask a valid review.
+ */
+export function findReviewForCheckpointSync(opts: {
+  directory: string;
+  checkpointId: string;
+  normalizeRaw?: (raw: string, provider: "claude" | "codex") => string;
+}): { payload: ObserverReviewPayload; file: string; reviewedAt?: number } | null {
+  let entries: string[];
+  try {
+    entries = readdirSync(opts.directory).filter((f) => OBSERVER_REVIEW_FILE_PATTERN.test(f));
+  } catch {
+    return null;
+  }
+  for (const file of entries) {
+    const path = join(opts.directory, file);
+    let raw: string;
+    try {
+      raw = readFileSync(path, "utf-8");
+    } catch {
+      continue;
+    }
+    if (opts.normalizeRaw) {
+      const provider = OBSERVER_REVIEW_FILE_PATTERN.exec(file)?.[1] as "claude" | "codex" | undefined;
+      if (provider) {
+        try {
+          raw = opts.normalizeRaw(raw, provider);
+        } catch {
+          continue;
+        }
+      }
+    }
+    const payload = parseObserverReviewPayload(raw);
+    if (!payload || payload.checkpoint_id !== opts.checkpointId) continue;
+    let reviewedAt: number | undefined;
+    try {
+      reviewedAt = statSync(path).mtimeMs;
+    } catch {
+      reviewedAt = undefined;
+    }
+    return { payload, file, reviewedAt };
+  }
+  return null;
 }
 
 export type ReviewDropReason =

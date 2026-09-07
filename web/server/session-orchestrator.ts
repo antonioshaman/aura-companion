@@ -39,7 +39,7 @@ import type { CheckpointPayload, ObserverReviewPayload } from "./council-types.j
 import { COUNCIL_SCHEMA_VERSION, OBSERVER_WAKE_PAYLOAD_VERSION, OBSERVER_WAKE_TIMEOUT_MS, normalizeCodexObserverReviewRaw, normalizeObserverFindingShapeRaw, parseCheckpointPayload, parseObserverReviewPayload } from "./council-types.js";
 import { writeAtomicJson } from "./atomic-write.js";
 import { watchCheckpoints } from "./checkpoint-watcher.js";
-import { watchReviews } from "./review-watcher.js";
+import { findReviewForCheckpointSync, watchReviews } from "./review-watcher.js";
 import { DEFAULT_REARM_DELAY_MS, runResilientWatch } from "./resilient-watch.js";
 import { validateObserverFindings } from "./observer-grounding.js";
 import { maybeEmitEvalSidecar } from "./eval-sidecar.js";
@@ -1849,26 +1849,7 @@ export class SessionOrchestrator {
           directory: reviewsDir,
           signal: abort.signal,
           onReview: (payload, reviewedAt) => this.handleCouncilReview(sessionGroupId, payload, reviewedAt),
-          // Two independent normalizations, deliberately gated differently.
-          // Envelope synthesis is codex-only because it stamps codex identity:
-          // the codex CLI emits a review missing every server-mandated audit
-          // field, so the parser rejects it on `schema_version` and every codex
-          // review drops (prompt tightening was empirically insufficient).
-          // Findings-shape mapping runs for EVERY provider — a claude observer
-          // emitting `{severity:"low", file, line}` under a correct envelope is
-          // observed behaviour, not a codex quirk, and it drops on
-          // `findings.severity` with the review already written to disk.
-          normalizeRaw: (raw, provider) => {
-            let out = raw;
-            if (provider === "codex") {
-              const meta = this.councilGroupMeta.get(sessionGroupId);
-              out = normalizeCodexObserverReviewRaw(out, {
-                observerModel: meta?.observerModel ?? "unknown",
-                observerCliVersion: "unknown",
-              });
-            }
-            return normalizeObserverFindingShapeRaw(out);
-          },
+          normalizeRaw: (raw, provider) => this.normalizeObserverReviewRaw(sessionGroupId, raw, provider),
         }),
       // A dead review watcher can only be recovered by re-waking the observer
       // (it re-writes its review on the next wake), which the checkpoint
@@ -2586,6 +2567,37 @@ export class SessionOrchestrator {
   }
 
   /**
+   * Bring provider-native review output up to schema before parsing.
+   *
+   * Two independent normalizations, deliberately gated differently. Envelope
+   * synthesis is codex-only because it stamps codex identity: the codex CLI
+   * emits a review missing every server-mandated audit field, so the parser
+   * rejects it on `schema_version` and every codex review drops (prompt
+   * tightening was empirically insufficient). Findings-shape mapping runs for
+   * EVERY provider — a claude observer emitting `{severity:"low", file, line}`
+   * under a correct envelope is observed behaviour, not a codex quirk, and it
+   * drops on `findings.severity` with the review already written to disk.
+   *
+   * Shared by the live watcher and the deadline rescan so a review that the
+   * watcher would have accepted cannot be rejected by the recovery path.
+   */
+  private normalizeObserverReviewRaw(
+    sessionGroupId: string,
+    raw: string,
+    provider: "claude" | "codex",
+  ): string {
+    let out = raw;
+    if (provider === "codex") {
+      const meta = this.councilGroupMeta.get(sessionGroupId);
+      out = normalizeCodexObserverReviewRaw(out, {
+        observerModel: meta?.observerModel ?? "unknown",
+        observerCliVersion: "unknown",
+      });
+    }
+    return normalizeObserverFindingShapeRaw(out);
+  }
+
+  /**
    * Council Review 2026-06-13 (P1 #1): the wake→review watchdog elapsed —
    * the observer accepted a wake but never produced a review file within
    * OBSERVER_WAKE_TIMEOUT_MS. Surface this as a visible `degraded` state
@@ -2608,6 +2620,32 @@ export class SessionOrchestrator {
       // Idempotence: a group already past this checkpoint's review (the
       // review landed but the disarm raced) should not be degraded.
       if (meta.lastReviewedCheckpointId === checkpointId) return;
+
+      // Sentinel-before-sweep (EC-8): the in-memory state above says "no review
+      // arrived", but that is only true if every fs event reached the watcher.
+      // A dropped `fs.watch` event is unrecoverable otherwise — nothing else
+      // re-reads `.council/reviews/`, so the pair degrades AND the findings are
+      // discarded permanently. Observed in prod 2026-09-07 (grp_2dab66cb): the
+      // review landed on disk 3.5 min before this deadline fired, the watcher
+      // logged neither success nor drop, and 7 findings including 2 grounded
+      // STOPs were lost. Look at the disk before declaring absence.
+      const recovered = findReviewForCheckpointSync({
+        directory: join(entry.cwd, ".council", "reviews"),
+        checkpointId,
+        normalizeRaw: (raw, provider) => this.normalizeObserverReviewRaw(sessionGroupId, raw, provider),
+      });
+      if (recovered) {
+        log.warn("session-orchestrator", "review recovered from disk at deadline — watcher missed the event", {
+          event: "council.review.recovered_by_deadline_rescan",
+          sessionGroupId,
+          observerSessionId: meta.observerSessionId,
+          checkpointId,
+          file: recovered.file,
+          reviewedAt: recovered.reviewedAt,
+        });
+        this.handleCouncilReview(sessionGroupId, recovered.payload, recovered.reviewedAt);
+        return;
+      }
 
       // Council Review 2026-06-13 P2 #8: do NOT pre-set the reason map here.
       // The reason rides the `half_died` event into `deriveSideEffects` and is

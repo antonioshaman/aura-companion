@@ -3261,6 +3261,112 @@ describe("SessionOrchestrator", () => {
         vi.useRealTimers();
       }
     });
+
+    // ── Sentinel-before-sweep at the deadline (EC-8) ───────────────────────
+    //
+    // Regression for a prod incident (2026-09-07, grp_2dab66cb): the observer
+    // wrote its review to `.council/reviews/` 3.5 minutes BEFORE the watchdog
+    // deadline, but the `fs.watch` event never reached the watcher — zero log
+    // lines, neither an accept nor a schema drop. The watchdog then read only
+    // in-memory state (`lastReviewedCheckpointId`), concluded "no review", and
+    // degraded the pair; 7 findings including 2 grounded STOPs were discarded
+    // permanently, because nothing else ever re-reads that directory.
+    //
+    // Checkpoints already have the mirror-image failsafe (EC-13's
+    // `scanForMissedObserverWakes` re-reads `.council/checkpoints/` from disk);
+    // reviews had none. These two tests pin both halves of the correction:
+    // recover when the file is on disk, still degrade when it genuinely isn't.
+    it("rescans .council/reviews at the deadline and does NOT degrade when the review is on disk (lost fs event)", async () => {
+      const { OBSERVER_WAKE_TIMEOUT_MS } = await import("./council-types.js");
+      const { buildObserverReviewFilename } = await import("./review-watcher.js");
+      const { mkdirSync, writeFileSync } = require("node:fs") as typeof import("node:fs");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      vi.useFakeTimers();
+      const emitted: Array<{ checkpointId: string; findings: Array<{ severity: string; claim: string }> }> = [];
+      try {
+        const { cwd, ws } = seedActiveGroupWithApplyEvent("grp_wd_rescan", { observer: "sess_obs_rescan" });
+        companionBus.on("group:review", (e: unknown) => {
+          emitted.push(e as { checkpointId: string; findings: Array<{ severity: string; claim: string }> });
+        });
+        vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "sent" });
+        callDispatch("grp_wd_rescan", validPayload("grp_wd_rescan", { checkpointId: "chk_wd_rescan" }));
+
+        // The observer answers — file lands on disk, but the watcher never
+        // sees the event, so `handleCouncilReview` is NOT invoked here.
+        const reviewsDir = pathJoin(cwd, ".council", "reviews");
+        mkdirSync(reviewsDir, { recursive: true });
+        writeFileSync(
+          pathJoin(reviewsDir, buildObserverReviewFilename("council-plan", "claude")),
+          JSON.stringify({
+            schema_version: 1,
+            observer_wake_payload_version_echo: 1,
+            checkpoint_id: "chk_wd_rescan",
+            phase: "council-plan",
+            session_group_id: "grp_wd_rescan",
+            reviewed_at: "2026-01-01T00:00:00Z",
+            observer_provider: "claude",
+            observer_model: "claude-opus-4-7",
+            observer_cli_version: "1.0.0",
+            findings: [{ severity: "NOTE", claim: "recovered from disk", evidence_path: "src/a.ts" }],
+          }),
+        );
+
+        vi.advanceTimersByTime(OBSERVER_WAKE_TIMEOUT_MS + 1);
+
+        // No false degrade…
+        expect(ws.coordinator.applyEvent).not.toHaveBeenCalled();
+        // …and the findings are not discarded — they take the normal fanout.
+        expect(emitted).toHaveLength(1);
+        expect(emitted[0]!.checkpointId).toBe("chk_wd_rescan");
+        expect(emitted[0]!.findings[0]!.claim).toBe("recovered from disk");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    // The rescan must not become a blanket suppressor of the watchdog: a
+    // review file present for a DIFFERENT checkpoint (e.g. the previous
+    // phase's, which is the common on-disk state) is not an answer to the
+    // armed wake, so the degrade must still fire.
+    it("still degrades when the reviews dir holds only a review for a different checkpoint", async () => {
+      const { OBSERVER_WAKE_TIMEOUT_MS } = await import("./council-types.js");
+      const { buildObserverReviewFilename } = await import("./review-watcher.js");
+      const { mkdirSync, writeFileSync } = require("node:fs") as typeof import("node:fs");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      vi.useFakeTimers();
+      try {
+        const { cwd, ws } = seedActiveGroupWithApplyEvent("grp_wd_rescan_miss", { observer: "sess_obs_miss" });
+        vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "sent" });
+        callDispatch("grp_wd_rescan_miss", validPayload("grp_wd_rescan_miss", { checkpointId: "chk_wd_awaited" }));
+
+        const reviewsDir = pathJoin(cwd, ".council", "reviews");
+        mkdirSync(reviewsDir, { recursive: true });
+        writeFileSync(
+          pathJoin(reviewsDir, buildObserverReviewFilename("council-plan", "claude")),
+          JSON.stringify({
+            schema_version: 1,
+            observer_wake_payload_version_echo: 1,
+            checkpoint_id: "chk_wd_previous_phase",
+            phase: "council-plan",
+            session_group_id: "grp_wd_rescan_miss",
+            reviewed_at: "2026-01-01T00:00:00Z",
+            observer_provider: "claude",
+            observer_model: "claude-opus-4-7",
+            observer_cli_version: "1.0.0",
+            findings: [],
+          }),
+        );
+
+        vi.advanceTimersByTime(OBSERVER_WAKE_TIMEOUT_MS + 1);
+        expect(ws.coordinator.applyEvent).toHaveBeenCalledWith("grp_wd_rescan_miss", {
+          type: "half_died",
+          role: "observer",
+          reason: "wake_produced_no_review",
+        });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
   });
 
   // ── Fix #6 (Council Review 2026-06-13 P1 #6): EC-6 wire coverage ─────────
