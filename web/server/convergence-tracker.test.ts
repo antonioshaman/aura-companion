@@ -311,6 +311,162 @@ describe("ConvergenceTracker — live bus wiring", () => {
     tracker.detach();
   });
 
+  // ── got-045: restart catch-up must not fabricate clean cycles ─────────────
+  // The restart catch-up dispatcher replays `council.wake.restart_catchup`
+  // against the same stale checkpoint; the observer rewrites an (empty) review
+  // and re-emits `group:review` with the SAME checkpointId + provider. Without
+  // a dedup guard each replay counts as a fresh clean cycle and can fake a
+  // "converged" pair that reviewed nothing. These pin the guard.
+
+  it("does NOT re-count a replayed review for the same (checkpoint, provider)", () => {
+    const seen: Array<{ transition: string; cycleNumber: number }> = [];
+    companionBus.on("group:convergence", (p) => {
+      seen.push({ transition: p.transition, cycleNumber: p.cycleNumber });
+    });
+
+    const tracker = new ConvergenceTracker({ isFrozen: () => false });
+    tracker.attach();
+
+    // One real clean review for cp-0 → counter 1.
+    // Then two replays of the exact same checkpoint+provider (restart
+    // catch-up signature) — both must be dropped, counter stays at 1.
+    for (let i = 0; i < 3; i++) {
+      companionBus.emit("group:review", {
+        sessionGroupId: "grp-replay",
+        checkpointId: "cp-0",
+        phase: "council-implement",
+        findings: [],
+        downgrades: [],
+        observerModel: "test",
+        observerProvider: "claude",
+      });
+    }
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toEqual({ transition: "cycle-progress", cycleNumber: 1 });
+    expect(tracker.getState("grp-replay")?.cleanCycleCount).toBe(1);
+    expect(tracker.getState("grp-replay")?.convergenceState).toBe("in-progress");
+
+    tracker.detach();
+  });
+
+  it("a stale spawn-checkpoint replayed 3× can NOT reach converged (got-045 core)", () => {
+    const seen: string[] = [];
+    companionBus.on("group:convergence", (p) => { seen.push(p.transition); });
+
+    const tracker = new ConvergenceTracker({ isFrozen: () => false });
+    tracker.attach();
+
+    // Simulate three server restarts, each replaying the SAME spawn checkpoint
+    // with an empty (clean) review. Pre-fix this reached converged at the 3rd.
+    for (let restart = 0; restart < 3; restart++) {
+      companionBus.emit("group:review", {
+        sessionGroupId: "grp-spawn",
+        checkpointId: "cp-spawn",
+        phase: "council-bootstrap",
+        findings: [],
+        downgrades: [],
+        observerModel: "test",
+        observerProvider: "claude",
+      });
+    }
+
+    // Only the first fold counts; never converges on replays alone.
+    expect(seen).toEqual(["cycle-progress"]);
+    expect(tracker.getState("grp-spawn")?.convergenceState).toBe("in-progress");
+
+    tracker.detach();
+  });
+
+  it("counts distinct providers of the same checkpoint separately (claude+codex)", () => {
+    // The dedup key includes the provider, so a two-provider pair reviewing the
+    // same checkpoint still folds both — only exact (checkpoint, provider)
+    // replays are dropped.
+    const seen: number[] = [];
+    companionBus.on("group:convergence", (p) => { seen.push(p.cycleNumber); });
+
+    const tracker = new ConvergenceTracker({ isFrozen: () => false });
+    tracker.attach();
+
+    for (const provider of ["claude", "codex"]) {
+      companionBus.emit("group:review", {
+        sessionGroupId: "grp-two",
+        checkpointId: "cp-0",
+        phase: "council-implement",
+        findings: [],
+        downgrades: [],
+        observerModel: "test",
+        observerProvider: provider,
+      });
+    }
+
+    expect(seen).toEqual([1, 2]);
+
+    tracker.detach();
+  });
+
+  it("forgetGroup clears the dedup ledger so a re-created group re-counts", () => {
+    const seen: number[] = [];
+    companionBus.on("group:convergence", (p) => { seen.push(p.cycleNumber); });
+
+    const tracker = new ConvergenceTracker({ isFrozen: () => false });
+    tracker.attach();
+
+    const emitCp0 = () =>
+      companionBus.emit("group:review", {
+        sessionGroupId: "grp-recycle",
+        checkpointId: "cp-0",
+        phase: "council-implement",
+        findings: [],
+        downgrades: [],
+        observerModel: "test",
+        observerProvider: "claude",
+      });
+
+    emitCp0();
+    emitCp0(); // replay dropped
+    expect(seen).toEqual([1]);
+
+    // Group torn down + recreated — the ledger must reset so cp-0 counts again.
+    tracker.forgetGroup("grp-recycle");
+    emitCp0();
+    expect(seen).toEqual([1, 1]);
+
+    tracker.detach();
+  });
+
+  it("does NOT consume the dedup slot for a frozen review (countable after recovery)", () => {
+    // A degraded (frozen) review folds to a no-op. It must not mark the
+    // checkpoint as seen, otherwise the post-recovery re-review of that same
+    // checkpoint would be wrongly dropped and never counted.
+    const seen: number[] = [];
+    companionBus.on("group:convergence", (p) => { seen.push(p.cycleNumber); });
+
+    let frozen = true;
+    const tracker = new ConvergenceTracker({ isFrozen: () => frozen });
+    tracker.attach();
+
+    const emitCp = () =>
+      companionBus.emit("group:review", {
+        sessionGroupId: "grp-thaw",
+        checkpointId: "cp-0",
+        phase: "council-implement",
+        findings: [],
+        downgrades: [],
+        observerModel: "test",
+        observerProvider: "claude",
+      });
+
+    emitCp(); // frozen → no-op, must NOT consume the slot
+    expect(seen).toHaveLength(0);
+
+    frozen = false;
+    emitCp(); // recovered → the same checkpoint now counts
+    expect(seen).toEqual([1]);
+
+    tracker.detach();
+  });
+
   it("attach + detach is idempotent", () => {
     const tracker = new ConvergenceTracker({ isFrozen: () => false });
     tracker.attach();
