@@ -243,6 +243,19 @@ describe("ChatView", () => {
     expect(screen.getByTestId("composer")).toBeTruthy();
   });
 
+  it("exposes a stable data-testid='chatview' anchor with the min-h-0 flex contract", () => {
+    // council-pair-layout-stability spec job-story: the ChatView column must not
+    // overflow (scrollHeight === clientHeight). The regression guard selects it
+    // via [data-testid="chatview"] and relies on the `flex flex-col h-full
+    // min-h-0` contract — min-h-0 is what lets the inner MessageFeed shrink
+    // instead of growing the document. Pin both the anchor and the class.
+    const { container } = render(<ChatView sessionId="s1" />);
+    const chatview = container.querySelector('[data-testid="chatview"]');
+    expect(chatview).not.toBeNull();
+    expect(chatview?.className).toContain("min-h-0");
+    expect(chatview?.className).toContain("h-full");
+  });
+
   // Accessibility scan — needs real timers for async axe import
   it("has no axe violations", { timeout: 15000 }, async () => {
     vi.useRealTimers();

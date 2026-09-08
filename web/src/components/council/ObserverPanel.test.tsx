@@ -462,6 +462,82 @@ describe("ObserverPanel — reviewing-stalled banner (#14/#15)", () => {
   });
 });
 
+describe("ObserverPanel — worst-case overflow contract (layout-stability spec)", () => {
+  // council-pair-layout-stability spec, Job Story acceptance #4: with the
+  // tallest realistic header stack (reviewing-stalled banner + first-run hint +
+  // a dense findings list) the aside must NOT overflow its column — findings
+  // scroll INTERNALLY via the FindingsLog `flex-1 min-h-0 overflow-y-auto`
+  // parent. jsdom cannot measure real layout (scrollHeight is always 0), so the
+  // numeric invariant was verified live via agent-browser (see
+  // .council/review-output/layout-stability-discovery-2026-09-08.md). This test
+  // pins the STRUCTURAL contract that makes the invariant hold — remove
+  // `min-h-0` from the findings parent or `shrink-0` from a banner and it fails.
+  //
+  // Note: the deriver's priority ladder makes `degraded` and `reviewing-stalled`
+  // mutually exclusive in the pill (degraded short-circuits first), so the
+  // spec's literal "degraded + stalled simultaneously" is not derivable;
+  // reviewing-stalled is the tallest stack that keeps the findings region.
+  function seedWorstCase() {
+    seedGroup();
+    // WARN/NOTE only — a live STOP would short-circuit into blocker-found and
+    // hide the reviewing-stalled banner we are stress-testing.
+    act(() => {
+      useStore.getState().appendObserverReview({
+        sessionGroupId: GROUP.sessionGroupId,
+        checkpointId: "chk_1",
+        phase: "council-implement",
+        findings: [
+          { id: "w1", severity: "WARN", claim: "Long warn one ".repeat(6), evidence_path: "web/server/a.ts" },
+          { id: "w2", severity: "WARN", claim: "Long warn two ".repeat(6), evidence_path: "web/server/b.ts" },
+          { id: "n1", severity: "NOTE", claim: "Long note one ".repeat(6), evidence_path: "web/server/c.ts" },
+          { id: "n2", severity: "NOTE", claim: "Long note two ".repeat(6), evidence_path: "web/server/d.ts" },
+          { id: "i1", severity: "INFO", claim: "Long info one ".repeat(6), evidence_path: "specs/x.md" },
+        ],
+        downgrades: [],
+        observerModel: "gpt-5-codex",
+        observerProvider: "codex",
+        timestamp: 500,
+      });
+    });
+    // Checkpoint AFTER the review so observerReviewing flips back on; timestamp
+    // far enough in the past that nowMs lapses the wake-timeout → stalled.
+    seedCheckpoint({ timestamp: 1_000, phase: "council-implement" });
+    // Force the first-run hint visible (persisted pref survives reset()).
+    act(() => {
+      useStore.setState({ firstRunHintDismissed: false });
+    });
+  }
+
+  it("stacks stalled banner + first-run hint + findings while preserving the internal-scroll contract", () => {
+    seedWorstCase();
+    render(<ObserverPanel sessionId={SESSION} onRespawnHalf={vi.fn()} nowMs={302_000} />);
+
+    // All three tall header elements are simultaneously present.
+    const stalled = screen.getByTestId("reviewing-stalled-banner");
+    expect(stalled).toBeInTheDocument();
+    expect(stalled.className).toContain("shrink-0");
+    expect(screen.getByText(/second AI reviewing/i)).toBeInTheDocument();
+
+    const aside = screen.getByTestId("observer-panel");
+    // The column is height-bounded and a flex column — it cannot grow the
+    // document; overflow is delegated to the findings child.
+    expect(aside.className).toContain("h-full");
+    expect(aside.className).toContain("flex");
+    expect(aside.className).toContain("flex-col");
+
+    // The FindingsLog parent is the single internal scroll region.
+    const scrollRegion = aside.querySelector(".overflow-y-auto");
+    expect(scrollRegion).not.toBeNull();
+    expect(scrollRegion?.className).toContain("flex-1");
+    expect(scrollRegion?.className).toContain("min-h-0");
+
+    // jsdom reports 0 for both; asserting equality documents the invariant and
+    // fails loudly only if a future jsdom/happy-dom gains layout and the panel
+    // genuinely overflows. Real numeric proof lives in the discovery report.
+    expect(aside.scrollHeight).toBe(aside.clientHeight);
+  });
+});
+
 describe("ObserverPanel — degraded → respawn", () => {
   it("calls onRespawnHalf with the sessionGroupId when Respawn is clicked", () => {
     seedGroup();

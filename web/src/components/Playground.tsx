@@ -3293,6 +3293,14 @@ function CouncilModeSection() {
             <CouncilConvergedPanelDemo />
           </div>
         </Card>
+        {/* Worst-case header stack in a SHORT column — layout-stability spec rec 3.
+            reviewing-stalled banner + first-run hint + dense findings; the panel
+            must clip internally (findings scroll), never overflow the column. */}
+        <Card label="ObserverPanel — worst-case overflow (stalled + first-run hint + dense findings)">
+          <div className="h-[300px] bg-cc-bg rounded-md overflow-hidden">
+            <CouncilWorstCasePanelDemo />
+          </div>
+        </Card>
       </div>
     </Section>
   );
@@ -3384,6 +3392,82 @@ function CouncilDegradedPanelDemo() {
   }, [upsertGroup, setGroupStatus, removeGroup]);
 
   return <ObserverPanel sessionId={COUNCIL_DEGRADED_DEMO_SESSION} onRespawnHalf={async () => {}} />;
+}
+
+// ── Worst-case panel-overflow demo (layout-stability spec, rec 3) ───────────
+//
+// The spec's `council-pair-layout-stability.md` mandates a Playground scenario
+// that maximizes the panel's non-scrolling header stack so the panel-overflow
+// invariant (`aside.scrollHeight === aside.clientHeight` — findings scroll
+// INTERNALLY, the column itself never grows the document) is visually testable.
+//
+// The panel's state ladder makes `degraded` and `reviewing-stalled` mutually
+// exclusive in the status pill (degraded short-circuits at the top of
+// deriveObserverPanelState), so the literal "degraded + stalled simultaneously"
+// the spec sketches is not derivable. The genuine worst case for header height
+// is therefore: `reviewing-stalled` banner + the (undismissed) first-run hint +
+// a dense findings list — the tallest realistic non-scrolling stack that still
+// keeps the findings region present. Rendered in a deliberately SHORT column so
+// the internal scroll must engage.
+const COUNCIL_WORSTCASE_SESSION = "playground-council-worstcase-orch";
+const COUNCIL_WORSTCASE_GROUP = "playground-council-worstcase-grp";
+
+function CouncilWorstCasePanelDemo() {
+  const upsertGroup = useStore((s) => s.upsertGroup);
+  const appendObserverReview = useStore((s) => s.appendObserverReview);
+  const recordCheckpoint = useStore((s) => s.recordCheckpoint);
+  const removeGroup = useStore((s) => s.removeGroup);
+
+  useEffect(() => {
+    // Force the first-run hint visible regardless of the operator's persisted
+    // dismissal; restore the prior value on unmount so the demo is side-effect
+    // free for the real panel.
+    const priorFirstRunDismissed = useStore.getState().firstRunHintDismissed;
+    useStore.setState({ firstRunHintDismissed: false });
+
+    upsertGroup({
+      sessionGroupId: COUNCIL_WORSTCASE_GROUP,
+      primarySessionId: COUNCIL_WORSTCASE_SESSION,
+      observerSessionId: "playground-council-worstcase-obs",
+      status: "active",
+      pairing: "claude+codex",
+    });
+    // Findings first (this sets observerReviewing=false); WARN/NOTE only so the
+    // deriver does NOT short-circuit into `blocker-found` — we want stalled.
+    appendObserverReview({
+      sessionGroupId: COUNCIL_WORSTCASE_GROUP,
+      checkpointId: "chk_worstcase_1",
+      phase: "council-implement",
+      findings: [
+        { id: "fnd_wc_1", severity: "WARN", claim: "Extracted helper `deriveSideEffects` has no negative-path test covering the degraded→archived transition.", evidence_path: "web/server/group-state-machine.ts", evidence_lines: [54, 80] },
+        { id: "fnd_wc_2", severity: "WARN", claim: "Checkpoint watcher debounce window may coalesce two distinct phases if they land inside 50ms of each other.", evidence_path: "web/server/checkpoint-watcher.ts", evidence_lines: [120, 145] },
+        { id: "fnd_wc_3", severity: "NOTE", claim: "Consider renaming BackendProvider once a third backend lands — the seam name implies a binary.", evidence_path: "web/server/backend-provider.ts" },
+        { id: "fnd_wc_4", severity: "NOTE", claim: "Observer prompt bundle regeneration is enforced by a CI canary; worth a comment at the call site.", evidence_path: "web/server/observer-prompt.ts", evidence_lines: [12, 30] },
+        { id: "fnd_wc_5", severity: "INFO", claim: "Spec coverage matches phase A boundaries for the reconnection grace window.", evidence_path: "specs/council-mode-paired-sessions.md" },
+        { id: "fnd_wc_6", severity: "NOTE", claim: "Reconciliation sentinel-before-sweep helper is duplicated between init and restart paths; extract if a third caller appears.", evidence_path: "web/server/group-reconciliation.ts", evidence_lines: [88, 110] },
+      ],
+      downgrades: [],
+      observerModel: "gpt-5-codex",
+      observerProvider: "codex",
+      timestamp: Date.now() - 620_000,
+    });
+    // Then a checkpoint dated past the wake-timeout deadline (default 300s) so
+    // the deriver flips reviewing → reviewing-stalled.
+    recordCheckpoint({
+      sessionGroupId: COUNCIL_WORSTCASE_GROUP,
+      checkpointId: "chk_worstcase_1",
+      phase: "council-implement",
+      sequence: 1,
+      timestamp: Date.now() - 600_000,
+    });
+
+    return () => {
+      removeGroup(COUNCIL_WORSTCASE_GROUP);
+      useStore.setState({ firstRunHintDismissed: priorFirstRunDismissed });
+    };
+  }, [upsertGroup, appendObserverReview, recordCheckpoint, removeGroup]);
+
+  return <ObserverPanel sessionId={COUNCIL_WORSTCASE_SESSION} onRespawnHalf={async () => {}} />;
 }
 
 // ─── Session Item Playground ─────────────────────────────────────────────────
