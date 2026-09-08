@@ -1241,6 +1241,48 @@ describe("CodexAdapter", () => {
     expect(errors[0]).toContain("initialization failed");
   });
 
+  // Regression (prod 2026-09-08). `onInitError` used to assign into a single
+  // slot, so the LAST registration won. In production two subscribers register
+  // in a fixed order: `cli-launcher` at spawn (SIGTERM both procs, release the
+  // codex WS port, mark the session `exited`, run the model-rejection fallback
+  // respawn), then `WsBridge.attachAdapter` once the launcher emits
+  // `backend:codex-adapter-created`. The bridge's registration silently
+  // replaced the launcher's, so a real init failure left the app-server
+  // subprocess running, the session `connected`, and every server-initiated
+  // send dropping as `socket_disconnected` — a council observer stuck like
+  // that never wakes and the sidebar shows it as healthy. The launcher's
+  // handler has its own unit test, which kept passing because it invokes the
+  // handler directly and never exercises this wiring.
+  it("invokes EVERY onInitError subscriber, not just the last registered", async () => {
+    const calls: string[] = [];
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini" });
+    adapter.onInitError(() => calls.push("launcher"));
+    adapter.onInitError(() => calls.push("bridge"));
+
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, error: { code: -1, message: "server not ready" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(calls).toEqual(["launcher", "bridge"]);
+  });
+
+  // The two subscribers own unrelated responsibilities (process cleanup vs.
+  // the user-facing error frame); a throw in one must not cancel the other,
+  // or a bug in the newly-registered bridge handler would silently
+  // reintroduce the leak this list exists to prevent.
+  it("keeps invoking later onInitError subscribers when an earlier one throws", async () => {
+    const calls: string[] = [];
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini" });
+    adapter.onInitError(() => { calls.push("first"); throw new Error("subscriber blew up"); });
+    adapter.onInitError(() => calls.push("second"));
+
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, error: { code: -1, message: "server not ready" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(calls).toEqual(["first", "second"]);
+  });
+
   it("rejects messages and discards queue after init failure", async () => {
     // Verify that after initialization fails, sendBrowserMessage returns false
     // and any previously queued messages are discarded (no memory leak).
@@ -3399,7 +3441,7 @@ describe("CodexAdapter with ICodexTransport", () => {
   });
 
   it("fires initError after all thread/start retries exhaust", async () => {
-    // When all retry attempts for thread/start fail, initErrorCb should fire.
+    // When all retry attempts for thread/start fail, the init-error subscribers should fire.
     const mock = createMockTransport();
     const messages: BrowserIncomingMessage[] = [];
     const initErrors: string[] = [];

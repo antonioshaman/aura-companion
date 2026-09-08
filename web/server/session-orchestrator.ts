@@ -2634,7 +2634,22 @@ export class SessionOrchestrator {
         checkpointId,
         normalizeRaw: (raw, provider) => this.normalizeObserverReviewRaw(sessionGroupId, raw, provider),
       });
-      if (recovered) {
+      // got-051: the rescan matches on `checkpointId` alone, and a phase name
+      // like `council-review` is NOT group-scoped — in a workspace shared by
+      // several pairs the directory can hold a same-named review belonging to
+      // a different group. `handleCouncilReview` now rejects foreign payloads,
+      // so handing one to it would return silently and this group would
+      // neither recover nor degrade. Check ownership here and fall through to
+      // the degrade path when the only review on disk is someone else's.
+      if (recovered && recovered.payload.session_group_id !== sessionGroupId) {
+        log.warn("session-orchestrator", "deadline rescan matched a foreign-group review — ignoring", {
+          event: "council.review.foreign_group_rescan",
+          sessionGroupId,
+          payloadSessionGroupId: recovered.payload.session_group_id,
+          checkpointId,
+          file: recovered.file,
+        });
+      } else if (recovered) {
         log.warn("session-orchestrator", "review recovered from disk at deadline — watcher missed the event", {
           event: "council.review.recovered_by_deadline_rescan",
           sessionGroupId,
@@ -2734,6 +2749,30 @@ export class SessionOrchestrator {
     try {
       const entry = this.councilWatchers.get(sessionGroupId);
       if (!entry) return;
+
+      // got-051 (prod 2026-09-08): the mirror of the `council.checkpoint
+      // .foreign_group` guard in `handleCouncilCheckpoint`. Every pair whose
+      // workspace is the same directory watches the SAME
+      // `<workspace>/.council/reviews/` tree, so one observer's review file
+      // is delivered to every group's `onReview` callback. Without this
+      // check each group adopted the foreign findings as its own: three
+      // groups sharing /root/aura-companion emitted three
+      // `observer.invocation.completed` lines for a single review file,
+      // each stamping its OWN observer session + model onto another pair's
+      // findings, clearing its own wake watchdog, and feeding its own
+      // convergence counter. Reject BEFORE any state mutation — the
+      // watchdog disarm below is itself a mutation a foreign review must
+      // not perform.
+      if (payload.session_group_id !== sessionGroupId) {
+        log.warn("session-orchestrator", "foreign-group review observed", {
+          event: "council.review.foreign_group",
+          sessionGroupId,
+          payloadSessionGroupId: payload.session_group_id,
+          checkpointId: payload.checkpoint_id,
+          observerProvider: payload.observer_provider,
+        });
+        return;
+      }
 
       // Council Review 2026-06-13 (P1 #1): a review arrived — disarm the
       // wake→review watchdog if it was tracking this checkpoint. A review

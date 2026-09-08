@@ -1774,8 +1774,22 @@ describe("codex onInitError model-rejection auto-respawn", () => {
   // retired), the launcher marks that model rejected for the session and
   // respawns on the next launchable fallback rather than surfacing a dead
   // session. The handler is registered on the CodexAdapter via onInitError; we
-  // capture the adapter off the bus and invoke its stored callback directly so
-  // the launcher branch is driven without standing up a full JSON-RPC init.
+  // capture the adapter off the bus and invoke its registered callbacks
+  // directly so the launcher branch is driven without standing up a full
+  // JSON-RPC init.
+  //
+  // `initErrorCbs` is a LIST, not a single slot (got-052): in production the
+  // launcher registers first and `WsBridge.attachAdapter` registers second,
+  // and while the adapter kept only the last callback the bridge silently
+  // disabled every recovery below — including this model-rejection respawn —
+  // for months. These tests kept passing throughout because they invoke the
+  // handler directly. `fireInitError` walks the whole list so the shape under
+  // test stays the shape production uses.
+
+  /** Invoke every `onInitError` subscriber the adapter has registered. */
+  function fireInitError(adapter: any, error: string): void {
+    for (const cb of adapter.initErrorCbs as ((e: string) => void)[]) cb(error);
+  }
 
   it("WS: rejects the failing model and respawns with a launchable fallback", async () => {
     process.env.COMPANION_CODEX_TRANSPORT = "ws";
@@ -1810,7 +1824,8 @@ describe("codex onInitError model-rejection auto-respawn", () => {
     const spawnCallsBefore = mockSpawn.mock.calls.length;
 
     // Drive the init-error handler with a model-availability error.
-    capturedAdapter.initErrorCb(
+    fireInitError(
+      capturedAdapter,
       "Codex initialization failed: model gpt-5.2-codex is not available for this account",
     );
     await new Promise((r) => setTimeout(r, 0));
@@ -1860,7 +1875,7 @@ describe("codex onInitError model-rejection auto-respawn", () => {
     const newer = createMockProc(9999);
     (launcher as any).processes.set("test-session-id", newer);
 
-    capturedAdapter.initErrorCb("model gpt-5.2-codex is not available");
+    fireInitError(capturedAdapter, "model gpt-5.2-codex is not available");
     await new Promise((r) => setTimeout(r, 0));
 
     expect(info.state).toBe(stateBefore);
@@ -1896,7 +1911,7 @@ describe("codex onInitError model-rejection auto-respawn", () => {
     const info = launcher.getSession("test-session-id")!;
     const spawnCallsBefore = mockSpawn.mock.calls.length;
 
-    capturedAdapter.initErrorCb("model gpt-5.2-codex is not available for this account");
+    fireInitError(capturedAdapter, "model gpt-5.2-codex is not available for this account");
     await new Promise((r) => setTimeout(r, 0));
 
     expect(info.model).toBe("gpt-5.1-codex-mini");
@@ -1927,7 +1942,7 @@ describe("codex onInitError model-rejection auto-respawn", () => {
     const info = launcher.getSession("test-session-id")!;
     const spawnCallsBefore = mockSpawn.mock.calls.length;
 
-    capturedAdapter.initErrorCb("Codex initialization failed: ECONNREFUSED");
+    fireInitError(capturedAdapter, "Codex initialization failed: ECONNREFUSED");
     await new Promise((r) => setTimeout(r, 0));
 
     expect(info.state).toBe("exited");
@@ -1962,7 +1977,7 @@ describe("codex onInitError model-rejection auto-respawn", () => {
     const newer = createMockCodexProc(9998);
     (launcher as any).processes.set("test-session-id", newer);
 
-    capturedAdapter.initErrorCb("model gpt-5.2-codex is not available");
+    fireInitError(capturedAdapter, "model gpt-5.2-codex is not available");
     await new Promise((r) => setTimeout(r, 0));
 
     expect(codexProc1.kill).toHaveBeenCalledWith("SIGTERM");

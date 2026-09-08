@@ -2806,6 +2806,102 @@ describe("SessionOrchestrator", () => {
       }
     });
 
+    // got-051 (prod 2026-09-08). Several council pairs can share one
+    // workspace, and every pair's review watcher then watches the SAME
+    // `.council/reviews/` directory — so one observer's review file is
+    // delivered to every group's `onReview`. Without a group check each
+    // group adopted the foreign findings: three groups sharing
+    // /root/aura-companion each emitted an `observer.invocation.completed`
+    // for a single review file, stamping their own observer session + model
+    // onto another pair's findings. This is the review-side mirror of the
+    // `council.checkpoint.foreign_group` guard.
+    it("drops a review whose session_group_id belongs to another group", () => {
+      seedGroup("grp_mine", { artifactPaths: [] });
+      const emitted: unknown[] = [];
+      companionBus.on("group:review", (e: unknown) => { emitted.push(e); });
+      const handle = (orchestrator as unknown as {
+        handleCouncilReview: (g: string, p: Record<string, unknown>) => void;
+      }).handleCouncilReview;
+      handle.call(orchestrator, "grp_mine", {
+        schema_version: 1,
+        observer_wake_payload_version_echo: 1,
+        checkpoint_id: "chk_a",
+        phase: "council-plan",
+        // The review file on disk is the NEIGHBOUR pair's.
+        session_group_id: "grp_theirs",
+        reviewed_at: "2026-01-01T00:00:00Z",
+        observer_provider: "codex",
+        observer_model: "gpt-5.5",
+        observer_cli_version: "1.0.0",
+        findings: [{ severity: "STOP", claim: "not ours", evidence_path: "src/a.ts" }],
+      });
+      expect(emitted).toHaveLength(0);
+    });
+
+    // The guard must reject BEFORE any state mutation. The wake→review
+    // watchdog disarm is the first thing the handler does, and letting a
+    // foreign review clear it would make this group's own missing review
+    // look like it arrived — the group would never degrade with
+    // `wake_produced_no_review` and the real failure would stay invisible.
+    it("leaves this group's wake watchdog armed when a foreign review arrives", () => {
+      seedGroup("grp_armed", { artifactPaths: [] });
+      const ws = orchestrator as unknown as {
+        councilWatchers: Map<string, {
+          pendingReviewDeadline: { checkpointId: string; timer: ReturnType<typeof setTimeout> } | null;
+        }>;
+        councilGroupMeta: Map<string, { lastReviewedCheckpointId?: string | null }>;
+      };
+      const timer = setTimeout(() => {}, 60_000);
+      const entry = ws.councilWatchers.get("grp_armed")!;
+      entry.pendingReviewDeadline = { checkpointId: "chk_a", timer };
+      try {
+        const handle = (orchestrator as unknown as {
+          handleCouncilReview: (g: string, p: Record<string, unknown>) => void;
+        }).handleCouncilReview;
+        handle.call(orchestrator, "grp_armed", {
+          schema_version: 1,
+          observer_wake_payload_version_echo: 1,
+          // Same checkpoint id — phase names like `council-review` are not
+          // group-scoped, so collisions across pairs are the normal case.
+          checkpoint_id: "chk_a",
+          phase: "council-plan",
+          session_group_id: "grp_someone_else",
+          reviewed_at: "2026-01-01T00:00:00Z",
+          observer_provider: "claude",
+          observer_model: "claude-opus-5",
+          observer_cli_version: "1.0.0",
+          findings: [],
+        });
+        expect(entry.pendingReviewDeadline).not.toBeNull();
+        expect(entry.pendingReviewDeadline!.checkpointId).toBe("chk_a");
+        expect(ws.councilGroupMeta.get("grp_armed")!.lastReviewedCheckpointId).toBeUndefined();
+      } finally {
+        clearTimeout(timer);
+      }
+    });
+
+    it("accepts a review whose session_group_id matches the watcher's group", () => {
+      seedGroup("grp_ok", { artifactPaths: [] });
+      const emitted: unknown[] = [];
+      companionBus.on("group:review", (e: unknown) => { emitted.push(e); });
+      const handle = (orchestrator as unknown as {
+        handleCouncilReview: (g: string, p: Record<string, unknown>) => void;
+      }).handleCouncilReview;
+      handle.call(orchestrator, "grp_ok", {
+        schema_version: 1,
+        observer_wake_payload_version_echo: 1,
+        checkpoint_id: "chk_a",
+        phase: "council-plan",
+        session_group_id: "grp_ok",
+        reviewed_at: "2026-01-01T00:00:00Z",
+        observer_provider: "claude",
+        observer_model: "claude-opus-5",
+        observer_cli_version: "1.0.0",
+        findings: [{ severity: "NOTE", claim: "ours", evidence_path: "src/a.ts" }],
+      });
+      expect(emitted).toHaveLength(1);
+    });
+
     it("stamps each live finding with the reviewedAt arg (review file mtime) passed from the watcher", () => {
       // Live counterpart to the REST bootstrap reviewedAt stamping: the
       // review watcher stats the file's mtime and threads it through
