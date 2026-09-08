@@ -46,6 +46,8 @@ import type { SocketData } from "./ws-bridge-types.js";
 import type { PendingControlRequest } from "./ws-bridge-types.js";
 import type { RecorderManager } from "./recorder.js";
 import { parseNDJSON, isDuplicateCLIMessage } from "./ws-bridge-cli-ingest.js";
+import type { CliTransport } from "./cli-transport.js";
+import { WebSocketCliTransport } from "./cli-transport.js";
 import type { CLIDedupState } from "./ws-bridge-cli-ingest.js";
 import { reportProtocolDrift } from "./protocol-monitor.js";
 import { companionBus } from "./event-bus.js";
@@ -71,17 +73,17 @@ const OBSERVER_WAKE_BACKPRESSURE_THRESHOLD_BYTES = 1024 * 1024;
  * dispatcher (Task 3) wraps this in a richer WakeDispatchOutcome that
  * adds coordinator-side reasons (observer_unknown, group_not_active).
  *
- * - `sent` — NDJSON frame was passed to `cliSocket.send` without throwing.
+ * - `sent` — NDJSON frame was passed to `transport.send` without throwing.
  *   The observer turn-state is now `in-flight` and idle-kill activity
  *   has been registered.
- * - `socket_disconnected` — cliSocket is null or closing. Transient
+ * - `socket_disconnected` — transport is null or closing. Transient
  *   observer disconnect window; the dispatcher should keep the pending
  *   checkpoint for the reconnect-aware drain (Task 5).
  * - `busy` — observer is mid-turn from a previous wake. Dispatcher should
  *   enqueue (Task 4).
  * - `backpressure` — bufferedAmount exceeds threshold. Refuse rather
  *   than queue; the next checkpoint will try again.
- * - `failed` — `cliSocket.send` threw synchronously. Logged at EC-9 by
+ * - `failed` — `transport.send` threw synchronously. Logged at EC-9 by
  *   the dispatcher; do NOT mark the half degraded directly (Subprocess
  *   Council Rec 6).
  */
@@ -116,8 +118,9 @@ export type ClaudeAdapterEnqueueOutcome =
 export class ClaudeAdapter implements IBackendAdapter {
   private sessionId: string;
 
-  // WebSocket to the Claude Code CLI process
-  private cliSocket: ServerWebSocket<SocketData> | null = null;
+  // Control channel to the Claude Code CLI process. WebSocket for a pinned
+  // pre-2.1.121 CLI, stdio pipes for a current one — see ./cli-transport.ts.
+  private transport: CliTransport | null = null;
 
   // Callbacks registered by the bridge via on*() methods
   private browserMessageCb: ((msg: BrowserIncomingMessage) => void) | null = null;
@@ -266,7 +269,18 @@ export class ClaudeAdapter implements IBackendAdapter {
    * flushes any NDJSON messages that were queued before the connection.
    */
   attachWebSocket(ws: ServerWebSocket<SocketData>): void {
-    this.cliSocket = ws;
+    this.attachTransport(new WebSocketCliTransport(ws));
+  }
+
+  /**
+   * Transport-agnostic attach. `attachWebSocket` is the WS-flavoured wrapper;
+   * the stdio launcher calls this directly with a {@link StdioCliTransport}.
+   *
+   * Every turn-state reset below is attach-bound, not socket-bound: a fresh
+   * transport is by definition a fresh turn regardless of its kind.
+   */
+  attachTransport(transport: CliTransport): void {
+    this.transport = transport;
     // Council Review 2026-05-13 Subprocess #5: reset turn-state on every
     // attach. A fresh socket is by definition a fresh turn — closes the
     // late-detach race where the stale-socket guard in detachWebSocket
@@ -302,9 +316,9 @@ export class ClaudeAdapter implements IBackendAdapter {
    * `busy` regardless of actual observer state.
    */
   detachWebSocket(ws: ServerWebSocket<SocketData>): void {
-    // Only detach if this is the current socket -- ignore stale close events
-    if (this.cliSocket !== ws) return;
-    this.cliSocket = null;
+    // Only detach if this is the current transport -- ignore stale close events
+    if (this.transport?.raw !== ws) return;
+    this.transport = null;
     this.observerTurnState = "idle";
     // Mirror reset for the orchestrator-half. See `observerTurnState`
     // comment immediately above; same socket-bound semantics.
@@ -337,7 +351,7 @@ export class ClaudeAdapter implements IBackendAdapter {
   // -- IBackendAdapter: Transport state ---------------------------------------
 
   isConnected(): boolean {
-    return this.cliSocket !== null;
+    return this.transport !== null;
   }
 
   /**
@@ -348,20 +362,20 @@ export class ClaudeAdapter implements IBackendAdapter {
    * not-ready. See {@link IBackendAdapter.isReadyForServerFrame}.
    */
   isReadyForServerFrame(): boolean {
-    return this.cliSocket !== null && this.cliSocket.readyState === 1;
+    return this.transport !== null && this.transport.isOpen();
   }
 
   async disconnect(): Promise<void> {
     // Clear pending control requests to prevent memory leaks from
     // unresolved promises (CLI won't respond after disconnect)
     this.pendingControlRequests.clear();
-    if (this.cliSocket) {
+    if (this.transport) {
       try {
-        this.cliSocket.close();
+        this.transport.close();
       } catch {
-        // Socket may already be closed
+        // Transport may already be closed
       }
-      this.cliSocket = null;
+      this.transport = null;
     }
   }
 
@@ -375,7 +389,7 @@ export class ClaudeAdapter implements IBackendAdapter {
    * never arrive. Stale `in-flight` here would deadlock the dispatcher.
    */
   handleTransportClose(): void {
-    this.cliSocket = null;
+    this.transport = null;
     this.observerTurnState = "idle";
   }
 
@@ -1213,7 +1227,7 @@ export class ClaudeAdapter implements IBackendAdapter {
    *
    * Gating order — three strict checks per Subprocess Council Rec 3:
    * 1. `observerTurnState === "in-flight"` → return `busy`
-   * 2. `cliSocket` is null or not OPEN → return `socket_disconnected`
+   * 2. transport is null or not writable → return `socket_disconnected`
    * 3. `bufferedAmount > OBSERVER_WAKE_BACKPRESSURE_THRESHOLD_BYTES`
    *    → return `backpressure`
    *
@@ -1271,14 +1285,14 @@ export class ClaudeAdapter implements IBackendAdapter {
       return { kind: "busy" };
     }
 
-    if (!this.cliSocket) {
+    if (!this.transport) {
       return { kind: "socket_disconnected" };
     }
-    if (this.cliSocket.readyState !== 1) {
+    if (!this.transport.isOpen()) {
       return { kind: "socket_disconnected" };
     }
 
-    const buffered = this.cliSocket.getBufferedAmount();
+    const buffered = this.transport.bufferedAmount();
     if (buffered > OBSERVER_WAKE_BACKPRESSURE_THRESHOLD_BYTES) {
       return { kind: "backpressure", bufferedAmount: buffered };
     }
@@ -1304,7 +1318,7 @@ export class ClaudeAdapter implements IBackendAdapter {
       this.recorder?.record(
         this.sessionId, "out", frame, "cli", "claude", "", "server:auto-proceed",
       );
-      this.cliSocket.send(frame + "\n");
+      this.transport.send(frame + "\n");
     } catch (err) {
       return {
         kind: "failed",
@@ -1333,17 +1347,18 @@ export class ClaudeAdapter implements IBackendAdapter {
       return { kind: "busy" };
     }
 
-    // Gate 2: transport. readyState 1 === OPEN per WebSocket spec.
-    if (!this.cliSocket) {
+    // Gate 2: transport is attached AND writable right now.
+    if (!this.transport) {
       return { kind: "socket_disconnected" };
     }
-    if (this.cliSocket.readyState !== 1) {
+    if (!this.transport.isOpen()) {
       return { kind: "socket_disconnected" };
     }
 
-    // Gate 3: backpressure. Bun's ServerWebSocket exposes
-    // getBufferedAmount(); refuse rather than silently queue in JS.
-    const buffered = this.cliSocket.getBufferedAmount();
+    // Gate 3: backpressure. The WS transport reports Bun's buffered amount;
+    // the stdio transport reports 0 (a pipe exposes no queue depth), so this
+    // gate is a no-op there rather than a fabricated number.
+    const buffered = this.transport.bufferedAmount();
     if (buffered > OBSERVER_WAKE_BACKPRESSURE_THRESHOLD_BYTES) {
       return { kind: "backpressure", bufferedAmount: buffered };
     }
@@ -1382,7 +1397,7 @@ export class ClaudeAdapter implements IBackendAdapter {
       this.recorder?.record(
         this.sessionId, "out", frame, "cli", "claude", "", "server:council-wake",
       );
-      this.cliSocket.send(frame + "\n");
+      this.transport.send(frame + "\n");
     } catch (err) {
       return {
         kind: "failed",
@@ -1455,7 +1470,7 @@ export class ClaudeAdapter implements IBackendAdapter {
    * queues the message for later delivery (flushed in attachWebSocket).
    */
   private sendToBackend(ndjson: string): void {
-    if (!this.cliSocket) {
+    if (!this.transport) {
       console.log(
         `[claude-adapter] CLI not yet connected for session ${this.sessionId}, queuing message`,
       );
@@ -1573,8 +1588,8 @@ export class ClaudeAdapter implements IBackendAdapter {
   }
 
   /**
-   * Low-level send: writes NDJSON to the CLI socket with newline delimiter.
-   * Records the outgoing message. Assumes cliSocket is non-null.
+   * Low-level send: writes NDJSON to the CLI transport with newline delimiter.
+   * Records the outgoing message. Assumes the transport is non-null.
    */
   private sendRaw(ndjson: string): void {
     // Record raw outgoing CLI message
@@ -1583,7 +1598,7 @@ export class ClaudeAdapter implements IBackendAdapter {
     );
     try {
       // NDJSON requires a newline delimiter
-      this.cliSocket!.send(ndjson + "\n");
+      this.transport!.send(ndjson + "\n");
     } catch (err) {
       console.error(
         `[claude-adapter] Failed to send to CLI for session ${this.sessionId}:`,
