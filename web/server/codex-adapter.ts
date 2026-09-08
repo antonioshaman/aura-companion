@@ -1128,6 +1128,16 @@ export class CodexAdapter implements IBackendAdapter {
   /** Max retries for thread/start or thread/resume during initialization. */
   private static readonly INIT_THREAD_MAX_RETRIES = 3;
   private static readonly INIT_THREAD_RETRY_BASE_MS = 500;
+  /**
+   * Backoff base for the `Not initialized` handshake race (prod 2026-09-08,
+   * got-050): we send the `initialized` notification and `thread/start` in the
+   * same tick, and codex app-server occasionally services the request before
+   * the notification → JSON-RPC -32600 "Not initialized". The server IS up and
+   * a re-sent `initialized` + short pause is enough; no need for the 500ms
+   * transport-drop backoff. 3 of 21 codex observer spawns hit this in 3h and
+   * every one stayed dead (initFailed) because only "Transport closed" retried.
+   */
+  private static readonly INIT_NOT_INITIALIZED_RETRY_BASE_MS = 100;
 
   private async initialize(): Promise<void> {
     if (this.initInProgress) {
@@ -1239,8 +1249,23 @@ export class CodexAdapter implements IBackendAdapter {
         } catch (threadErr) {
           lastThreadError = threadErr;
           const isTransportClosed = threadErr instanceof Error && threadErr.message === "Transport closed";
-          if (!isTransportClosed || attempt >= CodexAdapter.INIT_THREAD_MAX_RETRIES - 1) {
+          const isNotInitialized = this.isNotInitializedError(threadErr);
+          if ((!isTransportClosed && !isNotInitialized) || attempt >= CodexAdapter.INIT_THREAD_MAX_RETRIES - 1) {
             break; // Non-transient error or last attempt — give up
+          }
+          if (isNotInitialized) {
+            // Handshake race (got-050): app-server saw thread/start before our
+            // `initialized` notification. Re-send the notification so the
+            // server's state is definitely past the barrier, then retry after
+            // a short pause. The turn-time `callAfterNotInitializedRetry` path
+            // re-runs the whole initialize(); doing that from INSIDE
+            // initialize() would recurse, so this in-loop retry is the
+            // init-path equivalent.
+            const delay = CodexAdapter.INIT_NOT_INITIALIZED_RETRY_BASE_MS * Math.pow(2, attempt);
+            console.warn(`[codex-adapter] thread start attempt ${attempt + 1} failed (Not initialized) — re-sending initialized, retrying in ${delay}ms`);
+            await this.transport.notify("initialized", {});
+            await new Promise((r) => setTimeout(r, delay));
+            continue;
           }
           const delay = CodexAdapter.INIT_THREAD_RETRY_BASE_MS * Math.pow(2, attempt);
           console.warn(`[codex-adapter] thread start attempt ${attempt + 1} failed (Transport closed), retrying in ${delay}ms`);

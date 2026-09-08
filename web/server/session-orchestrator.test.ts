@@ -1400,6 +1400,65 @@ describe("SessionOrchestrator", () => {
         (orchestrator as unknown as { intentionalKills: Set<string> }).intentionalKills.has("s1"),
       ).toBe(false);
     });
+
+    // got-050: the fresh-spawn spawn-checkpoint poll gives up after 30s when
+    // the observer adapter never becomes ready (codex `Not initialized` race).
+    // Relaunching the OBSERVER half must re-arm that poll so the second
+    // process gets the spawn checkpoint; the orchestrator half and groups
+    // that already emitted must not re-arm.
+    describe("spawn-checkpoint re-arm after observer relaunch (got-050)", () => {
+      type Priv = {
+        coordinator: unknown;
+        spawnCheckpointPending: Set<string>;
+        scheduleSpawnCheckpointWhenObserverReady: (g: string, oid: string, cwd: string) => Promise<void>;
+      };
+      const group = {
+        sessionGroupId: "grp_rearm",
+        status: "active",
+        primary: { sessionId: "s-orch" },
+        observer: { sessionId: "s-obs" },
+      };
+
+      function arm(pending: boolean) {
+        const priv = orchestrator as unknown as Priv;
+        priv.coordinator = {
+          findBySessionId: vi.fn((sid: string) =>
+            sid === "s-orch" || sid === "s-obs" ? group : undefined),
+        };
+        priv.spawnCheckpointPending.clear();
+        if (pending) priv.spawnCheckpointPending.add("grp_rearm");
+        const scheduleSpy = vi.fn(async () => {});
+        priv.scheduleSpawnCheckpointWhenObserverReady = scheduleSpy;
+        deps.launcher.getSession.mockReturnValue({ archived: false, cwd: "/ws/rearm" } as any);
+        return scheduleSpy;
+      }
+
+      it("re-arms the spawn-checkpoint poll when the observer half is relaunched and the group is still pending", async () => {
+        const scheduleSpy = arm(true);
+        const result = await orchestrator.relaunchSession("s-obs");
+        expect(result.ok).toBe(true);
+        expect(scheduleSpy).toHaveBeenCalledWith("grp_rearm", "s-obs", "/ws/rearm");
+      });
+
+      it("does NOT re-arm when the group already got its spawn checkpoint", async () => {
+        const scheduleSpy = arm(false);
+        await orchestrator.relaunchSession("s-obs");
+        expect(scheduleSpy).not.toHaveBeenCalled();
+      });
+
+      it("does NOT re-arm on an orchestrator-half relaunch", async () => {
+        const scheduleSpy = arm(true);
+        await orchestrator.relaunchSession("s-orch");
+        expect(scheduleSpy).not.toHaveBeenCalled();
+      });
+
+      it("does NOT re-arm when the relaunch itself failed", async () => {
+        const scheduleSpy = arm(true);
+        deps.launcher.relaunch.mockResolvedValueOnce({ ok: false, error: "spawn failed" });
+        await orchestrator.relaunchSession("s-obs");
+        expect(scheduleSpy).not.toHaveBeenCalled();
+      });
+    });
   });
 
   // ── Archive ───────────────────────────────────────────────────────────────
