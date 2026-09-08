@@ -3457,6 +3457,77 @@ describe("CodexAdapter with ICodexTransport", () => {
     expect(mock.calls.length).toBe(2);
   });
 
+  // got-050 (prod 2026-09-08): codex app-server serviced `thread/start` before
+  // the `initialized` notification we sent in the same tick → JSON-RPC -32600
+  // "Not initialized". Previously only "Transport closed" was retried, so the
+  // adapter went initFailed and the council observer stayed dead while its
+  // process kept listening. Validates: the init loop re-sends `initialized`,
+  // waits the short NOT_INITIALIZED backoff (100ms, not 500ms), retries
+  // thread/start and completes init on success.
+  it("retries thread/start after a Not initialized handshake race, re-sending initialized first", async () => {
+    const mock = createMockTransport();
+    const messages: BrowserIncomingMessage[] = [];
+    const initErrors: string[] = [];
+    const adapter = new CodexAdapter(mock.transport, "test-session-notinit", { model: "gpt-5.5" });
+    adapter.onBrowserMessage((msg) => messages.push(msg));
+    adapter.onInitError((err) => initErrors.push(err));
+
+    await new Promise((r) => setTimeout(r, 50));
+    mock.resolveCall(1, { userAgent: "codex" });
+    await new Promise((r) => setTimeout(r, 20));
+
+    // One `initialized` notification sent before the first thread/start.
+    expect(mock.notifications.filter((n) => n.method === "initialized").length).toBe(1);
+    expect(mock.calls[1]?.method).toBe("thread/start");
+    // Wire shape observed in the recording: {"error":{"code":-32600,"message":"Not initialized"}}
+    mock.rejectCall(2, new Error("Not initialized"));
+
+    // 100ms base backoff + buffer — well under the 500ms transport-drop backoff,
+    // so this also guards that the short path is taken.
+    await new Promise((r) => setTimeout(r, 250));
+
+    // `initialized` was re-sent and thread/start retried.
+    expect(mock.notifications.filter((n) => n.method === "initialized").length).toBe(2);
+    expect(mock.calls[2]?.method).toBe("thread/start");
+    mock.resolveCall(3, { thread: { id: "thr_after_notinit" } });
+    await new Promise((r) => setTimeout(r, 50));
+    mock.resolveCall(4, {}); // rateLimits
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(initErrors.length).toBe(0);
+    expect(messages.filter((m) => m.type === "session_init").length).toBe(1);
+    expect(adapter.getThreadId()).toBe("thr_after_notinit");
+    expect(adapter.isReadyForServerFrame()).toBe(true);
+  });
+
+  // Bounded: a server that answers "Not initialized" forever must still fail
+  // init after INIT_THREAD_MAX_RETRIES (3) attempts, not spin.
+  it("gives up after max retries when Not initialized persists", async () => {
+    const mock = createMockTransport();
+    const initErrors: string[] = [];
+    const adapter = new CodexAdapter(mock.transport, "test-session-notinit-exhaust", { model: "gpt-5.5" });
+    adapter.onInitError((err) => initErrors.push(err));
+
+    await new Promise((r) => setTimeout(r, 50));
+    mock.resolveCall(1, { userAgent: "codex" });
+    await new Promise((r) => setTimeout(r, 20));
+
+    mock.rejectCall(2, new Error("Not initialized"));
+    await new Promise((r) => setTimeout(r, 250)); // 100ms backoff
+    expect(mock.calls[2]?.method).toBe("thread/start");
+    mock.rejectCall(3, new Error("Not initialized"));
+    await new Promise((r) => setTimeout(r, 400)); // 200ms backoff
+    expect(mock.calls[3]?.method).toBe("thread/start");
+    mock.rejectCall(4, new Error("Not initialized"));
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(initErrors.length).toBe(1);
+    expect(initErrors[0]).toContain("Codex initialization failed");
+    // initialize + 3 thread/start attempts, nothing more.
+    expect(mock.calls.length).toBe(4);
+    expect(mock.notifications.filter((n) => n.method === "initialized").length).toBe(3);
+  });
+
   it("falls back to thread/start when thread/resume fails with non-transient error", async () => {
     // When thread/resume fails (e.g. "no rollout found"), the adapter should
     // automatically fall back to thread/start instead of failing entirely.

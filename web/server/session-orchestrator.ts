@@ -490,6 +490,16 @@ export class SessionOrchestrator {
   // Tracks sessions intentionally killed (idle-kill, manual delete/archive)
   // so the proactive keepalive doesn't relaunch them.
   private intentionalKills = new Set<string>();
+  /**
+   * Council groups whose spawn checkpoint has NOT landed yet (got-050). The
+   * fresh-spawn poll in `scheduleSpawnCheckpointWhenObserverReady` gives up
+   * after 30s if the observer adapter never becomes send-ready (e.g. codex
+   * init died on the `Not initialized` race); the group then lives without
+   * its spawn-ack review. A manual/auto relaunch of the observer half
+   * consults this set and re-arms the poll so the second spawn gets the
+   * checkpoint the first one missed. Cleared on emit + on group teardown.
+   */
+  private spawnCheckpointPending = new Set<string>();
   // Timers for proactive keepalive relaunches (for cancellation on delete)
   private keepaliveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -1916,6 +1926,7 @@ export class SessionOrchestrator {
   ): Promise<void> {
     const MAX_WAIT_MS = 30_000;
     const POLL_INTERVAL_MS = 250;
+    this.spawnCheckpointPending.add(sessionGroupId);
     const deadline = Date.now() + MAX_WAIT_MS;
     while (Date.now() < deadline) {
       if (this.observerReadyForWake(observerSessionId)) {
@@ -2030,6 +2041,7 @@ export class SessionOrchestrator {
     const target = join(workspaceCwd, ".council", "checkpoints", `${payload.phase}.json`);
     try {
       writeAtomicJson(target, payload);
+      this.spawnCheckpointPending.delete(sessionGroupId);
       log.info("session-orchestrator", "council.spawn_checkpoint.emitted", {
         event: "council.spawn_checkpoint.emitted",
         sessionGroupId,
@@ -2063,6 +2075,7 @@ export class SessionOrchestrator {
     this.councilGroupMeta.delete(sessionGroupId);
     this.councilGroupDegradedReason.delete(sessionGroupId);
     this.councilGroupDeadRole.delete(sessionGroupId);
+    this.spawnCheckpointPending.delete(sessionGroupId);
   }
 
   /**
@@ -3492,10 +3505,37 @@ export class SessionOrchestrator {
     // stale mark would lock `scheduleProactiveRelaunch` out of recovery).
     this.intentionalKills.add(sessionId);
     try {
-      return await this.launcher.relaunch(sessionId, opts);
+      const result = await this.launcher.relaunch(sessionId, opts);
+      if (result.ok) this.rearmSpawnCheckpointAfterObserverRelaunch(sessionId);
+      return result;
     } finally {
       this.intentionalKills.delete(sessionId);
     }
+  }
+
+  /**
+   * got-050: if the relaunched session is the OBSERVER half of a council
+   * group whose spawn checkpoint never landed (first spawn's adapter died
+   * before the 30s readiness poll gave up), re-arm the poll against the
+   * fresh process. Without this the pair runs without its spawn-ack review
+   * and the panel sits on "never checkpointed" until the next user phase.
+   * Orchestrator-half relaunches and groups that already got their spawn
+   * checkpoint are a no-op.
+   */
+  private rearmSpawnCheckpointAfterObserverRelaunch(sessionId: string): void {
+    const group = this.coordinator?.findBySessionId(sessionId);
+    if (!group || group.status === "archived") return;
+    if (group.observer.sessionId !== sessionId) return;
+    if (!this.spawnCheckpointPending.has(group.sessionGroupId)) return;
+    const cwd = this.launcher.getSession(sessionId)?.cwd;
+    if (!cwd) return;
+    log.info("session-orchestrator", "council.spawn_checkpoint.rearmed_after_relaunch", {
+      event: "council.spawn_checkpoint.rearmed_after_relaunch",
+      sessionGroupId: group.sessionGroupId,
+      sessionId,
+      role: "observer",
+    });
+    void this.scheduleSpawnCheckpointWhenObserverReady(group.sessionGroupId, sessionId, cwd);
   }
 
   // ── Archive ────────────────────────────────────────────────────────────────
