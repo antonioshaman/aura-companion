@@ -45,7 +45,16 @@ export interface IBackendAdapter {
   /** Register callback for transport disconnection. */
   onDisconnect(cb: () => void): void;
 
-  /** Register callback for initialization errors. */
+  /**
+   * Register callback for initialization errors.
+   *
+   * **Additive, not last-writer-wins.** An adapter has two independent
+   * init-error subscribers by design: the launcher that spawned it (process
+   * teardown, port release, model-fallback respawn) and the bridge that
+   * attached it (user-facing error frame). An implementation that stores a
+   * single callback silently disables the launcher's cleanup as soon as the
+   * bridge attaches — see the note on `CodexAdapter.initErrorCbs`.
+   */
   onInitError?(cb: (error: string) => void): void;
 
   // ── Optional capabilities (not all backends support these) ──

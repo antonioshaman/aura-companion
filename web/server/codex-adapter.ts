@@ -446,7 +446,21 @@ export class CodexAdapter implements IBackendAdapter {
   private browserMessageCb: ((msg: BrowserIncomingMessage) => void) | null = null;
   private sessionMetaCb: ((meta: { cliSessionId?: string; model?: string; cwd?: string }) => void) | null = null;
   private disconnectCb: (() => void) | null = null;
-  private initErrorCb: ((error: string) => void) | null = null;
+  /**
+   * Init-error subscribers. A LIST, not a single slot (prod 2026-09-08):
+   * `cli-launcher` registers its handler at spawn — the one that SIGTERMs
+   * the codex procs, releases the WS port, marks the session `exited` and
+   * performs the model-rejection fallback respawn — and then emits
+   * `backend:codex-adapter-created`, which makes `WsBridge.attachAdapter`
+   * register its own. With a single slot the bridge's registration silently
+   * replaced the launcher's, so on a real init failure nothing cleaned up:
+   * the app-server subprocess kept running, the session stayed `connected`,
+   * and every server-initiated send dropped as `socket_disconnected` (a
+   * council observer in that state never wakes). `cli-launcher.test.ts`
+   * exercises the launcher's handler directly, so the unit tests kept
+   * passing while the wiring was dead.
+   */
+  private initErrorCbs: ((error: string) => void)[] = [];
 
   // State
   private threadId: string | null = null;
@@ -1085,7 +1099,7 @@ export class CodexAdapter implements IBackendAdapter {
   }
 
   onInitError(cb: (error: string) => void): void {
-    this.initErrorCb = cb;
+    this.initErrorCbs.push(cb);
   }
 
   isConnected(): boolean {
@@ -1347,7 +1361,16 @@ export class CodexAdapter implements IBackendAdapter {
       if (this.overloadRetryTimer) { clearTimeout(this.overloadRetryTimer); this.overloadRetryTimer = null; }
       this.pendingOutgoing.length = 0;
       this.emit({ type: "error", message: errorMsg });
-      this.initErrorCb?.(errorMsg);
+      // Every subscriber runs, and one that throws must not swallow the
+      // others — the launcher's cleanup and the bridge's user-facing error
+      // frame are independent responsibilities.
+      for (const cb of [...this.initErrorCbs]) {
+        try {
+          cb(errorMsg);
+        } catch (cbErr) {
+          console.error(`[codex-adapter] onInitError subscriber threw: ${cbErr}`);
+        }
+      }
     }
   }
 
