@@ -161,7 +161,8 @@ vi.mock("./settings-manager.js", () => ({
 // ─── Imports (after mocks) ───────────────────────────────────────────────────
 
 import { SessionStore } from "./session-store.js";
-import { CliLauncher } from "./cli-launcher.js";
+import { CliLauncher, shouldClearResumeAfterExit } from "./cli-launcher.js";
+import type { SdkSessionInfo } from "./cli-launcher.js";
 import { readLaunchableCodexModels } from "./codex-models.js";
 import { companionBus } from "./event-bus.js";
 import { log } from "./logger.js";
@@ -3256,5 +3257,55 @@ describe("prepareCodexHome auth.json seeding", () => {
     mockLegacyCodexHome.path = "/nonexistent-legacy-codex-home";
     callPrepare();
     expect(() => readFileSync(join(codexHome, "auth.json"), "utf-8")).toThrow();
+  });
+});
+
+// §7.1 hardening: a single fast resume-death must NOT destroy cliSessionId.
+// The pure decision helper is unit-tested directly so the threshold logic is
+// pinned without wrestling the spawn/relaunch harness. Regression guard for the
+// stdio-transport cutover, where a transient/version mismatch looks identical to
+// a genuinely dead --resume target.
+describe("shouldClearResumeAfterExit", () => {
+  function mkSession(overrides: Partial<SdkSessionInfo> = {}): SdkSessionInfo {
+    return {
+      sessionId: "s",
+      state: "exited",
+      cwd: "/tmp",
+      createdAt: Date.now(),
+      cliSessionId: "cli-abc",
+      ...overrides,
+    };
+  }
+
+  it("does NOT clear on the first fast resume-death (transient/version hiccup absorbed)", () => {
+    const session = mkSession();
+    // uptime under the window, resuming: suspicious but not conclusive.
+    expect(shouldClearResumeAfterExit(session, 1200, true)).toBe(false);
+    expect(session.resumeImmediateFailures).toBe(1);
+  });
+
+  it("clears only after a second consecutive fast resume-death", () => {
+    const session = mkSession();
+    expect(shouldClearResumeAfterExit(session, 500, true)).toBe(false);
+    expect(shouldClearResumeAfterExit(session, 500, true)).toBe(true);
+    expect(session.resumeImmediateFailures).toBe(2);
+  });
+
+  it("resets the counter when a spawn lives past the window (resume worked)", () => {
+    const session = mkSession({ resumeImmediateFailures: 1 });
+    // A healthy spawn that outlived the window clears the streak.
+    expect(shouldClearResumeAfterExit(session, 30_000, true)).toBe(false);
+    expect(session.resumeImmediateFailures).toBe(0);
+    // A subsequent fresh fast death starts counting from zero again.
+    expect(shouldClearResumeAfterExit(session, 500, true)).toBe(false);
+    expect(session.resumeImmediateFailures).toBe(1);
+  });
+
+  it("never counts a fast death that was not a resume", () => {
+    const session = mkSession({ cliSessionId: undefined });
+    // No --resume in play: a fast death is a normal fresh-spawn failure, and
+    // there is no conversation reference to protect.
+    expect(shouldClearResumeAfterExit(session, 200, false)).toBe(false);
+    expect(session.resumeImmediateFailures).toBe(0);
   });
 });
