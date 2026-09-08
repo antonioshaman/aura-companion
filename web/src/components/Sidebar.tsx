@@ -7,7 +7,7 @@ import { navigateToSession, navigateHome, parseHash } from "../utils/routing.js"
 import { ProjectGroup } from "./ProjectGroup.js";
 import { GlobalUsageBadge } from "./GlobalUsageBadge.js";
 import { TelemetryNudge } from "./TelemetryNudge.js";
-import { SessionItem } from "./SessionItem.js";
+import { SessionItem, type CouncilConvergenceInfo } from "./SessionItem.js";
 import { groupSessionsByProject, type SessionItem as SessionItemType } from "../utils/project-grouping.js";
 
 interface NavItem {
@@ -180,7 +180,7 @@ interface CollapsibleSessionListProps {
   sessionNames: Map<string, string>;
   pendingPermissions: Map<string, Map<string, unknown>>;
   recentlyRenamed: Set<string>;
-  getCouncilInfo: (id: string) => { pairing?: string; unreadStops?: number; role?: "orchestrator" | "observer" };
+  getCouncilInfo: (id: string) => { pairing?: string; unreadStops?: number; role?: "orchestrator" | "observer"; convergence?: CouncilConvergenceInfo };
   /** PLAN T12 (Phase G) - per-session terminal-failure reason map. */
   cliFailures: Map<string, { reason: import("../store/cli-status-slice.js").CliFailure["reason"] }>;
   sessionItemProps: SessionItemSharedProps;
@@ -233,6 +233,7 @@ function CollapsibleSessionList({
                 councilPairing={council.pairing}
                 councilUnreadStops={council.unreadStops}
                 councilRole={council.role}
+                councilConvergence={council.convergence}
                 cliFailedReason={failed?.reason}
                 {...sessionItemProps}
               />
@@ -704,7 +705,12 @@ export function Sidebar() {
    * from the store maps. Hoisted out of the JSX so the closure cost stays
    * bounded as the session list grows.
    */
-  function councilInfoFor(sessionId: string): { pairing?: string; unreadStops?: number; role?: "orchestrator" | "observer" } {
+  function councilInfoFor(sessionId: string): {
+    pairing?: string;
+    unreadStops?: number;
+    role?: "orchestrator" | "observer";
+    convergence?: CouncilConvergenceInfo;
+  } {
     const groupId = groupBySessionId.get(sessionId);
     if (!groupId) return {};
     const group = groups.get(groupId);
@@ -725,7 +731,25 @@ export function Sidebar() {
     let role: "orchestrator" | "observer" | undefined;
     if (group.primarySessionId === sessionId) role = "orchestrator";
     else if (group.observerSessionId === sessionId) role = "observer";
-    return { pairing: group.pairing, unreadStops: unread, role };
+    // Bidirectional pipeline Story 4.1.5 — convergence badge data. Emit when
+    // the pair is degraded (badge shows the frozen ⚠️ state) OR when the
+    // server has published convergence progress. Absent otherwise so a
+    // freshly-paired, never-checkpointed group shows no badge.
+    const degraded = group.status === "degraded";
+    const hasConvergenceData =
+      typeof group.convergenceState === "string" &&
+      typeof group.cycleNumber === "number" &&
+      typeof group.convergenceThreshold === "number";
+    const convergence: CouncilConvergenceInfo | undefined =
+      degraded || hasConvergenceData
+        ? {
+            state: group.convergenceState,
+            cycleNumber: group.cycleNumber,
+            threshold: group.convergenceThreshold,
+            degraded,
+          }
+        : undefined;
+    return { pairing: group.pairing, unreadStops: unread, role, convergence };
   }
 
   return (

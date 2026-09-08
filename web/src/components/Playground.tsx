@@ -3734,6 +3734,73 @@ function PlaygroundSessionItems() {
           />
         </div>
       </Card>
+
+      {/* Bidirectional pipeline Story 4.1.5 — convergence badge in the sidebar
+          row. Mid-cycle: 🔄 N/T. The badge sits in the meta-row chip cluster,
+          left of the backend badge, and is data-gated (only council pairs with
+          convergence progress or a degraded status carry it). */}
+      <Card label="Council pair — convergence mid-cycle (🔄 2/3)">
+        <div className="bg-cc-sidebar rounded-lg p-1">
+          <SessionItem
+            session={mockSession({
+              isConnected: true,
+              status: "running",
+              backendType: "claude",
+            })}
+            isActive={false}
+            sessionName="Iterating toward convergence"
+            permCount={0}
+            isRecentlyRenamed={false}
+            councilPairing="claude+codex"
+            councilRole="orchestrator"
+            councilConvergence={{ state: "in-progress", cycleNumber: 2, threshold: 3, degraded: false }}
+            {...noopSessionItemProps}
+          />
+        </div>
+      </Card>
+
+      {/* Converged — ✅ green badge; pair is ready to ship. */}
+      <Card label="Council pair — converged (✅ ready to ship)">
+        <div className="bg-cc-sidebar rounded-lg p-1">
+          <SessionItem
+            session={mockSession({
+              isConnected: true,
+              status: "idle",
+              backendType: "claude",
+            })}
+            isActive={false}
+            sessionName="Feature complete — 3 clean cycles"
+            permCount={0}
+            isRecentlyRenamed={false}
+            councilPairing="claude+codex"
+            councilRole="orchestrator"
+            councilConvergence={{ state: "converged", cycleNumber: 3, threshold: 3, degraded: false }}
+            {...noopSessionItemProps}
+          />
+        </div>
+      </Card>
+
+      {/* Degraded — ⚠️ amber badge; counter frozen while a half is offline.
+          Degraded takes priority over any convergence progress (AC 193). */}
+      <Card label="Council pair — degraded (⚠️ counter frozen)">
+        <div className="bg-cc-sidebar rounded-lg p-1">
+          <SessionItem
+            session={mockSession({
+              isConnected: false,
+              status: "idle",
+              backendType: "claude",
+            })}
+            isActive={false}
+            sessionName="Observer half went offline"
+            permCount={0}
+            isRecentlyRenamed={false}
+            councilPairing="claude+codex"
+            councilRole="orchestrator"
+            councilConvergence={{ state: "in-progress", cycleNumber: 2, threshold: 3, degraded: true }}
+            {...noopSessionItemProps}
+          />
+        </div>
+      </Card>
     </div>
   );
 }
