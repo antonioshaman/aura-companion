@@ -63,6 +63,42 @@ function claudeTransportMode(): "stdio" | "ws" {
   return (process.env.COMPANION_CLAUDE_TRANSPORT || "stdio").toLowerCase() === "ws" ? "ws" : "stdio";
 }
 
+/**
+ * A spawn dying within this window while resuming is *suspicious* — it may mean
+ * the resume target is gone, but it may equally be a version/transport mismatch
+ * or a transient failure. Kept identical to the pre-existing 5s heuristic.
+ */
+const RESUME_FAILURE_UPTIME_MS = 5000;
+
+/**
+ * How many *consecutive* fast resume-deaths it takes before we give up on the
+ * `cliSessionId` and start fresh. A genuinely dead resume target fails
+ * identically every attempt and clears after this many; a one-off transient
+ * (e.g. the stdio-transport cutover) is absorbed without destroying the
+ * conversation reference.
+ */
+const RESUME_FAILURE_THRESHOLD = 2;
+
+/**
+ * Shared decision for the two `proc.exited` handlers (WS + stdio). Mutates the
+ * session's `resumeImmediateFailures` counter and returns whether the caller
+ * should discard `cliSessionId`. A spawn that lived past the window resets the
+ * counter (the resume worked); a fast death while resuming increments it and
+ * only trips the discard once the threshold is reached.
+ */
+export function shouldClearResumeAfterExit(
+  session: SdkSessionInfo,
+  uptimeMs: number,
+  wasResuming: boolean,
+): boolean {
+  if (uptimeMs >= RESUME_FAILURE_UPTIME_MS || !wasResuming) {
+    session.resumeImmediateFailures = 0;
+    return false;
+  }
+  session.resumeImmediateFailures = (session.resumeImmediateFailures ?? 0) + 1;
+  return session.resumeImmediateFailures >= RESUME_FAILURE_THRESHOLD;
+}
+
 /** Whether WebSocket transport is enabled for Codex sessions. */
 function isCodexWsTransportEnabled(): boolean {
   const val = (process.env.COMPANION_CODEX_TRANSPORT || "ws").toLowerCase();
@@ -128,6 +164,14 @@ export interface SdkSessionInfo {
   createdAt: number;
   /** The CLI's internal session ID (from system.init), used for --resume */
   cliSessionId?: string;
+  /**
+   * Count of consecutive spawns that died within RESUME_FAILURE_UPTIME_MS while
+   * carrying `--resume`. A single fast death is NOT proof the resume target is
+   * bad — a version/transport mismatch or transient error looks identical — so
+   * we only discard `cliSessionId` once this reaches RESUME_FAILURE_THRESHOLD.
+   * Reset to 0 whenever a spawn lives past the window (the resume worked).
+   */
+  resumeImmediateFailures?: number;
   archived?: boolean;
   /** User-facing session name */
   name?: string;
@@ -1497,12 +1541,15 @@ export class CliLauncher {
         session.state = "exited";
         session.exitCode = exitCode;
 
-        // If the process exited almost immediately with --resume, the resume likely failed.
-        // Clear cliSessionId so the next relaunch starts fresh.
+        // A fast death while resuming is suspicious but not conclusive — only
+        // discard cliSessionId after RESUME_FAILURE_THRESHOLD consecutive ones,
+        // so a transient/version hiccup doesn't destroy the conversation ref.
         const uptime = Date.now() - spawnedAt;
-        if (uptime < 5000 && options.resumeSessionId) {
-          console.error(`[cli-launcher] Session ${sessionId} exited immediately after --resume (${uptime}ms). Clearing cliSessionId for fresh start.`);
+        if (shouldClearResumeAfterExit(session, uptime, !!options.resumeSessionId)) {
+          console.error(`[cli-launcher] Session ${sessionId} exited immediately after --resume (${uptime}ms) ${session.resumeImmediateFailures}x. Clearing cliSessionId for fresh start.`);
           session.cliSessionId = undefined;
+        } else if (uptime < 5000 && options.resumeSessionId) {
+          console.error(`[cli-launcher] Session ${sessionId} exited immediately after --resume (${uptime}ms), attempt ${session.resumeImmediateFailures}/${RESUME_FAILURE_THRESHOLD}. Preserving cliSessionId for retry.`);
         }
       }
       this.processes.delete(sessionId);
@@ -1644,16 +1691,24 @@ export class CliLauncher {
         session.state = "exited";
         session.exitCode = exitCode;
 
-        // Immediate exit under --resume means the resume target was rejected
-        // (rolled-over history, deleted jsonl). Clear it so the next relaunch
-        // starts fresh instead of failing identically forever.
+        // Immediate exit under --resume *may* mean the resume target was
+        // rejected (rolled-over history, deleted jsonl), but it looks identical
+        // to a version/transport mismatch or transient error — most acutely at
+        // the stdio-transport cutover. Only clear cliSessionId after
+        // RESUME_FAILURE_THRESHOLD consecutive fast deaths so one bad spawn
+        // doesn't permanently strand the conversation.
         const uptime = Date.now() - spawnedAt;
-        if (uptime < 5000 && options.resumeSessionId) {
+        if (shouldClearResumeAfterExit(session, uptime, !!options.resumeSessionId)) {
           console.error(
-            `[cli-launcher] Session ${sessionId} exited immediately after --resume (${uptime}ms). ` +
+            `[cli-launcher] Session ${sessionId} exited immediately after --resume (${uptime}ms) ${session.resumeImmediateFailures}x. ` +
             `Clearing cliSessionId for fresh start.`,
           );
           session.cliSessionId = undefined;
+        } else if (uptime < 5000 && options.resumeSessionId) {
+          console.error(
+            `[cli-launcher] Session ${sessionId} exited immediately after --resume (${uptime}ms), ` +
+            `attempt ${session.resumeImmediateFailures}/${RESUME_FAILURE_THRESHOLD}. Preserving cliSessionId for retry.`,
+          );
         }
       }
       this.processes.delete(sessionId);
