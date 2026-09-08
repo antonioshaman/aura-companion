@@ -22,6 +22,13 @@ interface SessionItemProps {
    */
   councilRole?: "orchestrator" | "observer";
   /**
+   * Bidirectional pipeline Story 4.1.5 — convergence badge data for the
+   * council pair this session belongs to. Undefined for solo sessions (and
+   * for council pairs that have neither convergence progress nor a degraded
+   * status). Drives the `🔄 N/T` / `✅ Converged` / `⚠️ Degraded` badge.
+   */
+  councilConvergence?: CouncilConvergenceInfo;
+  /**
    * PLAN T12 (Phase G) — when present, this session has a terminal
    * CLI failure (cli_failed wire frame landed). Renders a destructive
    * `✕` glyph next to the status dot + tooltip with the cause headline.
@@ -87,6 +94,80 @@ function StatusDot({ status }: { status: DerivedStatus }) {
   }
 }
 
+/**
+ * Bidirectional pipeline Story 4.1.5 — convergence badge in the sidebar row,
+ * attached to the SAME location as the existing ☼/☽ role decoration (spec's
+ * "convergence info attaches to the same location, not a new banner surface").
+ *
+ * Data-gated, NOT feature-flag-gated: it reads the server-authoritative
+ * convergence fields already on `GroupRecord` (populated by the live
+ * convergence-tracker → `group_convergence` pipeline) and only renders for
+ * council pairs — solo sessions never carry this prop. This matches the
+ * already-shipped, unconditional convergence rendering in `ObserverPanel`.
+ *
+ * Priority ladder mirrors AC 191-193:
+ *   degraded            →  ⚠️ Degraded   (amber-500, counter frozen)
+ *   converged           →  ✅ Converged  (emerald-500)
+ *   cycleNumber > 0     →  🔄 N/T        (mid-cycle progress)
+ *   otherwise           →  nothing (cycle 0, no progress yet — no clutter)
+ *
+ * The click-to-open popover (View final review / Reset counter / Dismiss) from
+ * AC 194 needs server endpoints that do not exist yet and is a documented
+ * follow-up; this badge is display-only and complete on its own.
+ */
+export interface CouncilConvergenceInfo {
+  state?: "in-progress" | "converged" | "revoked";
+  cycleNumber?: number;
+  threshold?: number;
+  degraded: boolean;
+}
+
+function CouncilConvergenceBadge({ info }: { info: CouncilConvergenceInfo }) {
+  if (info.degraded) {
+    return (
+      <span
+        data-testid="council-convergence-badge"
+        data-state="degraded"
+        aria-label="Convergence frozen — pair degraded"
+        title="Convergence frozen — pair degraded"
+        className="flex items-center gap-0.5 text-[9px] font-semibold px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-500 leading-none shrink-0"
+      >
+        <span aria-hidden="true">⚠️</span>
+        <span>Degraded</span>
+      </span>
+    );
+  }
+  if (info.state === "converged") {
+    return (
+      <span
+        data-testid="council-convergence-badge"
+        data-state="converged"
+        aria-label="Converged — ready to ship"
+        title="Converged — ready to ship"
+        className="flex items-center gap-0.5 text-[9px] font-semibold px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-500 leading-none shrink-0"
+      >
+        <span aria-hidden="true">✅</span>
+        <span>Converged</span>
+      </span>
+    );
+  }
+  if (typeof info.cycleNumber === "number" && info.cycleNumber > 0 && typeof info.threshold === "number") {
+    return (
+      <span
+        data-testid="council-convergence-badge"
+        data-state="cycle-progress"
+        aria-label={`Convergence cycle ${info.cycleNumber} of ${info.threshold} clean cycles`}
+        title={`Cycle ${info.cycleNumber} of ${info.threshold} clean cycles`}
+        className="flex items-center gap-0.5 text-[9px] font-semibold px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-400 leading-none shrink-0"
+      >
+        <span aria-hidden="true">🔄</span>
+        <span>{info.cycleNumber}/{info.threshold}</span>
+      </span>
+    );
+  }
+  return null;
+}
+
 function BackendBadge({ type }: { type: "claude" | "codex" }) {
   if (type === "codex") {
     return (
@@ -112,6 +193,7 @@ export function SessionItem({
   councilPairing,
   councilUnreadStops,
   councilRole,
+  councilConvergence,
   cliFailedReason,
   onSelect,
   onStartRename,
@@ -323,6 +405,7 @@ export function SessionItem({
                 </span>
               )}
               <span className="flex items-center gap-1 shrink-0">
+                {councilConvergence && <CouncilConvergenceBadge info={councilConvergence} />}
                 <BackendBadge type={s.backendType} />
                 {s.isContainerized && (
                   <span className="flex items-center px-1 py-0.5 rounded bg-blue-400/10" title="Docker">

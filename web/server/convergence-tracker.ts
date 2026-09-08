@@ -156,6 +156,15 @@ export class ConvergenceTracker {
   private readonly isFrozen: (sid: string) => boolean;
   private readonly getThreshold: (sid: string) => number;
   private unsubscribe: (() => void) | null = null;
+  /**
+   * got-045 guard: per-group set of already-folded review keys
+   * (`${checkpointId}::${observerProvider}`). A checkpoint's review is
+   * counted at most once per provider so restart catch-up — which replays
+   * `council.wake.restart_catchup` against the same stale checkpoint and
+   * rewrites an (empty) review — can NOT fabricate additional clean cycles
+   * and fake a "converged" pair that reviewed nothing real.
+   */
+  private readonly seenReviews = new Map<string, Set<string>>();
 
   constructor(opts: ConvergenceTrackerOptions) {
     this.states = opts.states ?? new Map();
@@ -167,7 +176,12 @@ export class ConvergenceTracker {
   attach(): void {
     if (this.unsubscribe) return;
     this.unsubscribe = companionBus.on("group:review", (payload) => {
-      this.handleReview(payload.sessionGroupId, payload.findings);
+      this.handleReview(
+        payload.sessionGroupId,
+        payload.checkpointId,
+        payload.observerProvider,
+        payload.findings,
+      );
     });
   }
 
@@ -181,6 +195,7 @@ export class ConvergenceTracker {
   /** Drop the per-group state — call on `group:exited`. */
   forgetGroup(sessionGroupId: string): void {
     this.states.delete(sessionGroupId);
+    this.seenReviews.delete(sessionGroupId);
   }
 
   /** Read-only state inspection — for tests + the broadcast layer. */
@@ -190,12 +205,32 @@ export class ConvergenceTracker {
 
   private handleReview(
     sessionGroupId: string,
+    checkpointId: string,
+    observerProvider: string,
     findings: readonly BrowserObserverFinding[],
   ): void {
+    const frozen = this.isFrozen(sessionGroupId);
+    // got-045: dedup a checkpoint's review per provider. A distinct
+    // (checkpointId, provider) pair folds exactly once; a replay of the same
+    // pair — the restart catch-up signature — is dropped before it can touch
+    // the counter. Only dedup when we have a real checkpoint id; a missing id
+    // is treated as un-keyable and folded as before (never collapsed together).
+    // Frozen (degraded) reviews are skipped here: they fold to a no-op anyway,
+    // and must NOT consume the dedup slot — after recovery the same checkpoint
+    // must still be countable.
+    if (!frozen && checkpointId) {
+      const key = `${checkpointId}::${observerProvider}`;
+      let seen = this.seenReviews.get(sessionGroupId);
+      if (!seen) {
+        seen = new Set();
+        this.seenReviews.set(sessionGroupId, seen);
+      }
+      if (seen.has(key)) return;
+      seen.add(key);
+    }
     const prev = this.states.get(sessionGroupId)
       ?? initialConvergenceState(this.getThreshold(sessionGroupId));
     const hasStop = reviewHasStop(findings);
-    const frozen = this.isFrozen(sessionGroupId);
     const { next, emit } = nextStateAfterReview(prev, hasStop, frozen);
     this.states.set(sessionGroupId, next);
     if (emit !== "noop") {

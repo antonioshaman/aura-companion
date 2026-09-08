@@ -75,7 +75,15 @@ interface MockStoreState {
   // Council Mode slice — Sidebar reads these to render per-session
   // pairing badge + unread STOP counter; empty maps mean no badges.
   groupBySessionId: Map<string, string>;
-  groups: Map<string, { pairing: string }>;
+  groups: Map<string, {
+    pairing: string;
+    primarySessionId?: string;
+    observerSessionId?: string;
+    status?: string;
+    convergenceState?: "in-progress" | "converged" | "revoked";
+    cycleNumber?: number;
+    convergenceThreshold?: number;
+  }>;
   findings: Map<string, unknown[]>;
   dismissedStopIds: Set<string>;
   // PLAN T12 (Phase G) - per-session terminal-failure axis.
@@ -2141,6 +2149,92 @@ describe("Sidebar — Council Mode badges", () => {
     render(<Sidebar />);
     expect(screen.queryByTestId("council-session-badge")).toBeNull();
     expect(screen.queryByTestId("council-unread-count")).toBeNull();
+  });
+});
+
+// ─── Council Mode — convergence badge derivation (Story 4.1.5) ─────────────
+
+describe("Sidebar — Council convergence badge", () => {
+  // councilInfoFor derives the badge data from GroupRecord and threads it to
+  // SessionItem. These tests exercise the derivation end-to-end (store shape →
+  // rendered badge) so a change to either half can't silently drop the badge.
+  function seedConvergenceSession(
+    sessionId: string,
+    group: {
+      pairing: string;
+      status?: string;
+      convergenceState?: "in-progress" | "converged" | "revoked";
+      cycleNumber?: number;
+      convergenceThreshold?: number;
+    },
+  ) {
+    const groupId = `grp_for_${sessionId}`;
+    const sdkSession = makeSdkSession(sessionId);
+    mockState.sessions = new Map([[sessionId, makeSession(sessionId)]]);
+    mockState.sdkSessions = [sdkSession];
+    mockState.cliConnected = new Map([[sessionId, true]]);
+    mockState.sessionStatus = new Map([[sessionId, "idle"]]);
+    mockState.groupBySessionId = new Map([[sessionId, groupId]]);
+    // primarySessionId === sessionId so the row is the orchestrator half.
+    mockState.groups = new Map([[groupId, { primarySessionId: sessionId, ...group }]]);
+    mockState.findings = new Map([[groupId, []]]);
+    mockState.dismissedStopIds = new Set();
+  }
+
+  it("renders the mid-cycle badge when the group has convergence progress", () => {
+    seedConvergenceSession("s_cycle", {
+      pairing: "claude+codex",
+      status: "active",
+      convergenceState: "in-progress",
+      cycleNumber: 2,
+      convergenceThreshold: 3,
+    });
+    render(<Sidebar />);
+    const badge = screen.getAllByTestId("council-convergence-badge")[0];
+    expect(badge).toHaveAttribute("data-state", "cycle-progress");
+    expect(badge.textContent).toContain("2/3");
+  });
+
+  it("renders the converged badge when the group has converged", () => {
+    seedConvergenceSession("s_converged", {
+      pairing: "claude+codex",
+      status: "active",
+      convergenceState: "converged",
+      cycleNumber: 3,
+      convergenceThreshold: 3,
+    });
+    render(<Sidebar />);
+    const badge = screen.getAllByTestId("council-convergence-badge")[0];
+    expect(badge).toHaveAttribute("data-state", "converged");
+  });
+
+  it("renders the frozen degraded badge when the group status is degraded", () => {
+    seedConvergenceSession("s_degraded", {
+      pairing: "claude+codex",
+      status: "degraded",
+      convergenceState: "in-progress",
+      cycleNumber: 2,
+      convergenceThreshold: 3,
+    });
+    render(<Sidebar />);
+    const badge = screen.getAllByTestId("council-convergence-badge")[0];
+    expect(badge).toHaveAttribute("data-state", "degraded");
+  });
+
+  it("renders no convergence badge for a freshly-paired group with no progress", () => {
+    seedConvergenceSession("s_fresh", { pairing: "claude+codex", status: "active" });
+    render(<Sidebar />);
+    expect(screen.queryByTestId("council-convergence-badge")).toBeNull();
+  });
+
+  it("renders no convergence badge for a solo (non-council) session", () => {
+    const sdkSession = makeSdkSession("s_solo_conv");
+    mockState.sessions = new Map([["s_solo_conv", makeSession("s_solo_conv")]]);
+    mockState.sdkSessions = [sdkSession];
+    mockState.cliConnected = new Map([["s_solo_conv", true]]);
+    mockState.sessionStatus = new Map([["s_solo_conv", "idle"]]);
+    render(<Sidebar />);
+    expect(screen.queryByTestId("council-convergence-badge")).toBeNull();
   });
 });
 

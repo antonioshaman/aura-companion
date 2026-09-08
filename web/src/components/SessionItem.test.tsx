@@ -714,6 +714,97 @@ describe("SessionItem", () => {
     expect(onStartRename).toHaveBeenCalledWith("session-1", "claude-sonnet-4-6");
   });
 
+  // ─── Convergence badge (bidirectional pipeline Story 4.1.5) ──────────────
+  //
+  // The badge is data-gated: it reads the server-authoritative convergence
+  // fields already on GroupRecord (threaded through Sidebar.councilInfoFor).
+  // It renders in the meta-row chip cluster only for council pairs that have
+  // convergence progress or a degraded status. These tests lock the priority
+  // ladder (degraded > converged > cycle-progress > nothing) and the absent
+  // cases so a future edit can't silently make the badge appear on solo rows.
+
+  it("renders the mid-cycle convergence badge (🔄 N/T) with an accessible label", () => {
+    render(
+      <SessionItem
+        {...buildProps({
+          councilRole: "orchestrator",
+          councilConvergence: { state: "in-progress", cycleNumber: 2, threshold: 3, degraded: false },
+        })}
+      />,
+    );
+    const badge = screen.getByTestId("council-convergence-badge");
+    expect(badge).toHaveAttribute("data-state", "cycle-progress");
+    expect(badge.textContent).toContain("2/3");
+    expect(badge).toHaveAttribute("aria-label", "Convergence cycle 2 of 3 clean cycles");
+  });
+
+  it("renders the converged badge (✅) when convergenceState is converged", () => {
+    render(
+      <SessionItem
+        {...buildProps({
+          councilRole: "orchestrator",
+          councilConvergence: { state: "converged", cycleNumber: 3, threshold: 3, degraded: false },
+        })}
+      />,
+    );
+    const badge = screen.getByTestId("council-convergence-badge");
+    expect(badge).toHaveAttribute("data-state", "converged");
+    expect(badge.textContent).toContain("Converged");
+    expect(badge).toHaveAttribute("aria-label", "Converged — ready to ship");
+  });
+
+  it("shows the degraded badge (⚠️) with the counter frozen, taking priority over cycle progress (AC 193)", () => {
+    // Even though the pair had mid-cycle progress (cycleNumber 2), a degraded
+    // status must flip the badge to the frozen ⚠️ state — the counter must not
+    // keep advancing while a half is offline.
+    render(
+      <SessionItem
+        {...buildProps({
+          councilRole: "orchestrator",
+          councilConvergence: { state: "in-progress", cycleNumber: 2, threshold: 3, degraded: true },
+        })}
+      />,
+    );
+    const badge = screen.getByTestId("council-convergence-badge");
+    expect(badge).toHaveAttribute("data-state", "degraded");
+    expect(badge.textContent).toContain("Degraded");
+    // The frozen counter must NOT surface a misleading "2/3" progress figure.
+    expect(badge.textContent).not.toContain("2/3");
+  });
+
+  it("does NOT render a convergence badge for solo sessions (no councilConvergence prop)", () => {
+    render(<SessionItem {...buildProps()} />);
+    expect(screen.queryByTestId("council-convergence-badge")).not.toBeInTheDocument();
+  });
+
+  it("does NOT render a convergence badge at cycle 0 with no progress and not degraded", () => {
+    // A freshly-paired group that has never checkpointed carries cycleNumber 0
+    // and in-progress state — the badge must stay hidden to avoid clutter.
+    render(
+      <SessionItem
+        {...buildProps({
+          councilRole: "orchestrator",
+          councilConvergence: { state: "in-progress", cycleNumber: 0, threshold: 3, degraded: false },
+        })}
+      />,
+    );
+    expect(screen.queryByTestId("council-convergence-badge")).not.toBeInTheDocument();
+  });
+
+  it("passes axe a11y checks with the convergence badge rendered", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(
+      <SessionItem
+        {...buildProps({
+          councilRole: "orchestrator",
+          councilConvergence: { state: "converged", cycleNumber: 3, threshold: 3, degraded: false },
+        })}
+      />,
+    );
+    const results = await axe(container);
+    expect(results).toHaveNoViolations();
+  });
+
   // ─── Continue-in-new-session menu item ───────────────────────────────────
 
   it("shows 'Continue in new session' menu item when onContinueInNew is provided", () => {

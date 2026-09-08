@@ -174,7 +174,7 @@ export function ChatView({ sessionId }: { sessionId: string }) {
     useStore((s) => s.sessions.get(sessionId)?.sessionGroupRole) === "observer";
 
   return (
-    <div className="flex flex-col h-full min-h-0">
+    <div data-testid="chatview" className="flex flex-col h-full min-h-0">
       {/* CLI disconnected / reconnecting / error banner */}
       {showCliBanner && (
         <div className="px-4 py-2 bg-cc-warning/10 border-b border-cc-warning/20 text-center flex items-center justify-center gap-3">
