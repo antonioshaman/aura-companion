@@ -1,21 +1,27 @@
 /**
  * Service Worker registration for production builds.
  *
- * Uses vite-plugin-pwa's "prompt" mode: when a new SW is detected it downloads
- * and installs, then parks in the "waiting" state instead of activating. The
- * open page keeps running the bundle it loaded with until the user opts in via
- * the update toaster (UpdateAvailableBanner), which calls applyUpdate() →
- * skipWaiting + reload. This prevents a silent cache swap from leaving a tab on
- * stale code after a frontend deploy.
+ * Auto-applies updates: when a new SW finishes installing and parks in the
+ * "waiting" state, onNeedRefresh immediately activates it (skipWaiting) and
+ * reloads the page onto the fresh bundle. This is a deliberate reversal of the
+ * earlier "prompt" model, where the tab kept running stale code until the user
+ * clicked the UpdateAvailableBanner — in practice that stranded browsers on
+ * pre-deploy bundles (a stale bundle after the stdio-transport change could not
+ * render live frames), forcing a manual hard reload. Freshness wins because a
+ * reload is cheap here: sessions persist server-side and the SW never
+ * intercepts /ws/* or /api/*, so a WebSocket reconnect loses nothing but any
+ * unsent composer text.
+ *
+ * The UpdateAvailableBanner plumbing (subscribeUpdateReady/applyUpdate) is kept
+ * as an inert fallback so a listener can still observe the transition, but the
+ * refresh no longer waits on a user gesture.
  *
  * In dev mode the virtual:pwa-register module is a no-op, so importing this file
  * has no effect during development.
  *
- * Edge cases:
- * - Multiple tabs: applyUpdate reloads the calling tab; other tabs pick up the
- *   new SW on their next navigation. WebSocket connections are unaffected (the
- *   SW never intercepts /ws/* or /api/* routes).
- * - First-time visitors: app loads from network; SW installs in background.
+ * Note: a tab already running the OLD prompt-mode bundle will still show the
+ * banner on the next update; only after it lands on this bundle once do future
+ * updates apply automatically.
  */
 import { registerSW } from "virtual:pwa-register";
 
@@ -37,6 +43,9 @@ const updateSW = registerSW({
   onNeedRefresh() {
     updateReady = true;
     for (const listener of listeners) listener(true);
+    // Auto-apply: activate the waiting SW and reload onto the fresh bundle
+    // without waiting for a banner click.
+    void updateSW(true);
   },
   onOfflineReady() {
     console.log("[SW] Offline-ready: all assets precached");
