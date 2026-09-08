@@ -10,6 +10,8 @@ import type {
 import type { SessionStore } from "./session-store.js";
 import type { IBackendAdapter, ServerSyntheticSendOutcome } from "./backend-adapter.js";
 import { ClaudeAdapter } from "./claude-adapter.js";
+import type { CliTransport } from "./cli-transport.js";
+import { WebSocketCliTransport } from "./cli-transport.js";
 import type { IdleTimerProbe } from "./idle-timer-manager.js";
 import { buildBrowserGroupRecord } from "./browser-group-record.js";
 import type { RecorderManager } from "./recorder.js";
@@ -1322,6 +1324,31 @@ export class WsBridge {
   handleCLIOpen(ws: ServerWebSocket<SocketData>, sessionId: string) {
     metricsCollector.recordWsConnection("cli", "open");
     this.recorder?.recordEvent(sessionId, "ws_open", "cli");
+    this.openCliTransport(sessionId, new WebSocketCliTransport(ws));
+  }
+
+  /**
+   * Open path for a stdio-transported Claude CLI.
+   *
+   * A current CLI cannot connect back over WebSocket (the `--sdk-url` host
+   * allowlist), so the launcher spawns it with pipes and hands the write end
+   * here. Everything downstream — adapter construction with the bridge's own
+   * idle-clock closures, state-machine transitions, the initialize kickoff and
+   * the queued-message flush — is identical to the WebSocket path, which is
+   * why both funnel through {@link openCliTransport}.
+   *
+   * Returns the adapter so the caller can pump the child's stdout into
+   * {@link ClaudeAdapter.handleRawMessage}.
+   */
+  handleCLIStdioOpen(sessionId: string, transport: CliTransport): ClaudeAdapter {
+    this.recorder?.recordEvent(sessionId, "ws_open", "cli");
+    return this.openCliTransport(sessionId, transport);
+  }
+
+  /**
+   * Transport-agnostic CLI open sequence — see the two entry points above.
+   */
+  private openCliTransport(sessionId: string, transport: CliTransport): ClaudeAdapter {
     const session = this.getOrCreateSession(sessionId);
 
     // Create or retrieve ClaudeAdapter for this session
@@ -1368,8 +1395,8 @@ export class WsBridge {
       log.info("ws-bridge", "CLI connected", { sessionId });
     }
 
-    // Attach the raw WebSocket to the adapter (flushes pending NDJSON)
-    adapter.attachWebSocket(ws);
+    // Attach the control channel to the adapter (flushes pending NDJSON)
+    adapter.attachTransport(transport);
 
     // Broadcast cli_connected on reconnection (new adapters already got this
     // via attachBackendAdapter to avoid double-broadcasting)
@@ -1401,6 +1428,8 @@ export class WsBridge {
         }
       }
     }
+
+    return adapter;
   }
 
   handleCLIMessage(ws: ServerWebSocket<SocketData>, raw: string | Buffer) {

@@ -165,6 +165,7 @@ import { CliLauncher } from "./cli-launcher.js";
 import { readLaunchableCodexModels } from "./codex-models.js";
 import { companionBus } from "./event-bus.js";
 import { log } from "./logger.js";
+import type { ClaudeAdapter } from "./claude-adapter.js";
 import * as settingsManager from "./settings-manager.js";
 import {
   writeRuntimeSidecar,
@@ -187,8 +188,23 @@ function createMockProc(pid = 12345) {
     pid,
     kill: vi.fn(),
     exited: exitedPromise,
-    stdout: null,
-    stderr: null,
+    // The stdio transport writes frames to `stdin` (FileSink shape: write +
+    // flush + end) and pumps `stdout`. The WS transport ignores all three, so
+    // one mock shape serves both paths.
+    stdin: { write: vi.fn(), flush: vi.fn(), end: vi.fn() },
+    stdout: new ReadableStream<Uint8Array>({ start() {} }),
+    stderr: new ReadableStream<Uint8Array>({ start() {} }),
+  };
+}
+
+/**
+ * Minimal stand-in for the ClaudeAdapter the bridge would hand back. The
+ * launcher only ever calls these two members on it.
+ */
+function createStubClaudeAdapter() {
+  return {
+    handleRawMessage: vi.fn(),
+    handleTransportClose: vi.fn(),
   };
 }
 
@@ -250,6 +266,10 @@ beforeEach(() => {
   delete process.env.COMPANION_FORCE_BYPASS_IN_CONTAINER;
   // Default to stdio for most tests; WS launcher behavior is covered explicitly below.
   process.env.COMPANION_CODEX_TRANSPORT = "stdio";
+  // Claude defaults to stdio too (a current CLI rejects --sdk-url); the WS
+  // transport is still supported and is pinned explicitly by the tests that
+  // assert its argv shape.
+  delete process.env.COMPANION_CLAUDE_TRANSPORT;
   // CR-6 fix added `realpathSync(cwd)` inside resolveObserverPromptForSpawn —
   // canonicalise here so path-equality assertions don't diverge on macOS
   // (`/var/folders/...` vs `/private/var/folders/...`).
@@ -257,6 +277,9 @@ beforeEach(() => {
   store = new SessionStore(tempDir);
   launcher = new CliLauncher(3456);
   launcher.setStore(store);
+  // index.ts wires this to WsBridge.handleCLIStdioOpen; the launcher refuses
+  // to spawn a stdio child it cannot hand to an adapter.
+  launcher.setStdioCliOpener(() => createStubClaudeAdapter() as unknown as ClaudeAdapter);
   mockSpawn.mockReturnValue(createMockProc());
   mockListen.mockImplementation(() => ({ stop: vi.fn() }));
   mockResolveBinary.mockReturnValue("/usr/bin/claude");
@@ -283,6 +306,9 @@ describe("launch", () => {
   });
 
   it("spawns CLI with correct --sdk-url and flags", () => {
+    // WebSocket transport: this test asserts the pre-2.1.121 argv/reconnect
+    // model, which stays supported behind COMPANION_CLAUDE_TRANSPORT=ws.
+    process.env.COMPANION_CLAUDE_TRANSPORT = "ws";
     launcher.launch({ cwd: "/tmp/project" });
 
     expect(mockSpawn).toHaveBeenCalledOnce();
@@ -377,6 +403,9 @@ describe("launch", () => {
   });
 
   it("uses COMPANION_CONTAINER_SDK_HOST for containerized sdk-url when set", () => {
+    // WebSocket transport: this test asserts the pre-2.1.121 argv/reconnect
+    // model, which stays supported behind COMPANION_CLAUDE_TRANSPORT=ws.
+    process.env.COMPANION_CLAUDE_TRANSPORT = "ws";
     process.env.COMPANION_CONTAINER_SDK_HOST = "172.17.0.1";
     launcher.launch({
       cwd: "/tmp/project",
@@ -865,6 +894,193 @@ describe("kill", () => {
 // restart-reconcile reclaims an archived session). These assert kill() now
 // signals the inherited PID, gated by the same EC-45 identity check the
 // relaunch path uses (skip-on-mismatch favours a reclaimable leak over a
+// ─── stdio transport (default) ───────────────────────────────────────────────
+// Claude Code >= 2.1.121 rejects `--sdk-url` for non-Anthropic hosts, so the
+// WebSocket control channel is unusable with a current CLI. These cover the
+// stdio path that replaced it as the default.
+describe("stdio transport", () => {
+  afterEach(async () => {
+    const procIdentity = await import("./process-identity.js");
+    procIdentity.__resetProcReaderForTests();
+  });
+
+  it("spawns with stream-json over pipes and without --sdk-url or the headless -p prompt", () => {
+    launcher.launch({ cwd: "/tmp/project" });
+
+    expect(mockSpawn).toHaveBeenCalledOnce();
+    const [cmdAndArgs, options] = mockSpawn.mock.calls[0];
+
+    expect(cmdAndArgs[0]).toBe("/usr/bin/claude");
+    // The rejected flag must not appear in any form.
+    expect(cmdAndArgs).not.toContain("--sdk-url");
+    expect(cmdAndArgs.join(" ")).not.toContain("ws://");
+    // `-p ""` would be consumed as the turn and the CLI would exit before
+    // reading stdin — the "spawns then immediately exits" shape.
+    expect(cmdAndArgs).not.toContain("-p");
+
+    // The protocol flags are identical to the WS shape.
+    expect(cmdAndArgs).toContain("--print");
+    expect(cmdAndArgs).toContain("--output-format");
+    expect(cmdAndArgs).toContain("stream-json");
+    expect(cmdAndArgs).toContain("--input-format");
+    expect(cmdAndArgs).toContain("--include-partial-messages");
+    expect(cmdAndArgs).toContain("--verbose");
+
+    // stdin must be piped — it carries every browser-originated frame.
+    expect(options.stdin).toBe("pipe");
+    expect(options.stdout).toBe("pipe");
+    expect(options.stderr).toBe("pipe");
+    expect(options.cwd).toBe("/tmp/project");
+  });
+
+  it("refuses to spawn when no stdio opener is wired", () => {
+    // A child whose stdout nobody pumps is an orphan that burns tokens and
+    // answers into the void, so the launcher must not create one.
+    const unwired = new CliLauncher(3456);
+    unwired.setStore(store);
+
+    const info = unwired.launch({ cwd: "/tmp/project" });
+
+    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(info.state).toBe("exited");
+    expect(info.exitCode).toBe(1);
+  });
+
+  it("stays 'starting' until the first frame arrives, then marks connected", async () => {
+    // Transport-open is not liveness: an open pipe only proves fork()
+    // succeeded. A CLI that dies on a rejected flag would otherwise read as
+    // connected forever.
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const stdout = new ReadableStream<Uint8Array>({
+      start(c) { controller = c; },
+    });
+    const seen: string[] = [];
+    launcher.setStdioCliOpener(
+      () => ({
+        handleRawMessage: (chunk: string) => { seen.push(chunk); },
+        handleTransportClose: vi.fn(),
+      }) as unknown as ClaudeAdapter,
+    );
+    mockSpawn.mockReturnValue({
+      pid: 4242,
+      kill: vi.fn(),
+      exited: new Promise<number>(() => {}),
+      stdin: { write: vi.fn(), flush: vi.fn(), end: vi.fn() },
+      stdout,
+      stderr: new ReadableStream<Uint8Array>({ start() {} }),
+    });
+
+    const info = launcher.launch({ cwd: "/tmp/project" });
+    expect(info.state).toBe("starting");
+
+    const frame = JSON.stringify({ type: "system", subtype: "init" }) + "\n";
+    controller.enqueue(new TextEncoder().encode(frame));
+    await vi.waitFor(() => expect(seen.length).toBeGreaterThan(0));
+
+    expect(launcher.getSession(info.sessionId)?.state).toBe("connected");
+    expect(seen[0]).toContain('"subtype":"init"');
+  });
+
+  it("reassembles a frame split across two stdout chunks", async () => {
+    // A pipe can split a JSON frame at any byte; a WebSocket never could.
+    // Without line buffering the fragment is dropped silently by parseNDJSON.
+    let controller!: ReadableStreamDefaultController<Uint8Array>;
+    const stdout = new ReadableStream<Uint8Array>({
+      start(c) { controller = c; },
+    });
+    const seen: string[] = [];
+    launcher.setStdioCliOpener(
+      () => ({
+        handleRawMessage: (chunk: string) => { seen.push(chunk); },
+        handleTransportClose: vi.fn(),
+      }) as unknown as ClaudeAdapter,
+    );
+    mockSpawn.mockReturnValue({
+      pid: 4243,
+      kill: vi.fn(),
+      exited: new Promise<number>(() => {}),
+      stdin: { write: vi.fn(), flush: vi.fn(), end: vi.fn() },
+      stdout,
+      stderr: new ReadableStream<Uint8Array>({ start() {} }),
+    });
+
+    launcher.launch({ cwd: "/tmp/project" });
+
+    const enc = new TextEncoder();
+    controller.enqueue(enc.encode('{"type":"system","sub'));
+    // Nothing may be emitted yet — the line is incomplete.
+    await new Promise((r) => setTimeout(r, 10));
+    expect(seen).toHaveLength(0);
+
+    controller.enqueue(enc.encode('type":"init"}\n'));
+    await vi.waitFor(() => expect(seen.length).toBeGreaterThan(0));
+    expect(seen.join("")).toContain('{"type":"system","subtype":"init"}');
+  });
+
+  it("kills a restart-survived stdio process instead of waiting for a reconnect that cannot happen", async () => {
+    // stdio pipes die with the previous server process, so a surviving PID can
+    // never talk to us again. Leaving it "starting" strands a session that
+    // looks alive but is deaf — and leaks the process.
+    const sessionId = "stdio-survived-1";
+    store.saveLauncher([
+      {
+        sessionId,
+        pid: 55555,
+        state: "connected" as const,
+        cwd: "/tmp/project",
+        createdAt: Date.now(),
+        cliSessionId: "cli-stdio-1",
+      },
+    ]);
+
+    // No --sdk-url token exists in stdio argv, so the sidecar hash is the
+    // identity anchor that makes the probe return `match`.
+    const stdioArgv = [
+      "/usr/bin/claude",
+      "--print",
+      "--output-format",
+      "stream-json",
+      "--input-format",
+      "stream-json",
+    ];
+    writeRuntimeSidecar(store.directory, sessionId, {
+      schemaVersion: SIDECAR_SCHEMA_VERSION,
+      pid: 55555,
+      processStartMs: 1_700_000_000_000,
+      argvSha256: argvSha256(stdioArgv),
+    });
+
+    const procStat = `1 (claude) ${["S", "1", ...Array(20).fill("0")].join(" ")}\n`;
+    const procIdentity = await import("./process-identity.js");
+    procIdentity.setProcReaderForTests({
+      platform: () => "linux",
+      killCheck: () => true,
+      readCmdline: () => stdioArgv.join("\0") + "\0",
+      readStat: () => procStat,
+      readBootStat: () => `btime 1700000000\n`,
+      clkTck: 100,
+    });
+
+    const killSpy = vi.spyOn(process, "kill").mockImplementation((() => true) as never);
+    try {
+      const newLauncher = new CliLauncher(3456);
+      newLauncher.setStore(store);
+
+      // Not "recovered": the identity matched, but the process is unreachable.
+      expect(newLauncher.restoreFromDisk()).toBe(0);
+      expect(killSpy).toHaveBeenCalledWith(55555, "SIGTERM");
+
+      const restored = newLauncher.getSession(sessionId);
+      expect(restored?.state).toBe("exited");
+      expect(restored?.pid).toBeUndefined();
+      // The conversation anchor survives, so the next message resumes it.
+      expect(restored?.cliSessionId).toBe("cli-stdio-1");
+    } finally {
+      killSpy.mockRestore();
+    }
+  });
+});
+
 // collateral kill of a PID-reuse victim).
 describe("kill: restart-survived processes", () => {
   afterEach(async () => {
@@ -873,6 +1089,9 @@ describe("kill: restart-survived processes", () => {
   });
 
   it("kills a restart-survived Claude session by its inherited PID when identity verifies", async () => {
+    // WebSocket transport: this test asserts the pre-2.1.121 argv/reconnect
+    // model, which stays supported behind COMPANION_CLAUDE_TRANSPORT=ws.
+    process.env.COMPANION_CLAUDE_TRANSPORT = "ws";
     store.saveLauncher([
       {
         sessionId: "survived-1",
@@ -921,6 +1140,9 @@ describe("kill: restart-survived processes", () => {
   });
 
   it("declines to signal a restart-survived PID when identity mismatches (leak-safe over wrong-kill)", async () => {
+    // WebSocket transport: this test asserts the pre-2.1.121 argv/reconnect
+    // model, which stays supported behind COMPANION_CLAUDE_TRANSPORT=ws.
+    process.env.COMPANION_CLAUDE_TRANSPORT = "ws";
     store.saveLauncher([
       {
         sessionId: "survived-2",
@@ -1849,6 +2071,9 @@ describe("persistence", () => {
     });
 
     it("recovers sessions from the store", async () => {
+    // WebSocket transport: this test asserts the pre-2.1.121 argv/reconnect
+    // model, which stays supported behind COMPANION_CLAUDE_TRANSPORT=ws.
+    process.env.COMPANION_CLAUDE_TRANSPORT = "ws";
       // Manually write launcher data to disk to simulate a previous run
       const savedSessions = [
         {
@@ -1906,6 +2131,9 @@ describe("persistence", () => {
     // mechanism was proven only in cli-runtime-sidecar.test.ts + the reaper.
     // This asserts a MATCHING sidecar drives a 3-factor `match` recovery.
     it("recovers via 3-factor probe when a matching runtime sidecar is present", async () => {
+    // WebSocket transport: this test asserts the pre-2.1.121 argv/reconnect
+    // model, which stays supported behind COMPANION_CLAUDE_TRANSPORT=ws.
+    process.env.COMPANION_CLAUDE_TRANSPORT = "ws";
       const sessionId = "sidecar-match-1";
       store.saveLauncher([
         {
@@ -1959,6 +2187,9 @@ describe("persistence", () => {
     // probe (liveness + argv) AND surface the corruption via the structured
     // boot_probe.sidecar_corrupt WARN — not silently masquerade as absent.
     it("degrades to two-factor + WARNs boot_probe.sidecar_corrupt on a malformed sidecar", async () => {
+    // WebSocket transport: this test asserts the pre-2.1.121 argv/reconnect
+    // model, which stays supported behind COMPANION_CLAUDE_TRANSPORT=ws.
+    process.env.COMPANION_CLAUDE_TRANSPORT = "ws";
       const sessionId = "sidecar-corrupt-1";
       store.saveLauncher([
         {

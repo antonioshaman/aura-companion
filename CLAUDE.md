@@ -7,7 +7,13 @@ This file provides guidance to Claude Code & Codex when working with code in thi
 Aura Companion — a self-learning web UI for Claude Code & Codex.
 Forked from [`The-Vibe-Company/companion`](https://github.com/The-Vibe-Company/companion) by [The Vibe Company](https://thevibecompany.co) (MIT), it adds an adaptive knowledge base, Council Mode (orchestrator + observer paired sessions), and self-improvement skills that make every development session smarter than the last.
 
-It reverse-engineers the undocumented `--sdk-url` WebSocket protocol in the Claude Code CLI to provide a browser-based interface for running multiple Claude Code sessions with streaming, tool call visibility, and permission control.
+It drives the Claude Code CLI's `stream-json` protocol to provide a browser-based interface for running multiple Claude Code sessions with streaming, tool call visibility, and permission control.
+
+**Transport note (2026-09):** the original implementation carried that protocol over the
+undocumented `--sdk-url` WebSocket. Claude Code >= 2.1.121 rejects `--sdk-url` for any host
+outside a compiled-in Anthropic allowlist, so **stdio is now the default transport** — the
+same `stream-json` frames over the CLI's own stdin/stdout. `COMPANION_CLAUDE_TRANSPORT=ws`
+restores the WebSocket path for a CLI pinned below 2.1.121. See `web/server/cli-transport.ts`.
 
 ## Development Commands
 
@@ -84,15 +90,22 @@ All UI components used in the message/chat flow **must** be represented in the P
 ### Data Flow
 
 ```
-Browser (React) ←→ WebSocket ←→ Hono Server (Bun) ←→ WebSocket (NDJSON) ←→ Claude Code CLI
-     :5174              /ws/browser/:id        :3456        /ws/cli/:id         (--sdk-url)
+Browser (React) ←→ WebSocket ←→ Hono Server (Bun) ←→ stdin/stdout (NDJSON) ←→ Claude Code CLI
+     :5174              /ws/browser/:id        :3456          pipes               (stream-json)
 ```
 
 1. Browser sends a "create session" REST call to the server
-2. Server spawns `claude --sdk-url ws://localhost:3456/ws/cli/SESSION_ID` as a subprocess
-3. CLI connects back to the server over WebSocket using NDJSON protocol
-4. Server bridges messages between CLI WebSocket and browser WebSocket
+2. Server spawns `claude --print --input-format stream-json --output-format stream-json`
+   with piped stdio (no `--sdk-url`, no `-p ""` — an empty positional prompt would be
+   consumed as the turn and the CLI would exit before reading stdin)
+3. The server writes frames to the child's stdin and pumps its stdout, line-buffered
+   (a pipe can split a JSON frame at any byte; a WebSocket message never could)
+4. Server bridges messages between the CLI transport and the browser WebSocket
 5. Tool calls arrive as `control_request` (subtype `can_use_tool`) — browser renders approval UI, server relays `control_response` back
+
+Legacy WS transport (`COMPANION_CLAUDE_TRANSPORT=ws`, CLI < 2.1.121): the server instead
+spawns `claude --sdk-url ws://localhost:3456/ws/cli/SESSION_ID` and the CLI dials back;
+steps 3-5 are unchanged apart from where the bytes travel.
 
 ### All code lives under `web/`
 
@@ -147,7 +160,21 @@ Full protocol documentation is in `WEBSOCKET_PROTOCOL_REVERSED.md`.
 
 ### Session Lifecycle
 
-Sessions persist to disk (`$TMPDIR/vibe-sessions/`) and survive server restarts. On restart, live CLI processes are detected by PID and given a grace period to reconnect their WebSocket. If they don't, they're killed and relaunched with `--resume` using the CLI's internal session ID.
+Sessions persist to disk and survive server restarts. What happens to the *process* on
+restart depends on the transport:
+
+- **WS transport** — live CLI processes are detected by PID and given a grace period to
+  reconnect their WebSocket. If they don't, they're killed and relaunched with `--resume`.
+- **stdio transport (default)** — the pipes died with the previous server process, so a
+  surviving PID can never talk to the new server. Boot recovery verifies identity (see
+  below) and SIGTERMs it rather than leaving a session that looks alive but is deaf. The
+  record keeps `cliSessionId`, so the next message relaunches with `--resume` and the
+  conversation continues where it stopped.
+
+**Process identity** (`process-identity.ts`) anchors on the `--sdk-url <sessionId>` argv
+token for WS sessions. stdio argv carries no sessionId at all, so the spawn-time sidecar's
+`argvSha256` is the equivalent anchor — without it a healthy stdio CLI reads as `mismatch`
+and the orphan-reaper kills it.
 
 ### Raw Protocol Recordings
 

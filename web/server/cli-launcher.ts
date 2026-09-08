@@ -17,6 +17,9 @@ import type { SessionStore } from "./session-store.js";
 import type { BackendType } from "./session-types.js";
 import type { RecorderManager } from "./recorder.js";
 import { CodexAdapter } from "./codex-adapter.js";
+import type { ClaudeAdapter } from "./claude-adapter.js";
+import type { CliTransport } from "./cli-transport.js";
+import { StdioCliTransport, pumpStdoutLines } from "./cli-transport.js";
 import { resolveBinary, getEnrichedPath } from "./path-resolver.js";
 import { resolveObserverPromptForSpawn } from "./observer-prompt-spawn.js";
 import { assertExhaustiveObserverPromptSource } from "./observer-prompt.js";
@@ -48,6 +51,17 @@ import {
   resolveCompanionCodexSessionHome,
 } from "./codex-home.js";
 import { reconcileProviderAuthForRelaunch } from "./provider-auth-env.js";
+
+/**
+ * Control-channel transport for Claude sessions.
+ *
+ * Defaults to `stdio` because a current Claude Code CLI (>= 2.1.121) refuses
+ * `--sdk-url ws://localhost`. Set `COMPANION_CLAUDE_TRANSPORT=ws` only with a
+ * CLI pinned below that version.
+ */
+function claudeTransportMode(): "stdio" | "ws" {
+  return (process.env.COMPANION_CLAUDE_TRANSPORT || "stdio").toLowerCase() === "ws" ? "ws" : "stdio";
+}
 
 /** Whether WebSocket transport is enabled for Codex sessions. */
 function isCodexWsTransportEnabled(): boolean {
@@ -278,6 +292,7 @@ export class CliLauncher {
   private port: number;
   private store: SessionStore | null = null;
   private recorder: RecorderManager | null = null;
+  private stdioCliOpener: ((sessionId: string, transport: CliTransport) => ClaudeAdapter) | null = null;
   constructor(port: number) {
     this.port = port;
   }
@@ -290,6 +305,19 @@ export class CliLauncher {
   /** Attach a recorder for raw message capture. */
   setRecorder(recorder: RecorderManager): void {
     this.recorder = recorder;
+  }
+
+  /**
+   * Wire the bridge's stdio CLI open path.
+   *
+   * The launcher owns the child process but must not construct the
+   * ClaudeAdapter itself — the adapter needs bridge-internal closures (idle
+   * clock, idle-timer probe). So the launcher hands over the write end of the
+   * pipe and gets the adapter back. Injected in index.ts alongside the store
+   * and recorder.
+   */
+  setStdioCliOpener(opener: (sessionId: string, transport: CliTransport) => ClaudeAdapter): void {
+    this.stdioCliOpener = opener;
   }
 
   /** Persist launcher state to disk. */
@@ -515,16 +543,20 @@ export class CliLauncher {
     // Codex has no argv identity factor — preserve prior best-effort kill.
     if (info.backendType === "codex") return true;
     let expectedStartMs: number | null = null;
+    let expectedArgvSha256: string | null = null;
     if (this.store) {
       try {
         const sidecar = readRuntimeSidecar(this.store.directory, info.sessionId);
-        if (sidecar.kind === "present") expectedStartMs = sidecar.payload.processStartMs;
+        if (sidecar.kind === "present") {
+          expectedStartMs = sidecar.payload.processStartMs;
+          expectedArgvSha256 = sidecar.payload.argvSha256;
+        }
       } catch {
         // Corrupt/absent sidecar → degrade to the two-factor probe
         // (liveness + argv), still strictly stronger than a blind kill.
       }
     }
-    const verdict = verifyProcessIdentity(info.pid, info.sessionId, expectedStartMs);
+    const verdict = verifyProcessIdentity(info.pid, info.sessionId, expectedStartMs, expectedArgvSha256);
     switch (verdict.kind) {
       case "match":
         return true;
@@ -623,11 +655,13 @@ export class CliLauncher {
           // Codex host-mode through the liveness-only fallback; the identity
           // probe is Claude-only until a Codex argv/port identity lands.
           let expectedStartMs: number | null = null;
+          let expectedArgvSha256: string | null = null;
           if (this.store && info.backendType !== "codex") {
             try {
               const sidecar = readRuntimeSidecar(this.store.directory, info.sessionId);
               if (sidecar.kind === "present") {
                 expectedStartMs = sidecar.payload.processStartMs;
+                expectedArgvSha256 = sidecar.payload.argvSha256;
               }
             } catch (e) {
               // Corrupt sidecar — degrade to two-factor probe but log
@@ -644,8 +678,20 @@ export class CliLauncher {
           const verdict =
             info.backendType === "codex"
               ? null
-              : verifyProcessIdentity(info.pid, info.sessionId, expectedStartMs);
+              : verifyProcessIdentity(info.pid, info.sessionId, expectedStartMs, expectedArgvSha256);
           if (verdict && verdict.kind === "match") {
+            // WS: the child reconnects to the new server, so wait in "starting".
+            // stdio: its pipes died with the previous server process, so a
+            // surviving PID can never talk to us again — kill it and let the
+            // next message relaunch with --resume rather than stranding a
+            // session that looks alive but is deaf.
+            if (claudeTransportMode() === "stdio") {
+              try { process.kill(info.pid, "SIGTERM"); } catch {}
+              info.pid = undefined;
+              info.state = "exited";
+              this.sessions.set(info.sessionId, info);
+              continue;
+            }
             info.state = "starting"; // WS not yet re-established, wait for CLI to reconnect
             this.sessions.set(info.sessionId, info);
             recovered++;
@@ -809,7 +855,11 @@ export class CliLauncher {
     if (backendType === "codex") {
       this.spawnCodex(sessionId, info, effectiveOptions);
     } else {
-      this.spawnCLI(sessionId, info, effectiveOptions);
+      if (claudeTransportMode() === "stdio") {
+        this.spawnClaudeStdio(sessionId, info, effectiveOptions);
+      } else {
+        this.spawnCLI(sessionId, info, effectiveOptions);
+      }
     }
     return info;
   }
@@ -1185,7 +1235,11 @@ export class CliLauncher {
     if (info.backendType === "codex") {
       this.spawnCodex(sessionId, info, effectiveRelaunchOptions);
     } else {
-      this.spawnCLI(sessionId, info, effectiveRelaunchOptions);
+      if (claudeTransportMode() === "stdio") {
+        this.spawnClaudeStdio(sessionId, info, effectiveRelaunchOptions);
+      } else {
+        this.spawnCLI(sessionId, info, effectiveRelaunchOptions);
+      }
     }
     return { ok: true };
   }
@@ -1201,36 +1255,21 @@ export class CliLauncher {
     return Array.from(this.sessions.values()).filter((s) => s.state === "starting");
   }
 
-  private spawnCLI(sessionId: string, info: SdkSessionInfo, options: LaunchOptions): void {
-    const isContainerized = !!options.containerId;
-
-    // For containerized sessions, the CLI binary lives inside the container.
-    // For host sessions, resolve the binary on the host.
-    let binary = options.claudeBinary || "claude";
-    if (!isContainerized) {
-      const resolved = resolveBinary(binary);
-      if (resolved) {
-        binary = resolved;
-      } else {
-        console.error(`[cli-launcher] Binary "${binary}" not found in PATH`);
-        info.state = "exited";
-        info.exitCode = 127;
-        this.persistState();
-        return;
-      }
-    }
-
-    // Allow overriding the host alias used by containerized Claude sessions.
-    // Useful when host.docker.internal is unavailable in a given Docker setup.
-    const containerSdkHost = (process.env.COMPANION_CONTAINER_SDK_HOST || "host.docker.internal").trim()
-      || "host.docker.internal";
-
-    // When running inside a container, the SDK URL should target the host alias
-    // so the CLI can connect back to the Hono server running on the host.
-    const sdkUrl = isContainerized
-      ? `ws://${containerSdkHost}:${this.port}/ws/cli/${sessionId}`
-      : `ws://localhost:${this.port}/ws/cli/${sessionId}`;
-
+  /**
+   * Build the Claude Code argv for either transport.
+   *
+   * `sdkUrl === null` selects the stdio control channel: no `--sdk-url`, no
+   * `-p ""`. Everything else — model, permission mode, tool gates, observer
+   * system prompt, `--resume` — is transport-independent and shared, so the
+   * two spawn paths cannot drift apart.
+   */
+  private buildClaudeArgs(
+    sessionId: string,
+    info: SdkSessionInfo,
+    options: LaunchOptions,
+    isContainerized: boolean,
+    sdkUrl: string | null,
+  ): string[] {
     // Claude Code rejects bypassPermissions when running with root/sudo.
     // Container sessions are downgraded by default; host sessions are only
     // downgraded when this server itself runs as root.
@@ -1257,7 +1296,9 @@ export class CliLauncher {
     }
 
     const args: string[] = [
-      "--sdk-url", sdkUrl,
+      // WS transport only. A current CLI (>= 2.1.121) rejects this flag for
+      // any non-Anthropic host, which is why stdio passes null here.
+      ...(sdkUrl ? ["--sdk-url", sdkUrl] : []),
       "--print",
       "--output-format", "stream-json",
       "--input-format", "stream-json",
@@ -1309,14 +1350,35 @@ export class CliLauncher {
       }
     }
 
-    // Always pass -p "" for headless mode. When relaunching, also pass --resume
-    // to restore the CLI's conversation context.
+    // Relaunch restores the CLI's conversation context. This is what makes a
+    // session resume where it stopped after the transport (or the server) died.
     if (options.resumeSessionId) {
       args.push("--resume", options.resumeSessionId);
     }
 
-    args.push("-p", "");
+    // WS transport: `-p ""` is what selects headless mode when the prompt
+    // arrives over the socket. stdio MUST NOT pass it — the empty positional
+    // would be consumed as the turn and the CLI would exit before reading
+    // stdin, which is exactly the "spawns then immediately exits" shape.
+    if (sdkUrl) {
+      args.push("-p", "");
+    }
 
+    return args;
+  }
+
+  /**
+   * Build the OS-level spawn command for a Claude CLI session (host or
+   * container). Shared by both transports so the docker-exec shape, PATH
+   * enrichment and env-unset discipline cannot drift between them.
+   */
+  private buildClaudeSpawnCommand(
+    info: SdkSessionInfo,
+    options: LaunchOptions,
+    binary: string,
+    args: string[],
+    isContainerized: boolean,
+  ): { spawnCmd: string[]; spawnEnv: Record<string, string | undefined>; spawnCwd: string | undefined } {
     let spawnCmd: string[];
     let spawnEnv: Record<string, string | undefined>;
     let spawnCwd: string | undefined;
@@ -1362,6 +1424,45 @@ export class CliLauncher {
       spawnCwd = info.cwd;
     }
 
+    return { spawnCmd, spawnEnv, spawnCwd };
+  }
+
+  private spawnCLI(sessionId: string, info: SdkSessionInfo, options: LaunchOptions): void {
+    const isContainerized = !!options.containerId;
+
+    // For containerized sessions, the CLI binary lives inside the container.
+    // For host sessions, resolve the binary on the host.
+    let binary = options.claudeBinary || "claude";
+    if (!isContainerized) {
+      const resolved = resolveBinary(binary);
+      if (resolved) {
+        binary = resolved;
+      } else {
+        console.error(`[cli-launcher] Binary "${binary}" not found in PATH`);
+        info.state = "exited";
+        info.exitCode = 127;
+        this.persistState();
+        return;
+      }
+    }
+
+    // Allow overriding the host alias used by containerized Claude sessions.
+    // Useful when host.docker.internal is unavailable in a given Docker setup.
+    const containerSdkHost = (process.env.COMPANION_CONTAINER_SDK_HOST || "host.docker.internal").trim()
+      || "host.docker.internal";
+
+    // When running inside a container, the SDK URL should target the host alias
+    // so the CLI can connect back to the Hono server running on the host.
+    const sdkUrl = isContainerized
+      ? `ws://${containerSdkHost}:${this.port}/ws/cli/${sessionId}`
+      : `ws://localhost:${this.port}/ws/cli/${sessionId}`;
+
+    const args = this.buildClaudeArgs(sessionId, info, options, isContainerized, sdkUrl);
+
+    const { spawnCmd, spawnEnv, spawnCwd } = this.buildClaudeSpawnCommand(
+      info, options, binary, args, isContainerized,
+    );
+
     console.log(
       `[cli-launcher] Spawning session ${sessionId}${isContainerized ? " (container)" : ""}: ` +
       sanitizeSpawnArgsForLog(spawnCmd),
@@ -1401,6 +1502,157 @@ export class CliLauncher {
         const uptime = Date.now() - spawnedAt;
         if (uptime < 5000 && options.resumeSessionId) {
           console.error(`[cli-launcher] Session ${sessionId} exited immediately after --resume (${uptime}ms). Clearing cliSessionId for fresh start.`);
+          session.cliSessionId = undefined;
+        }
+      }
+      this.processes.delete(sessionId);
+      this.persistState();
+      companionBus.emit("session:exited", { sessionId, exitCode });
+    });
+
+    this.persistState();
+  }
+
+
+  /**
+   * Spawn a Claude Code CLI session over its own stdin/stdout pipes.
+   *
+   * This is the transport for a current CLI. Claude Code >= 2.1.121 rejects
+   * `--sdk-url` for any host outside a compiled-in Anthropic allowlist, so the
+   * WebSocket control channel in {@link spawnCLI} cannot be used with it at
+   * all — every spawn dies with `--sdk-url rejected` before emitting a frame.
+   * The stream-json protocol carried over stdio is identical, including
+   * `--resume`, so only the pipe ends differ.
+   *
+   * Trade-off versus the WebSocket transport: pipes die with this process, so
+   * a stdio session cannot survive a server restart and reconnect. The session
+   * record keeps `cliSessionId`, so the next message relaunches it with
+   * `--resume` and the conversation continues where it stopped.
+   */
+  private spawnClaudeStdio(sessionId: string, info: SdkSessionInfo, options: LaunchOptions): void {
+    const isContainerized = !!options.containerId;
+
+    let binary = options.claudeBinary || "claude";
+    if (!isContainerized) {
+      const resolved = resolveBinary(binary);
+      if (resolved) {
+        binary = resolved;
+      } else {
+        console.error(`[cli-launcher] Binary "${binary}" not found in PATH`);
+        info.state = "exited";
+        info.exitCode = 127;
+        this.persistState();
+        return;
+      }
+    }
+
+    // The adapter must be built by the bridge (it owns the idle-clock
+    // closures), so refuse to spawn a child we could not wire up rather than
+    // leaking an orphan that talks to nobody.
+    const opener = this.stdioCliOpener;
+    if (!opener) {
+      console.error(
+        `[cli-launcher] No stdio CLI opener wired; cannot spawn session ${sessionId}`,
+      );
+      info.state = "exited";
+      info.exitCode = 1;
+      this.persistState();
+      return;
+    }
+
+    const args = this.buildClaudeArgs(sessionId, info, options, isContainerized, null);
+    const { spawnCmd, spawnEnv, spawnCwd } = this.buildClaudeSpawnCommand(
+      info, options, binary, args, isContainerized,
+    );
+
+    console.log(
+      `[cli-launcher] Spawning session ${sessionId} (stdio${isContainerized ? ", container" : ""}): ` +
+      sanitizeSpawnArgsForLog(spawnCmd),
+    );
+
+    const proc = Bun.spawn(spawnCmd, {
+      cwd: spawnCwd,
+      env: spawnEnv,
+      stdin: "pipe",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+
+    info.pid = proc.pid;
+    this.processes.set(sessionId, proc);
+    this.writeRuntimeSidecarForSpawn(sessionId, proc.pid, spawnCmd);
+
+    const stdin = proc.stdin;
+    if (!stdin || typeof stdin === "number") {
+      console.error(`[cli-launcher] Session ${sessionId}: stdin pipe unavailable`);
+      try { proc.kill("SIGTERM"); } catch {}
+      info.state = "exited";
+      info.exitCode = 1;
+      this.processes.delete(sessionId);
+      this.persistState();
+      return;
+    }
+
+    const transport = new StdioCliTransport(stdin, sessionId);
+    const adapter = opener(sessionId, transport);
+
+    // stdout carries the protocol, so it is pumped into the adapter rather
+    // than logged. Line buffering happens inside pumpStdoutLines — a pipe can
+    // split a JSON frame at any byte, unlike a WebSocket message.
+    const stdout = proc.stdout;
+    if (stdout && typeof stdout !== "number") {
+      let sawFirstFrame = false;
+      void pumpStdoutLines(
+        stdout,
+        (chunk) => {
+          // Transport-open is not liveness here: unlike the WS path, where the
+          // CLI dialling back proves it launched, an open pipe proves only
+          // that fork() succeeded — a CLI that dies on a rejected flag would
+          // still read as "connected". The first frame is the real signal.
+          if (!sawFirstFrame) {
+            sawFirstFrame = true;
+            this.markConnected(sessionId);
+          }
+          try {
+            adapter.handleRawMessage(chunk);
+          } catch (err) {
+            console.error(`[cli-launcher] Session ${sessionId}: handleRawMessage threw:`, err);
+          }
+        },
+        (err) => {
+          console.error(`[cli-launcher] Session ${sessionId}: stdout pump error:`, err);
+        },
+      );
+    }
+
+    // stderr stays diagnostic — this is where `--sdk-url rejected` and other
+    // startup failures surface.
+    const stderr = proc.stderr;
+    if (stderr && typeof stderr !== "number") {
+      this.pipeStream(sessionId, stderr, "stderr");
+    }
+
+    const spawnedAt = Date.now();
+    proc.exited.then((exitCode) => {
+      console.log(`[cli-launcher] Session ${sessionId} exited (code=${exitCode})`);
+      // Writing to a dead pipe throws EPIPE, so mark rather than close.
+      transport.markClosed();
+      adapter.handleTransportClose();
+
+      const session = this.sessions.get(sessionId);
+      if (session) {
+        session.state = "exited";
+        session.exitCode = exitCode;
+
+        // Immediate exit under --resume means the resume target was rejected
+        // (rolled-over history, deleted jsonl). Clear it so the next relaunch
+        // starts fresh instead of failing identically forever.
+        const uptime = Date.now() - spawnedAt;
+        if (uptime < 5000 && options.resumeSessionId) {
+          console.error(
+            `[cli-launcher] Session ${sessionId} exited immediately after --resume (${uptime}ms). ` +
+            `Clearing cliSessionId for fresh start.`,
+          );
           session.cliSessionId = undefined;
         }
       }

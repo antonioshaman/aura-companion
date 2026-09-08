@@ -228,6 +228,9 @@ wsBridge.setStore(sessionStore);
 wsBridge.setRecorder(recorder);
 launcher.setStore(sessionStore);
 launcher.setRecorder(recorder);
+// stdio transport: the launcher owns the child process, the bridge owns the
+// adapter (it holds the idle-clock closures). This hands the pipe over.
+launcher.setStdioCliOpener((sessionId, transport) => wsBridge.handleCLIStdioOpen(sessionId, transport));
 launcher.restoreFromDisk();
 wsBridge.restoreFromDisk();
 containerManager.restoreState(CONTAINER_STATE_PATH);

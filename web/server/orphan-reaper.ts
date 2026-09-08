@@ -338,9 +338,13 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
       // two-factor (Phase A interim). Either way the verdict drives
       // the branch.
       let expectedStartMs: number | null = null;
+      let expectedArgvSha256: string | null = null;
       try {
         const sidecar = readRuntimeSidecar(deps.sessionsRoot, known.sessionId);
-        if (sidecar.kind === "present") expectedStartMs = sidecar.payload.processStartMs;
+        if (sidecar.kind === "present") {
+          expectedStartMs = sidecar.payload.processStartMs;
+          expectedArgvSha256 = sidecar.payload.argvSha256;
+        }
       } catch (e) {
         // Corrupt sidecar — log + treat as absent (degrade to 2-factor).
         log.warn("orphan-reaper", "sidecar read failed — degrading to two-factor verify", {
@@ -350,7 +354,7 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
         });
       }
 
-      const verdict = verifyProcessIdentity(pid, known.sessionId, expectedStartMs);
+      const verdict = verifyProcessIdentity(pid, known.sessionId, expectedStartMs, expectedArgvSha256);
       if (verdict.kind === "match") {
         // PURE Map mutation. NEVER respawn. NEVER inject synthetic init.
         known.pid = pid;
