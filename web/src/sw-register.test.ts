@@ -45,10 +45,11 @@ describe("sw-register", () => {
     expect(typeof config.onNeedRefresh).toBe("function");
   });
 
-  // Prompt-mode signal: onNeedRefresh flips the update-ready flag and notifies
-  // subscribers so the React toaster can render. applyUpdate() then activates
-  // the waiting SW via the updateSW callback returned by registerSW.
-  it("notifies subscribers on onNeedRefresh and applies via updateSW", async () => {
+  // Auto-apply: onNeedRefresh flips the update-ready flag, notifies subscribers
+  // (the banner is now an inert fallback), AND immediately activates the waiting
+  // SW via updateSW(true) so the tab reloads onto the fresh bundle without a
+  // user gesture. This prevents a stale cached bundle from stranding the tab.
+  it("auto-applies the waiting SW on onNeedRefresh and notifies subscribers", async () => {
     const updateSWFn = vi.fn();
     mockRegisterSW.mockReturnValueOnce(updateSWFn);
 
@@ -64,9 +65,12 @@ describe("sw-register", () => {
 
     expect(mod.isUpdateReady()).toBe(true);
     expect(listener).toHaveBeenCalledWith(true);
-
-    mod.applyUpdate();
+    // The refresh no longer waits on applyUpdate()/a banner click.
     expect(updateSWFn).toHaveBeenCalledWith(true);
+
+    // applyUpdate() remains available as an explicit fallback and is idempotent.
+    mod.applyUpdate();
+    expect(updateSWFn).toHaveBeenCalledTimes(2);
 
     unsubscribe();
   });
