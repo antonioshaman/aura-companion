@@ -25,6 +25,7 @@ import { generateSessionTitle } from "./auto-namer.js";
 import { companionBus } from "./event-bus.js";
 import { metricsCollector } from "./metrics-collector.js";
 import { log } from "./logger.js";
+import { nextModelInChain } from "./model-fallback-chain.js";
 import { SessionGroupCoordinator } from "./session-group-coordinator.js";
 import type { GroupDegradeReason } from "./group-state-machine.js";
 import { isSupportedPairing as _isSupportedPairing } from "./backend-provider.js";
@@ -854,6 +855,23 @@ export class SessionOrchestrator {
     // are excluded via the intentionalKills set.
     companionBus.on("session:exited", ({ sessionId }) => {
       this.scheduleProactiveRelaunch(sessionId);
+    });
+
+    // Silent-stdio watchdog fired — the subprocess is alive but nothing
+    // is coming down the pipe. Kill it; the `session:exited` handler
+    // above then schedules an auto-relaunch with `--resume`, giving us
+    // a fresh stdio pipe and letting the CLI dial back into the same
+    // conversation. See event-bus-types.ts contract for full context.
+    companionBus.on("session:backend-silent", async ({ sessionId, sinceMs, reason }) => {
+      await this.handleBackendSilent(sessionId, sinceMs, reason);
+    });
+
+    // Rate-limit-class error classified — swap the session's model to
+    // the next chain entry, then kill so the keepalive path relaunches
+    // with the new `--model`. If no downgrade target exists, we surface
+    // an informational error and leave the session alone.
+    companionBus.on("session:model-fallback", async ({ sessionId, from, to, reason }) => {
+      await this.handleModelFallback(sessionId, from, to, reason);
     });
 
     // Start watching PRs when git info is resolved
@@ -4173,6 +4191,91 @@ export class SessionOrchestrator {
       clearTimeout(timer);
       this.keepaliveTimers.delete(sessionId);
     }
+  }
+
+  // ── Private: Backend silence + model fallback (silence-recovery) ───────────
+
+  /**
+   * Handler for `session:backend-silent`. The adapter's silent-stdio
+   * watchdog fires when a user turn is in flight but no stdout frame
+   * arrives from the CLI within its threshold. We SIGTERM the
+   * subprocess; the existing `session:exited` listener above schedules
+   * a `--resume` relaunch, restoring a fresh stdio pipe. Skips when
+   * the session is already archived / intentionally killed / gone.
+   */
+  private async handleBackendSilent(
+    sessionId: string,
+    sinceMs: number,
+    reason: string,
+  ): Promise<void> {
+    const info = this.launcher.getSession(sessionId);
+    if (!info || info.archived) return;
+    if (this.intentionalKills.has(sessionId)) return;
+    if (this.relaunchExhaustedNotified.has(sessionId)) return;
+    log.warn("orchestrator", "Backend silent — killing subprocess for relaunch", {
+      sessionId,
+      sinceMs,
+      reason,
+    });
+    // No need to schedule relaunch here — `launcher.kill` triggers
+    // `session:exited` which the sibling handler above already routes
+    // through `scheduleProactiveRelaunch`.
+    await this.launcher.kill(sessionId);
+  }
+
+  /**
+   * Handler for `session:model-fallback`. Downgrades the session to
+   * the next model in the fallback chain and kills the subprocess so
+   * the keepalive path relaunches with the new `--model` argument. If
+   * no downgrade target exists in the chain (the current model isn't
+   * listed, or it is already the tail), we surface an informational
+   * error and leave the session alone — an operator-visible dead end
+   * beats a silent no-op.
+   */
+  private async handleModelFallback(
+    sessionId: string,
+    from: string,
+    to: string,
+    reason: "rate_limit" | "out_of_credits" | "unknown_model" | "model_not_available",
+  ): Promise<void> {
+    const info = this.launcher.getSession(sessionId);
+    if (!info || info.archived) return;
+    if (this.intentionalKills.has(sessionId)) return;
+
+    // The adapter emits `from` from the message's own `model` field,
+    // which is `<synthetic>` in exactly the failure surface we act on.
+    // The launcher's stored model is the real spawn argument; prefer
+    // it when the event value is unresolvable in the chain.
+    const currentModel = info.model || from;
+    const nextModel = nextModelInChain(currentModel);
+    if (!nextModel) {
+      this.wsBridge.broadcastToSession(sessionId, {
+        type: "error",
+        message: `Model ${currentModel || "unknown"} hit ${reason}; no fallback available. Choose another model manually.`,
+      });
+      log.warn("orchestrator", "Model fallback requested but no chain successor", {
+        sessionId,
+        currentModel,
+        eventFrom: from,
+        eventTo: to,
+        reason,
+      });
+      return;
+    }
+    log.info("orchestrator", "Model fallback triggered", {
+      sessionId,
+      from: currentModel,
+      to: nextModel,
+      reason,
+    });
+    this.wsBridge.broadcastToSession(sessionId, {
+      type: "error",
+      message: `Model ${currentModel} hit ${reason}; falling back to ${nextModel}…`,
+    });
+    this.launcher.setModel(sessionId, nextModel);
+    await this.launcher.kill(sessionId);
+    // `session:exited` → `scheduleProactiveRelaunch` → `launcher.relaunch`
+    // reads the updated info.model in `buildClaudeArgs`.
   }
 
   // ── Private: Auto-naming ───────────────────────────────────────────────────
