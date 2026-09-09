@@ -44,6 +44,17 @@ describe("DegradedBanner", () => {
     expect(screen.getByText(/did not produce a review in time/i)).toBeInTheDocument();
   });
 
+  // Council review 2026-09-08 #8: a foreign-group review (the observer DID
+  // respond, but its review was addressed to another pair sharing the
+  // workspace) must NOT reuse the "no review in time — respawn" copy, which
+  // is factually wrong and recommends a remedy that can't fix a filename
+  // collision. It gets its own explanation.
+  it("renders cross-pair-collision copy for a foreign_group_review degrade, distinct from the no-review copy", () => {
+    render(<DegradedBanner deadRole="observer" reason="foreign_group_review" onRespawn={() => {}} />);
+    expect(screen.getByText(/different council pair sharing this workspace/i)).toBeInTheDocument();
+    expect(screen.queryByText(/did not produce a review in time/i)).not.toBeInTheDocument();
+  });
+
   // PLAN T15.4: warning palette + status role + polite live region —
   // distinct from BlockerBanner which is alert + assertive.
   it("uses role=status with aria-live=polite (channel-separated from blocker)", () => {

@@ -507,7 +507,10 @@ describe("buildObserverWakePayload", () => {
     expect(result.textBody.startsWith("# Council Checkpoint — council-implement")).toBe(true);
     expect(result.textBody).toContain("```json");
     expect(result.textBody).toContain("You MUST use your `Write` tool to create the file");
-    expect(result.textBody).toContain(".council/reviews/council-implement-claude-observer.md");
+    // Council review 2026-09-08 #1: the wake names a group-scoped review path
+    // (`<phase>-<session_group_id>-<provider>-observer.md`) so pairs sharing a
+    // workspace don't collide on the review file.
+    expect(result.textBody).toContain(".council/reviews/council-implement-grp_test-claude-observer.md");
     expect(result.droppedPaths).toEqual([]);
     expect(result.sha256).toMatch(/^[0-9a-f]{64}$/);
   });

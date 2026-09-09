@@ -465,7 +465,7 @@ export type BrowserIncomingMessageBase =
      * symmetrically with `degradedReason`.
      */
     deadRole?: "orchestrator" | "observer";
-    degradedReason?: "observer_exited" | "wake_send_failed" | "reconnect_failed" | "wake_produced_no_review";
+    degradedReason?: "observer_exited" | "wake_send_failed" | "reconnect_failed" | "wake_produced_no_review" | "foreign_group_review";
     /**
      * Task 9: server-published auto-wake-to-review timeout in
      * milliseconds. Frontend uses this to bound the `reviewing` panel
@@ -499,7 +499,7 @@ export type BrowserIncomingMessageBase =
      * "observer exited"). Omitted field defaults to "observer_exited"
      * for back-compat with v1 clients.
      */
-    reason?: "observer_exited" | "wake_send_failed" | "reconnect_failed" | "wake_produced_no_review";
+    reason?: "observer_exited" | "wake_send_failed" | "reconnect_failed" | "wake_produced_no_review" | "foreign_group_review";
   }
   | {
     /**
@@ -644,7 +644,7 @@ export interface BrowserGroupRecord {
   /** Optional: which half died (populated only when status === "degraded"). */
   deadRole?: SessionGroupRole;
   /** Optional: why the group degraded (populated only when status === "degraded"). */
-  degradedReason?: "observer_exited" | "wake_send_failed" | "reconnect_failed" | "wake_produced_no_review";
+  degradedReason?: "observer_exited" | "wake_send_failed" | "reconnect_failed" | "wake_produced_no_review" | "foreign_group_review";
   /** Task 9 — server-published wake-to-review bound; see `group_created`. */
   wakeTimeoutMs?: number;
 }

@@ -5311,7 +5311,9 @@ describe("POST /api/sessions/:id/council/checkpoint", () => {
     // history. Reading through promises sidesteps the mock and catches
     // silent JSON re-serialisation drift between writeAtomicJson and
     // parseCheckpointPayload.
-    const expectedPath = path.join(tmpCwd, ".council", "checkpoints", "council-plan.json");
+    // Council review 2026-09-08 #1: checkpoint filename is group-scoped
+    // (`<phase>.<groupId>.json`) so pairs sharing a workspace don't collide.
+    const expectedPath = path.join(tmpCwd, ".council", "checkpoints", "council-plan.grp_test.json");
     expect(json.written).toBe(expectedPath);
     const fsp = await import("node:fs/promises");
     const writtenRaw = await fsp.readFile(expectedPath, "utf8");

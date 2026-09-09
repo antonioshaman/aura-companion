@@ -32,7 +32,13 @@ export type GroupDegradeReason =
   | "observer_exited"
   | "wake_send_failed"
   | "reconnect_failed"
-  | "wake_produced_no_review";
+  | "wake_produced_no_review"
+  // Council review 2026-09-08 #8: the observer DID produce a review on time,
+  // but it was addressed to a different council pair sharing this workspace
+  // (its `session_group_id` didn't match), so it was rejected. Distinct from
+  // `wake_produced_no_review` (genuine silence) because the remedy differs —
+  // respawning won't fix a checkpoint/review filename collision.
+  | "foreign_group_review";
 
 /**
  * `reconnect_started` carries the surviving role: the half whose ws is still

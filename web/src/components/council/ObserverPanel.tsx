@@ -137,6 +137,7 @@ function StatusPill({ state }: { state: ObserverPanelState }) {
         if (state.reason === "observer_exited") return "exited";
         if (state.reason === "wake_send_failed") return "wake failed";
         if (state.reason === "wake_produced_no_review") return "no review";
+        if (state.reason === "foreign_group_review") return "cross-pair collision";
         if (state.reason === "reconnect_failed") return "reconnect failed";
         return null;
       })();
