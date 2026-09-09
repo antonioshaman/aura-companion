@@ -2349,6 +2349,22 @@ export class CliLauncher {
   }
 
   /**
+   * Update the persisted model id for a session. Called by the
+   * orchestrator's `session:model-fallback` handler after a rate-limit-
+   * class detection, so the next spawn/relaunch uses the downgraded
+   * model. No-op when the session is missing. Persists synchronously
+   * so a crash-between-set-and-relaunch still gets the intended model
+   * on boot recovery.
+   */
+  setModel(sessionId: string, model: string): void {
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      session.model = model;
+      this.persistState();
+    }
+  }
+
+  /**
    * Kill a session's CLI process.
    */
   async kill(sessionId: string): Promise<boolean> {

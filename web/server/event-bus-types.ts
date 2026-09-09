@@ -109,6 +109,43 @@ export interface CompanionEventMap {
     trigger: string;
   };
 
+  /**
+   * Backend went silent while a user-driven turn was in flight — the
+   * subprocess is alive (transport open, `state=connected`, pid running),
+   * but zero stream-json frames arrived on stdout for {@link
+   * SILENT_STDIO_TIMEOUT_MS} after we dispatched the user message. This
+   * matches the 2026-09-09 pathology where the claude CLI kept burning
+   * API tokens (its own `~/.claude/projects/*.jsonl` grew) while the
+   * pipe to bun silently stopped delivering frames.
+   *
+   * The `session-orchestrator` handler SIGTERMs the subprocess and lets
+   * the existing keepalive-relaunch machinery bring it back with fresh
+   * pipes via `--resume`, so the conversation continues where it stopped.
+   */
+  "session:backend-silent": {
+    sessionId: string;
+    /** Actual elapsed ms since last stdout frame. */
+    sinceMs: number;
+    /** Free-form label from the watchdog arm site, for logs + UI copy. */
+    reason: string;
+  };
+
+  /**
+   * Rate-limit-class error detected in a CLI response, and a downgrade
+   * target exists in the {@link CLAUDE_MODEL_FALLBACK_CHAIN}. The
+   * orchestrator handler updates the session's stored `model`, SIGTERMs
+   * the subprocess, and the existing keepalive path relaunches with
+   * `--model <fallback>` + `--resume`. If no next model exists in the
+   * chain, no event fires — a bare-metal 429 with no downgrade target
+   * flows through as a normal error and the user picks up manually.
+   */
+  "session:model-fallback": {
+    sessionId: string;
+    from: string;
+    to: string;
+    reason: "rate_limit" | "out_of_credits" | "unknown_model" | "model_not_available";
+  };
+
   // ── Backend integration ────────────────────────────────────────────
 
   /** Codex adapter created and ready to be attached to WsBridge. */

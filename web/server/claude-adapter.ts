@@ -53,6 +53,8 @@ import { reportProtocolDrift } from "./protocol-monitor.js";
 import { companionBus } from "./event-bus.js";
 import { isToolUseDeniedForSynthetic, denialMessageForSynthetic } from "./auto-proceed-permissions.js";
 import { resolveModelAvailability } from "./model-availability.js";
+import { SilentStdioWatchdog } from "./silent-stdio-watchdog.js";
+import { classifyFallbackReason, nextModelInChain } from "./model-fallback-chain.js";
 
 // --- Constants ----------------------------------------------------------------
 
@@ -67,6 +69,20 @@ const CLI_DEDUP_WINDOW = 2000;
  * the message is large — refuse the send rather than silently queue.
  */
 const OBSERVER_WAKE_BACKPRESSURE_THRESHOLD_BYTES = 1024 * 1024;
+
+/**
+ * Silent-stdio watchdog deadline. If a user turn is in flight and no
+ * stream-json frame arrives from the CLI for this many ms, we assume
+ * the stdio pipe is dead-but-not-closed and trigger a subprocess
+ * respawn via the orchestrator's existing keepalive path.
+ *
+ * Chosen to sit clearly above a normal tool-heavy turn (long Bash / git
+ * runs, sequential Reads) but well below a user's patience threshold.
+ * A legitimately long tool call slides the deadline forward every time
+ * a `tool_progress` / stream chunk arrives, so this is a "true silence"
+ * limit, not a "turn duration" limit.
+ */
+const SILENT_STDIO_TIMEOUT_MS = 60_000;
 
 /**
  * Adapter-level outcome of a wake send attempt. The orchestrator's
@@ -159,6 +175,26 @@ export class ClaudeAdapter implements IBackendAdapter {
 
   private protocolDriftSeen = new Set<string>();
   private parseErrorSeen = new Set<string>();
+
+  /**
+   * Silent-stdio deadline (see {@link SILENT_STDIO_TIMEOUT_MS} and the
+   * event contract on `session:backend-silent`). Armed when a user
+   * message dispatches to the CLI, slid forward on every parseable
+   * frame arrival, disarmed on `result` frames and transport close.
+   */
+  private readonly silenceWatchdog: SilentStdioWatchdog;
+
+  /**
+   * Once-per-spawn guard for the model-fallback classifier. A rate-
+   * limit-class error typically produces several assistant frames
+   * (synthetic "You've hit your session limit" messages, followed by a
+   * `result` with `stop_reason: "stop_sequence"`). We only want to
+   * fire the fallback event on the first such detection — the
+   * subsequent frames belong to the same failure, not a new one.
+   * Reset on {@link attachTransport} because a fresh spawn is by
+   * definition a fresh classification opportunity.
+   */
+  private modelFallbackFiredForThisSpawn = false;
 
   /**
    * Observer turn-state for the Council Mode auto-wake gate.
@@ -260,6 +296,24 @@ export class ClaudeAdapter implements IBackendAdapter {
     this.recorder = opts?.recorder ?? null;
     this.onActivityUpdate = opts?.onActivityUpdate ?? null;
     this.idleTimerProbe = opts?.idleTimerProbe ?? null;
+    this.silenceWatchdog = new SilentStdioWatchdog({
+      timeoutMs: SILENT_STDIO_TIMEOUT_MS,
+      onSilent: ({ sinceMs, reason }) => {
+        // The subprocess is producing output somewhere (its own jsonl
+        // is likely still growing — this failure mode was reproduced
+        // 2026-09-09), but nothing is reaching us. Surface a browser-
+        // visible error and let the orchestrator kill + relaunch.
+        this.browserMessageCb?.({
+          type: "error",
+          message: `Backend silent for ${Math.round(sinceMs / 1000)}s — relaunching…`,
+        });
+        companionBus.emit("session:backend-silent", {
+          sessionId: this.sessionId,
+          sinceMs,
+          reason,
+        });
+      },
+    });
   }
 
   // -- WebSocket lifecycle ----------------------------------------------------
@@ -292,6 +346,11 @@ export class ClaudeAdapter implements IBackendAdapter {
     // the council slice will re-mutate via setter (Task 8 surface) when
     // it next reconciles the session against the unresolved-STOP set.
     this.orchestratorTurnState = { kind: "awaiting-input", blockedByStop: false };
+    // A fresh spawn is a fresh classification opportunity — the
+    // previous spawn's rate-limit fatality does not carry.
+    this.modelFallbackFiredForThisSpawn = false;
+    // A fresh transport by definition cannot be silent yet.
+    this.silenceWatchdog.disarm();
 
     // Flush pending messages
     if (this.pendingMessages.length > 0) {
@@ -323,6 +382,10 @@ export class ClaudeAdapter implements IBackendAdapter {
     // Mirror reset for the orchestrator-half. See `observerTurnState`
     // comment immediately above; same socket-bound semantics.
     this.orchestratorTurnState = { kind: "awaiting-input", blockedByStop: false };
+    // Same reasoning as handleTransportClose: transport gone → no
+    // more frames → silence watchdog would misfire on a real
+    // disconnect.
+    this.silenceWatchdog.disarm();
     // Council Review #13 — mid-flap cleanup: clear pendingControlRequests
     // so unresolved Promise resolvers from the now-dead socket don't leak
     // into the next attach. `disconnect()` already clears this (line 283);
@@ -391,6 +454,10 @@ export class ClaudeAdapter implements IBackendAdapter {
   handleTransportClose(): void {
     this.transport = null;
     this.observerTurnState = "idle";
+    // Transport gone = no more frames can arrive; the exit + relaunch
+    // path takes over. Firing `backend-silent` on top of a real exit
+    // would double-trigger the orchestrator.
+    this.silenceWatchdog.disarm();
   }
 
   // -- IBackendAdapter: Raw message ingestion from CLI ------------------------
@@ -526,6 +593,12 @@ export class ClaudeAdapter implements IBackendAdapter {
     // provenance of the prompt. Provenance is recorded separately by
     // the recorder (Task 11 of the auto-proceed plan).
     this.orchestratorTurnState = { kind: "in-flight" };
+    // Arm the silence deadline: from this moment we expect a frame
+    // back within SILENT_STDIO_TIMEOUT_MS. Rate-limit-class errors
+    // still produce a synthetic assistant frame + result, so those
+    // paths will disarm normally; only a genuinely dead pipe reaches
+    // the timeout without any frame at all.
+    this.silenceWatchdog.arm("user_message_sent");
     return true;
   }
 
@@ -708,6 +781,12 @@ export class ClaudeAdapter implements IBackendAdapter {
     if (msg.type !== "keep_alive") {
       this.onActivityUpdate?.();
     }
+
+    // Any parseable frame — including keep_alives — is proof the stdio
+    // pipe is delivering. Slide the silence deadline forward. The 2026-
+    // 09-09 failure mode is exactly the opposite: ZERO frames for
+    // minutes while the subprocess kept working on its own jsonl.
+    this.silenceWatchdog.onFrame();
 
     switch (msg.type) {
       case "system":
@@ -951,11 +1030,81 @@ export class ClaudeAdapter implements IBackendAdapter {
   // -- Assistant, result, stream ----------------------------------------------
 
   private handleAssistantMessage(msg: CLIAssistantMessage): void {
+    // Rate-limit-class classification. The Claude CLI fabricates a
+    // synthetic assistant message (`model: "<synthetic>"`) containing
+    // the human-readable error string ("You've hit your session limit
+    // · resets 2:40am (UTC)") when the API returns an error the CLI
+    // knows how to translate. We look at those first-class error
+    // surfaces and, if the current model has a downgrade target in
+    // the chain, ask the orchestrator to swap-and-relaunch.
+    this.maybeEmitModelFallback(msg);
+
     this.browserMessageCb?.({
       type: "assistant",
       message: msg.message,
       parent_tool_use_id: msg.parent_tool_use_id,
       timestamp: Date.now(),
+    });
+  }
+
+  /**
+   * Scan an assistant message for rate-limit-class error text; if the
+   * classifier fires AND we have a downgrade target AND we haven't
+   * already fired this spawn, emit `session:model-fallback` for the
+   * orchestrator to swap-and-relaunch.
+   *
+   * Deliberately narrow: only "hit your session limit" / "rate_limit" /
+   * "out of credits" / "unknown model" surfaces trigger this. Any
+   * ambiguous or new failure mode is not misclassified as a fallback
+   * candidate — it flows through as a normal error.
+   */
+  private maybeEmitModelFallback(msg: CLIAssistantMessage): void {
+    if (this.modelFallbackFiredForThisSpawn) return;
+    const message = msg.message as { model?: unknown; content?: unknown } | undefined;
+    if (!message) return;
+
+    const currentModel = typeof message.model === "string" ? message.model : "";
+    // Extract text from all text-typed content blocks. Non-text blocks
+    // (tool_use, tool_result, etc.) can't carry a rate-limit surface
+    // in the shape we classify against, so skip.
+    const parts: string[] = [];
+    const content = message.content;
+    if (Array.isArray(content)) {
+      for (const block of content) {
+        if (block && typeof block === "object" && (block as { type?: unknown }).type === "text") {
+          const text = (block as { text?: unknown }).text;
+          if (typeof text === "string") parts.push(text);
+        }
+      }
+    } else if (typeof content === "string") {
+      parts.push(content);
+    }
+    const joined = parts.join("\n");
+    if (!joined) return;
+
+    const reason = classifyFallbackReason(joined);
+    if (!reason) return;
+
+    // Prefer the CLI's spawn-time model (persisted on the launcher's
+    // session record) over the message's own `model` — the assistant
+    // frame carries `<synthetic>` in exactly the case where a
+    // downgrade would help, and `<synthetic>` is not in the chain.
+    // The orchestrator has the real spawn model; we forward the
+    // reason and let it resolve `from` there.
+    const messageModel = currentModel;
+    const nextModel = nextModelInChain(messageModel);
+    // For the `<synthetic>` case, `nextModel` is null. That's the
+    // signal to the orchestrator handler: "please look up the real
+    // spawn model and downgrade from there". We fire the event
+    // regardless so the orchestrator gets a chance to decide; the
+    // handler will drop the event if it also can't resolve a next
+    // model.
+    this.modelFallbackFiredForThisSpawn = true;
+    companionBus.emit("session:model-fallback", {
+      sessionId: this.sessionId,
+      from: messageModel || "<unknown>",
+      to: nextModel ?? "<resolve-at-orchestrator>",
+      reason,
     });
   }
 
@@ -981,6 +1130,11 @@ export class ClaudeAdapter implements IBackendAdapter {
     // axis and may mutate via setter (Task 8 wiring).
     if (this.orchestratorTurnState.kind === "in-flight") {
       this.orchestratorTurnState = { kind: "awaiting-input", blockedByStop: false };
+      // Turn done → cancel the silence deadline. `handleRawMessage`
+      // already reset it on this very `result` frame, but the intent
+      // here is "no longer expecting output", not "reset for another
+      // 60s window".
+      this.silenceWatchdog.disarm();
       companionBus.emit("orchestrator:turn-done", {
         sessionId: this.sessionId,
         blockedByStop: false,
