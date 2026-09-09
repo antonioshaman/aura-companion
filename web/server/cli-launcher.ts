@@ -45,6 +45,7 @@ import { companionBus } from "./event-bus.js";
 import type { RelaunchExhaustedReason } from "./event-bus-types.js";
 import { selectLaunchableCodexModel } from "./codex-models.js";
 import { getSuppressedModelIds } from "./model-availability.js";
+import { resolveModelSubstitution } from "./broken-model-substitution.js";
 import { getSettings } from "./settings-manager.js";
 import {
   getLegacyCodexHome,
@@ -828,6 +829,27 @@ export class CliLauncher {
         launchModel = resolved.model;
       }
       this.syncRejectedCodexModels(sessionId, new Set());
+    } else {
+      // Claude backend: apply pre-spawn substitution for models we know
+      // trip an upstream CLI bug (see `broken-model-substitution.ts`).
+      // The substitution is silent on the spawn — no crash, no gate — but
+      // emits `session:model-substituted` so the orchestrator can surface
+      // a browser toast explaining the override. Persisted on
+      // `info.model` below so subsequent respawns already carry the
+      // substitute and this branch is a no-op on them.
+      const sub = resolveModelSubstitution(launchModel);
+      if (sub) {
+        console.log(
+          `[cli-launcher] Substituting broken model ${sub.from} → ${sub.to} at spawn for session ${sessionId}: ${sub.reason}`,
+        );
+        launchModel = sub.to;
+        companionBus.emit("session:model-substituted", {
+          sessionId,
+          from: sub.from,
+          to: sub.to,
+          reason: sub.reason,
+        });
+      }
     }
 
     const info: SdkSessionInfo = {
@@ -1145,6 +1167,28 @@ export class CliLauncher {
     // resolved slug (may be a fallback) now that the relaunch is committed.
     if (info.backendType === "codex" && validatedCodexModel !== undefined) {
       info.model = validatedCodexModel;
+    }
+
+    // Claude: apply pre-spawn substitution here too. Cases this catches
+    // that `launch()` doesn't: (a) session persisted from a bun version
+    // that predates the substitution table, and (b) an explicit
+    // `set_model` from the browser that names a broken model (the
+    // browser doesn't consult this table). Persisting to info.model
+    // means the substitute sticks across future relaunches.
+    if (info.backendType !== "codex") {
+      const sub = resolveModelSubstitution(info.model);
+      if (sub) {
+        console.log(
+          `[cli-launcher] Substituting broken model ${sub.from} → ${sub.to} on relaunch for session ${sessionId}: ${sub.reason}`,
+        );
+        info.model = sub.to;
+        companionBus.emit("session:model-substituted", {
+          sessionId,
+          from: sub.from,
+          to: sub.to,
+          reason: sub.reason,
+        });
+      }
     }
 
     const runtimeEnv = reconcileProviderAuthForRelaunch(
