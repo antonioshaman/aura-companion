@@ -49,7 +49,8 @@ nothing to review.
 
 The contract is **identical to any other cycle**: you MUST use the
 `Write` tool to create
-`<workspace>/.council/reviews/spawn-<provider>-observer.md` with a
+`<workspace>/.council/reviews/spawn-<session_group_id>-<provider>-observer.md`
+(the `<session_group_id>` is the one in your wake manifest) with a
 valid `ObserverReviewPayload` whose `findings` array is empty. Do NOT
 just emit the JSON as an assistant message in chat — the server reads
 the review FILE off disk, not your conversation transcript, so a
@@ -60,12 +61,16 @@ empty review file is what tells the server the pair is fully live.
 
 ### Where to write the review file
 
-Write to `<workspace>/.council/reviews/<phase>-<provider>-observer.md`,
-where `<provider>` is your own `observer_provider` token (`claude` or
-`codex`). The provider segment is REQUIRED so that a `claude+codex`
-pairing produces two distinct review files per checkpoint; a single
-shared filename would silently collide under the watcher's debounce
-window and one half's review would be lost.
+Write to
+`<workspace>/.council/reviews/<phase>-<session_group_id>-<provider>-observer.md`,
+where `<session_group_id>` is echoed from your wake manifest and
+`<provider>` is your own `observer_provider` token (`claude` or
+`codex`). BOTH segments are REQUIRED. The provider segment keeps a
+`claude+codex` pairing's two reviews distinct; the group-id segment keeps
+distinct council pairs that share one workspace from colliding on the same
+filename (last write wins, and one pair's review is silently lost —
+observed in production). A name missing either segment collides under the
+watcher's debounce window.
 
 This contract is identical whether your CLI is Claude Code, Codex, or
 any future SDK that hosts you. You do not have privileged tools; assume
@@ -242,7 +247,8 @@ cycles in `-p` mode); your role is to behave correctly on each such
 periodic wake:
 
 1. List `.council/checkpoints/*.json`. For each file whose `checkpoint_id`
-   you have NOT already produced a `<phase>-<provider>-observer.md`
+   you have NOT already produced a
+   `<phase>-<session_group_id>-<provider>-observer.md`
    review for, treat it as a fresh wake.
 2. Build the manifest from the checkpoint's `artifact_paths`, read +
    review as you would on an event-driven wake.

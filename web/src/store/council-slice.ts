@@ -181,7 +181,7 @@ export interface CouncilSlice {
   setGroupStatus: (
     sessionGroupId: string,
     status: SessionGroupStatus,
-    opts?: { deadRole?: SessionRole; reason?: "observer_exited" | "wake_send_failed" | "reconnect_failed" | "wake_produced_no_review" },
+    opts?: { deadRole?: SessionRole; reason?: "observer_exited" | "wake_send_failed" | "reconnect_failed" | "wake_produced_no_review" | "foreign_group_review" },
   ) => void;
   recordCheckpoint: (args: {
     sessionGroupId: string;

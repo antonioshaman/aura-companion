@@ -26,6 +26,7 @@ import { companionBus } from "./event-bus.js";
 import { metricsCollector } from "./metrics-collector.js";
 import { log } from "./logger.js";
 import { SessionGroupCoordinator } from "./session-group-coordinator.js";
+import type { GroupDegradeReason } from "./group-state-machine.js";
 import { isSupportedPairing as _isSupportedPairing } from "./backend-provider.js";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
@@ -38,7 +39,7 @@ import {
 import type { CheckpointPayload, ObserverReviewPayload } from "./council-types.js";
 import { COUNCIL_SCHEMA_VERSION, OBSERVER_WAKE_PAYLOAD_VERSION, OBSERVER_WAKE_TIMEOUT_MS, normalizeCodexObserverReviewRaw, normalizeObserverFindingShapeRaw, parseCheckpointPayload, parseObserverReviewPayload } from "./council-types.js";
 import { writeAtomicJson } from "./atomic-write.js";
-import { watchCheckpoints } from "./checkpoint-watcher.js";
+import { watchCheckpoints, buildCheckpointFilename } from "./checkpoint-watcher.js";
 import { findReviewForCheckpointSync, watchReviews } from "./review-watcher.js";
 import { DEFAULT_REARM_DELAY_MS, runResilientWatch } from "./resilient-watch.js";
 import { validateObserverFindings } from "./observer-grounding.js";
@@ -500,6 +501,16 @@ export class SessionOrchestrator {
    * checkpoint the first one missed. Cleared on emit + on group teardown.
    */
   private spawnCheckpointPending = new Set<string>();
+  /**
+   * Council review 2026-09-08 #4: groups with a spawn-checkpoint poll
+   * currently running its 30s window. `spawnCheckpointPending` answers "has
+   * the checkpoint landed yet", NOT "is a poll live" — so repeated relaunches
+   * inside the window would each start a concurrent poller (both key off the
+   * same observer readiness edge and both emit, waking the observer twice).
+   * Mirrors `catchupWakesInFlight`: checked at entry, cleared in `finally`,
+   * and re-checked each poll iteration so a group torn down mid-poll stops.
+   */
+  private readonly spawnCheckpointPollsInFlight = new Set<string>();
   // Timers for proactive keepalive relaunches (for cancellation on delete)
   private keepaliveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -544,7 +555,7 @@ export class SessionOrchestrator {
    * slice already has this pattern; this is the server-side mirror.
    */
   private councilGroupBySessionId = new Map<string, string>();
-  private councilGroupDegradedReason = new Map<string, "observer_exited" | "wake_send_failed" | "reconnect_failed" | "wake_produced_no_review">();
+  private councilGroupDegradedReason = new Map<string, "observer_exited" | "wake_send_failed" | "reconnect_failed" | "wake_produced_no_review" | "foreign_group_review">();
   /**
    * #9: which half died, persisted symmetrically with
    * `councilGroupDegradedReason` so a degraded-on-arrival bootstrap snapshot
@@ -1926,21 +1937,36 @@ export class SessionOrchestrator {
   ): Promise<void> {
     const MAX_WAIT_MS = 30_000;
     const POLL_INTERVAL_MS = 250;
+    // #4: at most one poll per group. A second relaunch inside the window
+    // finds the flag set and no-ops rather than stacking a duplicate poller.
+    if (this.spawnCheckpointPollsInFlight.has(sessionGroupId)) return;
+    this.spawnCheckpointPollsInFlight.add(sessionGroupId);
     this.spawnCheckpointPending.add(sessionGroupId);
-    const deadline = Date.now() + MAX_WAIT_MS;
-    while (Date.now() < deadline) {
-      if (this.observerReadyForWake(observerSessionId)) {
-        this.emitSpawnCheckpoint(sessionGroupId, workspaceCwd);
-        return;
+    try {
+      const deadline = Date.now() + MAX_WAIT_MS;
+      while (Date.now() < deadline) {
+        // #4: teardown cancellation. `tearDownCouncilGroupTracking` clears
+        // `spawnCheckpointPending`; if it's gone the group was archived/
+        // deleted mid-poll and must not have a checkpoint written into its
+        // (possibly reused, shared) workspace after the fact.
+        if (!this.spawnCheckpointPending.has(sessionGroupId)) return;
+        if (this.observerReadyForWake(observerSessionId)) {
+          if (this.spawnCheckpointPending.has(sessionGroupId)) {
+            this.emitSpawnCheckpoint(sessionGroupId, workspaceCwd);
+          }
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
       }
-      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+      log.warn("session-orchestrator", "council.spawn_checkpoint.adapter_wait_timed_out", {
+        event: "council.spawn_checkpoint.adapter_wait_timed_out",
+        sessionGroupId,
+        observerSessionId,
+        waitedMs: MAX_WAIT_MS,
+      });
+    } finally {
+      this.spawnCheckpointPollsInFlight.delete(sessionGroupId);
     }
-    log.warn("session-orchestrator", "council.spawn_checkpoint.adapter_wait_timed_out", {
-      event: "council.spawn_checkpoint.adapter_wait_timed_out",
-      sessionGroupId,
-      observerSessionId,
-      waitedMs: MAX_WAIT_MS,
-    });
   }
 
   /**
@@ -2038,7 +2064,7 @@ export class SessionOrchestrator {
       emitted_at: new Date().toISOString(),
       artifact_paths: [],
     };
-    const target = join(workspaceCwd, ".council", "checkpoints", `${payload.phase}.json`);
+    const target = join(workspaceCwd, ".council", "checkpoints", buildCheckpointFilename(payload.phase, sessionGroupId));
     try {
       writeAtomicJson(target, payload);
       this.spawnCheckpointPending.delete(sessionGroupId);
@@ -2654,7 +2680,16 @@ export class SessionOrchestrator {
       // so handing one to it would return silently and this group would
       // neither recover nor degrade. Check ownership here and fall through to
       // the degrade path when the only review on disk is someone else's.
+      // #8: default degrade reason is genuine silence; the foreign-review
+      // branch below overrides it so the banner tells the operator the truth
+      // (a review DID arrive, addressed to another pair) instead of
+      // "no review in time — respawn", which won't fix a filename collision.
+      let degradeReason: GroupDegradeReason = "wake_produced_no_review";
       if (recovered && recovered.payload.session_group_id !== sessionGroupId) {
+        degradeReason = "foreign_group_review";
+        // #12: distinct counter so the shared-workspace collision rate is
+        // visible on a dashboard, not just discoverable by log-grep.
+        metricsCollector.recordError("council.review.foreign_group_rescan");
         log.warn("session-orchestrator", "deadline rescan matched a foreign-group review — ignoring", {
           event: "council.review.foreign_group_rescan",
           sessionGroupId,
@@ -2686,17 +2721,19 @@ export class SessionOrchestrator {
         coordinator.applyEvent(sessionGroupId, {
           type: "half_died",
           role: "observer",
-          reason: "wake_produced_no_review",
+          reason: degradeReason,
         });
       } else {
         companionBus.emit("group:degraded", {
           sessionGroupId,
           deadRole: "observer",
-          reason: "wake_produced_no_review",
+          reason: degradeReason,
         });
       }
-      log.warn("session-orchestrator", "observer accepted wake but produced no review", {
-        event: "group.observer_wake_produced_no_review",
+      log.warn("session-orchestrator", "observer accepted wake but produced no usable review", {
+        event: degradeReason === "foreign_group_review"
+          ? "group.observer_wake_foreign_group_review"
+          : "group.observer_wake_produced_no_review",
         sessionGroupId,
         observerSessionId: meta.observerSessionId,
         checkpointId,
@@ -3566,6 +3603,10 @@ export class SessionOrchestrator {
     if (!group || group.status === "archived") return;
     if (group.observer.sessionId !== sessionId) return;
     if (!this.spawnCheckpointPending.has(group.sessionGroupId)) return;
+    // #4: a poll is already running for this group (e.g. two relaunches inside
+    // the 30s window) — don't log a re-arm that scheduleSpawnCheckpointWhen-
+    // ObserverReady will just no-op.
+    if (this.spawnCheckpointPollsInFlight.has(group.sessionGroupId)) return;
     const cwd = this.launcher.getSession(sessionId)?.cwd;
     if (!cwd) return;
     log.info("session-orchestrator", "council.spawn_checkpoint.rearmed_after_relaunch", {
@@ -4050,6 +4091,12 @@ export class SessionOrchestrator {
           metricsCollector.recordRelaunchSucceeded();
           this.autoRelaunchCounts.delete(sessionId);
           this.relaunchExhaustedNotified.delete(sessionId);
+          // Council review 2026-09-08 #2: the got-050 spawn-checkpoint re-arm
+          // must fire on EVERY successful relaunch, not only the manual REST
+          // one. This automatic path is the one that actually runs after a
+          // codex init failure (session:exited → keepalive → here), so
+          // omitting it left the fix's own target scenario unrecovered.
+          this.rearmSpawnCheckpointAfterObserverRelaunch(sessionId);
         }
         // ok=false without error: keep count to preserve the retry budget
       } finally {
@@ -4155,7 +4202,11 @@ export class SessionOrchestrator {
         for (const info of stale) {
           if (info.archived) continue;
           console.log(`[orchestrator] CLI for session ${info.sessionId} did not reconnect, relaunching...`);
-          await this.launcher.relaunch(info.sessionId);
+          const result = await this.launcher.relaunch(info.sessionId);
+          // Council review 2026-09-08 #2: boot-recovery relaunch is the third
+          // path that must re-arm the spawn-checkpoint poll — a server restart
+          // that catches a council observer mid-spawn lands here.
+          if (result.ok) this.rearmSpawnCheckpointAfterObserverRelaunch(info.sessionId);
         }
       }, RECONNECT_GRACE_MS);
     }

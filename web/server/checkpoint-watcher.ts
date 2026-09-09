@@ -13,6 +13,26 @@ const DEBOUNCE_MS = 150;
 /** Bounded LRU cap for the seen-checkpoint dedup set. */
 const SEEN_LRU_CAP = 256;
 
+/**
+ * Council review 2026-09-08 #1: build the group-scoped checkpoint filename.
+ *
+ * Pairs sharing one workspace share the `.council/checkpoints/` directory. A
+ * non-group-scoped name (`<phase>.json`) means two pairs on the same phase —
+ * or two fresh spawns (`spawn.json`) — write the SAME inode: last write wins,
+ * and the loser's `entry.lastCheckpoint` never populates, so its observer
+ * degrades. Scoping the filename by group id gives each pair its own file;
+ * the watcher still reads every `*.json` and the per-group
+ * `session_group_id` guard keeps foreign files out of the wrong group's
+ * state. Readers glob (they never reconstruct this name), so the write side
+ * is the only place this must change.
+ *
+ * `.json` filenames may contain `_`/`-`/`.`; a `grp_<hex>` id is safe. The
+ * result is `<phase>.<groupId>.json`.
+ */
+export function buildCheckpointFilename(phase: string, sessionGroupId: string): string {
+  return `${phase}.${sessionGroupId}.json`;
+}
+
 export type CheckpointDropReason =
   | "invalid-schema"
   | "duplicate-checkpoint-id"

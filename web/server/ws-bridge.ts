@@ -1224,6 +1224,18 @@ export class WsBridge {
 
     // ── onInitError (optional) ───────────────────────────────────────────
     adapter.onInitError?.((error) => {
+      // Council review 2026-09-08 #5: stale-adapter guard, mirroring the
+      // `onDisconnect` handler above. `companionBus.emit` is synchronous, so
+      // on a model-rejection auto-respawn the launcher's own onInitError
+      // subscriber (registered first) replaces `session.backendAdapter` with
+      // the fresh adapter BEFORE this subscriber runs — inside the old
+      // adapter's callback loop. Without this guard we broadcast the old,
+      // already-superseded adapter's error for a session that has already
+      // recovered, showing the user an alarming toast for a self-healed blip.
+      if (session.backendAdapter !== adapter) {
+        log.info("ws-bridge", "Ignoring stale init error (adapter replaced)", { sessionId });
+        return;
+      }
       log.error("ws-bridge", "Backend init error", { sessionId, error });
       this.broadcastToBrowsers(session, { type: "error", message: error });
     });

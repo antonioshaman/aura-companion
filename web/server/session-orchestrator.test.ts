@@ -149,6 +149,8 @@ import { generateSessionTitle } from "./auto-namer.js";
 import { companionBus } from "./event-bus.js";
 import { WsBridge } from "./ws-bridge.js";
 import { CodexAdapter, type ICodexTransport } from "./codex-adapter.js";
+import { metricsCollector } from "./metrics-collector.js";
+import { parseObserverReviewPayload } from "./council-types.js";
 
 // ── Mock factories ──────────────────────────────────────────────────────────
 
@@ -1455,6 +1457,29 @@ describe("SessionOrchestrator", () => {
       it("does NOT re-arm when the relaunch itself failed", async () => {
         const scheduleSpy = arm(true);
         deps.launcher.relaunch.mockResolvedValueOnce({ ok: false, error: "spawn failed" });
+        await orchestrator.relaunchSession("s-obs");
+        expect(scheduleSpy).not.toHaveBeenCalled();
+      });
+
+      // Council review 2026-09-08 #15: the archived-group and missing-cwd
+      // early-returns were mutation-blind — deleting either guard left every
+      // test green. Both are the exact "unanticipated relaunch vs. lifecycle
+      // ordering" edge got-050 came from.
+      it("does NOT re-arm when the group is archived", async () => {
+        const scheduleSpy = arm(true);
+        (orchestrator as unknown as { coordinator: { findBySessionId: (s: string) => unknown } }).coordinator = {
+          findBySessionId: (sid: string) =>
+            sid === "s-orch" || sid === "s-obs"
+              ? { ...group, status: "archived" }
+              : undefined,
+        };
+        await orchestrator.relaunchSession("s-obs");
+        expect(scheduleSpy).not.toHaveBeenCalled();
+      });
+
+      it("does NOT re-arm when the relaunched session has no cwd", async () => {
+        const scheduleSpy = arm(true);
+        deps.launcher.getSession.mockReturnValue({ archived: false, cwd: undefined } as any);
         await orchestrator.relaunchSession("s-obs");
         expect(scheduleSpy).not.toHaveBeenCalled();
       });
@@ -2897,6 +2922,37 @@ describe("SessionOrchestrator", () => {
       expect(emitted).toHaveLength(0);
     });
 
+    // Council review 2026-09-08 #9: the tests above hand the handler a
+    // pre-built object. A real observer writes BYTES (a .md file of JSON) that
+    // traverse normalizeObserverReviewRaw → parseObserverReviewPayload before
+    // reaching the guard. This case runs a raw codex-native string through
+    // that exact pipeline so a future reorder of the guard vs. the normalizers
+    // (or a codex-native shape that only fails once normalized) is caught.
+    it("drops a foreign-group review that arrives as raw codex-native bytes through the parse pipeline", () => {
+      seedGroup("grp_raw", { artifactPaths: [] });
+      const emitted: unknown[] = [];
+      companionBus.on("group:review", (e: unknown) => { emitted.push(e); });
+      // Codex-native raw file: no schema_version/reviewed_at/observer_model —
+      // exactly the shape normalizeCodexObserverReviewRaw backfills.
+      const rawBytes = JSON.stringify({
+        observer_wake_payload_version_echo: 1,
+        checkpoint_id: "chk_a",
+        phase: "council-plan",
+        session_group_id: "grp_someone_else", // foreign
+        observer_provider: "codex",
+        findings: [{ severity: "critical", file: "src/a.ts", line: 3, title: "x", detail: "y" }],
+      });
+      const priv = orchestrator as unknown as {
+        normalizeObserverReviewRaw: (g: string, raw: string, provider: "claude" | "codex") => string;
+        handleCouncilReview: (g: string, p: Record<string, unknown>) => void;
+      };
+      const normalized = priv.normalizeObserverReviewRaw("grp_raw", rawBytes, "codex");
+      const parsed = parseObserverReviewPayload(normalized);
+      expect(parsed).not.toBeNull(); // the bytes DO parse — so only the guard can drop them
+      priv.handleCouncilReview("grp_raw", parsed as unknown as Record<string, unknown>);
+      expect(emitted).toHaveLength(0);
+    });
+
     // The guard must reject BEFORE any state mutation. The wake→review
     // watchdog disarm is the first thing the handler does, and letting a
     // foreign review clear it would make this group's own missing review
@@ -3068,6 +3124,104 @@ describe("SessionOrchestrator", () => {
         })).not.toThrow();
       } finally {
         ws.councilGroupMeta.get = original;
+      }
+    });
+  });
+
+  // Council review 2026-09-08 #3: the deadline-rescan path — the recovery
+  // path that runs precisely when the live fs.watch already dropped the event
+  // — had zero tests, including its got-051 ownership branch (the mirror of
+  // this PR's headline fix). A regression here silently reintroduces
+  // cross-pair finding leakage exactly in the failure-recovery path.
+  describe("handleReviewDeadlineExpired (deadline rescan + ownership guard)", () => {
+    const { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } = require("node:fs") as typeof import("node:fs");
+    const { tmpdir } = require("node:os") as typeof import("node:os");
+    const { join: pathJoin } = require("node:path") as typeof import("node:path");
+
+    /** Seed a group whose review watchdog is armed for `chk_dl`, cwd = a real temp dir. */
+    function seedForDeadline(groupId: string, cwd: string) {
+      const ws = orchestrator as unknown as {
+        councilWatchers: Map<string, unknown>;
+        councilGroupMeta: Map<string, unknown>;
+      };
+      const timer = setTimeout(() => {}, 60_000);
+      ws.councilWatchers.set(groupId, {
+        cwd,
+        abort: new AbortController(),
+        lastCheckpoint: { sequence: 1, checkpoint_id: "chk_dl", phase: "council-plan", artifact_paths: [] },
+        previousCheckpoint: null,
+        pendingReviewDeadline: { checkpointId: "chk_dl", timer },
+      });
+      ws.councilGroupMeta.set(groupId, {
+        primarySessionId: "sess_orch",
+        observerSessionId: "sess_obs",
+        pairing: "claude+claude",
+        createdAt: Date.now(),
+        lastCheckpointReceivedAt: Date.now() - 100,
+      });
+      return () => clearTimeout(timer);
+    }
+
+    function writeReviewFile(cwd: string, ownerGroupId: string) {
+      const dir = pathJoin(cwd, ".council", "reviews");
+      mkdirSync(dir, { recursive: true });
+      const payload = {
+        schema_version: 1,
+        observer_wake_payload_version_echo: 1,
+        checkpoint_id: "chk_dl",
+        phase: "council-plan",
+        session_group_id: ownerGroupId,
+        reviewed_at: "2026-01-01T00:00:00Z",
+        observer_provider: "claude",
+        observer_model: "claude-opus-5",
+        observer_cli_version: "1.0.0",
+        findings: [{ severity: "NOTE", claim: "x", evidence_path: "a.ts" }],
+      };
+      writeFileSync(pathJoin(dir, "council-plan-claude-observer.md"), JSON.stringify(payload));
+    }
+
+    it("degrades with foreign_group_review (not silence) when the only review on disk belongs to another pair", async () => {
+      const cwd = realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-dl-foreign-")));
+      const clear = seedForDeadline("grp_dl_mine", cwd);
+      writeReviewFile(cwd, "grp_dl_theirs"); // neighbour's review, same checkpoint id
+      const degraded: Array<{ reason?: string; deadRole?: string }> = [];
+      const reviews: unknown[] = [];
+      companionBus.on("group:degraded", (e: unknown) => { degraded.push(e as { reason?: string }); });
+      companionBus.on("group:review", (e: unknown) => { reviews.push(e); });
+      const metricSpy = vi.spyOn(metricsCollector, "recordError");
+      try {
+        (orchestrator as unknown as { handleReviewDeadlineExpired: (g: string, c: string) => void })
+          .handleReviewDeadlineExpired("grp_dl_mine", "chk_dl");
+        // (a) degrades, with the foreign-review reason, not the generic silence one
+        expect(degraded).toHaveLength(1);
+        expect(degraded[0]!.reason).toBe("foreign_group_review");
+        // (b) never adopts the foreign review as its own
+        expect(reviews).toHaveLength(0);
+        // (c) the collision counter fired
+        expect(metricSpy).toHaveBeenCalledWith("council.review.foreign_group_rescan");
+      } finally {
+        metricSpy.mockRestore();
+        clear();
+        rmSync(cwd, { recursive: true, force: true });
+      }
+    });
+
+    it("recovers (adopts the review, no degrade) when the disk review belongs to THIS group", async () => {
+      const cwd = realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-dl-own-")));
+      const clear = seedForDeadline("grp_dl_own", cwd);
+      writeReviewFile(cwd, "grp_dl_own"); // our own review the watcher missed
+      const degraded: unknown[] = [];
+      const reviews: unknown[] = [];
+      companionBus.on("group:degraded", (e: unknown) => { degraded.push(e); });
+      companionBus.on("group:review", (e: unknown) => { reviews.push(e); });
+      try {
+        (orchestrator as unknown as { handleReviewDeadlineExpired: (g: string, c: string) => void })
+          .handleReviewDeadlineExpired("grp_dl_own", "chk_dl");
+        expect(reviews).toHaveLength(1); // recovered_by_deadline_rescan
+        expect(degraded).toHaveLength(0);
+      } finally {
+        clear();
+        rmSync(cwd, { recursive: true, force: true });
       }
     });
   });
@@ -4317,9 +4471,9 @@ describe("SessionOrchestrator", () => {
   // emitted artifact must (a) be a valid CheckpointPayload that round-
   // trips through `parseCheckpointPayload`, (b) carry empty
   // `artifact_paths` so the observer's review naturally collapses to
-  // `findings: []`, and (c) land at `<cwd>/.council/checkpoints/spawn.json`.
+  // `findings: []`, and (c) land at `<cwd>/.council/checkpoints/spawn.<groupId>.json` (group-scoped, council review 2026-09-08 #1).
   describe("emitSpawnCheckpoint", () => {
-    it("writes a valid empty-manifest CheckpointPayload under .council/checkpoints/spawn.json", async () => {
+    it("writes a valid empty-manifest CheckpointPayload under .council/checkpoints/spawn.<groupId>.json", async () => {
       const fs = await import("node:fs");
       const os = await import("node:os");
       const path = await import("node:path");
@@ -4334,7 +4488,7 @@ describe("SessionOrchestrator", () => {
         // manually here to match production ordering.
         fs.mkdirSync(path.join(ws, ".council", "checkpoints"), { recursive: true });
         obs.emitSpawnCheckpoint("grp_spawn1", ws);
-        const target = path.join(ws, ".council", "checkpoints", "spawn.json");
+        const target = path.join(ws, ".council", "checkpoints", "spawn.grp_spawn1.json");
         expect(fs.existsSync(target)).toBe(true);
         const parsed = parseCheckpointPayload(fs.readFileSync(target, "utf8"));
         expect(parsed).not.toBeNull();
@@ -4373,6 +4527,7 @@ describe("SessionOrchestrator", () => {
         const obs = orchestrator as unknown as {
           scheduleSpawnCheckpointWhenObserverReady: (g: string, oid: string, cwd: string) => Promise<void>;
           wsBridge: { getSession: (id: string) => { backendAdapter: unknown } | undefined };
+          spawnCheckpointPending: Set<string>;
         };
         const observerId = "observer-spawn-defer-1";
         const originalGetSession = obs.wsBridge.getSession.bind(obs.wsBridge);
@@ -4388,7 +4543,7 @@ describe("SessionOrchestrator", () => {
           return originalGetSession(id);
         };
         fs.mkdirSync(path.join(ws, ".council", "checkpoints"), { recursive: true });
-        const target = path.join(ws, ".council", "checkpoints", "spawn.json");
+        const target = path.join(ws, ".council", "checkpoints", "spawn.grp_defer_1.json");
         // Kick off the poll. It should not write the file yet because the
         // adapter is still null.
         const promise = obs.scheduleSpawnCheckpointWhenObserverReady("grp_defer_1", observerId, ws);
@@ -4396,14 +4551,32 @@ describe("SessionOrchestrator", () => {
         // backendAdapter is null. 100ms is well under POLL_INTERVAL_MS=250.
         await new Promise((r) => setTimeout(r, 100));
         expect(fs.existsSync(target)).toBe(false);
+        // Council review 2026-09-08 #10: the pending flag is SET while the
+        // poll is mid-window (the invariant the got-050 re-arm reads).
+        expect(obs.spawnCheckpointPending.has("grp_defer_1")).toBe(true);
         // Now flip the adapter to "attached" — the next poll tick will see
         // it and emit.
         returnAdapter = true;
         await promise;
         expect(fs.existsSync(target)).toBe(true);
+        // #10: and it is CLEARED once the checkpoint emits, so a later
+        // relaunch does not needlessly re-arm.
+        expect(obs.spawnCheckpointPending.has("grp_defer_1")).toBe(false);
       } finally {
         fs.rmSync(ws, { recursive: true, force: true });
       }
+    });
+
+    // Council review 2026-09-08 #10: teardown must clear the pending flag so a
+    // relaunch after archive/delete cannot resurrect a poll for a dead group.
+    it("tearDownCouncilGroupTracking clears the spawn-checkpoint pending flag", () => {
+      const obs = orchestrator as unknown as {
+        spawnCheckpointPending: Set<string>;
+        tearDownCouncilGroupTracking: (g: string) => void;
+      };
+      obs.spawnCheckpointPending.add("grp_teardown");
+      obs.tearDownCouncilGroupTracking("grp_teardown");
+      expect(obs.spawnCheckpointPending.has("grp_teardown")).toBe(false);
     });
 
     it("does not throw when the write fails — failure is logged, not propagated", async () => {

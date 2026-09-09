@@ -3570,6 +3570,98 @@ describe("CodexAdapter with ICodexTransport", () => {
     expect(mock.notifications.filter((n) => n.method === "initialized").length).toBe(3);
   });
 
+  // Council review 2026-09-08 #14. `Transport closed` and `Not initialized`
+  // are two independently-tuned mitigations (500ms vs 100ms base) that used to
+  // share ONE attempt counter and ONE budget of 3. A spawn that hit both — the
+  // realistic case, since both correlate with the same app-server startup
+  // jitter — therefore got fewer tries against either than each constant
+  // advertises, and the handshake branch computed its backoff off an exponent
+  // the transport branch had already advanced. Both isolated tests above pass
+  // either way; only a MIXED sequence can tell the two designs apart.
+  it("gives each failure class its own retry budget on a mixed Transport-closed / Not-initialized sequence", async () => {
+    const mock = createMockTransport();
+    const initErrors: string[] = [];
+    const adapter = new CodexAdapter(mock.transport, "test-session-mixed-retry", { model: "gpt-5.5" });
+    adapter.onInitError((err) => initErrors.push(err));
+
+    await new Promise((r) => setTimeout(r, 50));
+    mock.resolveCall(1, { userAgent: "codex" });
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Attempt 1 dies on the transport (500ms branch, spends a TRANSPORT slot).
+    expect(mock.calls[1]?.method).toBe("thread/start");
+    mock.rejectCall(2, new Error("Transport closed"));
+    await new Promise((r) => setTimeout(r, 700));
+
+    // Attempt 2 hits the handshake race (100ms branch, spends a NOT-INIT slot).
+    // Under the old shared counter this attempt was index 1, so it would have
+    // waited 100*2^1=200ms — an exponent inherited from the transport failure.
+    expect(mock.calls[2]?.method).toBe("thread/start");
+    mock.rejectCall(3, new Error("Not initialized"));
+    await new Promise((r) => setTimeout(r, 250));
+
+    // The decisive assertion: a third attempt exists at all. With one shared
+    // budget of 3 the loop would have stopped here (attempt index 2 = last).
+    expect(mock.calls[3]?.method).toBe("thread/start");
+    // And the handshake branch re-sent `initialized` before retrying: one at
+    // init, one for the single Not-initialized failure.
+    expect(mock.notifications.filter((n) => n.method === "initialized").length).toBe(2);
+
+    mock.resolveCall(4, { thread: { id: "thr_mixed" } });
+    await new Promise((r) => setTimeout(r, 50));
+    mock.resolveCall(5, {}); // rateLimits
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(initErrors.length).toBe(0);
+    expect(adapter.getThreadId()).toBe("thr_mixed");
+  });
+
+  // #13: the `initialized` re-send inside the handshake-race branch used to be
+  // an unguarded await. If the transport dropped in the window between the
+  // failed thread/start and the re-send, that rejection escaped the retry loop
+  // entirely into the outer catch — burning ZERO of the budget and reporting a
+  // generic "initialization failed", which is precisely the "stayed dead"
+  // outcome got-050 exists to remove. It must now be classified as a transport
+  // failure and consume a transport slot instead.
+  it("treats a failed `initialized` re-send as a transport error instead of escaping the retry loop", async () => {
+    const mock = createMockTransport();
+    const initErrors: string[] = [];
+    const adapter = new CodexAdapter(mock.transport, "test-session-notify-fail", { model: "gpt-5.5" });
+    adapter.onInitError((err) => initErrors.push(err));
+
+    await new Promise((r) => setTimeout(r, 50));
+    mock.resolveCall(1, { userAgent: "codex" });
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Make the NEXT notify reject, then trigger the handshake-race branch.
+    const originalNotify = mock.transport.notify.bind(mock.transport);
+    let notifyFailures = 0;
+    (mock.transport as { notify: (m: string, p?: Record<string, unknown>) => Promise<void> }).notify = async (m, p) => {
+      if (m === "initialized") {
+        notifyFailures++;
+        throw new Error("Transport closed");
+      }
+      return originalNotify(m, p);
+    };
+
+    expect(mock.calls[1]?.method).toBe("thread/start");
+    mock.rejectCall(2, new Error("Not initialized"));
+    // 500ms transport backoff (the slot the notify failure consumed) + buffer.
+    await new Promise((r) => setTimeout(r, 700));
+
+    expect(notifyFailures).toBe(1);
+    // The loop survived the notify rejection and retried thread/start rather
+    // than collapsing into the outer catch.
+    expect(mock.calls[2]?.method).toBe("thread/start");
+    expect(initErrors.length).toBe(0);
+
+    mock.resolveCall(3, { thread: { id: "thr_after_notify_fail" } });
+    await new Promise((r) => setTimeout(r, 50));
+    mock.resolveCall(4, {}); // rateLimits
+    await new Promise((r) => setTimeout(r, 20));
+    expect(adapter.getThreadId()).toBe("thr_after_notify_fail");
+  });
+
   it("falls back to thread/start when thread/resume fails with non-transient error", async () => {
     // When thread/resume fails (e.g. "no rollout found"), the adapter should
     // automatically fall back to thread/start instead of failing entirely.

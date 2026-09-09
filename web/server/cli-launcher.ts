@@ -2029,7 +2029,15 @@ export class CliLauncher {
 
     // Handle init errors
     adapter.onInitError((error) => {
-      console.error(`[cli-launcher] Codex WS session ${sessionId} init failed: ${error}`);
+      // Council review 2026-09-08 #7: structured EC-9-shaped init-failure log.
+      log.error("cli-launcher", "Codex WS init failed", {
+        event: "codex.init_failed",
+        sessionId,
+        sessionGroupId: info.sessionGroupId,
+        role: info.sessionGroupRole,
+        transport: "ws",
+        error,
+      });
       try { proxyProc.kill("SIGTERM"); } catch {}
       try { proc.kill("SIGTERM"); } catch {}
       // P1 #1 generation guard: a newer spawn already owns this session's
@@ -2266,11 +2274,26 @@ export class CliLauncher {
     // Also clear cliSessionId so the next relaunch starts a fresh thread
     // instead of trying to resume one whose rollout may be missing.
     adapter.onInitError((error) => {
-      console.error(`[cli-launcher] Codex session ${sessionId} init failed: ${error}`);
+      // Council review 2026-09-08 #7: structured, EC-9-shaped log so a
+      // council-observer init failure is greppable by sessionGroupId/role —
+      // this whole two-PR scope exists because that failure was invisible.
+      log.error("cli-launcher", "Codex stdio init failed", {
+        event: "codex.init_failed",
+        sessionId,
+        sessionGroupId: info.sessionGroupId,
+        role: info.sessionGroupRole,
+        transport: "stdio",
+        error,
+      });
+      // #6: kill the app-server subprocess unconditionally, mirroring the WS
+      // variant. The generic-failure branch below only flips state to
+      // `exited`; without this the OS process keeps running (holding memory
+      // and the app-server connection) while Companion believes it is dead —
+      // an orphan that only a later relaunch or a server restart reaps.
+      try { proc.kill("SIGTERM"); } catch {}
       // P1 #1 generation guard: a newer spawn already owns this session;
       // the old init-error must not respawn or mark the live session exited.
       if (this.isSupersededGeneration(sessionId, proc)) {
-        try { proc.kill("SIGTERM"); } catch {}
         return;
       }
       const session = this.sessions.get(sessionId);
@@ -2279,7 +2302,6 @@ export class CliLauncher {
           this.markCodexModelRejected(sessionId, session.model);
           const resolved = this.resolveCodexLaunchModel(sessionId, session.model);
           if (resolved.ok && resolved.model !== session.model) {
-            try { proc.kill("SIGTERM"); } catch {}
             session.state = "starting";
             session.exitCode = undefined;
             session.cliSessionId = undefined;

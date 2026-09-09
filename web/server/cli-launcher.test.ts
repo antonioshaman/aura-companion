@@ -1782,11 +1782,17 @@ describe("codex onInitError model-rejection auto-respawn", () => {
   // launcher registers first and `WsBridge.attachAdapter` registers second,
   // and while the adapter kept only the last callback the bridge silently
   // disabled every recovery below — including this model-rejection respawn —
-  // for months. These tests kept passing throughout because they invoke the
-  // handler directly. `fireInitError` walks the whole list so the shape under
-  // test stays the shape production uses.
-
-  /** Invoke every `onInitError` subscriber the adapter has registered. */
+  // for months.
+  //
+  // Council review 2026-09-08 #11 — honest scope: these tests only ever
+  // register ONE subscriber (the launcher's), so `fireInitError` over that
+  // one-element list does NOT exercise the multi-subscriber wiring; it drives
+  // the launcher's recovery branch in isolation. The proof that BOTH
+  // subscribers actually fire on a real init failure lives in
+  // `codex-adapter.test.ts` ("invokes EVERY onInitError subscriber…") and in
+  // the "two independent onInitError subscribers both run" test at the bottom
+  // of this describe, which registers a second subscriber through the public
+  // `onInitError` exactly as `ws-bridge.ts` does.
   function fireInitError(adapter: any, error: string): void {
     for (const cb of adapter.initErrorCbs as ((e: string) => void)[]) cb(error);
   }
@@ -1983,6 +1989,52 @@ describe("codex onInitError model-rejection auto-respawn", () => {
     expect(codexProc1.kill).toHaveBeenCalledWith("SIGTERM");
     expect(info.state).toBe(stateBefore);
     expect(info.model).toBe("gpt-5.2-codex");
+  });
+
+  // Council review 2026-09-08 #11: the additive-contract proof at the
+  // cli-launcher integration boundary. The launcher registers its handler at
+  // spawn (subscriber #1); production then registers a SECOND via
+  // `ws-bridge.ts`'s `adapter.onInitError?.(cb)`. This asserts the captured
+  // real adapter already carries the launcher's subscriber, that a second
+  // public registration is additive (not last-writer-wins, the got-052 bug),
+  // and that firing a real init error runs BOTH — the launcher's exit-marking
+  // AND the second subscriber. (The transport-level proof that a real codex
+  // init failure fans out to all subscribers lives in codex-adapter.test.ts.)
+  it("stdio: a second onInitError subscriber registered post-attach ALSO fires (additive contract)", async () => {
+    mockResolveBinary.mockReturnValue("/opt/fake/codex");
+    const codexProc1 = createMockCodexProc(8131);
+    mockSpawn.mockReturnValueOnce(codexProc1 as any);
+
+    let capturedAdapter: any;
+    companionBus.on("backend:codex-adapter-created", ({ adapter }) => {
+      capturedAdapter ??= adapter;
+    });
+
+    launcher.launch({
+      backendType: "codex",
+      cwd: "/tmp/project",
+      model: "gpt-5.2-codex",
+      codexSandbox: "workspace-write",
+    });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const info = launcher.getSession("test-session-id")!;
+    // The launcher's own subscriber is already registered from spawn.
+    expect(capturedAdapter.initErrorCbs.length).toBe(1);
+
+    // Register a second the way ws-bridge.ts does, via the public method.
+    let bridgeSawError: string | null = null;
+    capturedAdapter.onInitError?.((err: string) => { bridgeSawError = err; });
+    expect(capturedAdapter.initErrorCbs.length).toBe(2);
+
+    fireInitError(capturedAdapter, "Codex initialization failed: ECONNREFUSED");
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Subscriber #1 (launcher): session marked exited.
+    expect(info.state).toBe("exited");
+    // Subscriber #2 (bridge-shaped): also ran — the got-052 regression would
+    // have silently dropped exactly one of these.
+    expect(bridgeSawError).toBe("Codex initialization failed: ECONNREFUSED");
   });
 });
 

@@ -57,6 +57,7 @@ export const OBSERVER_REVIEW_FILE_PATTERN = /^[A-Za-z0-9_-][A-Za-z0-9_.\-]{0,63}
 export function buildObserverReviewFilename(
   phase: string,
   provider: "claude" | "codex",
+  sessionGroupId?: string,
 ): string {
   if (typeof phase !== "string" || phase.length === 0 || phase.length > 64) {
     throw new RangeError(
@@ -68,10 +69,17 @@ export function buildObserverReviewFilename(
       `buildObserverReviewFilename: provider must be "claude" or "codex" (got ${JSON.stringify(provider)})`,
     );
   }
-  const filename = `${phase}-${provider}-observer.md`;
+  // Council review 2026-09-08 #1: the group-id segment scopes the review file
+  // so pairs sharing a workspace don't collide on `<phase>-<provider>-...`.
+  // Optional for backward compatibility — an observer running the pre-#1
+  // prompt still writes the group-less name, which the pattern below (and the
+  // reader) both accept; the group segment is just extra prefix characters.
+  const filename = sessionGroupId
+    ? `${phase}-${sessionGroupId}-${provider}-observer.md`
+    : `${phase}-${provider}-observer.md`;
   if (!OBSERVER_REVIEW_FILE_PATTERN.test(filename)) {
     throw new RangeError(
-      `buildObserverReviewFilename: constructed name ${JSON.stringify(filename)} fails OBSERVER_REVIEW_FILE_PATTERN — phase token has illegal characters`,
+      `buildObserverReviewFilename: constructed name ${JSON.stringify(filename)} fails OBSERVER_REVIEW_FILE_PATTERN — phase or group token has illegal characters, or the combined prefix exceeds 64 chars`,
     );
   }
   return filename;

@@ -353,6 +353,23 @@ describe("buildObserverReviewFilename — producer-side helper", () => {
     expect(OBSERVER_REVIEW_FILE_PATTERN.test(codexName)).toBe(true);
   });
 
+  // Council review 2026-09-08 #1: the optional group-id segment scopes the
+  // review filename so two pairs sharing a workspace never collide. It must
+  // still satisfy the (unchanged) pattern, and it must be distinct from both
+  // the group-less form and a sibling group's form.
+  it("produces a group-scoped name that satisfies the pattern and is distinct across groups", () => {
+    const groupless = buildObserverReviewFilename("council-review", "claude");
+    const groupA = buildObserverReviewFilename("council-review", "claude", "grp_aaa111");
+    const groupB = buildObserverReviewFilename("council-review", "claude", "grp_bbb222");
+    expect(groupA).toBe("council-review-grp_aaa111-claude-observer.md");
+    expect(OBSERVER_REVIEW_FILE_PATTERN.test(groupA)).toBe(true);
+    expect(groupA).not.toBe(groupB);
+    expect(groupA).not.toBe(groupless);
+    // The reader extracts provider from capture group 1 regardless of the
+    // extra prefix segment.
+    expect(OBSERVER_REVIEW_FILE_PATTERN.exec(groupA)?.[1]).toBe("claude");
+  });
+
   it("throws on empty phase", () => {
     expect(() => buildObserverReviewFilename("", "claude")).toThrow(/non-empty/);
   });

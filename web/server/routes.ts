@@ -4,6 +4,7 @@ import { streamSSE } from "hono/streaming";
 import { execSync } from "node:child_process";
 import { resolveBinary } from "./path-resolver.js";
 import { writeAtomicJson } from "./atomic-write.js";
+import { buildCheckpointFilename } from "./checkpoint-watcher.js";
 import { parseCheckpointPayload } from "./council-types.js";
 import { extractHandoff, buildPickupDraft } from "./handoff-extractor.js";
 import { writeFileSync } from "node:fs";
@@ -637,7 +638,9 @@ export function createRoutes(
         },
       });
     }
-    const target = join(session.cwd, ".council", "checkpoints", `${payload.phase}.json`);
+    // Council review 2026-09-08 #1: group-scoped filename so two pairs sharing
+    // a workspace don't overwrite each other's same-phase checkpoint.
+    const target = join(session.cwd, ".council", "checkpoints", buildCheckpointFilename(payload.phase, payload.session_group_id));
     try {
       writeAtomicJson(target, payload);
     } catch (err) {

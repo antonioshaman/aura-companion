@@ -20,7 +20,7 @@ export interface DegradedBannerProps {
   /** Which half of the pair died. The label changes accordingly. */
   deadRole: SessionRole;
   /** Optional degraded reason from the server for more truthful copy. */
-  reason?: "observer_exited" | "wake_send_failed" | "reconnect_failed" | "wake_produced_no_review";
+  reason?: "observer_exited" | "wake_send_failed" | "reconnect_failed" | "wake_produced_no_review" | "foreign_group_review";
   /** Respawn the missing half. Returns a promise so the spinner reflects in-flight state. */
   onRespawn: () => void | Promise<void>;
   /** Continue solo — dismisses the degraded banner but keeps the panel visible. */
@@ -75,6 +75,9 @@ export function DegradedBanner({
     }
     if (deadRole === "observer" && reason === "wake_produced_no_review") {
       return "The observer accepted a checkpoint but did not produce a review in time. Respawn it to resume independent review.";
+    }
+    if (deadRole === "observer" && reason === "foreign_group_review") {
+      return "The observer produced a review, but it was addressed to a different council pair sharing this workspace — the checkpoint or review files are colliding across pairs. Give each pair its own workspace; respawning alone won't fix this.";
     }
     if (deadRole === "observer") {
       return "The orchestrator continues running solo. Respawn the observer to resume independent review.";

@@ -738,7 +738,7 @@ export function buildObserverWakePayload(args: {
     jsonBlock,
     "```",
     "",
-    `You MUST use your \`Write\` tool to create the file \`.council/reviews/${checkpoint.phase}-${observerProvider}-observer.md\` (workspace-relative) containing one review matching the \`ObserverReviewPayload\` JSON schema described in your system prompt — JSON only, no prose, no code fences. The server reads that FILE off disk; a reply emitted only in chat is silently dropped and your review will not reach the user. Set \`observer_wake_payload_version_echo\` to the integer value of \`observer_wake_payload_version\` from the manifest. Echo \`session_group_id\`, \`checkpoint_id\`, and \`phase\` from the manifest verbatim. Begin.`,
+    `You MUST use your \`Write\` tool to create the file \`.council/reviews/${checkpoint.phase}-${checkpoint.session_group_id}-${observerProvider}-observer.md\` (workspace-relative) containing one review matching the \`ObserverReviewPayload\` JSON schema described in your system prompt — JSON only, no prose, no code fences. The group-id segment is REQUIRED: pairs sharing a workspace share the reviews directory, so a name without it collides across pairs and one review is lost. The server reads that FILE off disk; a reply emitted only in chat is silently dropped and your review will not reach the user. Set \`observer_wake_payload_version_echo\` to the integer value of \`observer_wake_payload_version\` from the manifest. Echo \`session_group_id\`, \`checkpoint_id\`, and \`phase\` from the manifest verbatim. Begin.`,
     "",
   ].join("\n");
 

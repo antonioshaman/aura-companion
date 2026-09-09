@@ -1152,6 +1152,14 @@ export class CodexAdapter implements IBackendAdapter {
    * every one stayed dead (initFailed) because only "Transport closed" retried.
    */
   private static readonly INIT_NOT_INITIALIZED_RETRY_BASE_MS = 100;
+  /**
+   * Council review 2026-09-08 #14: the `Not initialized` handshake race gets
+   * its OWN retry budget, separate from the transport-drop budget above. A
+   * spawn that flaps between both error classes must not have one class eat
+   * the other's allowance, and the two backoff curves (500ms vs 100ms base)
+   * are tuned independently, so each carries its own attempt counter.
+   */
+  private static readonly INIT_NOT_INITIALIZED_MAX_RETRIES = 3;
 
   private async initialize(): Promise<void> {
     if (this.initInProgress) {
@@ -1196,8 +1204,15 @@ export class CodexAdapter implements IBackendAdapter {
       // different Codex API fields by design.
       let threadStarted = false;
       let lastThreadError: unknown;
-
-      for (let attempt = 0; attempt < CodexAdapter.INIT_THREAD_MAX_RETRIES; attempt++) {
+      // Council review 2026-09-08 #14: independent per-class retry budgets.
+      // `transportAttempts` counts `Transport closed`, `notInitAttempts`
+      // counts the `Not initialized` handshake race — each capped by its own
+      // constant so a mixed-failure sequence gets the full allowance of each
+      // class rather than draining one shared budget. The loop is bounded by
+      // the sum of both caps, so it always terminates.
+      let transportAttempts = 0;
+      let notInitAttempts = 0;
+      for (;;) {
         // Bail out early if superseded by a newer init cycle
         if (myEpoch !== this.initEpoch) {
           console.warn(`[codex-adapter] Session ${this.sessionId}: init epoch ${myEpoch} superseded during thread start, aborting`);
@@ -1264,10 +1279,14 @@ export class CodexAdapter implements IBackendAdapter {
           lastThreadError = threadErr;
           const isTransportClosed = threadErr instanceof Error && threadErr.message === "Transport closed";
           const isNotInitialized = this.isNotInitializedError(threadErr);
-          if ((!isTransportClosed && !isNotInitialized) || attempt >= CodexAdapter.INIT_THREAD_MAX_RETRIES - 1) {
-            break; // Non-transient error or last attempt — give up
+          if (!isTransportClosed && !isNotInitialized) {
+            break; // Non-transient error — give up
           }
           if (isNotInitialized) {
+            notInitAttempts++;
+            if (notInitAttempts >= CodexAdapter.INIT_NOT_INITIALIZED_MAX_RETRIES) {
+              break; // Handshake race persisted past its budget — give up
+            }
             // Handshake race (got-050): app-server saw thread/start before our
             // `initialized` notification. Re-send the notification so the
             // server's state is definitely past the barrier, then retry after
@@ -1275,14 +1294,32 @@ export class CodexAdapter implements IBackendAdapter {
             // re-runs the whole initialize(); doing that from INSIDE
             // initialize() would recurse, so this in-loop retry is the
             // init-path equivalent.
-            const delay = CodexAdapter.INIT_NOT_INITIALIZED_RETRY_BASE_MS * Math.pow(2, attempt);
-            console.warn(`[codex-adapter] thread start attempt ${attempt + 1} failed (Not initialized) — re-sending initialized, retrying in ${delay}ms`);
-            await this.transport.notify("initialized", {});
+            const delay = CodexAdapter.INIT_NOT_INITIALIZED_RETRY_BASE_MS * Math.pow(2, notInitAttempts - 1);
+            console.warn(`[codex-adapter] thread start Not-initialized retry ${notInitAttempts} — re-sending initialized, retrying in ${delay}ms`);
+            // #13: the re-send can itself reject if the transport dropped in
+            // the window after the failed thread/start. An unguarded await
+            // here escapes the whole retry loop into the outer catch and
+            // burns zero of the budget — the exact "stayed dead" failure
+            // got-050 set out to remove. Classify a notify failure as a
+            // transport error and consume a transport slot instead.
+            try {
+              await this.transport.notify("initialized", {});
+            } catch (notifyErr) {
+              lastThreadError = notifyErr;
+              transportAttempts++;
+              if (transportAttempts >= CodexAdapter.INIT_THREAD_MAX_RETRIES) break;
+              await new Promise((r) => setTimeout(r, CodexAdapter.INIT_THREAD_RETRY_BASE_MS * Math.pow(2, transportAttempts - 1)));
+              continue;
+            }
             await new Promise((r) => setTimeout(r, delay));
             continue;
           }
-          const delay = CodexAdapter.INIT_THREAD_RETRY_BASE_MS * Math.pow(2, attempt);
-          console.warn(`[codex-adapter] thread start attempt ${attempt + 1} failed (Transport closed), retrying in ${delay}ms`);
+          transportAttempts++;
+          if (transportAttempts >= CodexAdapter.INIT_THREAD_MAX_RETRIES) {
+            break; // Transport kept dropping past its budget — give up
+          }
+          const delay = CodexAdapter.INIT_THREAD_RETRY_BASE_MS * Math.pow(2, transportAttempts - 1);
+          console.warn(`[codex-adapter] thread start Transport-closed retry ${transportAttempts}, retrying in ${delay}ms`);
           await new Promise((r) => setTimeout(r, delay));
         }
       }
@@ -1354,7 +1391,14 @@ export class CodexAdapter implements IBackendAdapter {
       }
       this.initInProgress = false;
       const errorMsg = `Codex initialization failed: ${err}`;
-      console.error(`[codex-adapter] ${errorMsg}`);
+      // Council review 2026-09-08 #7: structured init-failure log. The adapter
+      // layer has only sessionId (group/role live in cli-launcher's record),
+      // but an `event`-keyed line is still greppable and correlatable.
+      log.error("codex-adapter", "Codex initialization failed", {
+        event: "codex.init_failed",
+        sessionId: this.sessionId,
+        error: errorMsg,
+      });
       this.initFailed = true;
       this.connected = false;
       // Discard any messages queued during the failed init attempt
