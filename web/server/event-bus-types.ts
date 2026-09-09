@@ -146,6 +146,22 @@ export interface CompanionEventMap {
     reason: "rate_limit" | "out_of_credits" | "unknown_model" | "model_not_available";
   };
 
+  /**
+   * Pre-spawn substitution of a `--model` argument to work around a
+   * known upstream CLI bug (see `broken-model-substitution.ts` for the
+   * substitution table + rationale). Fires at spawn time when
+   * `resolveModelSubstitution` matches — the orchestrator handler
+   * surfaces a browser toast so the user knows their model choice was
+   * overridden (silent substitution would be user-hostile). One event
+   * per spawn.
+   */
+  "session:model-substituted": {
+    sessionId: string;
+    from: string;
+    to: string;
+    reason: string;
+  };
+
   // ── Backend integration ────────────────────────────────────────────
 
   /** Codex adapter created and ready to be attached to WsBridge. */

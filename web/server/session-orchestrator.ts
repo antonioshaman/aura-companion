@@ -874,6 +874,22 @@ export class SessionOrchestrator {
       await this.handleModelFallback(sessionId, from, to, reason);
     });
 
+    // Pre-spawn substitution of a known-broken model — surface a
+    // browser toast so the user knows their model choice was overridden.
+    // Silent substitution is user-hostile; the toast makes the override
+    // visible without gating the spawn. Fires once per spawn (the
+    // launcher persists info.model to the substitute, so subsequent
+    // respawns don't re-fire).
+    companionBus.on("session:model-substituted", ({ sessionId, from, to, reason }) => {
+      log.warn("orchestrator", "Model auto-substituted at spawn", {
+        sessionId, from, to, reason,
+      });
+      this.wsBridge.broadcastToSession(sessionId, {
+        type: "error",
+        message: `Model ${from} auto-substituted to ${to}: ${reason}`,
+      });
+    });
+
     // Start watching PRs when git info is resolved
     companionBus.on("session:git-info-ready", ({ sessionId, cwd, branch }) => {
       this.prPoller.watch(sessionId, cwd, branch);
