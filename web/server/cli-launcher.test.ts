@@ -717,6 +717,66 @@ describe("state management", () => {
       // Should not throw
       launcher.markConnected("nonexistent");
     });
+
+    it("force-init-probe: emits session:cli-id-received when session already has cliSessionId (--resume respawn)", () => {
+      // 2026-09-10 fix: on respawn via --resume, the CLI may delay
+      // its `system.init` frame until first user input. Without
+      // this emit, post-grace council recovery (which listens on
+      // session:cli-id-received) never triggers, leaving groups
+      // stuck in `degraded` even though both halves are alive at
+      // PID level.
+      launcher.launch({ cwd: "/tmp" });
+      launcher.setCLISessionId("test-session-id", "cli-persisted-abc");
+
+      const events: Array<{ sessionId: string; cliSessionId: string }> = [];
+      const off = companionBus.on("session:cli-id-received", (p) => { events.push(p); });
+
+      launcher.markConnected("test-session-id");
+
+      expect(events.length).toBe(1);
+      expect(events[0]).toEqual({
+        sessionId: "test-session-id",
+        cliSessionId: "cli-persisted-abc",
+      });
+
+      off();
+    });
+
+    it("does NOT emit session:cli-id-received when session lacks cliSessionId (fresh spawn)", () => {
+      // On the very first spawn of a brand-new session, cliSessionId
+      // is not yet set — it will be populated by the CLI's system.init
+      // frame. The force-init-probe path must not fire an empty emit
+      // here; the natural init-driven emit is the source of truth.
+      launcher.launch({ cwd: "/tmp" });
+      // No setCLISessionId — this simulates fresh spawn.
+
+      const events: Array<{ sessionId: string; cliSessionId: string }> = [];
+      const off = companionBus.on("session:cli-id-received", (p) => { events.push(p); });
+
+      launcher.markConnected("test-session-id");
+
+      expect(events.length).toBe(0);
+      off();
+    });
+
+    it("markConnected called twice re-emits (idempotent downstream)", () => {
+      // The natural init-frame arrival can trigger session:cli-id-received
+      // AFTER markConnected already did. Both fires carry the same
+      // cliSessionId; downstream handlers (setCLISessionId, post-grace
+      // recovery) must be idempotent. This test asserts the emit-site
+      // behaviour: markConnected doesn't dedupe internally.
+      launcher.launch({ cwd: "/tmp" });
+      launcher.setCLISessionId("test-session-id", "cli-persisted-abc");
+
+      const events: unknown[] = [];
+      const off = companionBus.on("session:cli-id-received", (p) => { events.push(p); });
+
+      launcher.markConnected("test-session-id");
+      launcher.markConnected("test-session-id");
+
+      expect(events.length).toBe(2);
+      off();
+    });
   });
 
   describe("setCLISessionId", () => {
