@@ -890,6 +890,21 @@ export class SessionOrchestrator {
       });
     });
 
+    // Init-frame health canary tripped — the CLI subprocess opened
+    // its stdio transport but never emitted a `system.init` frame
+    // inside INIT_FRAME_TIMEOUT_MS. Distinct from `session:backend-silent`
+    // (which fires MID-TURN after a user_message). This one fires
+    // on spawn+attach without any user activity — the earliest
+    // observable signature of a stream-json emit regression in the
+    // upstream Claude CLI (see 2026-09-09/10 CLI 2.1.265 incident).
+    // Adapter already broadcast a browser toast; we log at WARN so
+    // operators watching journalctl see the regression too.
+    companionBus.on("session:no-init-frame", ({ sessionId, sinceMs }) => {
+      log.warn("orchestrator", "CLI subprocess never emitted its init frame — likely upstream regression", {
+        sessionId, sinceMs,
+      });
+    });
+
     // Start watching PRs when git info is resolved
     companionBus.on("session:git-info-ready", ({ sessionId, cwd, branch }) => {
       this.prPoller.watch(sessionId, cwd, branch);

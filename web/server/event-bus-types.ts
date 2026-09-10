@@ -162,6 +162,30 @@ export interface CompanionEventMap {
     reason: string;
   };
 
+  /**
+   * A spawned CLI subprocess never produced its `system.init` frame
+   * within the health-canary deadline (see `INIT_FRAME_TIMEOUT_MS`
+   * in `claude-adapter.ts`). Different failure class from the
+   * silent-stdio watchdog: THAT fires 60s after a user_message,
+   * expecting a running turn to respond. This one fires on spawn +
+   * transport-open with NO user activity at all — the CLI opened
+   * its side of the stdio pipe but the very first protocol frame
+   * (init) never crossed. Historically this is the earliest
+   * observable signature of an upstream CLI regression in
+   * stream-json emit (see the 2026-09-09/10 CLI 2.1.265 incident
+   * and `feedback_claude_cli_opus5_stdout_dead_jsonl_alive.md`).
+   *
+   * The orchestrator handler logs at WARN and broadcasts a browser
+   * toast so the operator hears about the regression on the FIRST
+   * failed spawn, not after the watchdog has burned through
+   * `MAX_AUTO_RELAUNCHES` and the group has fallen to `degraded`.
+   */
+  "session:no-init-frame": {
+    sessionId: string;
+    /** Actual elapsed ms since transport attach. */
+    sinceMs: number;
+  };
+
   // ── Backend integration ────────────────────────────────────────────
 
   /** Codex adapter created and ready to be attached to WsBridge. */
