@@ -85,6 +85,25 @@ const OBSERVER_WAKE_BACKPRESSURE_THRESHOLD_BYTES = 1024 * 1024;
 const SILENT_STDIO_TIMEOUT_MS = 60_000;
 
 /**
+ * Init-frame health canary deadline. A fresh CLI subprocess should
+ * emit its `system.init` stream-json frame within a few seconds of
+ * spawn — the CLI has no work to do before it, and stdio transport is
+ * synchronous on our side. If nothing arrives within this window, the
+ * upstream CLI is broken (the 2026-09-09 CLI 2.1.265 regression was
+ * exactly this shape: transport opens, subprocess runs, jsonl grows,
+ * but stream-json emit is silently dropped). Firing an event on this
+ * seam lets the operator hear about a CLI regression on the very
+ * first spawn, before the silent-stdio watchdog has burned through
+ * MAX_AUTO_RELAUNCHES on symptomatic kills.
+ *
+ * 30s is deliberately generous — a first spawn on a cold disk may
+ * take several seconds to load, and we don't want false positives.
+ * The regression case takes 60+ seconds to visibly fail today, so
+ * 30s still catches it two watchdog cycles earlier.
+ */
+const INIT_FRAME_TIMEOUT_MS = 30_000;
+
+/**
  * Adapter-level outcome of a wake send attempt. The orchestrator's
  * dispatcher (Task 3) wraps this in a richer WakeDispatchOutcome that
  * adds coordinator-side reasons (observer_unknown, group_not_active).
@@ -195,6 +214,21 @@ export class ClaudeAdapter implements IBackendAdapter {
    * definition a fresh classification opportunity.
    */
   private modelFallbackFiredForThisSpawn = false;
+
+  /**
+   * Init-frame health canary timer handle. Armed in
+   * {@link attachTransport} on every fresh transport; cleared in
+   * {@link handleSystemInit} on the first init frame; cleared on
+   * transport close so a clean disconnect before init doesn't fire
+   * a spurious warning. See {@link INIT_FRAME_TIMEOUT_MS} + the
+   * `session:no-init-frame` event contract for full rationale.
+   *
+   * Type is `ReturnType<typeof setTimeout>` for cross-runtime
+   * compatibility (bun/node/dom widen the return type differently).
+   */
+  private initFrameTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Wall-clock ms at last {@link attachTransport}, for the `sinceMs` field. */
+  private lastAttachAt: number = 0;
 
   /**
    * Observer turn-state for the Council Mode auto-wake gate.
@@ -351,6 +385,13 @@ export class ClaudeAdapter implements IBackendAdapter {
     this.modelFallbackFiredForThisSpawn = false;
     // A fresh transport by definition cannot be silent yet.
     this.silenceWatchdog.disarm();
+    // Arm the init-frame health canary. On a working CLI the
+    // `system.init` frame lands within a few seconds and
+    // `handleSystemInit` clears this timer. On a regressed CLI (see
+    // 2026-09-09/10 CLI 2.1.265 incident) init never arrives and we
+    // surface a WARN + browser toast at INIT_FRAME_TIMEOUT_MS so the
+    // operator hears about the regression on the first failed spawn.
+    this.armInitFrameCanary();
 
     // Flush pending messages
     if (this.pendingMessages.length > 0) {
@@ -386,6 +427,9 @@ export class ClaudeAdapter implements IBackendAdapter {
     // more frames → silence watchdog would misfire on a real
     // disconnect.
     this.silenceWatchdog.disarm();
+    // Init-frame canary too — a WS-transport detach before init
+    // means the CLI never dialled back through; no canary needed.
+    this.disarmInitFrameCanary();
     // Council Review #13 — mid-flap cleanup: clear pendingControlRequests
     // so unresolved Promise resolvers from the now-dead socket don't leak
     // into the next attach. `disconnect()` already clears this (line 283);
@@ -458,6 +502,11 @@ export class ClaudeAdapter implements IBackendAdapter {
     // path takes over. Firing `backend-silent` on top of a real exit
     // would double-trigger the orchestrator.
     this.silenceWatchdog.disarm();
+    // Same reasoning for the init-frame canary: a transport that
+    // closed before init landed will not now produce one, and the
+    // exit handler drives the recovery — a spurious `no-init-frame`
+    // on top of a real exit would be noise.
+    this.disarmInitFrameCanary();
   }
 
   // -- IBackendAdapter: Raw message ingestion from CLI ------------------------
@@ -988,6 +1037,12 @@ export class ClaudeAdapter implements IBackendAdapter {
   }
 
   private handleSystemInit(msg: CLISystemInitMessage): void {
+    // The very first init frame is the health-canary green signal —
+    // stream-json stdio emit is working. Cancel the deadline before
+    // anything else so a downstream throw doesn't leave the timer
+    // to fire spuriously.
+    this.disarmInitFrameCanary();
+
     // Emit session metadata so the bridge can update session state
     this.sessionMetaCb?.({
       cliSessionId: msg.session_id,
@@ -1617,6 +1672,48 @@ export class ClaudeAdapter implements IBackendAdapter {
     if (this.orchestratorTurnState.kind !== "awaiting-input") return;
     if (this.orchestratorTurnState.blockedByStop === blocked) return;
     this.orchestratorTurnState = { kind: "awaiting-input", blockedByStop: blocked };
+  }
+
+  /**
+   * Arm the init-frame health canary. Called from
+   * {@link attachTransport} on every fresh transport. On expiry
+   * (INIT_FRAME_TIMEOUT_MS elapsed with no `system.init` frame),
+   * emit `session:no-init-frame` on the internal bus and surface a
+   * browser-visible warning. Idempotent — a second arm without a
+   * disarm cancels the first, so back-to-back attachTransport calls
+   * (e.g. flap-reconnect) each get a full fresh window.
+   */
+  private armInitFrameCanary(): void {
+    this.disarmInitFrameCanary();
+    this.lastAttachAt = Date.now();
+    this.initFrameTimer = setTimeout(() => {
+      // Clear state BEFORE firing so a same-tick re-arm from the
+      // callback path works cleanly.
+      const attachedAt = this.lastAttachAt;
+      this.initFrameTimer = null;
+      const sinceMs = Date.now() - attachedAt;
+      this.browserMessageCb?.({
+        type: "error",
+        message: `Backend never emitted its init frame in ${Math.round(sinceMs / 1000)}s — CLI may be broken.`,
+      });
+      companionBus.emit("session:no-init-frame", {
+        sessionId: this.sessionId,
+        sinceMs,
+      });
+    }, INIT_FRAME_TIMEOUT_MS);
+  }
+
+  /**
+   * Cancel a pending init-frame canary. Called on the first
+   * `system.init` frame (success), on transport close (deferred to
+   * exit handler), and on detachWebSocket. Safe to call when no
+   * timer is armed — the pointer check makes this idempotent.
+   */
+  private disarmInitFrameCanary(): void {
+    if (this.initFrameTimer !== null) {
+      clearTimeout(this.initFrameTimer);
+      this.initFrameTimer = null;
+    }
   }
 
   /**

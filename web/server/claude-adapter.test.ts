@@ -49,6 +49,7 @@ vi.mock("./model-availability.js", () => ({
 
 import { ClaudeAdapter } from "./claude-adapter.js";
 import { log } from "./logger.js";
+import { companionBus } from "./event-bus.js";
 
 // ─── Mock socket factory ────────────────────────────────────────────────────
 
@@ -2150,5 +2151,114 @@ describe("result-frame sticky-token cleanup (Task 11.8)", () => {
     // (per the guard in handleResultMessage). A no-op result on
     // already-awaiting state is the replay-defence case.
     expect(noteTerminalResultFrame).not.toHaveBeenCalled();
+  });
+});
+/**
+ * PR #178 — Init-frame health canary. On every `attachTransport`, arm
+ * a 30-second deadline. First `system.init` frame cancels it. If it
+ * expires, adapter emits `session:no-init-frame` on the bus AND
+ * pushes a browser toast so the operator sees the regression on the
+ * FIRST failed spawn, not after MAX_AUTO_RELAUNCHES worth of
+ * symptomatic kills. Distinct from the silent-stdio watchdog which
+ * only arms on user_message send.
+ */
+describe("Init-frame health canary", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("fires session:no-init-frame + browser toast when init never arrives within 30s", async () => {
+    const browserCb = vi.fn();
+    const a = new ClaudeAdapter("sess-canary-1");
+    a.onBrowserMessage(browserCb as any);
+
+    const busEvents: unknown[] = [];
+    const off = companionBus.on("session:no-init-frame", (e) => { busEvents.push(e); });
+
+    // Attach transport but do NOT feed an init frame.
+    a.attachWebSocket(createMockSocket("sess-canary-1"));
+
+    // Advance to just before the deadline — should not fire.
+    vi.advanceTimersByTime(29_000);
+    expect(busEvents.length).toBe(0);
+
+    // Cross the deadline.
+    vi.advanceTimersByTime(2_000);
+    expect(busEvents.length).toBe(1);
+    const evt = busEvents[0] as { sessionId: string; sinceMs: number };
+    expect(evt.sessionId).toBe("sess-canary-1");
+    expect(evt.sinceMs).toBeGreaterThanOrEqual(30_000);
+
+    // Browser was told too.
+    const browserNotices = browserCb.mock.calls.map((c: any[]) => c[0]);
+    const initErr = browserNotices.find((n: any) => n.type === "error" && /never emitted its init/i.test(n.message));
+    expect(initErr).toBeDefined();
+
+    off();
+  });
+
+  it("does NOT fire when init arrives before the deadline", () => {
+    const a = new ClaudeAdapter("sess-canary-2");
+    a.onBrowserMessage(vi.fn());
+    const busEvents: unknown[] = [];
+    const off = companionBus.on("session:no-init-frame", (e) => { busEvents.push(e); });
+
+    a.attachWebSocket(createMockSocket("sess-canary-2"));
+    // Init lands well within the window.
+    vi.advanceTimersByTime(5_000);
+    a.handleRawMessage(makeInitMsg({ session_id: "cli-canary-2" }));
+
+    // Push far past the deadline — nothing fires (canary was disarmed
+    // by handleSystemInit).
+    vi.advanceTimersByTime(60_000);
+    expect(busEvents.length).toBe(0);
+
+    off();
+  });
+
+  it("does NOT fire when transport closes before the deadline (clean disconnect)", () => {
+    const a = new ClaudeAdapter("sess-canary-3");
+    a.onBrowserMessage(vi.fn());
+    const busEvents: unknown[] = [];
+    const off = companionBus.on("session:no-init-frame", (e) => { busEvents.push(e); });
+
+    a.attachWebSocket(createMockSocket("sess-canary-3"));
+    vi.advanceTimersByTime(5_000);
+    // Simulate stdio transport close before init landed (subprocess died).
+    a.handleTransportClose();
+    // Advance past the deadline — no fire.
+    vi.advanceTimersByTime(60_000);
+    expect(busEvents.length).toBe(0);
+
+    off();
+  });
+
+  it("re-arms cleanly on a second attachTransport (each spawn gets a fresh 30s window)", () => {
+    const a = new ClaudeAdapter("sess-canary-4");
+    a.onBrowserMessage(vi.fn());
+    const busEvents: unknown[] = [];
+    const off = companionBus.on("session:no-init-frame", (e) => { busEvents.push(e); });
+
+    // First attach — no init, timer armed.
+    a.attachWebSocket(createMockSocket("sess-canary-4"));
+    vi.advanceTimersByTime(20_000);
+    // Second attach BEFORE first deadline (simulates re-connect flap).
+    a.attachWebSocket(createMockSocket("sess-canary-4"));
+    // Original 30s window from first attach would have fired at t=30_000,
+    // but the re-arm cancels it. Advance to t=25_000 total: original
+    // deadline would have hit already (25s > 20s remaining from first
+    // arm was 10s, so 20s+10s=30s would have fired). New window is
+    // 30s from second attach → deadline at t=20+30=50s. So at t=25s
+    // (i.e. 5s into the second window) → NO fire.
+    vi.advanceTimersByTime(5_000);
+    expect(busEvents.length).toBe(0);
+    // Advance to 30s past the SECOND attach → deadline crossed.
+    vi.advanceTimersByTime(26_000);
+    expect(busEvents.length).toBe(1);
+
+    off();
   });
 });
