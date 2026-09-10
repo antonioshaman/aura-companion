@@ -76,13 +76,53 @@ const OBSERVER_WAKE_BACKPRESSURE_THRESHOLD_BYTES = 1024 * 1024;
  * the stdio pipe is dead-but-not-closed and trigger a subprocess
  * respawn via the orchestrator's existing keepalive path.
  *
- * Chosen to sit clearly above a normal tool-heavy turn (long Bash / git
- * runs, sequential Reads) but well below a user's patience threshold.
- * A legitimately long tool call slides the deadline forward every time
- * a `tool_progress` / stream chunk arrives, so this is a "true silence"
- * limit, not a "turn duration" limit.
+ * **Default 300s (5 min), overridable via `AURA_SILENT_STDIO_TIMEOUT_MS` env.**
+ *
+ * The prior 60s value (PR #175) was chosen from the initial 2026-09-09
+ * incident where stdout truly went dead for >45s at a time. Field
+ * observations 2026-09-10 showed 60s was too aggressive for legitimate
+ * tool-heavy turns: a long `Bash` execution or a slow `WebFetch` can
+ * silently span >60s between intermediate `tool_progress` / stream
+ * frames on some CLI paths — the watchdog then killed a HEALTHY
+ * subprocess in the middle of real work, dropped the turn, and
+ * cascaded the group to `degraded` via `reconnect_failed`. 300s keeps
+ * the anti-silence coverage but stops those false positives.
+ *
+ * Operators can tune via env for their workload — set the env var to a
+ * positive integer number of ms. Values <10s are rejected as too
+ * aggressive (log warn + fall through to default) since a healthy
+ * turn regularly has stream gaps in that range.
  */
-const SILENT_STDIO_TIMEOUT_MS = 60_000;
+const SILENT_STDIO_TIMEOUT_MS = resolveSilentStdioTimeoutMs();
+
+/**
+ * Env-override resolver for {@link SILENT_STDIO_TIMEOUT_MS}. Extracted +
+ * exported so the parsing rules are testable in isolation and the
+ * module-level constant stays a plain immutable number.
+ *
+ * Semantics — deliberately closed, deliberately strict:
+ *   - Unset / empty → default (300_000 ms).
+ *   - Integer >= MIN_MS (10_000) → use.
+ *   - Anything else (non-numeric, negative, float, below MIN_MS) →
+ *     log WARN and fall through to default. Fail-loud parse errors
+ *     rather than silent "smaller number picked" surprises.
+ */
+export function resolveSilentStdioTimeoutMs(
+  env: string | undefined = process.env.AURA_SILENT_STDIO_TIMEOUT_MS,
+  warn: (msg: string) => void = (m) => console.warn(m),
+): number {
+  const DEFAULT_MS = 300_000;
+  const MIN_MS = 10_000;
+  if (env === undefined || env === "") return DEFAULT_MS;
+  const parsed = Number.parseInt(env, 10);
+  if (!Number.isFinite(parsed) || parsed < MIN_MS || String(parsed) !== env.trim()) {
+    warn(
+      `[claude-adapter] AURA_SILENT_STDIO_TIMEOUT_MS=${env} rejected (must be integer >= ${MIN_MS}); using default ${DEFAULT_MS}ms`,
+    );
+    return DEFAULT_MS;
+  }
+  return parsed;
+}
 
 /**
  * Init-frame health canary deadline. A fresh CLI subprocess should
