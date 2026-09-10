@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { getCookie, setCookie } from "hono/cookie";
 import { streamSSE } from "hono/streaming";
 import { execSync } from "node:child_process";
@@ -7,7 +8,15 @@ import { writeAtomicJson } from "./atomic-write.js";
 import { buildCheckpointFilename } from "./checkpoint-watcher.js";
 import { parseCheckpointPayload } from "./council-types.js";
 import { extractHandoff, buildPickupDraft } from "./handoff-extractor.js";
-import { writeFileSync } from "node:fs";
+import { writeFileSync, appendFileSync } from "node:fs";
+import {
+  computeSweepCandidates,
+  executeSweep,
+  sweepPreviewToken,
+  type SweepCandidate,
+  type SweepComputeDeps,
+  type SweepAuditEntry,
+} from "./sweep-orphans.js";
 import { log } from "./logger.js";
 import { respondError } from "./respond-error.js";
 import { join, dirname } from "node:path";
@@ -660,6 +669,158 @@ export function createRoutes(
       phase: payload.phase,
       sequence: payload.sequence,
     });
+  });
+
+  // ─── Sweep orphans — manual cleanup of server-owned lost resources ─────────
+  //
+  // Two GLOBAL (not per-session) endpoints. The on-demand sibling of the boot
+  // `reapOrphans` pass: reap ONLY resources THIS server spawned and lost — its
+  // own orphaned CLI subprocesses, archived-leak processes, stale exited
+  // sessions, and orphaned per-session/per-group timers. Never another agent's
+  // process; never the caller's own; never a live tracked session (the engine
+  // ASSERTS this, it is not an incidental filter — see sweep-orphans.ts Task 3).
+  //
+  //   preview → PURE compute, returns decision-justifying fields + a token
+  //             binding the exact candidate set (hunt: minimal disclosure — no
+  //             proc dump, no co-tenant argv on the wire).
+  //   execute → must echo a fresh preview token; the server RECOMPUTES the
+  //             candidates + token and REJECTS on mismatch (the confirm token IS
+  //             the authorization for the destructive branch — hunt Principle 7).
+  //             Refuses any client-supplied PID. In-flight-locked + cooldowned so
+  //             a manual sweep can't race the background reaper or itself.
+  const SWEEP_EXECUTE_COOLDOWN_MS = Number(process.env.AURA_SWEEP_COOLDOWN_MS) || 3_000;
+  let sweepExecuteInFlight = false;
+  let lastSweepExecuteAt = 0;
+
+  // Resolve the caller's own sessionId (belt-and-braces over the engine's
+  // live-session assertion): a programmatic agent caller may self-identify so
+  // its own half is doubly excluded. A browser (the normal case) sends nothing.
+  function resolveCallerSessionId(c: Context): string | null {
+    const hdr = c.req.header("x-companion-caller-session");
+    if (typeof hdr === "string" && hdr.trim().length > 0) return hdr.trim();
+    return null;
+  }
+
+  // Build the compute deps from live server state. `storeDir` is the
+  // sessions-root = sentinel-root tier the boot reaper uses.
+  function buildSweepComputeDeps(callerSessionId: string | null, storeDir: string): SweepComputeDeps {
+    return {
+      listSessions: () => launcher.listSessions(),
+      callerSessionId,
+      serverPid: process.pid,
+      sessionsRoot: storeDir,
+      listOrphanTimers: () => orchestrator.listOrphanTimers(),
+    };
+  }
+
+  api.get("/sweep/preview", (c) => {
+    const storeDir = launcher.getStoreDirectory();
+    if (!storeDir) {
+      return respondError(c, 500, "internal_error", {
+        module: "sweep", detail: { reason: "session store not attached" },
+      });
+    }
+    const callerSessionId = resolveCallerSessionId(c);
+    let candidates: SweepCandidate[];
+    try {
+      candidates = computeSweepCandidates(buildSweepComputeDeps(callerSessionId, storeDir));
+    } catch (err) {
+      // The engine's Task-3 safety assertion throws if an excluded pid/session
+      // slipped into the set — treat as a server fault, never a partial preview.
+      return respondError(c, 500, "internal_error", {
+        module: "sweep", detail: { phase: "preview", message: err instanceof Error ? err.message : String(err) },
+      });
+    }
+    return c.json({
+      // Wire-safe projection: decision-justifying fields ONLY. argvSha256 (the
+      // internal TOCTOU anchor) stays server-side — execute recomputes it.
+      candidates: candidates.map((x) => ({
+        id: x.id, reason: x.reason, pid: x.pid, sessionId: x.sessionId,
+        evidence: x.evidence, ageMs: x.ageMs,
+      })),
+      token: sweepPreviewToken(candidates),
+    });
+  });
+
+  api.post("/sweep/execute", async (c) => {
+    const storeDir = launcher.getStoreDirectory();
+    if (!storeDir) {
+      return respondError(c, 500, "internal_error", {
+        module: "sweep", detail: { reason: "session store not attached" },
+      });
+    }
+    const body = (await c.req.json().catch(() => null)) as { token?: unknown } | null;
+    const token = body && typeof body.token === "string" ? body.token : null;
+    if (!token) {
+      // Refuse a bare confirm / client PID list — the token is the only
+      // accepted authorization for the destructive branch.
+      return respondError(c, 400, "bad_request", {
+        module: "sweep", detail: { reason: "missing preview token" },
+      });
+    }
+    const now = Date.now();
+    if (sweepExecuteInFlight) {
+      return respondError(c, 409, "conflict", { module: "sweep", detail: { reason: "sweep already in flight" } });
+    }
+    if (now - lastSweepExecuteAt < SWEEP_EXECUTE_COOLDOWN_MS) {
+      return respondError(c, 429, "rate_limited", { module: "sweep", detail: { reason: "cooldown" } });
+    }
+    const callerSessionId = resolveCallerSessionId(c);
+    // Recompute server-side — never trust a client-supplied candidate/PID.
+    let candidates: SweepCandidate[];
+    try {
+      candidates = computeSweepCandidates(buildSweepComputeDeps(callerSessionId, storeDir));
+    } catch (err) {
+      return respondError(c, 500, "internal_error", {
+        module: "sweep", detail: { phase: "execute-compute", message: err instanceof Error ? err.message : String(err) },
+      });
+    }
+    // The confirm token binds what-was-previewed to what-gets-killed. If the
+    // set drifted since preview (a candidate died, went live, or a new one
+    // appeared), the recomputed token differs → reject rather than kill a set
+    // the operator never saw. This is also what makes a retry idempotent: a
+    // second execute of an already-swept set recomputes an empty/changed set,
+    // its token won't match, and nothing is double-killed.
+    if (sweepPreviewToken(candidates) !== token) {
+      return respondError(c, 409, "conflict", {
+        module: "sweep", detail: { reason: "preview token stale — candidate set changed" },
+      });
+    }
+    sweepExecuteInFlight = true;
+    lastSweepExecuteAt = now;
+    const auditPath = join(storeDir, "sweep-audit.jsonl");
+    try {
+      const result = await executeSweep(candidates, {
+        sentinelRoot: storeDir,
+        killTrackedSession: async (sid) => {
+          await orchestrator.killSession(sid);
+          // Task 7: force a DEFINITIVE terminal record (pid nulled + exited)
+          // flushed synchronously to launcher.json BEFORE we respond, so boot
+          // recovery can never re-attach/relaunch a dead/recycled PID.
+          launcher.markSweptTerminal(sid);
+        },
+        clearOrphanTimer: (timerId) => orchestrator.clearOrphanTimer(timerId),
+        audit: (entry: SweepAuditEntry) => {
+          try {
+            appendFileSync(auditPath, JSON.stringify(entry) + "\n", { mode: 0o600 });
+          } catch (err) {
+            // Audit is best-effort — a failed append must never abort a kill
+            // that already happened. Log the EC-9 line to the server log instead.
+            log.warn("sweep", "audit append failed", {
+              event: "sweep.audit.append_failed", auditPath,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        },
+      });
+      return c.json(result);
+    } catch (err) {
+      return respondError(c, 500, "internal_error", {
+        module: "sweep", detail: { phase: "execute", message: err instanceof Error ? err.message : String(err) },
+      });
+    } finally {
+      sweepExecuteInFlight = false;
+    }
   });
 
   // ─── Council Mode — REST bootstrap of group findings ──────────────────────
