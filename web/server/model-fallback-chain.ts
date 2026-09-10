@@ -47,6 +47,69 @@ export function nextModelInChain(current: string | undefined | null): string | n
   return CLAUDE_MODEL_FALLBACK_CHAIN[idx + 1];
 }
 
+/** One session's silence-recurrence bookkeeping — see `session-orchestrator.ts:silenceRecurrenceCounts`. */
+export interface SilenceRecurrenceRecord {
+  count: number;
+  lastSilentModel: string;
+}
+
+/** Decision from {@link computeSilenceRotation} for one silence event. */
+export interface SilenceRotationDecision {
+  /**
+   * The bookkeeping record to persist AFTER this silence event, OR
+   * `null` when the caller should DELETE the entry (either because a
+   * rotation just happened — new model gets a clean scorecard — or
+   * because no rotation is planned but the map should reset for a
+   * different reason). Caller writes / deletes per this value.
+   */
+  newRecord: SilenceRecurrenceRecord | null;
+  /**
+   * Model id to rotate to via `launcher.setModel` BEFORE the next
+   * kill+respawn, or `null` when no rotation should happen (either
+   * threshold not reached, or the current model is not in the chain
+   * / already at the tail).
+   */
+  rotateTo: string | null;
+}
+
+/**
+ * Pure decision helper for the recurring-silence model-rotation loop
+ * in `session-orchestrator.ts:handleBackendSilent`. Extracted so the
+ * counting + threshold + chain-lookup rules are unit-testable without
+ * the full orchestrator setup.
+ *
+ * Rules:
+ *   - Same session going silent AGAIN on the SAME model → bump count.
+ *   - Model changed between silences → reset count to 1.
+ *   - Count reaches `threshold` AND chain has a successor → return
+ *     `rotateTo: <next>` with `newRecord: null` (caller clears map).
+ *   - Count reaches `threshold` but no chain successor → keep bumping
+ *     (`newRecord: bumped, rotateTo: null`); rotation exhausted.
+ */
+export function computeSilenceRotation(
+  prev: SilenceRecurrenceRecord | undefined,
+  currentModel: string,
+  threshold: number,
+  chainNext: (m: string) => string | null = nextModelInChain,
+): SilenceRotationDecision {
+  const bumped: SilenceRecurrenceRecord =
+    prev && prev.lastSilentModel === currentModel
+      ? { count: prev.count + 1, lastSilentModel: currentModel }
+      : { count: 1, lastSilentModel: currentModel };
+  if (bumped.count >= threshold) {
+    const next = chainNext(currentModel);
+    if (next) {
+      // Rotation triggered — new model gets a clean scorecard.
+      return { newRecord: null, rotateTo: next };
+    }
+    // Threshold reached but no chain successor — keep bumping,
+    // no rotation. Caller may separately notice via
+    // `newRecord.count >= threshold && rotateTo === null` and
+    // escalate to operator (e.g. "model rotation exhausted").
+  }
+  return { newRecord: bumped, rotateTo: null };
+}
+
 /** Closed classifier reason set — extend by adding a case + regex, never widen the union in-place. */
 export type FallbackReason =
   | "rate_limit"

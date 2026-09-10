@@ -2,8 +2,10 @@ import { describe, it, expect } from "vitest";
 import {
   CLAUDE_MODEL_FALLBACK_CHAIN,
   classifyFallbackReason,
+  computeSilenceRotation,
   nextModelInChain,
 } from "./model-fallback-chain.js";
+import { BROKEN_MODEL_SUBSTITUTIONS } from "./broken-model-substitution.js";
 
 describe("nextModelInChain", () => {
   it("returns the model at index+1 for chain members", () => {
@@ -88,5 +90,91 @@ describe("classifyFallbackReason", () => {
   it("is case-insensitive for the substring match", () => {
     expect(classifyFallbackReason("YOU'VE HIT YOUR SESSION LIMIT")).toBe("rate_limit");
     expect(classifyFallbackReason("Out Of Credits.")).toBe("out_of_credits");
+  });
+});
+
+/**
+ * `computeSilenceRotation` — pure decision helper for the recurring-silence
+ * model-rotation loop in `session-orchestrator.ts:handleBackendSilent`.
+ * See the JSDoc there for the full contract.
+ */
+describe("computeSilenceRotation", () => {
+  const CHAIN: Record<string, string> = {
+    "claude-opus-5": "claude-opus-4-8",
+    "claude-opus-4-8": "claude-opus-4-7",
+    "claude-opus-4-7": "claude-opus-4-6",
+    "claude-opus-4-6": "claude-sonnet-4-6",
+    "claude-sonnet-4-6": "claude-haiku-4-5",
+  };
+  const fakeChain = (m: string) => CHAIN[m] ?? null;
+
+  it("first silence for a model → count=1, no rotation", () => {
+    const d = computeSilenceRotation(undefined, "claude-opus-4-7", 2, fakeChain);
+    expect(d.rotateTo).toBeNull();
+    expect(d.newRecord).toEqual({ count: 1, lastSilentModel: "claude-opus-4-7" });
+  });
+
+  it("second silence on the SAME model at threshold=2 → rotates and clears map", () => {
+    const prev = { count: 1, lastSilentModel: "claude-opus-4-7" };
+    const d = computeSilenceRotation(prev, "claude-opus-4-7", 2, fakeChain);
+    expect(d.rotateTo).toBe("claude-opus-4-6");
+    expect(d.newRecord).toBeNull();
+  });
+
+  it("silence on a DIFFERENT model resets counter to 1", () => {
+    const prev = { count: 5, lastSilentModel: "claude-opus-4-7" };
+    const d = computeSilenceRotation(prev, "claude-opus-4-8", 2, fakeChain);
+    expect(d.rotateTo).toBeNull();
+    expect(d.newRecord).toEqual({ count: 1, lastSilentModel: "claude-opus-4-8" });
+  });
+
+  it("threshold=3 → does not rotate on second silence", () => {
+    const prev = { count: 1, lastSilentModel: "claude-opus-5" };
+    const d = computeSilenceRotation(prev, "claude-opus-5", 3, fakeChain);
+    expect(d.rotateTo).toBeNull();
+    expect(d.newRecord).toEqual({ count: 2, lastSilentModel: "claude-opus-5" });
+  });
+
+  it("threshold reached but chain-tail: no rotation, counter keeps bumping (rotation exhausted)", () => {
+    // claude-haiku-4-5 is chain tail in fakeChain (no successor).
+    const prev = { count: 1, lastSilentModel: "claude-haiku-4-5" };
+    const d = computeSilenceRotation(prev, "claude-haiku-4-5", 2, fakeChain);
+    expect(d.rotateTo).toBeNull();
+    // Bumped record persists so caller can escalate.
+    expect(d.newRecord).toEqual({ count: 2, lastSilentModel: "claude-haiku-4-5" });
+  });
+
+  it("unknown model (not in chain) at threshold: no rotation target, no rotation", () => {
+    const prev = { count: 1, lastSilentModel: "claude-fable-5-1" };
+    const d = computeSilenceRotation(prev, "claude-fable-5-1", 2, fakeChain);
+    expect(d.rotateTo).toBeNull();
+    expect(d.newRecord).toEqual({ count: 2, lastSilentModel: "claude-fable-5-1" });
+  });
+
+  it("uses the default chain when no chainNext is provided", () => {
+    // Default is `nextModelInChain` against CLAUDE_MODEL_FALLBACK_CHAIN.
+    // claude-opus-5 → claude-opus-4-8 per the real chain (asserted
+    // elsewhere in this file's nextModelInChain tests).
+    const prev = { count: 1, lastSilentModel: "claude-opus-5" };
+    const d = computeSilenceRotation(prev, "claude-opus-5", 2);
+    expect(d.rotateTo).toBe("claude-opus-4-8");
+    expect(d.newRecord).toBeNull();
+  });
+
+  it("threshold=1 → rotates on very first silence", () => {
+    const d = computeSilenceRotation(undefined, "claude-opus-4-7", 1, fakeChain);
+    expect(d.rotateTo).toBe("claude-opus-4-6");
+    expect(d.newRecord).toBeNull();
+  });
+});
+
+describe("BROKEN_MODEL_SUBSTITUTIONS content sanity — regression guard", () => {
+  it("opus-4-7 is in the substitution table (added 2026-09-10 after field verification)", () => {
+    // Belt-and-braces: even before the recurring-silence rotation
+    // catches it empirically, the substitution table pre-empts opus-4-7
+    // at spawn time. This test guards against accidental removal.
+    const entry = BROKEN_MODEL_SUBSTITUTIONS.find((s) => s.from === "claude-opus-4-7");
+    expect(entry).toBeDefined();
+    expect(entry?.to).toBe("claude-opus-4-8");
   });
 });
