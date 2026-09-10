@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.16.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.15.0...aura-companion-v1.16.0) (2026-09-10)
+
+
+### Features
+
+* **council:** convergence badge on active sessions + got-045 dedup fix ([#167](https://github.com/antonioshaman/aura-companion/issues/167)) ([26d406e](https://github.com/antonioshaman/aura-companion/commit/26d406e0417dbc0ed691e08927c33014c413afb4))
+* **server:** drive Claude CLI over stdio stream-json instead of --sdk-url ([#169](https://github.com/antonioshaman/aura-companion/issues/169)) ([c675c7f](https://github.com/antonioshaman/aura-companion/commit/c675c7f0e47f867ad842965288e6b34e23f3d663))
+* **server:** force-init-probe on --resume respawn to unstick post-grace recovery ([#181](https://github.com/antonioshaman/aura-companion/issues/181)) ([1883464](https://github.com/antonioshaman/aura-companion/commit/18834645c41c80305c5bbf490be76dc36c858287))
+* **server:** init-frame health canary — surface CLI regressions on first spawn ([#179](https://github.com/antonioshaman/aura-companion/issues/179)) ([6771472](https://github.com/antonioshaman/aura-companion/commit/677147218c54aec15f12c65bb3293222b19f7f92))
+* **server:** pre-spawn substitution for known-broken Claude models ([#176](https://github.com/antonioshaman/aura-companion/issues/176)) ([d5c4905](https://github.com/antonioshaman/aura-companion/commit/d5c4905ef52b46dd6cd295b46e9e1d6872d0753d))
+* **server:** replay last unanswered user_message on adapter respawn ([#177](https://github.com/antonioshaman/aura-companion/issues/177)) ([05b1976](https://github.com/antonioshaman/aura-companion/commit/05b19762a6b98b6267a1349c94e2a7339216f921))
+* **server:** silent-stdio watchdog + Claude model fallback chain ([#175](https://github.com/antonioshaman/aura-companion/issues/175)) ([c55cdc5](https://github.com/antonioshaman/aura-companion/commit/c55cdc518f7780cddf0ee254693c6881f030f1e5))
+* **server:** tune silent-stdio watchdog default 60s→300s + AURA_SILENT_STDIO_TIMEOUT_MS env override ([#180](https://github.com/antonioshaman/aura-companion/issues/180)) ([99249a1](https://github.com/antonioshaman/aura-companion/commit/99249a17c2b3a9b9387135d40aaac1cdb9943644))
+
+
+### Bug Fixes
+
+* **codex:** make onInitError additive so the launcher's recovery survives bridge attach ([#173](https://github.com/antonioshaman/aura-companion/issues/173)) ([5208108](https://github.com/antonioshaman/aura-companion/commit/52081082fd747cc2ecdf9257fbdcb6b659cd0193))
+* **codex:** prefer model tier over version when falling back ([#166](https://github.com/antonioshaman/aura-companion/issues/166)) ([c2210d8](https://github.com/antonioshaman/aura-companion/commit/c2210d8ab0151b78d3a0b4e668ec45a51d21a420))
+* **codex:** retry init thread/start on "Not initialized" race + re-arm spawn checkpoint after observer relaunch ([#172](https://github.com/antonioshaman/aura-companion/issues/172)) ([ae5a288](https://github.com/antonioshaman/aura-companion/commit/ae5a2884bd45027a60c6e8f3e8f6ebd73b7d05bb))
+* **council:** close 16 review findings on the codex-init + review-ownership fixes ([#174](https://github.com/antonioshaman/aura-companion/issues/174)) ([1a68032](https://github.com/antonioshaman/aura-companion/commit/1a68032869a79539c18ea3ae3eecb17cc6a7a454))
+* **council:** normalize observer finding shape and gate the skill drift canary ([#163](https://github.com/antonioshaman/aura-companion/issues/163)) ([01c72df](https://github.com/antonioshaman/aura-companion/commit/01c72df3769427e28a572afa991c632e1826b6a6))
+* **council:** rescan reviews dir before degrading on wake timeout ([#165](https://github.com/antonioshaman/aura-companion/issues/165)) ([26f3b4a](https://github.com/antonioshaman/aura-companion/commit/26f3b4a2853cce868040d1a430c8d585004f1789))
+* **pwa:** auto-apply waiting service worker so stale browsers refresh ([#170](https://github.com/antonioshaman/aura-companion/issues/170)) ([d6f31c5](https://github.com/antonioshaman/aura-companion/commit/d6f31c5f7f3a3a261e4774b46ac71aa3221935b5))
+* **server:** capture real shell PATH — brace-delimit ${PATH} + user-local-first fallback ([#168](https://github.com/antonioshaman/aura-companion/issues/168)) ([b0dc858](https://github.com/antonioshaman/aura-companion/commit/b0dc85895eab3eb03a7c96716060fa345baa27f0))
+* **server:** require two consecutive fast resume-deaths before discarding cliSessionId ([#171](https://github.com/antonioshaman/aura-companion/issues/171)) ([46455ec](https://github.com/antonioshaman/aura-companion/commit/46455ec3c95bb19023bef8b1dd57a93d6b43bd28))
+
 ## [1.15.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.14.0...aura-companion-v1.15.0) (2026-08-31)
 
 
