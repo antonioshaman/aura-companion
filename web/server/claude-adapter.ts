@@ -197,6 +197,32 @@ export class ClaudeAdapter implements IBackendAdapter {
   private modelFallbackFiredForThisSpawn = false;
 
   /**
+   * Content of the last user_message we dispatched to the CLI that has
+   * NOT yet been acknowledged by a `result` NDJSON frame. Set at the
+   * end of {@link handleOutgoingUserMessage}; cleared on the in-flight
+   * → awaiting-input transition in {@link handleResultMessage}.
+   *
+   * The silent-stdio-death failure mode (see PR #175, this same file's
+   * silence watchdog) causes the CLI to receive a user_message,
+   * process it into its own jsonl, but never emit the response on
+   * stdout. When the watchdog kills and the keepalive relaunches, the
+   * new subprocess resumes via `--resume` but does NOT re-drive the
+   * unanswered message — the user's turn is silently lost.
+   *
+   * This field is the memory that {@link handleSystemInit} uses to
+   * replay the unanswered message on the next spawn. Two guards keep
+   * it safe:
+   *   1. Set only for text-only user messages. Image payloads carry
+   *      base64 blobs that we'd prefer not to re-decode + re-transmit
+   *      on our own initiative — replaying those on respawn is out of
+   *      scope for now (logged + skipped).
+   *   2. Cleared on transport-close paths ({@link handleTransportClose},
+   *      {@link detachWebSocket}) alongside `orchestratorTurnState`
+   *      to keep the two in sync — a clean disconnect zeroes both.
+   */
+  private lastUnansweredUserMessage: string | null = null;
+
+  /**
    * Observer turn-state for the Council Mode auto-wake gate.
    *
    * `idle` means the observer is ready for a new `user` frame — either
@@ -599,6 +625,16 @@ export class ClaudeAdapter implements IBackendAdapter {
     // paths will disarm normally; only a genuinely dead pipe reaches
     // the timeout without any frame at all.
     this.silenceWatchdog.arm("user_message_sent");
+    // Remember this text-only turn's content in case the pipe goes
+    // silent and the watchdog forces a respawn. `handleSystemInit`
+    // replays it on the new spawn. Image-carrying messages are NOT
+    // remembered — replaying a base64 payload on our own initiative
+    // has a larger blast radius than the anti-silence win.
+    if (!msg.images?.length) {
+      this.lastUnansweredUserMessage = msg.content;
+    } else {
+      this.lastUnansweredUserMessage = null;
+    }
     return true;
   }
 
@@ -1025,6 +1061,45 @@ export class ClaudeAdapter implements IBackendAdapter {
         this.sendRaw(ndjson);
       }
     }
+
+    // Silent-stdio replay hook. When the previous spawn ate a user
+    // message but died before emitting a response (see
+    // `feedback_two_writer_path_divergence_canary.md` for the failure
+    // class), we saved the text content in `lastUnansweredUserMessage`.
+    // A fresh `system.init` frame is proof the new spawn's stdout is
+    // now alive, so re-drive that turn now — the user sees a slight
+    // pause and then the reply they were owed, instead of eternal
+    // silence. Guards:
+    //   - Only fires when the previous turn was ACTUALLY in-flight at
+    //     silence time (the field is null after a clean turn).
+    //   - The queue-flush above runs first; a browser-typed follow-up
+    //     that landed during the outage takes priority in the CLI's
+    //     input queue.
+    //   - The `handleOutgoingUserMessage` call below re-arms the
+    //     silence watchdog + re-sets `lastUnansweredUserMessage`, so a
+    //     second silence on the same replay produces the same
+    //     kill+respawn+replay loop and eventually trips
+    //     `MAX_AUTO_RELAUNCHES` — bounded, not infinite.
+    if (this.lastUnansweredUserMessage !== null) {
+      const content = this.lastUnansweredUserMessage;
+      // Clear BEFORE dispatch so the replay path itself sets a fresh
+      // pending state (via handleOutgoingUserMessage) rather than
+      // reading stale data if it races.
+      this.lastUnansweredUserMessage = null;
+      console.log(
+        `[claude-adapter] Replaying last unanswered user message after respawn for session ${this.sessionId} (${content.length} chars)`,
+      );
+      // Surface the replay on the browser channel so the user knows
+      // their previous turn is being re-driven, not just going quiet.
+      this.browserMessageCb?.({
+        type: "error",
+        message: "Backend recovered — replaying your last message…",
+      });
+      this.handleOutgoingUserMessage({
+        type: "user_message",
+        content,
+      });
+    }
   }
 
   // -- Assistant, result, stream ----------------------------------------------
@@ -1135,6 +1210,12 @@ export class ClaudeAdapter implements IBackendAdapter {
       // here is "no longer expecting output", not "reset for another
       // 60s window".
       this.silenceWatchdog.disarm();
+      // Turn answered — no replay needed on a future respawn. This
+      // clear MUST live in the in-flight → awaiting-input branch so a
+      // spurious `result` for a session already awaiting (CLI
+      // re-handshake replay) does not erase pending replay state
+      // from a still-in-flight turn.
+      this.lastUnansweredUserMessage = null;
       companionBus.emit("orchestrator:turn-done", {
         sessionId: this.sessionId,
         blockedByStop: false,
