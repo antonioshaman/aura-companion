@@ -25,7 +25,7 @@ import { generateSessionTitle } from "./auto-namer.js";
 import { companionBus } from "./event-bus.js";
 import { metricsCollector } from "./metrics-collector.js";
 import { log } from "./logger.js";
-import { nextModelInChain } from "./model-fallback-chain.js";
+import { nextModelInChain, computeSilenceRotation } from "./model-fallback-chain.js";
 import { SessionGroupCoordinator } from "./session-group-coordinator.js";
 import type { GroupDegradeReason } from "./group-state-machine.js";
 import { isSupportedPairing as _isSupportedPairing } from "./backend-provider.js";
@@ -67,6 +67,19 @@ const MAX_AUTO_RELAUNCHES = 3;
 const RELAUNCH_GRACE_MS = 10_000;
 const RELAUNCH_COOLDOWN_MS = 5_000;
 const RECONNECT_GRACE_MS = Number(process.env.COMPANION_RECONNECT_GRACE_MS || "30000");
+
+/**
+ * How many consecutive `session:backend-silent` events on the SAME
+ * session AND the SAME model trigger a model-rotation (via
+ * `nextModelInChain`) before the subprocess is killed for respawn.
+ * `2` means "one silence is a hiccup, two on the same model is a
+ * pattern → downgrade before the next respawn tries the same model
+ * again". Reset by a successful `orchestrator:turn-done` (proof the
+ * current model works). See `handleBackendSilent` for full mechanics
+ * and `feedback_claude_cli_opus5_stdout_dead_jsonl_alive.md` for the
+ * incident that motivated this.
+ */
+const RECURRING_SILENCE_ROTATE_THRESHOLD = 2;
 
 /**
  * Group-level reconnect grace window (PLAN Task 2). Layered on top of the
@@ -515,6 +528,17 @@ export class SessionOrchestrator {
   // Timers for proactive keepalive relaunches (for cancellation on delete)
   private keepaliveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
+  /**
+   * Per-session silence-recurrence bookkeeping. Keyed by Companion
+   * `sessionId`; value is the running count + the model that was
+   * silent. Bumped on every `session:backend-silent`; when count
+   * reaches {@link RECURRING_SILENCE_ROTATE_THRESHOLD} the handler
+   * rotates the model via `nextModelInChain` and clears the entry.
+   * Cleared on `orchestrator:turn-done` (successful turn = model
+   * works, no rotation needed).
+   */
+  private silenceRecurrenceCounts = new Map<string, { count: number; lastSilentModel: string }>();
+
   // Idempotency guard for initialize()
   private _initialized = false;
 
@@ -864,6 +888,15 @@ export class SessionOrchestrator {
     // conversation. See event-bus-types.ts contract for full context.
     companionBus.on("session:backend-silent", async ({ sessionId, sinceMs, reason }) => {
       await this.handleBackendSilent(sessionId, sinceMs, reason);
+    });
+
+    // Successful orchestrator turn = the current model+CLI combo works
+    // end-to-end. Clear any silence-recurrence bookkeeping for this
+    // session so a future single hiccup does not push straight to a
+    // model rotation. Paired with `handleBackendSilent` which bumps
+    // the counter.
+    companionBus.on("orchestrator:turn-done", ({ sessionId }) => {
+      this.silenceRecurrenceCounts.delete(sessionId);
     });
 
     // Rate-limit-class error classified — swap the session's model to
@@ -4243,6 +4276,47 @@ export class SessionOrchestrator {
     if (!info || info.archived) return;
     if (this.intentionalKills.has(sessionId)) return;
     if (this.relaunchExhaustedNotified.has(sessionId)) return;
+
+    // Recurring-silence rotation (model-agnostic durable fix, 2026-09-10).
+    // The named-list substitution in `broken-model-substitution.ts` is
+    // reactive to KNOWN-broken model ids; this loop discovers a NEWLY-
+    // broken model empirically. Delegates to the pure
+    // {@link computeSilenceRotation} for the counting + threshold +
+    // chain-lookup rules (kept in `model-fallback-chain.ts` for
+    // testability). Reset on `orchestrator:turn-done` (successful turn
+    // = model works; clear silence bookkeeping for that session).
+    const currentModel = info.model ?? "";
+    const decision = computeSilenceRotation(
+      this.silenceRecurrenceCounts.get(sessionId),
+      currentModel,
+      RECURRING_SILENCE_ROTATE_THRESHOLD,
+    );
+    if (decision.rotateTo) {
+      log.warn("orchestrator", "Recurring silence on same model — rotating to next chain entry", {
+        sessionId,
+        from: currentModel,
+        to: decision.rotateTo,
+      });
+      this.wsBridge.broadcastToSession(sessionId, {
+        type: "error",
+        message: `Model ${currentModel} silent on this session — rotating to ${decision.rotateTo} and relaunching.`,
+      });
+      this.launcher.setModel(sessionId, decision.rotateTo);
+      this.silenceRecurrenceCounts.delete(sessionId);
+    } else if (decision.newRecord) {
+      this.silenceRecurrenceCounts.set(sessionId, decision.newRecord);
+      if (decision.newRecord.count >= RECURRING_SILENCE_ROTATE_THRESHOLD) {
+        // Threshold reached but chain exhausted — flag it so operators
+        // notice via journalctl. Handler still kills + respawns below,
+        // but on the same broken model (no better target available).
+        log.warn("orchestrator", "Recurring silence but no chain successor — model rotation exhausted", {
+          sessionId,
+          currentModel,
+          occurrences: decision.newRecord.count,
+        });
+      }
+    }
+
     log.warn("orchestrator", "Backend silent — killing subprocess for relaunch", {
       sessionId,
       sinceMs,

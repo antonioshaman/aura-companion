@@ -55,7 +55,19 @@ export const BROKEN_MODEL_SUBSTITUTIONS: readonly BrokenModelSubstitution[] = [
     // `~/.claude/projects/*.jsonl`, but its stdout stream-json emitter
     // never fires. Same session (`--resume`) works instantly when
     // respawned with `--model claude-opus-4-8`.
-    reason: "Claude CLI 2.1.265 does not emit opus-5 responses on stdout (jsonl still writes) — auto-downgraded to Opus 4.8 until upstream fix",
+    reason: "Claude CLI 2.1.265+ does not emit opus-5 responses on stdout (jsonl still writes) — auto-downgraded to Opus 4.8 until upstream fix",
+  },
+  {
+    from: "claude-opus-4-7",
+    to: "claude-opus-4-8",
+    // Same stdout-emit regression class as opus-5 — verified 2026-09-10
+    // on aura-companion prod (grp_f0903abe pair, CLI 2.1.266). Two
+    // user_messages in a row on opus-4-7 produced zero assistant
+    // frames to bun over ~4 minutes despite subprocess `state=connected`,
+    // `pid` alive, and jsonl growing. Substituting to opus-4-8 (which
+    // works reliably under 2.1.266) is a stopgap; the durable fix is
+    // the recurring-silence rotation in `session-orchestrator.ts`.
+    reason: "Claude CLI 2.1.266 does not reliably emit opus-4-7 responses on stdout — auto-downgraded to Opus 4.8 until upstream fix",
   },
 ];
 

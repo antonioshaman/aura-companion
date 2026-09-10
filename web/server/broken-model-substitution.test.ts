@@ -13,9 +13,20 @@ describe("resolveModelSubstitution", () => {
     expect(sub?.reason).toContain("Claude CLI 2.1.265");
   });
 
+  it("substitutes claude-opus-4-7 → claude-opus-4-8 (added 2026-09-10 after field verification)", () => {
+    const sub = resolveModelSubstitution("claude-opus-4-7");
+    expect(sub).not.toBeNull();
+    expect(sub?.from).toBe("claude-opus-4-7");
+    expect(sub?.to).toBe("claude-opus-4-8");
+    expect(sub?.reason).toContain("Claude CLI 2.1.266");
+  });
+
   it("returns null for non-broken Claude models", () => {
     expect(resolveModelSubstitution("claude-opus-4-8")).toBeNull();
-    expect(resolveModelSubstitution("claude-opus-4-7")).toBeNull();
+    // Note: `claude-opus-4-7` was ADDED to the substitution table
+    // 2026-09-10 after field verification (see
+    // feedback_claude_cli_opus5_stdout_dead_jsonl_alive.md). It's now
+    // covered by the "recognises entries in the table" case above.
     expect(resolveModelSubstitution("claude-sonnet-4-6")).toBeNull();
     expect(resolveModelSubstitution("claude-haiku-4-5")).toBeNull();
   });
