@@ -169,6 +169,7 @@ function createMockLauncher() {
     setArchived: vi.fn(),
     removeSession: vi.fn(),
     setCLISessionId: vi.fn(),
+    markConnected: vi.fn(),
     getStartingSessions: vi.fn(() => []),
   } as any;
 }
@@ -277,6 +278,26 @@ describe("SessionOrchestrator", () => {
       expect(companionBus.listenerCount("session:relaunch-needed")).toBeGreaterThan(0);
       expect(companionBus.listenerCount("session:idle-kill")).toBeGreaterThan(0);
       expect(companionBus.listenerCount("session:first-turn-completed")).toBeGreaterThan(0);
+    });
+
+    it("marks Codex sessions connected when their backend adapter attaches", () => {
+      // Regression: Codex adapter creation is the connection edge. Without
+      // mirroring it into CliLauncher, REST can keep reporting `starting`
+      // after the browser has already received `cli_connected`.
+      orchestrator.initialize();
+
+      const adapter = {} as CodexAdapter;
+      companionBus.emit("backend:codex-adapter-created", {
+        sessionId: "codex-session",
+        adapter,
+      });
+
+      expect(deps.wsBridge.attachBackendAdapter).toHaveBeenCalledWith(
+        "codex-session",
+        adapter,
+        "codex",
+      );
+      expect(deps.launcher.markConnected).toHaveBeenCalledWith("codex-session");
     });
 
     // PLAN-aura-orchestrator-idle-auto-proceed Task 9 — boot reconcile wiring.

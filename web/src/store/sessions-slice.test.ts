@@ -207,6 +207,47 @@ describe("Session management", () => {
     expect(state.sdkSessions[0].sessionId).toBe("s2");
   });
 
+  it("setSdkSessions: marks live REST sessions as CLI connected", () => {
+    // The REST session list is an authoritative recovery snapshot after page
+    // reload/server restart. Use it to clear stale disconnected composer state
+    // even if the websocket lifecycle frame was missed.
+    useStore.getState().setCliConnected("s1", false);
+    useStore.getState().setCliReconnecting("s1", true);
+
+    useStore.getState().setSdkSessions([
+      {
+        sessionId: "s1",
+        state: "connected",
+        cwd: "/repo",
+        createdAt: 1,
+      },
+    ]);
+
+    const state = useStore.getState();
+    expect(state.cliConnected.get("s1")).toBe(true);
+    expect(state.cliReconnecting.has("s1")).toBe(false);
+  });
+
+  it("setSdkSessions: marks exited REST sessions as CLI disconnected", () => {
+    // Terminal REST state should still win so dead sessions keep the reconnect
+    // affordance and do not leave a stale enabled composer.
+    useStore.getState().setCliConnected("s1", true);
+    useStore.getState().setCliReconnecting("s1", true);
+
+    useStore.getState().setSdkSessions([
+      {
+        sessionId: "s1",
+        state: "exited",
+        cwd: "/repo",
+        createdAt: 1,
+      },
+    ]);
+
+    const state = useStore.getState();
+    expect(state.cliConnected.get("s1")).toBe(false);
+    expect(state.cliReconnecting.has("s1")).toBe(false);
+  });
+
   it("removeSession: does not clear currentSessionId if a different session is removed", () => {
     useStore.getState().addSession(makeSession("s1"));
     useStore.getState().addSession(makeSession("s2"));

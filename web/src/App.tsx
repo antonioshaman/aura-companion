@@ -63,6 +63,7 @@ export default function App() {
   const sessionCreatingBackend = useStore((s) => s.sessionCreatingBackend);
   const creationProgress = useStore((s) => s.creationProgress);
   const creationError = useStore((s) => s.creationError);
+  const sdkSessions = useStore((s) => s.sdkSessions);
   const hash = useHash();
   const route = useMemo(() => parseHash(hash), [hash]);
   const isSettingsPage = route.page === "settings";
@@ -105,6 +106,7 @@ export default function App() {
   // Capture the localStorage-restored session ID during render (before any effects run)
   // so the mount logic can use it even if the hash-sync branch would clear it.
   const restoredIdRef = useRef(useStore.getState().currentSessionId);
+  const initialServerSessionRecoveryRef = useRef(false);
 
   // Sync hash → store. On mount, restore a localStorage session into the URL first.
   useEffect(() => {
@@ -130,6 +132,29 @@ export default function App() {
     }
     // For other pages (settings, etc.), preserve currentSessionId
   }, [route]);
+
+  // If the browser opens with no persisted selection but the server already has
+  // live sessions (for example an agent was started from a CLI-side entrypoint),
+  // route to the newest active session once. Sidebar polling still owns the
+  // session list; this closes the gap where messages stream and ack in the
+  // background while the main panel remains on the empty home route.
+  useEffect(() => {
+    if (initialServerSessionRecoveryRef.current) return;
+    if (!isAuthenticated) return;
+    if (route.page !== "home" || currentSessionId !== null) {
+      initialServerSessionRecoveryRef.current = true;
+      return;
+    }
+    if (sdkSessions.length === 0) return;
+    initialServerSessionRecoveryRef.current = true;
+
+    const latestActive = sdkSessions
+      .filter((session) => !session.archived && session.state !== "exited")
+      .sort((a, b) => b.createdAt - a.createdAt)[0];
+    if (latestActive) {
+      navigateToSession(latestActive.sessionId, true);
+    }
+  }, [currentSessionId, isAuthenticated, route.page, sdkSessions]);
 
   // Keep git changed-files count in sync for the badge regardless of which tab is active.
   // DiffPanel does the same when mounted; this covers the case where the diff tab is closed.

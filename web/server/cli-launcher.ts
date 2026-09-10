@@ -671,6 +671,14 @@ export class CliLauncher {
             this.sessions.set(info.sessionId, info);
           }
         } else if (info.pid) {
+          if (info.backendType === "codex") {
+            try { process.kill(info.pid, "SIGTERM"); } catch {}
+            info.pid = undefined;
+            info.state = "exited";
+            this.releaseCodexWsPort(info);
+            this.sessions.set(info.sessionId, info);
+            continue;
+          }
           // PLAN T3 (Phase A) + T7 (Phase D): three-factor identity
           // probe — closes the live symptom where alive subprocesses
           // don't match Map `pid` fields (PID reuse → false-positive
@@ -692,16 +700,16 @@ export class CliLauncher {
           // a one-time boot WARN and we conservatively trust the old
           // liveness-only check — degraded but no worse than today.
           //
-          // Dual-backend contract: the probe's argv factor recognizes only
-          // Claude's `--sdk-url ws/cli/<sessionId>` token. Host-mode Codex
-          // (`app-server`, no `--sdk-url`) would always fail that factor →
-          // false `mismatch` → a live Codex app-server reaped on every
-          // restart (regression vs the prior bare `process.kill`). Route
-          // Codex host-mode through the liveness-only fallback; the identity
-          // probe is Claude-only until a Codex argv/port identity lands.
+          // Dual-backend contract: this PID identity probe is Claude-only.
+          // Host-mode Codex uses an app-server plus a Companion-owned proxy;
+          // after a Bun restart the app-server PID may still be alive, but
+          // the proxy/adapter died with Bun, so recovering by PID strands a
+          // session in `starting`. Codex host-mode is handled by the early
+          // branch above: terminate the unreachable app-server and let the
+          // normal browser-triggered relaunch resume the thread.
           let expectedStartMs: number | null = null;
           let expectedArgvSha256: string | null = null;
-          if (this.store && info.backendType !== "codex") {
+          if (this.store) {
             try {
               const sidecar = readRuntimeSidecar(this.store.directory, info.sessionId);
               if (sidecar.kind === "present") {
@@ -720,10 +728,7 @@ export class CliLauncher {
               });
             }
           }
-          const verdict =
-            info.backendType === "codex"
-              ? null
-              : verifyProcessIdentity(info.pid, info.sessionId, expectedStartMs, expectedArgvSha256);
+          const verdict = verifyProcessIdentity(info.pid, info.sessionId, expectedStartMs, expectedArgvSha256);
           if (verdict && verdict.kind === "match") {
             // WS: the child reconnects to the new server, so wait in "starting".
             // stdio: its pipes died with the previous server process, so a

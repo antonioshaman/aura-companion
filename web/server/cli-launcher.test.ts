@@ -1252,7 +1252,7 @@ describe("kill: restart-survived processes", () => {
     killSpy.mockRestore();
   });
 
-  it("force-signals a restart-survived Codex session's inherited PID (best-effort, no argv factor)", async () => {
+  it("terminates restart-survived Codex during restore because its proxy died with Bun", async () => {
     store.saveLauncher([
       {
         sessionId: "survived-codex",
@@ -1281,14 +1281,12 @@ describe("kill: restart-survived processes", () => {
       if (signal === "SIGTERM") { sigtermSent = true; return true; }
       return origKill.call(process, pid, signal as any);
     }) as any);
-
-    expect(newLauncher.restoreFromDisk()).toBe(1);
-
-    const result = await newLauncher.kill("survived-codex");
-    expect(result).toBe(true);
-    // Codex has no argv identity factor → best-effort SIGTERM to the PID.
+    expect(newLauncher.restoreFromDisk()).toBe(0);
     expect(killSpy).toHaveBeenCalledWith(99001, "SIGTERM");
-    expect(newLauncher.getSession("survived-codex")?.state).toBe("exited");
+    const restored = newLauncher.getSession("survived-codex");
+    expect(restored?.state).toBe("exited");
+    expect(restored?.pid).toBeUndefined();
+    expect(restored?.cliSessionId).toBe("cli-cx");
 
     killSpy.mockRestore();
   });
@@ -2442,13 +2440,11 @@ describe("persistence", () => {
 
       warnSpy.mockRestore();
     });
+    it("terminates restart-survived host-mode Codex instead of stranding it in starting", async () => {
+      // Host-mode Codex is two processes: app-server plus Companion proxy/adapter.
+      // After Bun restarts only the app-server PID can survive, so PID liveness
+      // is not a usable connection signal; keep the thread anchor and relaunch later.
 
-    // Dual-backend contract (CLAUDE.md): host-mode Codex (`app-server`, no
-    // `--sdk-url`) must survive a server restart. The Claude-only argv factor
-    // would otherwise reap it on every restart. Codex backend routes to the
-    // liveness-only fallback, so an alive pid is recovered even though its
-    // argv would never satisfy the Claude identity probe.
-    it("recovers a host-mode Codex session whose argv lacks --sdk-url", async () => {
       const savedSessions = [
         {
           sessionId: "codex-host-1",
@@ -2458,22 +2454,13 @@ describe("persistence", () => {
           createdAt: Date.now(),
           backendType: "codex" as const,
           cliSessionId: "codex-cli-xyz",
-          // host-mode: no containerId, no codexWsPort → falls to the pid branch.
+          codexWsPort: 4501,
         },
       ];
       store.saveLauncher(savedSessions);
-
-      // Liveness-only fallback uses the real process.kill(pid, 0); make it succeed.
-      const origKill = process.kill;
-      const killSpy = vi.spyOn(process, "kill").mockImplementation(((
-        pid: number,
-        signal?: string | number,
-      ) => {
-        if (signal === 0) return true;
-        return origKill.call(process, pid, signal as any);
-      }) as any);
-      // Install a hostile identity reader that WOULD mismatch — proving the
-      // Codex path bypasses the identity probe entirely rather than passing it.
+      const killSpy = vi.spyOn(process, "kill").mockImplementation((() => true) as never);
+      // Install a hostile identity reader that WOULD mismatch; Codex exits
+      // before this probe is consulted.
       const procIdentity = await import("./process-identity.js");
       procIdentity.setProcReaderForTests({
         platform: () => "linux",
@@ -2484,10 +2471,12 @@ describe("persistence", () => {
       const newLauncher = new CliLauncher(3456);
       newLauncher.setStore(store);
       const recovered = newLauncher.restoreFromDisk();
-
-      expect(recovered).toBe(1);
+      expect(recovered).toBe(0);
+      expect(killSpy).toHaveBeenCalledWith(33333, "SIGTERM");
       const session = newLauncher.getSession("codex-host-1");
-      expect(session?.state).toBe("starting");
+      expect(session?.state).toBe("exited");
+      expect(session?.pid).toBeUndefined();
+      expect(session?.codexWsPort).toBeUndefined();
       expect(session?.cliSessionId).toBe("codex-cli-xyz");
 
       killSpy.mockRestore();

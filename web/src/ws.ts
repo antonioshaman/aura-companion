@@ -772,6 +772,17 @@ function handleParsedMessage(
 
     case "session_update": {
       store.updateSession(sessionId, data.session);
+      const runtimeState = (data.session as { state?: string }).state;
+      if (
+        runtimeState === "connected" ||
+        runtimeState === "running"
+      ) {
+        store.setCliConnected(sessionId, true);
+        store.setCliReconnecting(sessionId, false);
+      } else if (runtimeState === "exited") {
+        store.setCliConnected(sessionId, false);
+        store.setCliReconnecting(sessionId, false);
+      }
       break;
     }
 

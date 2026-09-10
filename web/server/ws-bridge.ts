@@ -606,6 +606,10 @@ export class WsBridge {
     return Array.from(this.sessions.values()).map((s) => s.state);
   }
 
+  hasConnectedBackend(sessionId: string): boolean {
+    return this.sessions.get(sessionId)?.backendAdapter?.isConnected() === true;
+  }
+
   /**
    * PLAN Task 11: synchronously flush every pending debounced session-store
    * write to disk. Used by `gracefulShutdown` so a state mutation that
@@ -1015,6 +1019,7 @@ export class WsBridge {
         };
         this.refreshGitInfo(session, { notifyPoller: true });
         this.persistSession(session);
+        this.broadcastToBrowsers(session, { type: "session_update", session: session.state });
         if (session.pendingMessages.length > 0 && adapter.isConnected()) {
           this.flushQueuedBrowserMessages(session, adapter, "backend_session_update");
         }
@@ -1250,6 +1255,19 @@ export class WsBridge {
 
     // Broadcast cli_connected
     this.broadcastToBrowsers(session, { type: "cli_connected" });
+    // Transient hydration for browsers that reconnect after a Codex adapter
+    // attaches before the launcher/REST snapshot catches up. Keep it out of
+    // eventBuffer: replay should stay reserved for durable conversation events.
+    for (const ws of session.browserSockets) {
+      this.sendToBrowser(ws, {
+        type: "session_update",
+        session: {
+          session_id: session.id,
+          backend_type: session.backendType,
+          state: "connected",
+        } as Partial<SessionState> & { state: "connected" },
+      });
+    }
     // Fowler finding #12 — reachability derived from the live adapter at read
     // time; no cached bit to flip here.
     log.info("ws-bridge", "Backend adapter attached", {

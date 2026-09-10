@@ -554,6 +554,37 @@ describe("CLI handlers", () => {
     expect(session.state.model).toBe("claude-opus-4-6");
   });
 
+  it("handleCLIMessage: session_update broadcasts merged state to connected browsers", async () => {
+    // Codex sends session_update for runtime state changes after attach. The
+    // browser must receive it or it can stay stuck in a stale disconnected UI.
+    mockExecSync.mockImplementation(() => {
+      throw new Error("not a git repo");
+    });
+
+    const cli = makeCliSocket("s1");
+    const browser = makeBrowserSocket("s1");
+    bridge.handleCLIOpen(cli, "s1");
+    bridge.handleBrowserOpen(browser, "s1");
+    await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "cli-internal-uuid-abc123" }));
+    browser.send.mockClear();
+
+    const session = bridge.getSession("s1")!;
+    const adapter = session.backendAdapter as any;
+    adapter.browserMessageCb({
+      type: "session_update",
+      session: {
+        session_id: "cli-internal-uuid-abc123",
+        model: "claude-opus-4-6",
+      },
+    });
+
+    const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
+    const updateCall = calls.find((c: any) => c.type === "session_update");
+    expect(updateCall).toBeDefined();
+    expect(updateCall.session.session_id).toBe("s1");
+    expect(updateCall.session.model).toBe("claude-opus-4-6");
+  });
+
   it("handleCLIMessage: updates state from init (model, cwd, tools, permissionMode)", async () => {
     mockExecSync.mockImplementation(() => {
       throw new Error("not a git repo");

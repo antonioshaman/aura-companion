@@ -887,6 +887,26 @@ describe("handleMessage: stream_event message_start", () => {
 });
 
 // ===========================================================================
+// handleMessage: session_update
+// ===========================================================================
+describe("handleMessage: session_update", () => {
+  it("clears stale CLI disconnected state when the server reports a live session", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    fireMessage({ type: "cli_disconnected" });
+
+    fireMessage({
+      type: "session_update",
+      session: { state: "connected" },
+    });
+
+    const state = useStore.getState();
+    expect(state.cliConnected.get("s1")).toBe(true);
+    expect(state.cliReconnecting.has("s1")).toBe(false);
+  });
+});
+
+// ===========================================================================
 // handleMessage: result
 // ===========================================================================
 describe("handleMessage: result", () => {
