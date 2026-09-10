@@ -235,7 +235,22 @@ export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> 
       return { sessions };
     }),
 
-  setSdkSessions: (sessions) => set({ sdkSessions: sessions }),
+  setSdkSessions: (sessions) =>
+    set((s) => {
+      const cliConnected = new Map(s.cliConnected);
+      const cliReconnecting = new Map(s.cliReconnecting);
+      for (const session of sessions) {
+        const isLive = !session.archived && (session.state === "connected" || session.state === "running");
+        if (isLive) {
+          cliConnected.set(session.sessionId, true);
+          cliReconnecting.delete(session.sessionId);
+        } else if (session.archived || session.state === "exited") {
+          cliConnected.set(session.sessionId, false);
+          cliReconnecting.delete(session.sessionId);
+        }
+      }
+      return { sdkSessions: sessions, cliConnected, cliReconnecting };
+    }),
 
   setConnectionStatus: (sessionId, status) =>
     set((s) => {

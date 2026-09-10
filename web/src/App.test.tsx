@@ -188,7 +188,7 @@ vi.mock("./components/AgentsPage.js", () => ({
 // ─── Import SUT after mocks ─────────────────────────────────────
 import App from "./App.js";
 import { api } from "./api.js";
-import { parseHash } from "./utils/routing.js";
+import { navigateToSession, parseHash } from "./utils/routing.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────
 
@@ -298,6 +298,52 @@ describe("App", () => {
       render(<App />);
 
       expect(screen.getByTestId("session-launch-overlay")).toBeInTheDocument();
+    });
+
+    it("opens the newest active server session when no browser session is selected", async () => {
+      // CLI-created sessions can exist on the server before this browser has a
+      // currentSessionId in localStorage. The app should recover by selecting
+      // the newest live session once, so streamed assistant replies are visible
+      // instead of being acked in a background WebSocket while home is shown.
+      setStoreValues({
+        currentSessionId: null,
+        sdkSessions: [
+          {
+            sessionId: "old-live",
+            state: "connected",
+            cwd: "/repo",
+            createdAt: 100,
+            archived: false,
+          },
+          {
+            sessionId: "newest-live",
+            state: "running",
+            cwd: "/repo",
+            createdAt: 300,
+            archived: false,
+          },
+          {
+            sessionId: "newest-exited",
+            state: "exited",
+            cwd: "/repo",
+            createdAt: 400,
+            archived: false,
+          },
+          {
+            sessionId: "newest-archived",
+            state: "connected",
+            cwd: "/repo",
+            createdAt: 500,
+            archived: true,
+          },
+        ],
+      });
+
+      render(<App />);
+
+      await waitFor(() => {
+        expect(navigateToSession).toHaveBeenCalledWith("newest-live", true);
+      });
     });
   });
 

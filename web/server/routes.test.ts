@@ -320,6 +320,7 @@ function createMockBridge() {
     closeSession: vi.fn(),
     getSession: vi.fn(() => null),
     getAllSessions: vi.fn(() => []),
+    hasConnectedBackend: vi.fn(() => false),
     getCodexRateLimits: vi.fn(() => null),
     markContainerized: vi.fn(),
     prePopulateCommands: vi.fn(),
@@ -778,6 +779,42 @@ describe("GET /api/sessions", () => {
       totalLinesAdded: 0,
       totalLinesRemoved: 0,
     });
+  });
+
+  it("upgrades a `starting` snapshot to `connected` when the bridge has a live backend adapter", async () => {
+    // Regression: a Codex app-server whose proxy re-handshook after a Bun
+    // restart leaves the launcher snapshot at `starting` while the adapter is
+    // already live. REST must report `connected` (runtime reachability wins)
+    // so the composer is not stuck disabled behind a stale snapshot.
+    const sessions = [
+      { sessionId: "s1", state: "starting", cwd: "/a" },
+      { sessionId: "s2", state: "starting", cwd: "/b" },
+    ];
+    launcher.listSessions.mockReturnValue(sessions);
+    vi.mocked(sessionNames.getAllNames).mockReturnValue({});
+    // Only s1 has a live adapter; s2 is genuinely still spawning.
+    bridge.hasConnectedBackend.mockImplementation((id: string) => id === "s1");
+
+    const res = await app.request("/api/sessions", { method: "GET" });
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json[0]).toMatchObject({ sessionId: "s1", state: "connected" });
+    expect(json[1]).toMatchObject({ sessionId: "s2", state: "starting" });
+  });
+
+  it("never resurrects a non-starting snapshot even if a stale adapter reports connected", async () => {
+    // Guard: the upgrade is gated on `starting` only — an `exited` record must
+    // stay exited so a lingering adapter reference can't mask a dead session.
+    const sessions = [{ sessionId: "s1", state: "exited", cwd: "/a" }];
+    launcher.listSessions.mockReturnValue(sessions);
+    vi.mocked(sessionNames.getAllNames).mockReturnValue({});
+    bridge.hasConnectedBackend.mockReturnValue(true);
+
+    const res = await app.request("/api/sessions", { method: "GET" });
+
+    const json = await res.json();
+    expect(json[0]).toMatchObject({ sessionId: "s1", state: "exited" });
   });
 
   it("prefers bridge cwd over launcher cwd when available", async () => {

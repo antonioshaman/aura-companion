@@ -725,8 +725,20 @@ export function createRoutes(
     const bridgeMap = new Map(bridgeStates.map((s) => [s.session_id, s]));
     const enriched = sessions.map((s) => {
       const bridge = bridgeMap.get(s.sessionId);
+      // Runtime reachability wins over a stale launcher snapshot. A session
+      // whose backend adapter is live but whose launcher record still reads
+      // `starting` (adapter attached before the snapshot caught up, e.g. a
+      // Codex app-server whose proxy re-handshook after a Bun restart) must
+      // report `connected` here — otherwise the composer stays disabled and
+      // the user is forced to hit Reconnect by hand. Only upgrade `starting`;
+      // never resurrect an `exited` record.
+      const state =
+        s.state === "starting" && wsBridge.hasConnectedBackend(s.sessionId)
+          ? "connected"
+          : s.state;
       return {
         ...s,
+        state,
         // Bridge state is the source of truth for runtime cwd updates
         // (notably containerized sessions mapped back to host paths).
         cwd: bridge?.cwd || s.cwd,
