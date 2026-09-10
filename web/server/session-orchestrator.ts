@@ -4103,6 +4103,16 @@ export class SessionOrchestrator {
     // For containerized sessions, use container liveness instead of PID check
     // (the PID is the `docker exec` wrapper, which exits immediately for some
     // transports and is unreliable for container health).
+    // Prod 2026-09-10: a surviving PID is NOT proof the session is usable.
+    // After a Bun restart under `KillMode=process` the Codex app-server PID
+    // (and, on stdio, the claude subprocess) survives — but its WS proxy /
+    // backend adapter died with the parent, so its pipes are deaf. Both the
+    // PID-liveness skip below AND the `state !== "starting"` relaunch guard
+    // further down treated such a session as alive/initializing, blocking
+    // auto-relaunch and forcing a MANUAL Reconnect. Gate both on the backend
+    // adapter still being attached: a live PID with a dead adapter must
+    // relaunch (with `--resume`) instead of masquerading as alive.
+    const adapterAttached = this.wsBridge.getSession(sessionId)?.backendAdapter != null;
     if (freshInfo && freshInfo.state !== "exited") {
       if (freshInfo.containerId) {
         const containerState = containerManager.isContainerAlive(freshInfo.containerId);
@@ -4110,7 +4120,7 @@ export class SessionOrchestrator {
           this.relaunchingSet.delete(sessionId);
           return;
         }
-      } else if (freshInfo.pid) {
+      } else if (freshInfo.pid && adapterAttached) {
         try { process.kill(freshInfo.pid, 0); this.relaunchingSet.delete(sessionId); return; } catch {}
       }
     }
@@ -4132,7 +4142,11 @@ export class SessionOrchestrator {
       return;
     }
 
-    if (freshInfo && freshInfo.state !== "starting") {
+    // A `starting` session is normally mid-spawn and must not be double-
+    // relaunched — EXCEPT the surviving-but-deaf case above: a session stuck
+    // in `starting` after a Bun restart, whose PID lives but whose adapter
+    // died, will never leave `starting` on its own. Allow it to relaunch.
+    if (freshInfo && (freshInfo.state !== "starting" || !adapterAttached)) {
       this.autoRelaunchCounts.set(sessionId, count + 1);
       metricsCollector.recordRelaunchAttempted();
       log.info("orchestrator", "Auto-relaunching CLI", { sessionId, attempt: count + 1, maxAttempts: MAX_AUTO_RELAUNCHES });

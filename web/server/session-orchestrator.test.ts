@@ -2181,13 +2181,15 @@ describe("SessionOrchestrator", () => {
       expect(deps.launcher.relaunch).not.toHaveBeenCalled();
     });
 
-    it("skips relaunch when session is still starting", async () => {
-      // A session in "starting" state should not be relaunched — it's still
-      // initializing. The starting guard at line 771 prevents this.
+    it("skips relaunch when a still-starting session's PID is alive AND its backend adapter is attached", async () => {
+      // A genuinely-alive session (live PID + attached adapter) should not be
+      // relaunched — it's still initializing over a working transport.
       deps.launcher.getSession
         .mockReturnValueOnce({ archived: false } as any) // check archived
         .mockReturnValueOnce({ state: "starting", pid: process.pid } as any); // after grace: still starting
       deps.wsBridge.isCliConnected.mockReturnValue(false);
+      // Adapter attached → the live PID is trustworthy → skip relaunch.
+      vi.mocked(deps.wsBridge.getSession).mockReturnValue({ backendAdapter: {} } as any);
       orchestrator.initialize();
 
       companionBus.emit("session:relaunch-needed", { sessionId: "s1" });
@@ -2195,6 +2197,28 @@ describe("SessionOrchestrator", () => {
       await vi.advanceTimersByTimeAsync(0);
 
       expect(deps.launcher.relaunch).not.toHaveBeenCalled();
+    });
+
+    it("relaunches a surviving-but-deaf session: live PID but backend adapter died with the parent (prod 2026-09-10)", async () => {
+      // The Codex/stdio bug: after a Bun restart under KillMode=process the
+      // subprocess PID survives (process.kill(pid,0) succeeds) but its WS
+      // proxy / backend adapter died with the parent, so the session is deaf.
+      // The old code treated the live PID as "still alive" and blocked
+      // auto-relaunch, forcing a manual Reconnect. With the adapter-attached
+      // gate, a live PID + null adapter now relaunches (with --resume).
+      deps.launcher.getSession
+        .mockReturnValueOnce({ archived: false } as any) // check archived
+        .mockReturnValueOnce({ state: "starting", pid: process.pid } as any); // after grace: PID alive
+      deps.wsBridge.isCliConnected.mockReturnValue(false);
+      // Adapter GONE — died with the Bun parent.
+      vi.mocked(deps.wsBridge.getSession).mockReturnValue({ backendAdapter: null } as any);
+      orchestrator.initialize();
+
+      companionBus.emit("session:relaunch-needed", { sessionId: "s1" });
+      await vi.advanceTimersByTimeAsync(15_000);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(deps.launcher.relaunch).toHaveBeenCalledWith("s1");
     });
 
     it("relaunches exited session even when PID was recycled to a live process", async () => {
