@@ -2392,6 +2392,29 @@ export class CliLauncher {
 
   /**
    * Mark a session as connected (called when CLI establishes WS connection).
+   *
+   * Force-init-probe on spawn: when the session has a persisted
+   * `cliSessionId` from a prior successful init (the `--resume` case
+   * — which is EVERY auto-relaunch after the first spawn), emit
+   * `session:cli-id-received` immediately on transport-attach.
+   *
+   * Why: the Claude CLI in `--print --input-format stream-json` mode
+   * may delay its `system.init` frame emission until it receives its
+   * first stdin input, so the adapter's `handleSystemInit` — which
+   * normally fires the bus event — can be silent for minutes after
+   * spawn. Post-grace council recovery
+   * (`session-orchestrator.ts:session:cli-id-received` handler) then
+   * never triggers, leaving groups stuck in `degraded` even though
+   * both halves are alive at PID level. Verified 2026-09-10:
+   * "написал агенту → поднялось" — user's first user_message drove
+   * the CLI to emit init, which triggered recovery.
+   *
+   * The emit is safe on double-fire: the natural init from the CLI
+   * eventually triggers the same event again with the same
+   * cliSessionId; downstream handlers are idempotent
+   * (`setCLISessionId` writes the same value, post-grace recovery
+   * checks group.status which is already `active` on the second
+   * fire).
    */
   markConnected(sessionId: string): void {
     const session = this.sessions.get(sessionId);
@@ -2399,6 +2422,17 @@ export class CliLauncher {
       session.state = "connected";
       console.log(`[cli-launcher] Session ${sessionId} connected via WebSocket`);
       this.persistState();
+
+      if (session.cliSessionId) {
+        // Force-init-probe: transport-attach on a --resume respawn
+        // is proof enough for post-grace recovery. Don't wait for
+        // the CLI's next system.init frame, which may be user-input
+        // gated.
+        companionBus.emit("session:cli-id-received", {
+          sessionId,
+          cliSessionId: session.cliSessionId,
+        });
+      }
     }
   }
 
