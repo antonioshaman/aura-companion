@@ -47,7 +47,7 @@ vi.mock("./model-availability.js", () => ({
       : { kind: "ok", model: opts.requested },
 }));
 
-import { ClaudeAdapter } from "./claude-adapter.js";
+import { ClaudeAdapter, resolveSilentStdioTimeoutMs } from "./claude-adapter.js";
 import { log } from "./logger.js";
 import { companionBus } from "./event-bus.js";
 
@@ -2154,7 +2154,7 @@ describe("result-frame sticky-token cleanup (Task 11.8)", () => {
   });
 });
 /**
- * PR #178 — Init-frame health canary. On every `attachTransport`, arm
+ * PR #179 — Init-frame health canary. On every `attachTransport`, arm
  * a 30-second deadline. First `system.init` frame cancels it. If it
  * expires, adapter emits `session:no-init-frame` on the bus AND
  * pushes a browser toast so the operator sees the regression on the
@@ -2260,5 +2260,73 @@ describe("Init-frame health canary", () => {
     expect(busEvents.length).toBe(1);
 
     off();
+  });
+});
+
+/**
+ * PR — Silent-stdio watchdog threshold env override
+ * (`AURA_SILENT_STDIO_TIMEOUT_MS`). Default raised from 60s (PR #175
+ * value) to 300s after field observation that legitimate tool-heavy
+ * turns can silence >60s between intermediate stream frames, causing
+ * the watchdog to kill healthy work.
+ */
+describe("resolveSilentStdioTimeoutMs — env override parsing", () => {
+  it("returns default (300000 ms) when env is unset", () => {
+    expect(resolveSilentStdioTimeoutMs(undefined)).toBe(300_000);
+  });
+
+  it("returns default when env is empty string", () => {
+    expect(resolveSilentStdioTimeoutMs("")).toBe(300_000);
+  });
+
+  it("returns parsed value for integer >= MIN_MS (10000)", () => {
+    expect(resolveSilentStdioTimeoutMs("60000")).toBe(60_000);
+    expect(resolveSilentStdioTimeoutMs("120000")).toBe(120_000);
+    expect(resolveSilentStdioTimeoutMs("600000")).toBe(600_000);
+    // Boundary
+    expect(resolveSilentStdioTimeoutMs("10000")).toBe(10_000);
+  });
+
+  it("REJECTS values below MIN_MS with warn → default", () => {
+    const warns: string[] = [];
+    const warn = (m: string) => { warns.push(m); };
+    expect(resolveSilentStdioTimeoutMs("9999", warn)).toBe(300_000);
+    expect(resolveSilentStdioTimeoutMs("100", warn)).toBe(300_000);
+    expect(resolveSilentStdioTimeoutMs("0", warn)).toBe(300_000);
+    expect(warns.length).toBe(3);
+    // Each warn must identify the offending value + the minimum so
+    // operators can fix their config.
+    for (const w of warns) {
+      expect(w).toContain("AURA_SILENT_STDIO_TIMEOUT_MS");
+      expect(w).toContain("10000");
+    }
+  });
+
+  it("REJECTS negative values with warn → default", () => {
+    const warns: string[] = [];
+    const warn = (m: string) => { warns.push(m); };
+    expect(resolveSilentStdioTimeoutMs("-500", warn)).toBe(300_000);
+    expect(warns.length).toBe(1);
+  });
+
+  it("REJECTS non-numeric with warn → default", () => {
+    const warns: string[] = [];
+    const warn = (m: string) => { warns.push(m); };
+    expect(resolveSilentStdioTimeoutMs("banana", warn)).toBe(300_000);
+    expect(resolveSilentStdioTimeoutMs("60s", warn)).toBe(300_000);
+    expect(resolveSilentStdioTimeoutMs("Infinity", warn)).toBe(300_000);
+    expect(warns.length).toBe(3);
+  });
+
+  it("REJECTS partial-parse strings like '60000abc' — String(parseInt) round-trip check", () => {
+    // parseInt("60000abc") is 60000 numerically, but that's a config
+    // typo (trailing garbage) and MUST NOT silently succeed with a
+    // partial value. The round-trip `String(parsed) === env.trim()`
+    // is the tripwire.
+    const warns: string[] = [];
+    const warn = (m: string) => { warns.push(m); };
+    expect(resolveSilentStdioTimeoutMs("60000abc", warn)).toBe(300_000);
+    expect(resolveSilentStdioTimeoutMs("60000.5", warn)).toBe(300_000);
+    expect(warns.length).toBe(2);
   });
 });
