@@ -2070,3 +2070,38 @@ describe("Browser preview thin wrappers", () => {
     expect(JSON.parse(opts.body)).toEqual({ url: "https://acme.test" });
   });
 });
+
+// ===========================================================================
+// Sweep orphans (preview / execute)
+// ===========================================================================
+describe("sweep orphans", () => {
+  it("sweepPreview GETs /api/sweep/preview and returns candidates + token", async () => {
+    const data = {
+      candidates: [{ id: "stale-session:s1", reason: "stale-session", sessionId: "s1", evidence: "old", ageMs: 1 }],
+      token: "abc123",
+    };
+    mockFetch.mockResolvedValueOnce(mockResponse(data));
+    const result = await api.sweepPreview();
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/sweep/preview");
+    // GET — no explicit method/body
+    expect(opts.method).toBeUndefined();
+    expect(result).toEqual(data);
+  });
+
+  it("sweepExecute POSTs the preview token and returns the result counts", async () => {
+    const data = { requested: 2, swept: 1, skipped: 1, perReason: { orphan: 1, "archived-leak": 0, "stale-session": 0, "orphan-timer": 0 } };
+    mockFetch.mockResolvedValueOnce(mockResponse(data));
+    const result = await api.sweepExecute("abc123");
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/sweep/execute");
+    expect(opts.method).toBe("POST");
+    expect(JSON.parse(opts.body)).toEqual({ token: "abc123" });
+    expect(result).toEqual(data);
+  });
+
+  it("sweepExecute surfaces a rejected-token error body (409)", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ error: "conflict" }, 409));
+    await expect(api.sweepExecute("stale")).rejects.toThrow("conflict");
+  });
+});
