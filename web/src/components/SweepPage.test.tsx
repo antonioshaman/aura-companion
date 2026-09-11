@@ -129,6 +129,32 @@ describe("SweepPage confirm-gate behaviour", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: /Sweep 2 items/ })).toHaveFocus());
   });
 
+  it("Escape closes the dialog without executing", async () => {
+    render(<SweepPage embedded />);
+    fireEvent.click(await screen.findByRole("button", { name: /Sweep 2 items/ }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(mockSweepExecute).not.toHaveBeenCalled();
+  });
+
+  it("traps Tab within the dialog: Shift+Tab from Cancel wraps to the confirm button, Tab from confirm wraps back", async () => {
+    render(<SweepPage embedded />);
+    fireEvent.click(await screen.findByRole("button", { name: /Sweep 2 items/ }));
+    const dialog = await screen.findByRole("dialog");
+    const cancel = within(dialog).getByRole("button", { name: "Cancel" });
+    const confirm = within(dialog).getByRole("button", { name: /Sweep 2 items/ });
+
+    // Cancel has initial focus (first focusable). Shift+Tab must wrap to last.
+    await waitFor(() => expect(cancel).toHaveFocus());
+    fireEvent.keyDown(dialog, { key: "Tab", shiftKey: true });
+    expect(confirm).toHaveFocus();
+
+    // Tab from the last focusable wraps back to the first.
+    fireEvent.keyDown(dialog, { key: "Tab" });
+    expect(cancel).toHaveFocus();
+  });
+
   it("Cancel closes the dialog without executing", async () => {
     render(<SweepPage embedded />);
     fireEvent.click(await screen.findByRole("button", { name: /Sweep 2 items/ }));
