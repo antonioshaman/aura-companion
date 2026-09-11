@@ -263,7 +263,7 @@ describe("ObserverPanel — state pills (5 explicit states)", () => {
   // (CLAUDE.md) — kept brief here since the surrounding tests in this
   // describe block already lock the broader a11y posture.
 
-  it("renders cycle-progress pill with 🔄 Cycle N/T copy and aria-label", async () => {
+  it("renders cycle-progress pill with Cycle N/T copy and a decorative aria-hidden icon", async () => {
     seedGroup();
     act(() => {
       useStore.getState().applyConvergence({
@@ -278,17 +278,20 @@ describe("ObserverPanel — state pills (5 explicit states)", () => {
     expect(pill).toHaveAttribute("data-state", "cycle-progress");
     expect(pill).toHaveAttribute("role", "status");
     expect(pill).toHaveAttribute("aria-atomic", "true");
-    // Accessible name carries the readable "Cycle 2 of 3" form — emoji is
+    // Accessible name carries the readable "Cycle 2 of 3" form — the icon is
     // aria-hidden so AT doesn't double-read.
     expect(pill).toHaveAttribute("aria-label", "Cycle 2 of 3");
     expect(pill).toHaveTextContent(/Cycle 2\/3/);
-    const emoji = pill.querySelector("span[aria-hidden=\"true\"]");
-    expect(emoji).not.toBeNull();
+    // FIX #15: the glyph is now a monochrome currentColor SVG (was the 🔄 OS
+    // emoji span) — still decorative (aria-hidden) so it inherits the token
+    // color and screen readers rely on the pill's aria-label instead.
+    const icon = pill.querySelector("svg[aria-hidden=\"true\"]");
+    expect(icon).not.toBeNull();
     const { axe } = await import("vitest-axe");
     expect(await axe(container)).toHaveNoViolations();
   });
 
-  it("renders converged pill with ✅ ready-to-ship copy + emerald token", async () => {
+  it("renders converged pill with ready-to-ship copy + cc-success token", async () => {
     seedGroup();
     act(() => {
       useStore.getState().applyConvergence({
@@ -304,8 +307,10 @@ describe("ObserverPanel — state pills (5 explicit states)", () => {
     expect(pill).toHaveAttribute("role", "status");
     expect(pill).toHaveAttribute("aria-label", "Converged — ready to ship after 3 clean cycles");
     expect(pill).toHaveTextContent(/Converged — ready to ship/);
-    // Emerald token signals "ship-ready" per Story 4.1.5
-    expect(pill.className).toContain("text-emerald-500");
+    // A11Y-P1-3: theme-aware cc-success token (was raw text-emerald-500, which
+    // failed WCAG AA on the light card) still signals "ship-ready".
+    expect(pill.className).toContain("text-cc-success");
+    expect(pill.className).not.toContain("text-emerald-500");
     const { axe } = await import("vitest-axe");
     expect(await axe(container)).toHaveNoViolations();
   });

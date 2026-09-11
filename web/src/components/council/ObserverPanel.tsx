@@ -229,7 +229,12 @@ function StatusPill({ state }: { state: ObserverPanelState }) {
           aria-label={accessibleLabel}
           className="flex items-center gap-2 text-cc-info"
         >
-          <span aria-hidden="true">🔄</span>
+          {/* FIX #15: monochrome currentColor SVG (was the multicolor 🔄 OS
+              emoji) so the glyph inherits the cc-info token and stays on-system. */}
+          <svg aria-hidden="true" viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3 shrink-0">
+            <path d="M11.534 7h3.932a.25.25 0 0 1 .192.41l-1.966 2.36a.25.25 0 0 1-.384 0l-1.966-2.36a.25.25 0 0 1 .192-.41z" />
+            <path fillRule="evenodd" d="M8 3c-1.552 0-2.94.707-3.857 1.818a.5.5 0 1 1-.771-.636A6.002 6.002 0 0 1 13.917 7H12.9A5.002 5.002 0 0 0 8 3zM3.1 9a5.002 5.002 0 0 0 8.757 2.182.5.5 0 1 1 .771.636A6.002 6.002 0 0 1 2.083 9H3.1z" clipRule="evenodd" />
+          </svg>
           <span className="text-xs font-medium">
             Cycle {state.cycleNumber}/{state.threshold}
           </span>
@@ -238,7 +243,8 @@ function StatusPill({ state }: { state: ObserverPanelState }) {
     }
     case "converged": {
       // Bidirectional pipeline Story 4.1.5: pair has reached threshold.
-      // Emerald-500 token (Tailwind's `emerald-500`) signals "ship-ready".
+      // A11Y-P1-3: `text-cc-success` (theme-aware, AA on the light card) —
+      // the raw `text-emerald-500` failed 4.5:1 contrast in light mode.
       // Click target is the entire pill so an operator can drill into
       // the final review via the parent ObserverPanel's click handler
       // (popover wiring deferred — pill itself stays declarative).
@@ -250,9 +256,12 @@ function StatusPill({ state }: { state: ObserverPanelState }) {
           role="status"
           aria-atomic="true"
           aria-label={accessibleLabel}
-          className="flex items-center gap-2 text-emerald-500"
+          className="flex items-center gap-2 text-cc-success"
         >
-          <span aria-hidden="true">✅</span>
+          {/* FIX #15: monochrome currentColor SVG check (was the ✅ OS emoji). */}
+          <svg aria-hidden="true" viewBox="0 0 16 16" fill="currentColor" className="w-3 h-3 shrink-0">
+            <path fillRule="evenodd" d="M13.78 4.22a.75.75 0 010 1.06l-6.5 6.5a.75.75 0 01-1.06 0l-3-3a.75.75 0 111.06-1.06L6.75 10.19l5.97-5.97a.75.75 0 011.06 0z" clipRule="evenodd" />
+          </svg>
           <span className="text-xs font-medium">
             Converged — ready to ship
           </span>

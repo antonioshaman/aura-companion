@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useStore } from "./store.js";
 import { connectSession } from "./ws.js";
 import { api } from "./api.js";
@@ -222,6 +222,23 @@ export default function App() {
     });
   }, [isAuthenticated]);
 
+  // Finding #5 — wire the ObserverPanel's recovery affordance. Every recovery
+  // button inside ObserverPanel (DegradedBanner respawn, reviewing-stalled
+  // "Relaunch observer") is gated on `onRespawnHalf`, so leaving it unwired
+  // made the whole degraded/stalled recovery UI dead code. Respawn the DEAD
+  // half through the existing `POST /sessions/:id/relaunch` route — the same
+  // path used everywhere else to bring a CLI back with `--resume`. `deadRole`
+  // (set on the GroupRecord when the group degraded) picks the target; the
+  // reviewing-stalled case has no deadRole, so we default to the observer half
+  // (the one that failed to produce a review).
+  const handleRespawnHalf = useCallback(async (sessionGroupId: string) => {
+    const group = useStore.getState().groups.get(sessionGroupId);
+    if (!group) return;
+    const targetSessionId =
+      group.deadRole === "orchestrator" ? group.primarySessionId : group.observerSessionId;
+    await api.relaunchSession(targetSessionId);
+  }, []);
+
   // Auth gate: show login page when not authenticated
   if (!isAuthenticated) {
     return <LoginPage />;
@@ -365,7 +382,7 @@ export default function App() {
           behaviour mirrors TaskPanel's open/closed pattern. */}
       {currentSessionId && isSessionView && (
         <div className="hidden md:flex shrink-0 h-full">
-          <ObserverPanel sessionId={currentSessionId} />
+          <ObserverPanel sessionId={currentSessionId} onRespawnHalf={handleRespawnHalf} />
         </div>
       )}
 
