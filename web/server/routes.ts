@@ -1785,12 +1785,68 @@ export function createRoutes(
 
     try {
       if (session.containerId) {
+        // Container path is inherently ownership-bounded: the kill executes
+        // INSIDE this session's container, so it can only reach that
+        // container's PID namespace.
         containerManager.execInContainer(
           session.containerId,
           ["kill", "-TERM", String(pid)],
           5_000,
         );
       } else {
+        // Ownership binding (Hunt F2): a host-side kill by raw PID must NOT be
+        // able to signal any process the server's uid can reach (another
+        // session's CLI, a sibling Companion, an unrelated daemon). Only
+        // signal a PID that is a dev-server this session could actually
+        // manage — a DEV_COMMANDS process LISTENing on a TCP port, and, when
+        // its cwd is determinable, one rooted inside the session's workspace.
+        const targetIsListening = execSync(
+          `lsof -a -p ${pid} -iTCP -sTCP:LISTEN -P -n 2>/dev/null || true`,
+          { timeout: 2_000, encoding: "utf-8" },
+        ).trim();
+        if (!targetIsListening) {
+          return c.json(
+            { error: "Refused: PID is not a dev server this session manages (no LISTEN socket)" },
+            403,
+          );
+        }
+        const comm = execSync(`ps -p ${pid} -o comm= 2>/dev/null || true`, {
+          timeout: 2_000,
+          encoding: "utf-8",
+        }).trim();
+        const lowerComm = comm.toLowerCase();
+        const isDev =
+          DEV_COMMANDS.has(lowerComm)
+          || DEV_COMMANDS.has(comm)
+          || [...DEV_COMMANDS].some((d) => lowerComm.startsWith(d));
+        if (!isDev || EXCLUDE_COMMANDS.has(comm) || EXCLUDE_COMMANDS.has(lowerComm)) {
+          return c.json(
+            { error: `Refused: PID '${comm || pid}' is not a recognised dev command` },
+            403,
+          );
+        }
+        // cwd-subtree ownership: reject a determinable cwd OUTSIDE the session
+        // workspace (a different session's dev server). Unreadable cwd →
+        // allow (the dev-command + LISTEN gate already excluded the dangerous
+        // daemon/CLI cases).
+        if (session.cwd) {
+          const targetCwd = parseLsofCwd(
+            execSync(`lsof -a -p ${pid} -d cwd -Fn 2>/dev/null || true`, {
+              timeout: 2_000,
+              encoding: "utf-8",
+            }),
+          );
+          if (targetCwd) {
+            const root = session.cwd.endsWith("/") ? session.cwd : session.cwd + "/";
+            const within = targetCwd === session.cwd || targetCwd.startsWith(root);
+            if (!within) {
+              return c.json(
+                { error: "Refused: PID working directory is outside the session workspace" },
+                403,
+              );
+            }
+          }
+        }
         process.kill(pid, "SIGTERM");
       }
       return c.json({ ok: true, pid });
