@@ -636,6 +636,21 @@ export function classifyArgv(argv: readonly string[]): ArgvClassification {
     }
   }
 
+  // Stdio-transport marker (added 2026-09-11): a Companion-spawned
+  // Claude subprocess under the default stdio transport (CLI >= 2.1.123)
+  // carries argv `--print --output-format stream-json --input-format
+  // stream-json`. A user's bare interactive `claude` doesn't. Detecting
+  // this shape lets us reap orphaned stdio subprocesses that survive
+  // bun restarts under `KillMode=process` — the failure mode observed
+  // 2026-09-11 where a subprocess from a previous bun instance kept
+  // consuming Anthropic API tokens (verified: 8 established sockets to
+  // Anthropic on an unmanaged orphan). See
+  // `feedback_agent_browser_chrome_profile_leak.md` sibling incident
+  // report for full context.
+  let hasPrint = false;
+  let seenOutputStreamJson = false;
+  let seenInputStreamJson = false;
+
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i];
     // Categorical shape for redacted logging — never the raw bytes.
@@ -645,7 +660,15 @@ export function classifyArgv(argv: readonly string[]): ArgvClassification {
     }
     if (tok.startsWith("--")) {
       shape.push(tok);
+      // Track the stdio-transport quorum tokens.
+      if (tok === "--print") hasPrint = true;
       continue;
+    }
+    if (tok === "stream-json") {
+      // Which flag was this a value for?
+      const prev = i > 0 ? argv[i - 1] : "";
+      if (prev === "--output-format") seenOutputStreamJson = true;
+      if (prev === "--input-format") seenInputStreamJson = true;
     }
     if (tok.startsWith("ws://") || tok.startsWith("wss://") || tok.startsWith("http://") || tok.startsWith("https://")) {
       shape.push("<URL>");
@@ -672,6 +695,15 @@ export function classifyArgv(argv: readonly string[]): ArgvClassification {
       continue;
     }
     shape.push("<TOKEN>");
+  }
+
+  // Post-loop quorum: stdio-transport shape requires ALL three tokens.
+  // Any one of them alone could appear in an unrelated CLI mode; the
+  // combination is the Companion-spawn fingerprint. Only marks the
+  // process as server-managed IF the basename was already `claude`
+  // (Codex uses its own `app-server` marker above).
+  if (argv0Basename === "claude" && hasPrint && seenOutputStreamJson && seenInputStreamJson) {
+    isServerManagedShape = true;
   }
 
   return {
