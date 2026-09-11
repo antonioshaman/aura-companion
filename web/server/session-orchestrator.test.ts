@@ -164,6 +164,7 @@ function createMockLauncher() {
     })),
     kill: vi.fn(async () => true),
     relaunch: vi.fn(async () => ({ ok: true })),
+    setModel: vi.fn(),
     listSessions: vi.fn(() => []),
     getSession: vi.fn(() => undefined),
     setArchived: vi.fn(),
@@ -5571,6 +5572,62 @@ describe("SessionOrchestrator", () => {
       for (const field of ["sessionGroupId", "primarySessionId", "observerSessionId", "pairing", "status", "wakeTimeoutMs"] as const) {
         expect(boot![field]).toEqual(pushMsg![field]);
       }
+    });
+  });
+
+  // ── Recurring-silence model rotation (Beck #1 — the flagship #182 fix,
+  //    previously covered only by the pure arithmetic helper) ─────────────────
+  describe("recurring-silence model rotation (session:backend-silent)", () => {
+    it("rotates to the next LAUNCHABLE chain model after the threshold and clears the counter", async () => {
+      // The default model opus-4-8's naive successor opus-4-7 is a broken-model
+      // substitution `from`; the handler must rotate to opus-4-6 (skipping it)
+      // so the rotation actually terminates. Regression guard for the
+      // 2026-09-09 Silent Cliff on the default model.
+      const info: any = { archived: false, model: "claude-opus-4-8" };
+      deps.launcher.getSession.mockReturnValue(info);
+      deps.launcher.setModel.mockImplementation((_id: string, m: string) => {
+        info.model = m; // mirror the real launcher mutating the persisted model
+      });
+      orchestrator.initialize();
+
+      // 1st silence — below threshold (2): counts, does NOT rotate yet.
+      companionBus.emit("session:backend-silent", { sessionId: "s1", sinceMs: 60_000, reason: "no-stdout" });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(deps.launcher.setModel).not.toHaveBeenCalled();
+
+      // 2nd silence on the SAME model — hits threshold → rotate to opus-4-6.
+      companionBus.emit("session:backend-silent", { sessionId: "s1", sinceMs: 60_000, reason: "no-stdout" });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(deps.launcher.setModel).toHaveBeenCalledWith("s1", "claude-opus-4-6");
+      // Honest announce (finding #9): the toast names the model that will
+      // actually spawn (opus-4-6), never the bounce-back opus-4-7.
+      expect(deps.wsBridge.broadcastToSession).toHaveBeenCalledWith(
+        "s1",
+        expect.objectContaining({ message: expect.stringContaining("claude-opus-4-6") }),
+      );
+      // Each silence kills the subprocess so the keepalive path relaunches.
+      expect(deps.launcher.kill).toHaveBeenCalledWith("s1");
+
+      // 3rd silence — counter was cleared at rotation and the model is now
+      // opus-4-6, so this counts fresh and does NOT immediately rotate again.
+      deps.launcher.setModel.mockClear();
+      companionBus.emit("session:backend-silent", { sessionId: "s1", sinceMs: 60_000, reason: "no-stdout" });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(deps.launcher.setModel).not.toHaveBeenCalled();
+    });
+
+    it("does not rotate an archived or intentionally-killed session", async () => {
+      const info: any = { archived: true, model: "claude-opus-4-8" };
+      deps.launcher.getSession.mockReturnValue(info);
+      orchestrator.initialize();
+      companionBus.emit("session:backend-silent", { sessionId: "s1", sinceMs: 60_000, reason: "no-stdout" });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(deps.launcher.setModel).not.toHaveBeenCalled();
+      expect(deps.launcher.kill).not.toHaveBeenCalled();
     });
   });
 });
