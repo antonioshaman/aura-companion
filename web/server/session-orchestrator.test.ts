@@ -1396,9 +1396,7 @@ describe("SessionOrchestrator", () => {
     it("marks the session intentional during the kill, then clears it (EC-2)", async () => {
       let intentionalDuringRelaunch = false;
       deps.launcher.relaunch.mockImplementation(async () => {
-        intentionalDuringRelaunch = (
-          orchestrator as unknown as { intentionalKills: Set<string> }
-        ).intentionalKills.has("s1");
+        intentionalDuringRelaunch = (orchestrator as any).relaunchLifecycle.isIntentionalKill("s1");
         return { ok: true };
       });
 
@@ -1409,7 +1407,7 @@ describe("SessionOrchestrator", () => {
       expect(intentionalDuringRelaunch).toBe(true);
       // ...cleared AFTER, so a later real death can still drive recovery.
       expect(
-        (orchestrator as unknown as { intentionalKills: Set<string> }).intentionalKills.has("s1"),
+        (orchestrator as any).relaunchLifecycle.isIntentionalKill("s1"),
       ).toBe(false);
     });
 
@@ -1421,7 +1419,7 @@ describe("SessionOrchestrator", () => {
       await expect(orchestrator.relaunchSession("s1")).rejects.toThrow("spawn failed");
 
       expect(
-        (orchestrator as unknown as { intentionalKills: Set<string> }).intentionalKills.has("s1"),
+        (orchestrator as any).relaunchLifecycle.isIntentionalKill("s1"),
       ).toBe(false);
     });
 
@@ -1715,7 +1713,7 @@ describe("SessionOrchestrator", () => {
       // absorbing intentional-kill branch.
       let intentionalAtArchiveTime: string[] = [];
       const archiveGroupSpy = vi.fn(async () => {
-        intentionalAtArchiveTime = Array.from((orchestrator as any).intentionalKills);
+        intentionalAtArchiveTime = Array.from((orchestrator as any).relaunchLifecycle.intentionalKillSessionIds());
         return true;
       });
       (orchestrator as any).coordinator = {
@@ -2646,8 +2644,8 @@ describe("SessionOrchestrator", () => {
         createdAt: Date.now(),
         lastCheckpointReceivedAt: null,
       });
-      const intentional = (orchestrator as unknown as { intentionalKills: Set<string> }).intentionalKills;
-      intentional.add("sess_obs_t3");
+      const intentional = (orchestrator as any).relaunchLifecycle;
+      intentional.markIntentionalKill("sess_obs_t3");
       const broadcastCallsBefore = vi.mocked(deps.wsBridge.broadcastToGroup).mock.calls.length;
       companionBus.emit("session:exited", { sessionId: "sess_obs_t3", exitCode: 0 });
       expect(vi.mocked(deps.wsBridge.broadcastToGroup).mock.calls.length).toBe(broadcastCallsBefore);
@@ -2693,9 +2691,9 @@ describe("SessionOrchestrator", () => {
       expect(coord.get("grp_t4")?.status).toBe("reconnecting");
 
       // intentionalKills NOT mutated — auto-relaunch must be free to fire
-      const intentional = (orchestrator as unknown as { intentionalKills: Set<string> }).intentionalKills;
-      expect(intentional.has("sess_obs_t4")).toBe(false);
-      expect(intentional.has("sess_orch_t4")).toBe(false);
+      const intentional = (orchestrator as any).relaunchLifecycle;
+      expect(intentional.isIntentionalKill("sess_obs_t4")).toBe(false);
+      expect(intentional.isIntentionalKill("sess_orch_t4")).toBe(false);
     });
 
     // PLAN Task 3 — EC-8 dual: if session-level relaunch is already exhausted,
@@ -2704,7 +2702,6 @@ describe("SessionOrchestrator", () => {
     it("skips reconnect grace and goes straight to degraded when relaunch budget is exhausted", () => {
       const obs = orchestrator as unknown as {
         councilGroupMeta: Map<string, { primarySessionId: string; observerSessionId: string; pairing: string; createdAt: number; lastCheckpointReceivedAt: number | null }>;
-        relaunchExhaustedNotified: Set<string>;
       };
       obs.councilGroupMeta.set("grp_t4b", {
         primarySessionId: "sess_orch_t4b",
@@ -2722,7 +2719,7 @@ describe("SessionOrchestrator", () => {
         createdAt: Date.now(),
       });
       // Pre-mark the dying half as exhausted — Task 3's gate condition.
-      obs.relaunchExhaustedNotified.add("sess_obs_t4b");
+      (orchestrator as any).relaunchLifecycle.markExhausted("sess_obs_t4b");
 
       companionBus.emit("session:exited", { sessionId: "sess_obs_t4b", exitCode: 1 });
 
@@ -2736,9 +2733,9 @@ describe("SessionOrchestrator", () => {
       expect(coord.get("grp_t4b")?.status).toBe("degraded");
 
       // BOTH halves intentional — no relaunch can save this group.
-      const intentional = (orchestrator as unknown as { intentionalKills: Set<string> }).intentionalKills;
-      expect(intentional.has("sess_orch_t4b")).toBe(true);
-      expect(intentional.has("sess_obs_t4b")).toBe(true);
+      const intentional = (orchestrator as any).relaunchLifecycle;
+      expect(intentional.isIntentionalKill("sess_orch_t4b")).toBe(true);
+      expect(intentional.isIntentionalKill("sess_obs_t4b")).toBe(true);
     });
   });
 

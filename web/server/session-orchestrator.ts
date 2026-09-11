@@ -28,6 +28,7 @@ import { log } from "./logger.js";
 import { nextModelInChain, computeSilenceRotation } from "./model-fallback-chain.js";
 import { SessionGroupCoordinator } from "./session-group-coordinator.js";
 import type { GroupDegradeReason } from "./group-state-machine.js";
+import { SoloRelaunchLifecycle } from "./solo-relaunch-lifecycle.js";
 import { isSupportedPairing as _isSupportedPairing } from "./backend-provider.js";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
@@ -496,16 +497,13 @@ export class SessionOrchestrator {
    */
   private convergenceTracker: ConvergenceTracker | null = null;
 
-  // Auto-relaunch state
-  private relaunchingSet = new Set<string>();
-  private autoRelaunchCounts = new Map<string, number>();
-  // Sessions that have already been notified about relaunch exhaustion.
-  // Prevents repeated "keeps crashing" warnings for dead sessions.
-  private relaunchExhaustedNotified = new Set<string>();
-
-  // Tracks sessions intentionally killed (idle-kill, manual delete/archive)
-  // so the proactive keepalive doesn't relaunch them.
-  private intentionalKills = new Set<string>();
+  // Auto-relaunch / keepalive / intentional-kill lifecycle — Fowler F5 (Council
+  // Review 2026-09-11). The five previously-scattered Set/Map fields
+  // (relaunchingSet, autoRelaunchCounts, relaunchExhaustedNotified,
+  // intentionalKills, keepaliveTimers) now live in one cohesive owner with
+  // intention-revealing methods (mirrors group-state-machine.ts for the group
+  // side, AP-2). Behavior-preserving encapsulation; see the class JSDoc.
+  private readonly relaunchLifecycle = new SoloRelaunchLifecycle();
   /**
    * Council groups whose spawn checkpoint has NOT landed yet (got-050). The
    * fresh-spawn poll in `scheduleSpawnCheckpointWhenObserverReady` gives up
@@ -526,8 +524,6 @@ export class SessionOrchestrator {
    * and re-checked each poll iteration so a group torn down mid-poll stops.
    */
   private readonly spawnCheckpointPollsInFlight = new Set<string>();
-  // Timers for proactive keepalive relaunches (for cancellation on delete)
-  private keepaliveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   /**
    * Per-session silence-recurrence bookkeeping. Keyed by Companion
@@ -978,8 +974,8 @@ export class SessionOrchestrator {
         // Mark both intentional — relaunch will not succeed, downstream
         // exits must not re-enter the reconnect path.
         const meta = this.councilGroupMeta.get(foundGroupId)!;
-        this.intentionalKills.add(meta.primarySessionId);
-        this.intentionalKills.add(meta.observerSessionId);
+        this.relaunchLifecycle.markIntentionalKill(meta.primarySessionId);
+        this.relaunchLifecycle.markIntentionalKill(meta.observerSessionId);
         coord.applyEvent(foundGroupId, { type: "reconnect_failed", role: ctx.deadRole });
       } catch (err) {
         log.warn("session-orchestrator", "reconnect_failed short-circuit guard violation", {
@@ -1007,7 +1003,7 @@ export class SessionOrchestrator {
         return;
       }
       log.info("orchestrator", "Idle-killing session (preserving container)", { sessionId, reason: "no browsers, no activity" });
-      this.intentionalKills.add(sessionId);
+      this.relaunchLifecycle.markIntentionalKill(sessionId);
       // Cancel the CLI disconnect debounce timer so it doesn't fire
       // session:relaunch-needed after we intentionally kill the process.
       this.wsBridge.cancelDisconnectTimer(sessionId);
@@ -1717,7 +1713,7 @@ export class SessionOrchestrator {
     // (`armReconnect` refuses re-entry) prevents the duplicate-emit
     // hazard the old marking was guarding against.
     companionBus.on("session:exited", ({ sessionId }) => {
-      if (this.intentionalKills.has(sessionId)) return;
+      if (this.relaunchLifecycle.isIntentionalKill(sessionId)) return;
       let foundGroupId: string | null = null;
       let foundRole: "orchestrator" | "observer" | null = null;
       for (const [groupId, meta] of this.councilGroupMeta) {
@@ -1738,12 +1734,12 @@ export class SessionOrchestrator {
       // do not arm a window for an outcome that's already decided. From the
       // `active` state, the direct route to `degraded` is `half_died`;
       // `reconnect_failed` is a no-op when we never entered `reconnecting`.
-      if (this.relaunchExhaustedNotified.has(sessionId)) {
+      if (this.relaunchLifecycle.isExhausted(sessionId)) {
         // Mark both intentional now — relaunch will never succeed for the
         // dead half, so any later cascading exit must not re-enter.
         const meta = this.councilGroupMeta.get(foundGroupId)!;
-        this.intentionalKills.add(meta.primarySessionId);
-        this.intentionalKills.add(meta.observerSessionId);
+        this.relaunchLifecycle.markIntentionalKill(meta.primarySessionId);
+        this.relaunchLifecycle.markIntentionalKill(meta.observerSessionId);
         coordinator.applyEvent(foundGroupId, { type: "half_died", role: foundRole });
         return;
       }
@@ -1755,8 +1751,8 @@ export class SessionOrchestrator {
       if (ctx && ctx.snapshotSessionId !== sessionId) {
         coordinator.cancelReconnectTimer(foundGroupId, "second_half_died");
         const meta = this.councilGroupMeta.get(foundGroupId)!;
-        this.intentionalKills.add(meta.primarySessionId);
-        this.intentionalKills.add(meta.observerSessionId);
+        this.relaunchLifecycle.markIntentionalKill(meta.primarySessionId);
+        this.relaunchLifecycle.markIntentionalKill(meta.observerSessionId);
         coordinator.applyEvent(foundGroupId, { type: "reconnect_failed", role: foundRole });
         return;
       }
@@ -3663,13 +3659,13 @@ export class SessionOrchestrator {
     // → `armReconnect` → transient reconnecting/degraded flicker on a healthy
     // pair. Mark intentional BEFORE the kill and ALWAYS clear in finally (a
     // stale mark would lock `scheduleProactiveRelaunch` out of recovery).
-    this.intentionalKills.add(sessionId);
+    this.relaunchLifecycle.markIntentionalKill(sessionId);
     try {
       const result = await this.launcher.relaunch(sessionId, opts);
       if (result.ok) this.rearmSpawnCheckpointAfterObserverRelaunch(sessionId);
       return result;
     } finally {
-      this.intentionalKills.delete(sessionId);
+      this.relaunchLifecycle.clearIntentionalKill(sessionId);
     }
   }
 
@@ -3761,8 +3757,8 @@ export class SessionOrchestrator {
       // calls deps.kill on either. Without this, the dead half's
       // `session:exited` handler would enter the `reconnecting → degraded`
       // ladder instead of the absorbing intentional-kill path.
-      this.intentionalKills.add(group.primary.sessionId);
-      this.intentionalKills.add(group.observer.sessionId);
+      this.relaunchLifecycle.markIntentionalKill(group.primary.sessionId);
+      this.relaunchLifecycle.markIntentionalKill(group.observer.sessionId);
 
       this.cancelKeepaliveTimer(group.primary.sessionId);
       this.cancelKeepaliveTimer(group.observer.sessionId);
@@ -3811,7 +3807,7 @@ export class SessionOrchestrator {
       options?.linearTransition,
     );
 
-    this.intentionalKills.add(sessionId);
+    this.relaunchLifecycle.markIntentionalKill(sessionId);
     this.cancelKeepaliveTimer(sessionId);
     this.wsBridge.cancelDisconnectTimer(sessionId);
     await this.launcher.kill(sessionId);
@@ -3829,7 +3825,7 @@ export class SessionOrchestrator {
   // ── Delete ─────────────────────────────────────────────────────────────────
 
   async deleteSession(sessionId: string): Promise<DeleteSessionResult> {
-    this.intentionalKills.add(sessionId);
+    this.relaunchLifecycle.markIntentionalKill(sessionId);
     this.cancelKeepaliveTimer(sessionId);
     this.wsBridge.cancelDisconnectTimer(sessionId);
     await this.launcher.kill(sessionId);
@@ -3839,10 +3835,10 @@ export class SessionOrchestrator {
     sessionLinearIssues.removeLinearIssue(sessionId);
     this.launcher.removeSession(sessionId);
     this.wsBridge.closeSession(sessionId);
-    this.autoRelaunchCounts.delete(sessionId);
-    this.relaunchExhaustedNotified.delete(sessionId);
-    this.relaunchingSet.delete(sessionId);
-    this.intentionalKills.delete(sessionId);
+    this.relaunchLifecycle.resetRelaunchAttempts(sessionId);
+    this.relaunchLifecycle.clearExhausted(sessionId);
+    this.relaunchLifecycle.endRelaunch(sessionId);
+    this.relaunchLifecycle.clearIntentionalKill(sessionId);
     return { ok: true, worktree: worktreeResult };
   }
 
@@ -3858,8 +3854,8 @@ export class SessionOrchestrator {
   // ── Auto-relaunch count ────────────────────────────────────────────────────
 
   clearAutoRelaunchCount(sessionId: string): void {
-    this.autoRelaunchCounts.delete(sessionId);
-    this.relaunchExhaustedNotified.delete(sessionId);
+    this.relaunchLifecycle.resetRelaunchAttempts(sessionId);
+    this.relaunchLifecycle.clearExhausted(sessionId);
   }
 
   // ── Event registration ─────────────────────────────────────────────────────
@@ -3899,7 +3895,7 @@ export class SessionOrchestrator {
    */
   listOrphanTimers(): OrphanTimerRef[] {
     const out: OrphanTimerRef[] = [];
-    for (const sessionId of this.keepaliveTimers.keys()) {
+    for (const sessionId of this.relaunchLifecycle.keepaliveSessionIds()) {
       const info = this.launcher.getSession(sessionId);
       if (!info || info.archived) {
         out.push({ id: `keepalive:${sessionId}`, sessionId, kind: "keepalive" });
@@ -4144,22 +4140,22 @@ export class SessionOrchestrator {
   // ── Private: Auto-relaunch ─────────────────────────────────────────────────
 
   private async handleAutoRelaunch(sessionId: string): Promise<void> {
-    if (this.relaunchingSet.has(sessionId)) return;
+    if (this.relaunchLifecycle.isRelaunching(sessionId)) return;
     const info = this.launcher.getSession(sessionId);
     if (info?.archived) return;
 
     // If we've already notified the user about relaunch exhaustion, bail out
     // silently. Without this, every reconnect event from a dead session
     // (e.g. deleted container) re-logs the "limit reached" warning endlessly.
-    if (this.relaunchExhaustedNotified.has(sessionId)) return;
+    if (this.relaunchLifecycle.isExhausted(sessionId)) return;
 
-    this.relaunchingSet.add(sessionId);
+    this.relaunchLifecycle.beginRelaunch(sessionId);
 
     await new Promise((r) => setTimeout(r, RELAUNCH_GRACE_MS));
-    if (this.wsBridge.isCliConnected(sessionId)) { this.relaunchingSet.delete(sessionId); return; }
+    if (this.wsBridge.isCliConnected(sessionId)) { this.relaunchLifecycle.endRelaunch(sessionId); return; }
     const freshInfo = this.launcher.getSession(sessionId);
     if (freshInfo && (freshInfo.state === "connected" || freshInfo.state === "running")) {
-      this.relaunchingSet.delete(sessionId); return;
+      this.relaunchLifecycle.endRelaunch(sessionId); return;
     }
     // Only check PID liveness if the session is NOT already "exited".
     // After idle-kill or explicit kill(), the PID field stays set but the
@@ -4182,15 +4178,15 @@ export class SessionOrchestrator {
       if (freshInfo.containerId) {
         const containerState = containerManager.isContainerAlive(freshInfo.containerId);
         if (containerState === "running") {
-          this.relaunchingSet.delete(sessionId);
+          this.relaunchLifecycle.endRelaunch(sessionId);
           return;
         }
       } else if (freshInfo.pid && adapterAttached) {
-        try { process.kill(freshInfo.pid, 0); this.relaunchingSet.delete(sessionId); return; } catch {}
+        try { process.kill(freshInfo.pid, 0); this.relaunchLifecycle.endRelaunch(sessionId); return; } catch {}
       }
     }
 
-    const count = this.autoRelaunchCounts.get(sessionId) ?? 0;
+    const count = this.relaunchLifecycle.relaunchAttempts(sessionId) ?? 0;
     if (count >= MAX_AUTO_RELAUNCHES) {
       metricsCollector.recordRelaunchExhausted();
       log.warn("orchestrator", "Auto-relaunch limit reached", { sessionId, maxAttempts: MAX_AUTO_RELAUNCHES });
@@ -4198,12 +4194,12 @@ export class SessionOrchestrator {
         type: "error",
         message: "Session keeps crashing. Please relaunch manually.",
       });
-      this.relaunchExhaustedNotified.add(sessionId);
+      this.relaunchLifecycle.markExhausted(sessionId);
       // PLAN Task 5: signal council reconnect listeners that this session's
       // budget is spent — they can short-circuit `reconnecting → degraded`
       // without waiting for the 45s timer.
       companionBus.emit("session:relaunch-failed", { sessionId, reason: "budget_exhausted" });
-      this.relaunchingSet.delete(sessionId);
+      this.relaunchLifecycle.endRelaunch(sessionId);
       return;
     }
 
@@ -4212,7 +4208,7 @@ export class SessionOrchestrator {
     // in `starting` after a Bun restart, whose PID lives but whose adapter
     // died, will never leave `starting` on its own. Allow it to relaunch.
     if (freshInfo && (freshInfo.state !== "starting" || !adapterAttached)) {
-      this.autoRelaunchCounts.set(sessionId, count + 1);
+      this.relaunchLifecycle.setRelaunchAttempts(sessionId, count + 1);
       metricsCollector.recordRelaunchAttempted();
       log.info("orchestrator", "Auto-relaunching CLI", { sessionId, attempt: count + 1, maxAttempts: MAX_AUTO_RELAUNCHES });
       const session = this.wsBridge.getSession(sessionId);
@@ -4229,7 +4225,7 @@ export class SessionOrchestrator {
       // finally — failure paths must not leave the mark in place because
       // `scheduleProactiveRelaunch` reads `intentionalKills` to skip
       // proactive recovery and a stale mark would lock keepalive out.
-      this.intentionalKills.add(sessionId);
+      this.relaunchLifecycle.markIntentionalKill(sessionId);
       try {
         const result = await this.launcher.relaunch(sessionId);
         if (!result.ok && result.error) {
@@ -4245,14 +4241,14 @@ export class SessionOrchestrator {
             result.error.startsWith("observer spawn config load failed") ||
             result.error.startsWith("observer-prompt-source-drift-refused:");
           if (isLauncherEmittedFailure) {
-            this.autoRelaunchCounts.set(sessionId, count);
+            this.relaunchLifecycle.setRelaunchAttempts(sessionId, count);
           } else {
             companionBus.emit("session:relaunch-failed", { sessionId, reason: result.error });
           }
         } else if (result.ok) {
           metricsCollector.recordRelaunchSucceeded();
-          this.autoRelaunchCounts.delete(sessionId);
-          this.relaunchExhaustedNotified.delete(sessionId);
+          this.relaunchLifecycle.resetRelaunchAttempts(sessionId);
+          this.relaunchLifecycle.clearExhausted(sessionId);
           // Council review 2026-09-08 #2: the got-050 spawn-checkpoint re-arm
           // must fire on EVERY successful relaunch, not only the manual REST
           // one. This automatic path is the one that actually runs after a
@@ -4265,11 +4261,11 @@ export class SessionOrchestrator {
         // CR-12: clean up the intentional mark in ALL paths (success,
         // failure, throw). Leaving it set on failure would block the
         // next `scheduleProactiveRelaunch` indefinitely.
-        this.intentionalKills.delete(sessionId);
-        setTimeout(() => this.relaunchingSet.delete(sessionId), RELAUNCH_COOLDOWN_MS);
+        this.relaunchLifecycle.clearIntentionalKill(sessionId);
+        setTimeout(() => this.relaunchLifecycle.endRelaunch(sessionId), RELAUNCH_COOLDOWN_MS);
       }
     } else {
-      this.relaunchingSet.delete(sessionId);
+      this.relaunchLifecycle.endRelaunch(sessionId);
     }
   }
 
@@ -4288,19 +4284,19 @@ export class SessionOrchestrator {
   private scheduleProactiveRelaunch(sessionId: string): void {
     // Skip if this was an intentional kill. Use has() instead of delete() so
     // the guard is preserved for handleAutoRelaunch (debounce path fires later).
-    if (this.intentionalKills.has(sessionId)) return;
+    if (this.relaunchLifecycle.isIntentionalKill(sessionId)) return;
 
     const info = this.launcher.getSession(sessionId);
     if (!info || info.archived) return;
 
     // Skip if already at relaunch limit
-    if (this.relaunchExhaustedNotified.has(sessionId)) return;
+    if (this.relaunchLifecycle.isExhausted(sessionId)) return;
 
     // Skip if a relaunch is already in progress (e.g. triggered by browser reconnect)
-    if (this.relaunchingSet.has(sessionId)) return;
+    if (this.relaunchLifecycle.isRelaunching(sessionId)) return;
 
     // Exponential backoff: 3s → 6s → 12s based on attempt count
-    const attempt = this.autoRelaunchCounts.get(sessionId) ?? 0;
+    const attempt = this.relaunchLifecycle.relaunchAttempts(sessionId) ?? 0;
     const delay = KEEPALIVE_BASE_DELAY_MS * Math.pow(2, attempt);
 
     log.info("orchestrator", "Scheduling proactive keepalive relaunch", {
@@ -4314,7 +4310,7 @@ export class SessionOrchestrator {
     this.cancelKeepaliveTimer(sessionId);
 
     const timer = setTimeout(async () => {
-      this.keepaliveTimers.delete(sessionId);
+      this.relaunchLifecycle.clearKeepaliveTimer(sessionId);
 
       // Re-check conditions — state may have changed during the delay
       const freshInfo = this.launcher.getSession(sessionId);
@@ -4326,14 +4322,14 @@ export class SessionOrchestrator {
       await this.handleAutoRelaunch(sessionId);
     }, delay);
 
-    this.keepaliveTimers.set(sessionId, timer);
+    this.relaunchLifecycle.setKeepaliveTimer(sessionId, timer);
   }
 
   private cancelKeepaliveTimer(sessionId: string): void {
-    const timer = this.keepaliveTimers.get(sessionId);
+    const timer = this.relaunchLifecycle.getKeepaliveTimer(sessionId);
     if (timer) {
       clearTimeout(timer);
-      this.keepaliveTimers.delete(sessionId);
+      this.relaunchLifecycle.clearKeepaliveTimer(sessionId);
     }
   }
 
@@ -4354,8 +4350,8 @@ export class SessionOrchestrator {
   ): Promise<void> {
     const info = this.launcher.getSession(sessionId);
     if (!info || info.archived) return;
-    if (this.intentionalKills.has(sessionId)) return;
-    if (this.relaunchExhaustedNotified.has(sessionId)) return;
+    if (this.relaunchLifecycle.isIntentionalKill(sessionId)) return;
+    if (this.relaunchLifecycle.isExhausted(sessionId)) return;
 
     // Recurring-silence rotation (model-agnostic durable fix, 2026-09-10).
     // The named-list substitution in `broken-model-substitution.ts` is
@@ -4425,7 +4421,7 @@ export class SessionOrchestrator {
   ): Promise<void> {
     const info = this.launcher.getSession(sessionId);
     if (!info || info.archived) return;
-    if (this.intentionalKills.has(sessionId)) return;
+    if (this.relaunchLifecycle.isIntentionalKill(sessionId)) return;
 
     // The adapter emits `from` from the message's own `model` field,
     // which is `<synthetic>` in exactly the failure surface we act on.

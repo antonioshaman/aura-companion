@@ -1,10 +1,14 @@
-# TASK: Solo-session lifecycle state machine (Fowler F5 — deferred from Council Review 2026-09-11-0829)
+# TASK: Solo-session lifecycle transition table (Fowler F5 — remaining half)
 
-**Severity:** P2 (structure, not a correctness bug)
-**Origin:** `/council-review-aura` 2026-09-11 — Fowler finding F5. Deferred out of the
-`fix/council-lifecycle-hardening-findings` PR by explicit decision: bundling a large rewrite
-of the incident-prone lifecycle core with correctness fixes going to prod would undermine
-the stability goal. Ship it as its own focused PR with isolated validation.
+**Severity:** P3 (the cohesion win landed; this is the enforcement upgrade)
+**Origin:** `/council-review-aura` 2026-09-11 — Fowler finding F5.
+
+**STATUS UPDATE (2026-09-11):** the **encapsulation half is DONE** — the five scattered
+relaunch/keepalive fields now live in one cohesive owner, `SoloRelaunchLifecycle`
+(`web/server/solo-relaunch-lifecycle.ts` + unit test), with intention-revealing methods, and
+the orchestrator drives them through that object (behavior-preserving; 218 orchestrator tests
+green unchanged). What remains is the **transition-table enforcement** described below — the
+guard that makes invalid orderings *impossible* rather than merely cohesive.
 
 ## Problem
 
