@@ -17,6 +17,8 @@
  * assistant / error frame.
  */
 
+import { resolveModelSubstitution } from "./broken-model-substitution";
+
 /**
  * Fallback chain from strongest to fallback. Each entry MUST be a model
  * id the Claude CLI accepts on `--model`. The chain is closed — adding
@@ -34,18 +36,58 @@ export const CLAUDE_MODEL_FALLBACK_CHAIN: readonly string[] = [
 ];
 
 /**
- * Return the next model in the chain after `current`, or `null` if
- * `current` is not in the chain or is already the last entry. `null`
- * means "no fallback available" — caller should relaunch on the same
- * model rather than downgrade blindly.
+ * Return the next LAUNCHABLE model in the chain after `current`, or
+ * `null` if `current` is not in the chain or has no non-substituted
+ * successor. `null` means "no fallback available" — caller should
+ * relaunch on the same model rather than downgrade blindly.
+ *
+ * SINGLE SOURCE OF TRUTH: a successor that is itself a
+ * {@link BROKEN_MODEL_SUBSTITUTIONS} `from` is skipped, because the
+ * relaunch path (`cli-launcher.applyBrokenModelSubstitution`) would
+ * rewrite it right back to its substitute — often a model EARLIER in
+ * the chain. Without this skip the chain can bounce forever: e.g.
+ * `next(opus-4-8) → opus-4-7`, but `opus-4-7` is substituted back to
+ * `opus-4-8`, so the "downgrade" respawns the exact model that just
+ * failed and the rotation never terminates (2026-09-09 Silent Cliff
+ * for the default model). Skipping substituted entries guarantees the
+ * returned model both (a) actually spawns as announced and (b) is a
+ * strictly-further step down the chain.
  */
 export function nextModelInChain(current: string | undefined | null): string | null {
   if (!current) return null;
   const idx = CLAUDE_MODEL_FALLBACK_CHAIN.indexOf(current);
   if (idx < 0) return null;
-  if (idx >= CLAUDE_MODEL_FALLBACK_CHAIN.length - 1) return null;
-  return CLAUDE_MODEL_FALLBACK_CHAIN[idx + 1];
+  for (let i = idx + 1; i < CLAUDE_MODEL_FALLBACK_CHAIN.length; i++) {
+    const candidate = CLAUDE_MODEL_FALLBACK_CHAIN[i];
+    // Skip a successor the substitution table would rewrite on relaunch —
+    // it would bounce back to its target and defeat the downgrade.
+    if (resolveModelSubstitution(candidate)) continue;
+    return candidate;
+  }
+  return null;
 }
+
+/**
+ * Module-load canary (mirrors `observer-permissions.ts`'s disjoint check):
+ * the fallback chain and the broken-model table are two hand-maintained
+ * lists that MUST agree. The load-bearing invariant is that
+ * `nextModelInChain` only ever yields a launchable, non-substituted model.
+ * A future edit to either table (a new broken entry, a chain reorder) that
+ * violates it fails HERE at import time with a named error, instead of
+ * silently reopening the non-terminating-rotation P1 with zero signal.
+ */
+(function assertChainYieldsOnlyLaunchableModels(): void {
+  for (const model of CLAUDE_MODEL_FALLBACK_CHAIN) {
+    const next = nextModelInChain(model);
+    if (next !== null && resolveModelSubstitution(next)) {
+      throw new Error(
+        `model-fallback-chain invariant violated: nextModelInChain(${model}) → ${next}, ` +
+          `which is a BROKEN_MODEL_SUBSTITUTIONS.from and would bounce back on relaunch. ` +
+          `Keep CLAUDE_MODEL_FALLBACK_CHAIN and BROKEN_MODEL_SUBSTITUTIONS in sync.`,
+      );
+    }
+  }
+})();
 
 /** One session's silence-recurrence bookkeeping — see `session-orchestrator.ts:silenceRecurrenceCounts`. */
 export interface SilenceRecurrenceRecord {

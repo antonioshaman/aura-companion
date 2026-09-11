@@ -8,12 +8,30 @@ import {
 import { BROKEN_MODEL_SUBSTITUTIONS } from "./broken-model-substitution.js";
 
 describe("nextModelInChain", () => {
-  it("returns the model at index+1 for chain members", () => {
-    for (let i = 0; i < CLAUDE_MODEL_FALLBACK_CHAIN.length - 1; i++) {
+  it("returns the next LAUNCHABLE (non-substituted) successor for chain members", () => {
+    // Contract: the returned successor is a strictly-later chain entry that
+    // is NOT a broken-model substitution `from` (a substituted successor
+    // would bounce back to its target on relaunch — see the regression test
+    // below). It need not be literally index+1 when index+1 is substituted.
+    const isSubstituted = (m: string) =>
+      BROKEN_MODEL_SUBSTITUTIONS.some((s) => s.from === m);
+    for (let i = 0; i < CLAUDE_MODEL_FALLBACK_CHAIN.length; i++) {
       const current = CLAUDE_MODEL_FALLBACK_CHAIN[i];
-      const expected = CLAUDE_MODEL_FALLBACK_CHAIN[i + 1];
-      expect(nextModelInChain(current)).toBe(expected);
+      const next = nextModelInChain(current);
+      if (next === null) continue;
+      const nextIdx = CLAUDE_MODEL_FALLBACK_CHAIN.indexOf(next);
+      expect(nextIdx).toBeGreaterThan(i); // strictly further down the chain
+      expect(isSubstituted(next)).toBe(false); // never a bounce-back model
     }
+  });
+
+  it("skips a substituted successor so rotation terminates (Silent-Cliff P1 regression)", () => {
+    // The default model's naive index+1 successor is claude-opus-4-7, which
+    // BROKEN_MODEL_SUBSTITUTIONS rewrites back to claude-opus-4-8 on relaunch
+    // — a non-terminating bounce. nextModelInChain must step PAST it.
+    expect(nextModelInChain("claude-opus-4-8")).toBe("claude-opus-4-6");
+    // opus-5 (chain head) → opus-4-8 is fine: opus-4-8 is not substituted.
+    expect(nextModelInChain("claude-opus-5")).toBe("claude-opus-4-8");
   });
 
   it("returns null for the last model in the chain", () => {
