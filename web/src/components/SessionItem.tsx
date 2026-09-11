@@ -56,41 +56,82 @@ interface SessionItemProps {
   editInputRef: RefObject<HTMLInputElement | null>;
 }
 
-type DerivedStatus = "awaiting" | "running" | "reconnecting" | "idle" | "exited";
+// Finding #12: `exited` used to collapse BOTH a graceful finish and an
+// unexpected process drop into one outline dot. Split them so the sidebar
+// tells the truth: `completed` = the agent finished / archived (neutral),
+// `disconnected` = the CLI process is gone with no graceful terminal
+// (`cli_disconnected` per ws.ts; still not the terminal `cli_failed`, which
+// owns the destructive ✕ glyph). Each carries its own token + tooltip.
+type DerivedStatus =
+  | "awaiting"
+  | "running"
+  | "reconnecting"
+  | "idle"
+  | "completed"
+  | "disconnected";
+
+/** Human-readable label per status — drives the dot's title + aria-label so
+ *  the visual distinction (finished vs dropped) is also announced. */
+const STATUS_LABEL: Record<DerivedStatus, string> = {
+  awaiting: "Awaiting permission",
+  running: "Running",
+  reconnecting: "Reconnecting",
+  idle: "Idle",
+  completed: "Completed",
+  disconnected: "Disconnected — process gone",
+};
 
 function deriveStatus(s: SessionItemType, permCount: number): DerivedStatus {
   if (permCount > 0) return "awaiting";
   if ((s.status === "running" || s.status === "compacting") && s.isConnected) return "running";
   if (s.isReconnecting) return "reconnecting";
   if (s.isConnected) return "idle";
-  return "exited";
+  // Not connected and not reconnecting. `sdkState === "exited"` is the only
+  // graceful-terminal signal the row carries — anything else here is a
+  // process that dropped without finishing (dead adapter / killed CLI).
+  if (s.sdkState === "exited") return "completed";
+  return "disconnected";
 }
 
 function StatusDot({ status }: { status: DerivedStatus }) {
+  const label = STATUS_LABEL[status];
   switch (status) {
     case "running":
       return (
-        <span className="relative shrink-0 w-2 h-2">
-          <span className="absolute inset-0 rounded-full bg-cc-success animate-[pulse-dot_1.5s_ease-in-out_infinite]" />
-          <span className="w-2 h-2 rounded-full bg-cc-success block" />
+        <span role="img" aria-label={label} title={label} className="relative shrink-0 w-2 h-2">
+          <span aria-hidden="true" className="absolute inset-0 rounded-full bg-cc-success animate-[pulse-dot_1.5s_ease-in-out_infinite]" />
+          <span aria-hidden="true" className="w-2 h-2 rounded-full bg-cc-success block" />
         </span>
       );
     case "awaiting":
       return (
-        <span className="relative shrink-0 w-2 h-2">
-          <span className="w-2 h-2 rounded-full bg-cc-warning block animate-[ring-pulse_1.5s_ease-out_infinite]" />
+        <span role="img" aria-label={label} title={label} className="relative shrink-0 w-2 h-2">
+          <span aria-hidden="true" className="w-2 h-2 rounded-full bg-cc-warning block animate-[ring-pulse_1.5s_ease-out_infinite]" />
         </span>
       );
     case "reconnecting":
       return (
-        <span className="relative shrink-0 w-2 h-2">
-          <span className="w-2 h-2 rounded-full border border-cc-warning/40 border-t-cc-warning block animate-spin" />
+        <span role="img" aria-label={label} title={label} className="relative shrink-0 w-2 h-2">
+          <span aria-hidden="true" className="w-2 h-2 rounded-full border border-cc-warning/40 border-t-cc-warning block animate-spin" />
         </span>
       );
     case "idle":
-      return <span className="w-2 h-2 rounded-full bg-cc-muted/40 shrink-0" />;
-    case "exited":
-      return <span className="w-2 h-2 rounded-full border border-cc-muted/25 shrink-0" />;
+      return <span role="img" aria-label={label} title={label} className="w-2 h-2 rounded-full bg-cc-muted/40 shrink-0" />;
+    case "completed":
+      return <span role="img" aria-label={label} title={label} className="w-2 h-2 rounded-full border border-cc-muted/25 shrink-0" />;
+    case "disconnected":
+      // Distinct from `completed`: a red-tinted hollow ring signals the
+      // process dropped rather than finished. Still hollow (not the solid ✕
+      // cli-failed glyph) so it reads as "gone", not "hard error".
+      return (
+        <span
+          role="img"
+          aria-label={label}
+          title={label}
+          data-testid="session-item-disconnected-dot"
+          className="w-2 h-2 rounded-full border border-cc-error/40 shrink-0"
+        />
+      );
   }
 }
 
@@ -105,10 +146,13 @@ function StatusDot({ status }: { status: DerivedStatus }) {
  * council pairs — solo sessions never carry this prop. This matches the
  * already-shipped, unconditional convergence rendering in `ObserverPanel`.
  *
- * Priority ladder mirrors AC 191-193:
- *   degraded            →  ⚠️ Degraded   (amber-500, counter frozen)
- *   converged           →  ✅ Converged  (emerald-500)
- *   cycleNumber > 0     →  🔄 N/T        (mid-cycle progress)
+ * Priority ladder mirrors AC 191-193 (A11Y-P1-3: theme-aware semantic tokens
+ * that meet WCAG AA in BOTH themes — raw amber-500/emerald-500/sky-400 fail
+ * 4.5:1 on the light `--color-cc-card`; the cc- tokens are darkened in light
+ * mode. Off-system OS emoji replaced with monochrome currentColor SVGs):
+ *   degraded            →  ⚠ Degraded   (cc-warning, counter frozen)
+ *   converged           →  ✓ Converged  (cc-success)
+ *   cycleNumber > 0     →  ⟳ N/T        (cc-info, mid-cycle progress)
  *   otherwise           →  nothing (cycle 0, no progress yet — no clutter)
  *
  * The click-to-open popover (View final review / Reset counter / Dismiss) from
@@ -130,9 +174,11 @@ function CouncilConvergenceBadge({ info }: { info: CouncilConvergenceInfo }) {
         data-state="degraded"
         aria-label="Convergence frozen — pair degraded"
         title="Convergence frozen — pair degraded"
-        className="flex items-center gap-0.5 text-[9px] font-semibold px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-500 leading-none shrink-0"
+        className="flex items-center gap-0.5 text-[9px] font-semibold px-1.5 py-0.5 rounded bg-cc-warning/15 text-cc-warning leading-none shrink-0"
       >
-        <span aria-hidden="true">⚠️</span>
+        <svg aria-hidden="true" viewBox="0 0 20 20" fill="currentColor" className="w-2.5 h-2.5 shrink-0">
+          <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+        </svg>
         <span>Degraded</span>
       </span>
     );
@@ -144,9 +190,11 @@ function CouncilConvergenceBadge({ info }: { info: CouncilConvergenceInfo }) {
         data-state="converged"
         aria-label="Converged — ready to ship"
         title="Converged — ready to ship"
-        className="flex items-center gap-0.5 text-[9px] font-semibold px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-500 leading-none shrink-0"
+        className="flex items-center gap-0.5 text-[9px] font-semibold px-1.5 py-0.5 rounded bg-cc-success/15 text-cc-success leading-none shrink-0"
       >
-        <span aria-hidden="true">✅</span>
+        <svg aria-hidden="true" viewBox="0 0 16 16" fill="currentColor" className="w-2.5 h-2.5 shrink-0">
+          <path fillRule="evenodd" d="M13.78 4.22a.75.75 0 010 1.06l-6.5 6.5a.75.75 0 01-1.06 0l-3-3a.75.75 0 111.06-1.06L6.75 10.19l5.97-5.97a.75.75 0 011.06 0z" clipRule="evenodd" />
+        </svg>
         <span>Converged</span>
       </span>
     );
@@ -158,9 +206,12 @@ function CouncilConvergenceBadge({ info }: { info: CouncilConvergenceInfo }) {
         data-state="cycle-progress"
         aria-label={`Convergence cycle ${info.cycleNumber} of ${info.threshold} clean cycles`}
         title={`Cycle ${info.cycleNumber} of ${info.threshold} clean cycles`}
-        className="flex items-center gap-0.5 text-[9px] font-semibold px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-400 leading-none shrink-0"
+        className="flex items-center gap-0.5 text-[9px] font-semibold px-1.5 py-0.5 rounded bg-cc-info/10 text-cc-info leading-none shrink-0"
       >
-        <span aria-hidden="true">🔄</span>
+        <svg aria-hidden="true" viewBox="0 0 16 16" fill="currentColor" className="w-2.5 h-2.5 shrink-0">
+          <path d="M11.534 7h3.932a.25.25 0 0 1 .192.41l-1.966 2.36a.25.25 0 0 1-.384 0l-1.966-2.36a.25.25 0 0 1 .192-.41z" />
+          <path fillRule="evenodd" d="M8 3c-1.552 0-2.94.707-3.857 1.818a.5.5 0 1 1-.771-.636A6.002 6.002 0 0 1 13.917 7H12.9A5.002 5.002 0 0 0 8 3zM3.1 9a5.002 5.002 0 0 0 8.757 2.182.5.5 0 1 1 .771.636A6.002 6.002 0 0 1 2.083 9H3.1z" clipRule="evenodd" />
+        </svg>
         <span>{info.cycleNumber}/{info.threshold}</span>
       </span>
     );
@@ -216,7 +267,9 @@ export function SessionItem({
   const menuRef = useRef<HTMLDivElement>(null);
   const menuBtnRef = useRef<HTMLButtonElement>(null);
 
-  const derivedStatus = archived ? ("exited" as DerivedStatus) : deriveStatus(s, permCount);
+  // Archived sessions are a graceful terminal state → `completed` (neutral
+  // outline dot), never the red-tinted `disconnected` ring.
+  const derivedStatus = archived ? ("completed" as DerivedStatus) : deriveStatus(s, permCount);
 
   // Show the full cwd path below the session name
   const cwdTail = s.cwd || "";
@@ -361,7 +414,7 @@ export function SessionItem({
             onBlur={onConfirmRename}
             onClick={(e) => e.stopPropagation()}
             onDoubleClick={(e) => e.stopPropagation()}
-            className="text-[12.5px] font-medium flex-1 min-w-0 text-cc-fg bg-transparent border border-cc-border rounded-md px-2 py-1 outline-none focus:border-cc-primary/50 focus:ring-1 focus:ring-cc-primary/20"
+            className="text-[13px] font-medium flex-1 min-w-0 text-cc-fg bg-transparent border border-cc-border rounded-md px-2 py-1 outline-none focus:border-cc-primary/50 focus:ring-1 focus:ring-cc-primary/20"
           />
         ) : (
           <div className="flex-1 min-w-0">
@@ -371,7 +424,7 @@ export function SessionItem({
                 because the suffix carries the same info as accessible text
                 (so screen readers read the role once, not twice). */}
             <span
-              className={`text-[12.5px] font-medium truncate block leading-snug ${
+              className={`text-[13px] font-medium truncate block leading-snug ${
                 isActive ? "text-cc-fg" : "text-cc-fg/90"
               } ${isRecentlyRenamed ? "animate-name-appear" : ""}`}
               onAnimationEnd={() => onClearRecentlyRenamed(s.id)}

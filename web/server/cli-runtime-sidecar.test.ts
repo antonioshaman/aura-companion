@@ -29,6 +29,7 @@ import {
   readRuntimeSidecar,
   sidecarPath,
   writeRuntimeSidecar,
+  deleteRuntimeSidecar,
 } from "./cli-runtime-sidecar.js";
 
 let tmpRoot: string;
@@ -38,6 +39,25 @@ beforeEach(() => {
 });
 afterEach(() => {
   try { rmSync(tmpRoot, { recursive: true, force: true }); } catch { /* */ }
+});
+
+describe("deleteRuntimeSidecar — terminal-point cleanup (finding #16)", () => {
+  it("removes an existing sidecar so it no longer accumulates", () => {
+    writeRuntimeSidecar(tmpRoot, "sess-del", {
+      schemaVersion: SIDECAR_SCHEMA_VERSION,
+      pid: 4242,
+      processStartMs: 1_700_000_000_000,
+      argvSha256: argvSha256(["/usr/bin/claude", "--print"]),
+    });
+    expect(readRuntimeSidecar(tmpRoot, "sess-del").kind).toBe("present");
+    deleteRuntimeSidecar(tmpRoot, "sess-del");
+    expect(readRuntimeSidecar(tmpRoot, "sess-del").kind).toBe("absent");
+  });
+
+  it("is a silent no-op when the sidecar is already absent (never throws)", () => {
+    expect(() => deleteRuntimeSidecar(tmpRoot, "never-written")).not.toThrow();
+    expect(readRuntimeSidecar(tmpRoot, "never-written").kind).toBe("absent");
+  });
 });
 
 describe("sidecarPath — EC-7 routing through resolveCleanupPath", () => {

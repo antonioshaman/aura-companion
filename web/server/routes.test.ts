@@ -1208,6 +1208,56 @@ describe("GET /api/sessions/:id/processes/system", () => {
   });
 });
 
+describe("POST /api/sessions/:id/processes/system/:pid/kill — ownership binding (Hunt F2)", () => {
+  it("refuses a PID that is not LISTENing on a TCP port", async () => {
+    launcher.getSession.mockReturnValue({ sessionId: "s1", cwd: "/repo", pid: 111, state: "running" });
+    const killSpy = vi.spyOn(process, "kill").mockImplementation((() => true) as never);
+    vi.mocked(execSync).mockReturnValueOnce(""); // no LISTEN socket
+    const res = await app.request("/api/sessions/s1/processes/system/55555/kill", { method: "POST" });
+    expect(res.status).toBe(403);
+    expect(killSpy).not.toHaveBeenCalledWith(55555, "SIGTERM");
+    killSpy.mockRestore();
+  });
+
+  it("refuses a LISTENing PID whose command is not a recognised dev command (e.g. a daemon)", async () => {
+    launcher.getSession.mockReturnValue({ sessionId: "s1", cwd: "/repo", pid: 111, state: "running" });
+    const killSpy = vi.spyOn(process, "kill").mockImplementation((() => true) as never);
+    vi.mocked(execSync)
+      .mockReturnValueOnce("sshd 55555 root 3u IPv4 0 0t0 TCP *:22 (LISTEN)\n") // is LISTENing
+      .mockReturnValueOnce("sshd\n"); // …but not a dev command
+    const res = await app.request("/api/sessions/s1/processes/system/55555/kill", { method: "POST" });
+    expect(res.status).toBe(403);
+    expect(killSpy).not.toHaveBeenCalledWith(55555, "SIGTERM");
+    killSpy.mockRestore();
+  });
+
+  it("refuses a dev PID whose working directory is outside the session workspace (another session's server)", async () => {
+    launcher.getSession.mockReturnValue({ sessionId: "s1", cwd: "/repo", pid: 111, state: "running" });
+    const killSpy = vi.spyOn(process, "kill").mockImplementation((() => true) as never);
+    vi.mocked(execSync)
+      .mockReturnValueOnce("node 55555 test 20u IPv4 0 0t0 TCP *:3000 (LISTEN)\n")
+      .mockReturnValueOnce("node\n")
+      .mockReturnValueOnce("p55555\nfcwd\nn/other-project\n"); // cwd outside /repo
+    const res = await app.request("/api/sessions/s1/processes/system/55555/kill", { method: "POST" });
+    expect(res.status).toBe(403);
+    expect(killSpy).not.toHaveBeenCalledWith(55555, "SIGTERM");
+    killSpy.mockRestore();
+  });
+
+  it("allows killing a dev PID that LISTENs and is rooted inside the session workspace", async () => {
+    launcher.getSession.mockReturnValue({ sessionId: "s1", cwd: "/repo", pid: 111, state: "running" });
+    const killSpy = vi.spyOn(process, "kill").mockImplementation((() => true) as never);
+    vi.mocked(execSync)
+      .mockReturnValueOnce("node 55555 test 20u IPv4 0 0t0 TCP *:3000 (LISTEN)\n")
+      .mockReturnValueOnce("node\n")
+      .mockReturnValueOnce("p55555\nfcwd\nn/repo/app\n"); // cwd within /repo
+    const res = await app.request("/api/sessions/s1/processes/system/55555/kill", { method: "POST" });
+    expect(res.status).toBe(200);
+    expect(killSpy).toHaveBeenCalledWith(55555, "SIGTERM");
+    killSpy.mockRestore();
+  });
+});
+
 describe("DELETE /api/sessions/:id", () => {
   // Route delegates to orchestrator.deleteSession — detailed cleanup logic
   // (kill, container removal, worktree, etc.) is tested in session-orchestrator.test.ts
@@ -4730,9 +4780,15 @@ describe("POST /api/sessions/:id/processes/system/:pid/kill", () => {
     execSpy.mockRestore();
   });
 
-  it("kills process on host when session has no container", async () => {
+  it("kills process on host when session has no container (ownership gate passes)", async () => {
+    // Post-Hunt-F2: the host kill now verifies the PID is a LISTENing dev
+    // command before signalling. With no session cwd, the cwd-subtree check
+    // is skipped, so LISTEN + dev-command is sufficient.
     launcher.getSession.mockReturnValue({ pid: 1234 });
     const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+    vi.mocked(execSync)
+      .mockReturnValueOnce("node 9999 test 20u IPv4 0 0t0 TCP *:3000 (LISTEN)\n")
+      .mockReturnValueOnce("node\n");
 
     const res = await app.request("/api/sessions/sess-1/processes/system/9999/kill", {
       method: "POST",
@@ -4740,6 +4796,7 @@ describe("POST /api/sessions/:id/processes/system/:pid/kill", () => {
     expect(res.status).toBe(200);
     const data = await res.json();
     expect(data.ok).toBe(true);
+    expect(killSpy).toHaveBeenCalledWith(9999, "SIGTERM");
 
     killSpy.mockRestore();
   });

@@ -176,6 +176,15 @@ interface ArgvClassification {
    * never SIGTERMs an unrelated user CLI that merely shares the basename.
    */
   readonly isServerManagedShape: boolean;
+  /**
+   * True when `isServerManagedShape` was set SOLELY by the Claude stdio
+   * triple (`--print --output-format stream-json --input-format stream-json`)
+   * with no `--sdk-url` / `app-server` provable marker. That triple is a
+   * legitimate PUBLIC headless invocation any user can run, so a shape match
+   * alone is not ownership proof — the `no_known_session` reap gates the
+   * stdio shape on a server-written sidecar argvSha256 (finding #3).
+   */
+  readonly stdioShapeOnly: boolean;
   /** Extracted `sessionId` from the --sdk-url URL path (Claude). */
   readonly sessionId: string | null;
   /** Categorical argv shape for EC-23 redacted logging. */
@@ -252,6 +261,20 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
   const trackedPids = new Set<number>();
   for (const s of deps.loadedSessions) {
     if (typeof s.pid === "number" && s.pid > 0) trackedPids.add(s.pid);
+  }
+
+  // Ownership proof for the stdio shape (finding #3). The stdio triple
+  // (`claude --print --output-format stream-json --input-format stream-json`)
+  // is a legitimate PUBLIC headless invocation, so `isServerManagedShape`
+  // alone can match a user's own `claude -p` reparented to init. Mirror
+  // sweep-orphans' `buildOwnedFromSidecars`: a stdio-shaped orphan is only
+  // reapable when its argv hashes to a runtime sidecar THIS server wrote.
+  const ownedArgvShas = new Set<string>();
+  for (const s of deps.loadedSessions) {
+    try {
+      const sc = readRuntimeSidecar(deps.sessionsRoot, s.sessionId);
+      if (sc.kind === "present" && sc.payload.argvSha256) ownedArgvShas.add(sc.payload.argvSha256);
+    } catch { /* corrupt/absent sidecar → this session contributes no ownership proof */ }
   }
 
   let pids: number[];
@@ -408,6 +431,22 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
       skippedNoMatch++;
       log.warn("orphan-reaper", "companion-basename orphan lacks server-spawn marker — not reaping", {
         event: "orphan_reaper.skipped_unmanaged_shape",
+        pid,
+        argvSha256: classification.argvSha256,
+        argvShape: classification.argvShape,
+      });
+      continue;
+    }
+    // Finding #3: a stdio-shaped orphan (no --sdk-url / app-server marker)
+    // must ADDITIONALLY prove ownership via a server-written sidecar hash.
+    // The stdio triple alone also matches a user's headless `claude -p`
+    // reparented to init — reaping on shape alone is a cross-tenant SIGTERM
+    // on the documented shared prod host. `--sdk-url`/`app-server` orphans
+    // (stdioShapeOnly=false) stay reapable on their provable marker.
+    if (!known && classification.stdioShapeOnly && !ownedArgvShas.has(classification.argvSha256)) {
+      skippedNoMatch++;
+      log.warn("orphan-reaper", "stdio-shaped orphan lacks server-written sidecar ownership — not reaping", {
+        event: "orphan_reaper.skipped_unowned_stdio_shape",
         pid,
         argvSha256: classification.argvSha256,
         argvShape: classification.argvShape,
@@ -619,6 +658,11 @@ export function classifyArgv(argv: readonly string[]): ArgvClassification {
   const shape: string[] = [];
   let isCompanionShape = false;
   let isServerManagedShape = false;
+  // A PROVABLE server-spawn marker: `--sdk-url` (Claude WS) or `app-server`
+  // (Codex). These are structurally server-only. The stdio triple, by
+  // contrast, is a legitimate public headless invocation, so a shape match
+  // on it alone is NOT proof of ownership (see `stdioShapeOnly` at return).
+  let hasProvableMarker = false;
   let sessionId: string | null = null;
   let cwdDepth = 0;
 
@@ -675,6 +719,7 @@ export function classifyArgv(argv: readonly string[]): ArgvClassification {
       // Extract sessionId from --sdk-url ws://.../<sessionId>
       if (i > 0 && argv[i - 1] === "--sdk-url") {
         isServerManagedShape = true; // Claude: --sdk-url is server-spawn-only
+        hasProvableMarker = true;
         try {
           const url = new URL(tok);
           const segs = url.pathname.split("/").filter((s) => s.length > 0);
@@ -686,7 +731,7 @@ export function classifyArgv(argv: readonly string[]): ArgvClassification {
     }
     // Codex: the `app-server` subcommand is present only on Companion-spawned
     // Codex processes; a bare interactive `codex` never carries it.
-    if (tok === "app-server") isServerManagedShape = true;
+    if (tok === "app-server") { isServerManagedShape = true; hasProvableMarker = true; }
     if (tok.includes("/") || tok.includes("\\")) {
       shape.push("<PATH>");
       // Track depth of the deepest path token for cwd-depth-ish forensic.
@@ -709,6 +754,11 @@ export function classifyArgv(argv: readonly string[]): ArgvClassification {
   return {
     isCompanionShape,
     isServerManagedShape,
+    // True when the ONLY reason this looks server-managed is the stdio
+    // triple (no --sdk-url / app-server). That triple is a public headless
+    // invocation, so the `no_known_session` reap must additionally prove
+    // ownership via a server-written sidecar argvSha256 before signalling.
+    stdioShapeOnly: isServerManagedShape && !hasProvableMarker,
     sessionId,
     argvShape: shape,
     argvSha256: computeArgvSha(argv),

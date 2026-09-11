@@ -116,6 +116,9 @@ describe("classifyArgv — Companion-shape detection + EC-23 redaction", () => {
     ]);
     expect(c.isCompanionShape).toBe(true);
     expect(c.sessionId).toBe("abc-123");
+    // --sdk-url is a PROVABLE server-only marker → not stdioShapeOnly, so it
+    // stays reapable on shape without a sidecar ownership check (finding #3).
+    expect(c.stdioShapeOnly).toBe(false);
     // EC-23: argvShape is categorical labels (`<URL>`), never raw bytes.
     expect(c.argvShape).toEqual(["claude", "--sdk-url", "<URL>"]);
     expect(c.argvSha256).toMatch(/^[0-9a-f]{64}$/);
@@ -125,6 +128,8 @@ describe("classifyArgv — Companion-shape detection + EC-23 redaction", () => {
     const c = classifyArgv(["/usr/bin/codex", "app-server"]);
     expect(c.isCompanionShape).toBe(true);
     expect(c.sessionId).toBeNull();
+    // app-server is a provable server-only marker → not stdioShapeOnly.
+    expect(c.stdioShapeOnly).toBe(false);
   });
 
   it("detects Codex via node-wrapper invocation", () => {
@@ -170,6 +175,10 @@ describe("classifyArgv — Companion-shape detection + EC-23 redaction", () => {
     ]);
     expect(c.isCompanionShape).toBe(true);
     expect(c.isServerManagedShape).toBe(true);
+    // Finding #3: the stdio triple is server-managed BY SHAPE, but it is a
+    // public headless invocation, so ownership is not proven — reaping it
+    // requires a server-written sidecar hash.
+    expect(c.stdioShapeOnly).toBe(true);
     // No --sdk-url → no Companion sessionId extracted (stdio orphans
     // fall through to the REAP branch since they can't re-attach
     // anyway — bun can't recover stdin/stdout of a subprocess it
@@ -332,6 +341,71 @@ describe("reapOrphans — REAP branch (no known session)", () => {
     expect(kill).toHaveBeenCalledWith(7777, "SIGTERM");
     // Sentinel was written, then cleaned up after exit confirmed.
     expect(existsSync(join(tmpRoot, REAPING_SENTINEL_SUBDIR, `7777.json`))).toBe(false);
+  });
+});
+
+describe("reapOrphans — stdio-shape ownership gate (finding #3, cross-tenant kill safety)", () => {
+  // The stdio triple (`claude --print --output-format stream-json
+  // --input-format stream-json`) is a PUBLIC headless invocation any user can
+  // run, so unlike `--sdk-url`/`app-server` it is not proof of ownership. The
+  // boot reaper must NOT SIGTERM a stdio-shaped orphan on shape alone — only
+  // when its argv hashes to a runtime sidecar THIS server wrote.
+  const stdioArgv = [
+    "/home/auracomp/.local/bin/claude",
+    "--print",
+    "--output-format", "stream-json",
+    "--input-format", "stream-json",
+    "--resume", "cli-xyz",
+  ];
+  const stdioCmdline = stdioArgv.join("\0") + "\0";
+
+  it("does NOT reap a stdio-shaped orphan with no server-written sidecar (would be a cross-tenant kill)", async () => {
+    const kill = vi.fn();
+    const deps: OrphanReaperDeps = {
+      loadedSessions: [], // no sessions → no owned sidecars
+      sentinelRoot: tmpRoot,
+      sessionsRoot: tmpRoot,
+      platform: () => "linux",
+      listProcPids: () => [8080],
+      readStat: () => fakeStat("claude", 1),
+      readCmdline: () => stdioCmdline, // a user's own headless `claude -p`
+      killCheck: () => true,
+      kill,
+      sleep: async () => {},
+      now: () => 1_700_000_001_000,
+    };
+    const sum = await reapOrphans(deps);
+    // The critical assertion: an unowned stdio shape is left alone.
+    expect(kill).not.toHaveBeenCalled();
+    expect(sum.reaped).toBe(0);
+  });
+
+  it("DOES reap a stdio-shaped orphan whose argv matches a server-written sidecar", async () => {
+    const kill = vi.fn();
+    // A sidecar THIS server wrote for one of its sessions, proving ownership
+    // of this exact argv hash.
+    writeRuntimeSidecar(tmpRoot, "owned-sess", {
+      schemaVersion: SIDECAR_SCHEMA_VERSION,
+      pid: 8081,
+      processStartMs: 1_700_000_000_000,
+      argvSha256: argvSha256(stdioArgv),
+    });
+    const deps: OrphanReaperDeps = {
+      loadedSessions: [{ sessionId: "owned-sess", pid: undefined }], // orphan: pid not tracked
+      sentinelRoot: tmpRoot,
+      sessionsRoot: tmpRoot,
+      platform: () => "linux",
+      listProcPids: () => [8081],
+      readStat: () => fakeStat("claude", 1),
+      readCmdline: () => stdioCmdline,
+      killCheck: () => false, // gone after SIGTERM
+      kill,
+      sleep: async () => {},
+      now: () => 1_700_000_001_000,
+    };
+    const sum = await reapOrphans(deps);
+    expect(kill).toHaveBeenCalledWith(8081, "SIGTERM");
+    expect(sum.reaped).toBe(1);
   });
 });
 

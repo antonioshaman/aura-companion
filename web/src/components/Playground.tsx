@@ -3603,13 +3603,29 @@ function PlaygroundSessionItems() {
         </div>
       </Card>
 
-      {/* Exited */}
-      <Card label="Exited — session stopped">
+      {/* Completed — graceful terminal (sdkState "exited"): neutral outline dot */}
+      <Card label="Completed — finished cleanly (neutral outline dot)">
         <div className="bg-cc-sidebar rounded-lg p-1">
           <SessionItem
             session={mockSession({ sdkState: "exited", backendType: "codex" })}
             isActive={false}
             sessionName="Deploy to staging"
+            permCount={0}
+            isRecentlyRenamed={false}
+            {...noopSessionItemProps}
+          />
+        </div>
+      </Card>
+
+      {/* Disconnected — process dropped (Finding #12): not connected, not
+          reconnecting, and NOT a graceful terminal → red-tinted hollow ring,
+          distinct from the neutral "completed" outline. */}
+      <Card label="Disconnected — process gone (red-tinted ring)">
+        <div className="bg-cc-sidebar rounded-lg p-1">
+          <SessionItem
+            session={mockSession({ isConnected: false, isReconnecting: false, sdkState: null, backendType: "claude" })}
+            isActive={false}
+            sessionName="Long-running build (adapter died)"
             permCount={0}
             isRecentlyRenamed={false}
             {...noopSessionItemProps}

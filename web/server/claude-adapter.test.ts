@@ -47,9 +47,11 @@ vi.mock("./model-availability.js", () => ({
       : { kind: "ok", model: opts.requested },
 }));
 
+import { join } from "node:path";
 import { ClaudeAdapter, resolveSilentStdioTimeoutMs } from "./claude-adapter.js";
 import { log } from "./logger.js";
 import { companionBus } from "./event-bus.js";
+import { loadRecording, getIncomingCLIMessages } from "./replay.js";
 
 // ─── Mock socket factory ────────────────────────────────────────────────────
 
@@ -2328,5 +2330,57 @@ describe("resolveSilentStdioTimeoutMs — env override parsing", () => {
     expect(resolveSilentStdioTimeoutMs("60000abc", warn)).toBe(300_000);
     expect(resolveSilentStdioTimeoutMs("60000.5", warn)).toBe(300_000);
     expect(warns.length).toBe(2);
+  });
+});
+
+// ─── EC-6: replay-driven regression (finding #17) ───────────────────────────
+//
+// EC-6 mandates that load-bearing protocol parsers carry replay-based
+// regression tests: feed a captured recording's raw CLI frames through the
+// adapter and assert the emitted browser-message stream, so a future refactor
+// of the NDJSON routing that silently changes output is caught.
+//
+// Fixture: `evals/__fixtures__/claude-basic.jsonl` — a real checked-in
+// recording (header version 3, backend "claude") whose incoming `cli` frames
+// are genuine Claude stream-json shapes (two `result` frames + one
+// `keep_alive`). We deliberately reuse this existing recording rather than
+// fabricate protocol frames. Assertions target the adapter's REAL translated
+// output (result → browser `result`; keep_alive → silently consumed), not the
+// fixture's stub `out browser` line (which is a placeholder for the evals
+// backend-classification harness, not a faithful browser stream).
+describe("EC-6 replay — claude-basic.jsonl through the adapter", () => {
+  const FIXTURE = join(__dirname, "..", "evals", "__fixtures__", "claude-basic.jsonl");
+
+  it("translates the recording's incoming CLI frames to the expected browser-message stream", () => {
+    const replayAdapter = new ClaudeAdapter("sess-replay-1");
+    const emitted: Array<Record<string, unknown>> = [];
+    replayAdapter.onBrowserMessage(((m: unknown) => emitted.push(m as Record<string, unknown>)) as never);
+    const ws = createMockSocket("sess-replay-1");
+    replayAdapter.attachWebSocket(ws);
+
+    // Load the real recording and replay only its inbound CLI frames — the
+    // exact bytes the server received from the Claude CLI during that session.
+    const recording = loadRecording(FIXTURE);
+    const cliFrames = getIncomingCLIMessages(recording.entries);
+
+    // Sanity: the fixture must actually carry the frames the assertions below
+    // depend on — guards against a fixture edit silently gutting the test.
+    expect(cliFrames.length).toBe(3);
+    for (const raw of cliFrames) {
+      replayAdapter.handleRawMessage(raw);
+    }
+
+    // Two `result` frames translate to two browser `result` messages; the
+    // `keep_alive` frame is silently consumed (no browser emission). No other
+    // frame types appear in this recording, so the stream is exactly two
+    // results.
+    const types = emitted.map((m) => m.type);
+    expect(types).toEqual(["result", "result"]);
+    // The translated result carries the CLI payload under `data`.
+    const first = emitted[0] as { data: { subtype: string; num_turns: number } };
+    expect(first.data.subtype).toBe("success");
+    expect(first.data.num_turns).toBe(3);
+    const second = emitted[1] as { data: { num_turns: number } };
+    expect(second.data.num_turns).toBe(1);
   });
 });

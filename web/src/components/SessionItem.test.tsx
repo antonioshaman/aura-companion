@@ -115,12 +115,44 @@ describe("SessionItem", () => {
     expect(container.querySelector(".bg-cc-muted\\/40")).toBeTruthy();
   });
 
-  it("shows exited status dot when not connected", () => {
-    // Disconnected sessions show an outlined ring instead of a filled dot.
+  it("shows completed (neutral outline) status dot for a gracefully exited session", () => {
+    // Finding #12: a session that finished cleanly (sdkState === "exited")
+    // shows the neutral muted outline ring — NOT the red-tinted disconnected
+    // ring. This is the "finished its work" terminal state.
     const { container } = render(
-      <SessionItem {...buildProps({ session: makeSession({ isConnected: false }) })} />,
+      <SessionItem {...buildProps({ session: makeSession({ isConnected: false, sdkState: "exited" }) })} />,
     );
     expect(container.querySelector(".border-cc-muted\\/25")).toBeTruthy();
+    // Must NOT be the disconnected (dropped) treatment.
+    expect(container.querySelector("[data-testid='session-item-disconnected-dot']")).toBeNull();
+  });
+
+  it("shows disconnected (red-tinted) status dot + aria-label when the process dropped unexpectedly", () => {
+    // Finding #12: not connected, not reconnecting, and NOT a graceful
+    // terminal (sdkState !== "exited") = the CLI process is gone
+    // (`cli_disconnected`). This must read distinctly from a clean finish:
+    // a red-tinted hollow ring with its own accessible label.
+    const { container } = render(
+      <SessionItem {...buildProps({ session: makeSession({ isConnected: false, sdkState: "connected" }) })} />,
+    );
+    const dot = container.querySelector("[data-testid='session-item-disconnected-dot']");
+    expect(dot).toBeTruthy();
+    expect(dot?.className).toMatch(/border-cc-error/);
+    // Distinct accessible label so the drop is announced, not silent.
+    expect(dot?.getAttribute("aria-label")).toMatch(/process gone/i);
+    // And it must NOT collapse onto the neutral "completed" outline.
+    expect(container.querySelector(".border-cc-muted\\/25")).toBeNull();
+  });
+
+  it("passes axe a11y checks in the disconnected state (role=img dot with aria-label)", async () => {
+    // The disconnected dot carries role="img" + aria-label; axe must accept
+    // the labelled-image dot inside the row's button without violations.
+    const { axe } = await import("vitest-axe");
+    const { container } = render(
+      <SessionItem {...buildProps({ session: makeSession({ isConnected: false, sdkState: null }) })} />,
+    );
+    const results = await axe(container);
+    expect(results).toHaveNoViolations();
   });
 
   // --- Backend badge ---
