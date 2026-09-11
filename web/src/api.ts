@@ -913,6 +913,33 @@ export async function verifyAuthToken(token: string): Promise<boolean> {
   }
 }
 
+// ── Sweep orphans (manual cleanup of server-owned lost resources) ──────────
+export type SweepReason = "orphan" | "archived-leak" | "stale-session" | "orphan-timer";
+
+/** One reap candidate as returned by `GET /sweep/preview` — decision-justifying
+ *  fields ONLY (the server withholds argv/internal anchors from the wire). */
+export interface SweepCandidate {
+  id: string;
+  reason: SweepReason;
+  pid?: number;
+  sessionId?: string;
+  evidence: string;
+  ageMs: number;
+}
+
+export interface SweepPreview {
+  candidates: SweepCandidate[];
+  /** Opaque token binding this exact candidate set; echoed back on execute. */
+  token: string;
+}
+
+export interface SweepResult {
+  requested: number;
+  swept: number;
+  skipped: number;
+  perReason: Record<SweepReason, number>;
+}
+
 export const api = {
   // Auth
   getAuthQr: () =>
@@ -1038,6 +1065,10 @@ export const api = {
     },
   ) => put<CompanionEnv>(`/envs/${encodeURIComponent(slug)}`, data),
   deleteEnv: (slug: string) => del(`/envs/${encodeURIComponent(slug)}`),
+
+  // Sweep orphans — preview is read-only; execute must echo the preview token.
+  sweepPreview: () => get<SweepPreview>("/sweep/preview"),
+  sweepExecute: (token: string) => post<SweepResult>("/sweep/execute", { token }),
 
   // Sandboxes
   listSandboxes: () => get<CompanionSandbox[]>("/sandboxes"),

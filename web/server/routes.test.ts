@@ -312,6 +312,9 @@ function createMockLauncher() {
     getSession: vi.fn(),
     setArchived: vi.fn(),
     removeSession: vi.fn(),
+    // Sweep orphans (Tasks 6/7)
+    getStoreDirectory: vi.fn(() => null),
+    markSweptTerminal: vi.fn(),
   } as any;
 }
 
@@ -369,6 +372,9 @@ function createMockOrchestrator() {
     getSession: vi.fn(),
     getCouncilGroupBySessionId: vi.fn(() => null),
     getAllGroupsForBootstrap: vi.fn(() => [] as Array<{ sessionGroupId: string }>),
+    // Sweep orphans (Tasks 5/6)
+    listOrphanTimers: vi.fn(() => []),
+    clearOrphanTimer: vi.fn(),
   } as any;
 }
 
@@ -5469,5 +5475,118 @@ describe("getCachedPairingCapability cache behaviour", () => {
     const second = await getCachedPairingCapability({ probeFn: probe, now });
     expect(callCount).toBe(1); // <-- still only one probe call
     expect(second.supported).toBe(false);
+  });
+});
+
+// ─── Sweep orphans endpoints (Tasks 6/7) ──────────────────────────────────────
+//
+// The engine's classification/kill safety is covered hermetically in
+// sweep-orphans.test.ts. These tests cover the HTTP contract: the preview
+// shape + token, the confirm-token gate on execute (absent/stale → reject),
+// the structural AC3 guarantee (a live or caller session is NEVER a candidate
+// and NEVER killed), and the AC6 empty-set no-op. Candidates are driven purely
+// through `listSessions()` — the `/proc` orphan scan reads through the mocked
+// `readFileSync` (returns "") so it contributes nothing, keeping every case
+// deterministic without touching the real process table.
+describe("GET /api/sweep/preview + POST /api/sweep/execute", () => {
+  const JSON_HEADERS = { "content-type": "application/json" };
+  let storeDir: string;
+
+  beforeEach(async () => {
+    const os = await import("node:os");
+    const fs = await import("node:fs");
+    storeDir = `${os.tmpdir()}/aura-sweep-routes-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    fs.mkdirSync(storeDir, { recursive: true });
+    launcher.getStoreDirectory.mockReturnValue(storeDir);
+  });
+
+  it("preview returns decision-justifying candidate fields + a binding token (no argvSha256 on the wire)", async () => {
+    launcher.listSessions.mockReturnValue([
+      { sessionId: "sess_stale", state: "exited", createdAt: 0 } as any,
+    ]);
+    const res = await app.request("/api/sweep/preview");
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(typeof body.token).toBe("string");
+    expect(body.token.length).toBeGreaterThan(0);
+    expect(body.candidates).toHaveLength(1);
+    expect(body.candidates[0]).toMatchObject({
+      id: "stale-session:sess_stale",
+      reason: "stale-session",
+      sessionId: "sess_stale",
+    });
+    // Minimal-disclosure: the internal TOCTOU anchor never crosses the wire.
+    expect(body.candidates[0]).not.toHaveProperty("argvSha256");
+  });
+
+  it("execute refuses a bare confirm with no preview token (400)", async () => {
+    const res = await app.request("/api/sweep/execute", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ confirm: true }),
+    });
+    expect(res.status).toBe(400);
+    expect(orchestrator.killSession).not.toHaveBeenCalled();
+  });
+
+  it("execute rejects a stale/forged token that does not match the recomputed set (409)", async () => {
+    launcher.listSessions.mockReturnValue([
+      { sessionId: "sess_stale", state: "exited", createdAt: 0 } as any,
+    ]);
+    const res = await app.request("/api/sweep/execute", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ token: "deadbeefdeadbeef" }),
+    });
+    expect(res.status).toBe(409);
+    expect(orchestrator.killSession).not.toHaveBeenCalled();
+  });
+
+  it("execute never kills a live (connected) session — only the stale candidate (AC3)", async () => {
+    launcher.listSessions.mockReturnValue([
+      { sessionId: "sess_stale", state: "exited", createdAt: 0 } as any,
+      { sessionId: "sess_live", state: "connected", createdAt: 0 } as any,
+    ]);
+    const pv = await (await app.request("/api/sweep/preview")).json();
+    // The live session is excluded from the previewed set up front.
+    expect(pv.candidates.map((x: { sessionId: string }) => x.sessionId)).toEqual(["sess_stale"]);
+    const res = await app.request("/api/sweep/execute", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ token: pv.token }),
+    });
+    expect(res.status).toBe(200);
+    const result = await res.json();
+    expect(result.swept).toBe(1);
+    expect(orchestrator.killSession).toHaveBeenCalledWith("sess_stale");
+    expect(orchestrator.killSession).not.toHaveBeenCalledWith("sess_live");
+    // Task 7: the swept session is force-flushed to a terminal record.
+    expect(launcher.markSweptTerminal).toHaveBeenCalledWith("sess_stale");
+  });
+
+  it("excludes the caller's own session even when it is otherwise stale (AC3)", async () => {
+    launcher.listSessions.mockReturnValue([
+      { sessionId: "sess_caller", state: "exited", createdAt: 0 } as any,
+    ]);
+    const res = await app.request("/api/sweep/preview", {
+      headers: { "x-companion-caller-session": "sess_caller" },
+    });
+    const body = await res.json();
+    expect(body.candidates).toHaveLength(0);
+  });
+
+  it("empty preview → execute is a safe no-op (AC6)", async () => {
+    launcher.listSessions.mockReturnValue([]);
+    const pv = await (await app.request("/api/sweep/preview")).json();
+    expect(pv.candidates).toHaveLength(0);
+    const res = await app.request("/api/sweep/execute", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ token: pv.token }),
+    });
+    expect(res.status).toBe(200);
+    const result = await res.json();
+    expect(result).toMatchObject({ requested: 0, swept: 0, skipped: 0 });
+    expect(orchestrator.killSession).not.toHaveBeenCalled();
   });
 });

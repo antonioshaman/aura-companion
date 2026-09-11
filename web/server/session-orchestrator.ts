@@ -53,6 +53,7 @@ import {
   writeCouncilWakeSentinel,
 } from "./council-wake-sentinel.js";
 import { formatObserverInvocationLog } from "./observer-attribution.js";
+import type { OrphanTimerRef } from "./sweep-orphans.js";
 import type {
   BrowserGroupRecord,
   BrowserObserverDowngrade,
@@ -3876,6 +3877,70 @@ export class SessionOrchestrator {
 
   getSession(sessionId: string): SdkSessionInfo | undefined {
     return this.launcher.getSession(sessionId);
+  }
+
+  /**
+   * Sweep-orphans Task 5 — enumerate per-session/per-group timers whose owning
+   * entity is no longer live in the registry. Two timer families leak this way:
+   *
+   *   - `keepaliveTimers` (keyed by sessionId): a proactive-relaunch timer for
+   *     a session the launcher no longer tracks, or one that has since been
+   *     archived (an archived session must never be relaunched, so its timer is
+   *     dead weight).
+   *   - `councilWatchers` (keyed by sessionGroupId): a checkpoint/review watcher
+   *     + wake→review deadline for a group the coordinator no longer lists as a
+   *     non-archived record.
+   *
+   * PURE read — no teardown here; this only feeds `computeSweepCandidates`'s
+   * `listOrphanTimers`. The global `observerFailsafeTimer` is a single interval
+   * (not per-session) and the silent-stdio watchdog is owned by its adapter
+   * instance and self-resolves — both are deliberately OUT of scope (PLAN
+   * Task 5 / Risks).
+   */
+  listOrphanTimers(): OrphanTimerRef[] {
+    const out: OrphanTimerRef[] = [];
+    for (const sessionId of this.keepaliveTimers.keys()) {
+      const info = this.launcher.getSession(sessionId);
+      if (!info || info.archived) {
+        out.push({ id: `keepalive:${sessionId}`, sessionId, kind: "keepalive" });
+      }
+    }
+    const liveGroupIds = new Set<string>();
+    for (const g of this.coordinator?.listAll() ?? []) {
+      if (g.status !== "archived") liveGroupIds.add(g.sessionGroupId);
+    }
+    for (const groupId of this.councilWatchers.keys()) {
+      if (!liveGroupIds.has(groupId)) {
+        out.push({ id: `council-watcher:${groupId}`, kind: "council-watcher" });
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Sweep-orphans Task 5 — clear ONE orphaned timer by the id
+   * {@link listOrphanTimers} minted, routing through the registry's OWN
+   * teardown so the underlying resource is released the same way normal
+   * lifecycle does — never a bespoke `clearTimeout`. `keepalive:` →
+   * {@link cancelKeepaliveTimer} (clears + unmaps). `council-watcher:` →
+   * {@link stopCouncilWatchers}, which ALSO aborts the fs.watch handles and
+   * clears the wake→review deadline, not just the setTimeout. An unknown
+   * prefix is a no-op (logged) rather than a throw — a stale preview must not
+   * be able to crash execute.
+   */
+  clearOrphanTimer(timerId: string): void {
+    if (timerId.startsWith("keepalive:")) {
+      this.cancelKeepaliveTimer(timerId.slice("keepalive:".length));
+      return;
+    }
+    if (timerId.startsWith("council-watcher:")) {
+      this.stopCouncilWatchers(timerId.slice("council-watcher:".length));
+      return;
+    }
+    log.warn("session-orchestrator", "clearOrphanTimer: unknown timer id", {
+      event: "sweep.timer.unknown_id",
+      timerId,
+    });
   }
 
   /**

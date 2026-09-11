@@ -347,6 +347,16 @@ export class CliLauncher {
     this.store = store;
   }
 
+  /**
+   * The persistence directory (sessions root = sentinel root, same tier the
+   * boot `reapOrphans` uses). Sweep-orphans (Task 6) reads it to build the
+   * owned-argv map from runtime sidecars and to place the `.reaping/`
+   * sentinel. Null until {@link setStore} runs at boot wiring.
+   */
+  getStoreDirectory(): string | null {
+    return this.store?.directory ?? null;
+  }
+
   /** Attach a recorder for raw message capture. */
   setRecorder(recorder: RecorderManager): void {
     this.recorder = recorder;
@@ -2552,6 +2562,36 @@ export class CliLauncher {
     } catch {
       return true;
     }
+  }
+
+  /**
+   * Sweep-orphans Task 7 — after a tracked-kill on an archived-leak /
+   * stale-session sweep candidate, force the record to a DEFINITIVE terminal
+   * state (pid nulled, `state="exited"`) and flush `launcher.json`
+   * SYNCHRONOUSLY (atomic tmp+fsync+rename via `saveLauncher`, no debounce)
+   * BEFORE the sweep response returns. `kill()`'s in-process branch leaves
+   * `info.pid` set (harmless for reconnect since boot-recovery gates on
+   * `state !== "exited"`), but this closes the "archived + stale pid" record
+   * shape so a future boot never re-attaches/relaunches a dead or recycled
+   * PID (closes `project_archived_sessions_leak_live_cli_processes`).
+   *
+   * Also flips `archived = true`: a swept record must DROP OUT of the sweep
+   * candidate set, otherwise `computeSweepCandidates` re-lists it on the very
+   * next preview (the stale-session gate keys on `!archived && state==="exited"`
+   * and the archived-leak gate on a live pid) and the result count claims a
+   * reclamation that keeps reappearing. Archiving is the definitive terminal
+   * acknowledgement — idempotent for the archived-leak case (already archived),
+   * and it removes the now-dead record from the active list for stale-session.
+   * Idempotent + safe on an unknown/already-terminal session.
+   */
+  markSweptTerminal(sessionId: string): void {
+    const info = this.sessions.get(sessionId);
+    if (!info) return;
+    info.pid = undefined;
+    info.state = "exited";
+    info.archived = true;
+    if (info.exitCode == null) info.exitCode = -1;
+    this.persistState();
   }
 
   /**
