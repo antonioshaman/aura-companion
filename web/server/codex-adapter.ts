@@ -352,6 +352,25 @@ export class StdioTransport implements ICodexTransport {
       }
       // Notification (no id)
       this.notificationHandler?.(msg.method, (msg as JsonRpcNotification).params || {});
+    } else {
+      // EC-5: a frame matching NONE of the JSON-RPC shapes (no id+method
+      // request, no id-only response, no method-only notification) must not
+      // vanish silently. Report it as protocol drift — mirrors the parse-error
+      // path in processBuffer — so upstream Codex frame-shape drift is visible
+      // from the first offending frame rather than after silent divergence.
+      reportProtocolDrift(
+        this.protocolDriftSeen,
+        {
+          backend: "codex",
+          sessionId: this.sessionId,
+          direction: "incoming",
+          messageKind: "message",
+          messageName: "unmatched-frame",
+          keys: Object.keys(msg as unknown as Record<string, unknown>),
+          rawPreview: JSON.stringify(msg),
+        },
+        (message) => this.parseErrorCb?.(message),
+      );
     }
   }
 

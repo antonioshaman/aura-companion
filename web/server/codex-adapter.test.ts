@@ -4985,6 +4985,41 @@ describe("StdioTransport RPC timeout", () => {
     void transport;
   });
 
+  // EC-5 regression (finding #17): a JSON-RPC frame that parses cleanly but
+  // matches NONE of the three dispatch shapes (id+method request, id-only
+  // response, method-only notification) must not vanish silently. The terminal
+  // `else` in dispatch() now reports it via reportProtocolDrift so upstream
+  // Codex frame-shape drift is visible from the first offending frame. Mirrors
+  // the parse-error drift path.
+  it("reports protocol drift for a frame matching no JSON-RPC shape (no id, no method)", async () => {
+    const streams = createStreams();
+    const transport = new StdioTransport(streams.stdin, streams.stdout, "sess-transport-2");
+    const spy = vi.spyOn(log, "warn").mockImplementation(() => {});
+    const parseErrors: string[] = [];
+    transport.onParseError((message) => parseErrors.push(message));
+
+    // Valid JSON object, but carries neither `id` nor `method` — falls through
+    // every dispatch branch to the terminal else.
+    streams.pushRaw(JSON.stringify({ foo: "bar", nested: { a: 1 } }));
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(spy).toHaveBeenCalledWith(
+      "protocol-monitor",
+      "Backend protocol drift detected",
+      expect.objectContaining({
+        backend: "codex",
+        sessionId: "sess-transport-2",
+        messageKind: "message",
+        messageName: "unmatched-frame",
+      }),
+    );
+    // The drift also surfaces to the browser via the parse-error callback.
+    expect(parseErrors.some((m) => m.includes("protocol drift"))).toBe(true);
+
+    spy.mockRestore();
+    void transport;
+  });
+
   it("rejects pending RPC calls when companion/wsReconnected notification arrives", async () => {
     // When the WS proxy reconnects to Codex, it sends a companion/wsReconnected
     // notification. Any pending RPC calls should be immediately rejected because
