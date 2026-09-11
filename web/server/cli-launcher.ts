@@ -34,6 +34,7 @@ import {
   argvSha256,
   readRuntimeSidecar,
   writeRuntimeSidecar,
+  deleteRuntimeSidecar,
 } from "./cli-runtime-sidecar.js";
 import {
   OBSERVER_ALLOWED_TOOLS,
@@ -534,6 +535,28 @@ export class CliLauncher {
   }
 
   /**
+   * AURA-LOCAL — Fowler F1 (Council Review 2026-09-11). The SINGLE terminal
+   * tail for an EXHAUSTED relaunch: fuse the {@link clearPidAndPersist}
+   * obligation (pid-null + state=exited + persist + `session:relaunch-exhausted`
+   * emit) with the `{ ok: false }` return so a caller CANNOT abandon a session
+   * without clearing it. This makes the EC-19 invariant STRUCTURAL rather than
+   * grep-enforced — every exhaustion return is `return this.abortRelaunch(...)`,
+   * and it is impossible to null-return without the clear.
+   *
+   * NOT used by the two EC-19-EXEMPT returns (the `!info` entry guard and the
+   * Codex pre-kill model-validation bail), which deliberately leave the live
+   * session intact and must not fire the exhaustion emit.
+   */
+  private abortRelaunch(
+    sessionId: string,
+    reason: RelaunchExhaustedReason,
+    error: string,
+  ): { ok: false; error: string } {
+    this.clearPidAndPersist(sessionId, reason);
+    return { ok: false, error };
+  }
+
+  /**
    * AURA-LOCAL — PLAN T7. Persist the per-session runtime sidecar
    * (`<sessionId>.runtime.json`) right after `Bun.spawn` returns so the
    * spawn-time anchor (pid + processStartMs + argv hash) is durable.
@@ -589,14 +612,14 @@ export class CliLauncher {
    *     `mismatch`/`gone` → SKIP (the PID is not ours / already dead).
    *   • `unavailable` (non-Linux, no /proc) → kill best-effort: identity is
    *     unknowable and there is no stronger signal than the prior behaviour.
-   *   • Codex host-mode → kill best-effort: the argv factor recognises only
-   *     Claude's `--sdk-url` token, so the probe can't verify Codex; a
-   *     Codex argv/port identity factor is future work.
+   *   • Codex host-mode → SAME three-factor probe. The spawn-time sidecar
+   *     now carries `argvSha256` for Codex too, and `verifyProcessIdentity`'s
+   *     argv factor falls back to the argv-hash when no `--sdk-url` token is
+   *     present (`argvMatchesSessionId`), so a genuinely-surviving Codex proc
+   *     matches and a reused PID is rejected — no blind best-effort kill.
    */
   private shouldSignalPreviousInstancePid(info: SdkSessionInfo): boolean {
     if (typeof info.pid !== "number") return false;
-    // Codex has no argv identity factor — preserve prior best-effort kill.
-    if (info.backendType === "codex") return true;
     let expectedStartMs: number | null = null;
     let expectedArgvSha256: string | null = null;
     if (this.store) {
@@ -682,7 +705,17 @@ export class CliLauncher {
           }
         } else if (info.pid) {
           if (info.backendType === "codex") {
-            try { process.kill(info.pid, "SIGTERM"); } catch {}
+            // Host-mode Codex: the app-server PID may survive a Bun restart,
+            // but its proxy/adapter died with the parent, so it is unreachable
+            // — terminate it and let a browser-triggered relaunch resume the
+            // thread. VERIFY identity before signalling (sidecar argvSha256 +
+            // starttime via `shouldSignalPreviousInstancePid`): `match`/`unavailable`
+            // → SIGTERM our own deaf app-server; `mismatch`/`gone` → do NOT
+            // signal a reused/dead PID (leak-and-recover-next-boot is the safe
+            // direction). Closes the PID-reuse-after-reboot collateral kill.
+            if (this.shouldSignalPreviousInstancePid(info)) {
+              try { process.kill(info.pid, "SIGTERM"); } catch {}
+            }
             info.pid = undefined;
             info.state = "exited";
             this.releaseCodexWsPort(info);
@@ -1134,15 +1167,15 @@ export class CliLauncher {
         console.error(`[cli-launcher] Container ${containerLabel} no longer exists for session ${sessionId}`);
         info.exitCode = 1;
         // PLAN T7 (Phase D): structural failure — container is gone and
-        // will never come back via the retry budget. Route through
-        // `clearPidAndPersist` so `pid` is nulled (kills the boot-probe
-        // false-positive chain), `state` flips exited, persist fires,
-        // and `session:relaunch-exhausted` fans out for Phase F drain.
-        this.clearPidAndPersist(sessionId, "container_missing");
-        return {
-          ok: false,
-          error: `Container "${containerLabel}" was removed externally. Please create a new session.`,
-        };
+        // will never come back via the retry budget. The single terminal
+        // tail nulls `pid` (kills the boot-probe false-positive chain), flips
+        // `state` exited, persists, and fans `session:relaunch-exhausted` out
+        // for Phase F drain.
+        return this.abortRelaunch(
+          sessionId,
+          "container_missing",
+          `Container "${containerLabel}" was removed externally. Please create a new session.`,
+        );
       }
 
       if (containerState === "stopped") {
@@ -1152,12 +1185,12 @@ export class CliLauncher {
         } catch (e) {
           info.exitCode = 1;
           // PLAN T7 (Phase D): docker startContainer threw — structural
-          // failure. Route through `clearPidAndPersist`.
-          this.clearPidAndPersist(sessionId, "container_start_failed");
-          return {
-            ok: false,
-            error: `Container "${containerLabel}" is stopped and could not be restarted: ${e instanceof Error ? e.message : String(e)}`,
-          };
+          // failure. Route through the single terminal tail.
+          return this.abortRelaunch(
+            sessionId,
+            "container_start_failed",
+            `Container "${containerLabel}" is stopped and could not be restarted: ${e instanceof Error ? e.message : String(e)}`,
+          );
         }
       }
 
@@ -1168,11 +1201,11 @@ export class CliLauncher {
         info.exitCode = 127;
         // PLAN T7 (Phase D): CLI binary missing inside the container —
         // structural failure that won't fix itself across retries.
-        this.clearPidAndPersist(sessionId, "container_binary_missing");
-        return {
-          ok: false,
-          error: `"${binary}" command not found inside container "${containerLabel}". The container image may need to be rebuilt.`,
-        };
+        return this.abortRelaunch(
+          sessionId,
+          "container_binary_missing",
+          `"${binary}" command not found inside container "${containerLabel}". The container image may need to be rebuilt.`,
+        );
       }
     }
 
@@ -1267,14 +1300,13 @@ export class CliLauncher {
         companionBus.emit("session:relaunch-failed", { sessionId, reason });
       }
       // PLAN T7 (Phase D): observer-prompt-config load failure is
-      // deterministic — retrying won't fix it. Route through
-      // `clearPidAndPersist` so the pid is nulled, state persisted,
-      // and Phase F's drain dispatch listener wakes.
-      this.clearPidAndPersist(sessionId, "observer_prompt_config_failed");
-      return {
-        ok: false,
-        error: err instanceof Error ? err.message : String(err),
-      };
+      // deterministic — retrying won't fix it. The single terminal tail
+      // nulls the pid, persists, and wakes Phase F's drain dispatch listener.
+      return this.abortRelaunch(
+        sessionId,
+        "observer_prompt_config_failed",
+        err instanceof Error ? err.message : String(err),
+      );
     }
 
     // Council Review 2026-05-15-0820 P2 #7 (D7 / drift detection): when the
@@ -1329,10 +1361,9 @@ export class CliLauncher {
         const reason = `observer-prompt-source-drift-refused: ${previousObserverPromptSource} → ${info.observerPromptSource}`;
         companionBus.emit("session:relaunch-failed", { sessionId, reason });
         // PLAN T7 (Phase D): operator must restart the group to ack the
-        // policy change; we route through `clearPidAndPersist` to
-        // surface the structural failure to Phase F's drain listener.
-        this.clearPidAndPersist(sessionId, "observer_prompt_source_drift_refused");
-        return { ok: false, error: reason };
+        // policy change; the single terminal tail surfaces the structural
+        // failure to Phase F's drain listener.
+        return this.abortRelaunch(sessionId, "observer_prompt_source_drift_refused", reason);
       }
     }
     if (info.backendType === "codex") {
@@ -2505,8 +2536,22 @@ export class CliLauncher {
         try { process.kill(pid, "SIGTERM"); } catch {}
         const exited = await this.waitForPidExit(pid, 5_000);
         if (!exited) {
-          console.log(`[cli-launcher] Force-killing restart-survived session ${sessionId} (pid ${pid})`);
-          try { process.kill(pid, "SIGKILL"); } catch {}
+          // TOCTOU re-verify before the UNBLOCKABLE SIGKILL. `waitForPidExit`
+          // only observes liveness; if the target exited early in the grace
+          // window and the kernel reassigned its PID to an unrelated process,
+          // it reads as still-alive and returns false. Re-run the identity
+          // probe (re-reads /proc + re-hashes argv) and skip escalation on any
+          // non-`match` — a mis-sent SIGTERM can be ignored, a SIGKILL cannot.
+          if (this.shouldSignalPreviousInstancePid(session)) {
+            console.log(`[cli-launcher] Force-killing restart-survived session ${sessionId} (pid ${pid})`);
+            try { process.kill(pid, "SIGKILL"); } catch {}
+          } else {
+            log.warn("cli-launcher", "declined SIGKILL escalation — PID identity no longer matches after grace", {
+              event: "kill.sigkill_declined",
+              sessionId,
+              pid,
+            });
+          }
         }
         session.state = "exited";
         session.exitCode = -1;
@@ -2591,6 +2636,7 @@ export class CliLauncher {
     info.state = "exited";
     info.archived = true;
     if (info.exitCode == null) info.exitCode = -1;
+    if (this.store) deleteRuntimeSidecar(this.store.directory, sessionId); // finding #16
     this.persistState();
   }
 
@@ -2636,6 +2682,7 @@ export class CliLauncher {
     this.processes.delete(sessionId);
     this.codexWsProxies.delete(sessionId);
     this.sessionEnvs.delete(sessionId);
+    if (this.store) deleteRuntimeSidecar(this.store.directory, sessionId); // finding #16
     this.persistState();
   }
 
@@ -2650,6 +2697,7 @@ export class CliLauncher {
         this.sessions.delete(id);
         this.sessionEnvs.delete(id);
         this.codexWsProxies.delete(id);
+        if (this.store) deleteRuntimeSidecar(this.store.directory, id); // finding #16
         pruned++;
       }
     }

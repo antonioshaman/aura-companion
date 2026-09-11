@@ -34,7 +34,7 @@
 // resolver (`resolveCleanupPath`) before any read/write.
 
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, unlinkSync } from "node:fs";
 import { writeAtomicJson } from "./atomic-write.js";
 import { resolveCleanupPath } from "./cleanup/cleanup-paths.js";
 
@@ -158,6 +158,26 @@ export function writeRuntimeSidecar(
   const target = sidecarPath(sessionsRoot, sessionId);
   writeAtomicJson(target, payload);
   return target;
+}
+
+/**
+ * Delete the sidecar at a session's DEFINITIVE terminal points (session
+ * delete, eviction/prune, `markSweptTerminal`). Best-effort + ENOENT-silent:
+ * a missing sidecar is a no-op, not an error. Without this the sidecar
+ * accumulates one permanent `<sessionId>.runtime.json` per session ever
+ * spawned (session-store deliberately ignores these sister-files), so a
+ * long-lived host grows an unbounded pile of stale sidecars (finding #16).
+ * `randomUUID` sessionIds make a stale sidecar unreachable by any future
+ * session, so this is disk/inode hygiene, not correctness — hence never throw.
+ */
+export function deleteRuntimeSidecar(sessionsRoot: string, sessionId: string): void {
+  try {
+    unlinkSync(sidecarPath(sessionsRoot, sessionId));
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return; // already gone
+    // Any other error (EACCES, resolver violation) is swallowed — cleanup is
+    // best-effort and must never break a delete/prune/sweep terminal path.
+  }
 }
 
 /**

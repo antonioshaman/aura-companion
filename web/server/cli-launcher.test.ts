@@ -1273,7 +1273,13 @@ describe("kill: restart-survived processes", () => {
     killSpy.mockRestore();
   });
 
-  it("terminates restart-survived Codex during restore because its proxy died with Bun", async () => {
+  it("terminates restart-survived Codex during restore WHEN identity verifies (proxy died with Bun)", async () => {
+    // Host-mode Codex boot recovery now identity-verifies the inherited PID
+    // before SIGTERM (finding #2): the spawn-time sidecar carries argvSha256 +
+    // starttime, and verifyProcessIdentity's argv factor falls back to the
+    // argv hash when no --sdk-url token is present. Here identity MATCHES, so
+    // the deaf app-server is still terminated as before.
+    const codexArgv = ["/usr/bin/codex", "app-server", "--port", "45001"];
     store.saveLauncher([
       {
         sessionId: "survived-codex",
@@ -1285,31 +1291,85 @@ describe("kill: restart-survived processes", () => {
         backendType: "codex" as const,
       },
     ]);
-    const newLauncher = new CliLauncher(3456);
-    newLauncher.setStore(store);
+    writeRuntimeSidecar(store.directory, "survived-codex", {
+      schemaVersion: SIDECAR_SCHEMA_VERSION,
+      pid: 99001,
+      processStartMs: 1_700_000_000_000,
+      argvSha256: argvSha256(codexArgv),
+    });
+    const procStat = `1 (codex) ${["S", "1", ...Array(20).fill("0")].join(" ")}\n`;
+    const procIdentity = await import("./process-identity.js");
+    procIdentity.setProcReaderForTests({
+      platform: () => "linux",
+      killCheck: () => true,
+      readCmdline: () => codexArgv.join("\0") + "\0",
+      readStat: () => procStat,
+      readBootStat: () => `btime 1700000000\n`,
+      clkTck: 100,
+    });
 
-    const origKill = process.kill;
-    let sigtermSent = false;
-    const killSpy = vi.spyOn(process, "kill").mockImplementation(((
-      pid: number,
-      signal?: string | number,
-    ) => {
-      if (signal === 0) {
-        // Alive during the boot liveness probe; gone once SIGTERM landed.
-        if (sigtermSent) throw new Error("ESRCH");
-        return true;
-      }
-      if (signal === "SIGTERM") { sigtermSent = true; return true; }
-      return origKill.call(process, pid, signal as any);
-    }) as any);
-    expect(newLauncher.restoreFromDisk()).toBe(0);
-    expect(killSpy).toHaveBeenCalledWith(99001, "SIGTERM");
-    const restored = newLauncher.getSession("survived-codex");
-    expect(restored?.state).toBe("exited");
-    expect(restored?.pid).toBeUndefined();
-    expect(restored?.cliSessionId).toBe("cli-cx");
+    const killSpy = vi.spyOn(process, "kill").mockImplementation((() => true) as never);
+    try {
+      const newLauncher = new CliLauncher(3456);
+      newLauncher.setStore(store);
+      expect(newLauncher.restoreFromDisk()).toBe(0);
+      expect(killSpy).toHaveBeenCalledWith(99001, "SIGTERM");
+      const restored = newLauncher.getSession("survived-codex");
+      expect(restored?.state).toBe("exited");
+      expect(restored?.pid).toBeUndefined();
+      expect(restored?.cliSessionId).toBe("cli-cx");
+    } finally {
+      killSpy.mockRestore();
+    }
+  });
 
-    killSpy.mockRestore();
+  it("does NOT SIGTERM a restart-survived Codex PID whose identity no longer matches (PID-reuse safety, finding #2)", async () => {
+    // A previous-instance Codex PID that has been reused by an unrelated
+    // process (argv no longer matches the sidecar hash) must NOT be signalled
+    // — leak-and-recover is the safe direction. This is the collateral-kill
+    // hazard the identity gate closes.
+    const spawnArgv = ["/usr/bin/codex", "app-server", "--port", "45002"];
+    store.saveLauncher([
+      {
+        sessionId: "reused-codex",
+        pid: 99002,
+        state: "connected" as const,
+        cwd: "/tmp/project",
+        createdAt: Date.now(),
+        cliSessionId: "cli-cx2",
+        backendType: "codex" as const,
+      },
+    ]);
+    writeRuntimeSidecar(store.directory, "reused-codex", {
+      schemaVersion: SIDECAR_SCHEMA_VERSION,
+      pid: 99002,
+      processStartMs: 1_700_000_000_000,
+      argvSha256: argvSha256(spawnArgv),
+    });
+    const procIdentity = await import("./process-identity.js");
+    procIdentity.setProcReaderForTests({
+      platform: () => "linux",
+      killCheck: () => true, // the reused PID IS alive…
+      // …but it is a DIFFERENT process — argv hashes elsewhere.
+      readCmdline: () => ["/usr/bin/python3", "-m", "http.server"].join("\0") + "\0",
+      readStat: () => `1 (python3) ${["S", "1", ...Array(20).fill("0")].join(" ")}\n`,
+      readBootStat: () => `btime 1700000000\n`,
+      clkTck: 100,
+    });
+
+    const killSpy = vi.spyOn(process, "kill").mockImplementation((() => true) as never);
+    try {
+      const newLauncher = new CliLauncher(3456);
+      newLauncher.setStore(store);
+      newLauncher.restoreFromDisk();
+      // The critical assertion: the reused PID was never SIGTERM'd.
+      expect(killSpy).not.toHaveBeenCalledWith(99002, "SIGTERM");
+      const restored = newLauncher.getSession("reused-codex");
+      expect(restored?.state).toBe("exited");
+      expect(restored?.pid).toBeUndefined();
+    } finally {
+      killSpy.mockRestore();
+    }
   });
 });
 
@@ -1471,18 +1531,31 @@ describe("relaunch", () => {
     // Simulate container being removed
     mockIsContainerAlive.mockReturnValueOnce("missing");
 
+    // Beck #2: behaviourally assert clearPidAndPersist's exhaustion contract
+    // fires on this failure path (previously only proven by the EC-19/EC-22
+    // source-string canaries). A refactor that gates the emit behind a wrong
+    // condition would keep the grep green but fail HERE.
+    const exhausted: Array<{ sessionId: string; reason: string }> = [];
+    const off = companionBus.on("session:relaunch-exhausted", (p) => { exhausted.push(p); });
+
     const result = await launcher.relaunch("test-session-id");
     expect(result.ok).toBe(false);
     expect(result.error).toContain("companion-gone");
     expect(result.error).toContain("removed externally");
 
-    // Session should be marked as exited
+    // Session should be marked as exited, pid nulled, and the exhaustion
+    // event fanned out for the Phase F drain / council reconnect listeners.
     const session = launcher.getSession("test-session-id");
     expect(session?.state).toBe("exited");
     expect(session?.exitCode).toBe(1);
+    expect(session?.pid).toBeUndefined();
+    expect(exhausted).toContainEqual(
+      expect.objectContaining({ sessionId: "test-session-id", reason: "container_missing" }),
+    );
 
     // Should NOT have spawned a new process
     expect(mockSpawn).toHaveBeenCalledTimes(1); // only the initial launch
+    off();
   });
 
   it("restarts stopped container before spawning CLI", async () => {
@@ -2461,11 +2534,13 @@ describe("persistence", () => {
 
       warnSpy.mockRestore();
     });
-    it("terminates restart-survived host-mode Codex instead of stranding it in starting", async () => {
+    it("marks a restart-survived host-mode Codex exited WITHOUT SIGTERM when identity is gone (finding #2)", async () => {
       // Host-mode Codex is two processes: app-server plus Companion proxy/adapter.
-      // After Bun restarts only the app-server PID can survive, so PID liveness
-      // is not a usable connection signal; keep the thread anchor and relaunch later.
-
+      // After Bun restarts only the app-server PID can survive; we terminate our
+      // own deaf app-server and keep the thread anchor to relaunch later. But the
+      // SIGTERM is now identity-gated (finding #2): if the inherited PID is GONE
+      // (or reused), it must NOT be signalled — the session is still marked exited
+      // and its port released, but no stray kill is sent.
       const savedSessions = [
         {
           sessionId: "codex-host-1",
@@ -2480,12 +2555,11 @@ describe("persistence", () => {
       ];
       store.saveLauncher(savedSessions);
       const killSpy = vi.spyOn(process, "kill").mockImplementation((() => true) as never);
-      // Install a hostile identity reader that WOULD mismatch; Codex exits
-      // before this probe is consulted.
+      // Identity probe yields "gone" (killCheck false) → no SIGTERM.
       const procIdentity = await import("./process-identity.js");
       procIdentity.setProcReaderForTests({
         platform: () => "linux",
-        killCheck: () => false, // would yield "gone" if the probe ran
+        killCheck: () => false,
         readCmdline: () => ["codex", "app-server", "--listen", "127.0.0.1:0"].join("\0") + "\0",
       });
 
@@ -2493,7 +2567,8 @@ describe("persistence", () => {
       newLauncher.setStore(store);
       const recovered = newLauncher.restoreFromDisk();
       expect(recovered).toBe(0);
-      expect(killSpy).toHaveBeenCalledWith(33333, "SIGTERM");
+      // The gone PID must NOT be SIGTERM'd (was an unconditional kill pre-fix).
+      expect(killSpy).not.toHaveBeenCalledWith(33333, "SIGTERM");
       const session = newLauncher.getSession("codex-host-1");
       expect(session?.state).toBe("exited");
       expect(session?.pid).toBeUndefined();
@@ -3234,6 +3309,33 @@ describe("EC-19 canary — clearPidAndPersist routing in relaunch() (PLAN T7/T8)
         .map((v) => `at body-offset ${v.at}:\n${v.snippet}\n`)
         .join("\n")}`,
     ).toEqual([]);
+
+    // Fowler F1 (Council Review 2026-09-11): the exhaustion returns now route
+    // through the SINGLE `abortRelaunch` terminal tail, making the clear
+    // structural rather than per-return. Assert that tail actually FUSES the
+    // clearPidAndPersist obligation with the ok:false return — otherwise the
+    // "structural" invariant would be a hollow rename.
+    const abortIdx = src.indexOf("private abortRelaunch(");
+    expect(abortIdx, "abortRelaunch terminal tail must exist").toBeGreaterThan(-1);
+    // The return type is itself a brace literal (`{ ok: false; error: string }`),
+    // so anchor the BODY-open brace on the `} {` sequence — the return-type
+    // close followed by the body open — rather than the first `{` after the
+    // signature (which would land inside the return-type literal).
+    const typeClose = src.indexOf("} {", abortIdx);
+    expect(typeClose, "abortRelaunch return-type close + body open must be locatable").toBeGreaterThan(abortIdx);
+    const abortOpen = typeClose + 2;
+    let abortDepth = 1;
+    let abortEnd = -1;
+    for (let i = abortOpen + 1; i < src.length; i++) {
+      if (src[i] === "{") abortDepth++;
+      else if (src[i] === "}") {
+        abortDepth--;
+        if (abortDepth === 0) { abortEnd = i + 1; break; }
+      }
+    }
+    const abortBody = src.slice(abortOpen, abortEnd);
+    expect(abortBody, "abortRelaunch must call clearPidAndPersist").toMatch(/clearPidAndPersist\s*\(/);
+    expect(abortBody, "abortRelaunch must return ok:false").toMatch(/return\s*\{\s*ok:\s*false\b/);
   });
 
   // EC-22: the emit on `session:relaunch-exhausted` must actually fire
