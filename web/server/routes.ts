@@ -8,7 +8,7 @@ import { writeAtomicJson } from "./atomic-write.js";
 import { buildCheckpointFilename } from "./checkpoint-watcher.js";
 import { parseCheckpointPayload } from "./council-types.js";
 import { extractHandoff, buildPickupDraft } from "./handoff-extractor.js";
-import { writeFileSync, appendFileSync } from "node:fs";
+import { writeFileSync, appendFileSync, statSync, renameSync } from "node:fs";
 import {
   computeSweepCandidates,
   executeSweep,
@@ -689,6 +689,7 @@ export function createRoutes(
   //             Refuses any client-supplied PID. In-flight-locked + cooldowned so
   //             a manual sweep can't race the background reaper or itself.
   const SWEEP_EXECUTE_COOLDOWN_MS = Number(process.env.AURA_SWEEP_COOLDOWN_MS) || 3_000;
+  const SWEEP_AUDIT_MAX_BYTES = Number(process.env.AURA_SWEEP_AUDIT_MAX_BYTES) || 5_000_000;
   let sweepExecuteInFlight = false;
   let lastSweepExecuteAt = 0;
 
@@ -802,6 +803,14 @@ export function createRoutes(
         clearOrphanTimer: (timerId) => orchestrator.clearOrphanTimer(timerId),
         audit: (entry: SweepAuditEntry) => {
           try {
+            // Bound growth (parity with recorder rotation): once the audit file
+            // passes the cap, roll it to `.1` (single generation) before the
+            // append so it can never grow without limit.
+            try {
+              if (statSync(auditPath).size >= SWEEP_AUDIT_MAX_BYTES) {
+                renameSync(auditPath, `${auditPath}.1`);
+              }
+            } catch { /* ENOENT (first write) or rename race — just append */ }
             appendFileSync(auditPath, JSON.stringify(entry) + "\n", { mode: 0o600 });
           } catch (err) {
             // Audit is best-effort — a failed append must never abort a kill

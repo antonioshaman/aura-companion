@@ -117,6 +117,18 @@ describe("SweepPage confirm-gate behaviour", () => {
     await waitFor(() => expect(cancelBtn).toHaveFocus());
   });
 
+  it("restores focus to the triggering button when the dialog is cancelled (WCAG 2.4.3)", async () => {
+    render(<SweepPage embedded />);
+    const pageBtn = await screen.findByRole("button", { name: /Sweep 2 items/ });
+    pageBtn.focus();
+    fireEvent.click(pageBtn);
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    // Focus must return to the trigger, not be lost to <body>.
+    await waitFor(() => expect(screen.getByRole("button", { name: /Sweep 2 items/ })).toHaveFocus());
+  });
+
   it("Cancel closes the dialog without executing", async () => {
     render(<SweepPage embedded />);
     fireEvent.click(await screen.findByRole("button", { name: /Sweep 2 items/ }));

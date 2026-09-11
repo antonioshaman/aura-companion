@@ -140,7 +140,7 @@ export function SweepPage({ embedded = false }: Props) {
 
       {/* Loading */}
       {(state.tag === "idle" || state.tag === "previewing") && (
-        <div className="py-12 text-center text-sm text-cc-muted">Scanning for orphaned resources…</div>
+        <div role="status" aria-live="polite" className="py-12 text-center text-sm text-cc-muted">Scanning for orphaned resources…</div>
       )}
 
       {/* Error */}
@@ -152,7 +152,7 @@ export function SweepPage({ embedded = false }: Props) {
 
       {/* Executed — result reconciliation (requested / swept / skipped distinct) */}
       {state.tag === "executed" && (
-        <div className="mt-4 space-y-4">
+        <div className="mt-4 space-y-4" role="status" aria-live="polite">
           <div className="rounded-xl bg-cc-card p-4 sm:p-5">
             <div className="text-sm font-medium text-cc-fg mb-3">Sweep complete</div>
             <div className="grid grid-cols-3 gap-3 text-center">
@@ -179,7 +179,7 @@ export function SweepPage({ embedded = false }: Props) {
           </div>
 
           {count === 0 ? (
-            <div className="py-12 text-center text-sm text-cc-muted">
+            <div role="status" aria-live="polite" className="py-12 text-center text-sm text-cc-muted">
               Nothing to sweep — no orphaned resources found.
             </div>
           ) : (
@@ -270,11 +270,33 @@ function ConfirmDialog({
   onConfirm: () => void;
 }) {
   const cancelRef = useRef<HTMLButtonElement>(null);
+  const dialogRef = useRef<HTMLDivElement>(null);
 
-  // Default focus to Cancel (NOT confirm) so a stray Enter can't execute.
+  // Default focus to Cancel (NOT confirm) so a stray Enter can't execute, and
+  // restore focus to whatever triggered the dialog when it closes (WCAG 2.4.3).
   useEffect(() => {
+    const previouslyFocused = document.activeElement as HTMLElement | null;
     cancelRef.current?.focus();
+    return () => previouslyFocused?.focus?.();
   }, []);
+
+  // Trap Tab within the dialog (WCAG 2.1.2 / focus order): a modal must not let
+  // keyboard focus wander onto the inert page behind it.
+  function onKeyDown(e: React.KeyboardEvent<HTMLDivElement>) {
+    if (e.key === "Escape") { onCancel(); return; }
+    if (e.key !== "Tab") return;
+    const root = dialogRef.current;
+    if (!root) return;
+    const focusables = Array.from(
+      root.querySelectorAll<HTMLElement>('button:not([disabled]), [href], input, [tabindex]:not([tabindex="-1"])'),
+    );
+    if (focusables.length === 0) return;
+    const first = focusables[0]!;
+    const last = focusables[focusables.length - 1]!;
+    const active = document.activeElement;
+    if (e.shiftKey && active === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && active === last) { e.preventDefault(); first.focus(); }
+  }
 
   const label = `Confirm sweep of ${count} orphaned resource${count !== 1 ? "s" : ""}`;
 
@@ -284,13 +306,12 @@ function ConfirmDialog({
       onClick={onCancel}
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label={label}
         onClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => {
-          if (e.key === "Escape") onCancel();
-        }}
+        onKeyDown={onKeyDown}
         className="w-full max-w-md mx-0 sm:mx-4 flex flex-col bg-cc-bg rounded-t-[14px] sm:rounded-[14px] shadow-2xl overflow-hidden"
       >
         <div className="px-4 sm:px-5 py-3 sm:py-4">

@@ -846,6 +846,27 @@ describe("state management", () => {
     });
   });
 
+  describe("markSweptTerminal", () => {
+    it("forces a swept session to a definitive terminal + archived state so it drops out of the sweep set", () => {
+      launcher.launch({ cwd: "/tmp" });
+      const before = launcher.getSession("test-session-id");
+      expect(before).toBeDefined();
+
+      launcher.markSweptTerminal("test-session-id");
+
+      const after = launcher.getSession("test-session-id");
+      // pid nulled + exited → boot recovery can never re-attach; archived → the
+      // stale-session / archived-leak classifiers no longer re-list it.
+      expect(after?.pid).toBeUndefined();
+      expect(after?.state).toBe("exited");
+      expect(after?.archived).toBe(true);
+    });
+
+    it("is a safe no-op for an unknown session", () => {
+      expect(() => launcher.markSweptTerminal("nonexistent")).not.toThrow();
+    });
+  });
+
   describe("pruneExited", () => {
     it("removes exited sessions and returns count", async () => {
       launcher.launch({ cwd: "/tmp" });

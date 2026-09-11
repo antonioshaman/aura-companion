@@ -70,6 +70,35 @@ describe("computeSweepCandidates — safety core", () => {
     expect(out.some((c) => c.pid === 4321)).toBe(false);
   });
 
+  it("excludes a STARTING (non-archived, not connected/running) session's pid from orphan candidates (AC3 — WS-restart survivor)", () => {
+    // A session restored to `starting` after a WS-transport restart carries a
+    // live, server-owned, ppid==1 pid. It must NOT be classified as an orphan —
+    // otherwise reap-pid's TOCTOU gate (ppid==1) would pass and SIGTERM a live
+    // recovering session.
+    const out = computeSweepCandidates(baseDeps({
+      listSessions: () => [{ sessionId: "sess_starting", pid: 4321, state: "starting", createdAt: 0 } as any],
+      listProcPids: () => [4321],
+      readOwnedArgvShas: () => new Map([[OWNED_SHA, "sess_starting"]]),
+    }));
+    expect(out.some((c) => c.pid === 4321)).toBe(false);
+  });
+
+  it("does NOT double-list an archived session's live pid as both orphan and archived-leak", () => {
+    // The archived session's pid is owned (its sidecar sha is in the map) AND in
+    // /proc — but it must surface ONLY via the archived-leak branch (tracked
+    // kill), never also as a raw orphan reap targeting the same process.
+    const out = computeSweepCandidates(baseDeps({
+      listSessions: () => [{ sessionId: "sess_arch", pid: 777, archived: true, createdAt: 0 } as any],
+      listProcPids: () => [777],
+      readCmdline: () => OWNED_CMDLINE,
+      killCheck: () => true,
+      readOwnedArgvShas: () => new Map([[OWNED_SHA, "sess_arch"]]),
+    }));
+    const forPid = out.filter((c) => c.pid === 777);
+    expect(forPid).toHaveLength(1);
+    expect(forPid[0]!.reason).toBe("archived-leak");
+  });
+
   it("lists an archived-leak: archived session, alive pid, older than threshold", () => {
     const out = computeSweepCandidates(baseDeps({
       listSessions: () => [{ sessionId: "sess_arch", pid: 777, archived: true, createdAt: 0 } as any],

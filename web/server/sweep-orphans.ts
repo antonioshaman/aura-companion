@@ -115,13 +115,20 @@ export function computeSweepCandidates(deps: SweepComputeDeps): SweepCandidate[]
   const excludePids = new Set<number>();
   if (typeof deps.serverPid === "number") excludePids.add(deps.serverPid);
   if (typeof callerPid === "number") excludePids.add(callerPid);
-  // Live = non-archived AND actively connected/running. These are the ones AC3
-  // forbids ever touching; add their pids to the exclusion set.
-  const livePids = new Set<number>();
+  // Every pid that is the CURRENT pid of ANY tracked session — archived or not,
+  // in ANY state — is NOT an orphan. Non-archived sessions in a live-ish state
+  // (connected/running, but ALSO `starting` after a WS-transport restart and
+  // `reconnecting` inside the grace window) must be protected: a ppid==1
+  // survivor in one of those states would otherwise pass reap-pid's TOCTOU gate
+  // and be SIGTERMed — the AC3 "never a live non-archived session" violation.
+  // Archived sessions' live pids ARE reaped, but through the archived-leak
+  // branch below (tracked-kill, exit bookkeeping), so listing them here too
+  // would double-target one process. A true orphan is an owned-argv pid that is
+  // NOT any session's current pid (e.g. a relaunched session left its old pid
+  // behind, or the owning record was removed).
+  const trackedPids = new Set<number>();
   for (const s of sessions) {
-    if (!s.archived && (s.state === "connected" || s.state === "running") && typeof s.pid === "number") {
-      livePids.add(s.pid);
-    }
+    if (typeof s.pid === "number") trackedPids.add(s.pid);
   }
 
   const out: SweepCandidate[] = [];
@@ -130,7 +137,7 @@ export function computeSweepCandidates(deps: SweepComputeDeps): SweepCandidate[]
   let pids: number[] = [];
   try { pids = listProc(); } catch { pids = []; }
   for (const pid of pids) {
-    if (excludePids.has(pid) || livePids.has(pid)) continue;
+    if (excludePids.has(pid) || trackedPids.has(pid)) continue;
     let argv: string[];
     try { argv = splitCmdline(readCmdline(pid)); } catch { continue; }
     if (argv.length === 0) continue;

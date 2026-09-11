@@ -2569,6 +2569,14 @@ export class CliLauncher {
    * `state !== "exited"`), but this closes the "archived + stale pid" record
    * shape so a future boot never re-attaches/relaunches a dead or recycled
    * PID (closes `project_archived_sessions_leak_live_cli_processes`).
+   *
+   * Also flips `archived = true`: a swept record must DROP OUT of the sweep
+   * candidate set, otherwise `computeSweepCandidates` re-lists it on the very
+   * next preview (the stale-session gate keys on `!archived && state==="exited"`
+   * and the archived-leak gate on a live pid) and the result count claims a
+   * reclamation that keeps reappearing. Archiving is the definitive terminal
+   * acknowledgement — idempotent for the archived-leak case (already archived),
+   * and it removes the now-dead record from the active list for stale-session.
    * Idempotent + safe on an unknown/already-terminal session.
    */
   markSweptTerminal(sessionId: string): void {
@@ -2576,6 +2584,7 @@ export class CliLauncher {
     if (!info) return;
     info.pid = undefined;
     info.state = "exited";
+    info.archived = true;
     if (info.exitCode == null) info.exitCode = -1;
     this.persistState();
   }
