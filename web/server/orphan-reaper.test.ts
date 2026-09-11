@@ -150,6 +150,82 @@ describe("classifyArgv — Companion-shape detection + EC-23 redaction", () => {
     // cwdDepth captures structure of the deepest path token.
     expect(c.cwdDepth).toBeGreaterThanOrEqual(3);
   });
+
+  // 2026-09-11 addition: stdio transport (default for CLI >= 2.1.123).
+  // Companion-spawned Claude subprocesses under stdio carry a specific
+  // token quorum (`--print` + `--output-format stream-json` +
+  // `--input-format stream-json`). Reproduced orphan on prod 2026-09-11
+  // was exactly this shape.
+  it("detects stdio-transport Claude by quorum: --print + --output-format stream-json + --input-format stream-json", () => {
+    const c = classifyArgv([
+      "/home/auracomp/.local/bin/claude",
+      "--print",
+      "--output-format", "stream-json",
+      "--input-format", "stream-json",
+      "--include-partial-messages",
+      "--verbose",
+      "--model", "claude-opus-4-8",
+      "--permission-mode", "bypassPermissions",
+      "--resume", "2eaf079e-91c0-4e10-80db-18b340d1b97c",
+    ]);
+    expect(c.isCompanionShape).toBe(true);
+    expect(c.isServerManagedShape).toBe(true);
+    // No --sdk-url → no Companion sessionId extracted (stdio orphans
+    // fall through to the REAP branch since they can't re-attach
+    // anyway — bun can't recover stdin/stdout of a subprocess it
+    // didn't spawn).
+    expect(c.sessionId).toBeNull();
+  });
+
+  it("stdio quorum requires ALL three markers — --print alone is not enough", () => {
+    // A bare `claude --print "hi"` from a user script should NOT be
+    // treated as Companion-spawned. Only reap when the full stream-json
+    // stdio combination is present.
+    const c = classifyArgv([
+      "/usr/local/bin/claude",
+      "--print", "hi",
+    ]);
+    expect(c.isCompanionShape).toBe(true); // basename says "claude"
+    expect(c.isServerManagedShape).toBe(false); // quorum incomplete
+  });
+
+  it("stdio quorum requires ALL three markers — output-format alone is not enough", () => {
+    const c = classifyArgv([
+      "/usr/local/bin/claude",
+      "--output-format", "stream-json",
+      "hi",
+    ]);
+    expect(c.isServerManagedShape).toBe(false);
+  });
+
+  it("stdio quorum is basename-gated — random `node` binary with matching args is NOT reaped as claude", () => {
+    // Defense-in-depth: even if some other tool happens to use the same
+    // three flag names, we require argv[0] basename === "claude".
+    const c = classifyArgv([
+      "/usr/bin/node",
+      "--print",
+      "--output-format", "stream-json",
+      "--input-format", "stream-json",
+    ]);
+    expect(c.isCompanionShape).toBe(false); // basename check filters upfront
+    expect(c.isServerManagedShape).toBe(false);
+  });
+
+  it("stdio Claude with fable/opus/haiku model — model id does not affect classification", () => {
+    // The 2026-09-10 model rotation (PR #182) means orphans may be on
+    // any chain entry. Assert the classification is model-agnostic.
+    for (const model of ["claude-opus-5", "claude-opus-4-8", "claude-fable-5-1", "claude-haiku-4-5"]) {
+      const c = classifyArgv([
+        "/home/auracomp/.local/bin/claude",
+        "--print",
+        "--output-format", "stream-json",
+        "--input-format", "stream-json",
+        "--model", model,
+        "--resume", "some-cli-session-id",
+      ]);
+      expect(c.isServerManagedShape).toBe(true);
+    }
+  });
 });
 
 // ─── reapOrphans behaviour ──────────────────────────────────────────────────
