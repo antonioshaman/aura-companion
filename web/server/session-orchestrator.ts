@@ -27,6 +27,7 @@ import { metricsCollector } from "./metrics-collector.js";
 import { log } from "./logger.js";
 import { nextModelInChain, computeSilenceRotation } from "./model-fallback-chain.js";
 import { checkDrift, resolveJsonlPath } from "./silent-stdio-drift-detector.js";
+import { nextCompactionMilestone } from "./context-size-suggester.js";
 import { homedir } from "node:os";
 import { SessionGroupCoordinator } from "./session-group-coordinator.js";
 import type { GroupDegradeReason } from "./group-state-machine.js";
@@ -570,6 +571,15 @@ export class SessionOrchestrator {
    * for the 2026-09-11 failure pattern.
    */
   private driftPrevSnapshot = new Map<string, { jsonlMtimeMs: number; transcriptMtimeMs: number }>();
+
+  /**
+   * Per-session highest compaction-advisory milestone we've already
+   * fired (in bytes; 0 = none yet). Prevents the drift-detector tick
+   * from spamming the same `/compact` suggestion every 60s once the
+   * user has been told. See `context-size-suggester.ts` for milestone
+   * tiers and rationale.
+   */
+  private compactionAdvisoryFired = new Map<string, number>();
 
   // Idempotency guard for initialize()
   private _initialized = false;
@@ -1394,6 +1404,39 @@ export class SessionOrchestrator {
         jsonlMtimeMs: verdict.jsonlMtimeMs,
         transcriptMtimeMs: verdict.transcriptMtimeMs,
       });
+
+      // Compaction-advisory piggyback: cheap stat on the same jsonl
+      // we already tracked. If size crossed a new milestone since
+      // last advisory, surface a browser toast suggesting `/compact`.
+      // Prevents silent-stdio flares before they happen (empirical
+      // pattern: sessions >1.5 MB start flaring, >3 MB flare hourly).
+      // Fires at most once per milestone per session lifetime.
+      try {
+        const jsonlSize = statSync(jsonlPath).size;
+        const lastFired = this.compactionAdvisoryFired.get(info.sessionId) ?? 0;
+        const advisory = nextCompactionMilestone(jsonlSize, lastFired);
+        if (advisory) {
+          this.compactionAdvisoryFired.set(info.sessionId, advisory.milestoneBytes);
+          log.warn(
+            "session-orchestrator",
+            "compaction advisory fired — session context large",
+            {
+              event: "context_size.compaction_advisory",
+              sessionId: info.sessionId,
+              jsonlSize,
+              milestoneBytes: advisory.milestoneBytes,
+            },
+          );
+          this.wsBridge.broadcastToSession(info.sessionId, {
+            type: "error",
+            message: advisory.message,
+          });
+        }
+      } catch {
+        // jsonl stat failed (file gone between checkDrift and here,
+        // or permission changed) — skip silently. Next tick retries.
+      }
+
       if (!verdict.drifted) continue;
 
       // Belt-and-braces guards mirroring `handleBackendSilent`:
