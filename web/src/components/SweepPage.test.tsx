@@ -3,18 +3,22 @@
  * Tests for SweepPage — the manual "Sweep orphans" cleanup surface.
  *
  * SweepPage previews server-owned lost resources (orphan processes, archived
- * leaks, stale sessions, orphaned timers) and, behind a confirm dialog, asks
- * the server to reap them. It is display-only: the server is the sole mutator.
+ * leaks, stale session records, orphaned timers) and, behind a confirm dialog,
+ * asks the server to reap them. The server is the sole mutator.
  *
- * Coverage targets (per PLAN Tasks 8/9):
- * - Render + axe accessibility scan (mandated triad).
+ * Coverage targets:
+ * - Render + axe accessibility scan (mandated triad), including the confirm
+ *   dialog AND the executed receipt (new states).
  * - AC6 empty state ("Nothing to sweep") is DISTINCT from the loading state —
  *   the whole reason candidates start null, never [].
  * - The confirm-gate behaviour: clicking the page "Sweep N items" button opens
  *   the dialog and calls execute ZERO times; only the dialog's confirm button
  *   calls execute ONCE (with the preview token).
  * - The confirm dialog defaults focus to Cancel (a stray Enter can't execute).
- * - Result reconciliation shows requested / swept / skipped as distinct numbers.
+ * - Per-candidate selection drives the confirm count (deselecting narrows it).
+ * - Result reconciliation shows requested / swept / skipped as distinct VALUES.
+ * - The executed receipt itemises the swept set (reason + pid + session id) and
+ *   a per-reason breakdown, and offers an in-place Rescan when anything skipped.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
@@ -72,6 +76,21 @@ describe("SweepPage render & accessibility", () => {
     const results = await axe(document.body, { rules: { region: { enabled: false } } });
     expect(results).toHaveNoViolations();
   });
+
+  it("the executed receipt (with skipped>0) passes an axe scan", async () => {
+    const { axe } = await import("vitest-axe");
+    mockSweepExecute.mockResolvedValue({
+      requested: 2, swept: 1, skipped: 1,
+      perReason: { orphan: 1, "archived-leak": 0, "stale-session": 1, "orphan-timer": 0 },
+    });
+    const { container } = render(<SweepPage embedded />);
+    fireEvent.click(await screen.findByRole("button", { name: /Sweep 2 items/ }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /Sweep 2 items/ }));
+    await screen.findByText("Sweep complete");
+    const results = await axe(container);
+    expect(results).toHaveNoViolations();
+  });
 });
 
 describe("SweepPage states", () => {
@@ -88,6 +107,19 @@ describe("SweepPage states", () => {
     expect(screen.getByText("0 candidates")).toBeInTheDocument();
     // The empty state must NOT read as still-loading.
     expect(screen.queryByText("Scanning for orphaned resources…")).not.toBeInTheDocument();
+  });
+
+  it("on a preview failure keeps a Retry action INSIDE the error block", async () => {
+    mockSweepPreview.mockRejectedValueOnce(new Error("scan boom"));
+    render(<SweepPage embedded />);
+    const alert = await screen.findByRole("alert");
+    expect(within(alert).getByText("scan boom")).toBeInTheDocument();
+    // Retry lives in the error block, not only the header Rescan control.
+    const retry = within(alert).getByRole("button", { name: /Retry scan/ });
+    mockSweepPreview.mockResolvedValueOnce(makePreview());
+    fireEvent.click(retry);
+    // A successful retry recovers the candidate list.
+    await screen.findByText("2 candidates");
   });
 });
 
@@ -163,8 +195,47 @@ describe("SweepPage confirm-gate behaviour", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
     expect(mockSweepExecute).not.toHaveBeenCalled();
   });
+});
 
-  it("after execute, shows requested / swept / skipped as distinct numbers", async () => {
+describe("SweepPage per-candidate selection", () => {
+  it("deselecting a candidate narrows the confirm count (page button + dialog follow the SELECTED subset)", async () => {
+    render(<SweepPage embedded />);
+    await screen.findByText("2 candidates");
+    // Default: every candidate selected — the confirm count reflects the full set.
+    expect(screen.getByRole("button", { name: /Sweep 2 items/ })).toBeInTheDocument();
+    expect(screen.getByText(/2 selected/)).toBeInTheDocument();
+
+    // Deselect the orphan process; the count follows selection, not the preview.
+    const orphanBox = screen.getByRole("checkbox", { name: /Orphaned process \(pid 4321\)/ });
+    fireEvent.click(orphanBox);
+    expect(orphanBox).not.toBeChecked();
+    expect(screen.getByText(/1 selected/)).toBeInTheDocument();
+
+    const pageBtn = screen.getByRole("button", { name: /Sweep 1 item/ });
+    fireEvent.click(pageBtn);
+    const dialog = await screen.findByRole("dialog");
+    // The dialog confirm button reflects the selected subset, not the whole set.
+    expect(within(dialog).getByRole("button", { name: /Sweep 1 item/ })).toBeInTheDocument();
+    // ...and it is HONEST that the server reaps the whole token-bound set (the
+    // execute API cannot accept a subset), so a partial selection is flagged.
+    expect(within(dialog).getByText(/reaps the entire previewed set/)).toBeInTheDocument();
+  });
+
+  it("deselecting every candidate disables the page Sweep button (nothing to confirm)", async () => {
+    render(<SweepPage embedded />);
+    await screen.findByText("2 candidates");
+    for (const box of screen.getAllByRole("checkbox")) fireEvent.click(box);
+    expect(screen.getByText(/0 selected/)).toBeInTheDocument();
+    const pageBtn = screen.getByRole("button", { name: /Sweep 0 items/ });
+    expect(pageBtn).toBeDisabled();
+    fireEvent.click(pageBtn);
+    // A disabled trigger can never open the destructive gate.
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+});
+
+describe("SweepPage receipt (executed state)", () => {
+  it("after execute, shows requested / swept / skipped as distinct VALUES (2 / 1 / 1)", async () => {
     mockSweepExecute.mockResolvedValue({
       requested: 2, swept: 1, skipped: 1,
       perReason: { orphan: 1, "archived-leak": 0, "stale-session": 0, "orphan-timer": 0 },
@@ -175,10 +246,50 @@ describe("SweepPage confirm-gate behaviour", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: /Sweep 2 items/ }));
 
     await screen.findByText("Sweep complete");
-    // The three counts are shown independently — the server's identity re-check
-    // (1 skipped here) is visible, never collapsed into the preview count.
-    expect(screen.getByText("Requested")).toBeInTheDocument();
-    expect(screen.getByText("Swept")).toBeInTheDocument();
-    expect(screen.getByText("Skipped")).toBeInTheDocument();
+    // Assert the NUMBERS, not just the labels: requested=2, swept=1, skipped=1.
+    // Each value is scoped to its own stat tile so the two 1s (swept + skipped)
+    // are verified independently and can't be satisfied by a single stray "1".
+    const statTile = (label: string) => screen.getByText(label).parentElement as HTMLElement;
+    expect(within(statTile("Requested")).getByText("2")).toBeInTheDocument();
+    expect(within(statTile("Swept")).getByText("1")).toBeInTheDocument();
+    expect(within(statTile("Skipped")).getByText("1")).toBeInTheDocument();
+  });
+
+  it("itemises the swept set (reason + pid + session id) and the per-reason breakdown", async () => {
+    mockSweepExecute.mockResolvedValue({
+      requested: 2, swept: 2, skipped: 0,
+      perReason: { orphan: 1, "archived-leak": 0, "stale-session": 1, "orphan-timer": 0 },
+    });
+    render(<SweepPage embedded />);
+    fireEvent.click(await screen.findByRole("button", { name: /Sweep 2 items/ }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /Sweep 2 items/ }));
+
+    await screen.findByText("Sweep complete");
+    // The receipt does NOT discard candidate detail — reason + pid + session id survive.
+    expect(screen.getByText("Candidates in this sweep")).toBeInTheDocument();
+    expect(screen.getByText("pid 4321")).toBeInTheDocument();
+    expect(screen.getByText("s2")).toBeInTheDocument();
+    // Per-reason breakdown is rendered from the returned perReason map.
+    expect(screen.getByText("Swept by reason")).toBeInTheDocument();
+  });
+
+  it("when skipped>0, explains the residual set and offers an in-place Rescan", async () => {
+    mockSweepExecute.mockResolvedValue({
+      requested: 2, swept: 1, skipped: 1,
+      perReason: { orphan: 1, "archived-leak": 0, "stale-session": 0, "orphan-timer": 0 },
+    });
+    render(<SweepPage embedded />);
+    fireEvent.click(await screen.findByRole("button", { name: /Sweep 2 items/ }));
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /Sweep 2 items/ }));
+
+    await screen.findByText("Sweep complete");
+    expect(screen.getByText(/their identity change since preview/)).toBeInTheDocument();
+    // The residual set is actionable — a Rescan lives inside the receipt.
+    const rescan = screen.getByRole("button", { name: /Rescan for remaining/ });
+    fireEvent.click(rescan);
+    // mount preview (1) + receipt rescan (2)
+    await waitFor(() => expect(mockSweepPreview).toHaveBeenCalledTimes(2));
   });
 });
