@@ -26,6 +26,8 @@ import { companionBus } from "./event-bus.js";
 import { metricsCollector } from "./metrics-collector.js";
 import { log } from "./logger.js";
 import { nextModelInChain, computeSilenceRotation } from "./model-fallback-chain.js";
+import { checkDrift, resolveJsonlPath } from "./silent-stdio-drift-detector.js";
+import { homedir } from "node:os";
 import { SessionGroupCoordinator } from "./session-group-coordinator.js";
 import type { GroupDegradeReason } from "./group-state-machine.js";
 import { isSupportedPairing as _isSupportedPairing } from "./backend-provider.js";
@@ -81,6 +83,14 @@ const RECONNECT_GRACE_MS = Number(process.env.COMPANION_RECONNECT_GRACE_MS || "3
  * incident that motivated this.
  */
 const RECURRING_SILENCE_ROTATE_THRESHOLD = 2;
+
+/**
+ * Interval for the silent-stdio drift detector tick (see
+ * `silent-stdio-drift-detector.ts`). 60s is a middle ground — fast
+ * enough to catch drift well before the 300s silence watchdog would,
+ * slow enough to keep the cost of per-session `stat()` calls negligible.
+ */
+const DRIFT_DETECTOR_TICK_MS = 60_000;
 
 /**
  * Group-level reconnect grace window (PLAN Task 2). Layered on top of the
@@ -539,6 +549,27 @@ export class SessionOrchestrator {
    * works, no rotation needed).
    */
   private silenceRecurrenceCounts = new Map<string, { count: number; lastSilentModel: string }>();
+
+  /**
+   * Recurring tick handle for the silent-stdio drift detector (see
+   * `silent-stdio-drift-detector.ts`). Compares each active Claude
+   * session's `~/.claude/projects/<slug>/<cliSid>.jsonl` freshness
+   * against its bun-managed transcript; if the CLI is actively
+   * writing to jsonl but the transcript has stalled, we've detected
+   * the two-writer divergence pattern (silent-stdio in the act) and
+   * kill the subprocess to force respawn. Started in
+   * {@link initialize}, cleared in {@link shutdown}. Complements —
+   * does not replace — the `SilentStdioWatchdog` on the adapter
+   * (arm-on-user-message, 300s deadline).
+   */
+  private driftDetectorTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Per-session `(jsonlLines, transcriptLen)` snapshot from the last
+   * drift-detector tick — reserved for future delta-over-time
+   * detection. Currently unused; the mtime-based check is sufficient
+   * for the 2026-09-11 failure pattern.
+   */
+  private driftPrevSnapshot = new Map<string, { jsonlMtimeMs: number; transcriptMtimeMs: number }>();
 
   // Idempotency guard for initialize()
   private _initialized = false;
@@ -1061,6 +1092,7 @@ export class SessionOrchestrator {
     // (or never fired — Docker/NFS) still wakes the observer within one tick,
     // not only at the next server restart.
     this.startObserverFailsafe();
+    this.startDriftDetector();
 
     // PLAN-aura-orchestrator-idle-auto-proceed Task 9: rehydrate the idle
     // timer manager's per-session iteration counters from on-disk traces.
@@ -1300,6 +1332,95 @@ export class SessionOrchestrator {
     }, OBSERVER_FAILSAFE_TICK_MS);
     timer.unref?.();
     this.observerFailsafeTimer = timer;
+  }
+
+  /**
+   * Silent-stdio drift detector — recurring tick. Idempotent: a
+   * second call while already armed is a no-op. Complements the
+   * adapter-side `SilentStdioWatchdog` (arm-on-user-message, 300s):
+   * this tick runs every {@link DRIFT_DETECTOR_TICK_MS} regardless
+   * of user activity and catches the same failure mode via jsonl-
+   * vs-transcript mtime divergence — often minutes before the
+   * watchdog would fire.
+   */
+  private startDriftDetector(): void {
+    if (this.driftDetectorTimer) return;
+    const timer = setInterval(() => {
+      try {
+        this.driftDetectorTick();
+      } catch (err) {
+        log.warn("session-orchestrator", "silent-stdio drift detector tick failed", {
+          event: "silent_stdio_drift.tick_failed",
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }, DRIFT_DETECTOR_TICK_MS);
+    timer.unref?.();
+    this.driftDetectorTimer = timer;
+  }
+
+  /**
+   * One pass of the drift detector. For each active Claude session
+   * with a resolved `cliSessionId + cwd`, resolve the CLI's jsonl
+   * path, stat it against the bun transcript, and — if `checkDrift`
+   * returns drifted=true — surface a browser toast + SIGTERM the
+   * subprocess. The existing `session:exited` → `scheduleProactiveRelaunch`
+   * path then respawns with `--resume`, giving a fresh stdio pipe.
+   *
+   * Codex-half sessions are skipped: Codex has a different jsonl
+   * layout (or none) and different failure modes; the detector is
+   * Claude-specific for now.
+   */
+  private driftDetectorTick(): void {
+    const claudeHome = `${homedir()}/.claude`;
+    for (const info of this.launcher.listSessions()) {
+      if (info.archived) continue;
+      if (info.backendType === "codex") continue;
+      if (info.state !== "connected" && info.state !== "running") continue;
+      if (!info.cliSessionId || !info.cwd) continue;
+      const jsonlPath = resolveJsonlPath(claudeHome, info.cwd, info.cliSessionId);
+      if (!jsonlPath) continue;
+      const transcriptPath = `${homedir()}/.companion/sessions/${info.sessionId}.json`;
+      const verdict = checkDrift(
+        {
+          sessionId: info.sessionId,
+          transcriptPath,
+          jsonlPath,
+        },
+        {},
+      );
+      // Cache last snapshot for future delta-over-time detection.
+      this.driftPrevSnapshot.set(info.sessionId, {
+        jsonlMtimeMs: verdict.jsonlMtimeMs,
+        transcriptMtimeMs: verdict.transcriptMtimeMs,
+      });
+      if (!verdict.drifted) continue;
+
+      // Belt-and-braces guards mirroring `handleBackendSilent`:
+      if (this.intentionalKills.has(info.sessionId)) continue;
+      if (this.relaunchExhaustedNotified.has(info.sessionId)) continue;
+
+      log.warn(
+        "session-orchestrator",
+        "silent-stdio drift detected — killing subprocess for relaunch",
+        {
+          event: "silent_stdio_drift.detected",
+          sessionId: info.sessionId,
+          mtimeDeltaMs: verdict.mtimeDeltaMs,
+          reason: verdict.reason,
+        },
+      );
+      this.wsBridge.broadcastToSession(info.sessionId, {
+        type: "error",
+        message: `Backend transcript ${Math.round(verdict.mtimeDeltaMs / 1000)}s behind CLI's jsonl — relaunching to recover.`,
+      });
+      // Fire-and-forget kill; the session:exited handler picks up.
+      // We do NOT await here because the outer setInterval callback
+      // is sync — a per-session kill blocking further sessions would
+      // delay the whole tick. `launcher.kill` is idempotent on
+      // already-dead sessions.
+      void this.launcher.kill(info.sessionId);
+    }
   }
 
   /**
@@ -4138,6 +4259,10 @@ export class SessionOrchestrator {
     if (this.observerFailsafeTimer) {
       clearInterval(this.observerFailsafeTimer);
       this.observerFailsafeTimer = null;
+    }
+    if (this.driftDetectorTimer) {
+      clearInterval(this.driftDetectorTimer);
+      this.driftDetectorTimer = null;
     }
   }
 
