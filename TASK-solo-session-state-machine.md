@@ -32,12 +32,35 @@ The group side got `group-state-machine.ts` (AP-2, pure `transition(state, event
 side never did — and this is the exact surface the 2026-09 churn kept re-patching (relaunch
 flicker, wedged keepalive, deaf-but-alive PID).
 
-## Recommended approach
+## ⚠️ Design caveat discovered 2026-09-11 (read before building a literal FSM)
 
-Introduce an explicit solo-session lifecycle state machine mirroring `group-state-machine.ts`:
+A first pass at the literal transition table found the five fields are **orthogonal
+dimensions, not one state**: a session can simultaneously be relaunch-in-flight AND carry an
+attempt count AND be flagged intentional-kill AND hold a keepalive timer. Fowler's suggested
+states (`idle | relaunching | cooling-down | exhausted | intentional-kill`) cannot represent
+those combinations without either (a) losing information, or (b) picking a precedence for
+e.g. `relaunching + intentional-kill` — and any such precedence **changes behavior**. So a
+faithful single-state FSM that "rejects invalid orderings" without altering semantics is NOT
+a clean drop-in; a naive one risks throwing on a currently-VALID ordering in prod.
+
+If this is pursued, the viable shape is NOT a lossy single enum but either:
+  - a small **product state** (the tuple of the orthogonal flags) with a `transition` that
+    guards only the genuinely-illegal edges (e.g. begin-relaunch while already relaunching,
+    mark-exhausted while not relaunching), leaving the legal cross-products untouched; or
+  - keep the encapsulation as-is and add **targeted precondition asserts** on the existing
+    `SoloRelaunchLifecycle` methods for the two documented invariants that actually caused
+    incidents ("mark intentional BEFORE the SIGTERM"; "a stale intentional mark must be
+    cleared or keepalive is locked out") — cheaper, and it does not risk the false-throw.
+
+The cohesion win (one owner, intention-revealing methods) is already shipped and is the bulk
+of the value; the enforcement layer is optional hardening, not a correctness fix.
+
+## Recommended approach (superseded — see caveat above)
+
+~~Introduce an explicit solo-session lifecycle state machine mirroring `group-state-machine.ts`:
 a pure `transition(state, event)` over `{ idle | relaunching | cooling-down | exhausted |
 intentional-kill }`, and collapse the scattered `Set`/`Map`s into its state so ordering
-invariants are enforced by construction, not comment discipline.
+invariants are enforced by construction, not comment discipline.~~
 
 Alternative lower-risk intermediate (if a full transition table is too big a step): extract a
 `SoloSessionLifecycle` helper class that OWNS the 9 fields and exposes intention-revealing
