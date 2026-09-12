@@ -127,7 +127,7 @@ vi.mock("../store.js", () => ({
   ),
 }));
 
-import { TaskPanel, GitHubPRDisplay, CodexRateLimitsSection, CodexTokenDetailsSection } from "./TaskPanel.js";
+import { TaskPanel, GitHubPRDisplay, CodexRateLimitsSection, CodexTokenDetailsSection, ClaudeContextSection } from "./TaskPanel.js";
 import { api } from "../api.js";
 import type { GitHubPRInfo } from "../api.js";
 
@@ -424,6 +424,45 @@ describe("CodexTokenDetailsSection", () => {
     });
     render(<CodexTokenDetailsSection sessionId="s1" />);
     expect(screen.queryByText("Context")).not.toBeInTheDocument();
+  });
+});
+
+// Claude sessions never surfaced context% even though the value is already in
+// the store (derived from result.modelUsage.contextWindow). This section adds
+// parity with Codex's context meter.
+describe("ClaudeContextSection", () => {
+  it("renders nothing when context_used_percent is 0 (fresh session, no turns yet)", () => {
+    resetStore({ sessions: new Map([["s1", { backend_type: "claude", context_used_percent: 0 }]]) });
+    const { container } = render(<ClaudeContextSection sessionId="s1" />);
+    expect(container.firstChild).toBeNull();
+    expect(screen.queryByText("Context")).not.toBeInTheDocument();
+  });
+
+  it("renders nothing when context_used_percent is absent", () => {
+    resetStore({ sessions: new Map([["s1", { backend_type: "claude" }]]) });
+    const { container } = render(<ClaudeContextSection sessionId="s1" />);
+    expect(container.firstChild).toBeNull();
+  });
+
+  it("renders the Context meter with the stored percent once usage exists", () => {
+    resetStore({ sessions: new Map([["s1", { backend_type: "claude", context_used_percent: 37 }]]) });
+    render(<ClaudeContextSection sessionId="s1" />);
+    expect(screen.getByText("Context")).toBeInTheDocument();
+    expect(screen.getByText("37%")).toBeInTheDocument();
+  });
+
+  it("uses the server-computed (capped) percent verbatim", () => {
+    resetStore({ sessions: new Map([["s1", { backend_type: "claude", context_used_percent: 100 }]]) });
+    render(<ClaudeContextSection sessionId="s1" />);
+    expect(screen.getByText("100%")).toBeInTheDocument();
+  });
+
+  it("passes axe accessibility checks", async () => {
+    const { axe } = await import("vitest-axe");
+    resetStore({ sessions: new Map([["s1", { backend_type: "claude", context_used_percent: 42 }]]) });
+    const { container } = render(<ClaudeContextSection sessionId="s1" />);
+    const results = await axe(container);
+    expect(results).toHaveNoViolations();
   });
 });
 

@@ -50,6 +50,7 @@ import {
   GitHubPRDisplay,
   CodexRateLimitsSection,
   CodexTokenDetailsSection,
+  ClaudeContextSection,
 } from "./TaskPanel.js";
 import { LinearLogo } from "./LinearLogo.js";
 import { SessionCreationProgress } from "./SessionCreationProgress.js";
@@ -4268,6 +4269,9 @@ function CodexPlaygroundDemo() {
     <div className="w-[280px] border border-cc-border rounded-xl overflow-hidden bg-cc-card">
       <CodexRateLimitsSection sessionId={CODEX_DEMO_SESSION} />
       <CodexTokenDetailsSection sessionId={CODEX_DEMO_SESSION} />
+      {/* Claude context-usage meter (parity with Codex) — reads the same
+          context_used_percent the store already carries for Claude sessions. */}
+      <ClaudeContextSection sessionId={CODEX_DEMO_SESSION} />
     </div>
   );
 }
