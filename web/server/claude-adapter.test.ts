@@ -1612,6 +1612,93 @@ describe("sendUserFrameFromServer (Council Mode auto-wake)", () => {
   });
 });
 
+// ─── Observer wake completion backstop — Council Review 2026-09-11 P2-3 ──────
+//
+// A wake `result` frame split across TCP chunks whose first chunk fails
+// JSON.parse never reaches `handleResultMessage`, so `observerTurnState`
+// strands `in-flight` forever and every future wake returns `busy` — the
+// observer pair deadlocks. The Codex adapter already carried this backstop
+// (`OBSERVER_WAKE_COMPLETION_WATCHDOG_MS`); these tests pin the Claude port:
+// the 360s timer force-releases the slot, and every legitimate return to
+// idle (normal result, transport close) clears the timer so it never
+// double-fires on a healthy turn.
+describe("observer wake completion backstop (P2-3)", () => {
+  const BACKSTOP_MS = 360_000;
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("force-releases a stranded in-flight wake turn at 360s and emits observer:turn-done", () => {
+    const adapter = new ClaudeAdapter("sess-backstop-1");
+    const ws = createMockSocket("sess-backstop-1");
+    adapter.attachWebSocket(ws);
+    expect(adapter.sendUserFrameFromServer("# Council Checkpoint stranded").kind).toBe("sent");
+    expect(adapter.getObserverTurnState()).toBe("in-flight");
+
+    const drained: unknown[] = [];
+    const off = companionBus.on("observer:turn-done", (e) => { drained.push(e); });
+
+    // Just before the deadline — still stranded, no force-release.
+    vi.advanceTimersByTime(BACKSTOP_MS - 1_000);
+    expect(adapter.getObserverTurnState()).toBe("in-flight");
+    expect(drained.length).toBe(0);
+
+    // Cross the deadline — slot force-released + drain emitted so the
+    // orchestrator can dispatch a queued checkpoint instead of deadlocking.
+    vi.advanceTimersByTime(2_000);
+    expect(adapter.getObserverTurnState()).toBe("idle");
+    expect(drained.length).toBe(1);
+    expect((drained[0] as { sessionId: string }).sessionId).toBe("sess-backstop-1");
+
+    // A fresh wake is now accepted (the pair is unblocked).
+    expect(adapter.sendUserFrameFromServer("next").kind).toBe("sent");
+    off();
+  });
+
+  it("does NOT fire the backstop when the turn completes normally via a result frame", () => {
+    const adapter = new ClaudeAdapter("sess-backstop-2");
+    const ws = createMockSocket("sess-backstop-2");
+    adapter.attachWebSocket(ws);
+    expect(adapter.sendUserFrameFromServer("first").kind).toBe("sent");
+
+    const drained: unknown[] = [];
+    const off = companionBus.on("observer:turn-done", (e) => { drained.push(e); });
+
+    // Result lands normally → idle + one drain emit from handleResultMessage.
+    adapter.handleRawMessage(makeResultMsg({ session_id: "cli-backstop-2" }));
+    expect(adapter.getObserverTurnState()).toBe("idle");
+    expect(drained.length).toBe(1);
+
+    // Push far past the deadline — the backstop was cleared on completion,
+    // so it must NOT force a second observer:turn-done.
+    vi.advanceTimersByTime(BACKSTOP_MS + 5_000);
+    expect(drained.length).toBe(1);
+    off();
+  });
+
+  it("clears the backstop on transport close so it cannot fire after teardown", () => {
+    const adapter = new ClaudeAdapter("sess-backstop-3");
+    const ws = createMockSocket("sess-backstop-3");
+    adapter.attachWebSocket(ws);
+    expect(adapter.sendUserFrameFromServer("first").kind).toBe("sent");
+
+    const drained: unknown[] = [];
+    const off = companionBus.on("observer:turn-done", (e) => { drained.push(e); });
+
+    adapter.handleTransportClose();
+    expect(adapter.getObserverTurnState()).toBe("idle");
+
+    // Transport-close reset already returned the slot to idle; the stale
+    // backstop must not fire a spurious drain 360s later.
+    vi.advanceTimersByTime(BACKSTOP_MS + 5_000);
+    expect(drained.length).toBe(0);
+    off();
+  });
+});
+
 // ─── orchestratorTurnState + orchestrator:turn-done event ──────────────────
 //
 // PLAN-aura-orchestrator-idle-auto-proceed Task 4. The orchestrator-half

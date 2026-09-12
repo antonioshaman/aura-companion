@@ -51,6 +51,7 @@ import { WebSocketCliTransport } from "./cli-transport.js";
 import type { CLIDedupState } from "./ws-bridge-cli-ingest.js";
 import { reportProtocolDrift } from "./protocol-monitor.js";
 import { companionBus } from "./event-bus.js";
+import { log } from "./logger.js";
 import { isToolUseDeniedForSynthetic, denialMessageForSynthetic } from "./auto-proceed-permissions.js";
 import { resolveModelAvailability } from "./model-availability.js";
 import { SilentStdioWatchdog } from "./silent-stdio-watchdog.js";
@@ -142,6 +143,21 @@ export function resolveSilentStdioTimeoutMs(
  * 30s still catches it two watchdog cycles earlier.
  */
 const INIT_FRAME_TIMEOUT_MS = 30_000;
+
+/**
+ * Backstop for a stuck observer wake turn. `observerTurnState` flips to
+ * `in-flight` when a wake `user` frame is sent and is only cleared by a
+ * parsed `result` frame (or a transport reset). Council review 2026-09-11
+ * P2-3: a `result` frame split across TCP chunks whose first chunk fails
+ * JSON.parse never reaches `handleResultMessage`, so the turn strands
+ * `in-flight` forever and every future wake returns `busy` — the observer
+ * pair deadlocks. The Codex adapter already carries this exact backstop
+ * (`OBSERVER_WAKE_COMPLETION_WATCHDOG_MS`); this ports it to Claude. On
+ * expiry we force-release the slot and emit `observer:turn-done` so the
+ * orchestrator drains any queued checkpoint. Kept identical (360s) to the
+ * Codex value so both backends have the same stranded-turn ceiling.
+ */
+const OBSERVER_WAKE_COMPLETION_WATCHDOG_MS = 360_000;
 
 /**
  * Adapter-level outcome of a wake send attempt. The orchestrator's
@@ -291,6 +307,13 @@ export class ClaudeAdapter implements IBackendAdapter {
   private observerTurnState: "idle" | "in-flight" = "idle";
 
   /**
+   * Backstop timer for {@link observerTurnState}. Armed when a wake turn
+   * goes `in-flight`, cleared on every legitimate return to `idle`. See
+   * {@link OBSERVER_WAKE_COMPLETION_WATCHDOG_MS} for the strand it guards.
+   */
+  private observerWakeWatchdog: ReturnType<typeof setTimeout> | null = null;
+
+  /**
    * Orchestrator-half per-turn state. Mirrors `observerTurnState` but
    * tracks the user-driven cycle on the OTHER half of a Council pair
    * (and on solo sessions). Discriminated union — NOT a boolean — so
@@ -415,6 +438,7 @@ export class ClaudeAdapter implements IBackendAdapter {
     // skips the reset, leaving `in-flight` from the prior socket and
     // permanently blocking the dispatcher.
     this.observerTurnState = "idle";
+    this.clearObserverWakeWatchdog();
     // Same discipline for the orchestrator half: a fresh socket has no
     // in-flight turn. Default `blockedByStop` to false on reattach —
     // the council slice will re-mutate via setter (Task 8 surface) when
@@ -460,6 +484,7 @@ export class ClaudeAdapter implements IBackendAdapter {
     if (this.transport?.raw !== ws) return;
     this.transport = null;
     this.observerTurnState = "idle";
+    this.clearObserverWakeWatchdog();
     // Mirror reset for the orchestrator-half. See `observerTurnState`
     // comment immediately above; same socket-bound semantics.
     this.orchestratorTurnState = { kind: "awaiting-input", blockedByStop: false };
@@ -538,6 +563,7 @@ export class ClaudeAdapter implements IBackendAdapter {
   handleTransportClose(): void {
     this.transport = null;
     this.observerTurnState = "idle";
+    this.clearObserverWakeWatchdog();
     // Transport gone = no more frames can arrive; the exit + relaunch
     // path takes over. Firing `backend-silent` on top of a real exit
     // would double-trigger the orchestrator.
@@ -1214,6 +1240,7 @@ export class ClaudeAdapter implements IBackendAdapter {
     // sessions off the bus channel.
     if (this.observerTurnState === "in-flight") {
       this.observerTurnState = "idle";
+      this.clearObserverWakeWatchdog();
       companionBus.emit("observer:turn-done", { sessionId: this.sessionId });
     }
     // Orchestrator-half symmetric emit. Only fires on the in-flight →
@@ -1657,6 +1684,9 @@ export class ClaudeAdapter implements IBackendAdapter {
     // Success: flip turn-state to in-flight. Activity was already
     // registered before the gates (Council Review #15).
     this.observerTurnState = "in-flight";
+    // P2-3: arm the completion backstop so a lost/unparseable `result`
+    // frame can't strand this turn `in-flight` forever.
+    this.armObserverWakeWatchdog();
     return { kind: "sent" };
   }
 
@@ -1671,6 +1701,39 @@ export class ClaudeAdapter implements IBackendAdapter {
    */
   getObserverTurnState(): "idle" | "in-flight" {
     return this.observerTurnState;
+  }
+
+  /**
+   * P2-3 backstop. Arm a one-shot timer that force-releases a wake turn
+   * stranded `in-flight` (lost/unparseable `result` frame). On expiry we
+   * flip back to `idle` and emit `observer:turn-done` — the same terminal
+   * transition {@link handleResultMessage} performs — so the orchestrator
+   * drains any queued checkpoint instead of deadlocking on `busy`. The
+   * timer is `unref`'d so it never keeps the process alive on shutdown.
+   * Mirrors `CodexAdapter.armObserverWakeWatchdog`.
+   */
+  private armObserverWakeWatchdog(): void {
+    this.clearObserverWakeWatchdog();
+    const timer = setTimeout(() => {
+      this.observerWakeWatchdog = null;
+      if (this.observerTurnState !== "in-flight") return;
+      log.warn("claude-adapter", "observer wake turn never terminated — force-releasing slot", {
+        event: "council.observer_wake_completion_watchdog",
+        sessionId: this.sessionId,
+        timeoutMs: OBSERVER_WAKE_COMPLETION_WATCHDOG_MS,
+      });
+      this.observerTurnState = "idle";
+      companionBus.emit("observer:turn-done", { sessionId: this.sessionId });
+    }, OBSERVER_WAKE_COMPLETION_WATCHDOG_MS);
+    if (typeof timer.unref === "function") timer.unref();
+    this.observerWakeWatchdog = timer;
+  }
+
+  private clearObserverWakeWatchdog(): void {
+    if (this.observerWakeWatchdog) {
+      clearTimeout(this.observerWakeWatchdog);
+      this.observerWakeWatchdog = null;
+    }
   }
 
   /**
