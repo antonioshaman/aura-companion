@@ -169,6 +169,7 @@ function createMockLauncher() {
     setArchived: vi.fn(),
     removeSession: vi.fn(),
     setCLISessionId: vi.fn(),
+    setModel: vi.fn(),
     markConnected: vi.fn(),
     getStartingSessions: vi.fn(() => []),
   } as any;
@@ -412,6 +413,7 @@ describe("SessionOrchestrator", () => {
       const clearPendingSyntheticTurn = vi.fn();
       orchestrator.setIdleTimerManager({
         noteUserMessage: () => {},
+        noteApiLimitReached: () => {},
         clearPendingSyntheticTurn,
         disposeAll: () => {},
         getIterationCount: () => 0,
@@ -426,6 +428,47 @@ describe("SessionOrchestrator", () => {
       companionBus.emit("session:exited", { sessionId: "s-exited-1", exitCode: 0 });
 
       expect(clearPendingSyntheticTurn).toHaveBeenCalledWith("s-exited-1");
+    });
+
+    it("pauses model fallback and AFK auto-proceed on API rate limits", async () => {
+      const noteApiLimitReached = vi.fn();
+      orchestrator.setIdleTimerManager({
+        noteUserMessage: () => {},
+        noteApiLimitReached,
+        clearPendingSyntheticTurn: () => {},
+        disposeAll: () => {},
+        getIterationCount: () => 0,
+        isSyntheticTurnInFlight: () => false,
+        noteTerminalResultFrame: () => {},
+        armForSession: () => undefined,
+        cancelForSession: () => undefined,
+        rehydrateFromTrace: () => undefined,
+      } as any);
+      deps.launcher.getSession.mockReturnValue({
+        sessionId: "sess-rate-limited",
+        model: "claude-opus-4-8",
+        archived: false,
+      });
+
+      orchestrator.initialize();
+      companionBus.emit("session:model-fallback", {
+        sessionId: "sess-rate-limited",
+        from: "<synthetic>",
+        to: "<resolve-at-orchestrator>",
+        reason: "rate_limit",
+      });
+      await Promise.resolve();
+
+      expect(noteApiLimitReached).toHaveBeenCalledWith("sess-rate-limited");
+      expect(deps.wsBridge.broadcastToSession).toHaveBeenCalledWith(
+        "sess-rate-limited",
+        expect.objectContaining({
+          type: "error",
+          message: expect.stringContaining("Automatic fallback"),
+        }),
+      );
+      expect(deps.launcher.setModel).not.toHaveBeenCalled();
+      expect(deps.launcher.kill).not.toHaveBeenCalled();
     });
 
     it("session exit callback notifies agentExecutor", () => {

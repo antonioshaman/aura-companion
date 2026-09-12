@@ -121,7 +121,8 @@ export type SkipReason =
   | "group-not-active"
   | "blocked-by-stop"
   | "in-flight"
-  | "reconnect-grace-active";
+  | "reconnect-grace-active"
+  | "api-limit-reached";
 
 /** EC-9 log entry shape. */
 export interface IdleTimerLogEntry {
@@ -202,6 +203,15 @@ interface ArmedTimerState {
    * turns overlap, the number form is the path of least migration.
    */
   pendingSyntheticTurnToken: number | null;
+  /**
+   * Sticky circuit breaker set when the CLI reports a terminal API
+   * quota/rate-limit surface for this session. Auto-proceed is useful
+   * only while the account/model can actually answer; after a 429/402,
+   * another unattended synthetic turn just burns attempts and can fan
+   * out more subagents into the same limit. Cleared only by a real
+   * user message, making the resume point explicit.
+   */
+  apiLimitReached: boolean;
 }
 
 /**
@@ -263,6 +273,7 @@ export class IdleTimerManager implements IdleTimerProbe {
       lastObjectiveGateResult: null,
       timer: null,
       pendingSyntheticTurnToken: null,
+      apiLimitReached: false,
     };
     fresh.iterationCount = trace.iterationCount;
     fresh.firedAt = [...trace.firedAt];
@@ -319,6 +330,7 @@ export class IdleTimerManager implements IdleTimerProbe {
         lastObjectiveGateResult: null,
         timer: null,
         pendingSyntheticTurnToken: null,
+        apiLimitReached: false,
       };
     state.options = options;
     state.turnToken += 1;
@@ -359,6 +371,37 @@ export class IdleTimerManager implements IdleTimerProbe {
     const state = this.states.get(sessionId);
     if (!state) return;
     state.turnToken += 1;
+    state.apiLimitReached = false;
+    if (state.timer) {
+      state.timer.cancel();
+      state.timer = null;
+    }
+  }
+
+  /**
+   * Stop unattended auto-proceed after a terminal API limit surface
+   * (Claude 429 session limit / billing exhaustion). Existing timers are
+   * cancelled immediately; future arm/fire attempts refuse until the
+   * user sends a new message and consciously resumes.
+   */
+  noteApiLimitReached(sessionId: string): void {
+    const state = this.states.get(sessionId);
+    if (!state) {
+      this.states.set(sessionId, {
+        sessionId,
+        options: { idleMs: 0, maxIterations: AUTO_PROCEED_MAX_ITERATIONS_CEILING },
+        turnToken: 0,
+        iterationCount: 0,
+        firedAt: [],
+        cappedAt: null,
+        lastObjectiveGateResult: null,
+        timer: null,
+        pendingSyntheticTurnToken: null,
+        apiLimitReached: true,
+      });
+      return;
+    }
+    state.apiLimitReached = true;
     if (state.timer) {
       state.timer.cancel();
       state.timer = null;
@@ -498,6 +541,8 @@ export class IdleTimerManager implements IdleTimerProbe {
     sessionId: string,
   ): { kind: "ok"; view: IdleTimerSessionView } | { kind: "blocked"; reason: SkipReason } {
     const view = this.deps.getSession(sessionId);
+    const state = this.states.get(sessionId);
+    if (state?.apiLimitReached) return { kind: "blocked", reason: "api-limit-reached" };
     if (!view) return { kind: "blocked", reason: "session-missing" };
     if (view.state !== "connected") return { kind: "blocked", reason: "session-not-connected" };
     if (view.sessionGroupRole !== "orchestrator")

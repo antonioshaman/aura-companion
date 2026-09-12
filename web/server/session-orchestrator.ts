@@ -4591,9 +4591,31 @@ export class SessionOrchestrator {
     to: string,
     reason: "rate_limit" | "out_of_credits" | "unknown_model" | "model_not_available",
   ): Promise<void> {
+    if (reason === "rate_limit" || reason === "out_of_credits") {
+      this.idleTimerManager.noteApiLimitReached(sessionId);
+    }
+
     const info = this.launcher.getSession(sessionId);
     if (!info || info.archived) return;
     if (this.intentionalKills.has(sessionId)) return;
+
+    if (reason === "rate_limit" || reason === "out_of_credits") {
+      this.wsBridge.broadcastToSession(sessionId, {
+        type: "error",
+        message:
+          reason === "rate_limit"
+            ? "Model hit a rate/session limit. Automatic fallback and AFK auto-proceed are paused; send a message manually after the reset."
+            : "Account credits are exhausted. Automatic fallback and AFK auto-proceed are paused until billing/credits recover.",
+      });
+      log.warn("orchestrator", "Model fallback paused for API limit", {
+        sessionId,
+        currentModel: info.model || from,
+        eventFrom: from,
+        eventTo: to,
+        reason,
+      });
+      return;
+    }
 
     // The adapter emits `from` from the message's own `model` field,
     // which is `<synthetic>` in exactly the failure surface we act on.
