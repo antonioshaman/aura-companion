@@ -362,6 +362,7 @@ interface CouncilWatcherEntry {
  *     - `backpressure` — observer socket's bufferedAmount exceeds threshold
  *     - `observer_busy` — observer turn-state is in-flight (queue in Task 4)
  *     - `build_error` — `buildObserverWakePayload` threw on input validation
+ *     - `api_limit_reached` — observer previously reported a 429/credit limit
  * `failed` — `adapter.cliSocket.send` threw synchronously; per Subprocess
  *   Council Rec 6, do NOT mark the half degraded — the natural socket-close
  *   handler will fire `session:exited` and the reconnect path takes over.
@@ -377,6 +378,7 @@ export type WakeDispatchOutcome =
       | "backpressure"
       | "observer_busy"
       | "build_error"
+      | "api_limit_reached"
       | "already_woken" }
   | { kind: "failed"; error: string };
 
@@ -2579,6 +2581,19 @@ export class SessionOrchestrator {
         });
         return outcome;
       }
+    }
+
+    if (this.idleTimerManager.isApiLimitReached(observerSessionId)) {
+      const outcome: WakeDispatchOutcome = { kind: "skipped", reason: "api_limit_reached" };
+      log.warn("session-orchestrator", "observer wake skipped after API limit", {
+        event: "group.observer_wake_skipped",
+        sessionGroupId,
+        observerSessionId,
+        checkpointId: payload.checkpoint_id,
+        sequence: payload.sequence,
+        reason: outcome.reason,
+      });
+      return outcome;
     }
 
     // Build the per-checkpoint context manifest (delta vs previous).

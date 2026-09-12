@@ -189,6 +189,23 @@ describe("aiEvaluate", () => {
     expect(result.ruleBasedOnly).toBe(false);
   });
 
+  it("does not send deprecated temperature in the Anthropic request body", async () => {
+    updateSettings({ anthropicApiKey: "test-key", anthropicModel: "test-model" });
+
+    vi.spyOn(globalThis, "fetch").mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        content: [{ type: "text", text: '{"verdict": "safe", "reason": "ok"}' }],
+      }),
+    } as Response);
+
+    await aiEvaluate("Bash", { command: "ls -la" });
+
+    const [, req] = vi.mocked(globalThis.fetch).mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(String(req.body)) as Record<string, unknown>;
+    expect(body).not.toHaveProperty("temperature");
+  });
+
   it("returns actionable reason for 401 Unauthorized (invalid API key)", async () => {
     // When the Anthropic API returns 401, the reason should indicate an invalid key
     // so the user knows exactly what to fix in settings.

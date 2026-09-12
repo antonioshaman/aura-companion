@@ -5,7 +5,7 @@ description: Meta-skill that analyzes the knowledge base itself — promotes rec
 user-invokable: true
 args:
   - name: mode
-    description: "promote" (move KB entries to CLAUDE.md), "prune" (remove stale), "gaps" (find missing knowledge), or "all" (default)
+    description: '"promote" (move KB entries to CLAUDE.md), "prune" (remove stale), "gaps" (find missing knowledge), or "all" (default)'
     required: false
 ---
 

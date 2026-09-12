@@ -186,7 +186,6 @@ export async function aiEvaluate(
         messages: [
           { role: "user", content: userPrompt },
         ],
-        temperature: 0,
       }),
       signal: controller.signal,
     });

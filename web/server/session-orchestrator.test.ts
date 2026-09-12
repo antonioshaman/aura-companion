@@ -3405,6 +3405,18 @@ describe("SessionOrchestrator", () => {
       expect(out.reason).toBe("group_not_active");
     });
 
+    // A prior 429/credit-limit on the observer half must pause unattended
+    // wake traffic too; otherwise a fresh checkpoint can spend Claude budget
+    // again even though model fallback and AFK auto-proceed are already paused.
+    it("returns skipped:api_limit_reached when the observer session is API-limited", () => {
+      seedActiveGroup("grp_d_limit");
+      orchestrator.getIdleTimerManager().noteApiLimitReached("sess_obs");
+      const out = callDispatch("grp_d_limit", validPayload("grp_d_limit"));
+      expect(out.kind).toBe("skipped");
+      expect(out.reason).toBe("api_limit_reached");
+      expect(deps.wsBridge.sendObserverWakeFrame).not.toHaveBeenCalled();
+    });
+
     // Group status reconnecting → queues into pendingCheckpoint (#3 fix).
     it("queues into pendingCheckpoint when coordinator status is reconnecting", () => {
       seedActiveGroup("grp_d_rec");

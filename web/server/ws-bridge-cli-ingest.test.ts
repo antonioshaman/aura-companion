@@ -64,6 +64,11 @@ describe("parseNDJSON", () => {
     const input = '{"a":1}\n{"b":2}\n';
     expect(parseNDJSON(input)).toEqual(['{"a":1}', '{"b":2}']);
   });
+
+  it("trims whitespace around frames before parsing", () => {
+    const input = '  {"a":1}  \n\t{"b":2}\r\n';
+    expect(parseNDJSON(input)).toEqual(['{"a":1}', '{"b":2}']);
+  });
 });
 
 // ─── isDuplicateCLIMessage ────────────────────────────────────────────────────

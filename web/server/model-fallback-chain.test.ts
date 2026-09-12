@@ -8,12 +8,12 @@ import {
 import { BROKEN_MODEL_SUBSTITUTIONS } from "./broken-model-substitution.js";
 
 describe("nextModelInChain", () => {
-  it("returns the model at index+1 for chain members", () => {
-    for (let i = 0; i < CLAUDE_MODEL_FALLBACK_CHAIN.length - 1; i++) {
-      const current = CLAUDE_MODEL_FALLBACK_CHAIN[i];
-      const expected = CLAUDE_MODEL_FALLBACK_CHAIN[i + 1];
-      expect(nextModelInChain(current)).toBe(expected);
-    }
+  it("returns the next usable model for chain members", () => {
+    expect(nextModelInChain("claude-opus-5")).toBe("claude-opus-4-8");
+    expect(nextModelInChain("claude-opus-4-8")).toBe("claude-opus-4-6");
+    expect(nextModelInChain("claude-opus-4-7")).toBe("claude-opus-4-6");
+    expect(nextModelInChain("claude-opus-4-6")).toBe("claude-sonnet-4-6");
+    expect(nextModelInChain("claude-sonnet-4-6")).toBe("claude-haiku-4-5");
   });
 
   it("returns null for the last model in the chain", () => {
@@ -31,6 +31,13 @@ describe("nextModelInChain", () => {
     expect(nextModelInChain(null)).toBeNull();
     expect(nextModelInChain(undefined)).toBeNull();
     expect(nextModelInChain("")).toBeNull();
+  });
+
+  it("skips fallback targets that are substituted back to an earlier model", () => {
+    // `claude-opus-4-7` currently spawns as 4.8 due a CLI stdout bug.
+    // Rotating 4.8 -> 4.7 would therefore relaunch right back on 4.8
+    // and reset the silence counter forever.
+    expect(nextModelInChain("claude-opus-4-8")).toBe("claude-opus-4-6");
   });
 
   it("chain is ordered strongest-to-weakest by convention (opus > sonnet > haiku)", () => {

@@ -562,6 +562,12 @@ export class ClaudeAdapter implements IBackendAdapter {
     );
 
     const lines = parseNDJSON(data);
+    if (lines.length > 0) {
+      // Any non-empty CLI line proves the stdio pipe is alive, even if
+      // the line later fails protocol parsing. Without this, malformed
+      // but arriving output can let the silent watchdog kill a live turn.
+      this.silenceWatchdog.onFrame();
+    }
     for (const line of lines) {
       let msg: CLIMessage;
       try {
@@ -870,12 +876,6 @@ export class ClaudeAdapter implements IBackendAdapter {
     if (msg.type !== "keep_alive") {
       this.onActivityUpdate?.();
     }
-
-    // Any parseable frame — including keep_alives — is proof the stdio
-    // pipe is delivering. Slide the silence deadline forward. The 2026-
-    // 09-09 failure mode is exactly the opposite: ZERO frames for
-    // minutes while the subprocess kept working on its own jsonl.
-    this.silenceWatchdog.onFrame();
 
     switch (msg.type) {
       case "system":

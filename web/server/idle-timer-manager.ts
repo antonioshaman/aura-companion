@@ -423,6 +423,16 @@ export class IdleTimerManager implements IdleTimerProbe {
   }
 
   /**
+   * Read-only circuit-breaker probe for other unattended automation paths.
+   * Auto-proceed is not the only server-originated Claude prompt: Council
+   * observer wakes can also spend API budget without a new user turn. Once a
+   * session reports a quota/rate-limit surface, those paths should pause too.
+   */
+  isApiLimitReached(sessionId: string): boolean {
+    return this.states.get(sessionId)?.apiLimitReached === true;
+  }
+
+  /**
    * PLAN Task 11.4 — sticky synthetic-turn accessor for the denylist
    * gate (Task 11.5) and downstream consumers. Returns `true` between
    * the manager's successful `fire()` and the matching
