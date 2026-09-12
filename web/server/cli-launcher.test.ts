@@ -161,7 +161,7 @@ vi.mock("./settings-manager.js", () => ({
 // ─── Imports (after mocks) ───────────────────────────────────────────────────
 
 import { SessionStore } from "./session-store.js";
-import { CliLauncher, shouldClearResumeAfterExit } from "./cli-launcher.js";
+import { CliLauncher, shouldClearResumeAfterExit, resumeFailureThresholdFor, resumeTranscriptExists } from "./cli-launcher.js";
 import type { SdkSessionInfo } from "./cli-launcher.js";
 import { readLaunchableCodexModels } from "./codex-models.js";
 import { companionBus } from "./event-bus.js";
@@ -3518,5 +3518,46 @@ describe("shouldClearResumeAfterExit", () => {
     // there is no conversation reference to protect.
     expect(shouldClearResumeAfterExit(session, 200, false)).toBe(false);
     expect(session.resumeImmediateFailures).toBe(0);
+  });
+
+  // P2-1: a caller-injected higher threshold (transcript present) tolerates more
+  // fast deaths before discarding the anchor, but still discards eventually.
+  it("honours a higher injected threshold before discarding (transcript-present path)", () => {
+    const session = mkSession();
+    expect(shouldClearResumeAfterExit(session, 500, true, 4)).toBe(false); // 1
+    expect(shouldClearResumeAfterExit(session, 500, true, 4)).toBe(false); // 2 — base would have discarded here
+    expect(shouldClearResumeAfterExit(session, 500, true, 4)).toBe(false); // 3
+    expect(shouldClearResumeAfterExit(session, 500, true, 4)).toBe(true);  // 4 — fresh-start fallback still fires
+    expect(session.resumeImmediateFailures).toBe(4);
+  });
+});
+
+// P2-1: pure threshold selector — a present transcript (Claude only) earns a
+// higher discard bar; Codex and absent transcripts keep the base threshold.
+describe("resumeFailureThresholdFor", () => {
+  it("gives Claude with a present transcript the elevated threshold (4)", () => {
+    expect(resumeFailureThresholdFor("claude", true)).toBe(4);
+  });
+  it("keeps the base threshold (2) for Claude without a transcript", () => {
+    expect(resumeFailureThresholdFor("claude", false)).toBe(2);
+  });
+  it("keeps the base threshold (2) for Codex even with a transcript (no jsonl resume model)", () => {
+    expect(resumeFailureThresholdFor("codex", true)).toBe(2);
+  });
+  it("treats an undefined backend as non-Codex (elevated when transcript present)", () => {
+    expect(resumeFailureThresholdFor(undefined, true)).toBe(4);
+  });
+});
+
+// P2-1: transcript-existence predicate with injected stat (EC-7).
+describe("resumeTranscriptExists", () => {
+  it("returns true when the transcript file exists with content", () => {
+    expect(resumeTranscriptExists("/x/cli.jsonl", () => ({ size: 4096 }))).toBe(true);
+  });
+  it("returns false for an empty (0-byte) transcript", () => {
+    expect(resumeTranscriptExists("/x/cli.jsonl", () => ({ size: 0 }))).toBe(false);
+  });
+  it("returns false when stat throws (missing/unreadable → cannot confirm)", () => {
+    expect(resumeTranscriptExists("/x/cli.jsonl", () => { throw new Error("ENOENT"); })).toBe(false);
   });
 });
