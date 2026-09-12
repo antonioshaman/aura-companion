@@ -1273,10 +1273,14 @@ describe("kill: restart-survived processes", () => {
     killSpy.mockRestore();
   });
 
-  it("terminates restart-survived Codex during restore because its proxy died with Bun", async () => {
+  // P3-4: Codex boot recovery now runs the SAME identity probe as Claude
+  // before terminating the surviving app-server PID. `match` → SIGTERM (the
+  // proxy died with Bun, so the process is unreachable and must go).
+  it("terminates restart-survived Codex during restore when identity verifies (proxy died with Bun)", async () => {
+    const sessionId = "survived-codex";
     store.saveLauncher([
       {
-        sessionId: "survived-codex",
+        sessionId,
         pid: 99001,
         state: "connected" as const,
         cwd: "/tmp/project",
@@ -1285,31 +1289,88 @@ describe("kill: restart-survived processes", () => {
         backendType: "codex" as const,
       },
     ]);
-    const newLauncher = new CliLauncher(3456);
-    newLauncher.setStore(store);
+    // Codex host spawns write the same argvSha256 + processStartMs sidecar as
+    // stdio Claude; that hash is the identity anchor (no --sdk-url token).
+    const codexArgv = ["/usr/local/bin/codex", "app-server", "--port", "45999"];
+    writeRuntimeSidecar(store.directory, sessionId, {
+      schemaVersion: SIDECAR_SCHEMA_VERSION,
+      pid: 99001,
+      processStartMs: 1_700_000_000_000,
+      argvSha256: argvSha256(codexArgv),
+    });
+    const procStat = `1 (codex) ${["S", "1", ...Array(20).fill("0")].join(" ")}\n`;
+    const procIdentity = await import("./process-identity.js");
+    procIdentity.setProcReaderForTests({
+      platform: () => "linux",
+      killCheck: () => true,
+      readCmdline: () => codexArgv.join("\0") + "\0",
+      readStat: () => procStat,
+      readBootStat: () => `btime 1700000000\n`,
+      clkTck: 100,
+    });
 
-    const origKill = process.kill;
-    let sigtermSent = false;
-    const killSpy = vi.spyOn(process, "kill").mockImplementation(((
-      pid: number,
-      signal?: string | number,
-    ) => {
-      if (signal === 0) {
-        // Alive during the boot liveness probe; gone once SIGTERM landed.
-        if (sigtermSent) throw new Error("ESRCH");
-        return true;
-      }
-      if (signal === "SIGTERM") { sigtermSent = true; return true; }
-      return origKill.call(process, pid, signal as any);
-    }) as any);
-    expect(newLauncher.restoreFromDisk()).toBe(0);
-    expect(killSpy).toHaveBeenCalledWith(99001, "SIGTERM");
-    const restored = newLauncher.getSession("survived-codex");
-    expect(restored?.state).toBe("exited");
-    expect(restored?.pid).toBeUndefined();
-    expect(restored?.cliSessionId).toBe("cli-cx");
+    const killSpy = vi.spyOn(process, "kill").mockImplementation((() => true) as never);
+    try {
+      const newLauncher = new CliLauncher(3456);
+      newLauncher.setStore(store);
+      expect(newLauncher.restoreFromDisk()).toBe(0);
+      expect(killSpy).toHaveBeenCalledWith(99001, "SIGTERM");
+      const restored = newLauncher.getSession(sessionId);
+      expect(restored?.state).toBe("exited");
+      expect(restored?.pid).toBeUndefined();
+      expect(restored?.cliSessionId).toBe("cli-cx");
+    } finally {
+      killSpy.mockRestore();
+    }
+  });
 
-    killSpy.mockRestore();
+  // P3-4 core: a reused PID whose argv no longer matches the spawn sidecar must
+  // NOT be SIGTERM'd (that was the collateral-kill hazard). The session still
+  // ends `exited` — our process is gone regardless — but the stranger lives.
+  it("does NOT SIGTERM a restart-survived Codex PID when identity mismatches (leak-safe over wrong-kill)", async () => {
+    const sessionId = "survived-codex-reuse";
+    store.saveLauncher([
+      {
+        sessionId,
+        pid: 99002,
+        state: "connected" as const,
+        cwd: "/tmp/project",
+        createdAt: Date.now(),
+        cliSessionId: "cli-cx2",
+        backendType: "codex" as const,
+      },
+    ]);
+    // Sidecar records the argv we spawned…
+    writeRuntimeSidecar(store.directory, sessionId, {
+      schemaVersion: SIDECAR_SCHEMA_VERSION,
+      pid: 99002,
+      processStartMs: 1_700_000_000_000,
+      argvSha256: argvSha256(["/usr/local/bin/codex", "app-server", "--port", "45999"]),
+    });
+    // …but the live PID is now an unrelated process (different argv) → mismatch.
+    const procIdentity = await import("./process-identity.js");
+    procIdentity.setProcReaderForTests({
+      platform: () => "linux",
+      killCheck: () => true,
+      readCmdline: () => ["/usr/bin/python3", "-m", "http.server"].join("\0") + "\0",
+      readStat: () => `1 (python3) ${["S", "1", ...Array(20).fill("0")].join(" ")}\n`,
+      readBootStat: () => `btime 1700000000\n`,
+      clkTck: 100,
+    });
+
+    const killSpy = vi.spyOn(process, "kill").mockImplementation((() => true) as never);
+    try {
+      const newLauncher = new CliLauncher(3456);
+      newLauncher.setStore(store);
+      expect(newLauncher.restoreFromDisk()).toBe(0);
+      // The reused PID was NOT terminated.
+      expect(killSpy).not.toHaveBeenCalledWith(99002, "SIGTERM");
+      const restored = newLauncher.getSession(sessionId);
+      expect(restored?.state).toBe("exited");
+      expect(restored?.pid).toBeUndefined();
+    } finally {
+      killSpy.mockRestore();
+    }
   });
 });
 
@@ -2461,14 +2522,17 @@ describe("persistence", () => {
 
       warnSpy.mockRestore();
     });
-    it("terminates restart-survived host-mode Codex instead of stranding it in starting", async () => {
+    it("terminates restart-survived host-mode Codex (+releases WS port) when identity verifies", async () => {
       // Host-mode Codex is two processes: app-server plus Companion proxy/adapter.
       // After Bun restarts only the app-server PID can survive, so PID liveness
-      // is not a usable connection signal; keep the thread anchor and relaunch later.
-
-      const savedSessions = [
+      // is not a usable connection signal — the session must end `exited` for a
+      // browser-triggered --resume, never stranded in `starting`. P3-4: the
+      // SIGTERM is now gated on the SAME identity probe Claude uses (a verifying
+      // Codex sidecar), so a reused PID isn't collateral-killed.
+      const sessionId = "codex-host-1";
+      store.saveLauncher([
         {
-          sessionId: "codex-host-1",
+          sessionId,
           pid: 33333,
           state: "connected" as const,
           cwd: "/tmp/project",
@@ -2477,30 +2541,40 @@ describe("persistence", () => {
           cliSessionId: "codex-cli-xyz",
           codexWsPort: 4501,
         },
-      ];
-      store.saveLauncher(savedSessions);
+      ]);
+      const codexArgv = ["codex", "app-server", "--listen", "127.0.0.1:0"];
+      writeRuntimeSidecar(store.directory, sessionId, {
+        schemaVersion: SIDECAR_SCHEMA_VERSION,
+        pid: 33333,
+        processStartMs: 1_700_000_000_000,
+        argvSha256: argvSha256(codexArgv),
+      });
       const killSpy = vi.spyOn(process, "kill").mockImplementation((() => true) as never);
-      // Install a hostile identity reader that WOULD mismatch; Codex exits
-      // before this probe is consulted.
       const procIdentity = await import("./process-identity.js");
       procIdentity.setProcReaderForTests({
         platform: () => "linux",
-        killCheck: () => false, // would yield "gone" if the probe ran
-        readCmdline: () => ["codex", "app-server", "--listen", "127.0.0.1:0"].join("\0") + "\0",
+        killCheck: () => true,
+        readCmdline: () => codexArgv.join("\0") + "\0",
+        readStat: () => `1 (codex) ${["S", "1", ...Array(20).fill("0")].join(" ")}\n`,
+        readBootStat: () => `btime 1700000000\n`,
+        clkTck: 100,
       });
 
-      const newLauncher = new CliLauncher(3456);
-      newLauncher.setStore(store);
-      const recovered = newLauncher.restoreFromDisk();
-      expect(recovered).toBe(0);
-      expect(killSpy).toHaveBeenCalledWith(33333, "SIGTERM");
-      const session = newLauncher.getSession("codex-host-1");
-      expect(session?.state).toBe("exited");
-      expect(session?.pid).toBeUndefined();
-      expect(session?.codexWsPort).toBeUndefined();
-      expect(session?.cliSessionId).toBe("codex-cli-xyz");
-
-      killSpy.mockRestore();
+      try {
+        const newLauncher = new CliLauncher(3456);
+        newLauncher.setStore(store);
+        const recovered = newLauncher.restoreFromDisk();
+        expect(recovered).toBe(0);
+        expect(killSpy).toHaveBeenCalledWith(33333, "SIGTERM");
+        const session = newLauncher.getSession(sessionId);
+        expect(session?.state).toBe("exited");
+        expect(session?.pid).toBeUndefined();
+        expect(session?.codexWsPort).toBeUndefined();
+        expect(session?.cliSessionId).toBe("codex-cli-xyz");
+      } finally {
+        killSpy.mockRestore();
+        procIdentity.__resetProcReaderForTests();
+      }
     });
 
     it("returns 0 when no store is set", () => {
