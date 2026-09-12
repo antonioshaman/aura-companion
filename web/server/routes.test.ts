@@ -4713,7 +4713,17 @@ describe("POST /api/sessions/:id/processes/system/:pid/kill", () => {
 
   it("kills process in container when session has containerId", async () => {
     launcher.getSession.mockReturnValue({ pid: 1234, containerId: "cid123" });
-    const execSpy = vi.spyOn(containerManager, "execInContainer").mockReturnValue("");
+    // P3-5/P3-7: the kill now first re-enumerates the session's dev processes
+    // (ownership scan). First execInContainer call = the lsof scan (must
+    // surface pid 9999); subsequent call = the kill itself.
+    const execSpy = vi.spyOn(containerManager, "execInContainer")
+      .mockReturnValueOnce(
+        [
+          "COMMAND   PID USER   FD   TYPE   DEVICE SIZE/OFF NODE NAME",
+          "node     9999 test   20u  IPv6 0x1      0t0  TCP *:3000 (LISTEN)",
+        ].join("\n"),
+      )
+      .mockReturnValue("");
 
     const res = await app.request("/api/sessions/sess-1/processes/system/9999/kill", {
       method: "POST",
@@ -4732,6 +4742,13 @@ describe("POST /api/sessions/:id/processes/system/:pid/kill", () => {
 
   it("kills process on host when session has no container", async () => {
     launcher.getSession.mockReturnValue({ pid: 1234 });
+    // P3-5/P3-7: ownership scan must surface pid 9999 as a dev process.
+    vi.mocked(execSync).mockReturnValueOnce(
+      [
+        "COMMAND   PID USER   FD   TYPE   DEVICE SIZE/OFF NODE NAME",
+        "node     9999 test   20u  IPv6 0x1      0t0  TCP *:3000 (LISTEN)",
+      ].join("\n"),
+    );
     const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
 
     const res = await app.request("/api/sessions/sess-1/processes/system/9999/kill", {
@@ -4740,6 +4757,48 @@ describe("POST /api/sessions/:id/processes/system/:pid/kill", () => {
     expect(res.status).toBe(200);
     const data = await res.json();
     expect(data.ok).toBe(true);
+    expect(killSpy).toHaveBeenCalledWith(9999, "SIGTERM");
+
+    killSpy.mockRestore();
+  });
+
+  // ── P3-5 / P3-7: arbitrary-process-kill hardening ───────────────────────
+  it("refuses (403) to kill a pid that is not one of the session's dev processes", async () => {
+    launcher.getSession.mockReturnValue({ pid: 1234 });
+    // Scan surfaces a DIFFERENT dev pid (4321), not the requested 9999.
+    vi.mocked(execSync).mockReturnValueOnce(
+      [
+        "COMMAND   PID USER   FD   TYPE   DEVICE SIZE/OFF NODE NAME",
+        "node     4321 test   20u  IPv6 0x1      0t0  TCP *:3000 (LISTEN)",
+      ].join("\n"),
+    );
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+
+    const res = await app.request("/api/sessions/sess-1/processes/system/9999/kill", {
+      method: "POST",
+    });
+    expect(res.status).toBe(403);
+    const data = await res.json();
+    expect(data.error).toContain("not one of this session's dev processes");
+    expect(killSpy).not.toHaveBeenCalled();
+
+    killSpy.mockRestore();
+  });
+
+  it("fails closed (500) and does not kill when the ownership scan throws", async () => {
+    launcher.getSession.mockReturnValue({ pid: 1234 });
+    vi.mocked(execSync).mockImplementationOnce(() => {
+      throw new Error("lsof unavailable");
+    });
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(() => true);
+
+    const res = await app.request("/api/sessions/sess-1/processes/system/9999/kill", {
+      method: "POST",
+    });
+    expect(res.status).toBe(500);
+    const data = await res.json();
+    expect(data.error).toContain("Could not verify process ownership");
+    expect(killSpy).not.toHaveBeenCalled();
 
     killSpy.mockRestore();
   });

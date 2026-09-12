@@ -1619,51 +1619,77 @@ export function createRoutes(
     return ts;
   }
 
+  /**
+   * Enumerate the session's dev-related processes that are LISTENing on a TCP
+   * port, keyed by pid. Single source of truth shared by the GET listing and
+   * the kill guard.
+   *
+   * Council review 2026-09-11 P3-5 / P3-7 (Hunt + Fowler): the kill endpoint
+   * must only ever terminate a pid this scan actually attributes to the
+   * session — never an arbitrary caller-supplied pid. Extracting the scan
+   * here means the "what pids belong to this session" set the GET handler
+   * shows and the set the kill handler enforces can never drift apart.
+   */
+  function scanSessionDevProcesses(
+    session: { containerId?: string | null },
+  ): Map<number, { command: string; ports: Set<number> }> {
+    let raw: string;
+    if (session.containerId) {
+      raw = containerManager.execInContainer(
+        session.containerId,
+        ["sh", "-c", "lsof -iTCP -sTCP:LISTEN -P -n 2>/dev/null || ss -tlnp 2>/dev/null || true"],
+        5_000,
+      );
+    } else {
+      raw = execSync("lsof -iTCP -sTCP:LISTEN -P -n 2>/dev/null || true", {
+        timeout: 5_000,
+        encoding: "utf-8",
+      });
+    }
+
+    // Parse lsof output: COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
+    const lines = raw.trim().split("\n").slice(1); // skip header
+    const pidMap = new Map<number, { command: string; ports: Set<number> }>();
+
+    for (const line of lines) {
+      const parts = line.trim().split(/\s+/);
+      if (parts.length < 9) continue;
+      const command = parts[0];
+      const pid = parseInt(parts[1], 10);
+      if (isNaN(pid)) continue;
+      if (EXCLUDE_COMMANDS.has(command)) continue;
+
+      // Keep only dev-server commands (exact name, lower-cased, or prefix).
+      // Applied here so both consumers agree on the dev-process set.
+      const lowerCmd = command.toLowerCase();
+      const isDev = DEV_COMMANDS.has(lowerCmd)
+        || DEV_COMMANDS.has(command)
+        || [...DEV_COMMANDS].some((d) => lowerCmd.startsWith(d));
+      if (!isDev) continue;
+
+      // macOS lsof NAME ends like `TCP *:3000 (LISTEN)`, so the final token is
+      // often `(LISTEN)` rather than the address. Parse from the full line.
+      const portMatch = line.match(/:(\d+)\s+\(LISTEN\)\s*$/) ?? line.match(/:(\d+)\s*$/);
+      if (!portMatch) continue;
+      const port = parseInt(portMatch[1], 10);
+
+      const existing = pidMap.get(pid);
+      if (existing) {
+        existing.ports.add(port);
+      } else {
+        pidMap.set(pid, { command, ports: new Set([port]) });
+      }
+    }
+    return pidMap;
+  }
+
   api.get("/sessions/:id/processes/system", async (c) => {
     const sessionId = c.req.param("id");
     const session = launcher.getSession(sessionId);
     if (!session) return c.json({ error: "Session not found" }, 404);
 
     try {
-      let raw: string;
-      if (session.containerId) {
-        raw = containerManager.execInContainer(
-          session.containerId,
-          ["sh", "-c", "lsof -iTCP -sTCP:LISTEN -P -n 2>/dev/null || ss -tlnp 2>/dev/null || true"],
-          5_000,
-        );
-      } else {
-        raw = execSync("lsof -iTCP -sTCP:LISTEN -P -n 2>/dev/null || true", {
-          timeout: 5_000,
-          encoding: "utf-8",
-        });
-      }
-
-      // Parse lsof output: COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
-      const lines = raw.trim().split("\n").slice(1); // skip header
-      const pidMap = new Map<number, { command: string; ports: Set<number> }>();
-
-      for (const line of lines) {
-        const parts = line.trim().split(/\s+/);
-        if (parts.length < 9) continue;
-        const command = parts[0];
-        const pid = parseInt(parts[1], 10);
-        if (isNaN(pid)) continue;
-        if (EXCLUDE_COMMANDS.has(command)) continue;
-
-        // macOS lsof NAME ends like `TCP *:3000 (LISTEN)`, so the final token is
-        // often `(LISTEN)` rather than the address. Parse from the full line.
-        const portMatch = line.match(/:(\d+)\s+\(LISTEN\)\s*$/) ?? line.match(/:(\d+)\s*$/);
-        if (!portMatch) continue;
-        const port = parseInt(portMatch[1], 10);
-
-        const existing = pidMap.get(pid);
-        if (existing) {
-          existing.ports.add(port);
-        } else {
-          pidMap.set(pid, { command, ports: new Set([port]) });
-        }
-      }
+      const pidMap = scanSessionDevProcesses(session);
 
       // Get full command line for each PID
       const processes: {
@@ -1676,14 +1702,7 @@ export function createRoutes(
       }[] = [];
 
       for (const [pid, info] of pidMap) {
-        // Skip if command isn't dev-related (check both exact name and prefix)
-        const lowerCmd = info.command.toLowerCase();
-        const isDev = DEV_COMMANDS.has(lowerCmd)
-          || DEV_COMMANDS.has(info.command)
-          || [...DEV_COMMANDS].some((d) => lowerCmd.startsWith(d));
-
-        if (!isDev) continue;
-
+        // `scanSessionDevProcesses` already filtered to dev commands.
         let fullCommand = info.command;
         let cwd: string | undefined;
         let startedAt: number | undefined;
@@ -1781,6 +1800,27 @@ export function createRoutes(
     }
     if (session.pid === pid) {
       return c.json({ error: "Use the session kill endpoint to terminate Claude" }, 403);
+    }
+
+    // Council review 2026-09-11 P3-5 / P3-7: only permit killing a pid this
+    // session actually surfaced as one of its own dev processes. Without this
+    // the endpoint would SIGTERM ANY caller-supplied pid (arbitrary-process-kill
+    // + orphan-reaper argv-ownership bypass). Re-enumerate and reject anything
+    // outside that set. Fail CLOSED: if the ownership scan itself fails we
+    // cannot prove the pid belongs to the session, so we refuse rather than
+    // kill blind.
+    let ownedPids: Set<number>;
+    try {
+      ownedPids = new Set(scanSessionDevProcesses(session).keys());
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return c.json({ error: `Could not verify process ownership: ${msg}` }, 500);
+    }
+    if (!ownedPids.has(pid)) {
+      return c.json(
+        { error: "PID is not one of this session's dev processes" },
+        403,
+      );
     }
 
     try {

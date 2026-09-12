@@ -1612,6 +1612,146 @@ describe("sendUserFrameFromServer (Council Mode auto-wake)", () => {
   });
 });
 
+// ─── Observer wake completion backstop — Council Review 2026-09-11 P2-3 ──────
+//
+// A wake `result` frame split across TCP chunks whose first chunk fails
+// JSON.parse never reaches `handleResultMessage`, so `observerTurnState`
+// strands `in-flight` forever and every future wake returns `busy` — the
+// observer pair deadlocks. The Codex adapter already carried this backstop
+// (`OBSERVER_WAKE_COMPLETION_WATCHDOG_MS`); these tests pin the Claude port:
+// the 360s timer force-releases the slot, and every legitimate return to
+// idle (normal result, transport close) clears the timer so it never
+// double-fires on a healthy turn.
+describe("observer wake completion backstop (P2-3)", () => {
+  const BACKSTOP_MS = 360_000;
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("force-releases a stranded in-flight wake turn at 360s and emits observer:turn-done", () => {
+    const adapter = new ClaudeAdapter("sess-backstop-1");
+    const ws = createMockSocket("sess-backstop-1");
+    adapter.attachWebSocket(ws);
+    expect(adapter.sendUserFrameFromServer("# Council Checkpoint stranded").kind).toBe("sent");
+    expect(adapter.getObserverTurnState()).toBe("in-flight");
+
+    const drained: unknown[] = [];
+    const off = companionBus.on("observer:turn-done", (e) => { drained.push(e); });
+
+    // Just before the deadline — still stranded, no force-release.
+    vi.advanceTimersByTime(BACKSTOP_MS - 1_000);
+    expect(adapter.getObserverTurnState()).toBe("in-flight");
+    expect(drained.length).toBe(0);
+
+    // Cross the deadline — slot force-released + drain emitted so the
+    // orchestrator can dispatch a queued checkpoint instead of deadlocking.
+    vi.advanceTimersByTime(2_000);
+    expect(adapter.getObserverTurnState()).toBe("idle");
+    expect(drained.length).toBe(1);
+    expect((drained[0] as { sessionId: string }).sessionId).toBe("sess-backstop-1");
+
+    // A fresh wake is now accepted (the pair is unblocked).
+    expect(adapter.sendUserFrameFromServer("next").kind).toBe("sent");
+    off();
+  });
+
+  it("does NOT fire the backstop when the turn completes normally via a result frame", () => {
+    const adapter = new ClaudeAdapter("sess-backstop-2");
+    const ws = createMockSocket("sess-backstop-2");
+    adapter.attachWebSocket(ws);
+    expect(adapter.sendUserFrameFromServer("first").kind).toBe("sent");
+
+    const drained: unknown[] = [];
+    const off = companionBus.on("observer:turn-done", (e) => { drained.push(e); });
+
+    // Result lands normally → idle + one drain emit from handleResultMessage.
+    adapter.handleRawMessage(makeResultMsg({ session_id: "cli-backstop-2" }));
+    expect(adapter.getObserverTurnState()).toBe("idle");
+    expect(drained.length).toBe(1);
+
+    // Push far past the deadline — the backstop was cleared on completion,
+    // so it must NOT force a second observer:turn-done.
+    vi.advanceTimersByTime(BACKSTOP_MS + 5_000);
+    expect(drained.length).toBe(1);
+    off();
+  });
+
+  it("clears the backstop on transport close so it cannot fire after teardown", () => {
+    const adapter = new ClaudeAdapter("sess-backstop-3");
+    const ws = createMockSocket("sess-backstop-3");
+    adapter.attachWebSocket(ws);
+    expect(adapter.sendUserFrameFromServer("first").kind).toBe("sent");
+
+    const drained: unknown[] = [];
+    const off = companionBus.on("observer:turn-done", (e) => { drained.push(e); });
+
+    adapter.handleTransportClose();
+    expect(adapter.getObserverTurnState()).toBe("idle");
+
+    // Transport-close reset already returned the slot to idle; the stale
+    // backstop must not fire a spurious drain 360s later.
+    vi.advanceTimersByTime(BACKSTOP_MS + 5_000);
+    expect(drained.length).toBe(0);
+    off();
+  });
+});
+
+// ─── silent-stdio watchdog arming at the 300s default — P2-6 ────────────────
+//
+// The default (300_000 ms) is unit-asserted on resolveSilentStdioTimeoutMs and
+// the generic fire/no-fire behaviour on SilentStdioWatchdog, but the review
+// (2026-09-11 P2-6) flagged that nothing verified `new ClaudeAdapter()` ACTUALLY
+// arms its watchdog at that value. These tests pin the wiring: a user turn arms
+// it, it fires session:backend-silent just past 300s and not before, and any CLI
+// frame in the window resets the deadline (no false positive on a live turn).
+describe("silent-stdio watchdog arming (P2-6)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("arms at the 300000ms default: fires session:backend-silent just past the deadline, not before", () => {
+    const adapter = new ClaudeAdapter("sess-wd-300");
+    adapter.attachWebSocket(createMockSocket("sess-wd-300"));
+    const silent: unknown[] = [];
+    const off = companionBus.on("session:backend-silent", (e) => { silent.push(e); });
+
+    // A user turn arms the silence watchdog.
+    adapter.send({ type: "user_message", content: "hello" });
+
+    // Just before the 300s deadline — must NOT fire.
+    vi.advanceTimersByTime(299_000);
+    expect(silent.length).toBe(0);
+
+    // Cross the deadline — fires exactly once for this session.
+    vi.advanceTimersByTime(2_000);
+    expect(silent.length).toBe(1);
+    expect((silent[0] as { sessionId: string }).sessionId).toBe("sess-wd-300");
+    off();
+  });
+
+  it("a CLI frame inside the window resets the deadline (no false positive on a live turn)", () => {
+    const adapter = new ClaudeAdapter("sess-wd-reset");
+    adapter.attachWebSocket(createMockSocket("sess-wd-reset"));
+    const silent: unknown[] = [];
+    const off = companionBus.on("session:backend-silent", (e) => { silent.push(e); });
+
+    adapter.send({ type: "user_message", content: "hello" });
+    vi.advanceTimersByTime(200_000);
+    // Any non-empty CLI frame proves the pipe is alive → deadline resets.
+    adapter.handleRawMessage(makeAssistantMsg());
+    // 200s more (400s total, but only 200s since the frame) — still no fire.
+    vi.advanceTimersByTime(200_000);
+    expect(silent.length).toBe(0);
+    off();
+  });
+});
+
 // ─── orchestratorTurnState + orchestrator:turn-done event ──────────────────
 //
 // PLAN-aura-orchestrator-idle-auto-proceed Task 4. The orchestrator-half

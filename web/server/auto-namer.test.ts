@@ -253,4 +253,17 @@ describe("generateSessionTitle", () => {
     const body = JSON.parse(String(req.body)) as { max_tokens: number };
     expect(body.max_tokens).toBe(256);
   });
+
+  it("does not send deprecated temperature in the Anthropic request body", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({ content: [{ type: "text", text: "Title" }] }),
+    });
+
+    await generateSessionTitle("Fix login", "ignored");
+
+    const [, req] = mockFetch.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(String(req.body)) as Record<string, unknown>;
+    expect(body).not.toHaveProperty("temperature");
+  });
 });

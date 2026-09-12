@@ -169,6 +169,7 @@ function createMockLauncher() {
     setArchived: vi.fn(),
     removeSession: vi.fn(),
     setCLISessionId: vi.fn(),
+    setModel: vi.fn(),
     markConnected: vi.fn(),
     getStartingSessions: vi.fn(() => []),
   } as any;
@@ -412,6 +413,7 @@ describe("SessionOrchestrator", () => {
       const clearPendingSyntheticTurn = vi.fn();
       orchestrator.setIdleTimerManager({
         noteUserMessage: () => {},
+        noteApiLimitReached: () => {},
         clearPendingSyntheticTurn,
         disposeAll: () => {},
         getIterationCount: () => 0,
@@ -426,6 +428,47 @@ describe("SessionOrchestrator", () => {
       companionBus.emit("session:exited", { sessionId: "s-exited-1", exitCode: 0 });
 
       expect(clearPendingSyntheticTurn).toHaveBeenCalledWith("s-exited-1");
+    });
+
+    it("pauses model fallback and AFK auto-proceed on API rate limits", async () => {
+      const noteApiLimitReached = vi.fn();
+      orchestrator.setIdleTimerManager({
+        noteUserMessage: () => {},
+        noteApiLimitReached,
+        clearPendingSyntheticTurn: () => {},
+        disposeAll: () => {},
+        getIterationCount: () => 0,
+        isSyntheticTurnInFlight: () => false,
+        noteTerminalResultFrame: () => {},
+        armForSession: () => undefined,
+        cancelForSession: () => undefined,
+        rehydrateFromTrace: () => undefined,
+      } as any);
+      deps.launcher.getSession.mockReturnValue({
+        sessionId: "sess-rate-limited",
+        model: "claude-opus-4-8",
+        archived: false,
+      });
+
+      orchestrator.initialize();
+      companionBus.emit("session:model-fallback", {
+        sessionId: "sess-rate-limited",
+        from: "<synthetic>",
+        to: "<resolve-at-orchestrator>",
+        reason: "rate_limit",
+      });
+      await Promise.resolve();
+
+      expect(noteApiLimitReached).toHaveBeenCalledWith("sess-rate-limited");
+      expect(deps.wsBridge.broadcastToSession).toHaveBeenCalledWith(
+        "sess-rate-limited",
+        expect.objectContaining({
+          type: "error",
+          message: expect.stringContaining("Automatic fallback"),
+        }),
+      );
+      expect(deps.launcher.setModel).not.toHaveBeenCalled();
+      expect(deps.launcher.kill).not.toHaveBeenCalled();
     });
 
     it("session exit callback notifies agentExecutor", () => {
@@ -3362,6 +3405,18 @@ describe("SessionOrchestrator", () => {
       expect(out.reason).toBe("group_not_active");
     });
 
+    // A prior 429/credit-limit on the observer half must pause unattended
+    // wake traffic too; otherwise a fresh checkpoint can spend Claude budget
+    // again even though model fallback and AFK auto-proceed are already paused.
+    it("returns skipped:api_limit_reached when the observer session is API-limited", () => {
+      seedActiveGroup("grp_d_limit");
+      orchestrator.getIdleTimerManager().noteApiLimitReached("sess_obs");
+      const out = callDispatch("grp_d_limit", validPayload("grp_d_limit"));
+      expect(out.kind).toBe("skipped");
+      expect(out.reason).toBe("api_limit_reached");
+      expect(deps.wsBridge.sendObserverWakeFrame).not.toHaveBeenCalled();
+    });
+
     // Group status reconnecting → queues into pendingCheckpoint (#3 fix).
     it("queues into pendingCheckpoint when coordinator status is reconnecting", () => {
       seedActiveGroup("grp_d_rec");
@@ -3720,6 +3775,97 @@ describe("SessionOrchestrator", () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    // ── P1-1: catch-up-poll timeout escalation ──────────────────────────
+    //
+    // A genuinely deaf observer times out every 30s catch-up poll; the EC-13
+    // failsafe re-schedules that poll every ~5 min forever (observed:
+    // 120-cycle / multi-hour no-op loops with zero escalation). These tests
+    // pin the fix: after OBSERVER_CATCHUP_TIMEOUT_ESCALATION_THRESHOLD (3)
+    // consecutive timeouts for the SAME checkpoint the group is degraded via
+    // the single degrade authority; a successful wake resets the strike count.
+    describe("scheduleCatchupWakeWhenObserverReady escalation (P1-1)", () => {
+      function callCatchup(groupId: string, payload: any): Promise<void> {
+        return (orchestrator as unknown as {
+          scheduleCatchupWakeWhenObserverReady: (g: string, p: any) => Promise<void>;
+        }).scheduleCatchupWakeWhenObserverReady.call(orchestrator, groupId, payload);
+      }
+
+      it("degrades the group after 3 consecutive catch-up timeouts (half_died/observer/wake_send_failed)", async () => {
+        vi.useFakeTimers();
+        try {
+          seedActiveGroup("grp_p11");
+          const ws = orchestrator as unknown as {
+            coordinator: { get: ReturnType<typeof vi.fn>; applyEvent: ReturnType<typeof vi.fn> };
+          };
+          ws.coordinator.applyEvent = vi.fn();
+          // Observer adapter never becomes ready → every poll times out.
+          const readySpy = vi.spyOn(orchestrator as any, "observerReadyForWake").mockReturnValue(false);
+          const payload = validPayload("grp_p11", { checkpointId: "chk_stuck", sequence: 2 });
+
+          // Timeouts 1 and 2 — below threshold, no escalation.
+          for (let i = 0; i < 2; i++) {
+            const p = callCatchup("grp_p11", payload);
+            await vi.advanceTimersByTimeAsync(31_000);
+            await p;
+            expect(ws.coordinator.applyEvent).not.toHaveBeenCalled();
+          }
+
+          // Timeout 3 crosses the threshold → degrade through applyEvent.
+          const p3 = callCatchup("grp_p11", payload);
+          await vi.advanceTimersByTimeAsync(31_000);
+          await p3;
+          expect(ws.coordinator.applyEvent).toHaveBeenCalledTimes(1);
+          expect(ws.coordinator.applyEvent).toHaveBeenCalledWith("grp_p11", {
+            type: "half_died",
+            role: "observer",
+            reason: "wake_send_failed",
+          });
+          readySpy.mockRestore();
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it("resets the strike count on a successful wake so transient timeouts never escalate", async () => {
+        vi.useFakeTimers();
+        try {
+          seedActiveGroup("grp_p11b");
+          const ws = orchestrator as unknown as {
+            coordinator: { get: ReturnType<typeof vi.fn>; applyEvent: ReturnType<typeof vi.fn> };
+          };
+          ws.coordinator.applyEvent = vi.fn();
+          const readySpy = vi.spyOn(orchestrator as any, "observerReadyForWake");
+          const payload = validPayload("grp_p11b", { checkpointId: "chk_flap", sequence: 3 });
+
+          // Two timeouts (adapter not ready)…
+          readySpy.mockReturnValue(false);
+          for (let i = 0; i < 2; i++) {
+            const p = callCatchup("grp_p11b", payload);
+            await vi.advanceTimersByTimeAsync(31_000);
+            await p;
+          }
+          // …then the observer comes up and the wake dispatches → count reset.
+          readySpy.mockReturnValue(true);
+          const pOk = callCatchup("grp_p11b", payload);
+          await vi.advanceTimersByTimeAsync(500);
+          await pOk;
+          expect(deps.wsBridge.sendObserverWakeFrame).toHaveBeenCalled();
+
+          // Two more timeouts must NOT escalate (fresh scorecard after success).
+          readySpy.mockReturnValue(false);
+          for (let i = 0; i < 2; i++) {
+            const p = callCatchup("grp_p11b", payload);
+            await vi.advanceTimersByTimeAsync(31_000);
+            await p;
+          }
+          expect(ws.coordinator.applyEvent).not.toHaveBeenCalled();
+          readySpy.mockRestore();
+        } finally {
+          vi.useRealTimers();
+        }
+      });
     });
   });
 
@@ -5571,6 +5717,71 @@ describe("SessionOrchestrator", () => {
       for (const field of ["sessionGroupId", "primarySessionId", "observerSessionId", "pairing", "status", "wakeTimeoutMs"] as const) {
         expect(boot![field]).toEqual(pushMsg![field]);
       }
+    });
+  });
+
+  // ── handleBackendSilent — silence rotation wiring (P2-4 / P2-5) ──────────
+  //
+  // The pure decision helper (computeSilenceRotation) is unit-tested in
+  // model-fallback-chain.test.ts; these tests pin the ORCHESTRATOR wiring the
+  // review flagged as uncovered (council review 2026-09-11 P2-4/P2-5): a
+  // session:backend-silent must SIGTERM the subprocess, bump the per-session
+  // strike count, and rotate the model + toast the browser at the threshold; a
+  // successful orchestrator:turn-done must clear the count.
+  describe("handleBackendSilent silence rotation (P2-4/P2-5)", () => {
+    function callSilent(sessionId: string): Promise<void> {
+      return (orchestrator as unknown as {
+        handleBackendSilent: (s: string, ms: number, r: string) => Promise<void>;
+      }).handleBackendSilent.call(orchestrator, sessionId, 300_000, "silent_stdio_watchdog");
+    }
+    function strikeCount(sessionId: string): number | undefined {
+      const map = (orchestrator as unknown as {
+        silenceRecurrenceCounts: Map<string, { count: number; lastSilentModel: string }>;
+      }).silenceRecurrenceCounts;
+      return map.get(sessionId)?.count;
+    }
+
+    it("kills the subprocess and bumps the strike count on a single silence (no rotation below threshold)", async () => {
+      deps.launcher.getSession.mockReturnValue({ sessionId: "s-silent", model: "claude-opus-4-8", archived: false } as any);
+      await callSilent("s-silent");
+      expect(deps.launcher.kill).toHaveBeenCalledWith("s-silent");
+      expect(deps.launcher.setModel).not.toHaveBeenCalled();
+      expect(strikeCount("s-silent")).toBe(1);
+    });
+
+    it("rotates the model + toasts the browser once the strike threshold (2) is crossed (P2-4)", async () => {
+      deps.launcher.getSession.mockReturnValue({ sessionId: "s-rot", model: "claude-opus-4-8", archived: false } as any);
+      await callSilent("s-rot"); // strike 1
+      await callSilent("s-rot"); // strike 2 → rotate
+      // opus-4-8 → next non-substituted chain entry is opus-4-6 (opus-4-7 is a
+      // broken-model substitution `from`, skipped by nextModelInChain).
+      expect(deps.launcher.setModel).toHaveBeenCalledWith("s-rot", "claude-opus-4-6");
+      const toast = vi.mocked(deps.wsBridge.broadcastToSession).mock.calls.find(
+        (call: unknown[]) => {
+          const msg = call[1] as { type?: string; message?: string };
+          return msg?.type === "error" && /rotating to claude-opus-4-6/i.test(msg.message ?? "");
+        },
+      );
+      expect(toast).toBeDefined();
+      // Rotation clears the strike count (new model gets a clean scorecard).
+      expect(strikeCount("s-rot")).toBeUndefined();
+      expect(deps.launcher.kill).toHaveBeenCalledTimes(2);
+    });
+
+    it("a successful orchestrator:turn-done clears the strike count so it never reaches the threshold (P2-5)", async () => {
+      orchestrator.initialize(); // wires the orchestrator:turn-done reset listener
+      deps.launcher.getSession.mockReturnValue({ sessionId: "s-reset", model: "claude-opus-4-8", archived: false } as any);
+
+      await callSilent("s-reset"); // strike 1
+      expect(strikeCount("s-reset")).toBe(1);
+
+      // A successful turn proves the model works → reset via the wired listener.
+      companionBus.emit("orchestrator:turn-done", { sessionId: "s-reset", blockedByStop: false });
+      expect(strikeCount("s-reset")).toBeUndefined();
+
+      await callSilent("s-reset"); // strike 1 again, NOT 2 → no rotation
+      expect(strikeCount("s-reset")).toBe(1);
+      expect(deps.launcher.setModel).not.toHaveBeenCalled();
     });
   });
 });

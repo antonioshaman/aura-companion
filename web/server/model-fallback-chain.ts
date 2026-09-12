@@ -1,3 +1,5 @@
+import { resolveModelSubstitution } from "./broken-model-substitution.js";
+
 /**
  * Model fallback chain + rate-limit-class error classification.
  *
@@ -43,8 +45,12 @@ export function nextModelInChain(current: string | undefined | null): string | n
   if (!current) return null;
   const idx = CLAUDE_MODEL_FALLBACK_CHAIN.indexOf(current);
   if (idx < 0) return null;
-  if (idx >= CLAUDE_MODEL_FALLBACK_CHAIN.length - 1) return null;
-  return CLAUDE_MODEL_FALLBACK_CHAIN[idx + 1];
+  for (const candidate of CLAUDE_MODEL_FALLBACK_CHAIN.slice(idx + 1)) {
+    if (resolveModelSubstitution(candidate) === null) {
+      return candidate;
+    }
+  }
+  return null;
 }
 
 /** One session's silence-recurrence bookkeeping — see `session-orchestrator.ts:silenceRecurrenceCounts`. */

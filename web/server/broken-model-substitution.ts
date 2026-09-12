@@ -47,6 +47,24 @@ export interface BrokenModelSubstitution {
  */
 export const BROKEN_MODEL_SUBSTITUTIONS: readonly BrokenModelSubstitution[] = [
   {
+    from: "claude-fable-5-1",
+    to: "claude-opus-4-8",
+    // API codename for Opus 5 — same underlying model as
+    // "claude-opus-5" but resolved at a different layer. When
+    // Aura Companion's session state persists a session that was
+    // created via composer's "Opus 5" selection, the model id can
+    // land in the state file as either literal string depending on
+    // which layer wrote it last (composer set_model uses the
+    // display-name form; the CLI's own jsonl records the API
+    // codename in `assistant.message.model`, which bun then writes
+    // back on init). Both forms hit the SAME stdout-emit regression.
+    // Verified 2026-09-11: two sessions with `--model
+    // claude-fable-5-1` reproduced the silent-stdio pattern
+    // identically to `claude-opus-5`. Substitution table only
+    // knowing the literal `claude-opus-5` string missed them.
+    reason: "Claude CLI 2.1.266 does not emit fable-5-1 (Opus 5 API codename) responses on stdout — auto-downgraded to Opus 4.8 until upstream fix",
+  },
+  {
     from: "claude-opus-5",
     to: "claude-opus-4-8",
     // See `feedback_claude_cli_opus5_stdout_dead_jsonl_alive.md` and PR

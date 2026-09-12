@@ -589,14 +589,16 @@ export class CliLauncher {
    *     `mismatch`/`gone` → SKIP (the PID is not ours / already dead).
    *   • `unavailable` (non-Linux, no /proc) → kill best-effort: identity is
    *     unknowable and there is no stronger signal than the prior behaviour.
-   *   • Codex host-mode → kill best-effort: the argv factor recognises only
-   *     Claude's `--sdk-url` token, so the probe can't verify Codex; a
-   *     Codex argv/port identity factor is future work.
+   *   • Codex host-mode → run the SAME probe (council review 2026-09-11 P3-4).
+   *     The argv factor's stdio fallback hashes the spawn argv
+   *     (`argvSha256(tokens) === sidecar.argvSha256`); Codex spawns write that
+   *     sidecar, so the probe verifies Codex identically to a stdio Claude
+   *     session. `match` → kill; `mismatch`/`gone` → SKIP (a reused PID is not
+   *     ours); `unavailable` (non-Linux) → best-effort kill as before. This
+   *     closes the collateral-kill hazard the old blind Codex kill carried.
    */
   private shouldSignalPreviousInstancePid(info: SdkSessionInfo): boolean {
     if (typeof info.pid !== "number") return false;
-    // Codex has no argv identity factor — preserve prior best-effort kill.
-    if (info.backendType === "codex") return true;
     let expectedStartMs: number | null = null;
     let expectedArgvSha256: string | null = null;
     if (this.store) {
@@ -682,7 +684,45 @@ export class CliLauncher {
           }
         } else if (info.pid) {
           if (info.backendType === "codex") {
-            try { process.kill(info.pid, "SIGTERM"); } catch {}
+            // Host-mode Codex: the app-server PID may still be alive after a
+            // Bun restart, but its proxy/adapter died with Bun, so it can never
+            // talk to the new server — it must be terminated and the session
+            // left `exited` for a browser-triggered --resume. Council review
+            // 2026-09-11 P3-4: gate the SIGTERM behind the SAME identity probe
+            // Claude uses (Codex spawns write the argvSha256 + processStartMs
+            // sidecar, so the argv-hash fallback verifies it), so a reused PID
+            // is NOT collateral-killed. On `match`/`unavailable` we kill; on
+            // `mismatch`/`gone` we skip the kill — but either way the session
+            // ends `exited` and the WS port is released, since our process is
+            // no longer reachable regardless.
+            let expectedStartMs: number | null = null;
+            let expectedArgvSha256: string | null = null;
+            if (this.store) {
+              try {
+                const sidecar = readRuntimeSidecar(this.store.directory, info.sessionId);
+                if (sidecar.kind === "present") {
+                  expectedStartMs = sidecar.payload.processStartMs;
+                  expectedArgvSha256 = sidecar.payload.argvSha256;
+                }
+              } catch (e) {
+                log.warn("cli-launcher", "runtime sidecar load failed — degrading to two-factor probe", {
+                  event: "boot_probe.sidecar_corrupt",
+                  sessionId: info.sessionId,
+                  error_code: (e as NodeJS.ErrnoException).code ?? "unknown",
+                });
+              }
+            }
+            const verdict = verifyProcessIdentity(info.pid, info.sessionId, expectedStartMs, expectedArgvSha256);
+            if (verdict.kind === "match" || verdict.kind === "unavailable") {
+              try { process.kill(info.pid, "SIGTERM"); } catch {}
+            } else if (verdict.kind === "mismatch") {
+              log.warn("cli-launcher", "Boot probe rejected PID reuse / argv mismatch (codex)", {
+                event: "boot_probe.mismatch",
+                sessionId: info.sessionId,
+                pid: info.pid,
+                reason: verdict.reason,
+              });
+            }
             info.pid = undefined;
             info.state = "exited";
             this.releaseCodexWsPort(info);
@@ -710,13 +750,14 @@ export class CliLauncher {
           // a one-time boot WARN and we conservatively trust the old
           // liveness-only check — degraded but no worse than today.
           //
-          // Dual-backend contract: this PID identity probe is Claude-only.
+          // Dual-backend contract: this fall-through path handles Claude only.
           // Host-mode Codex uses an app-server plus a Companion-owned proxy;
           // after a Bun restart the app-server PID may still be alive, but
           // the proxy/adapter died with Bun, so recovering by PID strands a
           // session in `starting`. Codex host-mode is handled by the early
-          // branch above: terminate the unreachable app-server and let the
-          // normal browser-triggered relaunch resume the thread.
+          // branch above — which now runs the SAME `verifyProcessIdentity`
+          // probe before terminating the unreachable app-server (P3-4), then
+          // lets the normal browser-triggered relaunch resume the thread.
           let expectedStartMs: number | null = null;
           let expectedArgvSha256: string | null = null;
           if (this.store) {

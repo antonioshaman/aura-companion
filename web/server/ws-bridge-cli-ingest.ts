@@ -17,7 +17,10 @@ export interface CLIDedupState {
  */
 export function parseNDJSON(raw: string | Buffer): string[] {
   const data = typeof raw === "string" ? raw : raw.toString("utf-8");
-  return data.split("\n").filter((l) => l.trim());
+  return data
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
 }
 
 /**

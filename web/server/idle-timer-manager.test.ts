@@ -283,6 +283,42 @@ describe("IdleTimerManager — noteUserMessage cancels the timer (token-stale de
   });
 });
 
+describe("IdleTimerManager — API limit circuit breaker", () => {
+  it("cancels an armed timer and refuses unattended re-arm after a limit error", () => {
+    const h = buildHarness();
+    const m = new IdleTimerManager(h.deps);
+
+    expect(m.arm("sess-orch-1", VALID_OPTS)).toEqual({ kind: "armed" });
+    m.noteApiLimitReached("sess-orch-1");
+
+    expect(m.isArmed("sess-orch-1")).toBe(false);
+    h.clock.advance(VALID_OPTS.idleMs);
+    expect(h.sendCalls.length).toBe(0);
+    expect(h.persistCalls.length).toBe(0);
+
+    expect(m.arm("sess-orch-1", VALID_OPTS)).toEqual({
+      kind: "refused",
+      reason: "api-limit-reached",
+    });
+  });
+
+  it("clears the limit breaker only when a real user message resumes the session", () => {
+    const h = buildHarness();
+    const m = new IdleTimerManager(h.deps);
+
+    m.noteApiLimitReached("sess-orch-1");
+    expect(m.arm("sess-orch-1", VALID_OPTS)).toEqual({
+      kind: "refused",
+      reason: "api-limit-reached",
+    });
+
+    // A real browser→server user frame is the explicit operator action
+    // that resumes AFK automation after a quota/rate-limit stop.
+    m.noteUserMessage("sess-orch-1");
+    expect(m.arm("sess-orch-1", VALID_OPTS)).toEqual({ kind: "armed" });
+  });
+});
+
 describe("IdleTimerManager — TOCTOU defence (fresh gate read at fire-time)", () => {
   // EC-7 — the fire path MUST re-evaluate the gate on a fresh
   // session-state read. A state change between schedule and fire
