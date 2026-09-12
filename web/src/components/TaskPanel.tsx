@@ -352,6 +352,28 @@ function CodexTokenDetailsSection({ sessionId }: { sessionId: string }) {
   );
 }
 
+// ─── Claude Context Usage ─────────────────────────────────────────────────────
+
+/**
+ * Context-window usage meter for Claude sessions. Codex surfaces context% inside
+ * its token-details section ({@link CodexTokenDetailsSection}); Claude never
+ * rendered it even though the value is already derived from each result frame's
+ * `modelUsage.contextWindow` and stored as `context_used_percent` (see ws.ts).
+ * Only shown once real usage exists (> 0) — a fresh Claude session before its
+ * first turn has no context data, so a "0%" meter there would be noise, not
+ * signal (Codex can show 0% because its context window is known from the first
+ * frame; Claude's is only known after a result).
+ */
+function ClaudeContextSection({ sessionId }: { sessionId: string }) {
+  const contextPct = useStore((s) => s.sessions.get(sessionId)?.context_used_percent ?? 0);
+  if (contextPct <= 0) return null;
+  return (
+    <div className="shrink-0 px-4 py-2.5 space-y-2">
+      <ProgressMeter label="Context" pct={contextPct} />
+    </div>
+  );
+}
+
 // ─── GitHub PR Status ───────────────────────────────────────────────────────
 
 function prStatePill(state: GitHubPRInfo["state"], isDraft: boolean) {
@@ -855,7 +877,12 @@ function UsageLimitsRenderer({ sessionId }: { sessionId: string }) {
       </>
     );
   }
-  return <UsageLimitsSection sessionId={sessionId} />;
+  return (
+    <>
+      <UsageLimitsSection sessionId={sessionId} />
+      <ClaudeContextSection sessionId={sessionId} />
+    </>
+  );
 }
 
 /** Git branch info */
@@ -1206,7 +1233,7 @@ function SectionWithBadge({
 
 // ─── Task Panel ─────────────────────────────────────────────────────────────
 
-export { CodexRateLimitsSection, CodexTokenDetailsSection };
+export { CodexRateLimitsSection, CodexTokenDetailsSection, ClaudeContextSection };
 
 export function TaskPanel({ sessionId }: { sessionId: string }) {
   const session = useStore((s) => s.sessions.get(sessionId));
