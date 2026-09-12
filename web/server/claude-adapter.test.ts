@@ -1699,6 +1699,59 @@ describe("observer wake completion backstop (P2-3)", () => {
   });
 });
 
+// ─── silent-stdio watchdog arming at the 300s default — P2-6 ────────────────
+//
+// The default (300_000 ms) is unit-asserted on resolveSilentStdioTimeoutMs and
+// the generic fire/no-fire behaviour on SilentStdioWatchdog, but the review
+// (2026-09-11 P2-6) flagged that nothing verified `new ClaudeAdapter()` ACTUALLY
+// arms its watchdog at that value. These tests pin the wiring: a user turn arms
+// it, it fires session:backend-silent just past 300s and not before, and any CLI
+// frame in the window resets the deadline (no false positive on a live turn).
+describe("silent-stdio watchdog arming (P2-6)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("arms at the 300000ms default: fires session:backend-silent just past the deadline, not before", () => {
+    const adapter = new ClaudeAdapter("sess-wd-300");
+    adapter.attachWebSocket(createMockSocket("sess-wd-300"));
+    const silent: unknown[] = [];
+    const off = companionBus.on("session:backend-silent", (e) => { silent.push(e); });
+
+    // A user turn arms the silence watchdog.
+    adapter.send({ type: "user_message", content: "hello" });
+
+    // Just before the 300s deadline — must NOT fire.
+    vi.advanceTimersByTime(299_000);
+    expect(silent.length).toBe(0);
+
+    // Cross the deadline — fires exactly once for this session.
+    vi.advanceTimersByTime(2_000);
+    expect(silent.length).toBe(1);
+    expect((silent[0] as { sessionId: string }).sessionId).toBe("sess-wd-300");
+    off();
+  });
+
+  it("a CLI frame inside the window resets the deadline (no false positive on a live turn)", () => {
+    const adapter = new ClaudeAdapter("sess-wd-reset");
+    adapter.attachWebSocket(createMockSocket("sess-wd-reset"));
+    const silent: unknown[] = [];
+    const off = companionBus.on("session:backend-silent", (e) => { silent.push(e); });
+
+    adapter.send({ type: "user_message", content: "hello" });
+    vi.advanceTimersByTime(200_000);
+    // Any non-empty CLI frame proves the pipe is alive → deadline resets.
+    adapter.handleRawMessage(makeAssistantMsg());
+    // 200s more (400s total, but only 200s since the frame) — still no fire.
+    vi.advanceTimersByTime(200_000);
+    expect(silent.length).toBe(0);
+    off();
+  });
+});
+
 // ─── orchestratorTurnState + orchestrator:turn-done event ──────────────────
 //
 // PLAN-aura-orchestrator-idle-auto-proceed Task 4. The orchestrator-half

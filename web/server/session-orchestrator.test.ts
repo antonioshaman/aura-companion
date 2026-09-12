@@ -5719,4 +5719,69 @@ describe("SessionOrchestrator", () => {
       }
     });
   });
+
+  // ── handleBackendSilent — silence rotation wiring (P2-4 / P2-5) ──────────
+  //
+  // The pure decision helper (computeSilenceRotation) is unit-tested in
+  // model-fallback-chain.test.ts; these tests pin the ORCHESTRATOR wiring the
+  // review flagged as uncovered (council review 2026-09-11 P2-4/P2-5): a
+  // session:backend-silent must SIGTERM the subprocess, bump the per-session
+  // strike count, and rotate the model + toast the browser at the threshold; a
+  // successful orchestrator:turn-done must clear the count.
+  describe("handleBackendSilent silence rotation (P2-4/P2-5)", () => {
+    function callSilent(sessionId: string): Promise<void> {
+      return (orchestrator as unknown as {
+        handleBackendSilent: (s: string, ms: number, r: string) => Promise<void>;
+      }).handleBackendSilent.call(orchestrator, sessionId, 300_000, "silent_stdio_watchdog");
+    }
+    function strikeCount(sessionId: string): number | undefined {
+      const map = (orchestrator as unknown as {
+        silenceRecurrenceCounts: Map<string, { count: number; lastSilentModel: string }>;
+      }).silenceRecurrenceCounts;
+      return map.get(sessionId)?.count;
+    }
+
+    it("kills the subprocess and bumps the strike count on a single silence (no rotation below threshold)", async () => {
+      deps.launcher.getSession.mockReturnValue({ sessionId: "s-silent", model: "claude-opus-4-8", archived: false } as any);
+      await callSilent("s-silent");
+      expect(deps.launcher.kill).toHaveBeenCalledWith("s-silent");
+      expect(deps.launcher.setModel).not.toHaveBeenCalled();
+      expect(strikeCount("s-silent")).toBe(1);
+    });
+
+    it("rotates the model + toasts the browser once the strike threshold (2) is crossed (P2-4)", async () => {
+      deps.launcher.getSession.mockReturnValue({ sessionId: "s-rot", model: "claude-opus-4-8", archived: false } as any);
+      await callSilent("s-rot"); // strike 1
+      await callSilent("s-rot"); // strike 2 → rotate
+      // opus-4-8 → next non-substituted chain entry is opus-4-6 (opus-4-7 is a
+      // broken-model substitution `from`, skipped by nextModelInChain).
+      expect(deps.launcher.setModel).toHaveBeenCalledWith("s-rot", "claude-opus-4-6");
+      const toast = vi.mocked(deps.wsBridge.broadcastToSession).mock.calls.find(
+        (call: unknown[]) => {
+          const msg = call[1] as { type?: string; message?: string };
+          return msg?.type === "error" && /rotating to claude-opus-4-6/i.test(msg.message ?? "");
+        },
+      );
+      expect(toast).toBeDefined();
+      // Rotation clears the strike count (new model gets a clean scorecard).
+      expect(strikeCount("s-rot")).toBeUndefined();
+      expect(deps.launcher.kill).toHaveBeenCalledTimes(2);
+    });
+
+    it("a successful orchestrator:turn-done clears the strike count so it never reaches the threshold (P2-5)", async () => {
+      orchestrator.initialize(); // wires the orchestrator:turn-done reset listener
+      deps.launcher.getSession.mockReturnValue({ sessionId: "s-reset", model: "claude-opus-4-8", archived: false } as any);
+
+      await callSilent("s-reset"); // strike 1
+      expect(strikeCount("s-reset")).toBe(1);
+
+      // A successful turn proves the model works → reset via the wired listener.
+      companionBus.emit("orchestrator:turn-done", { sessionId: "s-reset", blockedByStop: false });
+      expect(strikeCount("s-reset")).toBeUndefined();
+
+      await callSilent("s-reset"); // strike 1 again, NOT 2 → no rotation
+      expect(strikeCount("s-reset")).toBe(1);
+      expect(deps.launcher.setModel).not.toHaveBeenCalled();
+    });
+  });
 });
