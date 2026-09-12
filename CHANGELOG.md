@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.17.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.16.0...aura-companion-v1.17.0) (2026-09-12)
+
+
+### Features
+
+* **server:** compaction-advisory banner on session-jsonl milestones ([#190](https://github.com/antonioshaman/aura-companion/issues/190)) ([218a7ab](https://github.com/antonioshaman/aura-companion/commit/218a7ab9467fed6234b5fa10801145796b9579f6))
+* **server:** orphan-reaper recognises stdio-transport Claude subprocesses ([#187](https://github.com/antonioshaman/aura-companion/issues/187)) ([9af8794](https://github.com/antonioshaman/aura-companion/commit/9af8794f7a83ae1ba9edc98aa146dbb0400ee8f0))
+* **server:** recurring-silence model rotation (model-agnostic durable fix) ([#182](https://github.com/antonioshaman/aura-companion/issues/182)) ([4908b01](https://github.com/antonioshaman/aura-companion/commit/4908b01ea7ae27b1b73cd673ada0f32fd8babea3))
+* **server:** silent-stdio drift detector — periodic transcript vs jsonl freshness check ([#189](https://github.com/antonioshaman/aura-companion/issues/189)) ([6467311](https://github.com/antonioshaman/aura-companion/commit/646731165b5d916ba8787804d50fe1ab25ee175c))
+* **sweep:** manual "Sweep orphans" cleanup affordance ([#186](https://github.com/antonioshaman/aura-companion/issues/186)) ([eea5a0c](https://github.com/antonioshaman/aura-companion/commit/eea5a0c91f13f561079c5172f566ce3e121efce5))
+* **ui:** show context-usage meter for Claude sessions (parity with Codex) ([#193](https://github.com/antonioshaman/aura-companion/issues/193)) ([33ac3f2](https://github.com/antonioshaman/aura-companion/commit/33ac3f22f3eae3a22c4dd30b2b673c9391b00480))
+
+
+### Bug Fixes
+
+* **deploy:** resolve bun by absolute path in aura-restart.sh ([#192](https://github.com/antonioshaman/aura-companion/issues/192)) ([ba99a12](https://github.com/antonioshaman/aura-companion/commit/ba99a12cdef393ced782bf08b601dbffed24788d))
+* **server:** relaunch surviving-but-deaf sessions (live PID, dead adapter) after Bun restart ([#184](https://github.com/antonioshaman/aura-companion/issues/184)) ([856dbbb](https://github.com/antonioshaman/aura-companion/commit/856dbbbb9ed9a5ddb559ffc204accd4465814682))
+* **server:** report live backend as connected instead of stale starting ([#185](https://github.com/antonioshaman/aura-companion/issues/185)) ([fb00f7d](https://github.com/antonioshaman/aura-companion/commit/fb00f7d4d9282e5a9bf395bb841219a32a52c424))
+* **server:** validate resume target before discarding cliSessionId (P2-1) ([#194](https://github.com/antonioshaman/aura-companion/issues/194)) ([99152b9](https://github.com/antonioshaman/aura-companion/commit/99152b9ff29af7e14b081d27f23e5a0c46dd46e9))
+* **stability:** merge stability-audit-followups (9 commits from Codex council session) ([#191](https://github.com/antonioshaman/aura-companion/issues/191)) ([0aca94e](https://github.com/antonioshaman/aura-companion/commit/0aca94e012e307706a23b57be28dcd9765893aea))
+
 ## [1.16.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.15.0...aura-companion-v1.16.0) (2026-09-10)
 
 
