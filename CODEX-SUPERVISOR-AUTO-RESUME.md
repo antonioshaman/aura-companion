@@ -178,3 +178,88 @@ Verification:
 - `cd web && bun run typecheck` passed.
 
 Note: I reviewed the final review's P1 observer-prompt-loader claim against current code and did not apply that patch. The active spawn path already constructs `.council/prompts/observer-system.md` before calling `resolveObserverSystemPrompt`, so changing the resolver based only on that finding would be riskier than leaving it for a focused follow-up.
+
+## Final Claude pair supervision after stability follow-ups
+
+Updated: `2026-09-12T20:20Z`
+
+Active pair observed after the user restarted follow-up work:
+
+- Orchestrator: `de1c233f-8840-4d15-855a-a8574b96bc2d`, live pid `3356910`, model `claude-opus-4-8`.
+- Observer: `fe1b650d-6f6e-45f8-8e55-bcda8fb5b9f5`, live pid `3356975`, model `claude-opus-4-8`.
+- Branch: `fix/stability-audit-followups`.
+- HEAD: `cf72f72 fix(security): verify Codex process identity before SIGTERM (P3-4)`.
+
+Committed by the Claude orchestrator after `a3e3e83`:
+
+- `2273f19 fix(council): backstop timer for stranded observer wake turn (P2-3)`
+- `b3d634d fix(council): escalate stuck catch-up wake to degraded instead of looping (P1-1)`
+- `de58bd2 fix(security): restrict system-process kill to the session's own dev processes (P3-5/P3-7)`
+- `c56d17e test(council): cover silence-rotation + watchdog wiring gaps (P2-4/P2-5/P2-6)`
+- `cf72f72 fix(security): verify Codex process identity before SIGTERM (P3-4)`
+
+The final observer command was sent only after the main fix series appeared complete and the worktree was otherwise clean. It asked the orchestrator to emit a checkpoint for all commits after `a3e3e83`, wait for observer review, and avoid new fixes, subagents, push, relaunch, or auto-proceed.
+
+Observer review result:
+
+- Review file: `.council/reviews/council-implement-grp_40bce3c046c0e6fd6c2f62264ac52cdc-claude-observer.md`
+- Checkpoint: `council-implement-23-03dae29a`
+- Findings: `1 INFO`, `0 WARN`, `0 STOP`
+- Downgrades: none.
+- High-confidence observer conclusion: all four closed findings were independently verified against live code; no correctness or contract defect was found.
+
+Usage at the final check:
+
+- Orchestrator usage endpoint: `five_hour.utilization=45`, `resets_at=2026-09-12T21:50:00.266010+00:00`, `locked_reason=null`.
+- Observer usage endpoint: `five_hour.utilization=45`, `resets_at=2026-09-12T21:50:00.266010+00:00`, `locked_reason=null`.
+- No fresh rapid-drain kill was observed during this final supervision pass.
+
+Verification reported by the Claude orchestrator:
+
+- `cd web && bun run typecheck` passed.
+- Full test suite reported `7836 passed`, `1 skipped-family`, and `1 failure` in `evals/supply-chain.test.ts` / pack-exclusion guard. The orchestrator investigated it as an environment/systemd stale-state issue rather than a branch regression; this should still be rechecked before merge.
+
+Current local artifacts:
+
+- Untracked: `.council/IMPLEMENTATION-CONTEXT-stability-audit.md`
+- No push was performed.
+
+Recommended next manual Claude phrase, only if usage is still healthy:
+
+```text
+Observer review is in with 0 STOP and 0 WARN. Do not start new fixes, subagents, relaunches, or observer checkpoints. Give me the final concise handoff: commits made, tests run, known residual risk, and exact next manual steps.
+```
+
+Do not ask Claude to continue implementation unless a human first reviews the remaining full-suite failure and decides it is actually related to this branch.
+
+## Codex takeover after orchestrator stopped responding
+
+Updated: `2026-09-12T20:39Z`
+
+After the observer review landed, the Claude orchestrator did not produce a final handoff. A single short final-handoff message was sent to the orchestrator API and the recording shows the user frame was delivered to the CLI, but no subsequent `status: requesting`, `assistant`, or `result` frame appeared. The process still reports `connected`, so this looks like a live-but-deaf/stuck CLI bridge rather than an unfinished implementation turn.
+
+No further Claude messages were sent.
+
+Latest observed Claude usage after that attempt:
+
+- `five_hour.utilization=53`
+- `resets_at=2026-09-12T21:50:00.982415+00:00`
+- `locked_reason=null`
+
+Codex completed the remaining local verification without Claude:
+
+- `cd web && bun run typecheck` passed.
+- `cd web && bun run test -- server/claude-adapter.test.ts server/session-orchestrator.test.ts server/routes.test.ts server/cli-launcher.test.ts` passed: `708 passed`.
+- `cd web && bun run test -- evals/supply-chain.test.ts` still has the single known failure in the pack-exclusion guard. Root cause is local ownership: current user is `auracomp`, but `web/package.json` is `root:root` with mode `644`, so `bun pm pack --dry-run` aborts with `EACCES` before it can enumerate tarball contents. The `web/` directory itself is writable.
+
+Current git status after Codex takeover:
+
+- Modified: `CODEX-SUPERVISOR-AUTO-RESUME.md`
+- Untracked: `.council/IMPLEMENTATION-CONTEXT-stability-audit.md`
+- Ignored runtime council files remain ignored and were not deleted.
+
+Recommended manual close-out:
+
+1. Commit the updated report/context if you want the session artifacts preserved.
+2. Fix local ownership before full-suite/pack guard validation: make `web/package.json` writable by the working user or run the pack-exclusion guard in the intended CI/package environment.
+3. Review the five stability commits and observer verdict, then merge/restart deliberately. Do not rely on the currently stuck Claude pair for more work.
