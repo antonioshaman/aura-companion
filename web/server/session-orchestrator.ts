@@ -138,6 +138,20 @@ export const OBSERVER_FAILSAFE_MIN_MS = 10_000;
 export const OBSERVER_FAILSAFE_MAX_MS = 3_600_000;
 
 /**
+ * Council review 2026-09-11 P1-1: how many consecutive catch-up wake polls
+ * for the SAME checkpoint may time out (`adapter_wait_timed_out`) before the
+ * group is escalated to `degraded` instead of retried forever. The EC-13
+ * failsafe re-schedules a 30s poll every {@link OBSERVER_FAILSAFE_FALLBACK_MS}
+ * (5 min); a genuinely deaf observer therefore produced 120-cycle / multi-hour
+ * no-op loops with zero escalation. Once the group degrades, the failsafe scan
+ * skips it (status !== active/reconnecting), closing the loop. 3 × ~5 min ≈ a
+ * ~15-minute deaf-observer ceiling before we stop retrying and surface the
+ * stuck state to the operator. A single slow adapter attach (≤30s) still
+ * succeeds within one poll and never counts toward this.
+ */
+export const OBSERVER_CATCHUP_TIMEOUT_ESCALATION_THRESHOLD = 3;
+
+/**
  * Pure parse of the failsafe-tick env value. Exported so the bounds/clamp/
  * warn-on-invalid branches are testable without reaching through the module
  * IIFE (Council Review 2026-07-05 Beck #3). Returns the fallback for absent,
@@ -607,6 +621,16 @@ export class SessionOrchestrator {
    * poll and cleared in its `finally`.
    */
   private readonly catchupWakesInFlight = new Set<string>();
+  /**
+   * Council review 2026-09-11 P1-1: consecutive catch-up-poll timeouts per
+   * `${sessionGroupId}:${checkpointId}`. Bumped when a poll expires without
+   * the observer adapter ever becoming ready; reset to 0 the instant a wake
+   * dispatches for that key. When it crosses
+   * {@link OBSERVER_CATCHUP_TIMEOUT_ESCALATION_THRESHOLD} the group is degraded
+   * (single degrade authority: `coordinator.applyEvent`) rather than retried
+   * forever. Cleared on group teardown so it never outlives the group.
+   */
+  private readonly catchupWakeTimeouts = new Map<string, number>();
   /**
    * Council Mode — per-group spawn metadata captured at pair creation
    * time so listeners running outside the spawn context (group:review
@@ -2277,10 +2301,22 @@ export class SessionOrchestrator {
         while (Date.now() < deadline) {
           if (this.observerReadyForWake(observerSessionId)) {
             this.dispatchObserverWake(sessionGroupId, payload);
+            // P1-1: a successful wake clears the consecutive-timeout strike
+            // count for this checkpoint — the observer is demonstrably alive.
+            this.catchupWakeTimeouts.delete(inFlightKey);
             return;
           }
           await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
         }
+        // P1-1: the poll expired with the observer adapter never becoming
+        // ready. Without escalation the EC-13 failsafe re-schedules this same
+        // 30s poll every ~5 min forever (observed: 120-cycle / multi-hour
+        // no-op loops). Count consecutive timeouts for THIS checkpoint and, at
+        // the threshold, degrade the group through the single degrade authority
+        // (`coordinator.applyEvent`). Once degraded, `scanForMissedObserverWakes`
+        // skips the group (status !== active/reconnecting), closing the loop.
+        const timeoutCount = (this.catchupWakeTimeouts.get(inFlightKey) ?? 0) + 1;
+        this.catchupWakeTimeouts.set(inFlightKey, timeoutCount);
         log.warn("session-orchestrator", "council.wake.restart_catchup_adapter_wait_timed_out", {
           event: "council.wake.restart_catchup_adapter_wait_timed_out",
           sessionGroupId,
@@ -2288,7 +2324,37 @@ export class SessionOrchestrator {
           checkpointId: payload.checkpoint_id,
           sequence: payload.sequence,
           waitedMs: MAX_WAIT_MS,
+          consecutiveTimeouts: timeoutCount,
+          escalationThreshold: OBSERVER_CATCHUP_TIMEOUT_ESCALATION_THRESHOLD,
         });
+        if (timeoutCount >= OBSERVER_CATCHUP_TIMEOUT_ESCALATION_THRESHOLD) {
+          this.catchupWakeTimeouts.delete(inFlightKey);
+          const coordinator = this.coordinator;
+          const stillLive =
+            coordinator?.get(sessionGroupId)?.status === "active" ||
+            coordinator?.get(sessionGroupId)?.status === "reconnecting";
+          if (coordinator && stillLive) {
+            log.warn("session-orchestrator", "council.wake.catchup_escalated_to_degraded", {
+              event: "council.wake.catchup_escalated_to_degraded",
+              sessionGroupId,
+              sessionId: observerSessionId,
+              role: "observer",
+              checkpointId: payload.checkpoint_id,
+              sequence: payload.sequence,
+              consecutiveTimeouts: timeoutCount,
+            });
+            // Observer never became reachable to receive the wake — model it
+            // as the observer half dying (deadRole=observer). `half_died` from
+            // `active`/`reconnecting` derives `group:degraded` via the same
+            // side-effect channel a real exit uses. `wake_send_failed` is the
+            // closest existing reason: we repeatedly failed to deliver the wake.
+            coordinator.applyEvent(sessionGroupId, {
+              type: "half_died",
+              role: "observer",
+              reason: "wake_send_failed",
+            });
+          }
+        }
       } catch (err) {
         log.warn("session-orchestrator", "council.wake.restart_catchup_dispatch_failed", {
           event: "council.wake.restart_catchup_dispatch_failed",
@@ -2352,6 +2418,13 @@ export class SessionOrchestrator {
     this.councilGroupDegradedReason.delete(sessionGroupId);
     this.councilGroupDeadRole.delete(sessionGroupId);
     this.spawnCheckpointPending.delete(sessionGroupId);
+    // P1-1: drop any per-checkpoint catch-up-timeout strike counts for this
+    // group (keys are `${sessionGroupId}:${checkpointId}`) so they never
+    // outlive the group.
+    const groupPrefix = `${sessionGroupId}:`;
+    for (const key of this.catchupWakeTimeouts.keys()) {
+      if (key.startsWith(groupPrefix)) this.catchupWakeTimeouts.delete(key);
+    }
   }
 
   /**

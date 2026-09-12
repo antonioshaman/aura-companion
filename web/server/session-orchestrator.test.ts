@@ -3776,6 +3776,97 @@ describe("SessionOrchestrator", () => {
         vi.useRealTimers();
       }
     });
+
+    // ── P1-1: catch-up-poll timeout escalation ──────────────────────────
+    //
+    // A genuinely deaf observer times out every 30s catch-up poll; the EC-13
+    // failsafe re-schedules that poll every ~5 min forever (observed:
+    // 120-cycle / multi-hour no-op loops with zero escalation). These tests
+    // pin the fix: after OBSERVER_CATCHUP_TIMEOUT_ESCALATION_THRESHOLD (3)
+    // consecutive timeouts for the SAME checkpoint the group is degraded via
+    // the single degrade authority; a successful wake resets the strike count.
+    describe("scheduleCatchupWakeWhenObserverReady escalation (P1-1)", () => {
+      function callCatchup(groupId: string, payload: any): Promise<void> {
+        return (orchestrator as unknown as {
+          scheduleCatchupWakeWhenObserverReady: (g: string, p: any) => Promise<void>;
+        }).scheduleCatchupWakeWhenObserverReady.call(orchestrator, groupId, payload);
+      }
+
+      it("degrades the group after 3 consecutive catch-up timeouts (half_died/observer/wake_send_failed)", async () => {
+        vi.useFakeTimers();
+        try {
+          seedActiveGroup("grp_p11");
+          const ws = orchestrator as unknown as {
+            coordinator: { get: ReturnType<typeof vi.fn>; applyEvent: ReturnType<typeof vi.fn> };
+          };
+          ws.coordinator.applyEvent = vi.fn();
+          // Observer adapter never becomes ready → every poll times out.
+          const readySpy = vi.spyOn(orchestrator as any, "observerReadyForWake").mockReturnValue(false);
+          const payload = validPayload("grp_p11", { checkpointId: "chk_stuck", sequence: 2 });
+
+          // Timeouts 1 and 2 — below threshold, no escalation.
+          for (let i = 0; i < 2; i++) {
+            const p = callCatchup("grp_p11", payload);
+            await vi.advanceTimersByTimeAsync(31_000);
+            await p;
+            expect(ws.coordinator.applyEvent).not.toHaveBeenCalled();
+          }
+
+          // Timeout 3 crosses the threshold → degrade through applyEvent.
+          const p3 = callCatchup("grp_p11", payload);
+          await vi.advanceTimersByTimeAsync(31_000);
+          await p3;
+          expect(ws.coordinator.applyEvent).toHaveBeenCalledTimes(1);
+          expect(ws.coordinator.applyEvent).toHaveBeenCalledWith("grp_p11", {
+            type: "half_died",
+            role: "observer",
+            reason: "wake_send_failed",
+          });
+          readySpy.mockRestore();
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it("resets the strike count on a successful wake so transient timeouts never escalate", async () => {
+        vi.useFakeTimers();
+        try {
+          seedActiveGroup("grp_p11b");
+          const ws = orchestrator as unknown as {
+            coordinator: { get: ReturnType<typeof vi.fn>; applyEvent: ReturnType<typeof vi.fn> };
+          };
+          ws.coordinator.applyEvent = vi.fn();
+          const readySpy = vi.spyOn(orchestrator as any, "observerReadyForWake");
+          const payload = validPayload("grp_p11b", { checkpointId: "chk_flap", sequence: 3 });
+
+          // Two timeouts (adapter not ready)…
+          readySpy.mockReturnValue(false);
+          for (let i = 0; i < 2; i++) {
+            const p = callCatchup("grp_p11b", payload);
+            await vi.advanceTimersByTimeAsync(31_000);
+            await p;
+          }
+          // …then the observer comes up and the wake dispatches → count reset.
+          readySpy.mockReturnValue(true);
+          const pOk = callCatchup("grp_p11b", payload);
+          await vi.advanceTimersByTimeAsync(500);
+          await pOk;
+          expect(deps.wsBridge.sendObserverWakeFrame).toHaveBeenCalled();
+
+          // Two more timeouts must NOT escalate (fresh scorecard after success).
+          readySpy.mockReturnValue(false);
+          for (let i = 0; i < 2; i++) {
+            const p = callCatchup("grp_p11b", payload);
+            await vi.advanceTimersByTimeAsync(31_000);
+            await p;
+          }
+          expect(ws.coordinator.applyEvent).not.toHaveBeenCalled();
+          readySpy.mockRestore();
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+    });
   });
 
   // ── Fix #6 (Council Review 2026-06-13 P1 #6): EC-6 wire coverage ─────────
