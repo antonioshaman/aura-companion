@@ -11,6 +11,7 @@ import {
   unlinkSync,
 } from "node:fs";
 import { join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import type { Subprocess } from "bun";
 import type { SessionStore } from "./session-store.js";
@@ -25,6 +26,7 @@ import { resolveObserverPromptForSpawn } from "./observer-prompt-spawn.js";
 import { assertExhaustiveObserverPromptSource } from "./observer-prompt.js";
 import { log } from "./logger.js";
 import { verifyProcessIdentity, readProcessStartMs } from "./process-identity.js";
+import { resolveJsonlPath } from "./silent-stdio-drift-detector.js";
 // AURA-LOCAL — PLAN T7. Per-session runtime sidecar carrying spawn-time
 // pid + processStartMs + argvSha256. Phase D upgrades the boot probe
 // from Phase A's interim two-factor to three-factor and feeds the
@@ -81,23 +83,75 @@ const RESUME_FAILURE_UPTIME_MS = 5000;
 const RESUME_FAILURE_THRESHOLD = 2;
 
 /**
+ * Council review 2026-09-11 P2-1: when the resume TARGET (the `--resume`
+ * transcript on disk) still exists, a fast death is much more likely a
+ * transient (startup lag, resource pressure, version/transport mismatch) than a
+ * genuinely-unresumable target — and discarding the anchor forfeits the user's
+ * whole conversation. So we give a present-transcript session more strikes
+ * before falling back to a fresh session. We still DO fall back eventually: a
+ * transcript that exists but is genuinely unresumable (corrupt / rolled-over)
+ * must not pin the session on a resume that always crashes, so the fresh-start
+ * escape hatch is preserved — just at a higher bar.
+ */
+const RESUME_FAILURE_THRESHOLD_TRANSCRIPT_PRESENT = 4;
+
+/**
  * Shared decision for the two `proc.exited` handlers (WS + stdio). Mutates the
  * session's `resumeImmediateFailures` counter and returns whether the caller
  * should discard `cliSessionId`. A spawn that lived past the window resets the
  * counter (the resume worked); a fast death while resuming increments it and
- * only trips the discard once the threshold is reached.
+ * only trips the discard once `threshold` consecutive fast deaths accrue.
+ *
+ * `threshold` is injected by the caller (see {@link resumeFailureThresholdFor})
+ * so a session whose resume transcript is still on disk gets more retries
+ * before its anchor is destroyed (P2-1).
  */
 export function shouldClearResumeAfterExit(
   session: SdkSessionInfo,
   uptimeMs: number,
   wasResuming: boolean,
+  threshold: number = RESUME_FAILURE_THRESHOLD,
 ): boolean {
   if (uptimeMs >= RESUME_FAILURE_UPTIME_MS || !wasResuming) {
     session.resumeImmediateFailures = 0;
     return false;
   }
   session.resumeImmediateFailures = (session.resumeImmediateFailures ?? 0) + 1;
-  return session.resumeImmediateFailures >= RESUME_FAILURE_THRESHOLD;
+  return session.resumeImmediateFailures >= threshold;
+}
+
+/**
+ * P2-1 pure helper: how many consecutive fast resume-deaths to tolerate before
+ * discarding `cliSessionId`. A present transcript (only meaningful for Claude,
+ * whose resume target is the `~/.claude/projects/**.jsonl` file) earns a higher
+ * bar; anything else keeps the base threshold.
+ */
+export function resumeFailureThresholdFor(
+  backendType: BackendType | undefined,
+  transcriptPresent: boolean,
+): number {
+  if (backendType !== "codex" && transcriptPresent) {
+    return RESUME_FAILURE_THRESHOLD_TRANSCRIPT_PRESENT;
+  }
+  return RESUME_FAILURE_THRESHOLD;
+}
+
+/**
+ * P2-1 filesystem predicate (EC-7: inlined resolution, injectable stat for
+ * tests): does a non-empty resume transcript exist at `jsonlPath`? Any error
+ * (missing, unreadable) → `false`, i.e. "cannot confirm the target exists" →
+ * the caller falls back to the base discard threshold rather than pinning a
+ * resume that may be unrecoverable.
+ */
+export function resumeTranscriptExists(
+  jsonlPath: string,
+  statFn: (p: string) => { size: number } = statSync,
+): boolean {
+  try {
+    return statFn(jsonlPath).size > 0;
+  } catch {
+    return false;
+  }
 }
 
 /** Whether WebSocket transport is enabled for Codex sessions. */
@@ -575,6 +629,23 @@ export class CliLauncher {
         error_code: (e as NodeJS.ErrnoException).code ?? "unknown",
       });
     }
+  }
+
+  /**
+   * P2-1: resolve the resume-failure discard threshold for a session. A Claude
+   * session whose resume transcript is still on disk earns more retries before
+   * its `cliSessionId` is discarded (the deaths are likely transient and the
+   * user's conversation is worth preserving); Codex and path-resolution
+   * failures fall back to the base threshold.
+   */
+  private resolveResumeFailureThreshold(session: SdkSessionInfo): number {
+    const cliSessionId = session.cliSessionId;
+    if (session.backendType === "codex" || !cliSessionId) {
+      return RESUME_FAILURE_THRESHOLD;
+    }
+    const jsonlPath = resolveJsonlPath(`${homedir()}/.claude`, session.cwd, cliSessionId);
+    if (!jsonlPath) return RESUME_FAILURE_THRESHOLD;
+    return resumeFailureThresholdFor(session.backendType, resumeTranscriptExists(jsonlPath));
   }
 
   /**
@@ -1645,11 +1716,12 @@ export class CliLauncher {
         // discard cliSessionId after RESUME_FAILURE_THRESHOLD consecutive ones,
         // so a transient/version hiccup doesn't destroy the conversation ref.
         const uptime = Date.now() - spawnedAt;
-        if (shouldClearResumeAfterExit(session, uptime, !!options.resumeSessionId)) {
-          console.error(`[cli-launcher] Session ${sessionId} exited immediately after --resume (${uptime}ms) ${session.resumeImmediateFailures}x. Clearing cliSessionId for fresh start.`);
+        const resumeThreshold = this.resolveResumeFailureThreshold(session);
+        if (shouldClearResumeAfterExit(session, uptime, !!options.resumeSessionId, resumeThreshold)) {
+          console.error(`[cli-launcher] Session ${sessionId} exited immediately after --resume (${uptime}ms) ${session.resumeImmediateFailures}x (threshold=${resumeThreshold}). Clearing cliSessionId for fresh start.`);
           session.cliSessionId = undefined;
         } else if (uptime < 5000 && options.resumeSessionId) {
-          console.error(`[cli-launcher] Session ${sessionId} exited immediately after --resume (${uptime}ms), attempt ${session.resumeImmediateFailures}/${RESUME_FAILURE_THRESHOLD}. Preserving cliSessionId for retry.`);
+          console.error(`[cli-launcher] Session ${sessionId} exited immediately after --resume (${uptime}ms), attempt ${session.resumeImmediateFailures}/${resumeThreshold}. Preserving cliSessionId for retry.`);
         }
       }
       this.processes.delete(sessionId);
@@ -1798,16 +1870,17 @@ export class CliLauncher {
         // RESUME_FAILURE_THRESHOLD consecutive fast deaths so one bad spawn
         // doesn't permanently strand the conversation.
         const uptime = Date.now() - spawnedAt;
-        if (shouldClearResumeAfterExit(session, uptime, !!options.resumeSessionId)) {
+        const resumeThreshold = this.resolveResumeFailureThreshold(session);
+        if (shouldClearResumeAfterExit(session, uptime, !!options.resumeSessionId, resumeThreshold)) {
           console.error(
-            `[cli-launcher] Session ${sessionId} exited immediately after --resume (${uptime}ms) ${session.resumeImmediateFailures}x. ` +
+            `[cli-launcher] Session ${sessionId} exited immediately after --resume (${uptime}ms) ${session.resumeImmediateFailures}x (threshold=${resumeThreshold}). ` +
             `Clearing cliSessionId for fresh start.`,
           );
           session.cliSessionId = undefined;
         } else if (uptime < 5000 && options.resumeSessionId) {
           console.error(
             `[cli-launcher] Session ${sessionId} exited immediately after --resume (${uptime}ms), ` +
-            `attempt ${session.resumeImmediateFailures}/${RESUME_FAILURE_THRESHOLD}. Preserving cliSessionId for retry.`,
+            `attempt ${session.resumeImmediateFailures}/${resumeThreshold}. Preserving cliSessionId for retry.`,
           );
         }
       }
