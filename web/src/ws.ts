@@ -1,5 +1,9 @@
 import { useStore } from "./store.js";
 import type { BrowserIncomingMessage, BrowserOutgoingMessage, ContentBlock, ChatMessage, TaskItem, ProcessItem, ProcessStatus, SdkSessionInfo, McpServerConfig } from "./types.js";
+// Pure, node-free helper shared with the server so the client meter and the
+// server-side auto-compact gate compute context% identically (cache tokens
+// counted, pinned to the primary model — see the function's own rationale).
+import { computeContextUsedPercent } from "../server/context-auto-compact.js";
 import { generateUniqueSessionName } from "./utils/names.js";
 import { playNotificationSound } from "./utils/notification-sound.js";
 import { getPreview } from "./components/ToolBlock.js";
@@ -1083,16 +1087,11 @@ function handleParsedMessage(
       if (typeof r.total_lines_removed === "number") {
         sessionUpdates.total_lines_removed = r.total_lines_removed;
       }
-      // Compute context % from modelUsage if available
+      // Compute context % from modelUsage if available (cache-aware, primary-
+      // model-pinned — matches the server so the meter and auto-compact agree).
       if (r.modelUsage) {
-        for (const usage of Object.values(r.modelUsage)) {
-          if (usage.contextWindow > 0) {
-            const pct = Math.round(
-              ((usage.inputTokens + usage.outputTokens) / usage.contextWindow) * 100
-            );
-            sessionUpdates.context_used_percent = Math.max(0, Math.min(pct, 100));
-          }
-        }
+        const pct = computeContextUsedPercent(r.modelUsage, store.sessions.get(sessionId)?.model);
+        if (pct !== null) sessionUpdates.context_used_percent = pct;
       }
       store.updateSession(sessionId, sessionUpdates);
       clearStreamingDraftMessage(sessionId);
@@ -1478,13 +1477,8 @@ function handleParsedMessage(
             resultUpdates.total_lines_removed = r.total_lines_removed;
           }
           if (r.modelUsage) {
-            for (const usage of Object.values(r.modelUsage)) {
-              if ((usage as { contextWindow: number; inputTokens: number; outputTokens: number }).contextWindow > 0) {
-                const u = usage as { contextWindow: number; inputTokens: number; outputTokens: number };
-                const pct = Math.round(((u.inputTokens + u.outputTokens) / u.contextWindow) * 100);
-                resultUpdates.context_used_percent = Math.max(0, Math.min(pct, 100));
-              }
-            }
+            const pct = computeContextUsedPercent(r.modelUsage, store.sessions.get(sessionId)?.model);
+            if (pct !== null) resultUpdates.context_used_percent = pct;
           }
           store.updateSession(sessionId, resultUpdates);
         } else if (histMsg.type === "system_event") {
