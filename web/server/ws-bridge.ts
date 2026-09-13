@@ -61,6 +61,7 @@ import { companionBus } from "./event-bus.js";
 import { SessionStateMachine } from "./session-state-machine.js";
 import { metricsCollector } from "./metrics-collector.js";
 import { log } from "./logger.js";
+import { shouldAutoCompactContext, computeContextUsedPercent } from "./context-auto-compact.js";
 
 // AURA-LOCAL — PLAN T10/T11 (Phase F). Drain dispatch wiring.
 import {
@@ -174,6 +175,7 @@ export class WsBridge {
   private store: SessionStore | null = null;
   private recorder: RecorderManager | null = null;
   private autoNamingAttempted = new Set<string>();
+  private autoCompactionFired = new Set<string>();
   private userMsgCounter = 0;
   /**
    * Cross-tab single-firer observers for user-frame arrivals (Task 11.6).
@@ -1089,20 +1091,21 @@ export class WsBridge {
           session.state.total_lines_removed = resultData.total_lines_removed;
         }
         if (resultData.modelUsage) {
-          for (const usage of Object.values(resultData.modelUsage)) {
-            if (usage.contextWindow > 0) {
-              const pct = Math.round(
-                ((usage.inputTokens + usage.outputTokens) / usage.contextWindow) * 100
-              );
-              session.state.context_used_percent = Math.max(0, Math.min(pct, 100));
-            }
-          }
+          // Count cache tokens (the bulk of a resumed/long prompt) and pin to
+          // the session's primary model so a Haiku sub-agent overflowing its own
+          // window can't be mistaken for the main conversation being full — the
+          // naive in+out/window loop under-reported cache-heavy sessions to ~0%
+          // and let object key order decide the stored value. See
+          // computeContextUsedPercent for the full rationale.
+          const pct = computeContextUsedPercent(resultData.modelUsage, session.state.model);
+          if (pct !== null) session.state.context_used_percent = pct;
         }
         this.refreshGitInfo(session, { broadcastUpdate: true, notifyPoller: true });
         this.appendHistory(session, msg);
         session.stateMachine.transition("ready", "turn_completed");
         this.persistSession(session);
         companionBus.emit("message:result", { sessionId: session.id, message: msg });
+        this.maybeAutoCompactSession(session);
 
         // Trigger auto-naming after first successful result
         if (
@@ -1642,7 +1645,7 @@ export class WsBridge {
   injectUserMessage(
     sessionId: string,
     content: string,
-    origin?: "server:cron" | "server:agent" | "server:rest" | "council:peer",
+    origin?: "server:cron" | "server:agent" | "server:rest" | "server:auto-compact" | "council:peer",
   ): void {
     const session = this.sessions.get(sessionId);
     if (!session) {
@@ -1955,7 +1958,7 @@ export class WsBridge {
     session: Session,
     msg: BrowserOutgoingMessage,
     ws?: ServerWebSocket<SocketData>,
-    origin?: "server:cron" | "server:agent" | "server:rest" | "council:peer",
+    origin?: "server:cron" | "server:agent" | "server:rest" | "server:auto-compact" | "council:peer",
   ) {
     // Bridge-level message types — never forwarded to backend
     if (msg.type === "session_subscribe") {
@@ -2158,6 +2161,35 @@ export class WsBridge {
       this.enqueuePendingMessage(session, JSON.stringify(msg));
       this.persistSession(session);
     }
+  }
+
+  private maybeAutoCompactSession(session: Session): void {
+    if (session.backendType !== "claude") return;
+
+    const decision = shouldAutoCompactContext({
+      contextUsedPercent: session.state.context_used_percent,
+      alreadyFired: this.autoCompactionFired.has(session.id),
+      isCompacting: session.state.is_compacting,
+    });
+
+    if (decision.kind === "rearm") {
+      this.autoCompactionFired.delete(session.id);
+      return;
+    }
+    if (decision.kind !== "fire") return;
+
+    this.autoCompactionFired.add(session.id);
+    log.info("ws-bridge", "auto-compaction threshold crossed", {
+      event: "context.auto_compact.fire",
+      sessionId: session.id,
+      contextUsedPercent: session.state.context_used_percent,
+    });
+    this.routeBrowserMessage(
+      session,
+      { type: "user_message", content: "/compact" },
+      undefined,
+      "server:auto-compact",
+    );
   }
 
   // ── Transport helpers (delegate to ws-bridge-publish) ────────────────────

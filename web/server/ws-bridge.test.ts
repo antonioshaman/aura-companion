@@ -1695,6 +1695,60 @@ describe("CLI message routing", () => {
     expect(state.context_used_percent).toBe(5);
   });
 
+  it("result: sends one server-origin /compact when Claude context usage crosses 85%", async () => {
+    // Regression for sessions reaching 100% context without the CLI auto-
+    // compacting. The bridge should synthesize the slash command once and
+    // avoid repeating it until a later low-usage result re-arms the guard.
+    cli.send.mockClear();
+
+    const makeResult = (uuid: string, inputTokens: number) => JSON.stringify({
+      type: "result",
+      subtype: "success",
+      is_error: false,
+      duration_ms: 5000,
+      duration_api_ms: 4000,
+      num_turns: 1,
+      total_cost_usd: 0.02,
+      stop_reason: "end_turn",
+      usage: { input_tokens: 500, output_tokens: 200, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      modelUsage: {
+        "claude-opus-4-8": {
+          inputTokens,
+          outputTokens: 0,
+          cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0,
+          contextWindow: 200000,
+          maxOutputTokens: 16384,
+          costUSD: 0.02,
+        },
+      },
+      uuid,
+      session_id: "s1",
+    });
+
+    await bridge.handleCLIMessage(cli, makeResult("uuid-auto-compact-1", 170000));
+
+    const outboundAfterFirst = cli.send.mock.calls
+      .map(([arg]: [string]) => JSON.parse(arg.trim()))
+      .filter((frame: any) => frame.type === "user" && frame.message?.content === "/compact");
+    expect(outboundAfterFirst).toHaveLength(1);
+
+    await bridge.handleCLIMessage(cli, makeResult("uuid-auto-compact-2", 190000));
+
+    const outboundAfterSecond = cli.send.mock.calls
+      .map(([arg]: [string]) => JSON.parse(arg.trim()))
+      .filter((frame: any) => frame.type === "user" && frame.message?.content === "/compact");
+    expect(outboundAfterSecond).toHaveLength(1);
+
+    await bridge.handleCLIMessage(cli, makeResult("uuid-auto-compact-3", 120000));
+    await bridge.handleCLIMessage(cli, makeResult("uuid-auto-compact-4", 180000));
+
+    const outboundAfterRearm = cli.send.mock.calls
+      .map(([arg]: [string]) => JSON.parse(arg.trim()))
+      .filter((frame: any) => frame.type === "user" && frame.message?.content === "/compact");
+    expect(outboundAfterRearm).toHaveLength(2);
+  });
+
   it("stream_event: broadcasts without storing", async () => {
     const msg = JSON.stringify({
       type: "stream_event",
