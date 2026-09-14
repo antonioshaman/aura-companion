@@ -391,7 +391,9 @@ export class CliLauncher {
   private port: number;
   private store: SessionStore | null = null;
   private recorder: RecorderManager | null = null;
-  private stdioCliOpener: ((sessionId: string, transport: CliTransport) => ClaudeAdapter) | null = null;
+  private stdioCliOpener:
+    | ((sessionId: string, transport: CliTransport, opts?: { resume?: boolean }) => ClaudeAdapter)
+    | null = null;
   constructor(port: number) {
     this.port = port;
   }
@@ -425,7 +427,9 @@ export class CliLauncher {
    * pipe and gets the adapter back. Injected in index.ts alongside the store
    * and recorder.
    */
-  setStdioCliOpener(opener: (sessionId: string, transport: CliTransport) => ClaudeAdapter): void {
+  setStdioCliOpener(
+    opener: (sessionId: string, transport: CliTransport, opts?: { resume?: boolean }) => ClaudeAdapter,
+  ): void {
     this.stdioCliOpener = opener;
   }
 
@@ -1813,7 +1817,13 @@ export class CliLauncher {
     }
 
     const transport = new StdioCliTransport(stdin, sessionId);
-    const adapter = opener(sessionId, transport);
+    // Tell the adapter whether this spawn is resuming a prior transcript so it
+    // can pick the longer init-frame canary deadline. Source of truth is the
+    // real argv we just built — a resume replays the transcript + makes its
+    // first API round-trip before `system.init`, legitimately blowing past the
+    // 30s cold deadline on a large transcript / slow API.
+    const isResume = args.includes("--resume");
+    const adapter = opener(sessionId, transport, { resume: isResume });
 
     // stdout carries the protocol, so it is pumped into the adapter rather
     // than logged. Line buffering happens inside pumpStdoutLines — a pipe can

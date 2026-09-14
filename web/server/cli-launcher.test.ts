@@ -1099,6 +1099,53 @@ describe("stdio transport", () => {
     expect(seen.join("")).toContain('{"type":"system","subtype":"init"}');
   });
 
+  // The adapter picks its init-frame canary deadline from whether the spawn is
+  // a resume (prod incident eb13fc90). Source of truth is the real argv, so the
+  // launcher must hand the opener `{ resume }` derived from `--resume` presence.
+  it("passes { resume: false } to the stdio opener for a COLD spawn", () => {
+    let capturedOpts: { resume?: boolean } | undefined = { resume: true }; // poison
+    launcher.setStdioCliOpener((_sid, _t, opts) => {
+      capturedOpts = opts;
+      return createStubClaudeAdapter() as unknown as ClaudeAdapter;
+    });
+    mockSpawn.mockReturnValue({
+      pid: 7001,
+      kill: vi.fn(),
+      exited: new Promise<number>(() => {}),
+      stdin: { write: vi.fn(), flush: vi.fn(), end: vi.fn() },
+      stdout: new ReadableStream<Uint8Array>({ start() {} }),
+      stderr: new ReadableStream<Uint8Array>({ start() {} }),
+    });
+
+    launcher.launch({ cwd: "/tmp/project" });
+
+    const cold = mockSpawn.mock.calls[0][0] as string[];
+    expect(cold).not.toContain("--resume");
+    expect(capturedOpts).toEqual({ resume: false });
+  });
+
+  it("passes { resume: true } to the stdio opener when spawning with --resume", () => {
+    let capturedOpts: { resume?: boolean } | undefined;
+    launcher.setStdioCliOpener((_sid, _t, opts) => {
+      capturedOpts = opts;
+      return createStubClaudeAdapter() as unknown as ClaudeAdapter;
+    });
+    mockSpawn.mockReturnValue({
+      pid: 7002,
+      kill: vi.fn(),
+      exited: new Promise<number>(() => {}),
+      stdin: { write: vi.fn(), flush: vi.fn(), end: vi.fn() },
+      stdout: new ReadableStream<Uint8Array>({ start() {} }),
+      stderr: new ReadableStream<Uint8Array>({ start() {} }),
+    });
+
+    launcher.launch({ cwd: "/tmp/project", resumeSessionId: "cli-resume-target" });
+
+    const argv = mockSpawn.mock.calls[0][0] as string[];
+    expect(argv).toContain("--resume");
+    expect(capturedOpts).toEqual({ resume: true });
+  });
+
   it("kills a restart-survived stdio process instead of waiting for a reconnect that cannot happen", async () => {
     // stdio pipes die with the previous server process, so a surviving PID can
     // never talk to us again. Leaving it "starting" strands a session that

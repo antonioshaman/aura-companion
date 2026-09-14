@@ -126,9 +126,9 @@ export function resolveSilentStdioTimeoutMs(
 }
 
 /**
- * Init-frame health canary deadline. A fresh CLI subprocess should
- * emit its `system.init` stream-json frame within a few seconds of
- * spawn — the CLI has no work to do before it, and stdio transport is
+ * Init-frame health canary deadline (COLD spawn). A fresh CLI subprocess
+ * should emit its `system.init` stream-json frame within a few seconds of
+ * spawn — a cold spawn has no work to do before it, and stdio transport is
  * synchronous on our side. If nothing arrives within this window, the
  * upstream CLI is broken (the 2026-09-09 CLI 2.1.265 regression was
  * exactly this shape: transport opens, subprocess runs, jsonl grows,
@@ -137,12 +137,68 @@ export function resolveSilentStdioTimeoutMs(
  * first spawn, before the silent-stdio watchdog has burned through
  * MAX_AUTO_RELAUNCHES on symptomatic kills.
  *
- * 30s is deliberately generous — a first spawn on a cold disk may
- * take several seconds to load, and we don't want false positives.
+ * 30s is deliberately generous for a COLD spawn — a first spawn on a cold
+ * disk may take several seconds to load, and we don't want false positives.
  * The regression case takes 60+ seconds to visibly fail today, so
  * 30s still catches it two watchdog cycles earlier.
+ *
+ * Overridable via `AURA_INIT_FRAME_TIMEOUT_MS` (integer ms >= MIN).
  */
-const INIT_FRAME_TIMEOUT_MS = 30_000;
+const INIT_FRAME_TIMEOUT_MS = resolveInitFrameTimeoutMs();
+
+/**
+ * Init-frame health canary deadline (`--resume` spawn). The cold-spawn
+ * premise above — "no work to do before the init frame" — is FALSE for a
+ * resume: the CLI must replay the persisted transcript
+ * (`~/.claude/projects/**.jsonl`, which can be multiple MB) AND make its
+ * first API round-trip before it emits `system.init`. On a large transcript
+ * under slow/rate-limited API, that legitimately exceeds the 30s cold
+ * deadline, so a resume spawn was being flagged "CLI may be broken" and
+ * churning through relaunches while the subprocess was in fact healthy but
+ * still loading (prod incident, session eb13fc90, 2026-09-14). A resume
+ * therefore gets a longer window; the anti-regression value is preserved
+ * because a genuinely stuck resume still trips this deadline (just later)
+ * and still eventually the silent-stdio watchdog once a turn is in flight.
+ *
+ * Default 120s, overridable via `AURA_INIT_FRAME_TIMEOUT_RESUME_MS`.
+ */
+const INIT_FRAME_TIMEOUT_RESUME_MS = resolveInitFrameTimeoutMs(
+  process.env.AURA_INIT_FRAME_TIMEOUT_RESUME_MS,
+  120_000,
+  "AURA_INIT_FRAME_TIMEOUT_RESUME_MS",
+);
+
+/**
+ * Env-override resolver for the init-frame canary deadlines. Extracted +
+ * exported so the parsing rules are testable in isolation and the two
+ * module-level constants stay plain immutable numbers. Same strict,
+ * fail-loud family as {@link resolveSilentStdioTimeoutMs}:
+ *   - Unset / empty → `defaultMs`.
+ *   - Integer >= MIN_MS (5_000) → use.
+ *   - Anything else (non-numeric, negative, float, below MIN_MS) →
+ *     log WARN and fall through to `defaultMs`.
+ *
+ * MIN_MS is 5s (not 10s like the silence watchdog): a resume on a warm
+ * transcript can init in well under 10s, and an operator tuning DOWN for a
+ * fast box is a legitimate ask the floor should not veto.
+ */
+export function resolveInitFrameTimeoutMs(
+  env: string | undefined = process.env.AURA_INIT_FRAME_TIMEOUT_MS,
+  defaultMs = 30_000,
+  envName = "AURA_INIT_FRAME_TIMEOUT_MS",
+  warn: (msg: string) => void = (m) => console.warn(m),
+): number {
+  const MIN_MS = 5_000;
+  if (env === undefined || env === "") return defaultMs;
+  const parsed = Number.parseInt(env, 10);
+  if (!Number.isFinite(parsed) || parsed < MIN_MS || String(parsed) !== env.trim()) {
+    warn(
+      `[claude-adapter] ${envName}=${env} rejected (must be integer >= ${MIN_MS}); using default ${defaultMs}ms`,
+    );
+    return defaultMs;
+  }
+  return parsed;
+}
 
 /**
  * Backstop for a stuck observer wake turn. `observerTurnState` flips to
@@ -285,6 +341,16 @@ export class ClaudeAdapter implements IBackendAdapter {
   private initFrameTimer: ReturnType<typeof setTimeout> | null = null;
   /** Wall-clock ms at last {@link attachTransport}, for the `sinceMs` field. */
   private lastAttachAt: number = 0;
+  /**
+   * Whether the NEXT / current spawn was launched with `--resume`. Set by the
+   * bridge via {@link setResumeExpected} before `attachTransport`, from the
+   * launcher's actual argv (`args.includes("--resume")`). Selects the longer
+   * {@link INIT_FRAME_TIMEOUT_RESUME_MS} deadline because a resume must replay
+   * the transcript + make its first API round-trip before `system.init` —
+   * work a cold spawn does not do. Reset by the launcher/bridge on each spawn;
+   * defaults to `false` (cold) so an unset value never over-waits.
+   */
+  private resumeExpected = false;
 
   /**
    * Observer turn-state for the Council Mode auto-wake gate.
@@ -1789,6 +1855,9 @@ export class ClaudeAdapter implements IBackendAdapter {
   private armInitFrameCanary(): void {
     this.disarmInitFrameCanary();
     this.lastAttachAt = Date.now();
+    const deadlineMs = this.resumeExpected
+      ? INIT_FRAME_TIMEOUT_RESUME_MS
+      : INIT_FRAME_TIMEOUT_MS;
     this.initFrameTimer = setTimeout(() => {
       // Clear state BEFORE firing so a same-tick re-arm from the
       // callback path works cleanly.
@@ -1803,7 +1872,20 @@ export class ClaudeAdapter implements IBackendAdapter {
         sessionId: this.sessionId,
         sinceMs,
       });
-    }, INIT_FRAME_TIMEOUT_MS);
+    }, deadlineMs);
+  }
+
+  /**
+   * Tell the adapter whether the spawn it is about to attach was launched
+   * with `--resume`. The bridge calls this from `openCliTransport` BEFORE
+   * `attachTransport`, sourcing the flag from the launcher's real argv. A
+   * resume selects the longer {@link INIT_FRAME_TIMEOUT_RESUME_MS} canary
+   * deadline (transcript replay + first API round-trip precede `system.init`);
+   * a cold spawn keeps the tight {@link INIT_FRAME_TIMEOUT_MS} window. Safe to
+   * call repeatedly; the value is consumed at the next `armInitFrameCanary`.
+   */
+  setResumeExpected(resume: boolean): void {
+    this.resumeExpected = resume;
   }
 
   /**
