@@ -26,6 +26,78 @@ const pendingOutgoingBySession = new Map<string, BrowserOutgoingMessage[]>();
 /** Track processed tool_use IDs to prevent duplicate task creation */
 const processedToolUseIds = new Map<string, Set<string>>();
 
+// ─── Context-window occupancy tracking ──────────────────────────────────────
+// The Claude context meter must reflect how full the model's window is RIGHT
+// NOW — and, critically, it must DROP after a /compact. The result frame's
+// `modelUsage` counters accumulate over the whole session (cache-read alone can
+// reach several times the window), so they can only ever climb and are useless
+// for this. Instead we derive the numerator from each `assistant` frame's
+// per-turn `usage` (fresh input + cache-read + cache-write = the real tokens
+// fed to the model that turn), which falls the instant the context is compacted.
+// The denominator (the model's declared context window) is only present on the
+// result frame's `modelUsage`, so we capture it there and combine the two.
+/** Last known per-turn context occupancy (input + cache_read + cache_creation). */
+const contextTokensBySession = new Map<string, number>();
+/** Model-declared context window, captured from result-frame `modelUsage`. */
+const contextWindowBySession = new Map<string, number>();
+
+/** Per-turn tokens actually resident in the model's context window. */
+function contextTokensFromUsage(u: {
+  input_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+}): number {
+  return (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+}
+
+/**
+ * Capture the model's declared context window from a result frame's
+ * `modelUsage`. Takes the largest window across models so a small-window
+ * side-model (e.g. a title-generation Haiku) can't shrink the denominator
+ * below the main model's window.
+ */
+function captureContextWindow(
+  sessionId: string,
+  modelUsage?: Record<string, { contextWindow?: number }>,
+): void {
+  if (!modelUsage) return;
+  let maxWindow = 0;
+  for (const u of Object.values(modelUsage)) {
+    if (typeof u.contextWindow === "number" && u.contextWindow > maxWindow) {
+      maxWindow = u.contextWindow;
+    }
+  }
+  if (maxWindow > 0) contextWindowBySession.set(sessionId, maxWindow);
+}
+
+/**
+ * Recompute and store `context_used_percent` from the last per-turn occupancy
+ * and the declared window. No-op until BOTH are known — the assistant frame
+ * (numerator) and the result frame (denominator) can arrive in either order
+ * within a turn, and a partial value would flash a wrong reading.
+ */
+function recomputeContextPct(sessionId: string): void {
+  const window = contextWindowBySession.get(sessionId);
+  const tokens = contextTokensBySession.get(sessionId);
+  if (!window || window <= 0 || tokens == null) return;
+  const pct = Math.max(0, Math.min(Math.round((tokens / window) * 100), 100));
+  useStore.getState().updateSession(sessionId, { context_used_percent: pct });
+}
+
+/** Record a per-turn usage sample and refresh the meter if the window is known. */
+function trackContextUsage(
+  sessionId: string,
+  usage?: {
+    input_tokens?: number;
+    cache_read_input_tokens?: number;
+    cache_creation_input_tokens?: number;
+  },
+): void {
+  if (!usage) return;
+  contextTokensBySession.set(sessionId, contextTokensFromUsage(usage));
+  recomputeContextPct(sessionId);
+}
+
 /**
  * PR #68 friedman fix-pass — when ANY session WebSocket reconnects (a
  * strong correlated signal that the network blipped), refire the
@@ -891,6 +963,9 @@ function handleParsedMessage(
       // tool_use) and streaming deltas create new drafts between them.
       clearStreamingDraftMessage(sessionId);
       upsertAssistantMessage(sessionId, chatMsg);
+      // Refresh the context meter from this turn's real occupancy so it drops
+      // immediately after a /compact (see contextTokensFromUsage rationale).
+      trackContextUsage(sessionId, msg.usage);
       store.setStreaming(sessionId, null);
       streamingPhaseBySession.delete(sessionId);
       // Reset streaming text accumulators so subsequent deltas in the same
@@ -1083,18 +1158,13 @@ function handleParsedMessage(
       if (typeof r.total_lines_removed === "number") {
         sessionUpdates.total_lines_removed = r.total_lines_removed;
       }
-      // Compute context % from modelUsage if available
-      if (r.modelUsage) {
-        for (const usage of Object.values(r.modelUsage)) {
-          if (usage.contextWindow > 0) {
-            const pct = Math.round(
-              ((usage.inputTokens + usage.outputTokens) / usage.contextWindow) * 100
-            );
-            sessionUpdates.context_used_percent = Math.max(0, Math.min(pct, 100));
-          }
-        }
-      }
       store.updateSession(sessionId, sessionUpdates);
+      // Capture the declared context window here (only the result frame carries
+      // it), then recompute the meter from the last per-turn occupancy. We do
+      // NOT derive the percentage from `modelUsage`'s counters — they accumulate
+      // over the whole session and never fall after a /compact.
+      captureContextWindow(sessionId, r.modelUsage);
+      recomputeContextPct(sessionId);
       clearStreamingDraftMessage(sessionId);
       store.setStreaming(sessionId, null);
       streamingPhaseBySession.delete(sessionId);
@@ -1419,6 +1489,9 @@ function handleParsedMessage(
           } else {
             chatMessages[existingIndex] = mergeAssistantMessage(chatMessages[existingIndex], assistantMsg);
           }
+          // Track per-turn context occupancy during replay so the restored
+          // meter matches the live one (drops after a /compact, not cumulative).
+          trackContextUsage(sessionId, msg.usage);
           // Also extract tasks, changed files, and background processes from history
           if (msg.content?.length) {
             const baseTimestamp = histMsg.timestamp || Date.now();
@@ -1477,16 +1550,11 @@ function handleParsedMessage(
           if (typeof r.total_lines_removed === "number") {
             resultUpdates.total_lines_removed = r.total_lines_removed;
           }
-          if (r.modelUsage) {
-            for (const usage of Object.values(r.modelUsage)) {
-              if ((usage as { contextWindow: number; inputTokens: number; outputTokens: number }).contextWindow > 0) {
-                const u = usage as { contextWindow: number; inputTokens: number; outputTokens: number };
-                const pct = Math.round(((u.inputTokens + u.outputTokens) / u.contextWindow) * 100);
-                resultUpdates.context_used_percent = Math.max(0, Math.min(pct, 100));
-              }
-            }
-          }
           store.updateSession(sessionId, resultUpdates);
+          // Capture the declared window from replay, then recompute from the
+          // last per-turn occupancy — mirrors the live result path.
+          captureContextWindow(sessionId, r.modelUsage as Record<string, { contextWindow?: number }> | undefined);
+          recomputeContextPct(sessionId);
         } else if (histMsg.type === "system_event") {
           const summary = summarizeSystemEvent(histMsg.event);
           if (!summary) continue;
