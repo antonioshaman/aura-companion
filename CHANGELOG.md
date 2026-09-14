@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.17.1](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.17.0...aura-companion-v1.17.1) (2026-09-14)
+
+
+### Bug Fixes
+
+* **server:** give --resume spawns a longer init-frame canary deadline ([#197](https://github.com/antonioshaman/aura-companion/issues/197)) ([c572e28](https://github.com/antonioshaman/aura-companion/commit/c572e28f34c44be9dcb7a5e064bc599a66ce2eb0))
+* **ui:** derive Claude context meter from per-turn occupancy so it drops after /compact ([#196](https://github.com/antonioshaman/aura-companion/issues/196)) ([cbd9b60](https://github.com/antonioshaman/aura-companion/commit/cbd9b60d9aae42cedbe47d28eccdb58151085437))
+
 ## [1.17.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.16.0...aura-companion-v1.17.0) (2026-09-12)
 
 
