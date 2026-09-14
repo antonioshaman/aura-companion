@@ -1370,15 +1370,28 @@ export class WsBridge {
    * Returns the adapter so the caller can pump the child's stdout into
    * {@link ClaudeAdapter.handleRawMessage}.
    */
-  handleCLIStdioOpen(sessionId: string, transport: CliTransport): ClaudeAdapter {
+  handleCLIStdioOpen(
+    sessionId: string,
+    transport: CliTransport,
+    opts?: { resume?: boolean },
+  ): ClaudeAdapter {
     this.recorder?.recordEvent(sessionId, "ws_open", "cli");
-    return this.openCliTransport(sessionId, transport);
+    return this.openCliTransport(sessionId, transport, opts);
   }
 
   /**
    * Transport-agnostic CLI open sequence — see the two entry points above.
+   *
+   * `opts.resume` (stdio path only) flags a `--resume` spawn so the adapter
+   * arms the longer init-frame canary deadline; the legacy WS path leaves it
+   * unset (cold deadline), which is correct — a WS resume re-dials an already
+   * loaded process rather than paying the cold transcript-replay cost.
    */
-  private openCliTransport(sessionId: string, transport: CliTransport): ClaudeAdapter {
+  private openCliTransport(
+    sessionId: string,
+    transport: CliTransport,
+    opts?: { resume?: boolean },
+  ): ClaudeAdapter {
     const session = this.getOrCreateSession(sessionId);
 
     // Create or retrieve ClaudeAdapter for this session
@@ -1425,6 +1438,10 @@ export class WsBridge {
       log.info("ws-bridge", "CLI connected", { sessionId });
     }
 
+    // Select the init-frame canary deadline BEFORE attach — a `--resume`
+    // spawn replays its transcript + makes a first API round-trip before
+    // `system.init`, so it gets the longer window (prod incident eb13fc90).
+    adapter.setResumeExpected(!!opts?.resume);
     // Attach the control channel to the adapter (flushes pending NDJSON)
     adapter.attachTransport(transport);
 

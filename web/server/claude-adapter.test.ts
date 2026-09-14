@@ -47,7 +47,7 @@ vi.mock("./model-availability.js", () => ({
       : { kind: "ok", model: opts.requested },
 }));
 
-import { ClaudeAdapter, resolveSilentStdioTimeoutMs } from "./claude-adapter.js";
+import { ClaudeAdapter, resolveSilentStdioTimeoutMs, resolveInitFrameTimeoutMs } from "./claude-adapter.js";
 import { log } from "./logger.js";
 import { companionBus } from "./event-bus.js";
 
@@ -2401,6 +2401,66 @@ describe("Init-frame health canary", () => {
 
     off();
   });
+
+  // Prod incident eb13fc90 (2026-09-14): a `--resume` spawn on a large
+  // transcript legitimately blows past the 30s cold deadline (transcript
+  // replay + first API round-trip precede `system.init`), so the canary was
+  // flagging a healthy-but-loading resume as "CLI may be broken". A resume
+  // spawn (setResumeExpected(true)) must use the longer 120s window instead.
+  it("uses the longer 120s deadline for a --resume spawn (no fire at 30s, fires at 120s)", () => {
+    const a = new ClaudeAdapter("sess-canary-resume");
+    a.onBrowserMessage(vi.fn());
+    const busEvents: unknown[] = [];
+    const off = companionBus.on("session:no-init-frame", (e) => { busEvents.push(e); });
+
+    // Bridge marks this spawn as a resume BEFORE attach (mirrors openCliTransport).
+    a.setResumeExpected(true);
+    a.attachWebSocket(createMockSocket("sess-canary-resume"));
+
+    // Past the COLD deadline — a cold spawn would have fired here; a resume
+    // must still be waiting (transcript replay + first API call in flight).
+    vi.advanceTimersByTime(35_000);
+    expect(busEvents.length).toBe(0);
+
+    // Just before the resume deadline — still quiet.
+    vi.advanceTimersByTime(84_000); // t=119s
+    expect(busEvents.length).toBe(0);
+
+    // Cross the 120s resume deadline → fires.
+    vi.advanceTimersByTime(2_000); // t=121s
+    expect(busEvents.length).toBe(1);
+    const evt = busEvents[0] as { sinceMs: number };
+    expect(evt.sinceMs).toBeGreaterThanOrEqual(120_000);
+
+    off();
+  });
+
+  // The resume flag is per-spawn state consumed at arm time: a cold re-attach
+  // after a resume attach must fall back to the tight 30s window, never leak
+  // the longer deadline. Guards against a stale `resumeExpected` over-waiting.
+  it("falls back to the cold 30s deadline when the next spawn is not a resume", () => {
+    const a = new ClaudeAdapter("sess-canary-resume-2");
+    a.onBrowserMessage(vi.fn());
+    const busEvents: unknown[] = [];
+    const off = companionBus.on("session:no-init-frame", (e) => { busEvents.push(e); });
+
+    // A resume spawn first.
+    a.setResumeExpected(true);
+    a.attachWebSocket(createMockSocket("sess-canary-resume-2"));
+    // Transport closes before init (subprocess died) — disarms the timer.
+    a.handleTransportClose();
+
+    // Next spawn is a plain cold relaunch — bridge clears the resume flag.
+    a.setResumeExpected(false);
+    a.attachWebSocket(createMockSocket("sess-canary-resume-2"));
+    // Cold deadline must apply: fires at 30s, not 120s.
+    vi.advanceTimersByTime(29_000);
+    expect(busEvents.length).toBe(0);
+    vi.advanceTimersByTime(2_000);
+    expect(busEvents.length).toBe(1);
+
+    off();
+  });
 });
 
 /**
@@ -2468,5 +2528,51 @@ describe("resolveSilentStdioTimeoutMs — env override parsing", () => {
     expect(resolveSilentStdioTimeoutMs("60000abc", warn)).toBe(300_000);
     expect(resolveSilentStdioTimeoutMs("60000.5", warn)).toBe(300_000);
     expect(warns.length).toBe(2);
+  });
+});
+
+/**
+ * Init-frame canary deadline env overrides — `AURA_INIT_FRAME_TIMEOUT_MS`
+ * (cold, default 30s) and `AURA_INIT_FRAME_TIMEOUT_RESUME_MS` (resume,
+ * default 120s). Same strict fail-loud family as the silence-watchdog
+ * resolver, but with a 5s floor (a warm-transcript resume can init faster
+ * than the 10s silence floor, and an operator tuning DOWN is legitimate).
+ */
+describe("resolveInitFrameTimeoutMs — env override parsing", () => {
+  it("returns the provided default when env is unset or empty", () => {
+    expect(resolveInitFrameTimeoutMs(undefined)).toBe(30_000);
+    expect(resolveInitFrameTimeoutMs("")).toBe(30_000);
+    // Caller can supply a different default (the resume constant uses 120s).
+    expect(resolveInitFrameTimeoutMs(undefined, 120_000)).toBe(120_000);
+    expect(resolveInitFrameTimeoutMs("", 120_000)).toBe(120_000);
+  });
+
+  it("returns parsed value for integer >= MIN_MS (5000)", () => {
+    expect(resolveInitFrameTimeoutMs("30000")).toBe(30_000);
+    expect(resolveInitFrameTimeoutMs("120000")).toBe(120_000);
+    expect(resolveInitFrameTimeoutMs("600000")).toBe(600_000);
+    // Boundary — 5s floor accepted.
+    expect(resolveInitFrameTimeoutMs("5000")).toBe(5_000);
+  });
+
+  it("REJECTS values below MIN_MS (5000) with warn → default, naming the env var", () => {
+    const warns: string[] = [];
+    const warn = (m: string) => { warns.push(m); };
+    expect(resolveInitFrameTimeoutMs("4999", 120_000, "AURA_INIT_FRAME_TIMEOUT_RESUME_MS", warn)).toBe(120_000);
+    expect(resolveInitFrameTimeoutMs("0", 30_000, "AURA_INIT_FRAME_TIMEOUT_MS", warn)).toBe(30_000);
+    expect(warns.length).toBe(2);
+    expect(warns[0]).toContain("AURA_INIT_FRAME_TIMEOUT_RESUME_MS");
+    expect(warns[0]).toContain("5000");
+    expect(warns[1]).toContain("AURA_INIT_FRAME_TIMEOUT_MS");
+  });
+
+  it("REJECTS non-numeric, negative, float, and partial-parse strings → default", () => {
+    const warns: string[] = [];
+    const warn = (m: string) => { warns.push(m); };
+    expect(resolveInitFrameTimeoutMs("banana", 30_000, "AURA_INIT_FRAME_TIMEOUT_MS", warn)).toBe(30_000);
+    expect(resolveInitFrameTimeoutMs("-500", 30_000, "AURA_INIT_FRAME_TIMEOUT_MS", warn)).toBe(30_000);
+    expect(resolveInitFrameTimeoutMs("30000.5", 30_000, "AURA_INIT_FRAME_TIMEOUT_MS", warn)).toBe(30_000);
+    expect(resolveInitFrameTimeoutMs("30000abc", 30_000, "AURA_INIT_FRAME_TIMEOUT_MS", warn)).toBe(30_000);
+    expect(warns.length).toBe(4);
   });
 });
