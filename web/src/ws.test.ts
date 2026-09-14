@@ -907,6 +907,126 @@ describe("handleMessage: session_update", () => {
 });
 
 // ===========================================================================
+// Context-usage meter (#193 fix)
+//
+// The Claude context meter must show how full the model's window is RIGHT NOW
+// and DROP after a /compact. These tests drive the two frames it derives from:
+//   - `assistant` carries per-turn `usage` (numerator = fresh input + cache
+//     read + cache write = tokens actually resident in the window this turn),
+//   - `result.modelUsage` carries the model-declared `contextWindow`
+//     (denominator).
+// The regression this guards: the original formula used the cumulative
+// `modelUsage` input+output counters, which only ever climb, so the meter
+// pinned high and never fell after compaction.
+// ===========================================================================
+describe("handleMessage: context meter", () => {
+  // Helper: fire one assistant turn with a given per-turn usage.
+  function fireAssistantTurn(usage: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_creation_input_tokens: number;
+    cache_read_input_tokens: number;
+  }, id = "msg-ctx") {
+    fireMessage({
+      type: "assistant",
+      message: {
+        id,
+        type: "message",
+        role: "assistant",
+        model: "claude-opus-4-8",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        usage,
+      },
+      parent_tool_use_id: null,
+    });
+  }
+
+  // Helper: fire a result frame that declares the context window via modelUsage.
+  function fireResultWithWindow(models: Record<string, number>) {
+    const modelUsage: Record<string, unknown> = {};
+    for (const [model, contextWindow] of Object.entries(models)) {
+      modelUsage[model] = {
+        inputTokens: 999,
+        outputTokens: 999,
+        cacheReadInputTokens: 999,
+        cacheCreationInputTokens: 999,
+        contextWindow,
+        maxOutputTokens: 64000,
+        costUSD: 0.01,
+      };
+    }
+    fireMessage({
+      type: "result",
+      data: {
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        duration_ms: 1,
+        duration_api_ms: 1,
+        num_turns: 1,
+        total_cost_usd: 0.01,
+        stop_reason: "end_turn",
+        usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        modelUsage,
+        uuid: "u-ctx",
+        session_id: "s1",
+      },
+    });
+  }
+
+  it("derives context % from per-turn occupancy ÷ declared window (not cumulative counters)", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+
+    // 1000 fresh + 50000 cache-read + 9000 cache-write = 60000 resident tokens.
+    fireAssistantTurn({ input_tokens: 1000, output_tokens: 2000, cache_creation_input_tokens: 9000, cache_read_input_tokens: 50000 });
+    // Window unknown until a result frame declares it — no premature reading.
+    expect(useStore.getState().sessions.get("s1")!.context_used_percent).toBe(0);
+
+    fireResultWithWindow({ "claude-opus-4-8": 200000 });
+    // 60000 / 200000 = 30% (the cumulative counters in modelUsage are ignored).
+    expect(useStore.getState().sessions.get("s1")!.context_used_percent).toBe(30);
+  });
+
+  it("DROPS the meter after a /compact instead of pinning high", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+
+    // Turn 1: window nearly full (180k / 200k = 90%).
+    fireAssistantTurn({ input_tokens: 0, output_tokens: 500, cache_creation_input_tokens: 0, cache_read_input_tokens: 180000 }, "msg-1");
+    fireResultWithWindow({ "claude-opus-4-8": 200000 });
+    expect(useStore.getState().sessions.get("s1")!.context_used_percent).toBe(90);
+
+    // Turn 2 after compaction: occupancy collapses to 40k. The window is already
+    // known, so the assistant frame alone must pull the meter down to 20%.
+    fireAssistantTurn({ input_tokens: 0, output_tokens: 500, cache_creation_input_tokens: 0, cache_read_input_tokens: 40000 }, "msg-2");
+    expect(useStore.getState().sessions.get("s1")!.context_used_percent).toBe(20);
+  });
+
+  it("uses the largest window across models so a small side-model can't shrink the denominator", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+
+    fireAssistantTurn({ input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 300000 });
+    // A title-gen Haiku (200k) must not override the main 1M window; otherwise
+    // 300000/200000 would clamp to a bogus 100%.
+    fireResultWithWindow({ "claude-opus-4-8": 1000000, "claude-haiku-4-5": 200000 });
+    expect(useStore.getState().sessions.get("s1")!.context_used_percent).toBe(30);
+  });
+
+  it("clamps to 100 and never below 0", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+
+    fireAssistantTurn({ input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 500000 });
+    fireResultWithWindow({ "claude-opus-4-8": 200000 });
+    // 500000/200000 = 250% → clamped to 100.
+    expect(useStore.getState().sessions.get("s1")!.context_used_percent).toBe(100);
+  });
+});
+
+// ===========================================================================
 // handleMessage: result
 // ===========================================================================
 describe("handleMessage: result", () => {
