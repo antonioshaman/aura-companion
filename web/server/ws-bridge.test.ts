@@ -1128,6 +1128,54 @@ describe("Browser handlers", () => {
     expect(disconnectedMsg).toBeUndefined();
   });
 
+  // RC-1 regression: after a stdio Claude process dies, `handleTransportClose`
+  // nulls the transport but leaves the ClaudeAdapter object attached (and fires
+  // no disconnect cb). The OLD `backendConnected = !!session.backendAdapter`
+  // presence check read that corpse as alive, so a returning user never
+  // triggered a relaunch — the "idle session won't come back" bug. The fix uses
+  // LIVENESS (`isConnected()`) for Claude, so a present-but-dead adapter relaunches.
+  it("handleBrowserOpen: RC-1 — relaunches when a Claude adapter is present but its transport is dead", () => {
+    const relaunchCb = vi.fn();
+    companionBus.on("session:relaunch-needed", ({ sessionId }) => relaunchCb(sessionId));
+
+    // Attach a REAL ClaudeAdapter via the CLI-open path (transport present →
+    // isConnected() true), then simulate the process death.
+    const cli = makeCliSocket("s1");
+    bridge.handleCLIOpen(cli, "s1");
+    const adapter = bridge.getSession("s1")!.backendAdapter as any;
+    expect(adapter.isConnected()).toBe(true);
+    adapter.handleTransportClose(); // transport → null; adapter object stays attached
+    expect(adapter.isConnected()).toBe(false);
+
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+
+    // Liveness-aware: the dead-but-present adapter is treated as disconnected.
+    expect(relaunchCb).toHaveBeenCalledWith("s1");
+    const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
+    expect(calls.find((c: any) => c.type === "cli_disconnected")).toBeDefined();
+  });
+
+  // Positive control for the RC-1 fix: a live (transport-attached) Claude adapter
+  // must NOT be relaunched on browser-open — proving the liveness change didn't
+  // regress into always-relaunching a healthy session (incl. the mid-init window,
+  // where the transport is attached before `system.init`).
+  it("handleBrowserOpen: does NOT relaunch when a Claude adapter is present and connected", () => {
+    const relaunchCb = vi.fn();
+    companionBus.on("session:relaunch-needed", ({ sessionId }) => relaunchCb(sessionId));
+
+    const cli = makeCliSocket("s1");
+    bridge.handleCLIOpen(cli, "s1");
+    expect((bridge.getSession("s1")!.backendAdapter as any).isConnected()).toBe(true);
+
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+
+    expect(relaunchCb).not.toHaveBeenCalled();
+    const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
+    expect(calls.find((c: any) => c.type === "cli_disconnected")).toBeUndefined();
+  });
+
   it("handleBrowserClose: removes from set", () => {
     const browser = makeBrowserSocket("s1");
     bridge.handleBrowserOpen(browser, "s1");

@@ -1608,10 +1608,22 @@ export class WsBridge {
     }
 
     // Notify if backend is not connected and request relaunch.
-    // Treat an attached adapter as "alive" during init — `isConnected()`
-    // may flip true only after initialize/thread start, and relaunching
-    // during that window can kill a healthy startup.
-    const backendConnected = !!session.backendAdapter;
+    // LIVENESS, not mere presence (RC-1). A stdio Claude process death runs
+    // `adapter.handleTransportClose()`, which nulls the transport but leaves the
+    // `ClaudeAdapter` object attached and fires no disconnect callback — so
+    // `!!session.backendAdapter` reads that corpse as alive and the returning
+    // user never triggers a relaunch (the exact "idle session won't come back"
+    // regression). For Claude, `isConnected()` is transport-presence: true
+    // throughout init (transport is attached before `system.init`), false only
+    // when the transport is gone — so it is the correct liveness signal and does
+    // NOT relaunch a healthy mid-init session. Codex KEEPS presence semantics:
+    // its `connected` flag is legitimately false during a ~16s init window and
+    // its own `onDisconnect` already emits `session:relaunch-needed` on real
+    // death, so using `isConnected()` for Codex would relaunch a healthy startup.
+    const backendConnected =
+      session.backendAdapter instanceof ClaudeAdapter
+        ? session.backendAdapter.isConnected()
+        : !!session.backendAdapter;
 
     // An archived session's backend is dead by design (the user closed it).
     // Emitting `cli_disconnected` would render a spurious "reconnecting" flap
