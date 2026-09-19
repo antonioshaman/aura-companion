@@ -20,6 +20,7 @@ import { SessionLaunchOverlay } from "./components/SessionLaunchOverlay.js";
 import { DockerUpdateDialog } from "./components/DockerUpdateDialog.js";
 import { OnboardingModal } from "./components/OnboardingModal.js";
 import { ObserverPanel } from "./components/council/index.js";
+import { SectionErrorBoundary } from "./components/SectionErrorBoundary.js";
 
 // Lazy-loaded route-level pages (not needed for initial render)
 const Playground = lazy(() => import("./components/Playground.js").then((m) => ({ default: m.Playground })));
@@ -339,7 +340,14 @@ export default function App() {
                 {currentSessionId ? (
                   activeTab === "diff"
                     ? <DiffPanel sessionId={currentSessionId} />
-                    : <ChatView sessionId={currentSessionId} />
+                    : (
+                      // Contain a chat-subtree render throw to this region so a
+                      // bad message/finding never escapes to the root
+                      // AppErrorBoundary and blanks the viewport (RC-1 T13 / RC-5).
+                      <SectionErrorBoundary label="Chat">
+                        <ChatView sessionId={currentSessionId} />
+                      </SectionErrorBoundary>
+                    )
                 ) : (
                   <HomePage key={homeResetKey} />
                 )}
@@ -365,7 +373,12 @@ export default function App() {
           behaviour mirrors TaskPanel's open/closed pattern. */}
       {currentSessionId && isSessionView && (
         <div className="hidden md:flex shrink-0 h-full">
-          <ObserverPanel sessionId={currentSessionId} />
+          {/* Contain a render throw in the observer UI (fires once per
+              group:checkpoint / group:review update) to this rail rather than
+              letting it escape to the root AppErrorBoundary (RC-1 T13 / RC-5). */}
+          <SectionErrorBoundary label="Observer">
+            <ObserverPanel sessionId={currentSessionId} />
+          </SectionErrorBoundary>
         </div>
       )}
 
