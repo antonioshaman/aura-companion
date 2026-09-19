@@ -1151,9 +1151,32 @@ describe("Browser handlers", () => {
     bridge.handleBrowserOpen(browser, "s1");
 
     // Liveness-aware: the dead-but-present adapter is treated as disconnected.
+    // EXACTLY ONE relaunch request (no duplicate emit from the same open).
     expect(relaunchCb).toHaveBeenCalledWith("s1");
+    expect(relaunchCb).toHaveBeenCalledTimes(1);
     const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
     expect(calls.find((c: any) => c.type === "cli_disconnected")).toBeDefined();
+  });
+
+  // RC-1 negative: an ARCHIVED session whose backend is dead must NOT relaunch
+  // (the user closed it on purpose) and must NOT emit a spurious cli_disconnected
+  // flap. The archived guard sits alongside the liveness check.
+  it("handleBrowserOpen: does NOT relaunch an archived session even when the Claude adapter is dead", () => {
+    const relaunchCb = vi.fn();
+    companionBus.on("session:relaunch-needed", ({ sessionId }) => relaunchCb(sessionId));
+
+    const cli = makeCliSocket("s1");
+    bridge.handleCLIOpen(cli, "s1");
+    const adapter = bridge.getSession("s1")!.backendAdapter as any;
+    adapter.handleTransportClose();
+    bridge.getSession("s1")!.archived = true;
+
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+
+    expect(relaunchCb).not.toHaveBeenCalled();
+    const calls = browser.send.mock.calls.map(([arg]: [string]) => JSON.parse(arg));
+    expect(calls.find((c: any) => c.type === "cli_disconnected")).toBeUndefined();
   });
 
   // Positive control for the RC-1 fix: a live (transport-attached) Claude adapter
