@@ -1199,6 +1199,61 @@ describe("Browser handlers", () => {
     expect(calls.find((c: any) => c.type === "cli_disconnected")).toBeUndefined();
   });
 
+  // RC-1 legacy-WS regression guard (COMPANION_CLAUDE_TRANSPORT=ws). The liveness
+  // change treats a transport-closed Claude adapter as dead — but WS legitimately
+  // cycles its socket (~30s) and reconnects. handleCLIClose arms a 15s debounce;
+  // while it is pending, handleBrowserOpen MUST defer (via !disconnectTimers.has)
+  // and not emit its own relaunch. The single relaunch (if the CLI never returns)
+  // comes from the existing debounce timer — exactly once, not doubled by the fix.
+  it("handleBrowserOpen: RC-1 — legacy WS reconnect during the disconnect debounce does NOT double-emit relaunch", () => {
+    vi.useFakeTimers();
+    try {
+      const relaunchCb = vi.fn();
+      companionBus.on("session:relaunch-needed", ({ sessionId }) => relaunchCb(sessionId));
+
+      const cli = makeCliSocket("s1");
+      bridge.handleCLIOpen(cli, "s1");
+      bridge.handleCLIClose(cli); // arms 15s debounce; WS detached → isConnected() false
+      expect((bridge.getSession("s1")!.backendAdapter as any).isConnected()).toBe(false);
+
+      // Browser reconnects WHILE the debounce is pending → handleBrowserOpen defers.
+      const browser = makeBrowserSocket("s1");
+      bridge.handleBrowserOpen(browser, "s1");
+      expect(relaunchCb).not.toHaveBeenCalled();
+
+      // Debounce expires with no CLI recovery → the TIMER emits exactly one relaunch.
+      vi.advanceTimersByTime(16_000);
+      expect(relaunchCb).toHaveBeenCalledTimes(1);
+      expect(relaunchCb).toHaveBeenCalledWith("s1");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // RC-1 legacy-WS: if the CLI reconnects INSIDE the debounce window, neither the
+  // browser-open path nor the timer relaunches (the timer's isConnected() recheck
+  // short-circuits). Proves the fix doesn't turn a healthy WS cycle into a relaunch.
+  it("handleBrowserOpen: RC-1 — legacy WS CLI recovery within the debounce yields NO relaunch", () => {
+    vi.useFakeTimers();
+    try {
+      const relaunchCb = vi.fn();
+      companionBus.on("session:relaunch-needed", ({ sessionId }) => relaunchCb(sessionId));
+
+      const cli = makeCliSocket("s1");
+      bridge.handleCLIOpen(cli, "s1");
+      bridge.handleCLIClose(cli); // arms debounce
+      const browser = makeBrowserSocket("s1");
+      bridge.handleBrowserOpen(browser, "s1"); // deferred, no emit
+      // CLI reconnects within the window → transport re-attached, isConnected() true.
+      const cli2 = makeCliSocket("s1");
+      bridge.handleCLIOpen(cli2, "s1");
+      vi.advanceTimersByTime(16_000); // timer sees isConnected() === true → returns
+      expect(relaunchCb).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("handleBrowserClose: removes from set", () => {
     const browser = makeBrowserSocket("s1");
     bridge.handleBrowserOpen(browser, "s1");

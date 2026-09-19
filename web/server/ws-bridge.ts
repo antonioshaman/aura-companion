@@ -1620,6 +1620,21 @@ export class WsBridge {
     // its `connected` flag is legitimately false during a ~16s init window and
     // its own `onDisconnect` already emits `session:relaunch-needed` on real
     // death, so using `isConnected()` for Codex would relaunch a healthy startup.
+    //
+    // INVARIANT — for Claude, `isConnected() === false` means a dead/exited spawn,
+    // NEVER merely "adapter assigned, transport not yet attached". Proof by
+    // construction order: `openCliTransport()` (the sole assigner of a Claude
+    // `session.backendAdapter`, via `attachBackendAdapter`) is SYNCHRONOUS from
+    // that assignment through `adapter.attachTransport(transport)` — no `await`
+    // between them. On the single-threaded loop, this synchronous
+    // `handleBrowserOpen` cannot interleave into that gap, so a Claude adapter
+    // observed here with `transport === null` has always already had its transport
+    // NULLED by a close path (`handleTransportClose` on process exit → launcher
+    // marks `state:"exited"`, or `disconnect()` on archive). The transient WS
+    // reconnect case (transport briefly closed but recovering) is separately
+    // covered by the `!this.disconnectTimers.has(sessionId)` guard below, which
+    // defers to `handleCLIClose`'s 15s debounce timer — so this fix does not
+    // regress `COMPANION_CLAUDE_TRANSPORT=ws`.
     const backendConnected =
       session.backendAdapter instanceof ClaudeAdapter
         ? session.backendAdapter.isConnected()
