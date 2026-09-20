@@ -9,32 +9,28 @@
 // scenario). See IMPLEMENTATION-LOG "RESOLVED DESIGN FINDING (variant B)".
 
 import { describe, it, expect } from "vitest";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { composeCouncil } from "./advisor-scorer.js";
 import { buildAdvisorBrief } from "./advisor-brief.js";
 import { loadCatalog } from "./capability-catalog.js";
 import type { AdvisorProfile, Vocabulary } from "./capability-catalog";
 import type { Fingerprint } from "./fingerprint";
 
-// --- frozen fixture profiles (mirror of the 14 seated meta.yaml, Task 2) -------
-const PROFILES: AdvisorProfile[] = [
-  { id: "hunt", signals: ["any"], domains: ["security"] },
-  { id: "fowler", signals: ["any"], domains: ["refactoring", "backend-architecture"] },
-  { id: "saarinen", signals: ["browser-spa", "react"], domains: ["ui-visual-quality"] },
-  { id: "friedman", signals: ["browser-spa", "cli", "telegram-mini-app"], domains: ["ux-flow"] },
-  { id: "willison", signals: ["any"], domains: ["llm-pipeline"] },
-  { id: "hashimoto", signals: ["docker", "github-actions", "systemd", "vps", "cloud-run", "nginx", "kubernetes"], domains: ["devops-deploy", "ci-supply-chain"] },
-  { id: "beck", signals: ["any"], domains: ["test-quality"] },
-  { id: "dahl", signals: ["bun", "node", "typescript", "hono", "express", "fastify", "websocket", "ndjson", "json-rpc", "rest", "sse"], domains: ["backend-architecture", "protocol-correctness", "realtime-streaming"] },
-  { id: "ritchie", signals: ["stdio-subprocess", "cli"], domains: ["process-lifecycle", "filesystem-persistence"] },
-  { id: "abramov", signals: ["react", "vue", "svelte", "nextjs", "browser-spa", "typescript", "javascript"], domains: ["frontend-architecture"] },
-  { id: "watson", signals: ["browser-spa", "react"], domains: ["accessibility"] },
-  { id: "durov", signals: ["telegram-bot", "telegram-mini-app"], domains: ["chat-platform-ux", "ux-flow"] },
-  { id: "vanrossum", signals: ["python", "cpython", "aiogram", "fastapi", "flask", "django", "starlette"], domains: ["backend-architecture"] },
-  { id: "brandur", signals: ["postgres", "sqlite", "mysql", "sqlalchemy", "alembic", "prisma", "drizzle"], domains: ["database-persistence", "schema-migrations"] },
-];
+// --- frozen catalog snapshot: the 14 seated profiles, checked in under
+// __fixtures__/council-catalog/ so the AC1.4 superset gates HERMETICALLY in the aura
+// repo's CI (observer WARN 2 — the earlier inline copy had no CI link to reality).
+// Regenerate via `bun run scripts/build-council-catalog-snapshot.ts`; the freshness
+// canary below asserts this snapshot still equals the live catalog where present.
+const PROFILES: AdvisorProfile[] = (
+  JSON.parse(
+    readFileSync(
+      join(dirname(new URL(import.meta.url).pathname), "__fixtures__", "council-catalog", "profiles.json"),
+      "utf8",
+    ),
+  ) as { profiles: AdvisorProfile[] }
+).profiles;
 
 const AURA_10 = ["hunt", "fowler", "dahl", "ritchie", "abramov", "watson", "saarinen", "friedman", "willison", "hashimoto"];
 const PYTHON_9 = ["hunt", "fowler", "durov", "vanrossum", "brandur", "hashimoto", "willison", "saarinen", "friedman"];
@@ -81,7 +77,7 @@ describe("AC1.4 back-compat superset — Python/aiogram", () => {
 // pre-commit hook), assert the inline PROFILES still MATCH what the catalog loads —
 // so drift between this frozen baseline and reality fails loudly. Skipped in bare CI
 // (no ~/.claude); the authoritative live gate remains the catalog verifier/CI.
-describe("frozen PROFILES stay in sync with the live catalog (beck #3)", () => {
+describe("catalog snapshot stays in sync with the live catalog (beck #3 / observer WARN 2)", () => {
   const catalogRoot =
     process.env.COUNCIL_CATALOG ?? join(homedir(), ".claude", "skills", "_council-experts");
   const havePresent = existsSync(catalogRoot);

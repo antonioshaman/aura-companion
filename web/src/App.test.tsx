@@ -16,7 +16,7 @@
  * - Various page routes (settings, environments, etc.)
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom";
 
 // ─── Hoisted mocks (must be before vi.mock calls) ────────────────
@@ -457,6 +457,45 @@ describe("App", () => {
       render(<App />);
       // The effect guards on isAuthenticated; before the flip it must not fire.
       expect(api.fetchGroups).not.toHaveBeenCalled();
+    });
+
+    // Follow-up (observer panel UX): a long-open tab that was already connected
+    // when a pair spawned can miss the live `group:created` push and never
+    // reconnect, leaving the ObserverPanel silently absent for a LIVE pair. The
+    // App re-runs the group bootstrap when the tab regains visibility/focus.
+    it("re-hydrates groups when the tab regains visibility", async () => {
+      setStoreValues({ isAuthenticated: true });
+      render(<App />);
+      await waitFor(() => expect(api.fetchGroups).toHaveBeenCalledTimes(1)); // mount
+
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" });
+      act(() => {
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      await waitFor(() => expect(api.fetchGroups).toHaveBeenCalledTimes(2));
+    });
+
+    it("re-hydrates groups on window focus", async () => {
+      setStoreValues({ isAuthenticated: true });
+      render(<App />);
+      await waitFor(() => expect(api.fetchGroups).toHaveBeenCalledTimes(1));
+      act(() => {
+        window.dispatchEvent(new Event("focus"));
+      });
+      await waitFor(() => expect(api.fetchGroups).toHaveBeenCalledTimes(2));
+    });
+
+    it("does NOT re-hydrate when the tab goes HIDDEN (only on visible)", async () => {
+      setStoreValues({ isAuthenticated: true });
+      render(<App />);
+      await waitFor(() => expect(api.fetchGroups).toHaveBeenCalledTimes(1));
+
+      Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" });
+      act(() => {
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(api.fetchGroups).toHaveBeenCalledTimes(1);
     });
   });
 

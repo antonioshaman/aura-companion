@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // Freezes the six council SKILL.md dispatchers into a checked-in fixture so
-// `detect-stack.skill-mirror.test.ts` has something to assert against in CI,
+// `skill-dispatcher-contract.test.ts` has something to assert against in CI,
 // where the operator's `~/.claude/skills` tree does not exist.
 //
 // RC-2 note. This used to freeze only the Phase-0 stack-detection router +
