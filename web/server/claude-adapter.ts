@@ -1226,6 +1226,22 @@ export class ClaudeAdapter implements IBackendAdapter {
     // the chain, ask the orchestrator to swap-and-relaunch.
     this.maybeEmitModelFallback(msg);
 
+    // Silent-stdio watchdog hold: an assistant message carrying a tool_use
+    // block means the CLI is about to run a tool locally and may emit NO
+    // stdout frames until it returns (a long Bash build / download / deploy).
+    // Hold the silence deadline open (widened window) so a legitimately-busy
+    // turn isn't misread as a dead stream and killed mid-work. A tool-free
+    // assistant message (final text) releases the hold; the `result`
+    // terminator disarms entirely. The classic no-output-after-user-message
+    // bug is unaffected — `held` is false until the first tool_use arrives.
+    const content = msg.message?.content;
+    const hasToolUse =
+      Array.isArray(content) &&
+      content.some(
+        (b) => b && typeof b === "object" && (b as { type?: unknown }).type === "tool_use",
+      );
+    this.silenceWatchdog.setHeld(hasToolUse);
+
     this.browserMessageCb?.({
       type: "assistant",
       message: msg.message,

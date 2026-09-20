@@ -144,4 +144,60 @@ describe("SilentStdioWatchdog", () => {
     expect(onSilent).toHaveBeenCalledTimes(1);
     expect(onSilent.mock.calls[0][0].reason).toBe("second");
   });
+
+  // ── tool_use hold (RC: false-positive kill on long silent tool runs) ──────
+  // A tool the CLI runs locally (Bash build/download/deploy) can emit zero
+  // stdout frames for its whole duration. setHeld(true) widens the deadline by
+  // HELD_TIMEOUT_MULTIPLIER (=2) so a legitimately-busy turn isn't misread as a
+  // dead stream, while a genuine hang is still bounded at 2x the base timeout.
+
+  it("held tool_use widens the deadline — a silent tool run within 2x does NOT fire", () => {
+    const { dog, advance, onSilent } = harness(1000);
+    dog.arm("user_message_sent");
+    dog.setHeld(true); // tool_use outstanding → CLI legitimately silent
+    advance(1001); // past the normal 1000ms window…
+    expect(onSilent).not.toHaveBeenCalled(); // …but held widens it to 2000ms
+    advance(1001); // now past 2000ms (the bounded max)
+    expect(onSilent).toHaveBeenCalledTimes(1);
+  });
+
+  it("releasing the hold restores the normal deadline", () => {
+    const { dog, advance, onSilent } = harness(1000);
+    dog.arm("user_message_sent");
+    dog.setHeld(true);
+    advance(500);
+    dog.onFrame(); // tool_result echo / progress slides the deadline
+    dog.setHeld(false); // tool done → back to the normal window
+    advance(1001);
+    expect(onSilent).toHaveBeenCalledTimes(1); // normal 1000ms window applies
+  });
+
+  it("arm() clears a stale held flag so a new turn is not silently un-killable", () => {
+    const { dog, advance, onSilent } = harness(1000);
+    dog.arm("first");
+    dog.setHeld(true);
+    expect(dog.isHeld()).toBe(true);
+    dog.arm("second"); // new turn must NOT inherit the hold
+    expect(dog.isHeld()).toBe(false);
+    advance(1001);
+    expect(onSilent).toHaveBeenCalledTimes(1); // fires on the normal window
+    expect(onSilent.mock.calls[0][0].reason).toBe("second");
+  });
+
+  it("disarm() clears the held flag", () => {
+    const { dog } = harness(1000);
+    dog.arm("user_message_sent");
+    dog.setHeld(true);
+    dog.disarm();
+    expect(dog.isHeld()).toBe(false);
+  });
+
+  it("classic bug still caught: no tool_use → normal deadline even though held API exists", () => {
+    const { dog, advance, onSilent } = harness(1000);
+    dog.arm("user_message_sent");
+    // Never call setHeld(true): the CLI produced no assistant output at all
+    // (the original silent-stdout failure mode). Must fire on the base window.
+    advance(1001);
+    expect(onSilent).toHaveBeenCalledTimes(1);
+  });
 });

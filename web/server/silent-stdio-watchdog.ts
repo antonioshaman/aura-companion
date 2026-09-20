@@ -39,6 +39,18 @@ export interface SilentStdioWatchdogOptions {
   clearTimer?: (handle: unknown) => void;
 }
 
+/**
+ * Multiplier applied to {@link SilentStdioWatchdogOptions.timeoutMs} while a
+ * tool_use is outstanding (see {@link SilentStdioWatchdog.setHeld}). A tool the
+ * CLI runs locally (Bash build/download/deploy, large multi-file op) can emit
+ * zero stdout frames for its whole duration; without this widening the silence
+ * watchdog misreads a legitimately-busy turn as a dead stream and kills it
+ * mid-work. A genuine hang is still bounded — it fires at this multiple of the
+ * base timeout. The classic "stream stopped with no assistant output at all"
+ * bug is unaffected: `held` is false until the first tool_use frame arrives.
+ */
+export const HELD_TIMEOUT_MULTIPLIER = 2;
+
 export class SilentStdioWatchdog {
   private readonly timeoutMs: number;
   private readonly onSilent: SilentStdioWatchdogOptions["onSilent"];
@@ -50,6 +62,8 @@ export class SilentStdioWatchdog {
   private armedAt: number | null = null;
   private lastFrameAt: number | null = null;
   private armReason: string = "";
+  /** True while a tool_use is outstanding — widens the deadline (see setHeld). */
+  private held = false;
 
   constructor(opts: SilentStdioWatchdogOptions) {
     this.timeoutMs = opts.timeoutMs;
@@ -70,6 +84,10 @@ export class SilentStdioWatchdog {
     this.armedAt = this.clock();
     this.lastFrameAt = this.armedAt;
     this.armReason = reason;
+    // Fresh turn: no tool_use outstanding yet, so the classic
+    // no-output-after-user-message bug fires on the normal (un-widened)
+    // deadline.
+    this.held = false;
     this.scheduleTimer(this.timeoutMs);
   }
 
@@ -100,11 +118,30 @@ export class SilentStdioWatchdog {
     this.armedAt = null;
     this.lastFrameAt = null;
     this.armReason = "";
+    this.held = false;
   }
 
   /** True when a deadline is currently active. Exposed for tests + diagnostics. */
   isArmed(): boolean {
     return this.armedAt !== null;
+  }
+
+  /**
+   * Mark whether a tool_use is currently outstanding. When the CLI emits an
+   * assistant message containing a tool_use block it is about to run a tool
+   * locally and may produce NO stdout frames until the tool returns — a long
+   * build/download/deploy legitimately looks identical to a dead stream. While
+   * held, the silence deadline is widened by {@link HELD_TIMEOUT_MULTIPLIER}.
+   * Set false again once the tool result / a plain-text assistant message /
+   * the turn terminator arrives. Idempotent; safe to call every frame.
+   */
+  setHeld(held: boolean): void {
+    this.held = held;
+  }
+
+  /** True while a tool_use holds the deadline open. Exposed for tests. */
+  isHeld(): boolean {
+    return this.held;
   }
 
   private scheduleTimer(ms: number): void {
@@ -119,10 +156,17 @@ export class SilentStdioWatchdog {
       if (this.armedAt === null || this.lastFrameAt === null) return;
       const now = this.clock();
       const sinceLastFrame = now - this.lastFrameAt;
-      if (sinceLastFrame < this.timeoutMs) {
-        // A frame slid the deadline forward while the timer was pending;
-        // re-schedule for the remaining window rather than fire.
-        this.scheduleTimer(this.timeoutMs - sinceLastFrame);
+      // While a tool_use is outstanding the CLI is legitimately busy and may
+      // emit no frames until the tool returns; widen the deadline so a long
+      // local build/deploy isn't misread as a dead stream. A genuine hang is
+      // still bounded — it fires at HELD_TIMEOUT_MULTIPLIER x the base timeout.
+      const effectiveTimeout = this.held
+        ? this.timeoutMs * HELD_TIMEOUT_MULTIPLIER
+        : this.timeoutMs;
+      if (sinceLastFrame < effectiveTimeout) {
+        // A frame slid the deadline forward while the timer was pending, or a
+        // tool is holding it open; re-schedule for the remaining window.
+        this.scheduleTimer(effectiveTimeout - sinceLastFrame);
         return;
       }
       const sinceMs = now - this.armedAt;
