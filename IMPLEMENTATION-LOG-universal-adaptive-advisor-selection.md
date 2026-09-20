@@ -122,7 +122,7 @@
 ### Task 12: Re-lock — ✅ COMPLETED
 
 - ✅ `verify-lock.py --update-attested` re-run after the 6 SKILL.md edits → C12 green (120 standalone files re-attested). `selection-engine.md` remains attested.
-- **Open decision (deliberately NOT taken this pass):** whether `meta.yaml` should JOIN the attested lock surface now that `capabilities` is selection-determining. C15 validates the profiles structurally but does not pin their sha256 — an attacker re-weighting the council edits a meta.yaml that C12 does not cover. Pinning it is a security improvement but makes every future capability edit a re-lock step. hashimoto D6 flagged it; leaving it for a human call rather than silently expanding the attested surface.
+- **Decision (2026-09-20, developer-confirmed): `meta.yaml` is NOT added to the attested lock.** Now that `capabilities` is selection-determining, C12 does not pin the profiles' sha256 — so in principle an attacker editing a `meta.yaml` capabilities block could re-weight the council without a lock diff. Rationale for declining to attest: (1) single-user box → low exploitation likelihood; (2) C15 already validates every profile structurally against the closed vocabulary (unknown/malformed token → CI red), so accidental corruption is caught; (3) attesting `meta.yaml` would impose a re-lock step on every legitimate future capability edit — friction not justified by the residual risk here. Recorded as a deliberate decision (not a silent gap); hashimoto D6 flagged it. Revisit if the catalog becomes multi-writer / shared beyond this operator.
 
 ---
 
