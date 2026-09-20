@@ -159,4 +159,24 @@ describe("emit-side vocabulary closure (hashimoto #3)", () => {
     const orphans = [...emitted].filter((t) => !vocab.has(t)).sort();
     expect(orphans, `emit tokens absent from capability-vocabulary.json: ${orphans.join(", ")}`).toEqual([]);
   });
+
+  // willison #2: the MISMATCH ("0-aiogram") guard in advisor-brief filters against
+  // the vocab's `frameworks` GROUP. If the fingerprint emits a token into the
+  // frameworks DIMENSION that is NOT in that group, the guard silently no-ops for it.
+  // Assert every framework-dimension emit token is in vocab.frameworks.
+  it.skipIf(!havePresent)("every framework-dimension emit token is in the vocab frameworks group", () => {
+    const raw = JSON.parse(readFileSync(vocabPath, "utf8")) as { signals: Record<string, string[]> };
+    const frameworkGroup = new Set((raw.signals.frameworks ?? []).map((t) => t.toLowerCase()));
+    const emittedFrameworks = new Set<string>();
+    for (const table of [JS_DEP_SIGNALS, PY_PKG_SIGNALS]) {
+      for (const emits of Object.values(table)) {
+        for (const e of emits) if (e.dimension === "frameworks") emittedFrameworks.add(e.token.toLowerCase());
+      }
+    }
+    const orphans = [...emittedFrameworks].filter((t) => !frameworkGroup.has(t)).sort();
+    expect(
+      orphans,
+      `framework-dimension emit tokens absent from vocab.signals.frameworks (MISMATCH guard would silently miss them): ${orphans.join(", ")}`,
+    ).toEqual([]);
+  });
 });

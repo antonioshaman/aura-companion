@@ -201,7 +201,14 @@ export function loadCatalog(catalogRoot: string, vocab?: Vocabulary): CatalogLoa
   }
   const v = vocab ?? loadVocabulary(root);
   if (!v) {
-    return { profiles: [], skipped: [], errors: [{ id: "<vocabulary>", reason: "malformed", detail: "capability-vocabulary.json missing or invalid" }] };
+    // Distinguish setup ("not deployed / wrong path") from integrity ("present but
+    // truncated/tampered/empty/wrong schema") so an operator can tell them apart
+    // (ritchie #4) — both still fail loud, this only sharpens the detail.
+    const vocabPath = join(root, ".verify", "capability-vocabulary.json");
+    const detail = existsSync(vocabPath)
+      ? "capability-vocabulary.json present but invalid (JSON parse / empty groups / schema_version ≠ 1 / symlink)"
+      : "capability-vocabulary.json missing at .verify/ (not deployed or wrong catalog root)";
+    return { profiles: [], skipped: [], errors: [{ id: "<vocabulary>", reason: "malformed", detail }] };
   }
   let entries: string[];
   try {
