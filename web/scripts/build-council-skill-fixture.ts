@@ -20,6 +20,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
+import { findContractViolations } from "./council-skill-contract.js";
+
 const SKILLS_ROOT =
   process.env.COUNCIL_SKILLS_ROOT ?? join(homedir(), ".claude", "skills");
 const FIXTURE_ROOT = join(
@@ -37,35 +39,17 @@ const DISPATCHERS = [
   "council-implement-aura",
 ];
 
-// Kept in lockstep with detect-stack.skill-mirror.test.ts: the builder refuses
-// to freeze a body that would fail the contract the test enforces.
-const FORBIDDEN_SUBSTRINGS = [
-  "### Council panel",
-  "**Panel:**",
-  "## Phase 0: Stack Detection",
-  "Stack detection: no recognised stack markers",
-  "Stack detection: both Aura and Python markers present",
-  ".council-stack-override",
-  "name=aura-companion",
-];
-const REQUIRED_TOKENS = ["council/checkpoint", "selection-engine.md"];
-
 function build(slug: string): string {
   const src = join(SKILLS_ROOT, slug, "SKILL.md");
   if (!existsSync(src)) throw new Error(`SKILL.md not found at ${src}`);
   const body = readFileSync(src, "utf8");
 
-  for (const token of FORBIDDEN_SUBSTRINGS) {
-    if (body.includes(token)) {
-      throw new Error(
-        `${slug}/SKILL.md still contains "${token}" — the fixed panel / stack router must be removed before the fixture can be frozen`,
-      );
-    }
-  }
-  for (const token of REQUIRED_TOKENS) {
-    if (!body.includes(token)) {
-      throw new Error(`${slug}/SKILL.md is missing the required "${token}" reference`);
-    }
+  // Fail loud on the SAME structural contract skill-dispatcher-contract.test.ts
+  // enforces (one shared source — council-skill-contract.ts), so the fixture can
+  // never be frozen into a non-conforming state.
+  const violations = findContractViolations(body);
+  if (violations.length > 0) {
+    throw new Error(`${slug}/SKILL.md fails the dispatcher contract; cannot freeze:\n  ${violations.join("\n  ")}`);
   }
 
   return (
