@@ -1,5 +1,6 @@
 import type { CliLauncher, SdkSessionInfo } from "./cli-launcher.js";
 import type { WsBridge } from "./ws-bridge.js";
+import { ClaudeAdapter } from "./claude-adapter.js";
 import type { SessionStore } from "./session-store.js";
 import type { WorktreeTracker } from "./worktree-tracker.js";
 import type { AgentExecutor } from "./agent-executor.js";
@@ -586,7 +587,7 @@ export class SessionOrchestrator {
    * detection. Currently unused; the mtime-based check is sufficient
    * for the 2026-09-11 failure pattern.
    */
-  private driftPrevSnapshot = new Map<string, { jsonlMtimeMs: number; transcriptMtimeMs: number }>();
+  private driftPrevSnapshot = new Map<string, { jsonlMtimeMs: number; bunLastFrameMs: number }>();
 
   /**
    * Per-session highest compaction-advisory milestone we've already
@@ -1416,11 +1417,20 @@ export class SessionOrchestrator {
       if (!info.cliSessionId || !info.cwd) continue;
       const jsonlPath = resolveJsonlPath(claudeHome, info.cwd, info.cliSessionId);
       if (!jsonlPath) continue;
-      const transcriptPath = `${homedir()}/.companion/sessions/${info.sessionId}.json`;
+      // Read the "bun freshness" signal from the live adapter, NOT from
+      // the transcript file mtime. See {@link ClaudeAdapter.getLastCliFrameReceivedMs}
+      // and `silent-stdio-drift-detector.ts` for why the transcript mtime
+      // is unusable here (polluted by browser events + state mutations,
+      // masked real stdio-pipe-death in the 2026-09-20 incident).
+      // If the adapter isn't a ClaudeAdapter (unlikely — codex was
+      // filtered above) or is missing, skip: nothing meaningful to check.
+      const adapter = this.wsBridge.getSession(info.sessionId)?.backendAdapter;
+      if (!(adapter instanceof ClaudeAdapter)) continue;
+      const bunLastFrameMs = adapter.getLastCliFrameReceivedMs();
       const verdict = checkDrift(
         {
           sessionId: info.sessionId,
-          transcriptPath,
+          bunLastFrameMs,
           jsonlPath,
         },
         {},
@@ -1428,7 +1438,7 @@ export class SessionOrchestrator {
       // Cache last snapshot for future delta-over-time detection.
       this.driftPrevSnapshot.set(info.sessionId, {
         jsonlMtimeMs: verdict.jsonlMtimeMs,
-        transcriptMtimeMs: verdict.transcriptMtimeMs,
+        bunLastFrameMs: verdict.bunLastFrameMs,
       });
 
       // Compaction-advisory piggyback: cheap stat on the same jsonl

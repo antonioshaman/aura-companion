@@ -36,8 +36,19 @@ import { statSync } from "node:fs";
 /** Per-session state maintained across ticks. */
 export interface DriftDetectorSessionState {
   readonly sessionId: string;
-  /** Bun-managed transcript file path (`~/.companion/sessions/<sid>.json`). */
-  readonly transcriptPath: string;
+  /**
+   * Wall-clock ms at the last CLI frame this bun instance received from
+   * the CLI's stdout. **Not** the transcript file mtime — bun writes to
+   * the transcript on many non-CLI events (browser subscribe/disconnect,
+   * session state field mutations, protocol-recording flushes), which
+   * masked real stdio-pipe-death in the 2026-09-19/20 aura-companion
+   * incident: transcript mtime stayed fresh via browser polling even
+   * while zero CLI frames were landing on bun's stdio. Read directly
+   * from the adapter's in-memory `getLastCliFrameReceivedMs()`.
+   * A value of 0 signals "adapter has never received a frame yet" —
+   * detector skips such sessions to avoid false positives during boot.
+   */
+  readonly bunLastFrameMs: number;
   /**
    * Claude CLI's own jsonl file path
    * (`~/.claude/projects/<proj-slug>/<cliSessionId>.jsonl`).
@@ -55,10 +66,16 @@ export interface DriftDetectorSessionState {
 export interface DriftVerdict {
   readonly sessionId: string;
   readonly drifted: boolean;
-  /** ms by which jsonl mtime is ahead of transcript mtime (negative if transcript newer). */
+  /**
+   * ms by which jsonl mtime is ahead of bun's last-frame-received timestamp
+   * (negative if bun received something newer than the jsonl mtime).
+   */
   readonly mtimeDeltaMs: number;
-  /** transcript mtime in ms (0 if missing). */
-  readonly transcriptMtimeMs: number;
+  /**
+   * bun's last-frame-received timestamp (echoed from input for observability).
+   * Zero if the adapter has not attached a transport yet.
+   */
+  readonly bunLastFrameMs: number;
   /** jsonl mtime in ms (0 if missing). */
   readonly jsonlMtimeMs: number;
   /** Human-readable reason if `drifted=true`. */
@@ -111,16 +128,26 @@ function defaultStatFile(p: PathLike): { mtimeMs: number } | null {
  * Evaluate one session for drift. Pure function of the inputs — no side
  * effects. Returns a verdict the caller can log + optionally act on.
  *
- * Drift conditions (BOTH must be met):
+ * Drift conditions (ALL must be met):
  *   1. jsonl exists AND was modified recently (within
  *      `jsonlIdleThresholdMs`). An idle jsonl is not evidence of
  *      anything.
- *   2. jsonl's mtime is more than `lagToleranceMs` newer than the
- *      transcript's mtime.
+ *   2. bun's `bunLastFrameMs` is non-zero — a session that has not
+ *      yet received its first CLI frame is booting, not drifting.
+ *   3. jsonl's mtime is more than `lagToleranceMs` newer than
+ *      `bunLastFrameMs`.
  *
- * The second condition is the tell: CLI is writing new records, bun's
- * transcript writer has NOT run in a while. That is the two-writer-
- * path divergence pattern, in the act.
+ * The third condition is the tell: CLI is writing new records to its
+ * own jsonl, bun has NOT received a frame in a while. That is the
+ * two-writer-path divergence pattern, in the act.
+ *
+ * `bunLastFrameMs` replaced the previous transcript-file-mtime signal
+ * on 2026-09-20 (aura-companion prod incident): the transcript is
+ * touched by many non-CLI events (browser subscribe/disconnect, state
+ * mutations, recording flushes), which kept transcript mtime fresh
+ * while zero CLI frames were arriving. The detector never fired on
+ * real stdio-pipe-death for that reason. See
+ * `feedback_aura_transcript_mtime_not_a_bun_freshness_signal.md`.
  */
 export function checkDrift(
   state: DriftDetectorSessionState,
@@ -139,16 +166,14 @@ export function checkDrift(
       sessionId: state.sessionId,
       drifted: false,
       mtimeDeltaMs: 0,
-      transcriptMtimeMs: 0,
+      bunLastFrameMs: state.bunLastFrameMs,
       jsonlMtimeMs: 0,
       reason: null,
     };
   }
 
   const jsonlStat = statFile(state.jsonlPath);
-  const transcriptStat = statFile(state.transcriptPath);
   const jsonlMtimeMs = jsonlStat?.mtimeMs ?? 0;
-  const transcriptMtimeMs = transcriptStat?.mtimeMs ?? 0;
 
   if (!jsonlStat) {
     // jsonl not present — CLI hasn't written anything yet. Not drift.
@@ -156,13 +181,13 @@ export function checkDrift(
       sessionId: state.sessionId,
       drifted: false,
       mtimeDeltaMs: 0,
-      transcriptMtimeMs,
+      bunLastFrameMs: state.bunLastFrameMs,
       jsonlMtimeMs,
       reason: null,
     };
   }
 
-  const mtimeDeltaMs = jsonlMtimeMs - transcriptMtimeMs;
+  const mtimeDeltaMs = jsonlMtimeMs - state.bunLastFrameMs;
   const jsonlAgeMs = now - jsonlMtimeMs;
 
   // Condition 1: jsonl must be recent. An idle jsonl (last written
@@ -173,22 +198,36 @@ export function checkDrift(
       sessionId: state.sessionId,
       drifted: false,
       mtimeDeltaMs,
-      transcriptMtimeMs,
+      bunLastFrameMs: state.bunLastFrameMs,
       jsonlMtimeMs,
       reason: null,
     };
   }
 
-  // Condition 2: jsonl mtime is more than lag-tolerance newer than
-  // transcript. That's the divergence signature.
+  // Condition 2: baseline must exist — an adapter that has never seen a
+  // CLI frame is booting, not drifting. `bunLastFrameMs === 0` means
+  // `attachTransport` has not yet run. Skip cleanly.
+  if (state.bunLastFrameMs === 0) {
+    return {
+      sessionId: state.sessionId,
+      drifted: false,
+      mtimeDeltaMs,
+      bunLastFrameMs: state.bunLastFrameMs,
+      jsonlMtimeMs,
+      reason: null,
+    };
+  }
+
+  // Condition 3: jsonl mtime is more than lag-tolerance newer than
+  // bun's last-received-frame timestamp. That's the divergence signature.
   if (mtimeDeltaMs > lagTolerance) {
     return {
       sessionId: state.sessionId,
       drifted: true,
       mtimeDeltaMs,
-      transcriptMtimeMs,
+      bunLastFrameMs: state.bunLastFrameMs,
       jsonlMtimeMs,
-      reason: `jsonl mtime ${Math.round(mtimeDeltaMs / 1000)}s newer than transcript while jsonl actively writing (age ${Math.round(jsonlAgeMs / 1000)}s)`,
+      reason: `jsonl mtime ${Math.round(mtimeDeltaMs / 1000)}s newer than bun's last frame (age ${Math.round(jsonlAgeMs / 1000)}s) while jsonl actively writing`,
     };
   }
 
@@ -196,7 +235,7 @@ export function checkDrift(
     sessionId: state.sessionId,
     drifted: false,
     mtimeDeltaMs,
-    transcriptMtimeMs,
+    bunLastFrameMs: state.bunLastFrameMs,
     jsonlMtimeMs,
     reason: null,
   };

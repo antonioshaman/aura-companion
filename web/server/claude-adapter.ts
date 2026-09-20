@@ -342,6 +342,18 @@ export class ClaudeAdapter implements IBackendAdapter {
   /** Wall-clock ms at last {@link attachTransport}, for the `sinceMs` field. */
   private lastAttachAt: number = 0;
   /**
+   * Wall-clock ms at the last non-empty CLI frame we received. Baseline
+   * is set on {@link attachTransport}; slid forward on every non-empty
+   * frame in {@link handleRawMessage}. Read by the silent-stdio drift
+   * detector as the authoritative "bun's freshness" signal — the
+   * previously-used transcript file mtime was polluted by non-CLI writes
+   * (browser subscribe/disconnect, state field updates), which meant the
+   * detector never fired on real stdio-pipe-death because the transcript
+   * stayed "fresh" via browser events even when zero CLI frames were
+   * arriving. See {@link getLastCliFrameReceivedMs}.
+   */
+  private lastCliFrameReceivedMs: number = 0;
+  /**
    * Whether the NEXT / current spawn was launched with `--resume`. Set by the
    * bridge via {@link setResumeExpected} before `attachTransport`, from the
    * launcher's actual argv (`args.includes("--resume")`). Selects the longer
@@ -515,6 +527,11 @@ export class ClaudeAdapter implements IBackendAdapter {
     this.modelFallbackFiredForThisSpawn = false;
     // A fresh transport by definition cannot be silent yet.
     this.silenceWatchdog.disarm();
+    // Baseline the drift detector's "bun freshness" signal to attach
+    // time. Anything the CLI sends after this point advances the value;
+    // a broken stdio pipe leaves it frozen while the CLI's own jsonl
+    // continues to grow — that gap IS the drift the detector catches.
+    this.lastCliFrameReceivedMs = Date.now();
     // Arm the init-frame health canary. On a working CLI the
     // `system.init` frame lands within a few seconds and
     // `handleSystemInit` clears this timer. On a regressed CLI (see
@@ -659,6 +676,14 @@ export class ClaudeAdapter implements IBackendAdapter {
       // the line later fails protocol parsing. Without this, malformed
       // but arriving output can let the silent watchdog kill a live turn.
       this.silenceWatchdog.onFrame();
+      // Slide the drift-detector freshness signal. Doing this at the
+      // parse-lines seam (not at the record() seam above) keeps the
+      // signal aligned with the watchdog's own liveness definition —
+      // both track "bun saw at least one line from CLI" rather than
+      // "bun's stdio read returned N bytes" (a partial line write with
+      // no newline would tick the recorder but not the watchdog or the
+      // drift baseline, correctly).
+      this.lastCliFrameReceivedMs = Date.now();
     }
     for (const line of lines) {
       let msg: CLIMessage;
@@ -1886,6 +1911,25 @@ export class ClaudeAdapter implements IBackendAdapter {
    */
   setResumeExpected(resume: boolean): void {
     this.resumeExpected = resume;
+  }
+
+  /**
+   * Wall-clock ms at the last non-empty CLI frame this adapter received.
+   * Baseline is set on {@link attachTransport}; slid forward on every
+   * non-empty line by {@link handleRawMessage}. Zero only before the
+   * first attach (i.e., the adapter has never been wired to a transport).
+   *
+   * Read by the silent-stdio drift detector in `session-orchestrator.ts`
+   * as the authoritative "when did bun last see a CLI frame" signal.
+   * Preferred over the transcript file's mtime because bun writes to
+   * the transcript on many non-CLI events (browser subscribe/disconnect,
+   * session state field mutations, protocol-recording flushes), so the
+   * transcript mtime stays fresh even when zero CLI frames are arriving
+   * — that failure mode is exactly what the detector is supposed to
+   * catch, and the polluted signal made it silent.
+   */
+  getLastCliFrameReceivedMs(): number {
+    return this.lastCliFrameReceivedMs;
   }
 
   /**
