@@ -54,6 +54,17 @@ describe("loadVocabulary", () => {
     expect(v.signals.has("react")).toBe(true);
     expect(v.domains.has("security")).toBe(true);
   });
+
+  // ritchie #6: the TS loader must reject a schema_version the c15 Python gate reds,
+  // so the two readers can't disagree about what a valid vocabulary is.
+  it("rejects a vocabulary whose schema_version is not 1 (parity with c15)", () => {
+    const r = realpathSync(newCatalog());
+    writeFileSync(
+      join(r, ".verify", "capability-vocabulary.json"),
+      JSON.stringify({ schema_version: 2, signals: { frameworks: ["react"] }, domains: ["security"] }),
+    );
+    expect(loadVocabulary(r)).toBeNull();
+  });
 });
 
 describe("loadAdvisorProfile — valid", () => {

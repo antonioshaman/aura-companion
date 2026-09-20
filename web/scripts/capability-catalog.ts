@@ -88,6 +88,11 @@ export function loadVocabulary(catalogRootResolved: string): Vocabulary | null {
   }
   if (!v || typeof v !== "object") return null;
   const obj = v as Record<string, unknown>;
+  // Assert the schema version the closed vocabulary declares, matching the c15
+  // Python gate (ritchie #6). Without this the TS engine would happily load a
+  // future schema_version:2 vocab that c15 reds — the canary and the code would
+  // disagree about what a valid vocabulary is.
+  if (obj["schema_version"] !== 1) return null;
   const sigGroups = obj["signals"];
   const domains = obj["domains"];
   const signals = new Set<string>();
