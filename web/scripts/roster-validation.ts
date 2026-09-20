@@ -9,9 +9,10 @@
 // too few/many). The model may choose within the floor; it may never overrule it.
 
 import {
-  applyGuardrails,
+  isGuaranteed,
   MAX_SEATS,
   MIN_SEATS,
+  selectSeats,
   type RankedCandidate,
 } from "./advisor-scorer";
 
@@ -20,6 +21,7 @@ export type RosterRejectReason =
   | "duplicate" // a chosen id appears twice
   | "below-min" // fewer than min seats
   | "above-max" // more than max seats
+  | "missing-guaranteed" // omits a relevant cross-stack lens the composition floor guarantees
   | "empty"; // Chair returned nothing
 
 export type RosterValidation =
@@ -44,7 +46,12 @@ export function validateChosenRoster(
   min: number = MIN_SEATS,
   max: number = MAX_SEATS,
 ): RosterValidation {
-  const fallback = applyGuardrails(candidates, min, max).map((c) => c.advisorId);
+  // Fail-closed fallback goes through the SAME seat-selection as the proposal path
+  // (guaranteed cross-stack lens reserved before rank-fill) — NOT plain top-N — so
+  // the deterministic destination is never a weaker floor than composeCouncil
+  // (dahl #2 / willison #1).
+  const seatedFallback = selectSeats(candidates, max);
+  const fallback = seatedFallback.map((c) => c.advisorId);
   const candidateIds = new Set(candidates.map((c) => c.advisorId));
 
   if (chosen.length === 0) {
@@ -69,6 +76,20 @@ export function validateChosenRoster(
   }
   if (chosen.length > max) {
     return { ok: false, reason: "above-max", offending: [], fallback };
+  }
+
+  // Composition-floor enforcement (hunt #4): every relevant cross-stack lens the
+  // engine would seat MUST be present. The scorer reserves guaranteed lenses ahead
+  // of rank-fill, so any guaranteed lens seated by `selectSeats` is un-starvable by
+  // design — the Chair may not drop it. Enforcing it here (not just in the proposal)
+  // closes the gap where a valid-but-lean roster silently omits the security/LLM lens.
+  const chosenSet = new Set(chosen);
+  const missingGuaranteed = seatedFallback
+    .filter(isGuaranteed)
+    .map((c) => c.advisorId)
+    .filter((id) => !chosenSet.has(id));
+  if (missingGuaranteed.length > 0) {
+    return { ok: false, reason: "missing-guaranteed", offending: missingGuaranteed, fallback };
   }
 
   // Return in deterministic candidate-rank order (not the Chair's arbitrary order).

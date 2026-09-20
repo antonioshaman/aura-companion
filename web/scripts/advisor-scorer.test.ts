@@ -115,6 +115,50 @@ describe("composeCouncil — crowded-out visibility (hunt #4)", () => {
   });
 });
 
+describe("dedupRedundant — cross-stack lenses are never collapsed (hunt #1)", () => {
+  it("keeps every cross-stack (`any`) lens even when their matched sets are identically empty", () => {
+    // On a narrow feature all four `any`-lenses collapse to key "|" — pre-fix this
+    // dropped all but the alphabetical survivor from ranked AND crowdedOut.
+    const huntC: RankedCandidate = { advisorId: "hunt", score: 1, matchedSignals: [], matchedDomains: [], crossStack: true };
+    const willC: RankedCandidate = { advisorId: "willison", score: 1, matchedSignals: [], matchedDomains: [], crossStack: true };
+    const beckC: RankedCandidate = { advisorId: "beck", score: 1, matchedSignals: [], matchedDomains: [], crossStack: true };
+    const out = dedupRedundant([huntC, willC, beckC]);
+    expect(out.map((c) => c.advisorId).sort()).toEqual(["beck", "hunt", "willison"]);
+  });
+  it("a narrow feature leaves the security lens visible (seated or crowded-out), never silently dropped", () => {
+    // pure frontend fingerprint, only frontend domain requested → hunt matches nothing
+    const comp = composeCouncil(fp(["react", "browser-spa"]), ["frontend-architecture"], [HUNT, FOWLER, ABRAMOV]);
+    const everywhere = [...comp.seated, ...comp.crowdedOut].map((c) => c.advisorId);
+    expect(everywhere).toContain("hunt");
+    expect(everywhere).toContain("fowler");
+  });
+});
+
+describe("composeCouncil — Variant-B guaranteed seat under cap pressure (hunt #4 / beck #4)", () => {
+  it("seats a domain-relevant cross-stack lens even when it ranks below the MAX cap", () => {
+    // 11 high-scoring distinct stack matchers + a guaranteed security lens ranking last
+    const sigs = ["react", "vue", "svelte", "hono", "express", "fastify", "fastapi", "flask", "django", "starlette", "postgres"];
+    const stack: AdvisorProfile[] = sigs.map((s, i) => prof(`z${String(i).padStart(2, "0")}`, [s], []));
+    const comp = composeCouncil(fp(sigs), ["security"], [...stack, HUNT]);
+    expect(comp.seated).toHaveLength(MAX_SEATS);
+    expect(comp.seated.some((c) => c.advisorId === "hunt")).toBe(true); // reserved, not crowded out
+    expect(comp.crowdedOut.some((c) => c.advisorId === "hunt")).toBe(false);
+  });
+  it("an out-of-domain cross-stack lens remains crowdable (adaptivity preserved)", () => {
+    const sigs = ["react", "vue", "svelte", "hono", "express", "fastify", "fastapi", "flask", "django", "starlette", "postgres"];
+    const stack: AdvisorProfile[] = sigs.map((s, i) => prof(`z${String(i).padStart(2, "0")}`, [s], []));
+    // security NOT requested → hunt is a baseline candidate but NOT guaranteed → crowdable
+    const comp = composeCouncil(fp(sigs), ["frontend-architecture"], [...stack, HUNT]);
+    expect(comp.seated).toHaveLength(MAX_SEATS);
+    expect(comp.crowdedOut.some((c) => c.advisorId === "hunt")).toBe(true);
+  });
+  it("reports belowMin on a genuinely thin candidate pool", () => {
+    const comp = composeCouncil(fp(["react"]), ["frontend-architecture"], [ABRAMOV]); // 1 candidate
+    expect(comp.seated.length).toBeLessThan(MIN_SEATS);
+    expect(comp.belowMin).toBe(true);
+  });
+});
+
 describe("scoreAdvisors — determinism (dahl #7)", () => {
   it("equal-score advisors resolve by advisorId; two runs are identical", () => {
     const pool = [WATSON, ABRAMOV, HUNT, FOWLER, BRANDUR];

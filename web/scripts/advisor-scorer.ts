@@ -28,6 +28,15 @@ const CROSS_STACK_BASELINE = 1;
 
 const WILDCARD = "any";
 
+// Locale-INDEPENDENT ordering. `String.prototype.localeCompare` resolves against
+// the runtime's ICU collation (orders `-`/`_` differently from code points, and
+// can shift across Bun/ICU versions) — a determinism leak the exact-roster tests
+// exist to prevent (dahl #4). Every sort in the engine uses this one comparator so
+// ordering is a function of the inputs alone. Do NOT reintroduce localeCompare.
+export function cmpCodePoint(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
 export interface RankedCandidate {
   advisorId: string;
   score: number;
@@ -75,7 +84,7 @@ export function scoreAdvisors(
     candidates.push({ advisorId: p.id, score, matchedSignals, matchedDomains, crossStack });
   }
 
-  candidates.sort((a, b) => b.score - a.score || a.advisorId.localeCompare(b.advisorId));
+  candidates.sort((a, b) => b.score - a.score || cmpCodePoint(a.advisorId, b.advisorId));
   return candidates;
 }
 
@@ -89,10 +98,18 @@ export function dedupRedundant(ranked: RankedCandidate[]): RankedCandidate[] {
   const seen = new Set<string>();
   const out: RankedCandidate[] = [];
   for (const c of ranked) {
+    // Cross-stack (`any`) lenses are NEVER deduped against each other. On a narrow
+    // feature all four collapse to the identical key `"|"` (empty matchedSignals —
+    // the `any` wildcard is excluded — and empty matchedDomains), which would drop
+    // all but the alphabetical survivor from `ranked`, and thus from `crowdedOut`
+    // too — the exact silent starve of the security/LLM lens the composition floor
+    // exists to prevent (hunt #1). Each is a distinct advisor; keep them all so the
+    // guarantee partition + crowded-out surfacing can see every one.
+    if (c.crossStack) {
+      out.push(c);
+      continue;
+    }
     const key = c.matchedSignals.join(",") + "|" + c.matchedDomains.join(",");
-    // Never dedup two cross-stack lenses against each other purely on empty
-    // matched sets — hunt/fowler/willison/beck have distinct domains so their
-    // keys differ; a truly identical key is a real redundancy.
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(c);
@@ -141,22 +158,22 @@ export interface Composition {
 // superset for them and satisfies hunt #4 (a relevant security lens can never be
 // crowded out by stack-signal matchers), while a narrow feature that doesn't
 // touch a lens's domain still leaves it unseated (adaptivity preserved).
-function isGuaranteed(c: RankedCandidate): boolean {
+export function isGuaranteed(c: RankedCandidate): boolean {
   return c.crossStack && c.matchedDomains.length > 0;
 }
 
-/** Convenience: score → dedup → guardrail in one deterministic pass. */
-export function composeCouncil(
-  fingerprint: Fingerprint,
-  featureDomains: string[],
-  profiles: AdvisorProfile[],
-  min: number = MIN_SEATS,
+/**
+ * The single seat-selection algorithm (dahl #2 / willison #1: one floor, one
+ * source of truth). Reserve seats for the relevant cross-stack lenses first, then
+ * fill the rest by rank up to the cap, and present in overall rank order. Used by
+ * BOTH `composeCouncil` (the proposal path) AND `roster-validation`'s fail-closed
+ * fallback, so the deterministic destination can never be a weaker floor than the
+ * proposal. `ranked` is assumed already scored+deduped.
+ */
+export function selectSeats(
+  ranked: RankedCandidate[],
   max: number = MAX_SEATS,
-): Composition {
-  const ranked = dedupRedundant(scoreAdvisors(fingerprint, featureDomains, profiles));
-
-  // Reserve seats for the relevant cross-stack lenses first, then fill the rest
-  // by rank up to the cap. Both partitions preserve `ranked` order.
+): RankedCandidate[] {
   const guaranteed = ranked.filter(isGuaranteed);
   const rest = ranked.filter((c) => !isGuaranteed(c));
   const seated: RankedCandidate[] = [];
@@ -168,9 +185,20 @@ export function composeCouncil(
     if (seated.length >= max) break;
     seated.push(c);
   }
-  // Present in overall rank order (score desc, id asc) regardless of partition.
-  seated.sort((a, b) => b.score - a.score || a.advisorId.localeCompare(b.advisorId));
+  seated.sort((a, b) => b.score - a.score || cmpCodePoint(a.advisorId, b.advisorId));
+  return seated;
+}
 
+/** Convenience: score → dedup → guardrail in one deterministic pass. */
+export function composeCouncil(
+  fingerprint: Fingerprint,
+  featureDomains: string[],
+  profiles: AdvisorProfile[],
+  min: number = MIN_SEATS,
+  max: number = MAX_SEATS,
+): Composition {
+  const ranked = dedupRedundant(scoreAdvisors(fingerprint, featureDomains, profiles));
+  const seated = selectSeats(ranked, max);
   const seatedIds = new Set(seated.map((c) => c.advisorId));
   return {
     seated,

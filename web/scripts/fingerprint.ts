@@ -340,12 +340,19 @@ export function detectFingerprint(workspaceRoot: string): Fingerprint {
   }
   const signals = [...seen].sort();
 
-  // Provenance sorted by (prefix, token, dimension) for reproducible output.
+  // Provenance sorted by (prefix, token, dimension, evidenceFile) for reproducible
+  // output. Code-point comparison (NOT localeCompare, whose ICU collation is
+  // runtime-dependent — dahl #4) and the sort key is TOTAL over every field the
+  // dedup below distinguishes: `evidenceFile` is included so two rows differing
+  // only in evidence file get a fixed order instead of relying on sort-stability +
+  // probe call order (dahl #14).
+  const cp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
   const provenance = [...acc.matches].sort(
     (a, b) =>
-      a.prefix.localeCompare(b.prefix) ||
-      a.token.localeCompare(b.token) ||
-      a.dimension.localeCompare(b.dimension),
+      cp(a.prefix, b.prefix) ||
+      cp(a.token, b.token) ||
+      cp(a.dimension, b.dimension) ||
+      cp(a.evidenceFile, b.evidenceFile),
   );
   const uniqProvenance = provenance.filter(
     (m, i) =>
