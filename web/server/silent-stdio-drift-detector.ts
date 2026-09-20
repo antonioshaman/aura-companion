@@ -245,13 +245,24 @@ export function checkDrift(
  * Compute the Claude CLI jsonl path from `(cwd, cliSessionId)`.
  * Mirrors the CLI's own path derivation:
  * `~/.claude/projects/<slug>/<cliSessionId>.jsonl` where
- * `<slug>` is the absolute cwd with every `/` replaced by `-`,
+ * `<slug>` is the absolute cwd with **both `/` AND `_` replaced by `-`**,
  * prefixed with a `-`.
  *
  * Example:
  *   cwd = `/root/aura-companion/web`
  *   → slug = `-root-aura-companion-web`
  *   → path = `<claudeHome>/projects/-root-aura-companion-web/<cliSid>.jsonl`
+ *
+ *   cwd = `/root/Rapesha_shop_bot`      (underscore in dir name)
+ *   → slug = `-root-Rapesha-shop-bot`   (dashes only)
+ *
+ * The underscore→dash conversion was verified live 2026-09-20 on aura-companion
+ * prod: sessions whose cwd contained `_` had their drift detector go silent
+ * because this helper computed `<slug with underscore>` while the CLI itself
+ * writes to `<slug with dash>`. The `stat()` on the wrong path returned null
+ * every tick, `checkDrift` short-circuited on "jsonl not present", and the
+ * session sat in stdio-pipe-death indefinitely. See
+ * `feedback_aura_resolvejsonlpath_underscore_slug_mismatch.md` in memory.
  *
  * `null` if either input is empty — the caller uses that to skip the
  * check until the session has fully initialised.
@@ -262,6 +273,10 @@ export function resolveJsonlPath(
   cliSessionId: string | undefined | null,
 ): string | null {
   if (!cwd || !cliSessionId) return null;
-  const slug = cwd.replace(/\//g, "-");
+  // Mirror the CLI's slug conversion: `/` AND `_` both collapse to `-`.
+  // A future refactor that spots more character classes CLI converts
+  // (e.g. `.`, spaces) should update this regex in lockstep with a real
+  // filesystem test against `~/.claude/projects/` on a live install.
+  const slug = cwd.replace(/[/_]/g, "-");
   return `${claudeHome}/projects/${slug}/${cliSessionId}.jsonl`;
 }

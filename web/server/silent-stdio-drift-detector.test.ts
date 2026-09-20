@@ -192,4 +192,25 @@ describe("resolveJsonlPath", () => {
     const p = resolveJsonlPath("/home/a/.claude", "/root", "abc");
     expect(p).toBe("/home/a/.claude/projects/-root/abc.jsonl");
   });
+
+  it("converts underscores in cwd to dashes (matches CLI's own slug rule)", () => {
+    // Regression guard for 2026-09-20 aura-companion prod incident: the
+    // CLI writes to `~/.claude/projects/-root-Rapesha-shop-bot/<sid>.jsonl`
+    // for a session whose cwd is `/root/Rapesha_shop_bot`. Without the
+    // underscore→dash mirroring, resolveJsonlPath computed the underscore
+    // path, `stat` returned null every drift-detector tick, and the
+    // session sat silent-stdio forever. See
+    // feedback_aura_resolvejsonlpath_underscore_slug_mismatch.md.
+    const p = resolveJsonlPath("/home/a/.claude", "/root/Rapesha_shop_bot", "abc");
+    expect(p).toBe("/home/a/.claude/projects/-root-Rapesha-shop-bot/abc.jsonl");
+  });
+
+  it("collapses BOTH slashes and underscores in a nested underscore-heavy cwd", () => {
+    const p = resolveJsonlPath(
+      "/home/a/.claude",
+      "/root/my_project/sub_folder/deep_nested",
+      "cli-x",
+    );
+    expect(p).toBe("/home/a/.claude/projects/-root-my-project-sub-folder-deep-nested/cli-x.jsonl");
+  });
 });
