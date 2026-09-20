@@ -9,8 +9,12 @@
 // scenario). See IMPLEMENTATION-LOG "RESOLVED DESIGN FINDING (variant B)".
 
 import { describe, it, expect } from "vitest";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { composeCouncil } from "./advisor-scorer.js";
 import { buildAdvisorBrief } from "./advisor-brief.js";
+import { loadCatalog } from "./capability-catalog.js";
 import type { AdvisorProfile, Vocabulary } from "./capability-catalog";
 import type { Fingerprint } from "./fingerprint";
 
@@ -68,6 +72,30 @@ describe("AC1.4 back-compat superset — Python/aiogram", () => {
     const seated = new Set(composeCouncil(AIOGRAM_FP, PYTHON_DOMAINS, PROFILES).seated.map((c) => c.advisorId));
     const missing = PYTHON_9.filter((a) => !seated.has(a));
     expect(missing, `Python-9 members not seated: ${missing.join(", ")}`).toEqual([]);
+  });
+});
+
+// Freshness canary (beck #3): the hermetic superset tests above score the FROZEN
+// inline PROFILES, so a live meta.yaml that loses a capability would leave them green
+// against a stale copy. When the live catalog is present (operator machine + the
+// pre-commit hook), assert the inline PROFILES still MATCH what the catalog loads —
+// so drift between this frozen baseline and reality fails loudly. Skipped in bare CI
+// (no ~/.claude); the authoritative live gate remains the catalog verifier/CI.
+describe("frozen PROFILES stay in sync with the live catalog (beck #3)", () => {
+  const catalogRoot =
+    process.env.COUNCIL_CATALOG ?? join(homedir(), ".claude", "skills", "_council-experts");
+  const havePresent = existsSync(catalogRoot);
+  const norm = (p: AdvisorProfile) => ({ id: p.id, signals: [...p.signals].sort(), domains: [...p.domains].sort() });
+
+  it.skipIf(!havePresent)("inline PROFILES equal the loaded catalog profiles (ids + signals + domains)", () => {
+    const live = loadCatalog(catalogRoot);
+    expect(live.errors, `catalog load errors: ${JSON.stringify(live.errors)}`).toEqual([]);
+    const liveNorm = live.profiles.map(norm).sort((a, b) => (a.id < b.id ? -1 : 1));
+    const frozenNorm = PROFILES.map(norm).sort((a, b) => (a.id < b.id ? -1 : 1));
+    expect(
+      frozenNorm,
+      "back-compat.golden PROFILES drifted from the live catalog meta.yaml — re-freeze them",
+    ).toEqual(liveNorm);
   });
 });
 
