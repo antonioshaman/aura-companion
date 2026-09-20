@@ -1,0 +1,178 @@
+{
+  "_doc": "FROZEN SNAPSHOT of the seated _council-experts/*/meta.yaml capability profiles for hermetic aura CI (observer WARN, P2-12). Regenerate via scripts/build-council-catalog-snapshot.ts; the freshness canary asserts this == live where present.",
+  "profiles": [
+    {
+      "id": "abramov",
+      "signals": [
+        "browser-spa",
+        "javascript",
+        "nextjs",
+        "react",
+        "svelte",
+        "typescript",
+        "vue"
+      ],
+      "domains": [
+        "frontend-architecture"
+      ]
+    },
+    {
+      "id": "beck",
+      "signals": [
+        "any"
+      ],
+      "domains": [
+        "test-quality"
+      ]
+    },
+    {
+      "id": "brandur",
+      "signals": [
+        "alembic",
+        "drizzle",
+        "mysql",
+        "postgres",
+        "prisma",
+        "sqlalchemy",
+        "sqlite"
+      ],
+      "domains": [
+        "database-persistence",
+        "schema-migrations"
+      ]
+    },
+    {
+      "id": "dahl",
+      "signals": [
+        "bun",
+        "express",
+        "fastify",
+        "hono",
+        "json-rpc",
+        "ndjson",
+        "node",
+        "rest",
+        "sse",
+        "typescript",
+        "websocket"
+      ],
+      "domains": [
+        "backend-architecture",
+        "protocol-correctness",
+        "realtime-streaming"
+      ]
+    },
+    {
+      "id": "durov",
+      "signals": [
+        "telegram-bot",
+        "telegram-mini-app"
+      ],
+      "domains": [
+        "chat-platform-ux",
+        "ux-flow"
+      ]
+    },
+    {
+      "id": "fowler",
+      "signals": [
+        "any"
+      ],
+      "domains": [
+        "backend-architecture",
+        "refactoring"
+      ]
+    },
+    {
+      "id": "friedman",
+      "signals": [
+        "browser-spa",
+        "cli",
+        "telegram-mini-app"
+      ],
+      "domains": [
+        "ux-flow"
+      ]
+    },
+    {
+      "id": "hashimoto",
+      "signals": [
+        "cloud-run",
+        "docker",
+        "github-actions",
+        "kubernetes",
+        "nginx",
+        "systemd",
+        "vps"
+      ],
+      "domains": [
+        "ci-supply-chain",
+        "devops-deploy"
+      ]
+    },
+    {
+      "id": "hunt",
+      "signals": [
+        "any"
+      ],
+      "domains": [
+        "security"
+      ]
+    },
+    {
+      "id": "ritchie",
+      "signals": [
+        "cli",
+        "stdio-subprocess"
+      ],
+      "domains": [
+        "filesystem-persistence",
+        "process-lifecycle"
+      ]
+    },
+    {
+      "id": "saarinen",
+      "signals": [
+        "browser-spa",
+        "react"
+      ],
+      "domains": [
+        "ui-visual-quality"
+      ]
+    },
+    {
+      "id": "vanrossum",
+      "signals": [
+        "aiogram",
+        "cpython",
+        "django",
+        "fastapi",
+        "flask",
+        "python",
+        "starlette"
+      ],
+      "domains": [
+        "backend-architecture"
+      ]
+    },
+    {
+      "id": "watson",
+      "signals": [
+        "browser-spa",
+        "react"
+      ],
+      "domains": [
+        "accessibility"
+      ]
+    },
+    {
+      "id": "willison",
+      "signals": [
+        "any"
+      ],
+      "domains": [
+        "llm-pipeline"
+      ]
+    }
+  ]
+}

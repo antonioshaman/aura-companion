@@ -9,7 +9,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { detectFingerprint, JS_DEP_SIGNALS, PY_PKG_SIGNALS } from "./fingerprint.js";
 
@@ -136,47 +136,63 @@ describe("detectFingerprint — needs-confirmation (AC1.3)", () => {
 // fingerprint emit table (`postgress`) silently never-matches and scores zero. This
 // asserts every token the fingerprinter can emit is in the closed vocabulary.
 //
-// The vocab lives in the separate catalog repo; the aura repo's CI has no
-// ~/.claude/skills. So this runs against the live vocab WHEN PRESENT (the operator's
-// machine + the pre-commit hook) and skips-if-absent in bare CI — the same honest
-// pattern the skill-dispatcher live arm uses. The cross-repo hard gate is the
-// catalog CI; this is the emit-side half that can only run where both exist.
-describe("emit-side vocabulary closure (hashimoto #3)", () => {
-  const vocabPath =
-    process.env.COUNCIL_VOCAB ??
-    join(homedir(), ".claude", "skills", "_council-experts", ".verify", "capability-vocabulary.json");
-  const havePresent = existsSync(vocabPath);
+// It runs HERMETICALLY against a checked-in FROZEN snapshot of the vocab, so it gates
+// in the aura repo's CI (which has no ~/.claude — the earlier skipIf-only version
+// silently skipped there, observer WARN 1). A separate skip-if-present freshness test
+// asserts the snapshot still matches the live vocab where the catalog exists.
+const VOCAB_SNAPSHOT = join(
+  dirname(new URL(import.meta.url).pathname), "__fixtures__", "council-catalog", "vocabulary.json",
+);
 
-  it.skipIf(!havePresent)("every fingerprint emit token is in the closed vocabulary", () => {
-    const raw = JSON.parse(readFileSync(vocabPath, "utf8")) as { signals: Record<string, string[]> };
-    const vocab = new Set<string>();
-    for (const group of Object.values(raw.signals)) for (const t of group) vocab.add(t.toLowerCase());
-
-    const emitted = new Set<string>();
-    for (const table of [JS_DEP_SIGNALS, PY_PKG_SIGNALS]) {
-      for (const emits of Object.values(table)) for (const e of emits) emitted.add(e.token.toLowerCase());
+function signalSet(raw: { signals: Record<string, string[]> }): Set<string> {
+  const s = new Set<string>();
+  for (const group of Object.values(raw.signals)) for (const t of group) s.add(t.toLowerCase());
+  return s;
+}
+function emittedTokens(frameworksOnly = false): Set<string> {
+  const out = new Set<string>();
+  for (const table of [JS_DEP_SIGNALS, PY_PKG_SIGNALS]) {
+    for (const emits of Object.values(table)) {
+      for (const e of emits) if (!frameworksOnly || e.dimension === "frameworks") out.add(e.token.toLowerCase());
     }
-    const orphans = [...emitted].filter((t) => !vocab.has(t)).sort();
-    expect(orphans, `emit tokens absent from capability-vocabulary.json: ${orphans.join(", ")}`).toEqual([]);
+  }
+  return out;
+}
+
+describe("emit-side vocabulary closure (hashimoto #3 / observer WARN 1) — hermetic", () => {
+  const snap = JSON.parse(readFileSync(VOCAB_SNAPSHOT, "utf8")) as { signals: Record<string, string[]> };
+
+  it("every fingerprint emit token is in the closed vocabulary (frozen snapshot)", () => {
+    const vocab = signalSet(snap);
+    const orphans = [...emittedTokens()].filter((t) => !vocab.has(t)).sort();
+    expect(orphans, `emit tokens absent from the vocab snapshot: ${orphans.join(", ")}`).toEqual([]);
   });
 
-  // willison #2: the MISMATCH ("0-aiogram") guard in advisor-brief filters against
-  // the vocab's `frameworks` GROUP. If the fingerprint emits a token into the
-  // frameworks DIMENSION that is NOT in that group, the guard silently no-ops for it.
-  // Assert every framework-dimension emit token is in vocab.frameworks.
-  it.skipIf(!havePresent)("every framework-dimension emit token is in the vocab frameworks group", () => {
-    const raw = JSON.parse(readFileSync(vocabPath, "utf8")) as { signals: Record<string, string[]> };
-    const frameworkGroup = new Set((raw.signals.frameworks ?? []).map((t) => t.toLowerCase()));
-    const emittedFrameworks = new Set<string>();
-    for (const table of [JS_DEP_SIGNALS, PY_PKG_SIGNALS]) {
-      for (const emits of Object.values(table)) {
-        for (const e of emits) if (e.dimension === "frameworks") emittedFrameworks.add(e.token.toLowerCase());
-      }
-    }
-    const orphans = [...emittedFrameworks].filter((t) => !frameworkGroup.has(t)).sort();
+  // willison #2: the MISMATCH ("0-aiogram") guard in advisor-brief filters against the
+  // vocab's `frameworks` GROUP; a framework-dimension emit token missing from it makes
+  // the guard silently no-op. Hermetic against the snapshot.
+  it("every framework-dimension emit token is in the vocab frameworks group (frozen snapshot)", () => {
+    const frameworks = new Set((snap.signals.frameworks ?? []).map((t) => t.toLowerCase()));
+    const orphans = [...emittedTokens(true)].filter((t) => !frameworks.has(t)).sort();
     expect(
       orphans,
-      `framework-dimension emit tokens absent from vocab.signals.frameworks (MISMATCH guard would silently miss them): ${orphans.join(", ")}`,
+      `framework-dim emit tokens absent from vocab.frameworks (MISMATCH guard would miss them): ${orphans.join(", ")}`,
     ).toEqual([]);
+  });
+});
+
+// Freshness: the frozen snapshot must still match the live vocab. Skip-if-absent in
+// bare CI (the hermetic tests above are the CI gate); this catches snapshot staleness
+// on an operator machine + the pre-commit hook — regenerate via
+// `bun run scripts/build-council-catalog-snapshot.ts`.
+describe("vocab snapshot freshness (observer WARN 1)", () => {
+  const livePath =
+    process.env.COUNCIL_VOCAB ??
+    join(homedir(), ".claude", "skills", "_council-experts", ".verify", "capability-vocabulary.json");
+  it.skipIf(!existsSync(livePath))("frozen vocab snapshot equals the live vocab (signals + domains)", () => {
+    const live = JSON.parse(readFileSync(livePath, "utf8")) as { signals: Record<string, string[]>; domains: string[] };
+    const snap = JSON.parse(readFileSync(VOCAB_SNAPSHOT, "utf8")) as { signals: Record<string, string[]>; domains: string[] };
+    expect(snap.signals, "vocab snapshot signals drifted from live — regenerate build-council-catalog-snapshot.ts").toEqual(live.signals);
+    expect([...snap.domains].sort(), "vocab snapshot domains drifted from live").toEqual([...live.domains].sort());
   });
 });

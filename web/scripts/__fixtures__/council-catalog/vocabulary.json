@@ -1,0 +1,98 @@
+{
+  "_doc": "FROZEN SNAPSHOT of _council-experts/.verify/capability-vocabulary.json for hermetic aura CI (observer WARN, P2-7). Regenerate via scripts/build-council-catalog-snapshot.ts; the freshness canary asserts this == live where the catalog is present.",
+  "schema_version": 1,
+  "signals": {
+    "reserved": [
+      "any"
+    ],
+    "languages": [
+      "typescript",
+      "javascript",
+      "python",
+      "go",
+      "rust",
+      "php",
+      "ruby",
+      "java"
+    ],
+    "runtimes": [
+      "bun",
+      "node",
+      "deno",
+      "cpython"
+    ],
+    "frameworks": [
+      "hono",
+      "express",
+      "fastify",
+      "react",
+      "vue",
+      "svelte",
+      "nextjs",
+      "aiogram",
+      "python-telegram-bot",
+      "fastapi",
+      "flask",
+      "django",
+      "starlette"
+    ],
+    "datastores": [
+      "postgres",
+      "sqlite",
+      "redis",
+      "firestore",
+      "mysql",
+      "mongodb"
+    ],
+    "orm-migrations": [
+      "sqlalchemy",
+      "alembic",
+      "prisma",
+      "drizzle"
+    ],
+    "infra": [
+      "docker",
+      "github-actions",
+      "systemd",
+      "vps",
+      "cloud-run",
+      "cloudflare",
+      "kubernetes",
+      "nginx"
+    ],
+    "surfaces": [
+      "websocket",
+      "ndjson",
+      "json-rpc",
+      "rest",
+      "graphql",
+      "cli",
+      "stdio-subprocess",
+      "telegram-bot",
+      "telegram-mini-app",
+      "browser-spa",
+      "sse",
+      "webhook"
+    ]
+  },
+  "domains": [
+    "security",
+    "refactoring",
+    "backend-architecture",
+    "frontend-architecture",
+    "database-persistence",
+    "schema-migrations",
+    "llm-pipeline",
+    "ui-visual-quality",
+    "ux-flow",
+    "accessibility",
+    "devops-deploy",
+    "ci-supply-chain",
+    "test-quality",
+    "process-lifecycle",
+    "filesystem-persistence",
+    "protocol-correctness",
+    "realtime-streaming",
+    "chat-platform-ux"
+  ]
+}
