@@ -167,9 +167,16 @@ export function loadAdvisorProfile(catalogRootResolved: string, id: string, voca
   }
   if (!doc || typeof doc !== "object") return { ok: false, id, reason: "malformed", detail: "meta.yaml is not a mapping" };
   const obj = doc as Record<string, unknown>;
-  const caps = obj["capabilities"];
-  if (caps === undefined || caps === null) {
+  // Distinguish a genuinely MISSING key (not-yet-migrated → benign skip) from a
+  // key that is PRESENT but empty/null (a migration started and left broken →
+  // loud malformed). Collapsing the two would let a half-migrated advisor silently
+  // drop out of every roster with no verifier red (dahl #13 / AC2.2).
+  if (!("capabilities" in obj) || obj["capabilities"] === undefined) {
     return { ok: false, id, reason: "absent-capabilities" };
+  }
+  const caps = obj["capabilities"];
+  if (caps === null) {
+    return { ok: false, id, reason: "malformed", detail: "capabilities present but empty" };
   }
   if (typeof caps !== "object" || Array.isArray(caps)) {
     return { ok: false, id, reason: "malformed", detail: "capabilities must be a mapping" };
@@ -201,7 +208,15 @@ export function loadCatalog(catalogRoot: string, vocab?: Vocabulary): CatalogLoa
   let entries: string[];
   try {
     entries = readdirSync(root, { withFileTypes: true })
-      .filter((e) => e.isDirectory() && !e.name.startsWith("."))
+      // Include symlinked entries, NOT just `isDirectory()` (ritchie #1). A
+      // Dirent for a symlink-to-dir reports isDirectory()===false, so pre-filtering
+      // on it would DROP a symlinked advisor dir (e.g. a stow/chezmoi-managed
+      // `hunt/`) before resolveInCatalog runs — an entire reviewer vanishing with no
+      // error/skip record, the one forbidden silent-absence on the trust root that
+      // decides who reviews code. Route every non-hidden dir-or-symlink through
+      // resolveInCatalog instead, so a symlinked dir surfaces as a loud `symlink`/
+      // `out_of_bounds` error (or is admitted if it resolves inside the catalog root).
+      .filter((e) => !e.name.startsWith(".") && (e.isDirectory() || e.isSymbolicLink()))
       .map((e) => e.name)
       .sort();
   } catch {
@@ -218,6 +233,7 @@ export function loadCatalog(catalogRoot: string, vocab?: Vocabulary): CatalogLoa
       out.errors.push({ id: load.id, reason: load.reason, detail: load.detail });
     }
   }
-  out.profiles.sort((a, b) => a.id.localeCompare(b.id));
+  // Code-point sort (NOT localeCompare — ICU collation is runtime-dependent, dahl #4).
+  out.profiles.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   return out;
 }

@@ -6,7 +6,7 @@
 // YAML-coercion are LOUD errors (ritchie B-3/B-8, dahl #6).
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -114,5 +114,45 @@ describe("loadCatalog — partitioning", () => {
     advisor(r, "fowler", "capabilities:\n  signals: []\n  domains: [security]\n");
     const c = loadCatalog(r);
     expect(c.errors.some((e) => e.id === "fowler" && e.reason === "malformed")).toBe(true);
+  });
+
+  // dahl #13: a present-but-empty `capabilities:` key is a half-migrated advisor →
+  // LOUD malformed, NOT a silent absent-capabilities skip.
+  it("present-but-null capabilities is malformed, not a silent skip", () => {
+    const r = newCatalog();
+    advisor(r, "dahl", "creator: x\ncapabilities:\n"); // key present, value null
+    const c = loadCatalog(r);
+    expect(c.skipped.some((s) => s.id === "dahl")).toBe(false);
+    expect(c.errors.some((e) => e.id === "dahl" && e.reason === "malformed")).toBe(true);
+  });
+
+  // P1-2 (ritchie #1): a SYMLINKED advisor directory must never be silently dropped
+  // by the enumerator — it must surface loudly (symlink/out_of_bounds error), because
+  // this is the trust root that decides who reviews code.
+  it("a symlinked advisor directory pointing outside the catalog is a LOUD error, never a silent drop", () => {
+    const r = newCatalog();
+    advisor(r, "abramov", "capabilities:\n  signals: [react]\n  domains: [frontend-architecture]\n");
+    // stow-style: `hunt` is a symlink to a real advisor dir OUTSIDE the catalog root
+    const outside = mkdtempSync(join(tmpdir(), "outside-"));
+    roots.push(outside);
+    mkdirSync(join(outside, "hunt"), { recursive: true });
+    writeFileSync(join(outside, "hunt", "meta.yaml"), "capabilities:\n  signals: [any]\n  domains: [security]\n");
+    symlinkSync(join(outside, "hunt"), join(r, "hunt"), "dir");
+    const c = loadCatalog(r);
+    // hunt is NOT silently absent: it appears in errors (out_of_bounds), not vanished.
+    const seenAnywhere =
+      c.profiles.some((p) => p.id === "hunt") ||
+      c.skipped.some((s) => s.id === "hunt") ||
+      c.errors.some((e) => e.id === "hunt");
+    expect(seenAnywhere).toBe(true);
+    expect(c.errors.some((e) => e.id === "hunt" && e.reason === "out_of_bounds")).toBe(true);
+  });
+
+  it("a bad advisor id shape is a loud bad-id error", () => {
+    const r = realpathSync(newCatalog());
+    const v = loadVocabulary(r)!;
+    const load = loadAdvisorProfile(r, "../evil", v);
+    expect(load.ok).toBe(false);
+    if (!load.ok) expect(load.reason).toBe("bad-id");
   });
 });
