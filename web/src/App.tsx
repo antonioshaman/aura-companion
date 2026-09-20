@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useStore } from "./store.js";
 import { connectSession } from "./ws.js";
 import { api } from "./api.js";
@@ -209,8 +209,7 @@ export default function App() {
   // live `group:created` push may have populated first. Failure is
   // best-effort: live WS events still arrive on the next group_*
   // frame, so a network blip here doesn't strand the UI.
-  useEffect(() => {
-    if (!isAuthenticated) return;
+  const bootstrapGroups = useCallback(() => {
     api.fetchGroups().then(({ groups }) => {
       useStore.getState().hydrateGroups(groups);
     }).catch((err) => {
@@ -221,7 +220,31 @@ export default function App() {
         error: err instanceof Error ? err.message : String(err),
       });
     });
-  }, [isAuthenticated]);
+  }, []);
+
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    bootstrapGroups();
+  }, [isAuthenticated, bootstrapGroups]);
+
+  // Re-hydrate groups when the tab regains visibility/focus. A long-open tab that
+  // was already connected when a pair spawned can miss the live `group:created`
+  // push AND never reconnect (so the WS-reconnect re-hydrate never fires) — leaving
+  // the ObserverPanel + Sidebar ☼/☽ glyph silently absent for a LIVE pair until a
+  // full reload. `hydrateGroups` is insert-only/idempotent (never clobbers mutable
+  // runtime fields a live push set), so re-running on focus is safe.
+  useEffect(() => {
+    if (!isAuthenticated) return;
+    const onVisible = () => {
+      if (document.visibilityState === "visible") bootstrapGroups();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    window.addEventListener("focus", bootstrapGroups);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("focus", bootstrapGroups);
+    };
+  }, [isAuthenticated, bootstrapGroups]);
 
   // Auth gate: show login page when not authenticated
   if (!isAuthenticated) {
