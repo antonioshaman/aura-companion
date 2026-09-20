@@ -191,10 +191,6 @@ export function enumerateCandidatePrefixes(rootResolved: string): EnumerationRes
   let scanned = 0;
   let truncated = false;
   for (const name of names) {
-    if (scanned >= MAX_CANDIDATE_SUBDIRS) {
-      truncated = true;
-      break;
-    }
     if (name.startsWith(".")) continue;
     if (SKIP_SUBDIRS.has(name)) continue;
     const candidate = join(rootResolved, name);
@@ -205,8 +201,21 @@ export function enumerateCandidatePrefixes(rootResolved: string): EnumerationRes
       failures.push({ name: `<workspace>/${name} (lstat)`, reason: "read_error" });
       continue;
     }
-    if (lst.isSymbolicLink()) continue; // EC-7 silent symlink reject.
+    // EC-7 symlink reject — but RECORDED, not silent (ritchie #3): a symlinked
+    // monorepo package contributes none of its signals, so its exclusion must be
+    // surfaced (drained by the renderer) rather than shrinking the roster mutely.
+    if (lst.isSymbolicLink()) {
+      failures.push({ name: `<workspace>/${name}`, reason: "symlink" });
+      continue;
+    }
     if (!lst.isDirectory()) continue;
+    // Cap check AFTER eligibility (ritchie #5): only a genuinely-skipped ELIGIBLE
+    // dir marks the scan truncated — trailing hidden/skip/symlink/file entries no
+    // longer trip a false "scan was capped" advisory.
+    if (scanned >= MAX_CANDIDATE_SUBDIRS) {
+      truncated = true;
+      break;
+    }
     prefixes.push(name);
     scanned += 1;
   }

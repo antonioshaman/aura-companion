@@ -8,7 +8,23 @@
 // state (shows what was detected + a forward action), never a dead-end refusal.
 
 import type { Composition, RankedCandidate } from "./advisor-scorer";
-import type { Fingerprint } from "./fingerprint";
+import type { Fingerprint, FingerprintFailure } from "./fingerprint";
+
+/**
+ * Surface fingerprint read-failures at the human boundary (ritchie #2). Every read
+ * primitive records size_exceeded / read_error / symlink / out_of_bounds / json_parse
+ * into `Fingerprint.failures`, but nothing drained it — a `pyproject.toml` over its
+ * byte cap silently dropped its signals and seated the wrong council with the only
+ * evidence discarded. A partial scan is NOT a clean scan; say so.
+ */
+export function renderFailures(failures: FingerprintFailure[]): string[] {
+  if (failures.length === 0) return [];
+  const lines = [
+    `⚠ DEGRADED SCAN — could not read ${failures.length} marker file(s); the roster may be missing signals from them:`,
+  ];
+  for (const f of failures) lines.push(`  - ${f.path} (${f.reason})`);
+  return lines;
+}
 
 function seatLine(c: RankedCandidate, index: number): string {
   const domain = c.matchedDomains[0] ?? (c.crossStack ? "cross-stack" : "—");
@@ -23,8 +39,13 @@ function seatLine(c: RankedCandidate, index: number): string {
  * prose, willison R2). Crowded-out candidates are listed with an `add` hint so a
  * starved lens (e.g. security) is visibly recoverable (hunt #4, AC3.5).
  */
-export function renderRosterPreview(comp: Composition): string {
+export function renderRosterPreview(comp: Composition, fingerprint?: Fingerprint): string {
   const lines: string[] = [];
+  // A degraded scan changes what the roster means — surface it ABOVE the seats so
+  // the developer sees the roster was computed from incomplete evidence.
+  if (fingerprint && fingerprint.failures.length > 0) {
+    lines.push(...renderFailures(fingerprint.failures), "");
+  }
   lines.push(`Proposed council — ${comp.seated.length} seat${comp.seated.length === 1 ? "" : "s"} (adjust or confirm):`);
   comp.seated.forEach((c, i) => lines.push(seatLine(c, i)));
   if (comp.crowdedOut.length > 0) {
@@ -59,6 +80,9 @@ export function renderConfirmStackPrompt(fingerprint: Fingerprint): string {
   }
   if (fingerprint.scanTruncated) {
     lines.push("  (scan was capped — a very wide monorepo may have unseen subdirs)");
+  }
+  if (fingerprint.failures.length > 0) {
+    lines.push("", ...renderFailures(fingerprint.failures));
   }
   lines.push("");
   lines.push("To proceed, pick one:");

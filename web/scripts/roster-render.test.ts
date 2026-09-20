@@ -40,6 +40,24 @@ describe("renderRosterPreview", () => {
     const comp: Composition = { seated: [cand("hunt", ["security"], [], true)], crowdedOut: [], belowMin: true, cappedAtMax: false };
     expect(renderRosterPreview(comp)).toContain("thin fingerprint");
   });
+
+  // ritchie #2: a partial scan (a marker file over its byte cap / unreadable) must
+  // NOT render as a clean roster — the degraded-scan warning is drained from
+  // fingerprint.failures above the seats.
+  it("surfaces a DEGRADED SCAN warning when the fingerprint carries read failures", () => {
+    const comp: Composition = { seated: [cand("dahl", ["backend-architecture"], ["typescript"])], crowdedOut: [], belowMin: false, cappedAtMax: false };
+    const fp = nc(["typescript"]);
+    fp.failures = [{ path: "api/pyproject.toml", reason: "size_exceeded" }];
+    const out = renderRosterPreview(comp, fp);
+    expect(out).toContain("DEGRADED SCAN");
+    expect(out).toContain("api/pyproject.toml");
+    expect(out).toContain("size_exceeded");
+  });
+
+  it("renders a clean roster (no degraded warning) when there are no failures", () => {
+    const comp: Composition = { seated: [cand("dahl", ["backend-architecture"], ["typescript"])], crowdedOut: [], belowMin: false, cappedAtMax: false };
+    expect(renderRosterPreview(comp, nc(["typescript"]))).not.toContain("DEGRADED SCAN");
+  });
 });
 
 describe("renderConfirmStackPrompt", () => {

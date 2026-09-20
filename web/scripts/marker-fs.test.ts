@@ -113,7 +113,7 @@ describe("enumerateCandidatePrefixes — sort-before-cap + symlink skip", () => 
     const sorted = [...res.prefixes].sort();
     expect(res.prefixes).toEqual(sorted);
   });
-  it("excludes hidden dirs and a symlinked subdir", () => {
+  it("excludes hidden dirs and RECORDS a symlinked subdir as a failure (ritchie #3)", () => {
     const r = newRoot();
     mkdirSync(join(r, "real"));
     mkdirSync(join(r, ".hidden"));
@@ -123,6 +123,31 @@ describe("enumerateCandidatePrefixes — sort-before-cap + symlink skip", () => 
     expect(res.prefixes).toContain("real");
     expect(res.prefixes).not.toContain(".hidden");
     expect(res.prefixes).not.toContain("linked");
+    // The symlinked subdir is not silently dropped — it is surfaced.
+    expect(res.failures.some((f) => f.name.includes("linked") && f.reason === "symlink")).toBe(true);
+  });
+
+  it("no FALSE truncation: exactly-cap eligible dirs + any number of ineligible ones → truncated false (ritchie #5)", () => {
+    const r = newRoot();
+    // Exactly the cap of eligible dirs — no eligible overflow exists.
+    for (let i = 0; i < MAX_CANDIDATE_SUBDIRS; i++) mkdirSync(join(r, `d${String(i).padStart(3, "0")}`));
+    // Ineligible entries (hidden + skip-listed) must NOT count toward the cap and
+    // must NOT trip the "scan was capped" advisory — truncation now trips only on a
+    // genuinely-skipped ELIGIBLE dir, not on loop re-entry at the cap boundary.
+    mkdirSync(join(r, ".zz-hidden"));
+    mkdirSync(join(r, "node_modules")); // SKIP_SUBDIRS member
+    mkdirSync(join(r, "__pycache__")); // SKIP_SUBDIRS member
+    const res = enumerateCandidatePrefixes(r);
+    expect(res.prefixes).toHaveLength(MAX_CANDIDATE_SUBDIRS);
+    expect(res.truncated).toBe(false);
+  });
+
+  it("DOES truncate when an eligible dir overflows the cap", () => {
+    const r = newRoot();
+    for (let i = 0; i < MAX_CANDIDATE_SUBDIRS + 3; i++) mkdirSync(join(r, `d${String(i).padStart(3, "0")}`));
+    const res = enumerateCandidatePrefixes(r);
+    expect(res.prefixes).toHaveLength(MAX_CANDIDATE_SUBDIRS);
+    expect(res.truncated).toBe(true);
   });
 });
 
