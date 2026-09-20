@@ -6,11 +6,12 @@
 // fingerprint emits (spec AC1.1/AC1.2/AC1.3/AC1.4), not just a tag.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { detectFingerprint } from "./fingerprint.js";
+import { detectFingerprint, JS_DEP_SIGNALS, PY_PKG_SIGNALS } from "./fingerprint.js";
 
 const workspaces: string[] = [];
 function newWorkspace(): string {
@@ -127,5 +128,35 @@ describe("detectFingerprint — needs-confirmation (AC1.3)", () => {
     write(w, "notes.txt", "nothing here");
     const fp = detectFingerprint(w);
     expect(fp.kind).toBe("needs-confirmation");
+  });
+});
+
+// Emit-side vocabulary closure (hashimoto #3). C15 checks the DECLARE side (each
+// meta.yaml token ∈ vocab); nothing checked the EMIT side, so a typo in a
+// fingerprint emit table (`postgress`) silently never-matches and scores zero. This
+// asserts every token the fingerprinter can emit is in the closed vocabulary.
+//
+// The vocab lives in the separate catalog repo; the aura repo's CI has no
+// ~/.claude/skills. So this runs against the live vocab WHEN PRESENT (the operator's
+// machine + the pre-commit hook) and skips-if-absent in bare CI — the same honest
+// pattern the skill-dispatcher live arm uses. The cross-repo hard gate is the
+// catalog CI; this is the emit-side half that can only run where both exist.
+describe("emit-side vocabulary closure (hashimoto #3)", () => {
+  const vocabPath =
+    process.env.COUNCIL_VOCAB ??
+    join(homedir(), ".claude", "skills", "_council-experts", ".verify", "capability-vocabulary.json");
+  const havePresent = existsSync(vocabPath);
+
+  it.skipIf(!havePresent)("every fingerprint emit token is in the closed vocabulary", () => {
+    const raw = JSON.parse(readFileSync(vocabPath, "utf8")) as { signals: Record<string, string[]> };
+    const vocab = new Set<string>();
+    for (const group of Object.values(raw.signals)) for (const t of group) vocab.add(t.toLowerCase());
+
+    const emitted = new Set<string>();
+    for (const table of [JS_DEP_SIGNALS, PY_PKG_SIGNALS]) {
+      for (const emits of Object.values(table)) for (const e of emits) emitted.add(e.token.toLowerCase());
+    }
+    const orphans = [...emitted].filter((t) => !vocab.has(t)).sort();
+    expect(orphans, `emit tokens absent from capability-vocabulary.json: ${orphans.join(", ")}`).toEqual([]);
   });
 });

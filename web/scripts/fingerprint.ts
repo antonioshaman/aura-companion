@@ -89,8 +89,11 @@ interface Emit {
   dimension: SignalDimension;
 }
 
-// package.json dependency name → emitted signal(s).
-const JS_DEP_SIGNALS: Record<string, Emit[]> = {
+// package.json dependency name → emitted signal(s). Exported so an emit-side
+// vocabulary-closure test can assert every token this table can emit is in the
+// closed vocabulary (hashimoto #3 — a typo like `postgress` otherwise silently
+// never-matches and scores zero, passing every gate).
+export const JS_DEP_SIGNALS: Record<string, Emit[]> = {
   hono: [{ token: "hono", dimension: "frameworks" }],
   express: [{ token: "express", dimension: "frameworks" }],
   fastify: [{ token: "fastify", dimension: "frameworks" }],
@@ -108,8 +111,8 @@ const JS_DEP_SIGNALS: Record<string, Emit[]> = {
 };
 
 // Python package token (matched as a whole word in pyproject/requirements text)
-// → emitted signal(s).
-const PY_PKG_SIGNALS: Record<string, Emit[]> = {
+// → emitted signal(s). Exported for the emit-side vocabulary-closure test (see JS_DEP_SIGNALS).
+export const PY_PKG_SIGNALS: Record<string, Emit[]> = {
   aiogram: [{ token: "aiogram", dimension: "frameworks" }, { token: "telegram-bot", dimension: "surfaces" }],
   "python-telegram-bot": [{ token: "python-telegram-bot", dimension: "frameworks" }, { token: "telegram-bot", dimension: "surfaces" }],
   fastapi: [{ token: "fastapi", dimension: "frameworks" }, { token: "rest", dimension: "surfaces" }],
