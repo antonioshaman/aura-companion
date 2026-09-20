@@ -7,6 +7,7 @@ import { Composer } from "./Composer.js";
 import { PermissionBanner } from "./PermissionBanner.js";
 import { AiValidationBadge } from "./AiValidationBadge.js";
 import { BlockerBanner } from "./council/index.js";
+import { SectionErrorBoundary } from "./SectionErrorBoundary.js";
 import { CliFailedBanner } from "./CliFailedBanner.js";
 import { ModelFallbackBanner } from "./ModelFallbackBanner.js";
 import { ModelSubstitutionDialog } from "./ModelSubstitutionDialog.js";
@@ -262,7 +263,12 @@ export function ChatView({ sessionId }: { sessionId: string }) {
         </div>
       ) : topBlocker ? (
         <div className="shrink-0 border-t border-cc-border bg-cc-card">
-          <BlockerBanner finding={topBlocker} onDismiss={dismissStop} />
+          {/* Contain a render throw in the observer-driven blocker banner to
+              this slot — a bad finding payload must not blank the whole app
+              via the root AppErrorBoundary (RC-1 T13 / RC-5). */}
+          <SectionErrorBoundary label="Blocker">
+            <BlockerBanner finding={topBlocker} onDismiss={dismissStop} />
+          </SectionErrorBoundary>
         </div>
       ) : null}
 

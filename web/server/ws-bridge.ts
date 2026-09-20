@@ -122,6 +122,26 @@ const RETRYABLE_BACKEND_MESSAGE_TYPES = new Set<BrowserOutgoingMessage["type"]>(
   "mcp_set_servers",
 ]);
 
+/**
+ * Marker text sent as the content of the init-probe `user` frame at
+ * kickoff time. See {@link WsBridge.sendInitProbeAndInterrupt} for the
+ * rationale. The wording asks Claude not to respond because the interrupt
+ * that follows aborts the turn — but on the off-chance the interrupt
+ * races behind the API call and a full reply escapes, the request text
+ * makes the model's reply obviously bootstrap-related in the transcript.
+ */
+export const AURA_INIT_PROBE_MARKER =
+  "[Aura Companion init probe — bootstrap frame, not from a user; do not respond]";
+
+/**
+ * Milliseconds to wait after sending the probe `user` frame before
+ * dispatching the interrupt. Empirically ~50-100 ms is enough on healthy
+ * stdio for the CLI to read the frame and emit `system.init`; 200 ms is
+ * chosen for headroom against slower boxes without giving the CLI enough
+ * time to complete an API round-trip.
+ */
+export const AURA_INIT_PROBE_INTERRUPT_DELAY_MS = 200;
+
 export class WsBridge {
   private static readonly PROCESSED_CLIENT_MSG_ID_LIMIT = 1000;
   /**
@@ -1608,10 +1628,37 @@ export class WsBridge {
     }
 
     // Notify if backend is not connected and request relaunch.
-    // Treat an attached adapter as "alive" during init — `isConnected()`
-    // may flip true only after initialize/thread start, and relaunching
-    // during that window can kill a healthy startup.
-    const backendConnected = !!session.backendAdapter;
+    // LIVENESS, not mere presence (RC-1). A stdio Claude process death runs
+    // `adapter.handleTransportClose()`, which nulls the transport but leaves the
+    // `ClaudeAdapter` object attached and fires no disconnect callback — so
+    // `!!session.backendAdapter` reads that corpse as alive and the returning
+    // user never triggers a relaunch (the exact "idle session won't come back"
+    // regression). For Claude, `isConnected()` is transport-presence: true
+    // throughout init (transport is attached before `system.init`), false only
+    // when the transport is gone — so it is the correct liveness signal and does
+    // NOT relaunch a healthy mid-init session. Codex KEEPS presence semantics:
+    // its `connected` flag is legitimately false during a ~16s init window and
+    // its own `onDisconnect` already emits `session:relaunch-needed` on real
+    // death, so using `isConnected()` for Codex would relaunch a healthy startup.
+    //
+    // INVARIANT — for Claude, `isConnected() === false` means a dead/exited spawn,
+    // NEVER merely "adapter assigned, transport not yet attached". Proof by
+    // construction order: `openCliTransport()` (the sole assigner of a Claude
+    // `session.backendAdapter`, via `attachBackendAdapter`) is SYNCHRONOUS from
+    // that assignment through `adapter.attachTransport(transport)` — no `await`
+    // between them. On the single-threaded loop, this synchronous
+    // `handleBrowserOpen` cannot interleave into that gap, so a Claude adapter
+    // observed here with `transport === null` has always already had its transport
+    // NULLED by a close path (`handleTransportClose` on process exit → launcher
+    // marks `state:"exited"`, or `disconnect()` on archive). The transient WS
+    // reconnect case (transport briefly closed but recovering) is separately
+    // covered by the `!this.disconnectTimers.has(sessionId)` guard below, which
+    // defers to `handleCLIClose`'s 15s debounce timer — so this fix does not
+    // regress `COMPANION_CLAUDE_TRANSPORT=ws`.
+    const backendConnected =
+      session.backendAdapter instanceof ClaudeAdapter
+        ? session.backendAdapter.isConnected()
+        : !!session.backendAdapter;
 
     // An archived session's backend is dead by design (the user closed it).
     // Emitting `cli_disconnected` would render a spurious "reconnecting" flap
@@ -1736,16 +1783,46 @@ export class WsBridge {
 
   /**
    * Bootstrap kickoff for sessions that never get browser-driven traffic
-   * (e.g. Council Mode observers). Sends ONE `initialize` control_request
-   * on CLI ws_open so the CLI emits its `system` init and reaches "ready"
-   * state without depending on user input or browser activity. Claude-only.
+   * (e.g. Council Mode observers) or fresh chats where the user hasn't
+   * typed yet. Fires on CLI ws_open so the CLI emits its `system` init
+   * and reaches "ready" state without depending on user input or browser
+   * activity. Claude-only.
    *
-   * OBS-STOP-1 fix: if `session.pendingSystemPromptInjection` is set
+   * **The kickoff shape changed 2026-09-20 after a prod incident.** The
+   * prior implementation sent a bare `control_request{initialize}`; that
+   * frame IS accepted by CLI 2.1.265+ but does NOT trigger the CLI's
+   * `system.init` emit — the CLI ONLY emits `system.init` in response to
+   * an actual `user` frame on stdin. Verified end-to-end on aura-companion
+   * prod: 4 Claude pairs sat silent-init for hours across CLI 2.1.263,
+   * 2.1.265, 2.1.266, 2.1.278; only typing a real message unblocked each.
+   * Recording (`~/.companion/recordings/*_claude_*.jsonl`) showed
+   * `control_request{initialize}` → `control_response{success}` → no
+   * `system.init` frame ever. See
+   * `feedback_aura_cli_init_needs_user_message_not_kickoff.md`.
+   *
+   * The new kickoff sends the following stdin sequence:
+   *   1. `control_request{initialize, appendSystemPrompt}` — ONLY when
+   *      `pendingSystemPromptInjection` is set (that's the sole
+   *      remaining useful side effect of this frame; the CLI applies
+   *      the system prompt but does not emit init in response).
+   *   2. If `session.pendingMessages` is EMPTY (fresh session, no user
+   *      turn queued): send a probe `user` frame carrying a distinctive
+   *      marker, immediately followed by `control_request{interrupt}`.
+   *      The user frame is what CLI wants to see for init emit; the
+   *      interrupt aborts before an API call generates a phantom reply.
+   *      Trade-off: the probe adds one placeholder user turn to the
+   *      CLI's own transcript (jsonl) with a "do not respond" marker.
+   *      A brief interrupt-signalled `result` frame may reach the
+   *      browser in the split-second before the interrupt lands.
+   *   3. If `session.pendingMessages` is non-empty, the queued real
+   *      user message will be flushed by `handleCLIOpen` and that frame
+   *      naturally triggers init emit — no probe needed.
+   *
+   * OBS-STOP-1 kept: if `session.pendingSystemPromptInjection` is set
    * (because `injectSystemPrompt` was called before the WS connected),
-   * include the prompt in the kickoff's `appendSystemPrompt` field and
-   * clear the pending slot. This collapses what was previously a two-
-   * initialize race (bare kickoff at WS open → later second initialize
-   * with prompt, second silently dropped) into one well-formed init.
+   * the initialize control_request carries `appendSystemPrompt` and the
+   * pending slot is cleared. This collapses what was previously a
+   * two-initialize race into one well-formed init.
    */
   sendInitializeKickoff(sessionId: string): void {
     const session = this.sessions.get(sessionId);
@@ -1753,23 +1830,69 @@ export class WsBridge {
     if (!(session.backendAdapter instanceof ClaudeAdapter)) return;
     const { randomUUID } = require("node:crypto") as typeof import("node:crypto");
     const pendingPrompt = session.pendingSystemPromptInjection;
-    const request: { subtype: "initialize"; appendSystemPrompt?: string } =
-      pendingPrompt
-        ? { subtype: "initialize", appendSystemPrompt: pendingPrompt }
-        : { subtype: "initialize" };
-    const ndjson = JSON.stringify({
-      type: "control_request",
-      request_id: randomUUID(),
-      request,
-    });
-    session.backendAdapter.sendRawNDJSON(ndjson);
+
+    // Step 1: system-prompt injection only when we have one to attach.
+    // The initialize control_request no longer serves as init trigger
+    // (that job moved to the user-frame probe in step 2), but it is
+    // still the documented channel for `appendSystemPrompt`.
     if (pendingPrompt) {
+      const ndjson = JSON.stringify({
+        type: "control_request",
+        request_id: randomUUID(),
+        request: { subtype: "initialize", appendSystemPrompt: pendingPrompt },
+      });
+      session.backendAdapter.sendRawNDJSON(ndjson);
       // Clear the pending slot — kickoff just consumed it. A future
       // `injectSystemPrompt` after this point is a legitimate mid-session
       // re-init (agent-executor mid-flow) and goes through the existing
       // direct-send path.
       session.pendingSystemPromptInjection = null;
     }
+
+    // Step 2: force init emit via a probe user frame + interrupt combo.
+    // Skip if a real user message is already queued — that frame will
+    // naturally trigger init and we avoid polluting the transcript.
+    if (session.pendingMessages.length === 0) {
+      this.sendInitProbeAndInterrupt(sessionId);
+    }
+  }
+
+  /**
+   * Send a probe `user` frame + `control_request{interrupt}` on stdin to
+   * force the CLI to emit its `system.init` frame while suppressing any
+   * assistant reply. Extracted for readability + testability; see the
+   * rationale in {@link sendInitializeKickoff}.
+   *
+   * The interrupt delay is 200 ms — empirically enough for the CLI to
+   * read the user frame and emit `system.init` on healthy stdio
+   * (verified ~50-100 ms in probes), but before an API round-trip
+   * completes. A shorter delay risks the interrupt racing ahead of
+   * init emit; a longer delay lets more assistant tokens leak.
+   */
+  private sendInitProbeAndInterrupt(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    if (!(session.backendAdapter instanceof ClaudeAdapter)) return;
+    const { randomUUID } = require("node:crypto") as typeof import("node:crypto");
+    const probeMsg = JSON.stringify({
+      type: "user",
+      message: { role: "user", content: AURA_INIT_PROBE_MARKER },
+    });
+    session.backendAdapter.sendRawNDJSON(probeMsg);
+    // Delay the interrupt so CLI has time to read the probe frame and
+    // emit `system.init`. If the session is torn down before the timer
+    // fires, the guard below drops the interrupt harmlessly.
+    setTimeout(() => {
+      const s = this.sessions.get(sessionId);
+      if (!s) return;
+      if (!(s.backendAdapter instanceof ClaudeAdapter)) return;
+      const interruptMsg = JSON.stringify({
+        type: "control_request",
+        request_id: randomUUID(),
+        request: { subtype: "interrupt" },
+      });
+      s.backendAdapter.sendRawNDJSON(interruptMsg);
+    }, AURA_INIT_PROBE_INTERRUPT_DELAY_MS);
   }
 
   /** Send an initialize control request with context appended to the system prompt.
