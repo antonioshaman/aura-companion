@@ -5497,39 +5497,148 @@ describe("injectMcpSetServers", () => {
 describe("sendInitializeKickoff", () => {
   // Validates the bootstrap fix for Council Mode observers (and the latent
   // orchestrator fragility): Claude Code CLI in `--print -p stream-json` mode
-  // does not emit `system` init until it receives a first input frame. Before
-  // this fix, sessions only handshaked if a browser happened to push some
-  // control_request (e.g. mcp_get_status on subscribe). Observers have no
-  // chat-surface subscription, so they were stuck in "initializing" forever
-  // and the UI banner read "Reconnecting" indefinitely. handleCLIOpen now
-  // fires a bare `initialize` control_request right after attachWebSocket so
-  // the CLI handshake completes deterministically, independent of any client.
-  it("sends bare initialize control_request automatically on handleCLIOpen", () => {
-    // No browser involvement — just a CLI socket opening. The kickoff must
-    // fire so the CLI emits its system init frame.
-    const cli = makeCliSocket("s1");
-    bridge.handleCLIOpen(cli, "s1");
+  // does not emit `system` init until it receives a `user` frame on stdin.
+  //
+  // 2026-09-20 update: the prior implementation sent `control_request{initialize}`
+  // at kickoff — that frame is accepted by CLI 2.1.265+ but does NOT trigger
+  // the `system.init` emit (verified on aura-companion prod across 2.1.263,
+  // 2.1.265, 2.1.266, 2.1.278 — recording showed `control_response{success}`
+  // arriving but no `system.init` frame). The kickoff now sends a probe `user`
+  // frame followed by `control_request{interrupt}`: CLI reads the user frame,
+  // emits `system.init`, and the interrupt aborts before an API call generates
+  // an assistant reply. See `sendInitializeKickoff` JSDoc for full rationale.
+  it("sends probe user frame + interrupt to force system.init emit when no user message queued", () => {
+    vi.useFakeTimers();
+    try {
+      const cli = makeCliSocket("s1");
+      bridge.handleCLIOpen(cli, "s1");
 
-    const calls = cli.send.mock.calls.map(([arg]: [string]) => arg);
-    const initMsg = calls.find((s: string) => {
-      try {
-        const j = JSON.parse(s.trim());
-        return j.type === "control_request" && j.request?.subtype === "initialize";
-      } catch { return false; }
-    });
-    expect(initMsg).toBeDefined();
-    const parsed = JSON.parse(initMsg!.trim());
-    expect(parsed.type).toBe("control_request");
-    expect(parsed.request.subtype).toBe("initialize");
-    // Bare kickoff carries no appendSystemPrompt — that's the orthogonal
-    // injectSystemPrompt path, used for Linear / agent-executor flows.
-    expect(parsed.request.appendSystemPrompt).toBeUndefined();
-    expect(parsed.request_id).toBeDefined();
-    expect(typeof parsed.request_id).toBe("string");
+      const initialCalls = cli.send.mock.calls.map(([arg]: [string]) => arg);
+      const probeMsg = initialCalls.find((s: string) => {
+        try {
+          const j = JSON.parse(s.trim());
+          return j.type === "user";
+        } catch { return false; }
+      });
+      expect(probeMsg).toBeDefined();
+      const probeParsed = JSON.parse(probeMsg!.trim());
+      expect(probeParsed.message.role).toBe("user");
+      expect(probeParsed.message.content).toContain("Aura Companion init probe");
+
+      // Interrupt fires 200ms after the probe (AURA_INIT_PROBE_INTERRUPT_DELAY_MS).
+      // Before advancing timers, no interrupt has been written yet.
+      const beforeInterrupt = cli.send.mock.calls.map(([arg]: [string]) => arg);
+      const noInterruptYet = beforeInterrupt.find((s: string) => {
+        try {
+          const j = JSON.parse(s.trim());
+          return j.type === "control_request" && j.request?.subtype === "interrupt";
+        } catch { return false; }
+      });
+      expect(noInterruptYet).toBeUndefined();
+
+      vi.advanceTimersByTime(250);
+      const afterInterrupt = cli.send.mock.calls.map(([arg]: [string]) => arg);
+      const interruptMsg = afterInterrupt.find((s: string) => {
+        try {
+          const j = JSON.parse(s.trim());
+          return j.type === "control_request" && j.request?.subtype === "interrupt";
+        } catch { return false; }
+      });
+      expect(interruptMsg).toBeDefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("skips probe user frame when a real user message is already queued", () => {
+    // If the browser sent a user_message before the CLI socket opened,
+    // that message is queued in `session.pendingMessages` and will be
+    // flushed by `handleCLIOpen`. That real frame naturally triggers CLI
+    // init emit, so the probe would be redundant transcript pollution.
+    vi.useFakeTimers();
+    try {
+      const session = bridge.getOrCreateSession("s-queued", "claude");
+      session.pendingMessages.push(
+        JSON.stringify({ type: "user_message", client_msg_id: "cm-1", text: "hello" }),
+      );
+      const cli = makeCliSocket("s-queued");
+      bridge.handleCLIOpen(cli, "s-queued");
+
+      // Advance past the interrupt delay so we'd catch a stray interrupt.
+      vi.advanceTimersByTime(500);
+      const calls = cli.send.mock.calls.map(([arg]: [string]) => arg);
+      const probeFrame = calls.find((s: string) => {
+        try {
+          const j = JSON.parse(s.trim());
+          return j.type === "user" && String(j.message?.content ?? "").includes("Aura Companion init probe");
+        } catch { return false; }
+      });
+      const interruptFrame = calls.find((s: string) => {
+        try {
+          const j = JSON.parse(s.trim());
+          return j.type === "control_request" && j.request?.subtype === "interrupt";
+        } catch { return false; }
+      });
+      expect(probeFrame).toBeUndefined();
+      expect(interruptFrame).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still sends control_request{initialize, appendSystemPrompt} when a pending prompt is set", () => {
+    // The `appendSystemPrompt` side effect of the initialize control_request
+    // still works even though init emit doesn't come from it. Preserved so
+    // agent-executor / Linear / OBS-STOP-1 paths keep working.
+    vi.useFakeTimers();
+    try {
+      const session = bridge.getOrCreateSession("s-prompt", "claude");
+      session.pendingSystemPromptInjection = "You are a helpful assistant.";
+      const cli = makeCliSocket("s-prompt");
+      bridge.handleCLIOpen(cli, "s-prompt");
+
+      const calls = cli.send.mock.calls.map(([arg]: [string]) => arg);
+      const initCtrl = calls.find((s: string) => {
+        try {
+          const j = JSON.parse(s.trim());
+          return (
+            j.type === "control_request" &&
+            j.request?.subtype === "initialize" &&
+            typeof j.request?.appendSystemPrompt === "string"
+          );
+        } catch { return false; }
+      });
+      expect(initCtrl).toBeDefined();
+      const parsed = JSON.parse(initCtrl!.trim());
+      expect(parsed.request.appendSystemPrompt).toBe("You are a helpful assistant.");
+      // Slot cleared so a subsequent injectSystemPrompt takes the
+      // direct-send path, not the buffered-kickoff path.
+      expect(session.pendingSystemPromptInjection).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("is a no-op for nonexistent session", () => {
     expect(() => bridge.sendInitializeKickoff("nonexistent")).not.toThrow();
+  });
+
+  it("harmlessly drops the interrupt if the session is torn down before the delay elapses", () => {
+    // Regression guard: the interrupt timer fires against a session id
+    // that may have been removed. The scheduled callback must guard
+    // against `sessions.get(sessionId) == undefined` and not throw.
+    vi.useFakeTimers();
+    try {
+      const cli = makeCliSocket("s-tornoff");
+      bridge.handleCLIOpen(cli, "s-tornoff");
+      // Mid-delay: nuke the session state.
+      (bridge as unknown as { sessions: Map<string, unknown> }).sessions.delete(
+        "s-tornoff",
+      );
+      expect(() => vi.advanceTimersByTime(500)).not.toThrow();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
