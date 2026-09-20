@@ -20,11 +20,11 @@
 // `no`/`on`/`1.0` list member coerces to boolean/number and is rejected as
 // malformed rather than silently never-matching (ritchie B-8).
 
-import { existsSync, lstatSync, readdirSync, realpathSync } from "node:fs";
-import { join, sep } from "node:path";
+import { existsSync, readdirSync, realpathSync } from "node:fs";
+import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 
-import { readText } from "./marker-fs";
+import { assertResolvedWithinRoot, readText } from "./marker-fs";
 
 // Security canary (spec / catalog convention): advisor IDs are creator surnames.
 export const ADVISOR_ID_RE = /^[a-z][a-z0-9-]{1,31}$/;
@@ -74,6 +74,10 @@ export interface CatalogLoad {
 export function loadVocabulary(catalogRootResolved: string): Vocabulary | null {
   const abs = join(catalogRootResolved, ".verify", "capability-vocabulary.json");
   if (!existsSync(abs)) return null;
+  // Route the vocabulary read through the SAME escape-guard every other catalog
+  // read uses (hunt #2) — a symlinked/out-of-bounds vocabulary file is refused,
+  // not silently followed off the trust root by readText's symlink-following stat.
+  if (!assertResolvedWithinRoot(abs, catalogRootResolved).ok) return null;
   const read = readText(abs, VOCAB_CAP);
   if (!read.ok) return null;
   let v: unknown;
@@ -107,26 +111,15 @@ export function loadVocabulary(catalogRootResolved: string): Vocabulary | null {
 }
 
 // Catalog-root-anchored path resolution (the EC-7 equivalent for the 2nd root).
+// The escape-guard tail is the SHARED `assertResolvedWithinRoot` (fowler #1) — only
+// the root-anchored candidate + the present/absent semantics differ (a missing
+// catalog meta.yaml is `no-meta`, not `ok`).
 function resolveInCatalog(catalogRootResolved: string, id: string): { ok: true; abs: string } | { ok: false; reason: ProfileReason } {
   if (!ADVISOR_ID_RE.test(id)) return { ok: false, reason: "bad-id" };
   const abs = join(catalogRootResolved, id, "meta.yaml");
   if (!existsSync(abs)) return { ok: false, reason: "no-meta" };
-  let lst;
-  try {
-    lst = lstatSync(abs);
-  } catch {
-    return { ok: false, reason: "read_error" };
-  }
-  if (lst.isSymbolicLink()) return { ok: false, reason: "symlink" };
-  let real: string;
-  try {
-    real = realpathSync(abs);
-  } catch {
-    return { ok: false, reason: "read_error" };
-  }
-  if (real !== abs && !real.startsWith(catalogRootResolved + sep)) {
-    return { ok: false, reason: "out_of_bounds" };
-  }
+  const guard = assertResolvedWithinRoot(abs, catalogRootResolved);
+  if (!guard.ok) return { ok: false, reason: guard.reason };
   return { ok: true, abs };
 }
 

@@ -51,6 +51,45 @@ function hasTraversalSegment(relPath: string): boolean {
 }
 
 /**
+ * The single escape-guard choke point (fowler #1 / hunt #1/#2). Given an
+ * absolute candidate that is known to EXIST and the resolved root, reject a
+ * symlink leaf (`symlink`), an lstat/realpath throw (`read_error`), or a resolved
+ * path escaping the root (`out_of_bounds`). This is the security-load-bearing tail
+ * that stops a symlinked/escaping path from being read — it lived duplicated
+ * byte-for-byte across the workspace resolver here and the catalog resolver in
+ * capability-catalog.ts (and was skipped entirely by loadVocabulary). Both roots
+ * now share this one implementation; only the root-anchored candidate differs.
+ *
+ * Caller MUST check existence first: presence semantics differ per root (a missing
+ * workspace marker is `ok`; a missing catalog meta.yaml is `no-meta`), so this
+ * assumes the path exists and only adjudicates the escape guard.
+ */
+export function assertResolvedWithinRoot(
+  candidateAbs: string,
+  rootResolved: string,
+): { ok: true } | { ok: false; reason: "symlink" | "out_of_bounds" | "read_error" } {
+  let lst;
+  try {
+    lst = lstatSync(candidateAbs);
+  } catch {
+    return { ok: false, reason: "read_error" };
+  }
+  if (lst.isSymbolicLink()) {
+    return { ok: false, reason: "symlink" };
+  }
+  let real: string;
+  try {
+    real = realpathSync(candidateAbs);
+  } catch {
+    return { ok: false, reason: "read_error" };
+  }
+  if (real !== candidateAbs && !real.startsWith(rootResolved + sep)) {
+    return { ok: false, reason: "out_of_bounds" };
+  }
+  return { ok: true };
+}
+
+/**
  * The single EC-7 resolving wrapper. `relativeMarker` is workspace-relative;
  * an absolute path or a `..` segment is refused as `out_of_bounds`. A symlink
  * leaf is refused as `symlink`. A resolved path escaping the root is refused as
@@ -68,24 +107,8 @@ export function resolveMarker(
   if (!existsSync(candidate)) {
     return { ok: true, absolute: candidate };
   }
-  let lst;
-  try {
-    lst = lstatSync(candidate);
-  } catch {
-    return { ok: false, reason: "read_error" };
-  }
-  if (lst.isSymbolicLink()) {
-    return { ok: false, reason: "symlink" };
-  }
-  let real: string;
-  try {
-    real = realpathSync(candidate);
-  } catch {
-    return { ok: false, reason: "read_error" };
-  }
-  if (real !== candidate && !real.startsWith(rootResolved + sep)) {
-    return { ok: false, reason: "out_of_bounds" };
-  }
+  const guard = assertResolvedWithinRoot(candidate, rootResolved);
+  if (!guard.ok) return { ok: false, reason: guard.reason };
   return { ok: true, absolute: candidate };
 }
 
