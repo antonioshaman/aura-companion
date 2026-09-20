@@ -126,6 +126,36 @@
 
 ---
 
+## COUNCIL-REVIEW-AURA + AUTO-FIX (2026-09-20) — all 19 findings resolved
+
+Ran `/council-review-aura` on the full RC-2 work (7 experts: hunt/fowler/dahl/ritchie/
+willison/beck/hashimoto; UI/UX/a11y/DB/telegram correctly NOT seated — dogfood of the
+adaptive selection). Review artifacts (gitignored): `.council/review-output/2026-09-20-0314/`.
+Verdict: engine structurally sound; 3 P1 / 9 P2 / 7 P3. All fixed + committed + pushed
+(aura branch `feat/rc2-universal-adaptive-advisor-selection`; catalog repo `master`).
+
+| Finding | Fix commit(s) |
+|---|---|
+| P1-1 Variant-B floor not enforced on arbitration/fallback + dedup collision (willison/dahl/hunt convergent) | aura `e9c4cc2` |
+| P1-2 symlinked advisor dir silently deseated (ritchie) | aura `4a229a4` |
+| P1-3 verifier had no CI backstop (hashimoto) | catalog `81c4ced` (GH Actions) |
+| P2-4 localeCompare nondeterminism | aura `e9c4cc2`,`4a229a4` |
+| P2-5 duplicated trust-root escape-guard + loadVocabulary gap | aura `1aae375` |
+| P2-6 prose↔TS weight/guardrail divergence | catalog `d6d331a`, aura `c61ec82` |
+| P2-7 one-directional vocab closure + MISMATCH no-op | aura `ee61bb9`,`461eb86`; catalog `e36a130` |
+| P2-8 failures[] dead-end + silent symlinked subdir | aura `afc6dc1` |
+| P2-9 C6 false-neg/false-pos + selftest | catalog `e36a130` |
+| P2-10 mirror test stale-blocklist + circular; shared contract module | aura `3ecbe6e` |
+| P2-11 marker-fs/guarantee/belowMin/fail-loud untested | aura `e9c4cc2`,`4a229a4`,`1aae375` |
+| P2-12 golden baseline hand-transcribed | aura `495c4d9` (freshness canary) |
+| P3-13..19 null-caps / total-sort / rename / vocab-diag / scanTruncated / WHY-prose / exit-preflight | across the above + `c61ec82`,`74440c8`,`461eb86` |
+
+Post-fix verification: `bun run typecheck` clean; scripts suite 86 tests (was 77);
+catalog `verify-catalog.sh` RESULT: PASS (incl. new C6 self-test). Phase 5.5 gate: the
+2 self-introduced P1s were pre-authorised fix-now by the developer and are fixed.
+Fallback cron (5h-limit safety net) was armed then expired with a session boundary; not
+needed — the auto-fix completed in-session.
+
 ## SESSION SUMMARY (as of this checkpoint)
 
 **Complete + fully tested (repo-side TS engine, the load-bearing spine):** T1 vocabulary, T2
