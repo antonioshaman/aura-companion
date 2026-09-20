@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.18.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.17.0...aura-companion-v1.18.0) (2026-09-20)
+
+
+### Features
+
+* **council:** universal adaptive advisor selection, retire 2-stack router (RC-2) ([#202](https://github.com/antonioshaman/aura-companion/issues/202)) ([77657b4](https://github.com/antonioshaman/aura-companion/commit/77657b4f7410309c9b0266303176d8e15cc78982))
+
+
+### Bug Fixes
+
+* **council:** gate emit-closure/back-compat in CI + re-hydrate ObserverPanel on focus (observer follow-ups) ([#203](https://github.com/antonioshaman/aura-companion/issues/203)) ([8e3c206](https://github.com/antonioshaman/aura-companion/commit/8e3c2068d685a0391ac2c558b51f1414499360ae))
+* **server:** drift detector uses adapter's last-frame-received ts, not transcript mtime ([#201](https://github.com/antonioshaman/aura-companion/issues/201)) ([4f47e7a](https://github.com/antonioshaman/aura-companion/commit/4f47e7aa738e35d500ed38e159b4307d09e951e0))
+* **server:** give --resume spawns a longer init-frame canary deadline ([#197](https://github.com/antonioshaman/aura-companion/issues/197)) ([c572e28](https://github.com/antonioshaman/aura-companion/commit/c572e28f34c44be9dcb7a5e064bc599a66ce2eb0))
+* **server:** kickoff via user-frame + interrupt to force CLI system.init emit ([#200](https://github.com/antonioshaman/aura-companion/issues/200)) ([7b7192a](https://github.com/antonioshaman/aura-companion/commit/7b7192a090080462bc9d634e0cafefb449fa2f3f))
+* **server:** resolveJsonlPath must mirror CLI's `_`→`-` slug conversion, not only `/`→`-` ([#204](https://github.com/antonioshaman/aura-companion/issues/204)) ([902965c](https://github.com/antonioshaman/aura-companion/commit/902965c37510deb2d0d2033c2b6d983a3b777929))
+* **ui:** derive Claude context meter from per-turn occupancy so it drops after /compact ([#196](https://github.com/antonioshaman/aura-companion/issues/196)) ([cbd9b60](https://github.com/antonioshaman/aura-companion/commit/cbd9b60d9aae42cedbe47d28eccdb58151085437))
+
 ## [1.17.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.16.0...aura-companion-v1.17.0) (2026-09-12)
 
 
