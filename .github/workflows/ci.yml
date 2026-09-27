@@ -40,6 +40,16 @@ jobs:
         working-directory: web
         run: bun run eval:replay --ci
 
+      # Council PRO Economy quality-floor guardrail (spec Story 4). Runs the
+      # hermetic guardrail against the checked-in fixture
+      # (web/scripts/__fixtures__/council-economy/) with a load-bearing exit code
+      # — proves the data-derived tier policy + depth thresholds never tier-down a
+      # seat that has produced a P1, never tier-down the fail-closed security/LLM
+      # lens, and never let reduced depth cover a P1 size bucket. Zero LLM calls.
+      - name: Council economy guardrail (zero P1 regression)
+        working-directory: web
+        run: bun run guardrail:ci
+
   test:
     strategy:
       matrix:
