@@ -31,11 +31,12 @@ import {
   unlinkSync,
   writeSync,
 } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { randomBytes, randomUUID } from "node:crypto";
 
 import { COMPANION_HOME } from "../server/paths.js";
 import {
+  assertComplexity,
   type Complexity,
   type ComplexitySignal,
   computeComplexity,
@@ -196,7 +197,7 @@ function statsFileName(rec: CouncilRunStats): string {
 }
 
 function writeJsonAtomic(target: string, payload: unknown): void {
-  const dir = target.slice(0, target.lastIndexOf("/")) || ".";
+  const dir = dirname(target);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   try {
     chmodSync(dir, 0o700);
@@ -250,33 +251,64 @@ export function recordRunStats(input: RunStatsInput, opts?: { dir?: string }): C
 }
 
 /**
- * Parse + validate one on-disk record. Returns the typed record, or null when
- * the JSON is malformed or fails validation (caller counts it as malformed).
+ * Validate a FULL on-disk record, preserving every persisted field exactly as
+ * written — critically the `complexity.band`/`bandSource` (a historical label
+ * that must NOT be recomputed from today's seed weights) and `runId`/`ts`/
+ * `schemaVersion`. Throws on any invalid field. Distinct from `buildRunStats`,
+ * which is the WRITE path and (re)computes the band for a fresh record.
  */
-export function parseRunStats(text: string): CouncilRunStats | null {
+function validateOnDiskRecord(o: Record<string, unknown>): CouncilRunStats {
+  const skill = assertBoundedString(o.skill, "skill");
+  if (!Array.isArray(o.seats) || o.seats.length === 0 || o.seats.length > MAX_SEATS) {
+    throw new Error(`run-stats: seats must be a non-empty array ≤ ${MAX_SEATS}`);
+  }
+  const seats = o.seats.map((s, i) => assertSeat(s, i));
+  const complexity = assertComplexity(o.complexity); // preserves band/bandSource
+  const engineVersion = o.engineVersion == null ? null : assertBoundedString(o.engineVersion, "engineVersion");
+  const runId = assertBoundedString(o.runId, "runId");
+  const ts = o.ts;
+  if (typeof ts !== "number" || !Number.isFinite(ts) || ts < 0) {
+    throw new Error("run-stats: ts must be a non-negative finite number");
+  }
+  const schemaVersion = o.schemaVersion;
+  if (typeof schemaVersion !== "number") {
+    throw new Error("run-stats: schemaVersion must be a number");
+  }
+  return { schemaVersion, runId, ts, skill, engineVersion, complexity, seats };
+}
+
+export type ParseRunStatsResult =
+  | { ok: true; record: CouncilRunStats }
+  | { ok: false; reason: "malformed" | "stale-schema" };
+
+/**
+ * Parse + validate one on-disk record. The `schemaVersion` is checked BEFORE the
+ * current-shape validators so a genuinely different schema (renamed/removed
+ * field — the real reason to bump the version) is reported as `stale-schema`, not
+ * misclassified as `malformed` disk corruption. Pass `includeStaleSchema` to
+ * still attempt validation of a differently-versioned record (works for
+ * additive/compatible changes; migration tooling).
+ */
+export function parseRunStats(
+  text: string,
+  opts?: { includeStaleSchema?: boolean },
+): ParseRunStatsResult {
   let doc: unknown;
   try {
     doc = JSON.parse(text);
   } catch {
-    return null;
+    return { ok: false, reason: "malformed" };
   }
-  if (!doc || typeof doc !== "object") return null;
+  if (!doc || typeof doc !== "object") return { ok: false, reason: "malformed" };
   const o = doc as Record<string, unknown>;
-  if (typeof o.schemaVersion !== "number") return null;
+  if (typeof o.schemaVersion !== "number") return { ok: false, reason: "malformed" };
+  if (o.schemaVersion !== RUN_STATS_SCHEMA_VERSION && !opts?.includeStaleSchema) {
+    return { ok: false, reason: "stale-schema" };
+  }
   try {
-    // Reuse the builder's validators by round-tripping through buildRunStats,
-    // but preserve the on-disk ids/ts/schemaVersion rather than regenerating.
-    const rebuilt = buildRunStats({
-      skill: o.skill as string,
-      engineVersion: (o.engineVersion ?? null) as string | null,
-      complexity: o.complexity as ComplexitySignal,
-      seats: o.seats as SeatStat[],
-      runId: o.runId as string,
-      ts: o.ts as number,
-    });
-    return { ...rebuilt, schemaVersion: o.schemaVersion };
+    return { ok: true, record: validateOnDiskRecord(o) };
   } catch {
-    return null;
+    return { ok: false, reason: "malformed" };
   }
 }
 
@@ -311,16 +343,14 @@ export function readRunStats(opts?: { dir?: string; includeStaleSchema?: boolean
       out.malformed += 1;
       continue;
     }
-    const rec = parseRunStats(text);
-    if (!rec) {
-      out.malformed += 1;
-      continue;
-    }
-    if (rec.schemaVersion !== RUN_STATS_SCHEMA_VERSION && !opts?.includeStaleSchema) {
+    const parsed = parseRunStats(text, { includeStaleSchema: opts?.includeStaleSchema });
+    if (parsed.ok) {
+      out.runs.push(parsed.record);
+    } else if (parsed.reason === "stale-schema") {
       out.skippedSchema += 1;
-      continue;
+    } else {
+      out.malformed += 1;
     }
-    out.runs.push(rec);
   }
   return out;
 }

@@ -89,6 +89,31 @@ describe("buildRunStats", () => {
   it("rejects an invalid complexity vector (delegates to complexity validator)", () => {
     expect(() => buildRunStats(input({ complexity: { diffFiles: -1, diffLines: 0, surfaceCount: 0, domainBreadth: 0 } }))).toThrow();
   });
+
+  // Bounds enforcement — an unbounded blob must be rejected before it reaches disk
+  // (spec §Boundaries; each cap in run-stats.ts). These throw-path cases are the
+  // ones most likely to regress silently since nothing else exercises them.
+  it("rejects an over-long skill string (MAX_STR)", () => {
+    expect(() => buildRunStats(input({ skill: "x".repeat(513) }))).toThrow();
+  });
+
+  it("rejects an over-long model string (MAX_STR)", () => {
+    expect(() => buildRunStats(input({ seats: [seat({ model: "m".repeat(513) })] }))).toThrow();
+  });
+
+  it("rejects too many seats (MAX_SEATS)", () => {
+    const many = Array.from({ length: 65 }, (_, i) => seat({ seatId: `s${i}`, guaranteed: false, tier: "top", findings: [] }));
+    expect(() => buildRunStats(input({ seats: many }))).toThrow();
+  });
+
+  it("rejects too many findings per seat (MAX_FINDINGS_PER_SEAT)", () => {
+    const findings = Array.from({ length: 513 }, (_, i) => ({ id: `f${i}`, priority: "P3" as const, survived: false }));
+    expect(() => buildRunStats(input({ seats: [seat({ findings })] }))).toThrow();
+  });
+
+  it("rejects a non-boolean guaranteed flag", () => {
+    expect(() => buildRunStats(input({ seats: [seat({ guaranteed: "yes" as unknown as boolean })] }))).toThrow();
+  });
 });
 
 describe("recordRunStats → readRunStats round-trip", () => {
@@ -109,6 +134,14 @@ describe("recordRunStats → readRunStats round-trip", () => {
     recordRunStats(input({ runId: "prior" }), { dir });
     // simulate a new session: a brand-new read call against the same dir
     expect(readRunStats({ dir }).runs.map((r) => r.runId)).toContain("prior");
+  });
+
+  it("rejects an over-cap record at write time (MAX_RECORD_BYTES)", () => {
+    // 64 seats × 512 findings comfortably exceeds the 256KB record cap; the write
+    // must throw rather than persist a runaway blob.
+    const findings = Array.from({ length: 512 }, (_, i) => ({ id: `finding-number-${i}`, priority: "P3" as const, survived: false }));
+    const seats = Array.from({ length: 64 }, (_, i) => seat({ seatId: `seat${i}`, guaranteed: false, tier: "top", findings }));
+    expect(() => recordRunStats(input({ seats }), { dir })).toThrow(/exceeds/);
   });
 
   it("writes the file with mode 0o600 (not group/other readable)", () => {
@@ -145,14 +178,45 @@ describe("reader invalidation + tolerance", () => {
 });
 
 describe("parseRunStats", () => {
-  it("returns null on malformed json", () => {
-    expect(parseRunStats("nope")).toBeNull();
+  it("reports malformed json", () => {
+    expect(parseRunStats("nope")).toEqual({ ok: false, reason: "malformed" });
   });
 
-  it("preserves the on-disk schemaVersion rather than regenerating it", () => {
+  // A genuinely different schema (renamed/removed field) is the real reason to
+  // bump the version; it must be classified stale-schema, NOT malformed disk
+  // corruption — the version check runs before the current-shape validators.
+  it("reports a mismatched schemaVersion as stale-schema (not malformed)", () => {
+    const rec = buildRunStats(input({ runId: "stale" }));
+    expect(parseRunStats(JSON.stringify({ ...rec, schemaVersion: 7 }))).toEqual({ ok: false, reason: "stale-schema" });
+  });
+
+  it("with includeStaleSchema, validates a differently-versioned record and preserves its schemaVersion", () => {
     const rec = buildRunStats(input({ runId: "keep" }));
-    const parsed = parseRunStats(JSON.stringify({ ...rec, schemaVersion: 7 }));
-    expect(parsed?.schemaVersion).toBe(7);
+    const parsed = parseRunStats(JSON.stringify({ ...rec, schemaVersion: 7 }), { includeStaleSchema: true });
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.record.schemaVersion).toBe(7);
+  });
+
+  // P1 regression: the reader must PRESERVE the on-disk band/bandSource, never
+  // recompute them from today's seed weights — otherwise retuning complexity.ts
+  // silently reinterprets history and a data-derived band gets relabelled.
+  it("preserves on-disk complexity band/bandSource instead of recomputing them", () => {
+    const rec = buildRunStats(input({ runId: "band" }));
+    // A band the provisional heuristic would NOT produce for this tiny vector,
+    // plus a data-derived source — proves the reader trusts the disk.
+    const onDisk = { ...rec, complexity: { ...rec.complexity, band: "high", bandSource: "data-derived" } };
+    const parsed = parseRunStats(JSON.stringify(onDisk));
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.record.complexity.band).toBe("high");
+      expect(parsed.record.complexity.bandSource).toBe("data-derived");
+    }
+  });
+
+  it("rejects an on-disk record with an invalid band as malformed", () => {
+    const rec = buildRunStats(input({ runId: "badband" }));
+    const onDisk = { ...rec, complexity: { ...rec.complexity, band: "extreme" } };
+    expect(parseRunStats(JSON.stringify(onDisk))).toEqual({ ok: false, reason: "malformed" });
   });
 });
 
@@ -179,6 +243,19 @@ describe("resolveStatsDir", () => {
     process.env.COMPANION_COUNCIL_STATS_DIR = "/tmp/env-stats";
     try {
       expect(resolveStatsDir()).toBe("/tmp/env-stats");
+    } finally {
+      if (prev === undefined) delete process.env.COMPANION_COUNCIL_STATS_DIR;
+      else process.env.COMPANION_COUNCIL_STATS_DIR = prev;
+    }
+  });
+
+  // Adversarial: with BOTH the override arg and the env var set, the override must
+  // win (proves the `??` ordering, not just each source in isolation).
+  it("override beats a simultaneously-set env var", () => {
+    const prev = process.env.COMPANION_COUNCIL_STATS_DIR;
+    process.env.COMPANION_COUNCIL_STATS_DIR = "/tmp/env-stats";
+    try {
+      expect(resolveStatsDir("/tmp/override-wins")).toBe("/tmp/override-wins");
     } finally {
       if (prev === undefined) delete process.env.COMPANION_COUNCIL_STATS_DIR;
       else process.env.COMPANION_COUNCIL_STATS_DIR = prev;

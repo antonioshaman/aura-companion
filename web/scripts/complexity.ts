@@ -19,6 +19,9 @@
 export type ComplexityBand = "low" | "medium" | "high";
 export type BandSource = "provisional-heuristic" | "data-derived";
 
+const COMPLEXITY_BANDS: ReadonlySet<string> = new Set<ComplexityBand>(["low", "medium", "high"]);
+const BAND_SOURCES: ReadonlySet<string> = new Set<BandSource>(["provisional-heuristic", "data-derived"]);
+
 /** The raw, authoritative complexity vector. Bands are derived FROM this. */
 export interface ComplexitySignal {
   /** Number of changed files in the diff under review. */
@@ -78,6 +81,35 @@ export function provisionalBand(v: ComplexitySignal): ComplexityBand {
   if (score < LOW_MAX) return "low";
   if (score < MEDIUM_MAX) return "medium";
   return "high";
+}
+
+/**
+ * Validate a FULL on-disk `Complexity` object, PRESERVING its `band`/`bandSource`
+ * exactly as written — never recomputing them. This is the read-path counterpart
+ * to `computeComplexity` (the write path): a historical record's band must stay a
+ * stable label even if the seed weights are retuned, and a `data-derived` band
+ * must not be relabelled as the provisional heuristic. Throws on any invalid
+ * field (fail-loud).
+ */
+export function assertComplexity(v: unknown): Complexity {
+  if (!v || typeof v !== "object") {
+    throw new Error("complexity: expected an object");
+  }
+  const o = v as Record<string, unknown>;
+  const signal: ComplexitySignal = {
+    diffFiles: o.diffFiles as number,
+    diffLines: o.diffLines as number,
+    surfaceCount: o.surfaceCount as number,
+    domainBreadth: o.domainBreadth as number,
+  };
+  assertComplexitySignal(signal);
+  if (typeof o.band !== "string" || !COMPLEXITY_BANDS.has(o.band)) {
+    throw new Error(`complexity: band must be one of ${[...COMPLEXITY_BANDS].join("|")}, got ${JSON.stringify(o.band)}`);
+  }
+  if (typeof o.bandSource !== "string" || !BAND_SOURCES.has(o.bandSource)) {
+    throw new Error(`complexity: bandSource must be one of ${[...BAND_SOURCES].join("|")}, got ${JSON.stringify(o.bandSource)}`);
+  }
+  return { ...signal, band: o.band as ComplexityBand, bandSource: o.bandSource as BandSource };
 }
 
 /**

@@ -7,6 +7,7 @@
 
 import { describe, it, expect } from "vitest";
 import {
+  assertComplexity,
   assertComplexitySignal,
   computeComplexity,
   provisionalBand,
@@ -67,5 +68,33 @@ describe("computeComplexity", () => {
   it("is deterministic — identical inputs give identical output", () => {
     const input = { diffFiles: 4, diffLines: 88, surfaceCount: 3, domainBreadth: 2 };
     expect(computeComplexity(input)).toEqual(computeComplexity(input));
+  });
+});
+
+describe("assertComplexity (read path — preserves band/bandSource)", () => {
+  const valid = { diffFiles: 1, diffLines: 5, surfaceCount: 4, domainBreadth: 4, band: "high", bandSource: "data-derived" };
+
+  it("preserves an on-disk band/bandSource verbatim, never recomputing", () => {
+    // The vector is tiny (would be `low` under the heuristic) but the stored band
+    // is `high` from a data-derived source — assertComplexity must trust the disk.
+    const c = assertComplexity(valid);
+    expect(c.band).toBe("high");
+    expect(c.bandSource).toBe("data-derived");
+  });
+
+  it("rejects an unknown band", () => {
+    expect(() => assertComplexity({ ...valid, band: "extreme" })).toThrow();
+  });
+
+  it("rejects an unknown bandSource", () => {
+    expect(() => assertComplexity({ ...valid, bandSource: "vibes" })).toThrow();
+  });
+
+  it("rejects an invalid underlying vector", () => {
+    expect(() => assertComplexity({ ...valid, diffFiles: -3 })).toThrow();
+  });
+
+  it("rejects a non-object", () => {
+    expect(() => assertComplexity(null)).toThrow();
   });
 });
