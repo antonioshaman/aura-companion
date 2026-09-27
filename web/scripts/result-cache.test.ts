@@ -129,6 +129,29 @@ describe("invalidation (typed misses)", () => {
     void rec;
   });
 
+  // Observer STOP regression: a non-finite maxAgeMs/nowMs must NOT disable the
+  // stale guard (NaN comparisons are always false). Both coerce to safe finite
+  // values, so an old entry is still caught as stale.
+  it("does not disable the stale guard when maxAgeMs is NaN (falls back to default)", () => {
+    put({ ts: 1000 });
+    const now = 1000 + DEFAULT_CACHE_MAX_AGE_MS + 5_000; // beyond the default bound
+    expect(
+      getCachedResult("council-review-aura", "hunt", "abc", {
+        dir,
+        engineVersion: "rc2",
+        maxAgeMs: Number("not-a-number"), // NaN, as the CLI could produce
+        nowMs: now,
+      }),
+    ).toEqual({ hit: false, reason: "stale" });
+  });
+
+  it("ignores a non-finite nowMs and uses the real clock (fresh entry still hits)", () => {
+    put(); // ts = Date.now()
+    expect(
+      getCachedResult("council-review-aura", "hunt", "abc", { dir, engineVersion: "rc2", nowMs: NaN }).hit,
+    ).toBe(true);
+  });
+
   it("reports malformed json as a typed miss (never throws)", () => {
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, cacheFileName("council-review-aura", "hunt", "abc")), "{ not json");

@@ -223,8 +223,16 @@ export function getCachedResult(
   // Defensive: the filename is keyed by hash, but a tampered/renamed file could
   // carry a different hash — never serve it as a match.
   if (rec.filesHash !== filesHash) return { hit: false, reason: "miss" };
-  const now = opts.nowMs ?? Date.now();
-  const maxAge = opts.maxAgeMs ?? DEFAULT_CACHE_MAX_AGE_MS;
+  // A non-finite/negative maxAgeMs or a non-finite nowMs would make the staleness
+  // comparison NaN (always false) and silently DISABLE the stale guard — serving an
+  // arbitrarily old entry (observer STOP). Coerce both to safe finite values first:
+  // a bad maxAgeMs falls back to the bounded default, a bad nowMs to the real clock.
+  const now =
+    typeof opts.nowMs === "number" && Number.isFinite(opts.nowMs) ? opts.nowMs : Date.now();
+  const maxAge =
+    typeof opts.maxAgeMs === "number" && Number.isFinite(opts.maxAgeMs) && opts.maxAgeMs >= 0
+      ? opts.maxAgeMs
+      : DEFAULT_CACHE_MAX_AGE_MS;
   if (now - rec.ts > maxAge) return { hit: false, reason: "stale" };
   return { hit: true, result: rec };
 }
