@@ -17,24 +17,12 @@
 // tmp+rename per run is interleave-free where a concurrent `appendFileSync` past
 // PIPE_BUF is not (ritchie — filesystem persistence discipline).
 
-import {
-  chmodSync,
-  closeSync,
-  constants as fsConstants,
-  existsSync,
-  fsyncSync,
-  mkdirSync,
-  openSync,
-  readdirSync,
-  readFileSync,
-  renameSync,
-  unlinkSync,
-  writeSync,
-} from "node:fs";
-import { dirname, join } from "node:path";
-import { randomBytes, randomUUID } from "node:crypto";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 
 import { COMPANION_HOME } from "../server/paths.js";
+import { writeJsonAtomic } from "./atomic-json.js";
 import {
   assertComplexity,
   type Complexity,
@@ -196,48 +184,6 @@ function statsFileName(rec: CouncilRunStats): string {
   return `${rec.ts}-${safeRunId}.json`;
 }
 
-function writeJsonAtomic(target: string, payload: unknown): void {
-  const dir = dirname(target);
-  mkdirSync(dir, { recursive: true, mode: 0o700 });
-  try {
-    chmodSync(dir, 0o700);
-  } catch {
-    /* best-effort: a shared COMPANION_HOME may be owned by another writer */
-  }
-  const json = JSON.stringify(payload);
-  const byteLen = Buffer.byteLength(json, "utf8");
-  if (byteLen > MAX_RECORD_BYTES) {
-    throw new Error(`run-stats: record (${byteLen} bytes) exceeds ${MAX_RECORD_BYTES}`);
-  }
-  const tmp = join(dir, `.${randomBytes(8).toString("hex")}.tmp`);
-  let fd = -1;
-  let renamed = false;
-  try {
-    fd = openSync(tmp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
-    writeSync(fd, json);
-    fsyncSync(fd);
-    closeSync(fd);
-    fd = -1;
-    renameSync(tmp, target);
-    renamed = true;
-  } finally {
-    if (fd >= 0) {
-      try {
-        closeSync(fd);
-      } catch {
-        /* ignore */
-      }
-    }
-    if (!renamed) {
-      try {
-        unlinkSync(tmp);
-      } catch {
-        /* tmp may not exist if open failed */
-      }
-    }
-  }
-}
-
 /**
  * Record one council run. Returns the written record (with generated ids). The
  * write is atomic (tmp+rename); a partial/corrupt file is never observable by a
@@ -246,7 +192,7 @@ function writeJsonAtomic(target: string, payload: unknown): void {
 export function recordRunStats(input: RunStatsInput, opts?: { dir?: string }): CouncilRunStats {
   const rec = buildRunStats(input);
   const dir = resolveStatsDir(opts?.dir);
-  writeJsonAtomic(join(dir, statsFileName(rec)), rec);
+  writeJsonAtomic(join(dir, statsFileName(rec)), rec, { maxBytes: MAX_RECORD_BYTES, label: "run-stats" });
   return rec;
 }
 
