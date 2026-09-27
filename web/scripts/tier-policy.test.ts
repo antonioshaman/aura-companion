@@ -78,6 +78,26 @@ describe("decideTier — data-derived cheap", () => {
     const d = decideTier({ seatId: "saarinen", guaranteed: false }, lowComplexity, policy);
     expect(d.reason).toBe("insufficient-data");
   });
+
+  // Observer STOP regression (Story 2): a malformed sampleSize must NOT slip a
+  // cheap decision through. NaN/Infinity make `< MIN` evaluate false, so the
+  // sample count is validated as a finite non-negative integer FIRST.
+  it.each([
+    ["NaN", NaN],
+    ["Infinity", Infinity],
+    ["negative", -5],
+    ["non-integer", 25.5],
+  ])("stays top when sampleSize is %s (fail-closed on garbage data)", (_label, bad) => {
+    const policy: TierPolicy = { entries: { [policyKey("saarinen", lowComplexity.band)]: { cheapEligible: true, sampleSize: bad as number } } };
+    const d = decideTier({ seatId: "saarinen", guaranteed: false }, lowComplexity, policy);
+    expect(d).toEqual({ tier: "top", reason: "insufficient-data" });
+  });
+
+  it("stays top when cheapEligible is a non-boolean truthy value (strict check)", () => {
+    const policy: TierPolicy = { entries: { [policyKey("saarinen", lowComplexity.band)]: { cheapEligible: "yes" as unknown as boolean, sampleSize: 1000 } } };
+    const d = decideTier({ seatId: "saarinen", guaranteed: false }, lowComplexity, policy);
+    expect(d).toEqual({ tier: "top", reason: "insufficient-data" });
+  });
 });
 
 describe("resolveModelForTier", () => {

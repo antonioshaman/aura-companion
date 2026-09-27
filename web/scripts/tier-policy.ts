@@ -110,10 +110,21 @@ export function decideTier(
   // 2. No complexity signal → safe/higher tier (spec AC1.4 negative).
   if (complexity == null) return { tier: "top", reason: "missing-complexity" };
 
-  // 3. Consult the data-derived policy. Absent entry, thin sample, or
-  //    not-cheap-eligible all fall back to top (never cheap on unknown ground).
+  // 3. Consult the data-derived policy. Absent entry, MALFORMED sample count,
+  //    thin sample, or not-cheap-eligible all fall back to top (never cheap on
+  //    unknown ground). `sampleSize` is validated as a finite non-negative
+  //    integer FIRST: a NaN/Infinity sample count makes `< MIN` evaluate false
+  //    (NaN comparisons are always false), which would otherwise slip a cheap
+  //    decision through on garbage data — a fail-closed bypass (observer STOP,
+  //    Story 2). `cheapEligible === true` is strict so a non-boolean truthy
+  //    value can't enable cheap either.
   const entry = policy.entries[policyKey(seat.seatId, complexity.band)];
-  if (!entry || entry.sampleSize < MIN_SAMPLES_FOR_CHEAP || !entry.cheapEligible) {
+  const validSample =
+    !!entry &&
+    typeof entry.sampleSize === "number" &&
+    Number.isInteger(entry.sampleSize) &&
+    entry.sampleSize >= MIN_SAMPLES_FOR_CHEAP;
+  if (!validSample || entry.cheapEligible !== true) {
     return { tier: "top", reason: "insufficient-data" };
   }
   return { tier: "cheap", reason: "data-derived-cheap" };
