@@ -151,6 +151,27 @@ describe("deriveDepthThresholds", () => {
     expect(t.sampleSize).toBe(3);
   });
 
+  // Observer STOP regression (Story 3): a surviving P1 at a zero-size change means
+  // no reduced-depth band is ever safe — must fail closed to null, not clamp to 0.
+  it("fails closed (null) when a surviving P1 occurred at zero lines", () => {
+    const runs = [
+      run({ diffFiles: 1, diffLines: 0, seats: [seat("s", [P1("zero-line")])] }),
+      run({ diffFiles: 3, diffLines: 50, seats: [seat("s", [P3("a")])] }),
+      run({ diffFiles: 2, diffLines: 30, seats: [seat("s", [])] }),
+    ];
+    expect(deriveDepthThresholds(runs, { minSamples: 3 }).reducedDepthMaxLines).toBeNull();
+    expect(deriveDepthThresholds(runs, { minSamples: 3 }).reducedDepthMaxFiles).toBeNull();
+  });
+
+  it("fails closed (null) when a surviving P1 occurred at zero files", () => {
+    const runs = [
+      run({ diffFiles: 0, diffLines: 5, seats: [seat("s", [P1("zero-file")])] }),
+      run({ diffFiles: 3, diffLines: 50, seats: [seat("s", [P3("a")])] }),
+      run({ diffFiles: 2, diffLines: 30, seats: [seat("s", [])] }),
+    ];
+    expect(deriveDepthThresholds(runs, { minSamples: 3 }).reducedDepthMaxFiles).toBeNull();
+  });
+
   it("ignores discarded P1s when bounding the ceiling (only surviving P1 counts)", () => {
     const runs = [
       run({ diffLines: 5, seats: [seat("s", [P1("discarded", false)])] }),

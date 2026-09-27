@@ -122,9 +122,15 @@ export function deriveDepthThresholds(runs: CouncilRunStats[], opts?: DeriveOpti
 
   const minP1Lines = Math.min(...withSurvivingP1.map((r) => r.complexity.diffLines));
   const minP1Files = Math.min(...withSurvivingP1.map((r) => r.complexity.diffFiles));
+  // A surviving P1 at a ZERO-size change (e.g. a Phase-0 automated-check P1 with no
+  // diff, or a pure rename) means P1s can appear at the smallest possible change —
+  // there is NO non-negative size strictly below it, so no reduced-depth band is
+  // ever safe. Fail closed to null rather than clamping to 0 (which would let
+  // reduced depth cover the very bucket a P1 lives in). Observer STOP, Story 3.
+  if (minP1Lines <= 0 || minP1Files <= 0) return insufficient;
   return {
-    reducedDepthMaxLines: Math.max(0, minP1Lines - 1),
-    reducedDepthMaxFiles: Math.max(0, minP1Files - 1),
+    reducedDepthMaxLines: minP1Lines - 1,
+    reducedDepthMaxFiles: minP1Files - 1,
     sampleSize: runs.length,
   };
 }
