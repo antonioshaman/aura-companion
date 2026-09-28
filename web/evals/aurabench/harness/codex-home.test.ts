@@ -21,6 +21,14 @@
  *     that cannot be written back is stashed, never deleted, and a run killed
  *     hard is recovered from the on-disk ledger on the next start; empty
  *     directories and limit outcomes are covered by the snapshot guard.
+ *   - FIX-D2-1c (review of #254): a copy that existed BEFORE the watch (a
+ *     stale token from an earlier run) is never written into the real file —
+ *     not on sync, release, recover, or from an old-format ledger; the base is
+ *     pinned at cell start, so after an external re-login an old-family token
+ *     is stashed instead of written; a logged-out (absent/empty) real file is
+ *     never refilled from a cell or the stash; the signal handler stops the
+ *     agent processes BEFORE releasing homes; a failing ledger write in the
+ *     poll does not throw.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -406,10 +414,12 @@ describe("CodexAuthKeeper (FIX-D2-1b)", () => {
     const home = join(root, "h");
     const sha0 = realAuthSha(real);
     prepareIsolatedCodexHome(home, real);
-    rotateInCell(home, "t1");
-    writeFileSync(join(real, "auth.json"), "prod");
+    // Watched while still a symlink (FIX-D2-1c: a copy that predates the
+    // watch would be foreign), then rotated while prod rotated too.
     const k = keeper();
     k.watch(home, "home", sha0);
+    rotateInCell(home, "t1");
+    writeFileSync(join(real, "auth.json"), "prod");
     expect(k.release(home)).toEqual({ "auth.json": "skipped_real_changed" });
     expect(k.recover().stash).toEqual({ propagated: [], dropped_in_sync: [], kept: [expect.any(String)] });
     expect(readFileSync(join(real, "auth.json"), "utf8")).toBe("prod");
@@ -482,5 +492,251 @@ describe("withCodexAuthWatch (FIX-D2-1b item 4)", () => {
     };
     const r = await withCodexAuthWatch(runner, k, sessions, () => realAuthSha(real))(ctx);
     expect(r).toMatchObject({ isolation: { codex_auth: { s1: "unchanged" } } });
+  });
+});
+
+/**
+ * FIX-D2-1c — review of #254 ("NOT SAFE TO PILOT"). Every test below is a
+ * way the keeper could overwrite prod's live `~/.codex/auth.json` with a token
+ * it cannot vouch for; each asserts the real file stays byte-identical.
+ */
+describe("CodexAuthKeeper — copies of unknown origin (FIX-D2-1c item 1, STOP)", () => {
+  const keeper = () => new CodexAuthKeeper({ realCodexDir: real, stateDir: join(root, "state") });
+  const realText = () => readFileSync(join(real, "auth.json"), "utf8");
+
+  it("a stale regular auth.json already in a session home when the watch starts is never written back (sync, release)", () => {
+    // Reproduces the review: bench/aura-home/.companion/codex-home/test-session-id/auth.json
+    // was a regular file left from an earlier run. The old keeper took the
+    // current real sha as its base and wrote it over prod on the first tick.
+    const sessions = join(root, "codex-home");
+    mkdirSync(join(sessions, "test-session-id"), { recursive: true });
+    writeFileSync(join(sessions, "test-session-id", "auth.json"), '{"token":"stale"}');
+    const k = keeper();
+    k.watch(sessions, "homes", realAuthSha(real));
+    k.syncAll();
+    k.syncAll();
+    expect(realText()).toBe('{"token":"t0"}');
+    expect(k.release(sessions)).toEqual({ "test-session-id": "skipped_foreign" });
+    expect(realText()).toBe('{"token":"t0"}');
+    // Moved to the stash (credential not left in the tree), flagged foreign.
+    expect(existsSync(join(sessions, "test-session-id", "auth.json"))).toBe(false);
+    const [stashed] = readdirSync(k.stash);
+    expect(JSON.parse(readFileSync(join(k.stash, stashed!), "utf8"))).toMatchObject({ foreign: true, base: null });
+  });
+
+  it("a foreign stash is never auto-restored, even when the real file later matches nothing / anything", () => {
+    const sessions = join(root, "codex-home");
+    mkdirSync(join(sessions, "old"), { recursive: true });
+    writeFileSync(join(sessions, "old", "auth.json"), '{"token":"stale"}');
+    const k = keeper();
+    k.watch(sessions, "homes", realAuthSha(real));
+    k.release(sessions);
+    expect(retryStashedCodexAuth(k.stash, real)).toEqual({ propagated: [], dropped_in_sync: [], kept: [expect.any(String)] });
+    expect(realText()).toBe('{"token":"t0"}');
+  });
+
+  it("a stale copy equal to the real file is just removed (in sync, nothing to stash)", () => {
+    const sessions = join(root, "codex-home");
+    mkdirSync(join(sessions, "old"), { recursive: true });
+    writeFileSync(join(sessions, "old", "auth.json"), '{"token":"t0"}');
+    const k = keeper();
+    k.watch(sessions, "homes", realAuthSha(real));
+    expect(k.release(sessions)).toEqual({ old: "skipped_not_newer" });
+    expect(existsSync(k.stash) ? readdirSync(k.stash) : []).toEqual([]);
+  });
+
+  it("the stale copy does not block a legitimate rotation from a session created during the cell", () => {
+    const sessions = join(root, "codex-home");
+    mkdirSync(join(sessions, "old"), { recursive: true });
+    writeFileSync(join(sessions, "old", "auth.json"), '{"token":"stale"}');
+    const k = keeper();
+    k.watch(sessions, "homes", realAuthSha(real));
+    prepareIsolatedCodexHome(join(sessions, "new"), real);
+    k.syncAll();
+    rotateInCell(join(sessions, "new"), "t1");
+    k.syncAll();
+    expect(realText()).toBe("t1");
+  });
+
+  it("recover(): a watch from a hard-killed run never writes back a copy that predated it", () => {
+    const sessions = join(root, "codex-home");
+    mkdirSync(join(sessions, "old"), { recursive: true });
+    writeFileSync(join(sessions, "old", "auth.json"), '{"token":"stale"}');
+    keeper().watch(sessions, "homes", realAuthSha(real)); // then SIGKILL
+    const r = keeper().recover();
+    expect(r.released).toEqual([sessions]);
+    expect(realText()).toBe('{"token":"t0"}');
+    expect(r.stash.kept).toHaveLength(1);
+  });
+
+  it("recover(): a pre-FIX-D2-1c ledger (no version) is fail-closed — its bases are not trusted", () => {
+    // The old keeper persisted `bases[home] = startSha` for a stale regular
+    // copy it saw on the first tick. Recovering that entry verbatim would
+    // write the stale copy over the (still unchanged) real file.
+    const home = join(root, "cell", "codex-home");
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(home, "auth.json"), '{"token":"stale"}');
+    const sha0 = realAuthSha(real);
+    mkdirSync(join(root, "state"), { recursive: true });
+    writeFileSync(join(root, "state", "ledger.json"), JSON.stringify({ [home]: { kind: "home", startSha: sha0, bases: { [home]: sha0 } } }));
+    const r = keeper().recover();
+    expect(r.released).toEqual([home]);
+    expect(realText()).toBe('{"token":"t0"}');
+    expect(r.stash.kept).toHaveLength(1);
+  });
+
+  it("re-watching an active path keeps the pinned start (a second watch cannot adopt a copy)", () => {
+    const home = join(root, "h");
+    prepareIsolatedCodexHome(home, real);
+    const k = keeper();
+    k.watch(home, "home", realAuthSha(real));
+    rotateInCell(home, "t1");
+    writeFileSync(join(real, "auth.json"), "prod");
+    k.watch(home, "home", realAuthSha(real)); // would pin to "prod" if reset
+    k.syncAll();
+    expect(realText()).toBe("prod");
+  });
+});
+
+describe("CodexAuthKeeper — pinned base (FIX-D2-1c item 2)", () => {
+  const keeper = () => new CodexAuthKeeper({ realCodexDir: real, stateDir: join(root, "state") });
+
+  it("a prod re-login during the cell freezes the base: the cell's old-family token is stashed, not written over it", () => {
+    const home = join(root, "h");
+    prepareIsolatedCodexHome(home, real);
+    const k = keeper();
+    k.watch(home, "home", realAuthSha(real));
+    k.syncAll(); // symlink, real at t0
+    writeFileSync(join(real, "auth.json"), "fresh-login"); // someone re-logs in prod
+    k.syncAll(); // symlink still — the old keeper moved base to "fresh-login" here
+    rotateInCell(home, "old-family"); // Codex in the cell rotates from its in-memory t0 token
+    k.syncAll();
+    expect(readFileSync(join(real, "auth.json"), "utf8")).toBe("fresh-login");
+    expect(k.release(home)).toEqual({ "auth.json": "skipped_real_changed" });
+    expect(readFileSync(join(real, "auth.json"), "utf8")).toBe("fresh-login");
+    expect(readdirSync(k.stash)).toHaveLength(1);
+  });
+
+  it("the base still follows a sha the keeper itself wrote (a sibling's write-back is not 'external')", () => {
+    const sessions = join(root, "codex-home");
+    const k = keeper();
+    k.watch(sessions, "homes", realAuthSha(real));
+    prepareIsolatedCodexHome(join(sessions, "s1"), real);
+    prepareIsolatedCodexHome(join(sessions, "s2"), real);
+    k.syncAll();
+    rotateInCell(join(sessions, "s1"), "a");
+    k.syncAll(); // keeper writes "a"
+    k.syncAll(); // s2 (symlink) now reads "a" and may follow it
+    rotateInCell(join(sessions, "s2"), "b"); // derived from "a"
+    k.syncAll();
+    expect(readFileSync(join(real, "auth.json"), "utf8")).toBe("b");
+  });
+
+  it("syncRotatedCodexAuth without a trusted set keeps the base pinned on a symlink", () => {
+    const home = join(root, "h");
+    prepareIsolatedCodexHome(home, real);
+    const sha0 = realAuthSha(real);
+    writeFileSync(join(real, "auth.json"), "fresh-login");
+    expect(syncRotatedCodexAuth(home, real, sha0)).toEqual({ outcome: "unchanged", base: sha0 });
+  });
+});
+
+describe("logged-out real file (FIX-D2-1c item 3)", () => {
+  const keeper = () => new CodexAuthKeeper({ realCodexDir: real, stateDir: join(root, "state") });
+
+  it("a stash with base=null is not restored after `codex logout` removed the real file", () => {
+    const home = join(root, "h");
+    prepareIsolatedCodexHome(home, real);
+    const k = keeper();
+    k.watch(home, "home", null);
+    rotateInCell(home, "t1");
+    rmSync(join(real, "auth.json"));
+    expect(k.release(home)).toEqual({ "auth.json": "skipped_real_missing" });
+    expect(retryStashedCodexAuth(k.stash, real).kept).toHaveLength(1);
+    expect(existsSync(join(real, "auth.json"))).toBe(false);
+  });
+
+  it("a cell rotation is not written into an absent or empty real file", () => {
+    for (const logout of [() => rmSync(join(real, "auth.json")), () => writeFileSync(join(real, "auth.json"), "")]) {
+      writeFileSync(join(real, "auth.json"), '{"token":"t0"}');
+      const home = join(root, `h-${Math.random()}`);
+      prepareIsolatedCodexHome(home, real);
+      const k = keeper();
+      k.watch(home, "home", realAuthSha(real));
+      rotateInCell(home, "t1");
+      logout();
+      k.syncAll();
+      expect(existsSync(join(real, "auth.json")) ? readFileSync(join(real, "auth.json"), "utf8") : null).not.toBe("t1");
+      expect(k.release(home)).toEqual({ "auth.json": "skipped_real_missing" });
+    }
+  });
+
+  it("an empty real file counts as logged out for realAuthSha", () => {
+    writeFileSync(join(real, "auth.json"), "");
+    expect(realAuthSha(real)).toBeNull();
+  });
+});
+
+describe("authSafeSignalHandler — agent processes first (FIX-D2-1c item 3)", () => {
+  it("stops the agent processes BEFORE releasing the homes, and syncs again after they exit", async () => {
+    const events: string[] = [];
+    const k = {
+      syncAll: vi.fn(() => events.push("sync")),
+      releaseAll: vi.fn(() => events.push("release")),
+      stop: vi.fn(),
+    };
+    let exited: () => void = () => {};
+    const done = new Promise<void>((r) => (exited = r));
+    const handler = authSafeSignalHandler(
+      k,
+      async () => void events.push("instance stopped"),
+      () => (events.push("exit"), exited()),
+      {
+        stop: async () => {
+          await new Promise((r) => setTimeout(r, 5));
+          events.push("children stopped");
+        },
+        killNow: () => events.push("kill"),
+      },
+    );
+    handler();
+    await done;
+    // Exact order: sync now, agents + instance stopped, sync again, release, exit.
+    expect(events).toEqual(["sync", "instance stopped", "children stopped", "sync", "release", "exit"]);
+  });
+
+  it("a second signal SIGKILLs the agents before releasing; a late first-path completion does not release twice", async () => {
+    const events: string[] = [];
+    const k = { syncAll: vi.fn(), releaseAll: vi.fn(() => events.push("release")), stop: vi.fn() };
+    let finishChildren: () => void = () => {};
+    const exit = vi.fn();
+    const handler = authSafeSignalHandler(k, async () => {}, exit, {
+      stop: () => new Promise<void>((r) => (finishChildren = r)),
+      killNow: () => events.push("kill"),
+    });
+    handler();
+    handler();
+    expect(events).toEqual(["kill", "release"]);
+    finishChildren();
+    await new Promise((r) => setTimeout(r, 5));
+    expect(k.releaseAll).toHaveBeenCalledTimes(1);
+    expect(exit).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("CodexAuthKeeper — ledger write failure in the poll (FIX-D2-1c item 3)", () => {
+  it("syncAll logs instead of throwing when the ledger cannot be written, and the write-back still happened", () => {
+    const logs: string[] = [];
+    const stateDir = join(root, "state");
+    const k = new CodexAuthKeeper({ realCodexDir: real, stateDir, log: (l) => logs.push(l) });
+    const home = join(root, "h");
+    prepareIsolatedCodexHome(home, real);
+    k.watch(home, "home", realAuthSha(real));
+    // Make the ledger path unwritable: a directory where the tmp file goes.
+    mkdirSync(join(stateDir, "ledger.json.tmp"), { recursive: true });
+    rotateInCell(home, "t1");
+    expect(() => k.syncAll()).not.toThrow();
+    expect(readFileSync(join(real, "auth.json"), "utf8")).toBe("t1");
+    expect(logs.some((l) => l.includes("ledger write failed"))).toBe(true);
   });
 });

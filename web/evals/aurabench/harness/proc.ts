@@ -3,7 +3,7 @@
  * a wall-clock timeout that kills the whole process group (agents spawn test
  * runners, dev servers, …), and the scrubbed child environment.
  *
- * Firewall-clean. Not unit-tested beyond `benchChildEnv` (real processes).
+ * Firewall-clean. Tested: `benchChildEnv`, the live-child registry (proc.test.ts).
  */
 
 import { spawn } from "node:child_process";
@@ -49,6 +49,42 @@ export interface SpawnResult extends ExecResult {
   stderr: string;
 }
 
+/** Process groups of agents/tools spawned by {@link spawnNice} that have not exited yet. */
+const liveGroups = new Map<number, Promise<void>>();
+
+/** How many spawned process groups are still running. */
+export const liveChildCount = () => liveGroups.size;
+
+/** SIGKILL every live spawned process group now. */
+export function killLiveChildren(sig: NodeJS.Signals = "SIGKILL"): void {
+  for (const pid of liveGroups.keys()) {
+    try {
+      process.kill(-pid, sig);
+    } catch {
+      // already gone
+    }
+  }
+}
+
+/**
+ * SIGTERM every live spawned process group, wait up to `graceMs` for them to
+ * exit, SIGKILL the rest and wait (bounded) again. Used by the signal handler
+ * before cell homes are released (FIX-D2-1c).
+ */
+export async function stopLiveChildren(graceMs = 10_000): Promise<void> {
+  const waitAll = (ms: number) =>
+    Promise.race([
+      Promise.allSettled([...liveGroups.values()]).then(() => undefined),
+      new Promise<void>((r) => setTimeout(r, ms).unref()),
+    ]);
+  if (!liveGroups.size) return;
+  killLiveChildren("SIGTERM");
+  await waitAll(graceMs);
+  if (!liveGroups.size) return;
+  killLiveChildren("SIGKILL");
+  await waitAll(5_000);
+}
+
 export function spawnNice(cmd: string, args: string[], o: SpawnOptions): Promise<SpawnResult> {
   const max = o.maxBufferBytes ?? 64 * 1024 * 1024;
   return new Promise((resolvePromise) => {
@@ -83,7 +119,12 @@ export function spawnNice(cmd: string, args: string[], o: SpawnOptions): Promise
       killGroup("SIGTERM");
       setTimeout(() => killGroup("SIGKILL"), 10_000).unref();
     }, o.timeoutMs);
+    let exited: () => void = () => {};
+    const pid = child.pid;
+    if (pid) liveGroups.set(pid, new Promise<void>((r) => (exited = r)));
     const done = (code: number) => {
+      if (pid) liveGroups.delete(pid);
+      exited();
       clearTimeout(timer);
       out?.end();
       err?.end();
