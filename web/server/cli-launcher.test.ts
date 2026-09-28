@@ -1826,6 +1826,59 @@ describe("codex websocket launcher", () => {
     expect(mockSpawn).toHaveBeenCalledTimes(4);
   });
 
+  // P4/FIX-AUTOHEAL-2 (b): spawnCodexWs awaits its port pick before
+  // Bun.spawn, and nobody awaits spawnCodexWs. A kill/archive/delete landing
+  // in that gap found no process in `processes` to signal, then the spawn went
+  // ahead — a live app-server for a session that should be down (orphan).
+  describe("a Codex WS spawn still picking its port (P4/FIX-AUTOHEAL-2)", () => {
+    function launchPendingCodexWs() {
+      process.env.COMPANION_CODEX_TRANSPORT = "ws";
+      mockResolveBinary.mockReturnValue("/opt/fake/codex");
+      mockSpawn.mockImplementation(() => createPendingCodexWsProxyProc(4100).proc);
+      // launch() runs spawnCodexWs synchronously up to the port-pick await.
+      return launcher.launch({ backendType: "codex", cwd: "/tmp/project", codexSandbox: "workspace-write" });
+    }
+
+    it("kill in the gap cancels the spawn: no process starts and the session is exited", async () => {
+      const info = launchPendingCodexWs();
+      await expect(launcher.kill(info.sessionId)).resolves.toBe(true);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(mockSpawn).not.toHaveBeenCalled();
+      expect(launcher.getSession(info.sessionId)?.state).toBe("exited");
+      // The port was never claimed, so it is free for the next spawn.
+      expect((launcher as any).claimedCodexWsPorts.size).toBe(0);
+    });
+
+    it("archive in the gap cancels the spawn", async () => {
+      const info = launchPendingCodexWs();
+      launcher.setArchived(info.sessionId, true);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(mockSpawn).not.toHaveBeenCalled();
+      expect(launcher.getSession(info.sessionId)?.state).toBe("exited");
+    });
+
+    it("delete in the gap cancels the spawn", async () => {
+      const info = launchPendingCodexWs();
+      launcher.removeSession(info.sessionId);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(mockSpawn).not.toHaveBeenCalled();
+      expect((launcher as any).claimedCodexWsPorts.size).toBe(0);
+    });
+
+    it("a relaunch in the gap supersedes the pending spawn: exactly one app-server + proxy pair starts", async () => {
+      const info = launchPendingCodexWs();
+      const relaunch = launcher.relaunch(info.sessionId);
+      await expect(relaunch).resolves.toEqual({ ok: true });
+      await new Promise((r) => setTimeout(r, 0));
+      // Two Bun.spawn calls = one codex app-server + its ws proxy (the
+      // relaunch's); the superseded launch spawned nothing.
+      expect(mockSpawn).toHaveBeenCalledTimes(2);
+      // The superseded spawn did not flip the relaunch's session to exited.
+      expect(launcher.getSession(info.sessionId)?.state).not.toBe("exited");
+      expect((launcher as any).claimedCodexWsPorts.size).toBe(1);
+    });
+  });
+
   it("relaunch with an unavailable codex model keeps the live session intact", async () => {
     // Council review P1 #2 — the requested model must be validated BEFORE the
     // running Codex process is killed. If resolution fails (model rejected /

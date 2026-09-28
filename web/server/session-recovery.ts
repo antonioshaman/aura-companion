@@ -114,6 +114,12 @@ export class SessionRecovery {
   private readonly relaunchInFlight = new Map<string, Promise<RelaunchOutcome>>();
   /** P4/FIX-AUTOHEAL-1: time of the last successful relaunch (settle window). */
   private readonly lastRelaunchOkAt = new Map<string, number>();
+  /**
+   * P4/FIX-AUTOHEAL-2: an automatic relaunch skipped because another one was
+   * running or settling re-checks the session once the window is over. A CLI
+   * that hangs in `starting` would otherwise never be recovered.
+   */
+  private readonly settleRechecks = new Map<string, ReturnType<typeof setTimeout>>();
   // Sessions that have already been notified about relaunch exhaustion.
   // Prevents repeated "keeps crashing" warnings for dead sessions.
   readonly relaunchExhaustedNotified = new Set<string>();
@@ -221,6 +227,49 @@ export class SessionRecovery {
     this.relaunchExhaustedNotified.delete(sessionId);
     this.relaunchingSet.delete(sessionId);
     this.lastRelaunchOkAt.delete(sessionId);
+    this.cancelSettleRecheck(sessionId);
+  }
+
+  private cancelSettleRecheck(sessionId: string): void {
+    const timer = this.settleRechecks.get(sessionId);
+    if (timer === undefined) return;
+    clearTimeout(timer);
+    this.settleRechecks.delete(sessionId);
+  }
+
+  /**
+   * P4/FIX-AUTOHEAL-2: arm (once per session) a re-check for when the settle
+   * window closes. If the CLI is then still `starting` without an attached
+   * adapter, it goes through {@link handleAutoRelaunch} — the crash budget
+   * bounds a CLI that keeps hanging. Still settling → re-arm.
+   */
+  private scheduleSettleRecheck(sessionId: string): void {
+    if (this.settleRechecks.has(sessionId)) return;
+    const at = this.lastRelaunchOkAt.get(sessionId);
+    const delay =
+      this.relaunchInFlight.has(sessionId) || at === undefined
+        ? RELAUNCH_SETTLE_MS
+        : Math.max(0, at + RELAUNCH_SETTLE_MS - Date.now());
+    const timer = setTimeout(() => {
+      this.settleRechecks.delete(sessionId);
+      const info = this.launcher.getSession(sessionId);
+      if (!info || info.archived || info.state !== "starting") return;
+      if (this.intentionalKills.has(sessionId) || this.stoppedByUser.has(sessionId)) return;
+      if (this.isRelaunchSettling(sessionId)) {
+        this.scheduleSettleRecheck(sessionId);
+        return;
+      }
+      // handleAutoRelaunch re-checks this too; here it keeps the log honest.
+      if (this.wsBridge.getSession(sessionId)?.backendAdapter != null) return;
+      log.warn("orchestrator", "CLI still starting after the settle window; recovering", {
+        event: "session.relaunch.settle_expired",
+        sessionId,
+        settleMs: RELAUNCH_SETTLE_MS,
+      });
+      void this.handleAutoRelaunch(sessionId);
+    }, delay);
+    timer.unref?.();
+    this.settleRechecks.set(sessionId, timer);
   }
 
   isRelaunchInFlight(sessionId: string): boolean {
@@ -244,10 +293,13 @@ export class SessionRecovery {
    * P4/FIX-AUTOHEAL-1: the single entry point to `launcher.relaunch`.
    *
    * - A call while another relaunch of the same session runs JOINS it (same
-   *   result, no second spawn). A manual call that asks for a different model
-   *   waits for the running one and then relaunches with its own options.
+   *   result, no second spawn). A manual call never joins: it waits for the
+   *   running one and then relaunches with its own options — the running one
+   *   may have read the old model, env or credentials before the user changed
+   *   them (Settings → apply credentials; P4/FIX-AUTOHEAL-2).
    * - Automatic sources skip (`skipped: "recently_relaunched"`) while the
-   *   previous successful relaunch is inside {@link RELAUNCH_SETTLE_MS}.
+   *   previous successful relaunch is inside {@link RELAUNCH_SETTLE_MS}; a
+   *   re-check is armed for when the window closes.
    * - The session is marked intentional for the old-process kill (CR-12); the
    *   mark is released only if no one else claimed it meanwhile (EC-2).
    * - If the session was archived while the spawn was awaited, the
@@ -261,7 +313,7 @@ export class SessionRecovery {
     for (;;) {
       const running = this.relaunchInFlight.get(sessionId);
       if (!running) break;
-      if (!opts?.model) {
+      if (source !== "manual") {
         log.info("orchestrator", "relaunch joined an in-flight relaunch", {
           event: "session.relaunch.joined",
           sessionId,
@@ -278,6 +330,7 @@ export class SessionRecovery {
         source,
         settleMs: RELAUNCH_SETTLE_MS,
       });
+      this.scheduleSettleRecheck(sessionId);
       return { ok: true, skipped: "recently_relaunched" };
     }
     const run = this.runRelaunch(sessionId, source, opts);
@@ -486,6 +539,7 @@ export class SessionRecovery {
         sessionId,
         source: "auto_relaunch",
       });
+      this.scheduleSettleRecheck(sessionId);
       this.relaunchingSet.delete(sessionId);
       return;
     }
