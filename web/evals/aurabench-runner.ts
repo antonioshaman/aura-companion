@@ -7,7 +7,7 @@
  *   bun run eval:aurabench leak --tasks <dir> [--id <task-id>]
  *   bun run eval:aurabench bench --bench-root <dir> [--variants A,B,…] [--reps 5]
  *     [--task-ids a,b] [--max-cells N] [--state <STATE.json>] [--timeout-min 60]
- *     [--claude-model claude-opus-5-5] [--codex-model gpt-5.4]
+ *     [--claude-model claude-opus-5-5] [--codex-model gpt-5.5]
  *
  * `prs.json` is `gh pr list --state merged --base main --limit 300
  *   --json number,title,body,mergeCommit`. `mine` writes one candidate per
@@ -215,8 +215,10 @@ async function bench(argv: string[], repo: string): Promise<number> {
   const stateFile = arg(argv, "state");
   // Every variant of a provider runs the SAME pinned model: Companion's own
   // default (claude-sonnet-4-6) differs from the CLI's, and `codex exec
-  // --ignore-user-config` drops the user's configured model.
-  const models = { claude: arg(argv, "claude-model") ?? "claude-opus-5-5", codex: arg(argv, "codex-model") ?? "gpt-5.4" };
+  // --ignore-user-config` drops the user's configured model. gpt-5.4 is no
+  // longer accepted for ChatGPT-account Codex auth (pilot: HTTP 400), and the
+  // account's models cache lists gpt-5.5.
+  const models = { claude: arg(argv, "claude-model") ?? "claude-opus-5-5", codex: arg(argv, "codex-model") ?? "gpt-5.5" };
   console.log(`[aurabench] pinned models: ${JSON.stringify(models)}`);
   // One absolute binary per provider for ALL variants (see AuraDeps.binaries).
   const binaries = { claude: Bun.which("claude") ?? undefined, codex: Bun.which("codex") ?? undefined };
@@ -245,6 +247,17 @@ async function bench(argv: string[], repo: string): Promise<number> {
     env: (extra) => benchChildEnv(process.env, extra),
     realClaudeDir: join(realHome, ".claude"),
     realCodexDir: join(realHome, ".codex"),
+    projectSkillNames: () => {
+      const names = new Set<string>();
+      for (const d of [join(repo, ".claude", "skills"), join(repo, ".agents", "skills")]) {
+        try {
+          for (const n of readdirSync(d)) names.add(n);
+        } catch {
+          // absent in this checkout
+        }
+      }
+      return [...names];
+    },
     userSkillNames: () => {
       try {
         return readdirSync(join(realHome, ".claude", "skills"));

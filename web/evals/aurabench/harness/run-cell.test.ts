@@ -14,15 +14,19 @@
  *     is a file that was green on the pristine base and is red now; files
  *     without a baseline verdict are counted as unknown, never as regressions;
  *   - a usage limit yields NO record (the driver retries the cell);
- *   - timeout is a recorded failure; worktree-add failure is a harness_error;
- *   - the worktree is removed on every path.
+ *   - timeout is a recorded failure; a failed checkout is a harness_error;
+ *   - the cell is a SEALED checkout (fresh `git init` + depth-1 fetch of the
+ *     base), never a `git worktree`: from a linked worktree Claude Code loads
+ *     the main checkout's `.claude/skills` and `git log --all` exposes the
+ *     merge commit. The merge commit is fetched only AFTER the agent ran;
+ *   - the checkout is removed on every path.
  */
 
 import { describe, it, expect } from "vitest";
 import type { AuraBenchTask } from "../task.js";
 import { VARIANTS } from "./variants.js";
 import { emptyMetrics } from "./agent-metrics.js";
-import { baselineZones, computeBaseline, parseNumstat, relatedSources, runCell, vitestFileVerdicts, type AgentRun, type AsyncExec, type CellDeps, type ExecResult } from "./run-cell.js";
+import { baselineZones, computeBaseline, parseNumstat, relatedSources, removeCheckout, runCell, vitestFileVerdicts, type AgentRun, type AsyncExec, type CellDeps, type ExecResult } from "./run-cell.js";
 
 const BASE = "b".repeat(40);
 const MERGE = "m".repeat(40);
@@ -61,7 +65,7 @@ function harness(s: Script) {
   const exec: AsyncExec = async (cmd, args, { cwd }) => {
     const c = `${cmd} ${args.join(" ")}`;
     calls.push(`${cwd}$ ${c}`);
-    if (cmd === "git" && args[0] === "worktree" && args[1] === "add") return res({ code: s.addFails ? 128 : 0, output: "fatal" });
+    if (cmd === "git" && args[0] === "fetch" && args.includes(BASE)) return res({ code: s.addFails ? 128 : 0, output: "fatal" });
     if (cmd === "git" && args[0] === "rev-parse") return res({ output: "p".repeat(40) + "\n" });
     if (cmd === "git" && args[0] === "diff" && args[1] === "--numstat") return res({ output: s.numstat ?? "" });
     if (cmd === "bunx" && args[1] === "run") {
@@ -120,7 +124,24 @@ describe("runCell", () => {
     // The diff base is the prepared (post-scrub) commit, new files included.
     expect(idx(calls, "add -A -N")).toBeLessThan(idx(calls, "diff --numstat"));
     expect(calls.find((c) => c.includes("diff --numstat"))).toContain("p".repeat(40));
-    expect(calls[calls.length - 1]).toContain("worktree remove --force");
+    expect(calls[calls.length - 1]).toContain(`rm -rf ${WT}`);
+  });
+
+  it("the agent works in a sealed checkout: no git worktree, merge commit fetched only after the agent", async () => {
+    const { deps, calls } = harness({ numstat: "1\t0\tweb/server/x.ts\n" });
+    await runCell(task, VARIANTS.A, 1, deps);
+    // Leak channel from the pilot: a linked worktree points Claude Code at the main repo.
+    expect(calls.some((c) => c.includes("git worktree"))).toBe(false);
+    const order = [`rm -rf ${WT}`, `git init -q ${WT}`, `fetch -q --depth=1 --no-tags /repo ${BASE}`, "checkout -q --detach FETCH_HEAD", "AGENT"];
+    const positions = order.map((n) => idx(calls, n));
+    expect(positions.every((p) => p >= 0)).toBe(true);
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+    // The base fetch runs inside the new checkout, not in the source repo.
+    expect(calls[idx(calls, `--depth=1 --no-tags /repo ${BASE}`)]).toMatch(new RegExp(`^${WT}\\$`));
+    // The reference solution (merge commit) is never reachable while the agent works.
+    const mergeFetch = idx(calls, `--depth=1 --no-tags /repo ${MERGE}`);
+    expect(mergeFetch).toBeGreaterThan(idx(calls, "AGENT"));
+    expect(mergeFetch).toBeLessThan(idx(calls, `checkout ${MERGE} --`));
   });
 
   it("aura variants leave the workspace unscrubbed", async () => {
@@ -160,7 +181,7 @@ describe("runCell", () => {
     const out = await runCell(task, VARIANTS.A, 1, deps);
     expect(out.kind).toBe("limit");
     expect(idx(calls, "vitest")).toBe(-1);
-    expect(calls[calls.length - 1]).toContain("worktree remove --force");
+    expect(calls[calls.length - 1]).toContain(`rm -rf ${WT}`);
   });
 
   it("a timeout is a recorded failure even if the hidden tests pass", async () => {
@@ -173,7 +194,7 @@ describe("runCell", () => {
     expect(out.record.hidden?.passed).toBe(true);
   });
 
-  it("a failed worktree add is a harness_error and the agent never runs", async () => {
+  it("a failed checkout is a harness_error and the agent never runs", async () => {
     const { deps, agentCalls } = harness({ addFails: true });
     const out = await runCell(task, VARIANTS.A, 1, deps);
     if (out.kind !== "record") throw new Error("expected record");
@@ -183,6 +204,20 @@ describe("runCell", () => {
 });
 
 describe("helpers", () => {
+  it("removeCheckout refuses relative or near-root paths (it runs rm -rf)", async () => {
+    const calls: string[] = [];
+    const exec: AsyncExec = async (cmd, args) => {
+      calls.push(`${cmd} ${args.join(" ")}`);
+      return { code: 0, output: "", timedOut: false };
+    };
+    for (const bad of ["", "wt/cell", "/", "/home", "/home/"]) {
+      expect((await removeCheckout(exec, "/repo", bad)).code).not.toBe(0);
+    }
+    expect(calls).toEqual([]);
+    expect((await removeCheckout(exec, "/repo", "/bench/wt/cell")).code).toBe(0);
+    expect(calls).toEqual(["rm -rf /bench/wt/cell"]);
+  });
+
   it("parseNumstat counts binary files as touched with 0 LOC", () => {
     expect(parseNumstat("-\t-\timg.png\n4\t2\ta.ts\n")).toEqual({ files_touched: 2, loc_added: 4, loc_removed: 2, files: ["img.png", "a.ts"] });
   });
@@ -211,10 +246,10 @@ describe("helpers", () => {
     };
     const got = await computeBaseline(task, { repo: "/repo", exec, readText: (p) => reports[p] ?? null, reportFile: (n) => `/b/${n}`, worktree: "/wt/b" });
     expect([...got]).toEqual([["server/y.test.ts", "pass"]]);
-    expect(calls.some((c) => c.startsWith(`git worktree add --detach /wt/b ${BASE}`))).toBe(true);
+    expect(calls.some((c) => c === `git fetch -q --depth=1 --no-tags /repo ${BASE}`)).toBe(true);
     // Hidden tests are NOT restored for the baseline — it is what the agent starts from.
     expect(calls.some((c) => c.includes(`checkout ${MERGE}`))).toBe(false);
-    expect(calls[calls.length - 1]).toContain("worktree remove --force /wt/b");
+    expect(calls[calls.length - 1]).toBe("rm -rf /wt/b");
     await expect(
       computeBaseline(task, { repo: "/repo", exec, readText: () => null, reportFile: (n) => `/b/${n}`, worktree: "/wt/b" }),
     ).rejects.toThrow(/no test verdicts/);
