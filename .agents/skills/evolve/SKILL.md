@@ -42,7 +42,7 @@ An entry is stale when:
 - Its recommendation contradicts a newer entry
 - It has `confidence: low` and is older than 14 days without re-confirmation
 - `outdatedReports >= helpfulCount` and `outdatedReports >= 2` (the field-driven signal — at least two flags and no fresh confirmations to balance them)
-- `usageCount >= 10` and `helpfulCount == 0` (surfaced often but never re-confirmed → too generic to be useful)
+- usage `>= 10` (store `usageCount` + `usage.log` surfacings, as computed by `kb:health`) and `helpfulCount == 0` (surfaced often but never re-confirmed → too generic to be useful)
 
 - Not surfaced by `/prime` for 20 consecutive sessions — `bun run --cwd web kb:prune --dry-run` lists them, `kb:prune` archives them
 

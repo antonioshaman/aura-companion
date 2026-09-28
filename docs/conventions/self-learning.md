@@ -44,5 +44,5 @@ The knowledge base grows organically. Over time:
 ## Lifecycle tooling
 
 - `bun run --cwd web kb:health` — lifecycle report (used / helpful / promoted / stale / never-surfaced / idle); corrupt lines reported with `file:line`, exit 1.
-- `bun run --cwd web kb:record -- <id>…` — called by `/prime` step 5; persists usage counters and the session clock in `.agents/knowledge/usage-state.json`.
+- `bun run --cwd web kb:record -- <id>…` — called by `/prime` step 5; appends one line to the gitignored `.agents/knowledge/usage.log` (telemetry kept out of the content-only `*.jsonl` stores).
 - `bun run --cwd web kb:prune [--dry-run]` — moves entries idle for 20 consecutive sessions to `.agents/knowledge/archive/` (never deletes; promoted entries exempt).

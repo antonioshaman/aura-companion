@@ -50,6 +50,8 @@ web/.council/state/
 .scheduled/
 # Legacy per-checkout learnings store (skill removed in aura-meta-diet A1; archived in docs/history/learnings/). Kept ignored while an out-of-repo reminder hook may still write it.
 .learnings/
+# KB usage telemetry written by `kb:record` on every /prime (FIX-A2-1). Kept out of git so /prime never dirties a checkout.
+.agents/knowledge/usage.log
 # Local backup snapshots
 .backup-auraco-old/
 # Scratch handoff / plan docs (repo-root only)

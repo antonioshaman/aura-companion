@@ -83,7 +83,7 @@ After presenting the brief, persist which entries were surfaced — one call per
 bun run --cwd web kb:record -- <id> <id> ...   # ids shown in the brief; no ids if none
 ```
 
-This bumps `usageCount`, sets `lastSurfacedSession`/`lastSurfacedAt` on those entries, and advances the session clock in `.agents/knowledge/usage-state.json`. Do not edit the counters by hand and do not bump `updatedAt` (that is the content timestamp). Entries not surfaced for 20 consecutive sessions become candidates for `bun run --cwd web kb:prune` (moved to `.agents/knowledge/archive/`, never deleted). `bun run --cwd web kb:health` shows the lifecycle report.
+This appends one line (`{session, at, ids}`) to `.agents/knowledge/usage.log` — a gitignored, append-only telemetry log. The `*.jsonl` stores are content-only and are **not** touched, so `/prime` never dirties the checkout, and concurrent `/prime` runs in the same repo cannot lose each other's records. Do not edit `usageCount` in the stores and do not bump `updatedAt` (that is the content timestamp). Entries not surfaced for 20 consecutive sessions become candidates for `bun run --cwd web kb:prune` (moved to `.agents/knowledge/archive/`, never deleted). `bun run --cwd web kb:health` shows the lifecycle report.
 
 Only read the top-level `*.jsonl` stores — `archive/` holds retired entries.
 
