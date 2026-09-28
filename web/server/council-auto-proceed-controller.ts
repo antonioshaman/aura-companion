@@ -34,6 +34,15 @@ export function isBlockingStopFinding(finding: BrowserObserverFinding): boolean 
 }
 
 /**
+ * FIX-AP-2 restore predicate: a finding holds after a restart when it blocks
+ * by its (frozen or re-grounded) verdict, or when it was a raw STOP whose
+ * verdict was never frozen and no human disputed it.
+ */
+function holdsOnRestore(finding: BrowserObserverFinding, unfrozenRawStopIds: ReadonlySet<string>): boolean {
+  return isBlockingStopFinding(finding) || (unfrozenRawStopIds.has(finding.id) && !finding.disputed);
+}
+
+/**
  * Auto-proceed (AFK idle-timeout) controller (aura-meta-diet P4/C1c).
  *
  * Owns the orchestrator's handle on the {@link IdleTimerManager} and every
@@ -408,6 +417,34 @@ export class CouncilAutoProceedController {
     });
   }
 
+  /**
+   * FIX-AP-3 — the findings of a bootstrap view that hold (or will hold once
+   * restored) the group's auto-proceed but that the blocker banner would hide
+   * on its own predicate (an unfrozen raw STOP re-grounded to NOTE / weak).
+   * The bootstrap flags them so every hold has a visible, dismissable STOP.
+   * Empty when the orchestrator never opted in or its layer is off (nothing
+   * arms, so nothing is held). Dismissals — in memory or on disk — are out.
+   */
+  invisibleHeldStopIds(sessionGroupId: string, view: Omit<GroupStopHoldView, "gaps">): Set<string> {
+    const out = new Set<string>();
+    const primary = this.groupMeta.get(sessionGroupId)?.primarySessionId;
+    if (!primary || !this.getAutoProceedConfig?.(primary)) return out;
+    if (this.isAutoProceedAllowed && !this.isAutoProceedAllowed(primary)) return out;
+    const hold = this.holds.get(sessionGroupId);
+    const resolved = new Set(hold?.resolved ?? []);
+    const cwd = this.watchers.get(sessionGroupId)?.cwd;
+    if (cwd) {
+      const read = readStopResolutions(cwd, sessionGroupId);
+      if (read.ok) for (const id of read.findingIds) resolved.add(id);
+    }
+    const unfrozen = new Set(view.unfrozenRawStopIds);
+    for (const f of view.findings) {
+      if (isBlockingStopFinding(f) || resolved.has(f.id)) continue;
+      if (holdsOnRestore(f, unfrozen) || hold?.unresolved.has(f.id)) out.add(f.id);
+    }
+    return out;
+  }
+
   /** Test / diagnostics: the finding ids currently holding the group. */
   getUnresolvedStopIds(sessionGroupId: string): string[] {
     return [...(this.holds.get(sessionGroupId)?.unresolved.keys() ?? [])];
@@ -469,7 +506,7 @@ export class CouncilAutoProceedController {
         const unfrozen = new Set(view?.unfrozenRawStopIds ?? []);
         for (const f of view?.findings ?? []) {
           if (hold.unresolved.has(f.id)) continue;
-          if (isBlockingStopFinding(f) || (unfrozen.has(f.id) && !f.disputed)) hold.unresolved.set(f.id, f);
+          if (holdsOnRestore(f, unfrozen)) hold.unresolved.set(f.id, f);
         }
         for (const id of hold.resolved) hold.unresolved.delete(id);
         if (gaps.length > 0) {

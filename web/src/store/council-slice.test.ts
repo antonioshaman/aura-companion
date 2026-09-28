@@ -128,6 +128,18 @@ describe("hydrateObserverFinding", () => {
     });
   });
 
+  // FIX-AP-3: the server's hold flag survives hydration (the banner reads it).
+  it("carries holdsAutoProceed from the wire", () => {
+    const out = hydrateObserverFinding(wireFinding({ severity: "NOTE", holdsAutoProceed: true }), {
+      receivedAt: 1_000,
+      checkpointId: "chk",
+      phase: "p",
+      observerModel: "m",
+      observerProvider: "claude",
+    });
+    expect(out.holdsAutoProceed).toBe(true);
+  });
+
   // Optional wire fields drop out when absent — no `undefined` litter on the
   // hydrated record.
   it("omits optional wire fields when absent on input", () => {

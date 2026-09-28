@@ -189,6 +189,42 @@ describe("FindingsLog", () => {
     expect(screen.queryByText("disputed earlier")).toBeNull();
   });
 
+  // FIX-AP-3: a held finding (unfrozen STOP now shown as NOTE) is marked in
+  // the log and keeps a Dismiss control, the release a human needs.
+  it("marks a finding holding auto-proceed and lets it be dismissed", () => {
+    const onDismissStop = vi.fn();
+    render(
+      <FindingsLog
+        findings={[finding({ id: "held", severity: "NOTE", claim: "held", wasDowngraded: true, downgradeReason: "evidence_not_in_modified_set", holdsAutoProceed: true })]}
+        onDismissStop={onDismissStop}
+      />,
+    );
+    expect(screen.getByTestId("finding-row-held")).toHaveAttribute("data-holds-auto-proceed", "true");
+    expect(screen.getByLabelText("Holds auto-proceed until you dismiss or dispute it")).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText("Dismiss STOP: held"));
+    expect(onDismissStop).toHaveBeenCalledWith("held");
+  });
+
+  it("drops the hold chip and Dismiss once the held finding is dismissed", () => {
+    render(
+      <FindingsLog
+        findings={[finding({ id: "held", severity: "NOTE", claim: "held", holdsAutoProceed: true })]}
+        onDismissStop={() => {}}
+        dismissedStopIds={new Set(["held"])}
+      />,
+    );
+    expect(screen.queryByText("holds auto-proceed")).toBeNull();
+    expect(screen.queryByLabelText("Dismiss STOP: held")).toBeNull();
+  });
+
+  it("passes accessibility scan with a row holding auto-proceed", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(
+      <FindingsLog findings={[finding({ id: "h", severity: "NOTE", claim: "held", wasDowngraded: true, downgradeReason: "evidence_not_in_modified_set", holdsAutoProceed: true })]} onDismissStop={() => {}} />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
   it("passes accessibility scan with a disputed row", async () => {
     const { axe } = await import("vitest-axe");
     const { container } = render(

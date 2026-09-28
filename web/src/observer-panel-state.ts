@@ -187,19 +187,27 @@ export function findUnresolvedStops(
   dismissedStopIds: ReadonlySet<string>,
 ): ObserverFinding[] {
   if (findings.length === 0) return [];
-  const out: ObserverFinding[] = [];
-  for (const f of findings) {
-    if (f.severity !== "STOP") continue;
-    if (f.wasDowngraded === true) continue;
-    // B2: weakly-grounded STOPs stay in the findings log but are not blockers
-    // until a human reads them (a path-only STOP once raised a false banner).
-    if (f.weakEvidence !== undefined) continue;
-    // B2b: a re-raised claim a human already dismissed in this group.
-    if (f.disputed !== undefined) continue;
-    if (dismissedStopIds.has(f.id)) continue;
-    out.push(f);
-  }
-  return out;
+  return findings.filter((f) => isUnresolvedStop(f, dismissedStopIds));
+}
+
+/**
+ * Pure predicate behind {@link findUnresolvedStops}, shared with the Sidebar
+ * unread count so the banner, the title and the rail never disagree.
+ */
+export function isUnresolvedStop(f: ObserverFinding, dismissedStopIds: ReadonlySet<string>): boolean {
+  if (dismissedStopIds.has(f.id)) return false;
+  // FIX-AP-3: the server says this finding holds auto-proceed. It is a
+  // blocker whatever its re-grounded severity — an invisible hold could only
+  // be released through REST.
+  if (f.holdsAutoProceed === true) return true;
+  if (f.severity !== "STOP") return false;
+  if (f.wasDowngraded === true) return false;
+  // B2: weakly-grounded STOPs stay in the findings log but are not blockers
+  // until a human reads them (a path-only STOP once raised a false banner).
+  if (f.weakEvidence !== undefined) return false;
+  // B2b: a re-raised claim a human already dismissed in this group.
+  if (f.disputed !== undefined) return false;
+  return true;
 }
 
 /**

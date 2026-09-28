@@ -479,6 +479,51 @@ describe("auto-proceed wiring (AP-WIRE)", () => {
     expect(h.manager.isArmed(ORCH)).toBe(true);
   });
 
+  // FIX-AP-3: no invisible holds. The bootstrap flags exactly the findings
+  // that hold but that the banner predicate alone would hide; a blocking STOP
+  // is already visible, a dismissed one no longer holds, and a pair whose
+  // auto-proceed never arms (no opt-in / layer off) holds nothing at all.
+  describe("invisibleHeldStopIds (FIX-AP-3)", () => {
+    const view = {
+      findings: [
+        stop({ id: "blocking" }),
+        stop({ id: "regrounded", severity: "NOTE", wasDowngraded: true, downgradeReason: "evidence_not_in_modified_set" }),
+        stop({ id: "weak", weakEvidence: "no_cited_lines" }),
+        stop({ id: "disputed", severity: "NOTE", disputed: "same_claim" }),
+        stop({ id: "plain-note", severity: "NOTE" }),
+      ],
+      unfrozenRawStopIds: ["regrounded", "weak", "disputed"],
+    };
+
+    it("flags unfrozen raw STOPs the banner would hide, not blocking / disputed / never-STOP ones", () => {
+      const h = makeHarness({ config: { idleMs: IDLE_MS, maxIterations: 3 }, cwd: tmpWorkspace() });
+      expect([...h.controller.invisibleHeldStopIds(GROUP, view)].sort()).toEqual(["regrounded", "weak"]);
+    });
+
+    it("drops a finding once a human dismissed it (in memory or persisted)", () => {
+      const cwd = tmpWorkspace();
+      const h = makeHarness({ config: { idleMs: IDLE_MS, maxIterations: 3 }, cwd });
+      expect(h.controller.resolveStop(GROUP, "regrounded")).toMatchObject({ ok: true, persisted: true });
+      expect([...h.controller.invisibleHeldStopIds(GROUP, view)]).toEqual(["weak"]);
+      // A fresh controller (restart) reads the persisted dismissal from disk.
+      const restarted = makeHarness({ config: { idleMs: IDLE_MS, maxIterations: 3 }, cwd });
+      expect([...restarted.controller.invisibleHeldStopIds(GROUP, view)]).toEqual(["weak"]);
+    });
+
+    it("also flags a finding the live hold already carries, whatever it now looks like", () => {
+      const h = makeHarness({ config: { idleMs: IDLE_MS, maxIterations: 3 }, cwd: tmpWorkspace() });
+      h.review([stop({ id: "live" })]);
+      const shown = { findings: [stop({ id: "live", severity: "NOTE" })], unfrozenRawStopIds: [] };
+      expect([...h.controller.invisibleHeldStopIds(GROUP, shown)]).toEqual(["live"]);
+    });
+
+    it("flags nothing without the opt-in or with the auto-proceed layer off", () => {
+      expect(makeHarness({ cwd: tmpWorkspace() }).controller.invisibleHeldStopIds(GROUP, view).size).toBe(0);
+      const off = makeHarness({ config: { idleMs: IDLE_MS, maxIterations: 3 }, layerAllowed: false, cwd: tmpWorkspace() });
+      expect(off.controller.invisibleHeldStopIds(GROUP, view).size).toBe(0);
+    });
+  });
+
   // A human dispute is a real release, frozen or not.
   it("an unfrozen raw STOP that a human disputed does not hold", async () => {
     const h = makeHarness({

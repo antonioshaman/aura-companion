@@ -3192,6 +3192,22 @@ function CouncilModeSection() {
           />
         </Card>
 
+        <Card label="BlockerBanner — holding auto-proceed (unfrozen STOP re-checked as NOTE, FIX-AP-3)">
+          <BlockerBanner
+            finding={{
+              ...liveBlockerFinding,
+              id: "fnd_held",
+              severity: "NOTE",
+              wasDowngraded: true,
+              downgradeReason: "evidence_not_in_modified_set",
+              holdsAutoProceed: true,
+            }}
+            nowMs={Date.now()}
+            onDismiss={() => { /* noop in playground */ }}
+            onDispute={() => { /* noop in playground */ }}
+          />
+        </Card>
+
         <Card label="DegradedBanner — observer offline (idle)">
           <DegradedBanner deadRole="observer" onRespawn={() => {}} onContinueSolo={() => {}} />
         </Card>
@@ -3277,6 +3293,7 @@ function CouncilModeSection() {
               mockFinding({ id: "f", severity: "STOP", claim: "Cited lines untouched this phase — downgraded", receivedAt: Date.now() - 8_000, wasDowngraded: true, downgradeReason: "evidence_lines_unchanged" }),
               mockFinding({ id: "g", severity: "STOP", claim: "Command fails at runtime — weak evidence, no banner", receivedAt: Date.now() - 5_000, weakEvidence: "no_cited_lines" }),
               mockFinding({ id: "h", severity: "STOP", claim: "Same command fails again — disputed earlier, no banner", receivedAt: Date.now() - 3_000, disputed: "shared_anchor" }),
+              mockFinding({ id: "i", severity: "NOTE", claim: "Unfrozen STOP re-checked as NOTE — still holds auto-proceed", receivedAt: Date.now() - 1_000, wasDowngraded: true, downgradeReason: "evidence_not_in_modified_set", holdsAutoProceed: true }),
             ]}
             onDismissStop={() => {}}
             nowMs={Date.now()}

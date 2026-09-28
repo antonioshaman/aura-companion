@@ -152,4 +152,43 @@ describe("BlockerBanner", () => {
     const results = await axe(container);
     expect(results).toHaveNoViolations();
   });
+
+  // FIX-AP-3: a finding that holds auto-proceed (an unfrozen raw STOP the
+  // server now re-grounds as NOTE / weak) is on the banner so the hold is
+  // visible, labelled as holding auto-proceed with the reason, and the
+  // Dismiss button that releases the hold is there.
+  it("labels a held finding as holding auto-proceed, says why, and keeps Dismiss", () => {
+    const onDismiss = vi.fn();
+    render(
+      <BlockerBanner
+        finding={finding({ id: "held", severity: "NOTE", wasDowngraded: true, downgradeReason: "evidence_not_in_modified_set", holdsAutoProceed: true })}
+        onDismiss={onDismiss}
+      />,
+    );
+    expect(screen.getByText("Holding auto-proceed")).toBeInTheDocument();
+    expect(screen.queryByText("Blocker from observer")).toBeNull();
+    expect(screen.getByTestId("blocker-hold-reason")).toHaveTextContent(/Re-checked as a note now/);
+    expect(screen.getByTestId("blocker-hold-reason")).toHaveTextContent(/Auto-proceed stays paused until you dismiss or dispute it/);
+    fireEvent.click(screen.getByText(/Dismiss for now/i));
+    expect(onDismiss).toHaveBeenCalledWith("held");
+  });
+
+  it("explains a held STOP whose evidence is now weak", () => {
+    render(<BlockerBanner finding={finding({ weakEvidence: "no_cited_lines", holdsAutoProceed: true })} onDismiss={() => {}} />);
+    expect(screen.getByTestId("blocker-hold-reason")).toHaveTextContent(/evidence is weak now/);
+  });
+
+  it("shows no hold reason on an ordinary blocker", () => {
+    render(<BlockerBanner finding={finding()} onDismiss={() => {}} />);
+    expect(screen.getByText("Blocker from observer")).toBeInTheDocument();
+    expect(screen.queryByTestId("blocker-hold-reason")).toBeNull();
+  });
+
+  it("passes accessibility scan for a held finding", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(
+      <BlockerBanner finding={finding({ severity: "NOTE", wasDowngraded: true, holdsAutoProceed: true })} onDismiss={() => {}} onDispute={() => {}} />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
 });
