@@ -4164,7 +4164,12 @@ describe("SessionOrchestrator", () => {
       // Stub a minimal coordinator with an active group record so Gate 1
       // doesn't short-circuit on absent-coordinator.
       ws.coordinator = {
-        get: vi.fn(() => ({ sessionGroupId: groupId, status: "active" })),
+        get: vi.fn(() => ({
+          sessionGroupId: groupId,
+          status: "active",
+          primary: { sessionId: opts.primary ?? "sess_orch" },
+          observer: { sessionId: opts.observer ?? "sess_obs" },
+        })),
       };
       return cwd;
     }
@@ -4707,7 +4712,19 @@ describe("SessionOrchestrator", () => {
     // pin the fix: after OBSERVER_CATCHUP_TIMEOUT_ESCALATION_THRESHOLD (3)
     // consecutive timeouts for the SAME checkpoint the group is degraded via
     // the single degrade authority; a successful wake resets the strike count.
+    //
+    // P4/OBS-AUTOHEAL: a timed-out poll now first tries to relaunch the
+    // observer. The strike/threshold path below still applies whenever the
+    // heal budget is spent (hourly cap → `rate_limited`), so these tests pin
+    // it with the auto-heal reporting `rate_limited`. The heal path itself is
+    // pinned in "observer auto-heal (P4/OBS-AUTOHEAL)" below.
     describe("scheduleCatchupWakeWhenObserverReady escalation (P1-1)", () => {
+      beforeEach(() => {
+        vi.spyOn((orchestrator as any).observerAutoheal, "heal").mockResolvedValue({
+          kind: "skipped",
+          reason: "rate_limited",
+        });
+      });
       function callCatchup(groupId: string, payload: any): Promise<void> {
         return (orchestrator as unknown as {
           scheduleCatchupWakeWhenObserverReady: (g: string, p: any) => Promise<void>;
@@ -4784,6 +4801,152 @@ describe("SessionOrchestrator", () => {
           }
           expect(ws.coordinator.applyEvent).not.toHaveBeenCalled();
           readySpy.mockRestore();
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+    });
+
+    // ── P4/OBS-AUTOHEAL: bounded observer-only relaunch ─────────────────
+    //
+    // Incident 2026-09-28 (twice): an idle Codex observer lost its backend
+    // adapter; the failsafe polled, timed out and degraded the pair ("Observer
+    // offline · wake failed"). Only a manual POST /sessions/<observer>/relaunch
+    // cured it. These tests drive the REAL coordinator and the live wake path
+    // (dispatchObserverWake → adapter_missing → catch-up poll → auto-heal)
+    // for both pairings — the heal is provider-agnostic, so claude+claude
+    // must behave exactly like claude+codex.
+    describe.each([
+      { pairing: "claude+codex", observerBackend: "codex" },
+      { pairing: "claude+claude", observerBackend: "claude" },
+    ])("observer auto-heal (P4/OBS-AUTOHEAL) — $pairing", ({ pairing, observerBackend }) => {
+      const ORCH = "sess_orch_heal";
+      const OBS = "sess_obs_heal";
+
+      function registerHealPair(groupId: string) {
+        const internals = orchestrator as unknown as {
+          councilGroupMeta: Map<string, unknown>;
+          councilWatchers: Map<string, unknown>;
+          getOrCreateCoordinatorSync: () => {
+            registerExternalGroup: (r: unknown) => void;
+            get: (id: string) => { status: string } | undefined;
+          };
+        };
+        const cwd = require("node:fs").realpathSync(
+          require("node:fs").mkdtempSync(require("node:path").join(require("node:os").tmpdir(), "council-heal-")),
+        );
+        internals.councilWatchers.set(groupId, {
+          cwd,
+          abort: new AbortController(),
+          lastCheckpoint: null,
+          previousCheckpoint: null,
+          pendingCheckpoint: null,
+          supersededCheckpointIds: [],
+          pendingReviewDeadline: null,
+        });
+        internals.councilGroupMeta.set(groupId, {
+          primarySessionId: ORCH,
+          observerSessionId: OBS,
+          pairing,
+          createdAt: Date.now(),
+          lastCheckpointReceivedAt: null,
+        });
+        const coord = internals.getOrCreateCoordinatorSync();
+        coord.registerExternalGroup({
+          sessionGroupId: groupId,
+          primary: { sessionId: ORCH, backendType: "claude" },
+          observer: { sessionId: OBS, backendType: observerBackend },
+          status: "active",
+          createdAt: Date.now(),
+        });
+        return coord;
+      }
+
+      it("adapter_missing → relaunches ONLY the observer → wake delivered → group stays active", async () => {
+        vi.useFakeTimers();
+        try {
+          deps.launcher.getSession.mockReturnValue({ archived: false, state: "running" } as any);
+          orchestrator.initialize();
+          const coord = registerHealPair("grp_heal_ok");
+          // Adapter gone until the observer is relaunched; attached right after.
+          let adapterAttached = false;
+          vi.spyOn(orchestrator as any, "observerReadyForWake").mockImplementation(() => adapterAttached);
+          deps.launcher.relaunch.mockImplementation(async () => {
+            adapterAttached = true;
+            return { ok: true };
+          });
+          vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockImplementation(() =>
+            adapterAttached ? { kind: "sent" } : { kind: "adapter_missing" },
+          );
+
+          const first = callDispatch("grp_heal_ok", validPayload("grp_heal_ok", { checkpointId: "chk_heal" }));
+          expect(first).toEqual({ kind: "skipped", reason: "adapter_missing" });
+
+          // 30s readiness poll times out → auto-heal relaunches → adapter attaches.
+          await vi.advanceTimersByTimeAsync(31_000);
+
+          expect(deps.launcher.relaunch).toHaveBeenCalledTimes(1);
+          expect(deps.launcher.relaunch).toHaveBeenCalledWith(OBS, {});
+          expect(deps.launcher.relaunch).not.toHaveBeenCalledWith(ORCH, expect.anything());
+          // The missed wake was re-sent and accepted after the heal.
+          const results = vi.mocked(deps.wsBridge.sendObserverWakeFrame).mock.results.map((r: { value: unknown }) => r.value);
+          expect(results.at(-1)).toEqual({ kind: "sent" });
+          expect(coord.get("grp_heal_ok")?.status).toBe("active");
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it("heal budget exhausted → the group degrades (not before)", async () => {
+        vi.useFakeTimers();
+        try {
+          deps.launcher.getSession.mockReturnValue({ archived: false, state: "running" } as any);
+          orchestrator.initialize();
+          const coord = registerHealPair("grp_heal_ex");
+          // Relaunch "succeeds" but the adapter never attaches.
+          vi.spyOn(orchestrator as any, "observerReadyForWake").mockReturnValue(false);
+          deps.launcher.relaunch.mockResolvedValue({ ok: true });
+          vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "adapter_missing" });
+
+          callDispatch("grp_heal_ex", validPayload("grp_heal_ex", { checkpointId: "chk_ex" }));
+          // Poll timeout + first relaunch's 60s ready window: still healing, still active.
+          await vi.advanceTimersByTimeAsync(31_000 + 30_000);
+          expect(deps.launcher.relaunch).toHaveBeenCalledTimes(1);
+          expect(coord.get("grp_heal_ex")?.status).toBe("active");
+
+          // Second attempt (after backoff) also never attaches → degraded.
+          await vi.advanceTimersByTimeAsync(5 * 60_000);
+          expect(deps.launcher.relaunch).toHaveBeenCalledTimes(2);
+          expect(deps.launcher.relaunch.mock.calls.every((c: unknown[]) => c[0] === OBS)).toBe(true);
+          expect(coord.get("grp_heal_ex")?.status).toBe("degraded");
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it("observer stopped by the user → no heal, no degrade (EC-2, P4/KILL-INTENTIONAL)", async () => {
+        vi.useFakeTimers();
+        try {
+          deps.launcher.getSession.mockReturnValue({ archived: false, state: "exited", pid: undefined } as any);
+          orchestrator.initialize();
+          const coord = registerHealPair("grp_heal_kill");
+          vi.spyOn(orchestrator as any, "observerReadyForWake").mockReturnValue(false);
+          vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "adapter_missing" });
+
+          await orchestrator.killSession(OBS);
+          deps.launcher.relaunch.mockClear();
+
+          // A checkpoint from before the stop hits the dead observer.
+          callDispatch("grp_heal_kill", validPayload("grp_heal_kill", { checkpointId: "chk_kill" }));
+          // And the catch-up poll is forced directly, as a restart scan would.
+          void (orchestrator as any).observerScheduler.scheduleCatchupWakeWhenObserverReady(
+            "grp_heal_kill",
+            validPayload("grp_heal_kill", { checkpointId: "chk_kill_2" }),
+          );
+          await vi.advanceTimersByTimeAsync(10 * 60_000);
+
+          expect(deps.launcher.relaunch).not.toHaveBeenCalled();
+          expect(coord.get("grp_heal_kill")?.status).toBe("active");
         } finally {
           vi.useRealTimers();
         }

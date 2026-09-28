@@ -9,6 +9,7 @@ import {
   type ObserverSchedulerGroupMeta,
 } from "./council-observer-scheduler.js";
 import type { CouncilWatcherEntry } from "./council-checkpoint-pipeline.js";
+import type { ObserverAutoheal, ObserverAutohealResult } from "./council-observer-autoheal.js";
 import { CheckpointLineSnapshots } from "./observer-line-snapshots.js";
 import { writeCouncilWakeSentinel } from "./council-wake-sentinel.js";
 import { writeAtomicJson } from "./atomic-write.js";
@@ -49,7 +50,7 @@ function coordinatorWithStatus(status: string): SessionGroupCoordinator {
   } as unknown as SessionGroupCoordinator;
 }
 
-function makeHarness(opts: { stoppedByUser?: Set<string> } = {}): Harness {
+function makeHarness(opts: { stoppedByUser?: Set<string>; autoheal?: ObserverAutoheal } = {}): Harness {
   const cwd = realpathSync(mkdtempSync(join(tmpdir(), "council-scheduler-")));
   cleanups.push(() => rmSync(cwd, { recursive: true, force: true }));
   const watchers = new Map<string, CouncilWatcherEntry>();
@@ -65,6 +66,7 @@ function makeHarness(opts: { stoppedByUser?: Set<string> } = {}): Harness {
     isObserverReadyForWake: () => ready,
     dispatchWake,
     isSessionStoppedByUser: opts.stoppedByUser ? (id) => opts.stoppedByUser!.has(id) : undefined,
+    autoheal: opts.autoheal,
   });
   watchers.set(GROUP, {
     cwd,
@@ -235,5 +237,99 @@ describe("CouncilObserverScheduler (DI seam)", () => {
     expect(() => vi.advanceTimersByTime(OBSERVER_FAILSAFE_FALLBACK_MS)).not.toThrow();
     expect(tick).toHaveBeenCalledTimes(1);
     h.scheduler.stopFailsafe();
+  });
+
+  // P4/OBS-AUTOHEAL seam: a timed-out catch-up poll hands the observer to the
+  // injected auto-heal. The four outcomes map to four scheduler reactions.
+  function fakeAutoheal(result: ObserverAutohealResult, onHeal?: () => void): ObserverAutoheal {
+    return {
+      heal: vi.fn(async () => {
+        onHeal?.();
+        return result;
+      }),
+      forgetGroup: vi.fn(),
+    } as unknown as ObserverAutoheal;
+  }
+  async function runOnePoll(h: Harness, payload: CheckpointPayload): Promise<void> {
+    const p = h.scheduler.scheduleCatchupWakeWhenObserverReady(GROUP, payload);
+    await vi.advanceTimersByTimeAsync(31_000);
+    await p;
+  }
+
+  it("healed → the missed wake is dispatched on the first timeout, no degrade", async () => {
+    vi.useFakeTimers();
+    let h!: Harness;
+    const autoheal = fakeAutoheal({ kind: "healed", attempts: 1 }, () => h.setReady(true));
+    h = makeHarness({ autoheal });
+    const coordinator = coordinatorWithStatus("active");
+    h.setCoordinator(coordinator);
+    await runOnePoll(h, checkpoint(5));
+    expect(autoheal.heal).toHaveBeenCalledWith(GROUP, OBSERVER, "adapter_wait_timed_out", "chk_5");
+    expect(h.dispatchWake).toHaveBeenCalledTimes(1);
+    expect(h.dispatchWake.mock.calls[0][1].checkpoint_id).toBe("chk_5");
+    expect(coordinator.applyEvent).not.toHaveBeenCalled();
+  });
+
+  it("exhausted → degrades on the FIRST timeout (the heal budget decides, not the strike count)", async () => {
+    vi.useFakeTimers();
+    const h = makeHarness({ autoheal: fakeAutoheal({ kind: "exhausted", attempts: 2 }) });
+    const coordinator = coordinatorWithStatus("active");
+    h.setCoordinator(coordinator);
+    await runOnePoll(h, checkpoint(6));
+    expect(coordinator.applyEvent).toHaveBeenCalledWith(GROUP, {
+      type: "half_died",
+      role: "observer",
+      reason: "wake_send_failed",
+    });
+    expect(h.dispatchWake).not.toHaveBeenCalled();
+  });
+
+  it("skipped because the user stopped a half → never degrades, however many timeouts", async () => {
+    vi.useFakeTimers();
+    const h = makeHarness({ autoheal: fakeAutoheal({ kind: "skipped", reason: "user_stopped" }) });
+    const coordinator = coordinatorWithStatus("active");
+    h.setCoordinator(coordinator);
+    for (let i = 0; i < OBSERVER_CATCHUP_TIMEOUT_ESCALATION_THRESHOLD + 1; i++) {
+      await runOnePoll(h, checkpoint(7));
+    }
+    expect(coordinator.applyEvent).not.toHaveBeenCalled();
+  });
+
+  it("rate-limited → falls back to the strike threshold", async () => {
+    vi.useFakeTimers();
+    const h = makeHarness({ autoheal: fakeAutoheal({ kind: "skipped", reason: "rate_limited" }) });
+    const coordinator = coordinatorWithStatus("active");
+    h.setCoordinator(coordinator);
+    for (let i = 0; i < OBSERVER_CATCHUP_TIMEOUT_ESCALATION_THRESHOLD - 1; i++) {
+      await runOnePoll(h, checkpoint(8));
+    }
+    expect(coordinator.applyEvent).not.toHaveBeenCalled();
+    await runOnePoll(h, checkpoint(8));
+    expect(coordinator.applyEvent).toHaveBeenCalledTimes(1);
+  });
+
+  it("requestCatchupWake (live adapter_missing) starts one poll, deduped, and skips a user-stopped observer", async () => {
+    vi.useFakeTimers();
+    const stopped = new Set<string>();
+    const h = makeHarness({ stoppedByUser: stopped });
+    h.setCoordinator(coordinatorWithStatus("active"));
+    // Two requests for the same checkpoint → one poll → one wake.
+    h.scheduler.requestCatchupWake(GROUP, checkpoint(9));
+    h.scheduler.requestCatchupWake(GROUP, checkpoint(9));
+    h.setReady(true);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(h.dispatchWake).toHaveBeenCalledTimes(1);
+
+    stopped.add(OBSERVER);
+    h.scheduler.requestCatchupWake(GROUP, checkpoint(10));
+    await vi.advanceTimersByTimeAsync(500);
+    expect(h.dispatchWake).toHaveBeenCalledTimes(1);
+  });
+
+  it("forgetGroup also drops the auto-heal's per-group history", () => {
+    const autoheal = fakeAutoheal({ kind: "healed", attempts: 1 });
+    const h = makeHarness({ autoheal });
+    h.scheduler.forgetGroup(GROUP);
+    expect(autoheal.forgetGroup).toHaveBeenCalledWith(GROUP);
   });
 });
