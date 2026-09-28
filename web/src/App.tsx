@@ -201,7 +201,7 @@ export default function App() {
   // EXCLUSIVELY by the live `group:created` push, so a tab reloading
   // after pair creation landed without the Sidebar ☼/☽ glyph + role
   // suffix and without ObserverPanel pair context
-  // (`BUG-council-mode-group-rest-bootstrap-gap.md`).
+  // (`docs/history/BUG-council-mode-group-rest-bootstrap-gap.md`).
   //
   // `hydrateGroups` is idempotent — it only INSERTS groups not already
   // in the store, so this bootstrap cannot clobber mutable runtime

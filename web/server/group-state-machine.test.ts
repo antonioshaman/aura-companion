@@ -170,7 +170,7 @@ describe("ALL_STATES inventory", () => {
   });
 });
 
-// PLAN-aura-consolidated-refactor.md Task 1: direct unit coverage for the
+// docs/history/PLAN-aura-consolidated-refactor.md Task 1: direct unit coverage for the
 // AP-2 keystone. The Council Review 2026-05-12-2211 flagged that
 // `deriveSideEffects` had zero direct tests — every applyEvent correctness
 // claim rested on integration happenstance. This block enumerates the full

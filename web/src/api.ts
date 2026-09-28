@@ -972,7 +972,7 @@ export const api = {
     }>(`/groups/${encodeURIComponent(groupId)}/findings`),
 
   // Council Mode — REST bootstrap of group records on app mount. Closes
-  // `BUG-council-mode-group-rest-bootstrap-gap.md` (PR #68). The browser's
+  // `docs/history/BUG-council-mode-group-rest-bootstrap-gap.md` (PR #68). The browser's
   // `groupBySessionId` map was previously populated EXCLUSIVELY by the
   // live `group:created` push; a tab reloading after pair creation landed
   // without the Sidebar ☼/☽ glyph + role suffix and without ObserverPanel

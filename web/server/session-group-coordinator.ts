@@ -45,7 +45,7 @@ export interface CreateGroupRequest {
    * Closure-captured local context in the spawner is the structurally safe
    * pattern (each `createGroup` call brings its own context object; spawn
    * callbacks read from `opts.spawnContext`, not from shared mutable state).
-   * PLAN-aura-consolidated-refactor.md Task 2.
+   * docs/history/PLAN-aura-consolidated-refactor.md Task 2.
    */
   spawnContext?: unknown;
 }

@@ -474,7 +474,7 @@ export function deterministicFindingId(input: {
 
 /**
  * Per-call context plumbed through the SessionGroupCoordinator's
- * `spawnContext` field (PLAN-aura-consolidated-refactor.md Task 2). The
+ * `spawnContext` field (docs/history/PLAN-aura-consolidated-refactor.md Task 2). The
  * `baseBody` is the parent `CreateSessionRequest` carrying the user's
  * model/permission/env choices the council spawn callback needs to forward
  * to `doCreateSession`. The `spawnErrors` capture struct is mutated by the
@@ -1642,7 +1642,7 @@ export class SessionOrchestrator {
         });
       } else {
         // Partial pair — approach (b) from FINAL-REVIEW 2026-05-12-2211
-        // P1 #1 (PLAN-aura-consolidated-refactor.md Task 3): apply
+        // P1 #1 (docs/history/PLAN-aura-consolidated-refactor.md Task 3): apply
         // `half_died → degraded` DIRECTLY, do NOT arm a reconnect grace
         // window. Rationale:
         //
@@ -1993,7 +1993,7 @@ export class SessionOrchestrator {
    * (forwarded verbatim by the coordinator from `createGroup`'s request).
    * Two concurrent `createCouncilGroup` invocations cannot cross-contaminate
    * by construction — each call brings its own closure-captured context
-   * object (PLAN-aura-consolidated-refactor.md Task 2; replaces the prior
+   * object (docs/history/PLAN-aura-consolidated-refactor.md Task 2; replaces the prior
    * `this.pendingCouncilCall` instance scalar that was racy across tabs).
    */
   private getOrCreateCoordinatorSync(): SessionGroupCoordinator {
@@ -4232,7 +4232,7 @@ export class SessionOrchestrator {
    * arrived while no browser was connected.
    *
    * Closes the bootstrap gap described in
-   * `BUG-council-mode-group-rest-bootstrap-gap.md` — historically the
+   * `docs/history/BUG-council-mode-group-rest-bootstrap-gap.md` — historically the
    * browser's group store was populated EXCLUSIVELY by the live
    * `group:created` push, so a reload after pair creation left the
    * Sidebar without the ☼/☽ decoration and the ObserverPanel without

@@ -3096,7 +3096,7 @@ describe("handleMessage: assistant clears only completed tool progress", () => {
 // Post-reconnect group bootstrap refetch (PR #68 friedman fix-pass)
 // ===========================================================================
 //
-// `BUG-council-mode-group-rest-bootstrap-gap.md` left a recovery hole:
+// `docs/history/BUG-council-mode-group-rest-bootstrap-gap.md` left a recovery hole:
 // if the App.tsx mount-effect `fetchGroups` call fails (network blip,
 // server 500), the user has no UI to retry. The friedman P2 fix says:
 // dispatch the same `fetchGroups → hydrateGroups` pipeline on every
