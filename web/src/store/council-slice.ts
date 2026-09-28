@@ -9,6 +9,7 @@ import type {
   SessionRole,
 } from "../types.js";
 import { clearAnnouncerScope } from "../components/council/FindingsLog.js";
+import { api } from "../api.js";
 
 // ── Persistence keys & bounds ───────────────────────────────────────────────
 
@@ -129,6 +130,7 @@ export function hydrateObserverFinding(
     ...(wire.wasDowngraded === true ? { wasDowngraded: true } : {}),
     ...(wire.downgradeReason !== undefined ? { downgradeReason: wire.downgradeReason } : {}),
     ...(wire.weakEvidence !== undefined ? { weakEvidence: wire.weakEvidence } : {}),
+    ...(wire.disputed !== undefined ? { disputed: wire.disputed } : {}),
     observerModel: context.observerModel,
     observerProvider: context.observerProvider,
   };
@@ -228,7 +230,7 @@ export interface CouncilSlice {
   // export the prior commit shipped unused).
 }
 
-export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = (set) => ({
+export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = (set, get) => ({
   groups: new Map(),
   groupBySessionId: new Map(),
   findings: new Map(),
@@ -467,11 +469,25 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
       return { firstRunHintDismissed: true };
     }),
 
-  dismissStop: (findingId) =>
+  dismissStop: (findingId) => {
+    if (get().dismissedStopIds.has(findingId)) return;
     set((s) => {
-      if (s.dismissedStopIds.has(findingId)) return {};
       const dismissedStopIds = new Set(s.dismissedStopIds);
       dismissedStopIds.add(findingId);
       return { dismissedStopIds };
-    }),
+    });
+    // B2b: tell the server, so the dismissal survives a reload and a re-raised
+    // copy of the claim at a later checkpoint stays out of the banner. Best
+    // effort: the local dismissal above already hid this banner.
+    for (const [groupId, list] of get().findings) {
+      const f = list.find((x) => x.id === findingId);
+      if (!f) continue;
+      api
+        .disputeObserverFinding(groupId, { finding_id: f.id, claim: f.claim, evidence_path: f.evidence_path })
+        .catch((err: unknown) => {
+          console.warn("[council] dispute not recorded", err);
+        });
+      return;
+    }
+  },
 });

@@ -728,6 +728,9 @@ export function Sidebar() {
     for (const f of groupFindings) {
       if (f.severity !== "STOP") continue;
       if (f.wasDowngraded === true) continue;
+      // Same exclusions as findUnresolvedStops: weak (B2) and disputed (B2b)
+      // STOPs never count as unread blockers.
+      if (f.weakEvidence !== undefined || f.disputed !== undefined) continue;
       if (dismissedStopIds.has(f.id)) continue;
       unread++;
     }

@@ -168,6 +168,35 @@ describe("FindingsLog", () => {
     expect(screen.getByLabelText(/Weak evidence, not raised as a blocker — no cited lines/)).toBeInTheDocument();
   });
 
+  // B2b: a STOP the server matched to an earlier dismissal stays in the log
+  // as a STOP (still dismissable) with a labelled "dismissed earlier" chip
+  // naming how it matched.
+  it.each([
+    ["same_claim", "same claim"],
+    ["shared_anchor", "same quoted code"],
+  ] as const)("renders a disputed (%s) STOP with a labelled chip", (via, text) => {
+    const onDismissStop = vi.fn();
+    render(<FindingsLog findings={[finding({ id: "r", severity: "STOP", disputed: via })]} onDismissStop={onDismissStop} />);
+    const row = screen.getByTestId("finding-row-r");
+    expect(row).toHaveAttribute("data-severity", "STOP");
+    expect(row).toHaveAttribute("data-disputed", "true");
+    expect(screen.getByLabelText(`Dismissed earlier, not raised as a blocker — ${text}`)).toBeInTheDocument();
+  });
+
+  it("renders no disputed chip on an ordinary STOP", () => {
+    render(<FindingsLog findings={[finding({ id: "o", severity: "STOP" })]} />);
+    expect(screen.getByTestId("finding-row-o")).toHaveAttribute("data-disputed", "false");
+    expect(screen.queryByText("dismissed earlier")).toBeNull();
+  });
+
+  it("passes accessibility scan with a disputed row", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(
+      <FindingsLog findings={[finding({ id: "r", severity: "STOP", claim: "again", disputed: "shared_anchor" })]} onDismissStop={() => {}} />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
   it("passes accessibility scan with weak-evidence and line-downgraded rows", async () => {
     const { axe } = await import("vitest-axe");
     const { container } = render(

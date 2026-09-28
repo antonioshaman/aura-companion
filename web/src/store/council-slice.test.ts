@@ -47,6 +47,7 @@ import {
   hydrateObserverFinding,
 } from "./council-slice.js";
 import type { BrowserObserverFinding, GroupRecord } from "../types.js";
+import { api } from "../api.js";
 
 beforeEach(() => {
   useStore.getState().reset();
@@ -195,6 +196,13 @@ describe("hydrateObserverFinding", () => {
       hydrateObserverFinding(wireFinding({ wasDowngraded: true, downgradeReason: "evidence_lines_unchanged" }), ctx).downgradeReason,
     ).toBe("evidence_lines_unchanged");
     expect(hydrateObserverFinding(wireFinding(), ctx)).not.toHaveProperty("weakEvidence");
+  });
+
+  // B2b: the server's "dismissed earlier" mark survives hydration (it gates the banner).
+  it("preserves the disputed mark", () => {
+    const ctx = { receivedAt: 1_000, checkpointId: "chk", phase: "p", observerModel: "m", observerProvider: "codex" };
+    expect(hydrateObserverFinding(wireFinding({ disputed: "shared_anchor" }), ctx).disputed).toBe("shared_anchor");
+    expect(hydrateObserverFinding(wireFinding(), ctx)).not.toHaveProperty("disputed");
   });
 });
 
@@ -741,6 +749,41 @@ describe("dismissStop", () => {
     const before = useStore.getState().dismissedStopIds;
     useStore.getState().dismissStop("f1");
     expect(useStore.getState().dismissedStopIds).toBe(before);
+  });
+
+  // B2b: a dismissal is also sent to the server (once, with the claim the
+  // human saw) so it survives a reload and suppresses re-raised copies. A
+  // failed request must not undo the local dismissal.
+  it("persists the dismissal as a server-side dispute, once, keeping the local dismissal on failure", async () => {
+    const spy = vi.spyOn(api, "disputeObserverFinding").mockRejectedValue(new Error("offline"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      useStore.getState().upsertGroup(group());
+      useStore.getState().appendObserverReview({
+        sessionGroupId: "grp_abc",
+        checkpointId: "chk_1",
+        phase: "council-plan",
+        findings: [wireFinding({ id: "f1", claim: "`bun run --cwd web kb:record` fails", evidence_path: "a.diff" })],
+        downgrades: [],
+        observerModel: "gpt-5.5",
+        observerProvider: "codex",
+        timestamp: 1_500,
+      });
+      useStore.getState().dismissStop("f1");
+      useStore.getState().dismissStop("f1");
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy).toHaveBeenCalledWith("grp_abc", { finding_id: "f1", claim: "`bun run --cwd web kb:record` fails", evidence_path: "a.diff" });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(warn).toHaveBeenCalled();
+      expect(useStore.getState().dismissedStopIds.has("f1")).toBe(true);
+      // An id the store has no finding for (e.g. already pruned) stays local-only.
+      useStore.getState().dismissStop("unknown");
+      expect(spy).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+      warn.mockRestore();
+    }
   });
 });
 
