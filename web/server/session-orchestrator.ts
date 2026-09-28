@@ -46,6 +46,7 @@ export {
   type WakeDispatchOutcome,
 } from "./council-checkpoint-pipeline.js";
 import { CouncilObserverScheduler } from "./council-observer-scheduler.js";
+import { ObserverAutoheal, observerAutohealBlockedReason } from "./council-observer-autoheal.js";
 export {
   OBSERVER_CATCHUP_TIMEOUT_ESCALATION_THRESHOLD,
   OBSERVER_FAILSAFE_FALLBACK_MS,
@@ -305,6 +306,15 @@ export class SessionOrchestrator {
     replyCapture: this.observerReplyCapture,
     lineSnapshots: this.checkpointLineSnapshots,
     readLedger: this.observerReadLedger,
+    onObserverAdapterMissing: (gid, payload) => this.observerScheduler.requestCatchupWake(gid, payload),
+  });
+  /** P4/OBS-AUTOHEAL: bounded observer-only relaunch when its adapter is gone. */
+  private observerAutoheal = new ObserverAutoheal({
+    relaunchObserver: (id) => this.relaunchSession(id),
+    isObserverReadyForWake: (id) => this.observerReadyForWake(id),
+    blockedReason: (gid, id) =>
+      observerAutohealBlockedReason(this.coordinator?.get(gid), id,
+        (s) => this.recovery.isStoppedByUser(s), (s) => this.intentionalKills.has(s)),
   });
   /**
    * P4/C1b: observer wake scheduling outside the live watcher (missed-
@@ -320,6 +330,7 @@ export class SessionOrchestrator {
       this.dispatchObserverWake(sessionGroupId, payload);
     },
     isSessionStoppedByUser: (sessionId) => this.recovery.isStoppedByUser(sessionId),
+    autoheal: this.observerAutoheal,
   });
   private councilGroupDegradedReason = new Map<string, CouncilDegradedReason>();
   /**

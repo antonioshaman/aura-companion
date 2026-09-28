@@ -8,6 +8,7 @@ import { buildCheckpointFilename } from "./checkpoint-watcher.js";
 import { readCouncilWakeSentinel } from "./council-wake-sentinel.js";
 import type { CheckpointLineSnapshots } from "./observer-line-snapshots.js";
 import type { CouncilWatcherEntry } from "./council-checkpoint-pipeline.js";
+import type { ObserverAutoheal } from "./council-observer-autoheal.js";
 import { log } from "./logger.js";
 
 /**
@@ -31,6 +32,8 @@ import { log } from "./logger.js";
  * — a direct read of each group's `.council/checkpoints/` — so an unprocessed
  * checkpoint still wakes the observer even when the watcher is gone. The scan
  * is idempotent (Gate 0 sentinel), so a redundant tick is a cheap no-op.
+ * When the observer adapter never comes back, the catch-up poll hands it to
+ * the P4/OBS-AUTOHEAL relaunch (`council-observer-autoheal.ts`).
  *
  * Default 5 min; env-overridable, bounded to [10s, 1h] to catch operator
  * typos. Read once at module load (never in a hot path).
@@ -110,6 +113,13 @@ export interface CouncilObserverSchedulerDeps {
    * the pair to `degraded` although nothing crashed.
    */
   isSessionStoppedByUser?: (sessionId: string) => boolean;
+  /**
+   * P4/OBS-AUTOHEAL: when a catch-up poll times out because the observer's
+   * adapter never came back, relaunch the observer (bounded) and re-send the
+   * missed wake before counting a strike. Absent → the pre-autoheal
+   * strike/degrade behaviour.
+   */
+  autoheal?: ObserverAutoheal;
 }
 
 export class CouncilObserverScheduler {
@@ -385,6 +395,7 @@ export class CouncilObserverScheduler {
    */
   forgetGroup(sessionGroupId: string): void {
     this.spawnCheckpointPending.delete(sessionGroupId);
+    this.deps.autoheal?.forgetGroup(sessionGroupId);
     // P1-1: drop any per-checkpoint catch-up-timeout strike counts for this
     // group (keys are `${sessionGroupId}:${checkpointId}`) so they never
     // outlive the group.
@@ -535,33 +546,42 @@ export class CouncilObserverScheduler {
           consecutiveTimeouts: timeoutCount,
           escalationThreshold: OBSERVER_CATCHUP_TIMEOUT_ESCALATION_THRESHOLD,
         });
+        // P4/OBS-AUTOHEAL: the adapter never came back — relaunch the
+        // observer (bounded) and re-send this wake instead of waiting for the
+        // strike threshold. `healed` → wake sent, strikes cleared;
+        // `exhausted` → degrade now (the heal budget, not the strike count,
+        // decides); `skipped` because a half was stopped by the user or the
+        // group is gone → no strike (nothing crashed); rate-limited /
+        // in-flight → keep the strike and fall through to the threshold.
+        if (this.deps.autoheal) {
+          const heal = await this.deps.autoheal.heal(
+            sessionGroupId,
+            observerSessionId,
+            "adapter_wait_timed_out",
+            payload.checkpoint_id,
+          );
+          if (heal.kind === "healed") {
+            this.catchupWakeTimeouts.delete(inFlightKey);
+            if (this.deps.groupMeta.has(sessionGroupId)) this.deps.dispatchWake(sessionGroupId, payload);
+            return;
+          }
+          if (heal.kind === "exhausted") {
+            this.catchupWakeTimeouts.delete(inFlightKey);
+            this.escalateToDegraded(sessionGroupId, observerSessionId, payload, {
+              autohealAttempts: heal.attempts,
+            });
+            return;
+          }
+          if (heal.reason !== "rate_limited" && heal.reason !== "in_flight") {
+            this.catchupWakeTimeouts.delete(inFlightKey);
+            return;
+          }
+        }
         if (timeoutCount >= OBSERVER_CATCHUP_TIMEOUT_ESCALATION_THRESHOLD) {
           this.catchupWakeTimeouts.delete(inFlightKey);
-          const coordinator = this.deps.getCoordinator();
-          const stillLive =
-            coordinator?.get(sessionGroupId)?.status === "active" ||
-            coordinator?.get(sessionGroupId)?.status === "reconnecting";
-          if (coordinator && stillLive) {
-            log.warn("session-orchestrator", "council.wake.catchup_escalated_to_degraded", {
-              event: "council.wake.catchup_escalated_to_degraded",
-              sessionGroupId,
-              sessionId: observerSessionId,
-              role: "observer",
-              checkpointId: payload.checkpoint_id,
-              sequence: payload.sequence,
-              consecutiveTimeouts: timeoutCount,
-            });
-            // Observer never became reachable to receive the wake — model it
-            // as the observer half dying (deadRole=observer). `half_died` from
-            // `active`/`reconnecting` derives `group:degraded` via the same
-            // side-effect channel a real exit uses. `wake_send_failed` is the
-            // closest existing reason: we repeatedly failed to deliver the wake.
-            coordinator.applyEvent(sessionGroupId, {
-              type: "half_died",
-              role: "observer",
-              reason: "wake_send_failed",
-            });
-          }
+          this.escalateToDegraded(sessionGroupId, observerSessionId, payload, {
+            consecutiveTimeouts: timeoutCount,
+          });
         }
       } catch (err) {
         log.warn("session-orchestrator", "council.wake.restart_catchup_dispatch_failed", {
@@ -576,6 +596,63 @@ export class CouncilObserverScheduler {
     } finally {
       this.catchupWakesInFlight.delete(inFlightKey);
     }
+  }
+
+  /**
+   * P4/OBS-AUTOHEAL: a live checkpoint wake was skipped with
+   * `adapter_missing`. Instead of waiting up to one failsafe tick (5 min) for
+   * the scan to notice, start the catch-up poll now — it re-sends the wake
+   * once the adapter attaches, and auto-heals the observer if it never does.
+   * Deduped against an in-flight poll for the same checkpoint; a user-stopped
+   * observer is left alone.
+   */
+  requestCatchupWake(sessionGroupId: string, payload: CheckpointPayload): void {
+    const observerSessionId = this.deps.groupMeta.get(sessionGroupId)?.observerSessionId;
+    if (!observerSessionId) return;
+    if (this.deps.isSessionStoppedByUser?.(observerSessionId)) return;
+    const inFlightKey = `${sessionGroupId}:${payload.checkpoint_id}`;
+    if (this.catchupWakesInFlight.has(inFlightKey)) return;
+    log.info("session-orchestrator", "catchup wake requested after adapter_missing", {
+      event: "council.wake.adapter_missing_catchup",
+      sessionGroupId,
+      sessionId: observerSessionId,
+      role: "observer",
+      checkpointId: payload.checkpoint_id,
+      sequence: payload.sequence,
+    });
+    void this.scheduleCatchupWakeWhenObserverReady(sessionGroupId, payload);
+  }
+
+  /**
+   * Observer never became reachable to receive the wake — model it as the
+   * observer half dying (deadRole=observer). `half_died` from
+   * `active`/`reconnecting` derives `group:degraded` via the same side-effect
+   * channel a real exit uses. `wake_send_failed` is the closest existing
+   * reason: we repeatedly failed to deliver the wake.
+   */
+  private escalateToDegraded(
+    sessionGroupId: string,
+    observerSessionId: string,
+    payload: CheckpointPayload,
+    detail: Record<string, number>,
+  ): void {
+    const coordinator = this.deps.getCoordinator();
+    const status = coordinator?.get(sessionGroupId)?.status;
+    if (!coordinator || (status !== "active" && status !== "reconnecting")) return;
+    log.warn("session-orchestrator", "council.wake.catchup_escalated_to_degraded", {
+      event: "council.wake.catchup_escalated_to_degraded",
+      sessionGroupId,
+      sessionId: observerSessionId,
+      role: "observer",
+      checkpointId: payload.checkpoint_id,
+      sequence: payload.sequence,
+      ...detail,
+    });
+    coordinator.applyEvent(sessionGroupId, {
+      type: "half_died",
+      role: "observer",
+      reason: "wake_send_failed",
+    });
   }
 
   /**

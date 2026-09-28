@@ -45,7 +45,7 @@ function activeCoordinator(status = "active"): SessionGroupCoordinator {
   return { get: vi.fn(() => ({ sessionGroupId: GROUP, status })), applyEvent: vi.fn() } as unknown as SessionGroupCoordinator;
 }
 
-function makeHarness(): Harness {
+function makeHarness(opts: { onObserverAdapterMissing?: (g: string, p: CheckpointPayload) => void } = {}): Harness {
   const cwd = realpathSync(mkdtempSync(join(tmpdir(), "council-pipeline-")));
   const watchers = new Map<string, CouncilWatcherEntry>();
   const meta = new Map<string, CheckpointPipelineGroupMeta>();
@@ -67,6 +67,7 @@ function makeHarness(): Harness {
     }),
     lineSnapshots: new CheckpointLineSnapshots(),
     readLedger: ledger,
+    onObserverAdapterMissing: opts.onObserverAdapterMissing,
   });
   watchers.set(GROUP, {
     cwd,
@@ -297,5 +298,25 @@ describe("CouncilCheckpointPipeline (standalone, DI only)", () => {
       h.pipeline.handleCouncilReview(GROUP, review("chk_2"));
       expect(reviews[0]).toMatchObject({ artifactsRead: 0 });
     });
+  });
+
+  // P4/OBS-AUTOHEAL: an `adapter_missing` skip is handed to the injected
+  // hook (the orchestrator routes it to the scheduler's catch-up poll, which
+  // auto-heals the observer). Other skips — e.g. a disconnected socket, which
+  // the reconnect path owns — must NOT trigger it.
+  it("hands an adapter_missing skip to onObserverAdapterMissing, and only that skip", () => {
+    const hook = vi.fn();
+    const h = makeHarness({ onObserverAdapterMissing: hook });
+    h.setCoordinator(activeCoordinator());
+    h.send.mockReturnValueOnce({ kind: "adapter_missing" } as never);
+    const outcome = h.pipeline.dispatchObserverWake(GROUP, checkpoint(1));
+    expect(outcome).toEqual({ kind: "skipped", reason: "adapter_missing" });
+    expect(hook).toHaveBeenCalledTimes(1);
+    expect(hook.mock.calls[0][0]).toBe(GROUP);
+    expect(hook.mock.calls[0][1].checkpoint_id).toBe("chk_1");
+
+    h.send.mockReturnValueOnce({ kind: "socket_disconnected" } as never);
+    h.pipeline.dispatchObserverWake(GROUP, checkpoint(2));
+    expect(hook).toHaveBeenCalledTimes(1);
   });
 });

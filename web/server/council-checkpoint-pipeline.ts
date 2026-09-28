@@ -188,6 +188,13 @@ export interface CouncilCheckpointPipelineDeps {
   lineSnapshots: CheckpointLineSnapshots;
   /** P3/CONV-HONEST: host-observed observer tool calls per dispatched wake. */
   readLedger: Pick<ObserverReadLedger, "begin" | "touchesFor">;
+  /**
+   * P4/OBS-AUTOHEAL: a wake was skipped because the observer's backend
+   * adapter is gone. The orchestrator hands it to the scheduler's catch-up
+   * poll, which re-sends it once the adapter attaches and auto-heals the
+   * observer if it never does.
+   */
+  onObserverAdapterMissing?: (sessionGroupId: string, payload: CheckpointPayload) => void;
 }
 
 export class CouncilCheckpointPipeline {
@@ -613,6 +620,9 @@ export class CouncilCheckpointPipeline {
           sequence: payload.sequence,
           reason: outcome.reason,
         });
+        if (bridgeOutcome.kind === "adapter_missing") {
+          this.deps.onObserverAdapterMissing?.(sessionGroupId, payload);
+        }
         return outcome;
       }
       case "failed": {
