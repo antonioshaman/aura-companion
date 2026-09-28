@@ -13,7 +13,7 @@
 
 import type { Hono } from "hono";
 import { resolve, sep } from "node:path";
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
 
 import { respondError } from "../respond-error.js";
 import type { CliLauncher } from "../cli-launcher.js";
@@ -84,37 +84,60 @@ export function registerCouncilEconomyRoutes(api: Hono, deps: { launcher: CliLau
     if (!session) {
       return respondError(c, 404, "not_found", { module: "council.economy.cache.hash", detail: { sessionId } });
     }
-    const rootResolved = resolve(session.cwd);
+    // realpath the workspace root once so the bounds check is symlink-safe (a
+    // lexical `startsWith` alone is bypassable by a symlink inside the workspace
+    // pointing outside — observer STOP).
+    let rootReal: string;
+    try {
+      rootReal = realpathSync(resolve(session.cwd));
+    } catch {
+      return respondError(c, 404, "not_found", {
+        module: "council.economy.cache.hash",
+        detail: { sessionId, reason: "workspace path does not resolve" },
+      });
+    }
     const entries: FileEntry[] = [];
     for (const p of paths) {
       if (typeof p !== "string" || p.length === 0 || p.length > MAX_HASH_PATH_LEN) {
         return respondError(c, 400, "bad_request", { module: "council.economy.cache.hash", detail: { reason: "bad path entry" } });
       }
-      const abs = resolve(rootResolved, p);
-      // Traversal guard: the resolved path must stay within the session workspace.
-      if (abs !== rootResolved && !abs.startsWith(rootResolved + sep)) {
+      const abs = resolve(rootReal, p);
+      // Fast lexical reject of `..` escapes before touching the filesystem.
+      if (abs !== rootReal && !abs.startsWith(rootReal + sep)) {
         return respondError(c, 403, "forbidden", {
           module: "council.economy.cache.hash",
           detail: { reason: "path escapes workspace", path: p },
+        });
+      }
+      // Symlink-safe bounds: resolve the REAL path; a symlink whose target escapes
+      // the workspace is refused. A missing file has no realpath → deletion
+      // sentinel (matches the CLI; a nonexistent path can't leak anything).
+      let real: string | null = null;
+      try {
+        real = realpathSync(abs);
+      } catch {
+        entries.push({ path: p, content: UNREADABLE_SENTINEL });
+        continue;
+      }
+      if (real !== rootReal && !real.startsWith(rootReal + sep)) {
+        return respondError(c, 403, "forbidden", {
+          module: "council.economy.cache.hash",
+          detail: { reason: "symlink target escapes workspace", path: p },
         });
       }
       // Reject (never truncate) an over-cap file: a truncated hash would go blind to
       // changes past the cap and forge a false cache hit.
       let content: string;
       try {
-        const size = statSync(abs).size;
+        const size = statSync(real).size;
         if (size > MAX_HASH_FILE_BYTES) {
           return respondError(c, 400, "bad_request", {
             module: "council.economy.cache.hash",
             detail: { reason: "file too large to hash", path: p, size },
           });
         }
-        content = readFileSync(abs).toString("utf8");
-      } catch (e) {
-        // A missing/unreadable file folds in as the deletion sentinel (matches the
-        // CLI); but a size-cap rejection above already returned. Only genuine
-        // ENOENT/EACCES reach here.
-        void e;
+        content = readFileSync(real).toString("utf8");
+      } catch {
         content = UNREADABLE_SENTINEL;
       }
       entries.push({ path: p, content });

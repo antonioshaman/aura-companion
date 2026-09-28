@@ -5,7 +5,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Hono } from "hono";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -104,6 +104,19 @@ describe("POST /council/economy/cache/hash", () => {
   it("403s a path that escapes the session workspace (traversal guard)", async () => {
     const res = await post("/council/economy/cache/hash", { sessionId: "sess-1", paths: ["../../etc/passwd"] });
     expect(res.status).toBe(403);
+  });
+
+  it("403s a SYMLINK inside the workspace whose target escapes it (symlink-safe bounds)", async () => {
+    // A secret outside the workspace, and a symlink inside it pointing at the secret.
+    const outside = mkdtempSync(join(tmpdir(), "econ-secret-"));
+    writeFileSync(join(outside, "secret.txt"), "TOP SECRET");
+    symlinkSync(join(outside, "secret.txt"), join(workspace, "leak.ts"));
+    try {
+      const res = await post("/council/economy/cache/hash", { sessionId: "sess-1", paths: ["leak.ts"] });
+      expect(res.status).toBe(403); // lexical guard passes, realpath bounds catches it
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
   });
 
   it("400s (never truncates) a file larger than the hash cap", async () => {
