@@ -54,6 +54,11 @@ import {
   resolveCompanionCodexSessionHome,
 } from "./codex-home.js";
 import { reconcileProviderAuthForRelaunch } from "./provider-auth-env.js";
+import {
+  buildLayerSpawnConfig,
+  composeSystemPrompt,
+  type LayerFlags,
+} from "./layer-flags.js";
 
 /**
  * Control-channel transport for Claude sessions.
@@ -262,6 +267,9 @@ export interface SdkSessionInfo {
   agentName?: string;
   /** Sandbox profile slug used for this session */
   sandboxSlug?: string;
+  /** aura-meta-diet C3 — non-default layer flags (absent = all layers on).
+   *  Persisted so a relaunch re-applies the same restrictions. */
+  layers?: LayerFlags;
 
   // Codex WebSocket transport fields
   /** Port used for Codex WebSocket transport (host mode). */
@@ -371,6 +379,12 @@ export interface LaunchOptions {
    *  launcher disables the recorder for this sessionId before the
    *  adapter wires its first `record()` call. */
   record?: boolean;
+  /** aura-meta-diet C3 — resolved layer flags. Absent or all-default →
+   *  spawn argv unchanged. See `layer-flags.ts`. */
+  layers?: LayerFlags;
+  /** Internal: layer directive composed by `applyLayerSpawnOverrides`;
+   *  appended to Claude's system prompt / Codex thread instructions. */
+  layerSystemPrompt?: string;
 }
 
 /**
@@ -1032,10 +1046,17 @@ export class CliLauncher {
     // Council Mode observer spawn config (council review #1 P1#1) is
     // applied uniformly across both backends and reused on relaunch so
     // the council context isn't lost on every non-initial spawn (#4).
-    const effectiveOptions = this.buildObserverSpawnOverrides(sessionId, info, {
-      ...options,
-      model: launchModel,
-    });
+    // Stored whenever the caller resolved flags (routes always do), so the
+    // per-session choice survives relaunch and outranks a later env change.
+    if (options.layers) {
+      info.layers = options.layers;
+    }
+    const effectiveOptions = this.applyLayerSpawnOverrides(
+      this.buildObserverSpawnOverrides(sessionId, info, {
+        ...options,
+        model: launchModel,
+      }),
+    );
 
     this.sessions.set(sessionId, info);
     if (effectiveOptions.env) {
@@ -1152,6 +1173,23 @@ export class CliLauncher {
         `observer spawn config load failed for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+  }
+
+  /**
+   * aura-meta-diet C3: fold the layer flags into the spawn options — extra
+   * `--disallowedTools` rules (Claude) and the layer directive. Runs AFTER
+   * {@link buildObserverSpawnOverrides}, which replaces `disallowedTools`
+   * wholesale for the observer profile; the layer rules are added on top,
+   * never widening. Default flags → options returned unchanged.
+   */
+  private applyLayerSpawnOverrides(options: LaunchOptions): LaunchOptions {
+    const layer = buildLayerSpawnConfig(options.layers);
+    if (layer.disallowedTools.length === 0 && !layer.systemPrompt) return options;
+    return {
+      ...options,
+      disallowedTools: [...(options.disallowedTools ?? []), ...layer.disallowedTools],
+      layerSystemPrompt: layer.systemPrompt,
+    };
   }
 
   /**
@@ -1347,6 +1385,7 @@ export class CliLauncher {
         env: runtimeEnv,
         sessionGroupId: info.sessionGroupId,
         sessionGroupRole: info.sessionGroupRole,
+        layers: info.layers,
       }
       : {
         model: info.model,
@@ -1359,6 +1398,7 @@ export class CliLauncher {
         env: runtimeEnv,
         sessionGroupId: info.sessionGroupId,
         sessionGroupRole: info.sessionGroupRole,
+        layers: info.layers,
       };
     // Council Review 2026-05-15-0820 P2 #7: detect drift in observer
     // prompt provenance across the relaunch boundary. Snapshot captured
@@ -1367,7 +1407,9 @@ export class CliLauncher {
     // gated below (CR-3).
     let effectiveRelaunchOptions: LaunchOptions;
     try {
-      effectiveRelaunchOptions = this.buildObserverSpawnOverrides(sessionId, info, baseRelaunchOptions);
+      effectiveRelaunchOptions = this.applyLayerSpawnOverrides(
+        this.buildObserverSpawnOverrides(sessionId, info, baseRelaunchOptions),
+      );
     } catch (err) {
       info.exitCode = 1;
       // Council Review 2026-05-15-0820 P2 #8 (D4): emit `session:relaunch-failed`
@@ -1556,12 +1598,16 @@ export class CliLauncher {
     // about provenance ("source transitioned" when the model still sees
     // the old prompt). Only the fresh-fallback path (uptime<5000ms
     // cleared cliSessionId → no resume) actually re-applies the prompt.
-    if (
-      options.systemPrompt &&
-      options.sessionGroupRole === "observer" &&
-      !options.resumeSessionId
-    ) {
-      args.push("--append-system-prompt", options.systemPrompt);
+    //
+    // aura-meta-diet C3: the layer-flag directive rides the same flag (one
+    // `--append-system-prompt` — a second occurrence would override the
+    // first) and obeys the same skip-on-resume rule.
+    const appendedSystemPrompt = composeSystemPrompt(
+      options.sessionGroupRole === "observer" ? options.systemPrompt : undefined,
+      options.layerSystemPrompt,
+    );
+    if (appendedSystemPrompt && !options.resumeSessionId) {
+      args.push("--append-system-prompt", appendedSystemPrompt);
     }
     if (options.disallowedTools && options.disallowedTools.length > 0) {
       for (const tool of options.disallowedTools) {
@@ -2195,7 +2241,7 @@ export class CliLauncher {
       threadId: info.cliSessionId,
       sandbox: options.codexSandbox,
       recorder: this.recorder ?? undefined,
-      systemPrompt: options.systemPrompt,
+      systemPrompt: composeSystemPrompt(options.systemPrompt, options.layerSystemPrompt),
       killProcess: async () => {
         try {
           proxyProc.kill("SIGTERM");
@@ -2450,7 +2496,7 @@ export class CliLauncher {
       threadId: info.cliSessionId,
       sandbox: options.codexSandbox,
       recorder: this.recorder ?? undefined,
-      systemPrompt: options.systemPrompt,
+      systemPrompt: composeSystemPrompt(options.systemPrompt, options.layerSystemPrompt),
     });
 
     // Handle init errors — mark session as exited so UI shows failure.
