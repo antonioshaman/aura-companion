@@ -34,11 +34,8 @@ import { SessionGroupCoordinator } from "./session-group-coordinator.js";
 import { isSupportedPairing as _isSupportedPairing } from "./backend-provider.js";
 import { join } from "node:path";
 import { mkdirSync, readdirSync, readFileSync, existsSync, statSync } from "node:fs";
-import { IdleTimerManager } from "./idle-timer-manager.js";
-import {
-  buildNoopIdleTimerManager,
-  runAutoProceedBootReconcile,
-} from "./auto-proceed-orchestrator-bindings.js";
+import type { IdleTimerManager } from "./idle-timer-manager.js";
+import { CouncilAutoProceedController } from "./council-auto-proceed-controller.js";
 import type { CheckpointPayload, ObserverReviewPayload } from "./council-types.js";
 import { parseObserverReviewPayload } from "./council-types.js";
 import { writeAtomicJson } from "./atomic-write.js";
@@ -337,19 +334,6 @@ export class SessionOrchestrator {
   private prPoller: SessionOrchestratorDeps["prPoller"];
   private agentExecutor: AgentExecutor;
   /**
-   * Auto-proceed idle-timer manager (PLAN Task 7+9). Lifecycle:
-   *  - Boot reconcile: in {@link initialize}, after `reconcileCouncilGroups`,
-   *    scan each active group's `.council/state/` for trace JSON and
-   *    rehydrate the per-session iteration counter via `manager.rehydrate`.
-   *  - SIGTERM drain: `disposeAll()` is the FIRST step in `group-shutdown.ts`,
-   *    called BEFORE kill propagation (EC-2 extends naturally — timers
-   *    cleared before kills fire to children).
-   * Null-object when DI omits it so test paths and existing tests don't
-   * crash; production always wires the real manager from `index.ts`.
-   */
-  private idleTimerManager: IdleTimerManager;
-
-  /**
    * Bidirectional pipeline Story 4.1: convergence tracker folds the
    * `group:review` stream into a per-group clean-cycle counter. Lazy-
    * initialised in {@link initialize} after `wireGroupListeners` so the
@@ -440,6 +424,11 @@ export class SessionOrchestrator {
    */
   private councilGroupBySessionId = new Map<string, string>();
   /**
+   * P4/C1c: auto-proceed (AFK idle-timeout) controller — owns the idle-timer
+   * manager handle and its call sites. Built in the constructor (needs DI).
+   */
+  private autoProceed: CouncilAutoProceedController;
+  /**
    * P3/B1: the observer replies with a bare findings array; the host builds
    * the review envelope and writes the file (see `observer-reply.ts`).
    * Deps resolve `this.*` lazily at call time.
@@ -465,7 +454,7 @@ export class SessionOrchestrator {
     groupMeta: this.councilGroupMeta,
     getCoordinator: () => this.coordinator,
     getWsBridge: () => this.wsBridge,
-    isApiLimitReached: (sessionId) => this.idleTimerManager.isApiLimitReached(sessionId),
+    isApiLimitReached: (sessionId) => this.autoProceed.isApiLimitReached(sessionId),
     replyCapture: this.observerReplyCapture,
     lineSnapshots: this.checkpointLineSnapshots,
   });
@@ -514,11 +503,11 @@ export class SessionOrchestrator {
     this.worktreeTracker = deps.worktreeTracker;
     this.prPoller = deps.prPoller;
     this.agentExecutor = deps.agentExecutor;
-    // Null-object default when DI omits the manager. Disposing a null
-    // manager is a no-op; rehydrate is a no-op; arm/cancel/note are no-ops.
-    // Production wires the real manager from `index.ts` so the boot
-    // reconcile path actually rehydrates traces.
-    this.idleTimerManager = deps.idleTimerManager ?? buildNoopIdleTimerManager();
+    this.autoProceed = new CouncilAutoProceedController({
+      manager: deps.idleTimerManager,
+      groupMeta: this.councilGroupMeta,
+      watchers: this.councilWatchers,
+    });
   }
 
   /**
@@ -528,7 +517,7 @@ export class SessionOrchestrator {
    * kills fire to children.
    */
   getIdleTimerManager(): IdleTimerManager {
-    return this.idleTimerManager;
+    return this.autoProceed.getManager();
   }
 
   /**
@@ -541,7 +530,7 @@ export class SessionOrchestrator {
    * setter BEFORE `initialize()` runs the boot reconcile.
    */
   setIdleTimerManager(manager: IdleTimerManager): void {
-    this.idleTimerManager = manager;
+    this.autoProceed.setManager(manager);
   }
 
   // ── Initialization (event wiring) ──────────────────────────────────────────
@@ -555,33 +544,12 @@ export class SessionOrchestrator {
       this.launcher.setCLISessionId(sessionId, cliSessionId);
     });
 
-    // Task 11.6 — cross-tab single-firer wiring for the auto-proceed
-    // turn-token. The bridge fires `onUserFrameObserved` once per
-    // browser→server `user_message` frame regardless of tab count.
-    // Forwarding to `idleTimerManager.noteUserMessage` advances the
-    // per-session monotonic turn-token, which cancels any pending
-    // synthetic-fire and invalidates an in-flight fire callback (the
-    // re-read inside `fire()` is the actual single-firer gate; this
-    // wiring is the observability path that drives it).
-    //
-    // Production caller for `IdleTimerManager.noteUserMessage` — closes
-    // the call-site gap from Task 11.1 foundation work where the method
-    // shipped with unit tests but no production wiring.
-    this.wsBridge.onUserFrameObserved((sessionId) => {
-      this.idleTimerManager.noteUserMessage(sessionId);
-    });
-
-    // Task 11.8 — clear the pending-synthetic-turn sticky token on every
-    // session exit. Without this, a session that died mid-synthetic-turn
-    // (CLI crash before result-frame, container teardown, manual kill)
-    // would leave the sticky token armed in the manager; if the same
-    // sessionId were later re-used (--resume), the next can_use_tool
-    // check would falsely treat the resumed session as auto-proceed-
-    // driven. `clearPendingSyntheticTurn` is idempotent on never-armed
-    // sessions, so firing it on every exit is safe regardless of
-    // whether auto-proceed was actually in play.
-    companionBus.on("session:exited", ({ sessionId }) => {
-      this.idleTimerManager.clearPendingSyntheticTurn(sessionId);
+    // P4/C1c: auto-proceed call sites — Task 11.6 cross-tab user-frame gate
+    // (bridge → manager.noteUserMessage) and Task 11.8 sticky-token clear on
+    // every session exit. See `council-auto-proceed-controller.ts`.
+    this.autoProceed.wire({
+      onUserFrameObserved: (cb) => this.wsBridge.onUserFrameObserved(cb),
+      onSessionExited: (cb) => companionBus.on("session:exited", ({ sessionId }) => cb(sessionId)),
     });
 
     // Council Mode auto-wake (Task 4 drain hook): when the observer
@@ -980,43 +948,11 @@ export class SessionOrchestrator {
     // each trace maps to a known orchestrator-half. Idempotent — safe to
     // call multiple times; re-rehydrating with the same trace produces
     // the same in-memory state.
-    this.rehydrateAutoProceedTraces();
+    this.autoProceed.rehydrateTraces();
 
     // Reconnection watchdog for stale sessions after server restart
     this.startReconnectionWatchdog();
   }
-
-  /**
-   * PLAN-aura-orchestrator-idle-auto-proceed Task 9: boot reconcile.
-   *
-   * Walks each active council group's `.council/state/` directory looking
-   * for `<group-id>-auto-proceed-trace.json` files. For each parseable
-   * trace whose `sessionGroupId` matches a reconciled group, calls
-   * {@link IdleTimerManager.rehydrate} with the orchestrator-half session
-   * id so the in-memory iteration counter resumes from disk rather than
-   * starting at zero.
-   *
-   * Logic lives in the dependency-injected
-   * {@link reconcileAutoProceedTraces} reducer so the unit test exercises
-   * the real filesystem + real manager without standing up the
-   * orchestrator's full event-bus harness. This method is just the
-   * concrete-bindings adapter.
-   *
-   * Idempotency: re-running with no on-disk changes is a no-op. Errors
-   * are caught + logged inside the reducer; this method never throws so
-   * `initialize()` always completes.
-   */
-  private rehydrateAutoProceedTraces(): void {
-    runAutoProceedBootReconcile(
-      this.councilGroupMeta,
-      this.councilWatchers,
-      this.idleTimerManager,
-      (entry) =>
-        log.info("session-orchestrator", "auto-proceed reconcile", entry as unknown as Record<string, unknown>),
-    );
-  }
-
-
 
   /**
    * Silent-stdio drift detector — recurring tick. Idempotent: a
@@ -1679,14 +1615,8 @@ export class SessionOrchestrator {
       kill: async (sessionId) => {
         await this.killSession(sessionId);
       },
-      // PLAN Task 8: route applyEvent's auto-proceed idle-timer descriptors
-      // into the real IdleTimerManager. AP-2 — the state machine is the
-      // sole mutator; this seam is the enactor that drains its effects.
-      idleTimerEnactor: {
-        arm: (sessionId, options) => this.idleTimerManager.arm(sessionId, options),
-        cancel: (sessionId) => this.idleTimerManager.cancel(sessionId),
-        noteUserMessage: (sessionId) => this.idleTimerManager.noteUserMessage(sessionId),
-      },
+      // PLAN Task 8 (AP-2): the coordinator drains idle-timer effects here.
+      idleTimerEnactor: this.autoProceed.enactor,
     });
     return this.coordinator;
   }
@@ -2619,7 +2549,7 @@ export class SessionOrchestrator {
       // so it's unconditionally before any kill — listener handles late
       // edge cases as belt-and-braces, not as the primary defence.
       // Idempotent on never-armed sessions.
-      this.idleTimerManager.clearPendingSyntheticTurn(group.primary.sessionId);
+      this.autoProceed.clearPendingSyntheticTurn(group.primary.sessionId);
 
       await coord.archiveGroup(group.sessionGroupId);
 
@@ -3308,7 +3238,7 @@ export class SessionOrchestrator {
     reason: "rate_limit" | "out_of_credits" | "unknown_model" | "model_not_available",
   ): Promise<void> {
     if (reason === "rate_limit" || reason === "out_of_credits") {
-      this.idleTimerManager.noteApiLimitReached(sessionId);
+      this.autoProceed.noteApiLimitReached(sessionId);
     }
 
     const info = this.launcher.getSession(sessionId);
