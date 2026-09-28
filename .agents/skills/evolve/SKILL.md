@@ -27,12 +27,12 @@ Start from the mechanical report — `bun run --cwd web kb:health` (total, used�
 When a pattern appears 3+ times across sessions or has high confidence with broad impact:
 
 1. Extract the core rule
-2. Add it to the appropriate section in `CLAUDE.md`
+2. Add it where it belongs: `CLAUDE.md` only if it is load-bearing for **every** session and the file stays within its 15 360-byte budget (guarded by `web/server/claude-md-budget.test.ts`); otherwise the matching on-demand doc under `docs/architecture/` or `docs/conventions/` (already linked from `CLAUDE.md`)
 3. Mark the KB entry as `promoted: true` (keep for history, but no longer surfaced by `/prime`)
 
 **Example promotion:**
 - KB entry: "Always test WebSocket changes against both NDJSON and JSON-RPC backends"
-- → Becomes a bullet point in CLAUDE.md's Architecture section
+- → Becomes a bullet point in `docs/architecture/overview.md` (area-specific, so not in the `CLAUDE.md` core)
 
 ### 3. Prune Stale Entries (mode: prune)
 
