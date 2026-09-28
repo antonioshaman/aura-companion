@@ -55,6 +55,7 @@
     "eval:label-export": "bun evals/label-export-runner.ts",
     "eval:compare": "bun evals/compare-runner.ts",
     "eval:redteam": "bun evals/redteam-runner.ts",
+    "eval:aurabench": "bun evals/aurabench-runner.ts",
     "kb:health": "bun scripts/kb-health.ts report",
     "kb:record": "bun scripts/kb-health.ts record",
     "kb:prune": "bun scripts/kb-health.ts prune"
