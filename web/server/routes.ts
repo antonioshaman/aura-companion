@@ -875,9 +875,10 @@ export function createRoutes(
 
   // ─── Council Mode — dispute an observer STOP (meta-diet B2b) ──────────────
   //
-  // The browser calls this when a human dismisses a STOP. The server persists
-  // the claim per group (`.council/state/<group>-disputes.json`); a later STOP
-  // repeating it is marked `disputed` and kept out of the blocker banner. The
+  // The browser calls this when a human presses "Dispute" on a STOP (not on a
+  // plain "Dismiss for now"). The server persists the claim per group
+  // (`.council/state/<group>-disputes.json`); a later STOP repeating it on the
+  // same evidence file is marked `disputed` and kept out of the banner. The
   // browser sends the claim text it was shown: the server has no finding-id
   // index, and the claim is what the match runs on anyway.
   api.post("/groups/:groupId/disputes", async (c) => {

@@ -11,7 +11,10 @@
  *  - Reasoning visible — evidence path + line range + observer attribution
  *    are spelled out. Not a verdict in isolation.
  *  - Dismissable but not snoozable; dismissed STOPs remain in the
- *    FindingsLog permanently.
+ *    FindingsLog permanently. "Dismiss for now" only hides this banner in
+ *    this tab. "Dispute" is the separate, explicit "this claim is wrong"
+ *    action: it is remembered server-side and keeps a re-raise of the claim
+ *    on the same evidence file out of the banner (FIX-B2b-1).
  *  - Renders ONLY through JSX text content; never `dangerouslySetInnerHTML`.
  */
 
@@ -22,8 +25,10 @@ export interface BlockerBannerProps {
   finding: ObserverFinding;
   /** Wallclock (ms) used for the relative-time stamp; defaults to Date.now(). */
   nowMs?: number;
-  /** Dismiss this STOP from the banner. Finding remains in FindingsLog. */
+  /** Dismiss this STOP from the banner (this tab only). Finding remains in FindingsLog. */
   onDismiss: (findingId: string) => void;
+  /** Optional: mark the claim wrong so its re-raise on the same file stays out of the banner. */
+  onDispute?: (findingId: string) => void;
   /** Optional callback when user clicks "Open evidence" (route to editor or file panel). */
   onOpenEvidence?: (finding: ObserverFinding) => void;
   /** Optional callback when user marks the STOP addressed (same as dismiss in v1; reserved for future status). */
@@ -41,6 +46,7 @@ export function BlockerBanner({
   finding,
   nowMs,
   onDismiss,
+  onDispute,
   onOpenEvidence,
   onMarkAddressed,
 }: BlockerBannerProps) {
@@ -87,7 +93,9 @@ export function BlockerBanner({
 
             {/* Actions — `data-council-blocker-primary` marks the primary
                 action so the Cmd/Ctrl+Shift+B shortcut can focus it.
-                Stacking: Open evidence > Mark addressed > Dismiss. */}
+                Stacking: Open evidence > Mark addressed > Dispute > Dismiss.
+                Dispute is never the primary: a keyboard shortcut must not
+                silently suppress future blockers. */}
             <div className="mt-3 flex flex-wrap items-center gap-2">
               {onOpenEvidence && (
                 <button
@@ -108,6 +116,21 @@ export function BlockerBanner({
                 >
                   Mark addressed
                 </button>
+              )}
+              {onDispute && (
+                <button
+                  type="button"
+                  onClick={() => onDispute(finding.id)}
+                  aria-describedby={`blocker-dispute-hint-${finding.id}`}
+                  className="text-xs font-medium px-3 py-1.5 rounded-md bg-cc-card hover:bg-cc-hover text-cc-fg border border-cc-border transition-colors cursor-pointer"
+                >
+                  Dispute
+                </button>
+              )}
+              {onDispute && (
+                <span id={`blocker-dispute-hint-${finding.id}`} className="sr-only">
+                  Marks this claim as wrong. The observer repeating it about {finding.evidence_path} will not raise a blocker again.
+                </span>
               )}
               <button
                 type="button"

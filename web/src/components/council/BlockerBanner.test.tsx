@@ -86,6 +86,41 @@ describe("BlockerBanner", () => {
   // Hunt P1 / Willison P2 — the renderer must escape content. JSX text
   // content does this automatically; we verify by asserting an injected
   // script tag is rendered as literal text, not as a DOM element.
+  // FIX-B2b-1: "Dismiss for now" and "Dispute" are separate actions. Dismiss
+  // is local and temporary; only Dispute says "this claim is wrong" and is
+  // persisted server-side. A click on one must never fire the other.
+  it("keeps Dismiss and Dispute separate: each click fires only its own callback", () => {
+    const onDismiss = vi.fn();
+    const onDispute = vi.fn();
+    render(<BlockerBanner finding={finding({ id: "x" })} onDismiss={onDismiss} onDispute={onDispute} />);
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss for now" }));
+    expect(onDismiss).toHaveBeenCalledWith("x");
+    expect(onDispute).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Dispute" }));
+    expect(onDispute).toHaveBeenCalledWith("x");
+    expect(onDismiss).toHaveBeenCalledTimes(1);
+  });
+
+  // The Dispute button's consequence (scoped to the evidence file) is spelled
+  // out for assistive tech; with no onDispute the button is absent.
+  it("describes what Dispute does, scoped to the evidence file, and hides it without onDispute", () => {
+    const { unmount } = render(<BlockerBanner finding={finding()} onDismiss={() => {}} onDispute={() => {}} />);
+    expect(screen.getByRole("button", { name: "Dispute" })).toHaveAccessibleDescription(
+      /about web\/server\/session-orchestrator\.ts will not raise a blocker again/,
+    );
+    unmount();
+    render(<BlockerBanner finding={finding()} onDismiss={() => {}} />);
+    expect(screen.queryByRole("button", { name: "Dispute" })).toBeNull();
+  });
+
+  // Dispute suppresses future blockers, so the Cmd/Ctrl+Shift+B shortcut
+  // (which focuses the primary action) must never land on it.
+  it("never marks Dispute as the primary action", () => {
+    render(<BlockerBanner finding={finding()} onDismiss={() => {}} onDispute={() => {}} />);
+    expect(screen.getByRole("button", { name: "Dispute" })).not.toHaveAttribute("data-council-blocker-primary");
+    expect(screen.getByRole("button", { name: "Dismiss for now" })).toHaveAttribute("data-council-blocker-primary");
+  });
+
   it("escapes HTML in claim — script tags are rendered as literal text, not HTML", () => {
     const malicious = '<img src=x onerror="alert(1)"> &lt;b&gt;tagged&lt;/b&gt;';
     render(<BlockerBanner finding={finding({ claim: malicious })} onDismiss={() => {}} />);
@@ -109,6 +144,7 @@ describe("BlockerBanner", () => {
       <BlockerBanner
         finding={finding()}
         onDismiss={() => {}}
+        onDispute={() => {}}
         onOpenEvidence={() => {}}
         onMarkAddressed={() => {}}
       />,

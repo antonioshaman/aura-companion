@@ -198,7 +198,7 @@ describe("hydrateObserverFinding", () => {
     expect(hydrateObserverFinding(wireFinding(), ctx)).not.toHaveProperty("weakEvidence");
   });
 
-  // B2b: the server's "dismissed earlier" mark survives hydration (it gates the banner).
+  // B2b: the server's "disputed earlier" mark survives hydration (it gates the banner).
   it("preserves the disputed mark", () => {
     const ctx = { receivedAt: 1_000, checkpointId: "chk", phase: "p", observerModel: "m", observerProvider: "codex" };
     expect(hydrateObserverFinding(wireFinding({ disputed: "shared_anchor" }), ctx).disputed).toBe("shared_anchor");
@@ -751,26 +751,49 @@ describe("dismissStop", () => {
     expect(useStore.getState().dismissedStopIds).toBe(before);
   });
 
-  // B2b: a dismissal is also sent to the server (once, with the claim the
-  // human saw) so it survives a reload and suppresses re-raised copies. A
-  // failed request must not undo the local dismissal.
-  it("persists the dismissal as a server-side dispute, once, keeping the local dismissal on failure", async () => {
+  // FIX-B2b-1: "Dismiss for now" is local and temporary. It must NOT create a
+  // server-side dispute (B2b did, so any dismissal permanently silenced every
+  // later STOP quoting the same command).
+  it("does not persist anything server-side", () => {
+    const spy = vi.spyOn(api, "disputeObserverFinding").mockResolvedValue({ ok: true, added: true });
+    try {
+      useStore.getState().upsertGroup(group());
+      appendStop();
+      useStore.getState().dismissStop("f1");
+      expect(useStore.getState().dismissedStopIds.has("f1")).toBe(true);
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+function appendStop(): void {
+  useStore.getState().appendObserverReview({
+    sessionGroupId: "grp_abc",
+    checkpointId: "chk_1",
+    phase: "council-plan",
+    findings: [wireFinding({ id: "f1", claim: "`bun run --cwd web kb:record` fails", evidence_path: "a.diff" })],
+    downgrades: [],
+    observerModel: "gpt-5.5",
+    observerProvider: "codex",
+    timestamp: 1_500,
+  });
+}
+
+describe("disputeStop", () => {
+  // B2b: an explicit dispute hides the banner locally AND is sent to the
+  // server (once, with the claim + path the human saw) so it survives a
+  // reload and suppresses re-raised copies on the same file. A failed request
+  // must not undo the local dismissal.
+  it("persists the dispute server-side, once, keeping the local dismissal on failure", async () => {
     const spy = vi.spyOn(api, "disputeObserverFinding").mockRejectedValue(new Error("offline"));
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       useStore.getState().upsertGroup(group());
-      useStore.getState().appendObserverReview({
-        sessionGroupId: "grp_abc",
-        checkpointId: "chk_1",
-        phase: "council-plan",
-        findings: [wireFinding({ id: "f1", claim: "`bun run --cwd web kb:record` fails", evidence_path: "a.diff" })],
-        downgrades: [],
-        observerModel: "gpt-5.5",
-        observerProvider: "codex",
-        timestamp: 1_500,
-      });
-      useStore.getState().dismissStop("f1");
-      useStore.getState().dismissStop("f1");
+      appendStop();
+      useStore.getState().disputeStop("f1");
+      useStore.getState().disputeStop("f1");
       expect(spy).toHaveBeenCalledTimes(1);
       expect(spy).toHaveBeenCalledWith("grp_abc", { finding_id: "f1", claim: "`bun run --cwd web kb:record` fails", evidence_path: "a.diff" });
       await Promise.resolve();
@@ -778,8 +801,9 @@ describe("dismissStop", () => {
       expect(warn).toHaveBeenCalled();
       expect(useStore.getState().dismissedStopIds.has("f1")).toBe(true);
       // An id the store has no finding for (e.g. already pruned) stays local-only.
-      useStore.getState().dismissStop("unknown");
+      useStore.getState().disputeStop("unknown");
       expect(spy).toHaveBeenCalledTimes(1);
+      expect(useStore.getState().dismissedStopIds.has("unknown")).toBe(true);
     } finally {
       spy.mockRestore();
       warn.mockRestore();

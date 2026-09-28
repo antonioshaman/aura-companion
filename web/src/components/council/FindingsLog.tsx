@@ -198,10 +198,10 @@ function DisputedChip({ via }: { via: NonNullable<ObserverFinding["disputed"]> }
   return (
     <span
       className="ml-1 inline-flex items-center gap-1 text-[9px] uppercase tracking-wide font-mono-code px-1.5 py-0.5 rounded bg-cc-muted/10 text-cc-muted border border-cc-border"
-      title={`Dismissed earlier, not raised as a blocker — ${human}`}
-      aria-label={`Dismissed earlier, not raised as a blocker — ${human}`}
+      title={`Disputed earlier, not raised as a blocker — ${human}`}
+      aria-label={`Disputed earlier, not raised as a blocker — ${human}`}
     >
-      dismissed earlier
+      disputed earlier
       <span className="opacity-70 normal-case font-normal tracking-normal">· {human}</span>
     </span>
   );
