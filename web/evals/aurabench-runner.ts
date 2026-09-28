@@ -53,8 +53,15 @@ import { benchInstancePaths, startBenchInstance, type RunningInstance } from "./
 import { guardRealCodexHome, propagateFromSessionHomes, realAuthSha } from "./aurabench/harness/codex-home.js";
 import { benchChildEnv, niceExec, spawnNice } from "./aurabench/harness/proc.js";
 import type { CellRecord } from "./aurabench/harness/cells.js";
+import {
+  CELL_PATH_CONFOUND,
+  checkWorktreeRoot,
+  newCellWorktree,
+  sweepStaleCellWorktrees,
+  withCleanClaudeProject,
+} from "./aurabench/harness/cell-paths.js";
 import { chmodSync, copyFileSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 
 const MIN_AVAILABLE_KB = 1.5 * 1024 * 1024;
 
@@ -201,7 +208,7 @@ function openSocket(url: string, onMessage: (d: string) => void, onClose: () => 
 async function bench(argv: string[], repo: string): Promise<number> {
   const benchRootArg = arg(argv, "bench-root");
   if (!benchRootArg) {
-    console.error("usage: bench --bench-root <dir> [--variants A,B,…] [--reps 5] [--task-ids a,b] [--max-cells N] [--state <STATE.json>] [--timeout-min 60] [--tasks <dir>]");
+    console.error("usage: bench --bench-root <dir> [--variants A,B,…] [--reps 5] [--task-ids a,b] [--max-cells N] [--state <STATE.json>] [--timeout-min 60] [--tasks <dir>] [--wt-root <dir outside bench-root and repo>]");
     return 2;
   }
   const benchRoot = resolve(benchRootArg);
@@ -241,6 +248,17 @@ async function bench(argv: string[], repo: string): Promise<number> {
   const byId = new Map(selected.map((t) => [t.id, t]));
   const resultsFile = join(benchRoot, "results", "cells.jsonl");
   for (const d of ["results", "cells", "wt", "baseline"]) mkdirSync(join(benchRoot, d), { recursive: true });
+  // Cell checkouts live away from results and the repo (FIX-D2-3); a stale
+  // one from an interrupted run is swept (its cell reruns from scratch).
+  const wtRoot = resolve(arg(argv, "wt-root") ?? join(tmpdir(), "aurabench-wt"));
+  const wtRootProblem = checkWorktreeRoot(wtRoot, [benchRoot, repo]);
+  if (wtRootProblem) {
+    console.error(`[aurabench] ${wtRootProblem}`);
+    return 2;
+  }
+  mkdirSync(wtRoot, { recursive: true });
+  const swept = sweepStaleCellWorktrees(wtRoot);
+  console.log(`[aurabench] cell checkouts under ${wtRoot}${swept.length ? ` (swept ${swept.length} stale)` : ""}`);
 
   const realHome = homedir();
   const nakedDeps: NakedDeps = {
@@ -295,7 +313,9 @@ async function bench(argv: string[], repo: string): Promise<number> {
   const runners: Record<"A" | "B" | "aura", AgentRunner> = {
     A: guard(nakedClaudeRunner(nakedDeps)),
     B: guard(nakedCodexRunner(nakedDeps)),
-    aura: guard(async (ctx) => {
+    // Unique checkout per cell → fresh `projects/<cwd>` in the shared bench
+    // HOME; the wrapper proves it and moves it into the cell's artifacts.
+    aura: guard(withCleanClaudeProject(async (ctx) => {
       if (!instance) instance = await startBenchInstance({ webDir: join(repo, "web"), benchRoot, realHome });
       const inst = instance;
       const authShaAtStart = realAuthSha(realCodexDir);
@@ -314,7 +334,7 @@ async function bench(argv: string[], repo: string): Promise<number> {
       // Codex sessions of the bench instance may have rotated the shared token.
       const auth = propagateFromSessionHomes(benchSessionCodexHomes, realCodexDir, authShaAtStart);
       return run.kind === "done" ? { ...run, isolation: { ...run.isolation, codex_auth: auth } } : run;
-    }),
+    }, join(benchInstancePaths(benchRoot).home, ".claude", "projects"))),
   };
   const baselineCache = new Map<string, Baseline>();
   const baseline = async (task: AuraBenchTask): Promise<Baseline> => {
@@ -354,8 +374,9 @@ async function bench(argv: string[], repo: string): Promise<number> {
         mkdirSync(artifactDir, { recursive: true });
         return runCell(task, variant, cell.rep, {
           repo,
-          worktree: join(benchRoot, "wt", "cell"),
+          worktree: newCellWorktree(wtRoot),
           artifactDir,
+          confounds: [CELL_PATH_CONFOUND],
           exec: niceExec,
           runAgent: variant.mode === "aura" ? runners.aura : cell.variant === "A" ? runners.A : runners.B,
           baseline,

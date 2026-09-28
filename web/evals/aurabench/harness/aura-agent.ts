@@ -17,7 +17,8 @@
  *      worktree into `isolation.layer_evidence` (did a checkpoint, a review,
  *      an auto-proceed fire actually happen) — a layer is reported as
  *      measured only if it left a trace;
- *   6. kill + delete the sessions (the worktree is removed by `runCell`).
+ *   6. archive + delete the sessions ({@link teardownSessions}; the worktree
+ *      is removed by `runCell`).
  *
  * HTTP and sockets are injected; unit-tested with fakes. Firewall-clean.
  */
@@ -218,8 +219,7 @@ export function auraRunner(d: AuraDeps): AgentRunner {
     if (v.councilPairing && !ids.groupId) {
       // Without the group id neither the directive nor the evidence works:
       // the cell would silently measure C under D's name.
-      await d.http("POST", `/api/sessions/${ids.primary}/kill`).catch(() => undefined);
-      for (const id of [ids.primary, ...ids.others]) await d.http("DELETE", `/api/sessions/${id}`).catch(() => undefined);
+      isolation.teardown = await teardownSessions(d, [ids.primary, ...ids.others]);
       return {
         kind: "done",
         status: "agent_error",
@@ -307,8 +307,38 @@ export function auraRunner(d: AuraDeps): AgentRunner {
         : { kind: "done", status: "completed", metrics: tracker.metrics(), isolation, confounds };
     } finally {
       for (const s of sockets.values()) s.close();
-      for (const id of all) await d.http("POST", `/api/sessions/${id}/kill`).catch(() => undefined);
-      for (const id of all) await d.http("DELETE", `/api/sessions/${id}`).catch(() => undefined);
+      isolation.teardown = await teardownSessions(d, all);
     }
   };
+}
+
+/**
+ * Stop the cell's sessions without a keepalive relaunch into the checkout
+ * that `runCell` deletes next (FIX-D2-3). `POST /kill` is NOT an intentional
+ * kill server-side: the exit schedules a keepalive relaunch 3 s later, and a
+ * council pair's two kills + deletes could outlast it (pilot 1 logged a
+ * relaunch per killed session). Archive marks the id — for a council pair
+ * BOTH ids, before either kill (EC-2) — intentional and cancels keepalive
+ * timers; delete then forgets the session. The list is re-read afterwards:
+ * `still_present` must be empty (null = the list could not be read).
+ */
+export async function teardownSessions(
+  d: Pick<AuraDeps, "http">,
+  ids: readonly string[],
+): Promise<{ archived: string[]; deleted: string[]; still_present: string[] | null }> {
+  const archived: string[] = [];
+  const deleted: string[] = [];
+  for (const id of ids) {
+    const r = await d.http("POST", `/api/sessions/${id}/archive`, {}).catch(() => null);
+    if (r?.status === 200) archived.push(id);
+  }
+  for (const id of ids) {
+    const r = await d.http("DELETE", `/api/sessions/${id}`).catch(() => null);
+    if (r?.status === 200) deleted.push(id);
+  }
+  const list = await d.http("GET", "/api/sessions").catch(() => null);
+  const still_present = Array.isArray(list?.json)
+    ? list.json.flatMap((s) => (isObj(s) && typeof s.sessionId === "string" && ids.includes(s.sessionId) ? [s.sessionId] : []))
+    : null;
+  return { archived, deleted, still_present };
 }
