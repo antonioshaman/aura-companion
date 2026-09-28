@@ -122,7 +122,7 @@ describe("loadObserverSystemPrompt", () => {
     expect(() => loadObserverSystemPrompt(promptPath)).toThrow(/exceeds OBSERVER_PROMPT_MAX_BYTES/);
   });
 
-  // Council Plan PLAN-aura-observer-prompt-bundled-fallback.md Task 6:
+  // Council Plan docs/history/council/handoffs/PLAN-aura-observer-prompt-bundled-fallback.md Task 6:
   // the loader still throws on missing file — that IS its contract at
   // this layer. The bundled fallback semantic lives in the higher-level
   // resolver tested below. Inverted from the prior "throws on missing"

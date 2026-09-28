@@ -293,7 +293,7 @@ export interface SdkSessionInfo {
    * - `"workspace"` — loaded from `<cwd>/.council/prompts/observer-system.md`
    * - `"bundled"` — workspace file absent (ENOENT); fell back to the
    *    bundled artifact shipped with aura-companion
-   * (Council Plan PLAN-aura-observer-prompt-bundled-fallback.md Task 4)
+   * (Council Plan docs/history/council/handoffs/PLAN-aura-observer-prompt-bundled-fallback.md Task 4)
    *
    * Consumers (recorder attribution, EC-9 invocation log, UI provenance
    * display, replay determinism) MUST distinguish on THIS field rather

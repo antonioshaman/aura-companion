@@ -99,7 +99,7 @@ export function parseObserverPromptHeader(raw: string): number | null {
  * `sourcePath` must be absolute — relative paths are a misconfiguration
  * vector (relative to *what*? process cwd is unstable).
  *
- * Council Plan PLAN-aura-observer-prompt-bundled-fallback.md Task 11
+ * Council Plan docs/history/council/handoffs/PLAN-aura-observer-prompt-bundled-fallback.md Task 11
  * rewrote the prior anti-fallback wording — the schema-mismatch hazard
  * is now mitigated at the resolver layer, not by refusing fallback
  * everywhere.

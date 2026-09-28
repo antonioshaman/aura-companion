@@ -11,7 +11,7 @@
  * the probe field for a captured-method-reference (`probe.isSyntheticTurnInFlight.bind(...)`)
  * would silently snapshot the manager and ship green-on-unit-tests / red-in-prod.
  *
- * Plan vs reality divergence (PLAN-aura-auto-proceed-race-regression-test.md):
+ * Plan vs reality divergence (docs/history/council/handoffs/PLAN-aura-auto-proceed-race-regression-test.md):
  *   Plan asked for real WsBridge ALSO. Reality: bridge's `setIdleTimerProbe`
  *   feeds the idle-kill clock-split (already tested at ws-bridge.test.ts:2798-2823);
  *   the denylist-gate + result-frame terminator live in `claude-adapter.ts`.

@@ -55,6 +55,10 @@ web/.council/state/
 # Scratch handoff / plan docs (repo-root only)
 /HANDOFF-*.md
 /PLAN-*.md
+# Supervisor run reports (scripts/codex-supervise-after-limit-reset.sh) — scratch output,
+# never born inside the docs/history/ archive
+/SESSION-AUTO-RESUME-REPORT.md
+/CODEX-SUPERVISOR-AUTO-RESUME.md
 # Scratch planning specs that pair with the root PLAN-*.md scratch docs above
 /specs/session-map-eviction-and-boot-hygiene.md
 /specs/system-resource-reclamation.md
