@@ -1,5 +1,5 @@
 /**
- * Bidirectional pipeline Story 1.1 — canonical 9-step orchestrator
+ * Bidirectional pipeline Story 1.1 — canonical 8-step orchestrator
  * sequence. Tests assert DEEP-EQUALITY against the spec list, not
  * substring; substring tests would silently pass on reordering or
  * step drops (feedback_i18n_test_assert_key_not_substring sibling).
@@ -7,6 +7,10 @@
  * Locking the slug + intent shape makes "did we ship the announcement?"
  * a one-line check from any future consumer (start-of-session banner,
  * out-of-sequence WARN detector, audit log enricher).
+ *
+ * 9 → 8 steps in aura-meta-diet A1: the competing learning skill was removed
+ * so `/learn` is the single learning-capture step. The deep-equality lock
+ * also guards against the removed slug creeping back in.
  */
 
 import { describe, expect, it } from "vitest";
@@ -16,12 +20,12 @@ import {
 } from "./canonical-sequence.js";
 
 describe("CANONICAL_ORCHESTRATOR_SEQUENCE", () => {
-  it("has exactly 9 steps (spec lock)", () => {
-    expect(CANONICAL_SEQUENCE_LENGTH).toBe(9);
-    expect(CANONICAL_ORCHESTRATOR_SEQUENCE).toHaveLength(9);
+  it("has exactly 8 steps (spec lock)", () => {
+    expect(CANONICAL_SEQUENCE_LENGTH).toBe(8);
+    expect(CANONICAL_ORCHESTRATOR_SEQUENCE).toHaveLength(8);
   });
 
-  it("emits the 9 slugs in spec order (deep-equality, not substring)", () => {
+  it("emits the 8 slugs in spec order (deep-equality, not substring)", () => {
     const slugs = CANONICAL_ORCHESTRATOR_SEQUENCE.map((s) => s.slug);
     expect(slugs).toEqual([
       "/prime",
@@ -30,7 +34,6 @@ describe("CANONICAL_ORCHESTRATOR_SEQUENCE", () => {
       "/council-implement",
       "/council-review",
       "/test-architect",
-      "/self-improvement",
       "/learn",
       "/self-reflect",
     ]);

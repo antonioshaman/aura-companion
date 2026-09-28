@@ -5,7 +5,7 @@ This file provides guidance to Claude Code & Codex when working with code in thi
 ## What This Is
 
 Aura Companion — a self-learning web UI for Claude Code & Codex.
-Forked from [`The-Vibe-Company/companion`](https://github.com/The-Vibe-Company/companion) by [The Vibe Company](https://thevibecompany.co) (MIT), it adds an adaptive knowledge base, Council Mode (orchestrator + observer paired sessions), and self-improvement skills that make every development session smarter than the last.
+Forked from [`The-Vibe-Company/companion`](https://github.com/The-Vibe-Company/companion) by [The Vibe Company](https://thevibecompany.co) (MIT), it adds an adaptive knowledge base, Council Mode (orchestrator + observer paired sessions), and self-learning skills (`/prime`, `/learn`, `/self-reflect`) that make every development session smarter than the last.
 
 It drives the Claude Code CLI's `stream-json` protocol to provide a browser-based interface for running multiple Claude Code sessions with streaming, tool call visibility, and permission control.
 

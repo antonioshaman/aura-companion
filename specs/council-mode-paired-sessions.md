@@ -1,11 +1,13 @@
 # Spec: Council Mode — paired orchestrator + observer sessions
 
+> **Amended 2026-09-28 (aura-meta-diet A1):** `/self-improvement` was removed from the canonical orchestrator sequence — `/learn` is the single learning-capture path. The sequence is now 8 steps.
+
 **Date:** 2026-05-11
 **Status:** Draft
 
 ## Objective
 
-Add a "Council Mode" to Aura Companion that, on session creation, spawns two linked SDK sessions — an **orchestrator** (the user-facing chat where the Carmack Council workflow runs: `/prime → /spec-writer → /council-plan → /council-implement → /council-review → /test-architect → /self-improvement → /self-reflect`) and an **observer** that wakes on each pipeline checkpoint, performs an independent review of the just-produced artifacts, and signals findings back into the orchestrator UI. The goal is to make the multi-agent pattern that worked manually in past pipelines (catching ~2 P1 issues per phase that single-author thinking missed) reproducible in one click instead of requiring two terminals and manual coordination.
+Add a "Council Mode" to Aura Companion that, on session creation, spawns two linked SDK sessions — an **orchestrator** (the user-facing chat where the Carmack Council workflow runs: `/prime → /spec-writer → /council-plan → /council-implement → /council-review → /test-architect → /self-reflect`) and an **observer** that wakes on each pipeline checkpoint, performs an independent review of the just-produced artifacts, and signals findings back into the orchestrator UI. The goal is to make the multi-agent pattern that worked manually in past pipelines (catching ~2 P1 issues per phase that single-author thinking missed) reproducible in one click instead of requiring two terminals and manual coordination.
 
 ## Context
 
