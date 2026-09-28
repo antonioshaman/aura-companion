@@ -1,0 +1,35 @@
+# Council Mode (paired orchestrator + observer sessions)
+
+> Moved out of `CLAUDE.md` in P2/A3 (2026-09-28). `CLAUDE.md` links here with one line;
+> this file is loaded on demand, not on every session start.
+
+
+A user-opt-in flag on the New Session form (`councilMode: "council"` + `councilPairing: "claude+claude" | "claude+codex"`) spawns two linked CLI sessions sharing one workspace — an **orchestrator** that the user drives via the main chat surface, and an **observer** that wakes on filesystem checkpoint sentinels, reads a manifest of paths, emits a structured review file, and the server fans grounded findings back into the orchestrator's UI as `BlockerBanner` + side-panel `ObserverPanel`.
+
+**Cross-process protocol** lives entirely on the filesystem under `<workspace>/.council/`:
+- `.council/prompts/observer-system.md` — versioned (`<!-- observer-system-prompt v1 -->`) CLI-agnostic role definition. Loaded at observer spawn time; hash stamped on `SdkSessionInfo.observerPromptSha256`. **OPTIONAL per-workspace override** — if absent, the bundled fallback (`observer-prompt-bundled.ts`, generated from this repo's canonical artifact) is used and `SdkSessionInfo.observerPromptSource` reflects `"bundled"` vs `"workspace"`. Malformed-but-present STILL throws — the explicit-intent contract is preserved at the loader layer.
+- `.council/checkpoints/<phase>.json` — written by the orchestrator via `writeAtomicJson` after each Carmack-Council phase. Schema: `CheckpointPayload` in `council-types.ts`. Producer-side REST: `POST /api/sessions/:id/council/checkpoint` with the JSON payload as the body — server validates via `parseCheckpointPayload`, cross-checks `session_group_id` against the caller's actual group (orchestrator-half only), then atomically writes into the workspace's `.council/checkpoints/` directory.
+- `.council/reviews/<phase>-<provider>-observer.md` — written by the observer (content is JSON despite `.md` extension). Filename MUST carry the `<provider>` segment (`claude` | `codex`) so the `claude+codex` pairing produces two distinct review files per checkpoint rather than colliding under the watcher's debounce window.
+
+**Server pipeline:**
+1. `routes.ts /sessions/create` (or `/sessions/create-stream`) branches on `councilMode === "council"` → `orchestrator.createCouncilGroup`.
+2. `SessionGroupCoordinator` calls injected spawn callback twice (orchestrator + observer) with shared `sessionGroupId` and respective `sessionGroupRole`. Atomic rollback — observer-spawn failure kills the orchestrator half before propagating.
+3. `cli-launcher.applyCouncilObserverSpawnConfig` loads the prompt artefact, applies `getObserverSpawnOverrides()` (allowed/disallowed tools + permission mode intersected with caller-supplied lists), and injects `--append-system-prompt` (Claude) or `systemPrompt` option (Codex).
+4. `session-orchestrator.startCouncilWatchers` arms `watchCheckpoints` + `watchReviews` on the workspace's `.council/` subtree (recursive `mkdirSync` ensures the dirs exist before watch attach).
+5. On each checkpoint: `handleCouncilCheckpoint` rejects stale sequences, captures the prior checkpoint, emits `group:checkpoint`.
+6. On each review file: `handleCouncilReview` runs `validateObserverFindings` against the manifest's delta paths (via `buildObserverContextManifest`); STOPs outside the modified set OR missing on disk are downgraded to NOTE server-side. Findings get deterministic `fnd_<hex>` ids derived from `(sessionGroupId, checkpointId, observerProvider, findingIndex, evidence_path, claim)` — restart-replay produces stable ids, browser dedup catches it. Emits `group:review` with both findings + downgrades.
+7. `wireGroupListeners` in `initialize()` fans `group:created` / `group:exited` / `group:degraded` / `group:checkpoint` / `group:review` out to both halves' browsers via `wsBridge.broadcastToGroup`.
+8. `applyEvent` on the coordinator's state machine is the **sole** lifecycle mutator: a pure `deriveSideEffects(prev, next, event)` table decides which `group:*` bus events fire and which EC-9 log entries land; `applyEvent` drains both. `archiveGroup` routes through `applyEvent({type:"user_archived"})` so the `group:exited` emit comes from the same channel, still firing BEFORE the kills proceed so the browser cleans its store first.
+9. Unintentional `session:exited` against a council-tracked half drives `coordinator.armReconnect` (45s grace, env-overridable via `COMPANION_GROUP_RECONNECT_GRACE_MS`) instead of immediate `group:degraded`. If the half re-handshakes via `session:cli-id-received` within the window → `reconnect_ok` → `group:created` re-broadcast (active). Otherwise → `reconnect_failed` → `group:degraded`. `relaunchExhaustedNotified` or `intentionalKills` short-circuit the grace; cascading second-half death also short-circuits. EC-2 invariant is preserved on the kill paths (archive/delete still mark both intentional first).
+
+**Browser pipeline:**
+1. `ws.ts` switch dispatches `group_*` / `observer_review` to council slice actions.
+2. `observer-panel-state.deriveObserverPanelState` derives the discriminated-union status from `(group, findings, dismissedStopIds)` — priority ladder degraded > blocker-found > reconnecting > reviewing > spawning > sleeping > never-checkpointed-yet.
+3. `BlockerBanner` renders the most-recent unresolved STOP in the same DOM slot as `PermissionBanner` (permission-first stacking); `ObserverPanel` (sibling of ChatView) renders the status pill + collapsible rail + FindingsLog; `Sidebar` shows per-session ProviderBadges + unread STOP counter.
+4. `useBrowserTitleAlert` prepends `(N)` to `document.title` aggregated across all groups; `useCouncilShortcuts` provides `Cmd/Ctrl+Shift+O` (toggle panel) and `Cmd/Ctrl+Shift+B` (focus blocker primary action).
+
+**Convention floor** (AP-1..3, EC-1..9, EC-13 — do not re-flag in council reviews): kept in the
+core `CLAUDE.md` under "Council Mode convention floor" so reviewers always load it; not duplicated here.
+
+Full conventions list in `conventions.md`. Council review artefacts (per-expert findings + synthesised `FINAL-REVIEW.md`) in `.council/review-output/<TIMESTAMP>/`.
+Archived process history (closed handoffs, plans, bug write-ups, past council batches) lives in `docs/history/` — see `docs/history/README.md`. It is history, not current rules: never treat it as a source of active conventions.
