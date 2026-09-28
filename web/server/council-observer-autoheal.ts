@@ -30,6 +30,17 @@ import { log } from "./logger.js";
  *
  * Provider-agnostic: the relaunch and readiness callbacks are the same for a
  * Claude or a Codex observer.
+ *
+ * P4/FIX-AUTOHEAL-1 (known limits, documented in docs/architecture/council-mode.md):
+ *   - the hourly budget ({@link OBSERVER_AUTOHEAL_MAX_PER_HOUR}) lives in
+ *     memory, so a server restart resets it: at most 4 more relaunches per
+ *     group per restart;
+ *   - an observer that never attaches degrades the pair after about 3 min
+ *     (30 s poll + 2 × 60 s attach wait + 30 s backoff) instead of the ~15 min
+ *     of 3 failsafe strikes before auto-heal.
+ * The relaunch callback goes through the orchestrator's per-session
+ * single-flight gate (`SessionRecovery.relaunchOnce`) and does not reset the
+ * auto-relaunch crash budget.
  */
 
 export const OBSERVER_AUTOHEAL_MAX_ATTEMPTS = 2;

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CliLauncher, SdkSessionInfo } from "./cli-launcher.js";
 import type { WsBridge } from "./ws-bridge.js";
 import { companionBus } from "./event-bus.js";
+import { IntentionalKills } from "./intentional-kills.js";
 import { DEFAULT_LAG_TOLERANCE_MS } from "./silent-stdio-drift-detector.js";
 import {
   DRIFT_DETECTOR_TICK_MS,
@@ -10,6 +11,7 @@ import {
   RECONNECT_GRACE_MS,
   RELAUNCH_COOLDOWN_MS,
   RELAUNCH_GRACE_MS,
+  RELAUNCH_SETTLE_MS,
   SessionRecovery,
 } from "./session-recovery.js";
 
@@ -40,7 +42,8 @@ function makeRecovery(sessions: Map<string, SdkSessionInfo>) {
     getSession: vi.fn(() => undefined),
     broadcastToSession: vi.fn(),
   };
-  const intentionalKills = new Set<string>();
+  // P4/FIX-AUTOHEAL-1: the orchestrator's set carries relaunch-mark ownership.
+  const intentionalKills = new IntentionalKills();
   const onRelaunchSucceeded = vi.fn();
   const noteApiLimitReached = vi.fn();
   const recovery = new SessionRecovery({
@@ -225,5 +228,194 @@ describe("SessionRecovery (P4/C1d DI seam)", () => {
     await vi.advanceTimersByTimeAsync(DRIFT_DETECTOR_TICK_MS);
     expect(tick).toHaveBeenCalledTimes(2);
     recovery.stopDriftDetector();
+  });
+});
+
+// P4/FIX-AUTOHEAL-1 item 1: every relaunch path goes through one per-session
+// single-flight gate. Before it, after a server restart the boot watchdog
+// (RECONNECT_GRACE_MS) and the observer catch-up poll → auto-heal (30 s) fired
+// together and each called launcher.relaunch → two CLIs `--resume`d on one
+// cliSessionId, one orphaned. Same race with handleAutoRelaunch while a fresh
+// Codex CLI is still `starting` (~16 s init).
+describe("SessionRecovery.relaunchOnce — single-flight (P4/FIX-AUTOHEAL-1)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    companionBus.clear();
+  });
+
+  /** launcher.relaunch that stays pending until the test resolves it. */
+  function deferredRelaunch(launcher: ReturnType<typeof makeRecovery>["launcher"]) {
+    const pending: Array<(r: { ok: boolean; error?: string }) => void> = [];
+    let concurrent = 0;
+    let maxConcurrent = 0;
+    launcher.relaunch.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          concurrent++;
+          maxConcurrent = Math.max(maxConcurrent, concurrent);
+          pending.push((r) => {
+            concurrent--;
+            resolve(r);
+          });
+        }),
+    );
+    return { pending, maxConcurrent: () => maxConcurrent };
+  }
+
+  it("parallel auto-heal + boot-watchdog calls spawn ONE process and share its result", async () => {
+    const sessions = new Map([["s1", info("s1", { state: "starting" })]]);
+    const { recovery, launcher, onRelaunchSucceeded } = makeRecovery(sessions);
+    const d = deferredRelaunch(launcher);
+
+    const heal = recovery.relaunchOnce("s1", "autoheal", {});
+    const boot = recovery.relaunchOnce("s1", "boot_watchdog");
+    expect(recovery.isRelaunchInFlight("s1")).toBe(true);
+    d.pending[0]({ ok: true });
+    await expect(heal).resolves.toEqual({ ok: true });
+    await expect(boot).resolves.toEqual({ ok: true });
+
+    expect(launcher.relaunch).toHaveBeenCalledTimes(1);
+    // The got-050 follow-up runs once per real relaunch, not once per caller.
+    expect(onRelaunchSucceeded).toHaveBeenCalledTimes(1);
+    expect(recovery.isRelaunchInFlight("s1")).toBe(false);
+  });
+
+  it("the boot watchdog joins an auto-heal relaunch already in flight", async () => {
+    const sessions = new Map([["s1", info("s1", { state: "starting" })]]);
+    const { recovery, launcher } = makeRecovery(sessions);
+    const d = deferredRelaunch(launcher);
+
+    recovery.startReconnectionWatchdog();
+    await vi.advanceTimersByTimeAsync(RECONNECT_GRACE_MS - 1_000);
+    const heal = recovery.relaunchOnce("s1", "autoheal", {});
+    await vi.advanceTimersByTimeAsync(2_000);
+    d.pending[0]({ ok: true });
+    await heal;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(launcher.relaunch).toHaveBeenCalledTimes(1);
+  });
+
+  it("handleAutoRelaunch neither relaunches again nor spends budget while another relaunch runs or settles", async () => {
+    const sessions = new Map([["s1", info("s1", { state: "starting" })]]);
+    const { recovery, launcher } = makeRecovery(sessions);
+    const d = deferredRelaunch(launcher);
+
+    const heal = recovery.relaunchOnce("s1", "autoheal", {});
+    const auto = recovery.handleAutoRelaunch("s1");
+    await vi.advanceTimersByTimeAsync(RELAUNCH_GRACE_MS);
+    await auto;
+    expect(launcher.relaunch).toHaveBeenCalledTimes(1);
+
+    d.pending[0]({ ok: true });
+    await heal;
+    // The fresh CLI is still `starting` with no adapter (Codex init) — the
+    // deaf check would have relaunched it; the settle window prevents that.
+    await vi.advanceTimersByTimeAsync(10_000);
+    const auto2 = recovery.handleAutoRelaunch("s1");
+    await vi.advanceTimersByTimeAsync(RELAUNCH_GRACE_MS);
+    await auto2;
+    expect(launcher.relaunch).toHaveBeenCalledTimes(1);
+
+    // Budget untouched: MAX_AUTO_RELAUNCHES real attempts are still available.
+    sessions.set("s1", info("s1", { state: "exited" }));
+    launcher.relaunch.mockResolvedValue({ ok: false });
+    for (let i = 0; i < MAX_AUTO_RELAUNCHES; i++) {
+      const p = recovery.handleAutoRelaunch("s1");
+      await vi.advanceTimersByTimeAsync(RELAUNCH_GRACE_MS + RELAUNCH_COOLDOWN_MS);
+      await p;
+    }
+    expect(launcher.relaunch).toHaveBeenCalledTimes(1 + MAX_AUTO_RELAUNCHES);
+    expect(recovery.isRelaunchExhausted("s1")).toBe(false);
+  });
+
+  it("automatic sources skip inside the settle window; a manual relaunch always runs; a crashed CLI is not 'settling'", async () => {
+    const sessions = new Map([["s1", info("s1", { state: "starting" })]]);
+    const { recovery, launcher } = makeRecovery(sessions);
+
+    await recovery.relaunchOnce("s1", "manual", {});
+    await expect(recovery.relaunchOnce("s1", "autoheal", {})).resolves.toEqual({
+      ok: true,
+      skipped: "recently_relaunched",
+    });
+    await recovery.relaunchOnce("s1", "boot_watchdog");
+    expect(launcher.relaunch).toHaveBeenCalledTimes(1);
+
+    await recovery.relaunchOnce("s1", "manual", {});
+    expect(launcher.relaunch).toHaveBeenCalledTimes(2);
+
+    // The fresh CLI died (exited) — that is a crash, not a spawn in progress.
+    sessions.set("s1", info("s1", { state: "exited" }));
+    expect(recovery.isRelaunchSettling("s1")).toBe(false);
+    await recovery.relaunchOnce("s1", "autoheal", {});
+    expect(launcher.relaunch).toHaveBeenCalledTimes(3);
+
+    // Past the window an automatic relaunch runs again.
+    sessions.set("s1", info("s1", { state: "starting" }));
+    await vi.advanceTimersByTimeAsync(RELAUNCH_SETTLE_MS);
+    await recovery.relaunchOnce("s1", "boot_watchdog");
+    expect(launcher.relaunch).toHaveBeenCalledTimes(4);
+  });
+
+  it("a manual relaunch with a different model waits for the running one instead of overlapping it", async () => {
+    const sessions = new Map([["s1", info("s1")]]);
+    const { recovery, launcher } = makeRecovery(sessions);
+    const d = deferredRelaunch(launcher);
+
+    const first = recovery.relaunchOnce("s1", "autoheal", {});
+    const manual = recovery.relaunchOnce("s1", "manual", { model: "claude-sonnet-5" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(launcher.relaunch).toHaveBeenCalledTimes(1);
+    d.pending[0]({ ok: true });
+    await first;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(launcher.relaunch).toHaveBeenCalledTimes(2);
+    expect(launcher.relaunch).toHaveBeenLastCalledWith("s1", { model: "claude-sonnet-5" });
+    d.pending[1]({ ok: true });
+    await manual;
+    expect(d.maxConcurrent()).toBe(1);
+  });
+
+  // Item 3 (EC-2): archive marks the session intentional while the relaunch
+  // is awaiting the spawn. The relaunch's cleanup must not wipe that mark,
+  // and the process it just spawned for an archived session must be killed.
+  it("archive during an in-flight relaunch keeps the archive's intentional mark and kills the new process", async () => {
+    const sessions = new Map([["s1", info("s1")]]);
+    const { recovery, launcher, intentionalKills, onRelaunchSucceeded } = makeRecovery(sessions);
+    const d = deferredRelaunch(launcher);
+
+    const run = recovery.relaunchOnce("s1", "autoheal", {});
+    expect(intentionalKills.has("s1")).toBe(true);
+    // Archive path: mark intentional, set archived.
+    intentionalKills.add("s1");
+    sessions.set("s1", info("s1", { archived: true }));
+    d.pending[0]({ ok: true });
+
+    await expect(run).resolves.toMatchObject({ ok: false });
+    expect(intentionalKills.has("s1")).toBe(true);
+    expect(launcher.kill).toHaveBeenCalledWith("s1");
+    expect(onRelaunchSucceeded).not.toHaveBeenCalled();
+  });
+
+  it("releases its own intentional mark on failure and on throw (keepalive must not be locked out)", async () => {
+    const sessions = new Map([["s1", info("s1")]]);
+    const { recovery, launcher, intentionalKills } = makeRecovery(sessions);
+    launcher.relaunch.mockResolvedValueOnce({ ok: false, error: "boom" });
+    await recovery.relaunchOnce("s1", "manual", {});
+    expect(intentionalKills.has("s1")).toBe(false);
+    launcher.relaunch.mockRejectedValueOnce(new Error("spawn threw"));
+    await expect(recovery.relaunchOnce("s1", "manual", {})).rejects.toThrow("spawn threw");
+    expect(intentionalKills.has("s1")).toBe(false);
+    expect(recovery.isRelaunchInFlight("s1")).toBe(false);
+  });
+
+  it("does not release a mark that existed before the relaunch (e.g. an idle-kill)", async () => {
+    const sessions = new Map([["s1", info("s1")]]);
+    const { recovery, intentionalKills } = makeRecovery(sessions);
+    intentionalKills.add("s1");
+    await recovery.relaunchOnce("s1", "manual", {});
+    expect(intentionalKills.has("s1")).toBe(true);
   });
 });

@@ -10,6 +10,7 @@ import { checkDrift, resolveJsonlPath } from "./silent-stdio-drift-detector.js";
 import { nextCompactionMilestone } from "./context-size-suggester.js";
 import { homedir } from "node:os";
 import { statSync } from "node:fs";
+import type { IntentionalKills } from "./intentional-kills.js";
 
 /**
  * Session recovery controller (aura-meta-diet P4/C1d).
@@ -24,6 +25,12 @@ import { statSync } from "node:fs";
  *  - the silent-stdio drift detector tick (+ compaction advisory);
  *  - the boot reconnection watchdog for sessions stuck in `starting`.
  *
+ * P4/FIX-AUTOHEAL-1: every relaunch — manual (REST), observer auto-heal,
+ * auto-relaunch, boot watchdog — goes through {@link SessionRecovery.relaunchOnce},
+ * a per-session single-flight gate. Two paths firing together (after a server
+ * restart the boot watchdog and the observer catch-up poll both wake at ~30 s)
+ * used to spawn two CLIs with `--resume` on one cliSessionId, orphaning one.
+ *
  * Extracted verbatim from `session-orchestrator.ts`. The orchestrator owns
  * `intentionalKills` (council lifecycle, archive and delete write it too) and
  * hands it in (AP-1 DI); the council-specific follow-ups of a successful
@@ -35,6 +42,22 @@ import { statSync } from "node:fs";
 export const MAX_AUTO_RELAUNCHES = 3;
 export const RELAUNCH_GRACE_MS = 10_000;
 export const RELAUNCH_COOLDOWN_MS = 5_000;
+/**
+ * P4/FIX-AUTOHEAL-1: after a successful relaunch the new CLI needs time to
+ * attach (Codex `thread/resume` ~16 s). Automatic paths (auto-relaunch, boot
+ * watchdog, observer auto-heal) do not relaunch the same session again inside
+ * this window; an explicit manual relaunch always runs.
+ */
+export const RELAUNCH_SETTLE_MS = 60_000;
+
+export type RelaunchSource = "manual" | "autoheal" | "auto_relaunch" | "boot_watchdog";
+
+export interface RelaunchOutcome {
+  ok: boolean;
+  error?: string;
+  /** Set when an automatic caller found a relaunch already settling. */
+  skipped?: "recently_relaunched";
+}
 export const RECONNECT_GRACE_MS = Number(process.env.COMPANION_RECONNECT_GRACE_MS || "30000");
 
 /**
@@ -70,7 +93,7 @@ export interface SessionRecoveryDeps {
    * Orchestrator-owned: sessions killed on purpose (idle-kill, archive,
    * delete, group degrade). Keepalive, silence and drift recovery skip them.
    */
-  intentionalKills: Set<string>;
+  intentionalKills: IntentionalKills;
   /** Runs after every successful relaunch (manual, automatic, boot watchdog). */
   onRelaunchSucceeded: (sessionId: string) => void;
   /** Rate-limit / out-of-credits fallback pauses AFK auto-proceed. */
@@ -80,13 +103,17 @@ export interface SessionRecoveryDeps {
 export class SessionRecovery {
   private readonly launcher: CliLauncher;
   private readonly wsBridge: WsBridge;
-  private readonly intentionalKills: Set<string>;
+  private readonly intentionalKills: IntentionalKills;
   private readonly onRelaunchSucceeded: (sessionId: string) => void;
   private readonly noteApiLimitReached: (sessionId: string) => void;
 
   // Auto-relaunch state
   private relaunchingSet = new Set<string>();
   private autoRelaunchCounts = new Map<string, number>();
+  /** P4/FIX-AUTOHEAL-1: the one `launcher.relaunch` running per session. */
+  private readonly relaunchInFlight = new Map<string, Promise<RelaunchOutcome>>();
+  /** P4/FIX-AUTOHEAL-1: time of the last successful relaunch (settle window). */
+  private readonly lastRelaunchOkAt = new Map<string, number>();
   // Sessions that have already been notified about relaunch exhaustion.
   // Prevents repeated "keeps crashing" warnings for dead sessions.
   readonly relaunchExhaustedNotified = new Set<string>();
@@ -193,6 +220,101 @@ export class SessionRecovery {
     this.autoRelaunchCounts.delete(sessionId);
     this.relaunchExhaustedNotified.delete(sessionId);
     this.relaunchingSet.delete(sessionId);
+    this.lastRelaunchOkAt.delete(sessionId);
+  }
+
+  isRelaunchInFlight(sessionId: string): boolean {
+    return this.relaunchInFlight.has(sessionId);
+  }
+
+  /**
+   * A relaunch is running, or one succeeded less than
+   * {@link RELAUNCH_SETTLE_MS} ago and its CLI is still `starting` (not yet
+   * attached). A CLI that crashed after the relaunch (`exited`) is not
+   * settling — it gets the normal auto-relaunch.
+   */
+  isRelaunchSettling(sessionId: string): boolean {
+    if (this.relaunchInFlight.has(sessionId)) return true;
+    const at = this.lastRelaunchOkAt.get(sessionId);
+    if (at === undefined || Date.now() - at >= RELAUNCH_SETTLE_MS) return false;
+    return this.launcher.getSession(sessionId)?.state === "starting";
+  }
+
+  /**
+   * P4/FIX-AUTOHEAL-1: the single entry point to `launcher.relaunch`.
+   *
+   * - A call while another relaunch of the same session runs JOINS it (same
+   *   result, no second spawn). A manual call that asks for a different model
+   *   waits for the running one and then relaunches with its own options.
+   * - Automatic sources skip (`skipped: "recently_relaunched"`) while the
+   *   previous successful relaunch is inside {@link RELAUNCH_SETTLE_MS}.
+   * - The session is marked intentional for the old-process kill (CR-12); the
+   *   mark is released only if no one else claimed it meanwhile (EC-2).
+   * - If the session was archived while the spawn was awaited, the
+   *   fresh process is killed instead of left running.
+   */
+  async relaunchOnce(
+    sessionId: string,
+    source: RelaunchSource,
+    opts?: { model?: string },
+  ): Promise<RelaunchOutcome> {
+    for (;;) {
+      const running = this.relaunchInFlight.get(sessionId);
+      if (!running) break;
+      if (!opts?.model) {
+        log.info("orchestrator", "relaunch joined an in-flight relaunch", {
+          event: "session.relaunch.joined",
+          sessionId,
+          source,
+        });
+        return running;
+      }
+      await running.catch(() => undefined);
+    }
+    if (source !== "manual" && this.isRelaunchSettling(sessionId)) {
+      log.info("orchestrator", "relaunch skipped: previous relaunch still settling", {
+        event: "session.relaunch.skipped_settling",
+        sessionId,
+        source,
+        settleMs: RELAUNCH_SETTLE_MS,
+      });
+      return { ok: true, skipped: "recently_relaunched" };
+    }
+    const run = this.runRelaunch(sessionId, source, opts);
+    this.relaunchInFlight.set(sessionId, run);
+    try {
+      return await run;
+    } finally {
+      if (this.relaunchInFlight.get(sessionId) === run) this.relaunchInFlight.delete(sessionId);
+    }
+  }
+
+  private async runRelaunch(
+    sessionId: string,
+    source: RelaunchSource,
+    opts: { model?: string } | undefined,
+  ): Promise<RelaunchOutcome> {
+    const ownsMark = this.intentionalKills.addTransient(sessionId);
+    try {
+      const result = opts ? await this.launcher.relaunch(sessionId, opts) : await this.launcher.relaunch(sessionId);
+      if (!result.ok) return result;
+      const info = this.launcher.getSession(sessionId);
+      // A deleted session has no launcher record left to kill through.
+      if (info?.archived) {
+        log.warn("orchestrator", "session archived during relaunch; killing the new process", {
+          event: "session.relaunch.archived_during_flight",
+          sessionId,
+          source,
+        });
+        await this.launcher.kill(sessionId);
+        return { ok: false, error: "Session was archived during relaunch" };
+      }
+      this.lastRelaunchOkAt.set(sessionId, Date.now());
+      this.onRelaunchSucceeded(sessionId);
+      return result;
+    } finally {
+      if (ownsMark) this.intentionalKills.releaseTransient(sessionId);
+    }
   }
 
   /** Session ids with a pending keepalive timer (sweep-orphans input). */
@@ -354,6 +476,19 @@ export class SessionRecovery {
 
     await new Promise((r) => setTimeout(r, RELAUNCH_GRACE_MS));
     if (this.wsBridge.isCliConnected(sessionId)) { this.relaunchingSet.delete(sessionId); return; }
+    // P4/FIX-AUTOHEAL-1: another path (manual, observer auto-heal, boot
+    // watchdog) is relaunching this session or just did — a fresh CLI sits in
+    // `starting` with no adapter for up to ~16 s (Codex), which the deaf
+    // check below would read as "relaunch again". Leave it to settle.
+    if (this.isRelaunchSettling(sessionId)) {
+      log.info("orchestrator", "auto-relaunch skipped: another relaunch in flight or settling", {
+        event: "session.relaunch.skipped_settling",
+        sessionId,
+        source: "auto_relaunch",
+      });
+      this.relaunchingSet.delete(sessionId);
+      return;
+    }
     const freshInfo = this.launcher.getSession(sessionId);
     if (freshInfo && (freshInfo.state === "connected" || freshInfo.state === "running")) {
       this.relaunchingSet.delete(sessionId); return;
@@ -416,20 +551,19 @@ export class SessionRecovery {
       if (session?.stateMachine) {
         session.stateMachine.transition("starting", "relaunch_initiated");
       }
-      // Council Review 2026-05-15-1015 CR-12 (Subprocess P2): mark this
-      // session intentional BEFORE the launcher's SIGTERM on the old proc.
-      // Without this, the old proc's `session:exited` event arms the
-      // council reconnect timer (45s grace), then the new proc's spawn
-      // clears it — producing a transient `reconnecting → active` UI
-      // flicker on every relaunch. Marking intentional first short-circuits
-      // the `session:exited` council listener in `session-orchestrator.ts`. ALWAYS clear in the
-      // finally — failure paths must not leave the mark in place because
-      // `scheduleProactiveRelaunch` reads `intentionalKills` to skip
-      // proactive recovery and a stale mark would lock keepalive out.
-      this.intentionalKills.add(sessionId);
+      // Council Review 2026-05-15-1015 CR-12 (Subprocess P2): the session is
+      // marked intentional BEFORE the launcher's SIGTERM on the old proc, so
+      // its `session:exited` does not arm the council reconnect timer
+      // (transient `reconnecting → active` flicker). `relaunchOnce` owns that
+      // mark and releases it in ALL paths — a stale mark would lock
+      // `scheduleProactiveRelaunch` out of recovery — unless archive/delete
+      // claimed it meanwhile (P4/FIX-AUTOHEAL-1, EC-2).
       try {
-        const result = await this.launcher.relaunch(sessionId);
-        if (!result.ok && result.error) {
+        const result = await this.relaunchOnce(sessionId, "auto_relaunch");
+        if (result.skipped) {
+          // Another relaunch just finished — not an attempt of ours.
+          this.autoRelaunchCounts.set(sessionId, count);
+        } else if (!result.ok && result.error) {
           this.wsBridge.broadcastToSession(sessionId, { type: "error", message: result.error });
           // Council Review 2026-05-15-1015 CR-2 + CR-17: errors the
           // launcher emitted on the typed channel itself — skip the
@@ -451,18 +585,12 @@ export class SessionRecovery {
           this.autoRelaunchCounts.delete(sessionId);
           this.relaunchExhaustedNotified.delete(sessionId);
           // Council review 2026-09-08 #2: the got-050 spawn-checkpoint re-arm
-          // must fire on EVERY successful relaunch, not only the manual REST
-          // one. This automatic path is the one that actually runs after a
-          // codex init failure (session:exited → keepalive → here), so
-          // omitting it left the fix's own target scenario unrecovered.
-          this.onRelaunchSucceeded(sessionId);
+          // fires on EVERY successful relaunch — `relaunchOnce` runs
+          // `onRelaunchSucceeded` for this automatic path too (it is the one
+          // that runs after a codex init failure).
         }
         // ok=false without error: keep count to preserve the retry budget
       } finally {
-        // CR-12: clean up the intentional mark in ALL paths (success,
-        // failure, throw). Leaving it set on failure would block the
-        // next `scheduleProactiveRelaunch` indefinitely.
-        this.intentionalKills.delete(sessionId);
         setTimeout(() => this.relaunchingSet.delete(sessionId), RELAUNCH_COOLDOWN_MS);
       }
     } else {
@@ -690,12 +818,15 @@ export class SessionRecovery {
         const stale = this.launcher.getStartingSessions();
         for (const info of stale) {
           if (info.archived) continue;
+          // P4/FIX-AUTOHEAL-1: the observer catch-up poll wakes at the same
+          // ~30 s and may already be auto-healing this session — join or skip
+          // through the single-flight gate instead of spawning a second CLI.
           console.log(`[orchestrator] CLI for session ${info.sessionId} did not reconnect, relaunching...`);
-          const result = await this.launcher.relaunch(info.sessionId);
-          // Council review 2026-09-08 #2: boot-recovery relaunch is the third
-          // path that must re-arm the spawn-checkpoint poll — a server restart
-          // that catches a council observer mid-spawn lands here.
-          if (result.ok) this.onRelaunchSucceeded(info.sessionId);
+          // Council review 2026-09-08 #2: boot-recovery relaunch re-arms the
+          // spawn-checkpoint poll (via `relaunchOnce` → `onRelaunchSucceeded`)
+          // — a server restart that catches a council observer mid-spawn
+          // lands here.
+          await this.relaunchOnce(info.sessionId, "boot_watchdog");
         }
       }, RECONNECT_GRACE_MS);
     }

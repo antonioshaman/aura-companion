@@ -4958,6 +4958,49 @@ describe("SessionOrchestrator", () => {
         }
       });
 
+      // P4/FIX-AUTOHEAL-1 items 1 + 4: the heal relaunch goes through the
+      // single-flight gate (a manual relaunch clicked meanwhile joins it —
+      // one CLI, not two `--resume`s on one cliSessionId) and, unlike a
+      // manual relaunch, does not reset the auto-relaunch crash budget.
+      it("heal relaunch: a concurrent manual relaunch joins it, and the crash budget is not reset", async () => {
+        vi.useFakeTimers();
+        try {
+          deps.launcher.getSession.mockReturnValue({ archived: false, state: "running" } as any);
+          orchestrator.initialize();
+          registerHealPair("grp_heal_sf");
+          let adapterAttached = false;
+          vi.spyOn(orchestrator as any, "observerReadyForWake").mockImplementation(() => adapterAttached);
+          let finishRelaunch!: (r: { ok: boolean }) => void;
+          deps.launcher.relaunch.mockImplementation(
+            () => new Promise((resolve) => { finishRelaunch = resolve; }),
+          );
+          vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockImplementation(() =>
+            adapterAttached ? { kind: "sent" } : { kind: "adapter_missing" },
+          );
+          const recovery = (orchestrator as any).recovery;
+          const clearBudget = vi.spyOn(recovery, "clearAutoRelaunchCount");
+
+          callDispatch("grp_heal_sf", validPayload("grp_heal_sf", { checkpointId: "chk_sf" }));
+          await vi.advanceTimersByTimeAsync(31_000);
+          expect(deps.launcher.relaunch).toHaveBeenCalledTimes(1);
+          // Auto-heal did not wipe the crash-loop budget.
+          expect(clearBudget).not.toHaveBeenCalled();
+
+          // The user clicks relaunch while the heal's spawn is still running.
+          const manual = orchestrator.relaunchSession(OBS);
+          await vi.advanceTimersByTimeAsync(0);
+          adapterAttached = true;
+          finishRelaunch({ ok: true });
+          await expect(manual).resolves.toEqual({ ok: true });
+          await vi.advanceTimersByTimeAsync(1_000);
+          expect(deps.launcher.relaunch).toHaveBeenCalledTimes(1);
+          // The manual path still resets the budget (explicit user action).
+          expect(clearBudget).toHaveBeenCalledWith(OBS);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
       it("heal budget exhausted → the group degrades (not before)", async () => {
         vi.useFakeTimers();
         try {

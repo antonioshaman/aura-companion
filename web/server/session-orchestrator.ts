@@ -29,6 +29,7 @@ import type { SessionGroupCoordinator } from "./session-group-coordinator.js";
 import type { IdleTimerManager } from "./idle-timer-manager.js";
 import { CouncilAutoProceedController, type IgnoreRestoreGapResult, type ResolveStopResult } from "./council-auto-proceed-controller.js";
 import { SessionRecovery } from "./session-recovery.js";
+import { IntentionalKills } from "./intentional-kills.js";
 import type { CheckpointPayload, ObserverReviewPayload } from "./council-types.js";
 import { writeAtomicJson } from "./atomic-write.js";
 import { findReviewForCheckpointSync } from "./review-watcher.js";
@@ -226,7 +227,7 @@ export class SessionOrchestrator {
   // Tracks sessions intentionally killed (idle-kill, manual delete/archive)
   // so the proactive keepalive doesn't relaunch them. Shared with
   // {@link SessionRecovery} (AP-1 DI); council lifecycle writes it too.
-  private intentionalKills = new Set<string>();
+  private intentionalKills = new IntentionalKills();
   /**
    * P4/C1d: auto-relaunch, keepalive, silence/model-fallback recovery, the
    * silent-stdio drift detector and the boot reconnection watchdog.
@@ -310,7 +311,7 @@ export class SessionOrchestrator {
   });
   /** P4/OBS-AUTOHEAL: bounded observer-only relaunch when its adapter is gone. */
   private observerAutoheal = new ObserverAutoheal({
-    relaunchObserver: (id) => this.relaunchSession(id),
+    relaunchObserver: (id) => this.relaunchObserverForAutoheal(id),
     isObserverReadyForWake: (id) => this.observerReadyForWake(id),
     blockedReason: (gid, id) =>
       observerAutohealBlockedReason(this.coordinator?.get(gid), id,
@@ -1383,19 +1384,25 @@ export class SessionOrchestrator {
     }
     // EC-2 / CR-12: a manually-triggered relaunch (Settings "apply
     // credentials", explicit relaunch button) SIGTERMs the old proc exactly
-    // like the auto-relaunch path. For a council half that intentional kill
-    // would otherwise be seen as a real death by the `session:exited` listener
-    // → `armReconnect` → transient reconnecting/degraded flicker on a healthy
-    // pair. Mark intentional BEFORE the kill and ALWAYS clear in finally (a
-    // stale mark would lock `scheduleProactiveRelaunch` out of recovery).
-    this.intentionalKills.add(sessionId);
-    try {
-      const result = await this.launcher.relaunch(sessionId, opts);
-      if (result.ok) this.rearmSpawnCheckpointAfterObserverRelaunch(sessionId);
-      return result;
-    } finally {
-      this.intentionalKills.delete(sessionId);
+    // like the auto-relaunch path; `relaunchOnce` marks it intentional first
+    // (no reconnecting/degraded flicker on a healthy pair) and serializes it
+    // with every other relaunch path (P4/FIX-AUTOHEAL-1).
+    return this.recovery.relaunchOnce(sessionId, "manual", opts);
+  }
+
+  /**
+   * P4/FIX-AUTOHEAL-1: the observer auto-heal relaunch. Unlike a manual
+   * relaunch it neither resets the auto-relaunch crash budget nor clears a
+   * user stop (auto-heal is blocked for user-stopped pairs anyway), and it
+   * joins/skips a relaunch another path already runs for the observer.
+   */
+  private async relaunchObserverForAutoheal(sessionId: string): Promise<{ ok: boolean; error?: string }> {
+    if (this.launcher.getSession(sessionId)?.archived) {
+      return { ok: false, error: "Session is archived and cannot be relaunched" };
     }
+    const joining = this.recovery.isRelaunchSettling(sessionId);
+    if (!joining) this.wsBridge.getSession(sessionId)?.stateMachine?.transition("starting", "relaunch_initiated");
+    return this.recovery.relaunchOnce(sessionId, "autoheal", {});
   }
 
   /**
