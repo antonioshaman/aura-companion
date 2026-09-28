@@ -2082,7 +2082,7 @@ export function createRoutes(
 
   registerFsRoutes(api);
   registerEnvRoutes(api, { webDir: WEB_DIR });
-  registerCouncilEconomyRoutes(api);
+  registerCouncilEconomyRoutes(api, { launcher });
   registerSandboxRoutes(api);
 
   registerPromptRoutes(api);

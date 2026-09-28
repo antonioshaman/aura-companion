@@ -13,9 +13,10 @@
 
 import type { Hono } from "hono";
 import { resolve, sep } from "node:path";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 
 import { respondError } from "../respond-error.js";
+import type { CliLauncher } from "../cli-launcher.js";
 import { recordRunStats, type RunStatsInput } from "../../scripts/run-stats.js";
 import {
   hashFileSet,
@@ -27,13 +28,19 @@ import {
 
 const MAX_HASH_PATHS = 200;
 const MAX_HASH_PATH_LEN = 1024;
-const MAX_HASH_FILE_BYTES = 512 * 1024;
-// Same deletion-sensitive sentinel hashFilesOnDisk uses, so the HTTP path and the
-// CLI path produce IDENTICAL hashes for the same file set (a mixed fleet stays
-// cache-compatible).
+// A file at or under this size is hashed in FULL (matching the CLI hashFilesOnDisk,
+// so HTTP and CLI hashes stay byte-identical). A file OVER it is rejected (400) —
+// never truncated: truncating before hashing would make two large files that differ
+// only past the cap hash identically → a false cache hit that could serve stale
+// findings (observer STOP). The council's assigned files are source files well under
+// this bound; an over-cap file simply skips caching.
+const MAX_HASH_FILE_BYTES = 2 * 1024 * 1024;
+// Same deletion-sensitive sentinel hashFilesOnDisk uses, so a missing file hashes
+// identically across the HTTP and CLI paths.
 const UNREADABLE_SENTINEL = "\u0000<unreadable-or-missing>";
 
-export function registerCouncilEconomyRoutes(api: Hono): void {
+export function registerCouncilEconomyRoutes(api: Hono, deps: { launcher: CliLauncher }): void {
+  const { launcher } = deps;
   // Record one council run into the persistent stats dataset.
   api.post("/council/economy/stats", async (c) => {
     let body: RunStatsInput;
@@ -54,40 +61,60 @@ export function registerCouncilEconomyRoutes(api: Hono): void {
   });
 
   // Content-hash a seat's assigned file set (read server-side, path-guarded).
+  // `root` is NOT client-supplied — it is derived from the caller's live session
+  // cwd, so this can never be turned into an arbitrary-file-read oracle over the
+  // whole box (observer STOP): the caller passes its sessionId + workspace-relative
+  // paths only.
   api.post("/council/economy/cache/hash", async (c) => {
-    let body: { root?: unknown; paths?: unknown };
+    let body: { sessionId?: unknown; paths?: unknown };
     try {
-      body = (await c.req.json()) as { root?: unknown; paths?: unknown };
+      body = (await c.req.json()) as { sessionId?: unknown; paths?: unknown };
     } catch {
       return respondError(c, 400, "bad_request", { module: "council.economy.cache.hash" });
     }
-    const root = typeof body.root === "string" ? body.root : "";
+    const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
     const paths = Array.isArray(body.paths) ? body.paths : null;
-    if (!root || !paths || paths.length === 0 || paths.length > MAX_HASH_PATHS) {
+    if (!sessionId || !paths || paths.length === 0 || paths.length > MAX_HASH_PATHS) {
       return respondError(c, 400, "bad_request", {
         module: "council.economy.cache.hash",
-        detail: { reason: `root + non-empty paths[] (<= ${MAX_HASH_PATHS}) required` },
+        detail: { reason: `sessionId + non-empty paths[] (<= ${MAX_HASH_PATHS}) required` },
       });
     }
-    const rootResolved = resolve(root);
+    const session = launcher.getSession(sessionId);
+    if (!session) {
+      return respondError(c, 404, "not_found", { module: "council.economy.cache.hash", detail: { sessionId } });
+    }
+    const rootResolved = resolve(session.cwd);
     const entries: FileEntry[] = [];
     for (const p of paths) {
       if (typeof p !== "string" || p.length === 0 || p.length > MAX_HASH_PATH_LEN) {
         return respondError(c, 400, "bad_request", { module: "council.economy.cache.hash", detail: { reason: "bad path entry" } });
       }
       const abs = resolve(rootResolved, p);
-      // Traversal guard: the resolved path must stay within root.
+      // Traversal guard: the resolved path must stay within the session workspace.
       if (abs !== rootResolved && !abs.startsWith(rootResolved + sep)) {
         return respondError(c, 403, "forbidden", {
           module: "council.economy.cache.hash",
-          detail: { reason: "path escapes root", path: p },
+          detail: { reason: "path escapes workspace", path: p },
         });
       }
+      // Reject (never truncate) an over-cap file: a truncated hash would go blind to
+      // changes past the cap and forge a false cache hit.
       let content: string;
       try {
-        const buf = readFileSync(abs);
-        content = (buf.length > MAX_HASH_FILE_BYTES ? buf.subarray(0, MAX_HASH_FILE_BYTES) : buf).toString("utf8");
-      } catch {
+        const size = statSync(abs).size;
+        if (size > MAX_HASH_FILE_BYTES) {
+          return respondError(c, 400, "bad_request", {
+            module: "council.economy.cache.hash",
+            detail: { reason: "file too large to hash", path: p, size },
+          });
+        }
+        content = readFileSync(abs).toString("utf8");
+      } catch (e) {
+        // A missing/unreadable file folds in as the deletion sentinel (matches the
+        // CLI); but a size-cap rejection above already returned. Only genuine
+        // ENOENT/EACCES reach here.
+        void e;
         content = UNREADABLE_SENTINEL;
       }
       entries.push({ path: p, content });

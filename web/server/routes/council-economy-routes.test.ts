@@ -30,7 +30,11 @@ beforeEach(() => {
 
   app = new Hono();
   const api = new Hono();
-  registerCouncilEconomyRoutes(api);
+  // Minimal launcher: session "sess-1" lives in `workspace`; anything else unknown.
+  const fakeLauncher = {
+    getSession: (id: string) => (id === "sess-1" ? { cwd: workspace } : undefined),
+  } as unknown as Parameters<typeof registerCouncilEconomyRoutes>[1]["launcher"];
+  registerCouncilEconomyRoutes(api, { launcher: fakeLauncher });
   app.route("/api", api);
 });
 
@@ -83,22 +87,34 @@ describe("POST /council/economy/stats", () => {
 });
 
 describe("POST /council/economy/cache/hash", () => {
-  it("hashes a file set and matches the CLI hashFilesOnDisk byte-for-byte", async () => {
+  it("hashes a file set (root derived from session) matching CLI hashFilesOnDisk byte-for-byte", async () => {
     writeFileSync(join(workspace, "a.ts"), "alpha");
     writeFileSync(join(workspace, "b.ts"), "beta");
-    const res = await post("/council/economy/cache/hash", { root: workspace, paths: ["a.ts", "b.ts"] });
+    const res = await post("/council/economy/cache/hash", { sessionId: "sess-1", paths: ["a.ts", "b.ts"] });
     expect(res.status).toBe(200);
     const { hash } = (await res.json()) as { hash: string };
     expect(hash).toBe(hashFilesOnDisk(workspace, ["a.ts", "b.ts"]));
   });
 
-  it("403s a path that escapes the root (traversal guard)", async () => {
-    const res = await post("/council/economy/cache/hash", { root: workspace, paths: ["../../etc/passwd"] });
+  it("404s an unknown session (root is never client-supplied)", async () => {
+    const res = await post("/council/economy/cache/hash", { sessionId: "nope", paths: ["a.ts"] });
+    expect(res.status).toBe(404);
+  });
+
+  it("403s a path that escapes the session workspace (traversal guard)", async () => {
+    const res = await post("/council/economy/cache/hash", { sessionId: "sess-1", paths: ["../../etc/passwd"] });
     expect(res.status).toBe(403);
   });
 
+  it("400s (never truncates) a file larger than the hash cap", async () => {
+    // 3 MB > 2 MB cap → rejected, so a change past the cap can't forge a false hit.
+    writeFileSync(join(workspace, "big.bin"), Buffer.alloc(3 * 1024 * 1024, 0x61));
+    const res = await post("/council/economy/cache/hash", { sessionId: "sess-1", paths: ["big.bin"] });
+    expect(res.status).toBe(400);
+  });
+
   it("400s a missing paths array", async () => {
-    const res = await post("/council/economy/cache/hash", { root: workspace });
+    const res = await post("/council/economy/cache/hash", { sessionId: "sess-1" });
     expect(res.status).toBe(400);
   });
 });
