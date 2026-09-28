@@ -195,7 +195,9 @@ export interface CodexAdapterOptions {
   recorder?: RecorderManager;
   /** Callback to kill the underlying process/connection on disconnect. */
   killProcess?: () => Promise<void> | void;
-  /** Optional system prompt injected into thread/start as instructions (e.g. Linear context). */
+  /** Optional system prompt (observer role prompt, layer-flag directive)
+   *  sent as `developerInstructions` on thread/start AND thread/resume —
+   *  see `threadInstructionParams`. */
   systemPrompt?: string;
 }
 
@@ -1234,6 +1236,7 @@ export class CodexAdapter implements IBackendAdapter {
                 cwd: this.getExecutionCwd(),
                 approvalPolicy: this.mapApprovalPolicy(this.currentPermissionMode),
                 sandbox: this.options.sandbox || this.mapSandboxPolicy(this.currentPermissionMode),
+                ...this.threadInstructionParams(),
               }) as { thread: { id: string } };
               this.threadId = resumeResult.thread.id;
             } catch (resumeErr) {
@@ -1250,7 +1253,7 @@ export class CodexAdapter implements IBackendAdapter {
                 cwd: this.getExecutionCwd(),
                 approvalPolicy: this.mapApprovalPolicy(this.currentPermissionMode),
                 sandbox: this.options.sandbox || this.mapSandboxPolicy(this.currentPermissionMode),
-                ...(this.options.systemPrompt ? { instructions: this.options.systemPrompt } : {}),
+                ...this.threadInstructionParams(),
               }) as { thread: { id: string } };
               this.threadId = freshResult.thread.id;
               // Update options.threadId so subsequent resetForReconnect calls
@@ -1269,7 +1272,7 @@ export class CodexAdapter implements IBackendAdapter {
               cwd: this.getExecutionCwd(),
               approvalPolicy: this.mapApprovalPolicy(this.currentPermissionMode),
               sandbox: this.options.sandbox || this.mapSandboxPolicy(this.currentPermissionMode),
-              ...(this.options.systemPrompt ? { instructions: this.options.systemPrompt } : {}),
+              ...this.threadInstructionParams(),
             }) as { thread: { id: string } };
             this.threadId = threadResult.thread.id;
           }
@@ -3306,6 +3309,22 @@ export class CodexAdapter implements IBackendAdapter {
 
   private mapCollaborationMode(kind: "default" | "plan"): { mode: "default" | "plan"; settings: { model: string } } {
     return { mode: kind, settings: { model: this.options.model || "" } };
+  }
+
+  /**
+   * aura-meta-diet FIX-C3-1: the system prompt rides `developerInstructions`
+   * — the field Codex app-server's ThreadStartParams/ThreadResumeParams
+   * actually define (verified against `codex app-server
+   * generate-json-schema`, codex-cli 0.142.5). The previous `instructions`
+   * key is not in the schema and was dropped silently: prod rollouts of
+   * Codex observers carried neither the observer prompt nor a developer
+   * message with it. Sent on resume too — a server restart resumes the
+   * thread, and a thread started before this fix never received the prompt.
+   * `developerInstructions` (not `baseInstructions`) so Codex keeps its own
+   * base prompt.
+   */
+  private threadInstructionParams(): { developerInstructions?: string } {
+    return this.options.systemPrompt ? { developerInstructions: this.options.systemPrompt } : {};
   }
 
   private isNotInitializedError(err: unknown): boolean {
