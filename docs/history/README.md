@@ -17,6 +17,7 @@ surfacing closed handoffs as if they were present-tense guidance. Git history is
 | `docs/history/council/review-output/` | 14 committed council review batches (per-expert findings + `FINAL-REVIEW.md`) | `.council/review-output/` |
 | `docs/history/council/plan-output/` | Council plan artefacts (phase-3β sub-plans, validator briefs, commit attestations) | `.council/plan-output/` |
 | `docs/history/council/implementation-logs/` | Council implementation logs | `.council/implementation-logs/` |
+| `docs/history/learnings/` | 3 `.learnings/*.md` logs of the removed `self-improvement` skill (step **P1/A1**; prod host IP and a credential location redacted). Migration verdicts: `docs/history/learnings-migration.md` | gitignored `.learnings/` in the prod checkout |
 
 ## What did NOT move
 
