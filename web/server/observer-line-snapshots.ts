@@ -23,7 +23,7 @@
  * this is a grounding aid, not a persistence layer.
  */
 
-import { readFileSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readSync, statSync } from "node:fs";
 import { diffArrays } from "diff";
 import {
   createWorkspaceResolver,
@@ -37,6 +37,12 @@ export const SNAPSHOT_MAX_FILE_BYTES = 512 * 1024;
 export const SNAPSHOT_MAX_CHECKPOINTS_PER_GROUP = 4;
 /** Artifact paths snapshotted per checkpoint; the rest get live-read facts. */
 export const SNAPSHOT_MAX_PATHS_PER_CHECKPOINT = 200;
+/**
+ * Total bytes one capture may read. Capture is synchronous on the checkpoint
+ * path, so without this 200 × 512 KB could block the event loop on ~100 MB of
+ * reads. Paths past the budget are not snapshotted (live-read facts later).
+ */
+export const SNAPSHOT_MAX_BYTES_PER_CHECKPOINT = 8 * 1024 * 1024;
 
 export type LineRange = [number, number];
 
@@ -81,19 +87,59 @@ export function changedLineRanges(prev: readonly string[], next: readonly string
   return ranges;
 }
 
-/** Read a workspace file as lines, or `null` if missing/escaping/binary/oversized. */
-function readLinesWithin(resolveRel: (rel: string) => string | null, relPath: string): string[] | null {
+type BoundedRead = { lines: string[]; bytes: number } | "over_limit" | null;
+
+/**
+ * Read a workspace file as lines. `null` = missing/escaping/not a regular
+ * file/binary/over the per-file cap; `"over_limit"` = within the per-file cap
+ * but larger than the caller's remaining `maxBytes`. Size is checked BEFORE
+ * reading (stat, then fstat on the opened fd), and the read itself is bounded,
+ * so an oversized artifact costs a stat, never a full read. Non-regular files
+ * (FIFOs, devices) are rejected before open — opening a FIFO blocks.
+ */
+function readBoundedLines(
+  resolveRel: (rel: string) => string | null,
+  relPath: string,
+  maxBytes: number = SNAPSHOT_MAX_FILE_BYTES,
+): BoundedRead {
   const abs = resolveRel(relPath);
   if (!abs) return null;
-  let buf: Buffer;
+  const sizeVerdict = (size: number): "over_cap" | "over_limit" | "ok" =>
+    size > SNAPSHOT_MAX_FILE_BYTES ? "over_cap" : size > maxBytes ? "over_limit" : "ok";
+  let fd: number | undefined;
   try {
-    buf = readFileSync(abs);
+    const st = statSync(abs);
+    if (!st.isFile()) return null;
+    const pre = sizeVerdict(st.size);
+    if (pre !== "ok") return pre === "over_cap" ? null : "over_limit";
+    fd = openSync(abs, "r");
+    const fst = fstatSync(fd);
+    if (!fst.isFile()) return null;
+    const post = sizeVerdict(fst.size);
+    if (post !== "ok") return post === "over_cap" ? null : "over_limit";
+    // One byte past the stat'd size detects growth between fstat and read.
+    const buf = Buffer.allocUnsafe(fst.size + 1);
+    let len = 0;
+    while (len < buf.length) {
+      const n = readSync(fd, buf, len, buf.length - len, len);
+      if (n === 0) break;
+      len += n;
+    }
+    if (len > fst.size) return null;
+    const content = buf.subarray(0, len);
+    if (content.subarray(0, 8000).includes(0)) return null;
+    return { lines: splitLines(content.toString("utf8")), bytes: len };
   } catch {
     return null;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
-  if (buf.length > SNAPSHOT_MAX_FILE_BYTES) return null;
-  if (buf.subarray(0, 8000).includes(0)) return null;
-  return splitLines(buf.toString("utf8"));
+}
+
+/** Read a workspace file as lines under the per-file cap, or `null`. */
+function readLinesWithin(resolveRel: (rel: string) => string | null, relPath: string): string[] | null {
+  const read = readBoundedLines(resolveRel, relPath);
+  return read && read !== "over_limit" ? read.lines : null;
 }
 
 function toFacts(lines: string[], changedRanges: LineRange[] | null): EvidenceLineFacts {
@@ -122,13 +168,23 @@ export class CheckpointLineSnapshots {
 
     const resolveRel = createWorkspaceResolver(workspaceRoot);
     const files = new Map<string, FileSnapshot | null>();
+    let budget = SNAPSHOT_MAX_BYTES_PER_CHECKPOINT;
     for (const relPath of [...new Set(paths)].slice(0, SNAPSHOT_MAX_PATHS_PER_CHECKPOINT)) {
-      const lines = readLinesWithin(resolveRel, relPath);
-      if (!lines) {
+      const read = readBoundedLines(resolveRel, relPath, budget);
+      if (read === "over_limit") {
+        // Out of capture budget: leave the path unsnapshotted (the provider
+        // live-reads it with unknown changes) and drop its baseline so the
+        // next diff cannot attribute two checkpoints' edits to one.
+        group.latestByPath.delete(relPath);
+        continue;
+      }
+      if (!read) {
         files.set(relPath, null);
         group.latestByPath.delete(relPath);
         continue;
       }
+      budget -= read.bytes;
+      const { lines } = read;
       const prev = group.latestByPath.get(relPath);
       files.set(relPath, { lines, changedRanges: prev ? changedLineRanges(prev, lines) : null });
       group.latestByPath.set(relPath, lines);
