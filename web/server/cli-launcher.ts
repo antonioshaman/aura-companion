@@ -383,7 +383,7 @@ export interface LaunchOptions {
    *  spawn argv unchanged. See `layer-flags.ts`. */
   layers?: LayerFlags;
   /** Internal: layer directive composed by `applyLayerSpawnOverrides`;
-   *  appended to Claude's system prompt / Codex thread instructions. */
+   *  appended to Claude's system prompt / Codex `developerInstructions`. */
   layerSystemPrompt?: string;
 }
 
@@ -1601,7 +1601,12 @@ export class CliLauncher {
     //
     // aura-meta-diet C3: the layer-flag directive rides the same flag (one
     // `--append-system-prompt` — a second occurrence would override the
-    // first) and obeys the same skip-on-resume rule.
+    // first) and obeys the same skip-on-resume rule. FIX-C3-1 verified the
+    // skip is safe (Claude Code 2.1.283): the CLI writes a `prompt_snapshot`
+    // attachment into the transcript and a flag-less `--resume` still answers
+    // from the original appended prompt. `--disallowedTools` is re-emitted
+    // below on every spawn. Codex re-sends it on thread/resume instead
+    // (`CodexAdapter.threadInstructionParams`).
     const appendedSystemPrompt = composeSystemPrompt(
       options.sessionGroupRole === "observer" ? options.systemPrompt : undefined,
       options.layerSystemPrompt,

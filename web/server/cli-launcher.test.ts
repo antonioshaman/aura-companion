@@ -3732,4 +3732,30 @@ describe("layer flags at spawn (P4/C3)", () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(captured.options.systemPrompt).toBeUndefined();
   });
+
+  it("codex: the directive survives a relaunch that resumes the thread (FIX-C3-1)", async () => {
+    // On stdio every server restart relaunches with the persisted thread id.
+    // The relaunched adapter must still carry the directive AND the thread
+    // id, so CodexAdapter re-sends it as developerInstructions on
+    // thread/resume (adapter half covered in codex-adapter.test.ts).
+    let resolveFirst!: (code: number) => void;
+    mockSpawn.mockReturnValueOnce({
+      ...createMockCodexProc(4001),
+      kill: vi.fn(() => resolveFirst(0)),
+      exited: new Promise<number>((r) => { resolveFirst = r; }),
+    });
+    const adapters: any[] = [];
+    companionBus.on("backend:codex-adapter-created", ({ adapter }) => { adapters.push(adapter); });
+    launcher.launch({ cwd: "/tmp/project", backendType: "codex", layers: { ...ALL_ON, council: false } });
+    await new Promise((r) => setTimeout(r, 0));
+    launcher.setCLISessionId("test-session-id", "thr_persisted");
+    mockSpawn.mockReturnValueOnce(createMockCodexProc(4002));
+
+    expect(await launcher.relaunch("test-session-id")).toEqual({ ok: true });
+    await new Promise((r) => setTimeout(r, 0));
+    const relaunched = adapters[adapters.length - 1];
+    expect(adapters.length).toBeGreaterThanOrEqual(2);
+    expect(relaunched.options.threadId).toBe("thr_persisted");
+    expect(relaunched.options.systemPrompt).toContain("council layer is disabled");
+  });
 });

@@ -30,7 +30,7 @@
  *  - Claude: `--disallowedTools` permission rules (KB file access + skills)
  *    plus an appended system-prompt directive.
  *  - Codex: has no per-tool deny flag, so `knowledge`/`council` OFF is
- *    enforced by the same directive injected as thread instructions only
+ *    enforced by the same directive sent as `developerInstructions` only
  *    (documented limitation — soft for Codex).
  *  - `observer` / `autoProceed` are enforced host-side (routes) and are
  *    provider-independent.
@@ -180,7 +180,7 @@ const KB_DIR = "./.agents/knowledge/**";
 export interface LayerSpawnConfig {
   /** Claude `--disallowedTools` rules to add (ignored by Codex). */
   disallowedTools: string[];
-  /** Directive appended to the system prompt (Claude) / thread instructions (Codex). */
+  /** Directive appended to the system prompt (Claude) / `developerInstructions` (Codex). */
   systemPrompt?: string;
 }
 
