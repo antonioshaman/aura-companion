@@ -20,8 +20,9 @@ import sys
 
 # Surfaces that legitimately carry unprefixed names: the archive itself
 # (frozen history), the diet spec (task statement), and .gitignore (patterns
-# for new scratch files at the repo root, not references to archived ones).
-SKIP = ("docs/history/", "specs/aura-meta-diet", ".gitignore")
+# for new scratch files at the repo root, not references to archived ones),
+# and this gate itself (its docstring and ALLOW table quote the names it hunts).
+SKIP = ("docs/history/", "specs/aura-meta-diet", ".gitignore", "scripts/aura-diet/check-history-refs.py")
 # (path, basename) pairs that name a NEW output file which merely shares its name
 # with an archived one. The supervisor writes fresh reports to the repo root
 # (gitignored) — new artifacts must never be born inside the archive.
