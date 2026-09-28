@@ -12,6 +12,8 @@ import type { ModelOption } from "./utils/backends.js";
 // frame per status makes a dropped mapping branch go red.
 import claudeResultErrorsRaw from "./__fixtures__/model-failover/claude-result-errors.jsonl?raw";
 import codexResultErrorRaw from "./__fixtures__/model-failover/codex-result-error.jsonl?raw";
+// UI-RESUME-NOISE — real `--resume` bookkeeping + api_error result frames.
+import resumeResultsRaw from "./__fixtures__/resume-interrupted/claude-resume-results.jsonl?raw";
 
 // Browser-safe mirror of replay.ts's getExpectedBrowserMessages over a raw
 // recording string: drop the header line, then keep `dir:"out" ch:"browser"`
@@ -24,6 +26,12 @@ function recordedBrowserResultFrames(recording: string): Array<Record<string, un
     .filter((e) => e.dir === "out" && e.ch === "browser")
     .map((e) => JSON.parse(e.raw) as Record<string, unknown>);
 }
+
+// Spy on the completion chime so the resume-noise tests can assert it stays silent.
+const mockPlayNotificationSound = vi.hoisted(() => vi.fn());
+vi.mock("./utils/notification-sound.js", () => ({
+  playNotificationSound: mockPlayNotificationSound,
+}));
 
 // Mock the names utility before any imports
 vi.mock("./utils/names.js", () => ({
@@ -1120,6 +1128,88 @@ describe("handleMessage: result", () => {
     expect(msgs).toHaveLength(1);
     expect(msgs[0].role).toBe("system");
     expect(msgs[0].content).toBe("Error: Something went wrong, Another error");
+  });
+
+  it("tags a real execution error from a live result as the red error variant", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+
+    fireMessage({
+      type: "result",
+      data: {
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        terminal_reason: "aborted_streaming",
+        errors: ["Stream closed unexpectedly"],
+        duration_ms: 100,
+        duration_api_ms: 50,
+        num_turns: 1,
+        total_cost_usd: 0.01,
+        stop_reason: null,
+        usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        uuid: "u2",
+        session_id: "s1",
+      },
+    });
+
+    // Same terminal reason, but a human-readable error → still a real error.
+    const msgs = useStore.getState().messages.get("s1")!;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].systemVariant).toBe("error");
+  });
+
+  // UI-RESUME-NOISE live path: the REAL recorded frame arriving right after a
+  // relaunch becomes a muted note and does not fire the "Session completed"
+  // chime/desktop notification — nothing finished, a restart cut it off.
+  it("renders the recorded live --resume frame as a note and keeps notifications silent", () => {
+    const hasFocus = vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const NotificationMock = vi.fn();
+    Object.assign(NotificationMock, { permission: "granted" });
+    // Swap Notification by hand — vi.unstubAllGlobals() would also drop the
+    // suite's WebSocket stub and break every later test.
+    const g = globalThis as { Notification?: unknown };
+    const originalNotification = g.Notification;
+    g.Notification = NotificationMock;
+    mockPlayNotificationSound.mockClear();
+    try {
+      useStore.setState({ notificationSound: true, notificationDesktop: true });
+      wsModule.connectSession("s1");
+      fireMessage({ type: "session_init", session: makeSession("s1") });
+
+      const [aborted] = recordedBrowserResultFrames(resumeResultsRaw);
+      fireMessage(aborted);
+
+      const msgs = useStore.getState().messages.get("s1")!;
+      expect(msgs).toHaveLength(1);
+      expect(msgs[0].systemVariant).toBe("resume-interrupted");
+      expect(mockPlayNotificationSound).not.toHaveBeenCalled();
+      expect(NotificationMock).not.toHaveBeenCalled();
+
+      // Control: a normal successful result in the same setup DOES chime, so
+      // the silence above is the resume guard, not a broken test harness.
+      fireMessage({
+        type: "result",
+        data: {
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          duration_ms: 1000,
+          duration_api_ms: 800,
+          num_turns: 1,
+          total_cost_usd: 0.05,
+          stop_reason: "end_turn",
+          usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+          uuid: "u3",
+          session_id: "s1",
+        },
+      });
+      expect(mockPlayNotificationSound).toHaveBeenCalledTimes(1);
+      expect(NotificationMock).toHaveBeenCalledTimes(1);
+    } finally {
+      hasFocus.mockRestore();
+      g.Notification = originalNotification;
+    }
   });
 
   // Claude `set_model` is optimistic + unvalidated by the CLI, so an unusable
@@ -2305,6 +2395,46 @@ describe("handleMessage: message_history", () => {
     expect(msgs).toHaveLength(1);
     expect(msgs[0].role).toBe("system");
     expect(msgs[0].content).toBe("Error: Timed out");
+  });
+
+  // UI-RESUME-NOISE: after a relaunch with --resume the Claude CLI closes the
+  // turn the old process was killed in with an `aborted_streaming` result
+  // (`[ede_diagnostic] …`). Replaying the REAL recorded frame through the
+  // history path must yield a muted "resume-interrupted" note, while a real
+  // execution error in the same history stays a red "error".
+  it("marks the recorded --resume bookkeeping frame as resume-interrupted in history", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+
+    const [aborted] = recordedBrowserResultFrames(resumeResultsRaw);
+    fireMessage({
+      type: "message_history",
+      messages: [
+        aborted,
+        {
+          type: "result",
+          data: {
+            type: "result",
+            subtype: "error_during_execution",
+            is_error: true,
+            errors: ["Timed out"],
+            duration_ms: 100,
+            duration_api_ms: 50,
+            num_turns: 1,
+            total_cost_usd: 0,
+            stop_reason: null,
+            usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+            uuid: "u1",
+            session_id: "s1",
+          },
+        },
+      ],
+    });
+
+    const msgs = useStore.getState().messages.get("s1")!;
+    expect(msgs.map((m) => m.systemVariant)).toEqual(["resume-interrupted", "error"]);
+    // The raw diagnostic is kept as the expandable detail.
+    expect(msgs[0].content).toContain("[ede_diagnostic]");
   });
 
   it("assigns stable IDs to error results based on history index", () => {

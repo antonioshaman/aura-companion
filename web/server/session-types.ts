@@ -146,6 +146,13 @@ export interface CLIResultMessage {
   api_error_status?: number;
   result?: string;
   errors?: string[];
+  /**
+   * Why the CLI ended the turn (Claude Code >= 2.1). Observed values include
+   * `api_error`, `blocking_limit`, and `aborted_streaming` — the last one is
+   * what `--resume` emits to close a turn the previous process was killed in
+   * (see `src/utils/resume-interrupted.ts`). Absent on Codex results.
+   */
+  terminal_reason?: string;
   duration_ms: number;
   duration_api_ms: number;
   num_turns: number;

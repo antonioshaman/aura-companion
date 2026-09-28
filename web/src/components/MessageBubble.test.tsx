@@ -78,6 +78,55 @@ describe("MessageBubble - system messages", () => {
   });
 });
 
+// ─── System messages built from errored result frames (UI-RESUME-NOISE) ─────
+
+describe("MessageBubble - result error variants", () => {
+  const diagnostic = "Error: [ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null";
+
+  it("renders a real execution error in the error color", () => {
+    const msg = makeMessage({ role: "system", content: "Error: Timed out", systemVariant: "error" });
+    render(<MessageBubble message={msg} />);
+    const text = screen.getByText("Error: Timed out");
+    expect(text.className).toContain("text-cc-error");
+  });
+
+  it("renders the --resume bookkeeping frame as a muted, collapsed note (not an error)", () => {
+    const msg = makeMessage({ role: "system", content: diagnostic, systemVariant: "resume-interrupted" });
+    const { container } = render(<MessageBubble message={msg} />);
+
+    const note = screen.getByTestId("resume-interrupted-note") as HTMLDetailsElement;
+    // Collapsed by default: only the human label is visible.
+    expect(note.open).toBe(false);
+    expect(screen.getByText("Previous turn was interrupted by a restart")).toBeTruthy();
+    // Nothing in the note uses the error color — this is the whole point.
+    expect(container.querySelector(".text-cc-error")).toBeNull();
+  });
+
+  it("expands to show the raw diagnostic when the summary is clicked", () => {
+    const msg = makeMessage({ role: "system", content: diagnostic, systemVariant: "resume-interrupted" });
+    const { container } = render(<MessageBubble message={msg} />);
+
+    const note = screen.getByTestId("resume-interrupted-note") as HTMLDetailsElement;
+    fireEvent.click(container.querySelector("summary")!);
+    expect(note.open).toBe(true);
+    expect(screen.getByText(diagnostic)).toBeTruthy();
+  });
+
+  it("passes axe for both variants", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(
+      <div>
+        <MessageBubble message={makeMessage({ role: "system", content: "Error: Timed out", systemVariant: "error" })} />
+        <MessageBubble
+          message={makeMessage({ role: "system", content: diagnostic, systemVariant: "resume-interrupted" })}
+        />
+      </div>,
+    );
+    const results = await axe(container);
+    expect(results).toHaveNoViolations();
+  });
+});
+
 // ─── User messages ───────────────────────────────────────────────────────────
 
 describe("MessageBubble - user messages", () => {

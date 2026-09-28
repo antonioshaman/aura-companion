@@ -412,6 +412,24 @@ const MSG_SYSTEM: ChatMessage = {
   timestamp: Date.now() - 30000,
 };
 
+// Result frame with a real execution error (red)
+const MSG_SYSTEM_ERROR: ChatMessage = {
+  id: "msg-6-error",
+  role: "system",
+  content: "Error: Tool execution failed: permission denied",
+  timestamp: Date.now() - 29000,
+  systemVariant: "error",
+};
+
+// Result frame --resume emits for a turn a restart cut off (muted, collapsed)
+const MSG_SYSTEM_RESUME_INTERRUPTED: ChatMessage = {
+  id: "msg-6-resume",
+  role: "system",
+  content: "Error: [ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null",
+  timestamp: Date.now() - 28000,
+  systemVariant: "resume-interrupted",
+};
+
 // Tool result with error
 const MSG_TOOL_ERROR: ChatMessage = {
   id: "msg-7",
@@ -1121,6 +1139,12 @@ export function Playground() {
             </Card>
             <Card label="System message">
               <MessageBubble message={MSG_SYSTEM} />
+            </Card>
+            <Card label="System message (execution error)">
+              <MessageBubble message={MSG_SYSTEM_ERROR} />
+            </Card>
+            <Card label="System message (previous turn interrupted by restart)">
+              <MessageBubble message={MSG_SYSTEM_RESUME_INTERRUPTED} />
             </Card>
           </div>
         </Section>
