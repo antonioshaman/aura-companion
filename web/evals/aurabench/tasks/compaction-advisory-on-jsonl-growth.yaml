@@ -1,0 +1,56 @@
+# AuraBench task mined from PR #190 ("feat(server): compaction-advisory banner on session-jsonl size milestones").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: compaction-advisory-on-jsonl-growth
+title: "Users are advised to compact a Claude session before its transcript grows large enough to destabilise it"
+start_commit: 646731165b5d916ba8787804d50fe1ab25ee175c
+prompt: |
+  Claude sessions whose CLI jsonl transcript grows past ~1.5 MB start suffering
+  silent-stdio stalls, and past a few MB they stall hourly. Running `/compact`
+  early helps, but users don't know when to do it.
+
+  Add a new pure module `web/server/context-size-suggester.ts` exporting:
+  - `COMPACTION_MILESTONE_BYTES` — ascending tiers 1.5 MB, 3 MB, 5 MB, 10 MB
+    (decimal: 1_500_000 … 10_000_000);
+  - `MILESTONE_MESSAGE` — an object keyed by tier byte value holding a
+    user-facing message (more than 20 characters) per tier that mentions the size ("1.5 MB", "3 MB", …); the last tier may advise
+    archiving instead of compacting;
+  - `nextCompactionMilestone(sizeBytes, lastFiredBytes, milestones?, messages?)`
+    returning `{ milestoneBytes, message }` for the highest tier reached
+    (`>=`) that is above `lastFiredBytes`, or `null` (below the first tier,
+    already advised, at the ceiling, or a tier without a message). Custom tier
+    lists/messages can be passed in.
+  Then show each newly crossed tier once per session as a browser notice, from
+  the orchestrator's existing periodic check that already stats the session's
+  jsonl.
+expected_files:
+  - web/server/context-size-suggester.ts
+  - web/server/session-orchestrator.ts
+expected_tests:
+  - web/server/context-size-suggester.test.ts
+failure_modes:
+  - "the same milestone notice repeats every tick"
+  - "a missing jsonl throws in the periodic check"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 190
+  merge_commit: 218a7ab9467fed6234b5fa10801145796b9579f6
+  class: feature
+  hidden_tests:
+    - web/server/context-size-suggester.test.ts
+  validation:
+    base: fail
+    merge: pass
+    base_failure: missing-interface
+    checked_at: "2026-09-28T07:45:07.749Z"

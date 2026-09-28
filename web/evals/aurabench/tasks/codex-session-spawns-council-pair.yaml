@@ -1,0 +1,44 @@
+# AuraBench task mined from PR #125 ("fix(council): don't spawn a pair when council toggled on the claude tab").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: codex-session-spawns-council-pair
+title: "Starting a Codex session never spawns a Council pair by accident"
+start_commit: 3db1ff86ef2f4150eb2f5e27081a57bf557c43a8
+prompt: |
+  Repro: on the home page, choose the Claude backend, enable Council mode, switch
+  to the Codex tab and start a session. Instead of a single Codex session the
+  server spawns a Council pair. The Council toggle is only shown for Claude, so
+  the user has no idea Council is on.
+
+  Fix it so a non-Claude session creation never sends Council fields, while the
+  user's Council preference on the Claude tab is preserved when they switch back.
+expected_files:
+  - web/src/components/HomePage.tsx
+expected_tests:
+  - web/src/components/HomePage.test.tsx
+failure_modes:
+  - "the Council preference is reset when switching tabs"
+  - "Claude sessions stop sending council fields"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 125
+  merge_commit: f0d10e8d8a7042f4201e3436a5a2da93a5287088
+  class: debug
+  hidden_tests:
+    - web/src/components/HomePage.test.tsx
+  validation:
+    base: fail
+    merge: pass
+    base_failure: assertion
+    checked_at: "2026-09-28T07:32:10.751Z"

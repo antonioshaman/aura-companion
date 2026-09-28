@@ -1,0 +1,52 @@
+# AuraBench task mined from PR #40 ("feat(persistence): explicit schemaVersion + load-side migration for sessions").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: session-schema-version
+title: "Persisted sessions carry a schema version and future-version records are rejected loudly"
+start_commit: 9a7fd272107cf855201f2712b4ae515fa10b1da7
+prompt: |
+  Persisted session JSON has no version field, so a future server that changes
+  the stored shape would silently parse old records with wrong defaults (and an
+  old server would misread new ones).
+
+  In `web/server/session-store.ts`:
+  - export `CURRENT_SESSION_SCHEMA_VERSION = 1` and add an optional
+    `schemaVersion` field to the persisted session type;
+  - export a pure `migratePersistedSession(raw, logger?)` (logger:
+    `{ warn(msg: string) }`) that returns the same object when it is already
+    current, returns a new stamped copy (input not mutated) for records without
+    `schemaVersion` (v0 → v1), and returns `null` for records from a future
+    version, logging one warning that says the record is from a future version
+    and includes the session id and its version number;
+  - every save stamps the current version; `load()` applies the migration
+    (future version → `null`) and `loadAll()` skips future-version records.
+expected_files:
+  - web/server/session-store.ts
+expected_tests:
+  - web/server/session-store.test.ts
+failure_modes:
+  - "unknown-version records are loaded with guessed defaults"
+  - "round-trip of a current record mutates it"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 40
+  merge_commit: a1a1db879a5aff78dbf59c90bf574096a77ce34c
+  class: feature
+  hidden_tests:
+    - web/server/session-store.test.ts
+  validation:
+    base: fail
+    merge: pass
+    base_failure: assertion
+    checked_at: "2026-09-28T07:18:13.219Z"

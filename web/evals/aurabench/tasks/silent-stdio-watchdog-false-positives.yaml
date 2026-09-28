@@ -1,0 +1,49 @@
+# AuraBench task mined from PR #180 ("feat(server): tune silent-stdio watchdog default 60s→300s + env override").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: silent-stdio-watchdog-false-positives
+title: "The silent-stdio watchdog stops killing long tool-heavy turns and can be tuned"
+start_commit: 677147218c54aec15f12c65bb3293222b19f7f92
+prompt: |
+  The silent-stdio watchdog restarts a Claude CLI when no frame arrives for 60 s.
+  Legitimate long tool calls (slow Bash, WebFetch) regularly stay silent longer
+  than that, so healthy sessions get killed mid-turn.
+
+  Raise the default to 5 minutes (300000 ms) and allow operators to override it
+  with the environment variable `AURA_SILENT_STDIO_TIMEOUT_MS`. Put the parsing
+  in an exported pure function in `web/server/claude-adapter.ts`,
+  `resolveSilentStdioTimeoutMs(envValue?, warn?)`: unset or empty → default; a
+  plain integer ≥ `MIN_MS` (10000) → that value; anything else (below the
+  minimum, negative, non-numeric, partially numeric like `60000abc`) → call
+  `warn` once with a message naming `AURA_SILENT_STDIO_TIMEOUT_MS` and the
+  minimum (10000), and use the default.
+expected_files:
+  - web/server/claude-adapter.ts
+expected_tests:
+  - web/server/claude-adapter.test.ts
+failure_modes:
+  - "garbage env values are partially parsed"
+  - "values below 10 s are accepted"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 180
+  merge_commit: 99249a17c2b3a9b9387135d40aaac1cdb9943644
+  class: feature
+  hidden_tests:
+    - web/server/claude-adapter.test.ts
+  validation:
+    base: fail
+    merge: pass
+    base_failure: missing-interface
+    checked_at: "2026-09-28T07:43:31.590Z"

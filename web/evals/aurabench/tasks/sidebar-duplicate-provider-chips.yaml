@@ -1,0 +1,59 @@
+# AuraBench task mined from PR #27 ("fix(council): hide duplicate ProviderBadges in sidebar for homogeneous pairs").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: sidebar-duplicate-provider-chips
+title: "The sidebar no longer shows redundant provider chips for same-provider Council pairs"
+start_commit: be86831b063da9c0d766aa120e76af92559c41a3
+prompt: |
+  In the sidebar, a `claude+claude` Council session shows the green Claude
+  backend chip and then an extra `CLAUDE + CLAUDE` provider chip pair, which
+  adds nothing in a dense row. Users keep reporting it.
+
+  - Export `isHomogeneousPairing(pairing)` from
+    `web/src/components/council/ProviderBadges.tsx` (and the council index):
+    true when both halves of a pairing string like `"claude+claude"` name the
+    same provider, case-insensitively; false for asymmetric or malformed input
+    (empty, one half, empty half, more than two parts).
+  - In the sidebar session row only, don't render the council provider badge
+    (`data-testid="council-session-badge"`) for homogeneous pairs; asymmetric
+    pairs keep it. The top bar and observer panel are unchanged, and the unread
+    STOP counter is shown regardless of pairing.
+  - Long session names are truncated to a couple of characters because the chip
+    cluster competes with the name in one horizontal row. Lay the sidebar row out
+    in two rows inside the row button: the name on the first row, and a metadata
+    row (chip cluster + cwd) beneath it — the chip cluster must no longer be a
+    direct child of the button's flex row.
+expected_files:
+  - web/src/components/SessionItem.tsx
+  - web/src/components/council/ProviderBadges.tsx
+  - web/src/components/council/index.ts
+expected_tests:
+  - web/src/components/SessionItem.test.tsx
+  - web/src/components/council/ProviderBadges.test.tsx
+failure_modes:
+  - "badges disappear from the top bar/observer panel too"
+  - "malformed pairings crash the row"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 27
+  merge_commit: 89d0f318843e6f2c429a5b8b0cc43b4279e43f04
+  class: ui
+  hidden_tests:
+    - web/src/components/SessionItem.test.tsx
+    - web/src/components/council/ProviderBadges.test.tsx
+  validation:
+    base: fail
+    merge: pass
+    base_failure: assertion
+    checked_at: "2026-09-28T07:16:02.842Z"

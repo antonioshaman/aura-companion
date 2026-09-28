@@ -1,0 +1,45 @@
+# AuraBench task mined from PR #115 ("fix(model-switcher): reflect Claude model selection in the trigger immediately").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: model-switcher-label-lags
+title: "The model picker label updates the moment a Claude model is chosen"
+start_commit: 60e9125c44ca0506272f92fd81790384f2f2833b
+prompt: |
+  In the chat composer, picking a different model for a Claude session sends the
+  switch, but the dropdown's trigger label keeps showing the old model until the
+  next message is sent, so users think the switch didn't work.
+
+  Make the `ModelSwitcher` label reflect a Claude model selection immediately
+  (optimistically), using the store's existing session-update action for the
+  runtime session. Selecting the model that is already active must not send
+  anything.
+expected_files:
+  - web/src/components/ModelSwitcher.tsx
+expected_tests:
+  - web/src/components/ModelSwitcher.test.tsx
+failure_modes:
+  - "Codex model switching changes"
+  - "the switch message is sent twice"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 115
+  merge_commit: 01f144b93b79c61efcbb51aff731c578163ee49c
+  class: ui
+  hidden_tests:
+    - web/src/components/ModelSwitcher.test.tsx
+  validation:
+    base: fail
+    merge: pass
+    base_failure: assertion
+    checked_at: "2026-09-28T07:28:25.914Z"

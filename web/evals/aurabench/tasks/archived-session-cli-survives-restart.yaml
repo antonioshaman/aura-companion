@@ -1,0 +1,50 @@
+# AuraBench task mined from PR #114 ("fix(cli-launcher): kill restart-survived CLI process on archive/delete").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: archived-session-cli-survives-restart
+title: "Archiving a session after a server restart actually stops its CLI process"
+start_commit: 1bb028fd9c61b163396333d07f3a57b042bc2741
+prompt: |
+  Under systemd `KillMode=process`, CLI child processes survive a server restart.
+  After the restart the launcher restores those sessions from disk with their
+  live `pid`, but `CliLauncher.kill()` only signals the in-memory subprocess
+  handle, which no longer exists — so archiving or deleting such a session
+  leaves the CLI process running forever.
+
+  Make `kill()` handle a restored session that has a pid but no subprocess
+  handle: SIGTERM it, wait a grace period for it to exit, escalate to SIGKILL,
+  then mark the session exited and clear its pid, and return whether it
+  signalled. For Claude sessions, reuse the existing process-identity check used
+  when relaunching over a previous instance's pid — if the identity does not
+  match (pid reuse), do not signal anything. Codex sessions have no argv
+  identity anchor; signal them best-effort.
+expected_files:
+  - web/server/cli-launcher.ts
+expected_tests:
+  - web/server/cli-launcher.test.ts
+failure_modes:
+  - "an unrelated process with a reused pid is killed"
+  - "kill() blocks forever waiting on a pid"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 114
+  merge_commit: 60e9125c44ca0506272f92fd81790384f2f2833b
+  class: bugfix
+  hidden_tests:
+    - web/server/cli-launcher.test.ts
+  validation:
+    base: fail
+    merge: pass
+    base_failure: assertion
+    checked_at: "2026-09-28T07:28:18.486Z"

@@ -1,0 +1,82 @@
+# AuraBench task mined from PR #169 ("feat(server): drive Claude CLI over stdio stream-json instead of --sdk-url").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: claude-cli-stdio-transport
+title: "Companion can drive current Claude CLIs that reject --sdk-url"
+start_commit: b0dc85895eab3eb03a7c96716060fa345baa27f0
+prompt: |
+  Claude Code >= 2.1.121 rejects `--sdk-url` for hosts outside a compiled-in
+  allowlist, so every Claude session dies on spawn: Companion drives the CLI via
+  a WebSocket that the CLI dials back through `--sdk-url`. Switch the default
+  control channel to the CLI's documented stdio `stream-json` mode while keeping
+  the WebSocket path available behind `COMPANION_CLAUDE_TRANSPORT=ws`.
+
+  Introduce a transport seam so the Claude adapter's protocol translation stays
+  identical for both channels, in a new module `web/server/cli-transport.ts`:
+  - `WebSocketCliTransport(ws)` — `send`/`close` delegate to the socket,
+    `isOpen()` iff `readyState === 1`, `bufferedAmount()` from the socket, and
+    the socket exposed as `raw`;
+  - `StdioCliTransport(sink: StdinSink, sessionId)` — `StdinSink` is
+    `{ write(chunk), flush(), end() }`; `send` writes and flushes every frame and
+    throws (message containing "closed") once closed; `close()` ends the pipe
+    once (idempotent, tolerates `end()` throwing); `markClosed()` closes the
+    channel without touching the pipe; `bufferedAmount()` is 0;
+  - `createLineAccumulator(onLine)` with `push(chunk)` emitting only complete
+    newline-terminated lines (newline included) and `flush()` emitting a
+    non-blank unterminated tail;
+  - `pumpStdoutLines(stream, onLine, onError?)` — reads a byte stream to EOF,
+    decoding UTF-8 correctly across chunk boundaries, emits lines, flushes the
+    tail at EOF, and routes stream errors to `onError` (never rejects).
+
+  In the launcher, a stdio Claude spawn runs the CLI with `--print
+  --output-format stream-json --input-format stream-json --verbose
+  --include-partial-messages` (no `--sdk-url`, no `-p`) and piped stdio. The
+  launcher gets a `setStdioCliOpener(opener)` hook (wired by the server to the
+  WebSocket bridge) returning the session's adapter; without an
+  opener the launch fails (session `exited`, exit code 1) instead of spawning.
+  Stdout lines go to the adapter's raw-message handler and the session becomes
+  connected on output. A stdio Claude process that survives a server restart
+  cannot be re-attached (its pipes died with the old server): on restore from
+  disk, terminate it (SIGTERM, after a process-identity check — the existing check
+  only recognises the `--sdk-url` argv, so extend it to recognise a stdio Claude
+  process by comparing its argv with a hash of the argv recorded at spawn), mark
+  the session exited with its pid cleared, keep its `cliSessionId` so the next
+  message resumes the conversation, and do not count it as restored.
+expected_files:
+  - web/server/claude-adapter.ts
+  - web/server/cli-launcher.ts
+  - web/server/cli-transport.ts
+  - web/server/index.ts
+  - web/server/orphan-reaper.ts
+  - web/server/process-identity.ts
+  - web/server/ws-bridge.ts
+expected_tests:
+  - web/server/cli-launcher.test.ts
+  - web/server/cli-transport.test.ts
+failure_modes:
+  - "the WebSocket transport stops working behind COMPANION_CLAUDE_TRANSPORT=ws"
+  - "partial lines or split multi-byte characters corrupt frames"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 169
+  merge_commit: c675c7f0e47f867ad842965288e6b34e23f3d663
+  class: architecture
+  hidden_tests:
+    - web/server/cli-launcher.test.ts
+    - web/server/cli-transport.test.ts
+  validation:
+    base: fail
+    merge: pass
+    base_failure: missing-interface
+    checked_at: "2026-09-28T07:39:14.531Z"
