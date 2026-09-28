@@ -16,7 +16,10 @@ import { scorePrecisionCorpus, type PrecisionSummary } from "../scorers/precisio
 import {
   buildEvalScorecard,
   ADVISORY_THRESHOLDS,
+  evidenceVerdict,
   groundingRecallRegression,
+  MIN_LABELED_STOPS,
+  renderEvidenceVerdict,
   renderGroundingBeforeAfter,
 } from "./eval-scorecard.js";
 import { renderScorecardMarkdown, renderScorecardText } from "./scorecard.js";
@@ -110,3 +113,31 @@ describe("B2 grounding before/after", () => {
   });
 });
 
+
+// B3 sufficiency verdict: with < 100 labeled STOPs no conclusion about the
+// observer may be stated, however good the precision number looks.
+describe("evidenceVerdict (B3)", () => {
+  it("marks usefulness UNPROVEN and the >90% gate NOT EVALUATED below 100 labeled STOPs, even at precision 1.0", () => {
+    const v = evidenceVerdict(MIN_LABELED_STOPS - 1, 1);
+    expect(v).toEqual({ labeled_stops: 99, observer_useful: "unproven", stop_precision_gate: "not_evaluated" });
+    const text = renderEvidenceVerdict(v);
+    expect(text).toContain("Observer is useful: UNPROVEN (99/100 labeled STOPs)");
+    expect(text).toContain("gate STOP precision > 90%: NOT EVALUATED (99/100 labeled STOPs)");
+  });
+
+  it("stays not evaluated at 100 labels when precision is unavailable", () => {
+    expect(evidenceVerdict(100, "unavailable").stop_precision_gate).toBe("not_evaluated");
+  });
+
+  it("evaluates the gate strictly (> 0.9) once 100 STOPs are labeled", () => {
+    // Exactly 90% is NOT above the gate — boundary is strict.
+    expect(evidenceVerdict(100, 0.9)).toMatchObject({ observer_useful: "not_supported", stop_precision_gate: "fail" });
+    expect(evidenceVerdict(150, 0.95)).toMatchObject({ observer_useful: "supported", stop_precision_gate: "pass" });
+  });
+
+  it("renders a markdown table with both claims", () => {
+    const md = renderEvidenceVerdict(evidenceVerdict(3, 0.5), true);
+    expect(md).toContain("| Observer is useful | UNPROVEN (3/100 labeled STOPs) |");
+    expect(md).toContain("| gate: STOP precision > 90% | NOT EVALUATED (3/100 labeled STOPs) |");
+  });
+});

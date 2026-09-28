@@ -121,3 +121,59 @@ export function groundingRecallRegression(summary: PrecisionSummary): string | n
   }
   return null;
 }
+
+/** Labeled STOPs required before any claim about observer usefulness is made
+ *  (spec: 100–200 human labels). Below it, the corpus is an anecdote. */
+export const MIN_LABELED_STOPS = 100;
+/** The product gate the labels are collected for. */
+export const STOP_PRECISION_GATE = 0.9;
+
+export interface EvidenceVerdict {
+  labeled_stops: number;
+  /** "Observer is useful" — only `supported`/`not_supported` with enough labels. */
+  observer_useful: "unproven" | "supported" | "not_supported";
+  /** "STOP precision > 90%" gate. */
+  stop_precision_gate: "not_evaluated" | "pass" | "fail";
+}
+
+/**
+ * B3: refuse to state a conclusion the labels cannot carry. With fewer than
+ * {@link MIN_LABELED_STOPS} labeled STOPs both the usefulness claim and the
+ * precision gate are reported as not established, whatever the precision
+ * number happens to be. With enough labels the gate is strict `>`.
+ */
+export function evidenceVerdict(labeledStops: number, stopPrecision: number | "unavailable"): EvidenceVerdict {
+  if (labeledStops < MIN_LABELED_STOPS || typeof stopPrecision !== "number") {
+    return { labeled_stops: labeledStops, observer_useful: "unproven", stop_precision_gate: "not_evaluated" };
+  }
+  const pass = stopPrecision > STOP_PRECISION_GATE;
+  return {
+    labeled_stops: labeledStops,
+    observer_useful: pass ? "supported" : "not_supported",
+    stop_precision_gate: pass ? "pass" : "fail",
+  };
+}
+
+export function renderEvidenceVerdict(v: EvidenceVerdict, markdown = false): string {
+  const need = `${v.labeled_stops}/${MIN_LABELED_STOPS} labeled STOPs`;
+  const useful =
+    v.observer_useful === "unproven"
+      ? `UNPROVEN (${need})`
+      : v.observer_useful === "supported"
+        ? `supported (${need})`
+        : `not supported (${need})`;
+  const gate =
+    v.stop_precision_gate === "not_evaluated"
+      ? `NOT EVALUATED (${need})`
+      : v.stop_precision_gate.toUpperCase();
+  const pct = Math.round(STOP_PRECISION_GATE * 100);
+  if (markdown) {
+    return [
+      "| claim | status |",
+      "|---|---|",
+      `| Observer is useful | ${useful} |`,
+      `| gate: STOP precision > ${pct}% | ${gate} |`,
+    ].join("\n");
+  }
+  return [`Observer is useful: ${useful}`, `gate STOP precision > ${pct}%: ${gate}`].join("\n");
+}
