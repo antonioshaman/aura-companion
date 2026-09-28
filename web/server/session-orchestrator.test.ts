@@ -3643,6 +3643,112 @@ describe("SessionOrchestrator", () => {
       }
     });
 
+    // ── P3/B1: host-built reviews from the observer's reply ────────────────
+    //
+    // The observer's final message is a bare findings array; on turn end the
+    // orchestrator finalizes the capture armed at dispatch. These pin the
+    // orchestrator-side wiring: file written under the canonical name, one bad
+    // answer does not degrade the group, a streak of bad answers (or silence)
+    // still does through the existing wake_produced_no_review channel.
+    function observerReply(groupId: string, observer: string, text: string) {
+      const ws = orchestrator as unknown as {
+        observerReplyCapture: { onAssistant: (s: string, m: unknown) => void };
+        finalizeObserverReply: (g: string, s: string) => void;
+      };
+      ws.observerReplyCapture.onAssistant(observer, { type: "assistant", message: { model: "claude-opus-4-8", content: [{ type: "text", text }] } });
+      ws.finalizeObserverReply.call(orchestrator, groupId, observer);
+    }
+
+    it("B1: a findings-array reply is written as the canonical review file with host fields", async () => {
+      const { parseObserverReviewPayload } = await import("./council-types.js");
+      const { cwd } = seedActiveGroupWithApplyEvent("grp_b1_ok", { observer: "sess_obs_b1" });
+      vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "sent" });
+      callDispatch("grp_b1_ok", validPayload("grp_b1_ok", { checkpointId: "chk_b1_ok" }));
+      observerReply("grp_b1_ok", "sess_obs_b1", JSON.stringify([
+        { severity: "WARN", claim: "missing test for retry", evidence_path: "src/a.ts", confidence: "medium" },
+      ]));
+      const raw = require("node:fs").readFileSync(require("node:path").join(cwd, ".council", "reviews", "council-plan-grp_b1_ok-claude-observer.md"), "utf-8");
+      const review = parseObserverReviewPayload(raw);
+      expect(review).toMatchObject({
+        checkpoint_id: "chk_b1_ok",
+        phase: "council-plan",
+        session_group_id: "grp_b1_ok",
+        observer_provider: "claude",
+        observer_model: "claude-opus-4-8",
+        findings: [{ severity: "WARN", claim: "missing test for retry", evidence_path: "src/a.ts", confidence: "medium" }],
+      });
+    });
+
+    it("B1: the deadline rescan recovers a host-written review, so no degrade fires", async () => {
+      // The review watcher is not running in this harness; the EC-8 rescan at
+      // the deadline is the path that must find the host's file on disk.
+      const { OBSERVER_WAKE_TIMEOUT_MS } = await import("./council-types.js");
+      vi.useFakeTimers();
+      try {
+        const { ws } = seedActiveGroupWithApplyEvent("grp_b1_rescan", { observer: "sess_obs_b1r" });
+        vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "sent" });
+        callDispatch("grp_b1_rescan", validPayload("grp_b1_rescan", { checkpointId: "chk_b1_rescan" }));
+        observerReply("grp_b1_rescan", "sess_obs_b1r", "[]");
+        vi.advanceTimersByTime(OBSERVER_WAKE_TIMEOUT_MS + 1);
+        expect(ws.coordinator.applyEvent).not.toHaveBeenCalledWith("grp_b1_rescan", expect.objectContaining({ type: "half_died" }));
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("B1: one invalid reply writes no review and does NOT degrade the group", async () => {
+      const { OBSERVER_WAKE_TIMEOUT_MS } = await import("./council-types.js");
+      vi.useFakeTimers();
+      try {
+        const { cwd, ws } = seedActiveGroupWithApplyEvent("grp_b1_bad", { observer: "sess_obs_bad" });
+        vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "sent" });
+        callDispatch("grp_b1_bad", validPayload("grp_b1_bad", { checkpointId: "chk_b1_bad" }));
+        observerReply("grp_b1_bad", "sess_obs_bad", "Looks good, no issues.");
+        expect(require("node:fs").existsSync(require("node:path").join(cwd, ".council", "reviews"))).toBe(false);
+        const entry = (orchestrator as unknown as {
+          councilWatchers: Map<string, { pendingReviewDeadline: unknown }>;
+        }).councilWatchers.get("grp_b1_bad");
+        expect(entry?.pendingReviewDeadline).toBeNull();
+        vi.advanceTimersByTime(OBSERVER_WAKE_TIMEOUT_MS + 1);
+        expect(ws.coordinator.applyEvent).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("B1: after OBSERVER_REPLY_REJECTIONS_BEFORE_DEGRADE bad replies in a row the watchdog degrades as before", async () => {
+      const { OBSERVER_WAKE_TIMEOUT_MS } = await import("./council-types.js");
+      const { OBSERVER_REPLY_REJECTIONS_BEFORE_DEGRADE } = await import("./session-orchestrator.js");
+      vi.useFakeTimers();
+      try {
+        const { ws } = seedActiveGroupWithApplyEvent("grp_b1_streak", { observer: "sess_obs_streak" });
+        vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "sent" });
+        for (let i = 1; i <= OBSERVER_REPLY_REJECTIONS_BEFORE_DEGRADE; i++) {
+          callDispatch("grp_b1_streak", validPayload("grp_b1_streak", { checkpointId: `chk_streak_${i}`, sequence: i }));
+          observerReply("grp_b1_streak", "sess_obs_streak", "{\"status\":\"approved\"}");
+        }
+        vi.advanceTimersByTime(OBSERVER_WAKE_TIMEOUT_MS + 1);
+        expect(ws.coordinator.applyEvent).toHaveBeenCalledWith("grp_b1_streak", { type: "half_died", role: "observer", reason: "wake_produced_no_review" });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("B1: an empty reply (silence after the last tool call) keeps the watchdog armed", async () => {
+      const { OBSERVER_WAKE_TIMEOUT_MS } = await import("./council-types.js");
+      vi.useFakeTimers();
+      try {
+        const { ws } = seedActiveGroupWithApplyEvent("grp_b1_empty", { observer: "sess_obs_empty" });
+        vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "sent" });
+        callDispatch("grp_b1_empty", validPayload("grp_b1_empty", { checkpointId: "chk_b1_empty" }));
+        observerReply("grp_b1_empty", "sess_obs_empty", "   ");
+        vi.advanceTimersByTime(OBSERVER_WAKE_TIMEOUT_MS + 1);
+        expect(ws.coordinator.applyEvent).toHaveBeenCalledWith("grp_b1_empty", { type: "half_died", role: "observer", reason: "wake_produced_no_review" });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("re-arms the watchdog for the newest dispatched checkpoint (single-slot supersede)", () => {
       const ws = orchestrator as unknown as {
         councilWatchers: Map<string, { pendingReviewDeadline: { checkpointId: string } | null }>;
