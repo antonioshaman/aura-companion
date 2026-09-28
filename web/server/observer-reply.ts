@@ -57,42 +57,124 @@ export type ExtractedFindings =
   | { ok: true; findings: unknown[]; shape: "array" | "object" }
   | { ok: false; reason: Exclude<ObserverReplyRejectReason, "invalid_findings"> };
 
+/** Upper bound on bracket positions the prose scan will try. A reply with
+ *  thousands of unmatched `[` would otherwise make the scan quadratic. */
+const MAX_PROSE_SCAN_STARTS = 512;
+
+/**
+ * Return the balanced `[...]` / `{...}` span starting at `start`, tracking
+ * JSON string literals so a `]` inside `"evidence"` does not close the span.
+ * `null` if the text ends before the span balances.
+ */
+function balancedSpanEnd(text: string, start: number): number | null {
+  let depth = 0;
+  let inString = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (ch === "\\") i++;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === "[" || ch === "{") depth++;
+    else if (ch === "]" || ch === "}") {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return null;
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+type Classified =
+  | { kind: "findings"; findings: unknown[]; shape: "array" | "object" }
+  | { kind: "other" };
+
+/**
+ * Decide whether parsed JSON is a findings list. `standalone` = it was the
+ * whole reply or a whole fenced block — an explicit answer. Only a
+ * standalone value may be an EMPTY list or an array the validator must
+ * judge; JSON pulled out of prose must look like findings (a non-empty
+ * array of objects), so `[0]`, `[ ]` or `[1, 2]` in a sentence never
+ * becomes a review.
+ */
+function classifyFindings(parsed: unknown, standalone: boolean): Classified {
+  if (Array.isArray(parsed)) {
+    if (standalone) return { kind: "findings", findings: parsed, shape: "array" };
+    if (parsed.length > 0 && parsed.every(isPlainObject)) return { kind: "findings", findings: parsed, shape: "array" };
+    return { kind: "other" };
+  }
+  if (isPlainObject(parsed) && Array.isArray(parsed.findings)) {
+    const findings = parsed.findings as unknown[];
+    if (standalone || findings.length > 0) return { kind: "findings", findings, shape: "object" };
+  }
+  return { kind: "other" };
+}
+
+function tryParse(text: string): { ok: true; value: unknown } | { ok: false } {
+  try {
+    return { ok: true, value: JSON.parse(text) };
+  } catch {
+    return { ok: false };
+  }
+}
+
 /**
  * Pull the findings list out of the observer's final reply text.
  *
- * Accepted, in order: the whole text as JSON; the LAST ```json fenced block
- * that parses; the outermost `[...]` / `{...}` span. A JSON array is the
- * findings list; an object is accepted only if it carries a `findings`
- * array (legacy envelope pasted in chat). Anything else is rejected —
- * never guessed at.
+ * Accepted, in order:
+ *  1. the whole text as JSON;
+ *  2. the LAST ```json fenced block whose whole body parses;
+ *  3. the LAST balanced `[...]` / `{...}` span in prose that parses AND
+ *     looks like findings (non-empty array of objects, or an object with a
+ *     non-empty `findings` array). Spans are found by a string-aware
+ *     bracket scan, so prose brackets (`rule [R3]`, `see [docs]`,
+ *     `foo[0]`) neither swallow the real array nor stand in for it.
+ *
+ * An EMPTY review is accepted only from an explicit empty list as the whole
+ * reply or a whole fenced block — never from `[ ]` inside a sentence.
+ * A JSON array is the findings list; an object is accepted only if it
+ * carries a `findings` array (legacy envelope pasted in chat). Anything
+ * else is rejected — never guessed at.
  */
 export function extractObserverFindings(text: string): ExtractedFindings {
   const trimmed = text.trim();
   if (trimmed.length === 0) return { ok: false, reason: "empty_reply" };
 
-  const candidates: string[] = [trimmed];
-  const fences = [...trimmed.matchAll(/```(?:json)?\s*\n([\s\S]*?)\n?```/g)].map((m) => m[1] ?? "");
-  candidates.push(...fences.reverse());
-  for (const [open, close] of [["[", "]"], ["{", "}"]] as const) {
-    const a = trimmed.indexOf(open);
-    const b = trimmed.lastIndexOf(close);
-    if (a >= 0 && b > a) candidates.push(trimmed.slice(a, b + 1));
+  let sawJson = false;
+  const standalone: string[] = [trimmed];
+  const fences = [...trimmed.matchAll(/```(?:json)?\s*\n([\s\S]*?)\n?```/g)].map((m) => (m[1] ?? "").trim());
+  standalone.push(...fences.reverse());
+  for (const c of standalone) {
+    const r = tryParse(c);
+    if (!r.ok) continue;
+    sawJson = true;
+    const cls = classifyFindings(r.value, true);
+    if (cls.kind === "findings") return { ok: true, findings: cls.findings, shape: cls.shape };
   }
 
-  let sawJson = false;
-  for (const c of candidates) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(c);
-    } catch {
-      continue;
-    }
+  // Prose scan: outermost balanced spans left to right; the last span that
+  // classifies as findings wins (mirrors "last fenced block").
+  let found: Extract<Classified, { kind: "findings" }> | null = null;
+  let starts = 0;
+  for (let i = 0; i < trimmed.length && starts < MAX_PROSE_SCAN_STARTS; i++) {
+    const ch = trimmed[i];
+    if (ch !== "[" && ch !== "{") continue;
+    starts++;
+    const end = balancedSpanEnd(trimmed, i);
+    if (end === null) continue;
+    const r = tryParse(trimmed.slice(i, end + 1));
+    if (!r.ok) continue;
     sawJson = true;
-    if (Array.isArray(parsed)) return { ok: true, findings: parsed, shape: "array" };
-    if (typeof parsed === "object" && parsed !== null && Array.isArray((parsed as { findings?: unknown }).findings)) {
-      return { ok: true, findings: (parsed as { findings: unknown[] }).findings, shape: "object" };
-    }
+    const cls = classifyFindings(r.value, false);
+    if (cls.kind === "findings") found = cls;
+    i = end; // skip the parsed span: its inner objects are not candidates
   }
+  if (found) return { ok: true, findings: found.findings, shape: found.shape };
   return { ok: false, reason: sawJson ? "not_findings" : "no_json" };
 }
 

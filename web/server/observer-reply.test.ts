@@ -65,6 +65,63 @@ describe("extractObserverFindings", () => {
     // Valid JSON that is not a findings list (e.g. a native `{status, summary}` verdict).
     expect(extractObserverFindings('{"status":"approved","summary":"ok"}')).toEqual({ ok: false, reason: "not_findings" });
   });
+
+  // P3/FIX-B1-2 (supervisor review 2026-09-28): the old extractor sliced from
+  // the FIRST `[` to the LAST `]`, so any bracket in prose either broke a
+  // real findings array (→ not_findings, review lost) or turned a sentence
+  // into an EMPTY review (→ a silent "all clear"). Each case below was a
+  // reproduced failure on the old code.
+  describe("brackets in prose (FIX-B1-2)", () => {
+    const arr = JSON.stringify([STOP]);
+
+    it("finds the array after a prose preamble that cites a bracketed rule", () => {
+      // Old: slice "[R3]…[{…}]" → JSON.parse throws → no findings.
+      expect(extractObserverFindings(`Per rule [R3] this is blocking:\n${arr}`)).toEqual({ ok: true, findings: [STOP], shape: "array" });
+    });
+
+    it("finds the array when prose with brackets follows it", () => {
+      // Old: slice "[{…}]\nSee [docs]" → parse error.
+      expect(extractObserverFindings(`${arr}\nSee [docs] for the protocol.`)).toEqual({ ok: true, findings: [STOP], shape: "array" });
+    });
+
+    it("skips a code-ish index expression that is itself valid JSON", () => {
+      // `[0]` parses as a JSON array, but a number list is not findings;
+      // the real array after it must win.
+      expect(extractObserverFindings(`\`foo[0]\` is read before the guard:\n${arr}`)).toEqual({ ok: true, findings: [STOP], shape: "array" });
+    });
+
+    it("never turns bracketed prose into an empty review", () => {
+      // Old: "[ ]" parsed as [] → accepted as a complete, EMPTY review.
+      expect(extractObserverFindings("like [ ] but here: none")).toEqual({ ok: false, reason: "not_findings" });
+      expect(extractObserverFindings("Nothing to report: []")).toEqual({ ok: false, reason: "not_findings" });
+      // A prose-embedded legacy envelope with no findings is equally implicit.
+      expect(extractObserverFindings('Result: {"findings": []}')).toEqual({ ok: false, reason: "not_findings" });
+    });
+
+    it("still accepts an explicit empty list as the whole reply or a whole fenced block", () => {
+      expect(extractObserverFindings("[]")).toEqual({ ok: true, findings: [], shape: "array" });
+      expect(extractObserverFindings("No issues.\n```json\n[]\n```")).toEqual({ ok: true, findings: [], shape: "array" });
+    });
+
+    it("keeps brackets inside JSON strings from closing the span", () => {
+      // A claim quoting code with `]` must not truncate the array.
+      const tricky = { ...STOP, claim: 'arr[i] is read after "]" handling' };
+      const reply = `See [notes]:\n${JSON.stringify([tricky])}\nthanks`;
+      expect(extractObserverFindings(reply)).toEqual({ ok: true, findings: [tricky], shape: "array" });
+    });
+
+    it("takes the LAST findings-shaped span when prose carries several", () => {
+      const WARN = { ...STOP, severity: "WARN", claim: "second" };
+      const reply = `Draft: ${JSON.stringify([STOP])}\nFinal: ${JSON.stringify([WARN])}`;
+      expect(extractObserverFindings(reply)).toMatchObject({ ok: true, findings: [WARN] });
+    });
+
+    it("stays bounded on pathological unmatched brackets", () => {
+      // 20k unmatched `[` would be quadratic without the scan-start cap;
+      // the result is a plain rejection, not a hang.
+      expect(extractObserverFindings("[".repeat(20_000))).toEqual({ ok: false, reason: "no_json" });
+    });
+  });
 });
 
 describe("buildHostObserverReview", () => {
