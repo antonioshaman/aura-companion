@@ -2978,6 +2978,70 @@ describe("SessionOrchestrator", () => {
       }
     });
 
+    // B2 (meta-diet) wiring: the orchestrator snapshots a checkpoint's
+    // artifact files on arrival and grounds the answering review against
+    // THOSE lines. Covers the three live outcomes end-to-end through the real
+    // handlers: a STOP citing lines past EOF and a STOP citing lines the
+    // checkpoint did not change are downgraded with their reason; a STOP that
+    // cites no lines stays STOP but carries `weakEvidence` (banner-exempt);
+    // a line-grounded STOP naming a symbol on its changed lines is untouched.
+    it("B2: grounds review STOPs against the checkpoint's line snapshot (out-of-range / unchanged / weak / strong)", () => {
+      const { mkdtempSync, writeFileSync, mkdirSync, rmSync, realpathSync } = require("node:fs") as typeof import("node:fs");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      const workspace = realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-orch-b2-")));
+      try {
+        mkdirSync(pathJoin(workspace, "src"), { recursive: true });
+        const v1 = ["import x from 'x';", "export function keep() {}", "export function alpha() { return 1; }", "// end"];
+        writeFileSync(pathJoin(workspace, "src/a.ts"), v1.join("\n") + "\n");
+        seedGroup("grp_b2", { cwd: workspace, artifactPaths: ["src/a.ts"] });
+        const checkpoint = (handle: unknown) => handle as (g: string, p: Record<string, unknown>) => void;
+        const handleCheckpoint = checkpoint((orchestrator as unknown as { handleCouncilCheckpoint: unknown }).handleCouncilCheckpoint);
+        const base = { schema_version: 1, phase: "council-implement", session_group_id: "grp_b2", emitted_at: "2026-01-01T00:00:00Z", artifact_paths: ["src/a.ts"] };
+        // Checkpoint 1 establishes the baseline snapshot (no prior → changed unknown).
+        handleCheckpoint.call(orchestrator, "grp_b2", { ...base, checkpoint_id: "chk_b2_1", sequence: 1 });
+        // Only line 3 changes before checkpoint 2.
+        const v2 = [...v1];
+        v2[2] = "export function alphaRenamed() { return 2; }";
+        writeFileSync(pathJoin(workspace, "src/a.ts"), v2.join("\n") + "\n");
+        handleCheckpoint.call(orchestrator, "grp_b2", { ...base, checkpoint_id: "chk_b2_2", sequence: 2 });
+        // An edit AFTER the checkpoint must not affect grounding of its review.
+        writeFileSync(pathJoin(workspace, "src/a.ts"), "// rewritten\n");
+
+        const emitted: Array<{ findings: Array<{ severity: string; wasDowngraded?: boolean; downgradeReason?: string; weakEvidence?: string }> }> = [];
+        companionBus.on("group:review", (e: unknown) => { emitted.push(e as (typeof emitted)[number]); });
+        const handleReview = checkpoint((orchestrator as unknown as { handleCouncilReview: unknown }).handleCouncilReview);
+        handleReview.call(orchestrator, "grp_b2", {
+          schema_version: 1,
+          observer_wake_payload_version_echo: 1,
+          checkpoint_id: "chk_b2_2",
+          phase: "council-implement",
+          session_group_id: "grp_b2",
+          reviewed_at: "2026-01-01T00:00:00Z",
+          observer_provider: "codex",
+          observer_model: "gpt-5.5",
+          observer_cli_version: "1.0.0",
+          findings: [
+            { severity: "STOP", claim: "alphaRenamed returns the wrong value", evidence_path: "src/a.ts", evidence_lines: [3, 3] },
+            { severity: "STOP", claim: "alphaRenamed is broken", evidence_path: "src/a.ts", evidence_lines: [40, 41] },
+            { severity: "STOP", claim: "keep is broken", evidence_path: "src/a.ts", evidence_lines: [2, 2] },
+            { severity: "STOP", claim: "the build fails at runtime", evidence_path: "src/a.ts" },
+          ],
+        });
+        expect(emitted).toHaveLength(1);
+        const [strong, outOfRange, unchanged, weak] = emitted[0]!.findings;
+        expect(strong).toMatchObject({ severity: "STOP" });
+        expect(strong!.wasDowngraded).toBeUndefined();
+        expect(strong!.weakEvidence).toBeUndefined();
+        expect(outOfRange).toMatchObject({ severity: "NOTE", wasDowngraded: true, downgradeReason: "evidence_lines_out_of_range" });
+        expect(unchanged).toMatchObject({ severity: "NOTE", wasDowngraded: true, downgradeReason: "evidence_lines_unchanged" });
+        expect(weak).toMatchObject({ severity: "STOP", weakEvidence: "no_cited_lines" });
+        expect(weak!.wasDowngraded).toBeUndefined();
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
     // got-051 (prod 2026-09-08). Several council pairs can share one
     // workspace, and every pair's review watcher then watches the SAME
     // `.council/reviews/` directory — so one observer's review file is

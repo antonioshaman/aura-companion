@@ -193,3 +193,31 @@ describe("scoreObserverPrecision — orphan labels", () => {
     expect(s.missed_blockers).toBe(1);
   });
 });
+
+// B2 tiers: `grounded_path_only` is the before-B2 gate, `banner` is what
+// raises the blocker banner (grounded STOP minus weak evidence). Recall keeps
+// the fixed known-blocker denominator in every tier.
+describe("scoreObserverPrecision — B2 tiers", () => {
+  it("scores path-only, full, and banner tiers from the per-finding severities", () => {
+    const findings = [
+      finding({ id: "tp", evidence_path: "a" }),
+      finding({ id: "fp_line", evidence_path: "a", grounded_severity: "NOTE", path_only_grounded_severity: "STOP" }),
+      finding({ id: "fp_weak", evidence_path: "a", weak_evidence: true }),
+    ];
+    const labels = [
+      verdict("true_positive", "tp", "a"),
+      verdict("false_positive", "fp_line", "a"),
+      verdict("false_positive", "fp_weak", "a"),
+    ];
+    const s = scoreObserverPrecision(findings, labels);
+    expect([s.grounded_path_only.surfaced, s.grounded.surfaced, s.banner.surfaced]).toEqual([3, 2, 1]);
+    expect(s.banner.false_positive).toBe(0);
+    expect(s.banner.recall).toMatchObject({ kind: "value", value: 1 });
+  });
+
+  it("path-only tier defaults to the grounded severity when not supplied", () => {
+    const s = scoreObserverPrecision([finding({ id: "x", evidence_path: "a", grounded_severity: "NOTE" })], []);
+    expect(s.grounded_path_only.surfaced).toBe(0);
+  });
+});
+

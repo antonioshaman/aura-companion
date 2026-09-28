@@ -3112,9 +3112,14 @@ function CouncilModeSection() {
         { id: "fnd_warn", severity: "WARN", claim: "Extracted helper has no negative-path test.", evidence_path: "web/server/group-state-machine.ts", evidence_lines: [54, 80] },
         { id: "fnd_note", severity: "NOTE", claim: "Consider renaming BackendProvider once a third backend lands.", evidence_path: "web/server/backend-provider.ts" },
         { id: "fnd_downgraded", severity: "STOP", claim: "Suspicious cast in unrelated file (downgraded by grounding).", evidence_path: "src/unrelated.ts", wasDowngraded: true, downgradeReason: "evidence_not_in_modified_set" },
+        { id: "fnd_downgraded_lines", severity: "STOP", claim: "Off-by-one in retry loop (cited lines untouched this phase).", evidence_path: "web/server/session-orchestrator.ts", evidence_lines: [12, 14], wasDowngraded: true, downgradeReason: "evidence_lines_unchanged" },
+        { id: "fnd_weak", severity: "STOP", claim: "`bun run --cwd web kb:record` fails at runtime (no cited lines — kept off the banner).", evidence_path: ".council/review/A2.diff", weakEvidence: "no_cited_lines" },
         { id: "fnd_info", severity: "INFO", claim: "Spec coverage matches phase A boundaries.", evidence_path: "specs/council-mode-paired-sessions.md" },
       ],
-      downgrades: [{ id: "fnd_downgraded", reason: "evidence_not_in_modified_set" }],
+      downgrades: [
+        { id: "fnd_downgraded", reason: "evidence_not_in_modified_set" },
+        { id: "fnd_downgraded_lines", reason: "evidence_lines_unchanged" },
+      ],
       observerModel: "gpt-5-codex",
       observerProvider: "codex",
       timestamp: Date.now() - 60_000,
@@ -3256,7 +3261,7 @@ function CouncilModeSection() {
         <Card label="FindingsLog — empty state">
           <FindingsLog findings={[]} />
         </Card>
-        <Card label="FindingsLog — full mix (STOP / WARN / NOTE / INFO / downgraded)">
+        <Card label="FindingsLog — full mix (STOP / WARN / NOTE / INFO / downgraded / weak evidence)">
           <FindingsLog
             // Append-ordered (index 0 = oldest), matching the council slice's
             // push-onto-end convention; FindingsLog renders newest-first, so
@@ -3267,6 +3272,8 @@ function CouncilModeSection() {
               mockFinding({ id: "c", severity: "NOTE", claim: "Consider renaming BackendProvider", receivedAt: Date.now() - 120_000 }),
               mockFinding({ id: "d", severity: "STOP", claim: "Suspicious cast — downgraded by grounding", receivedAt: Date.now() - 60_000, wasDowngraded: true, downgradeReason: "evidence_not_in_modified_set" }),
               mockFinding({ id: "e", severity: "INFO", claim: "Spec coverage matches phase A boundaries", receivedAt: Date.now() - 10_000 }),
+              mockFinding({ id: "f", severity: "STOP", claim: "Cited lines untouched this phase — downgraded", receivedAt: Date.now() - 8_000, wasDowngraded: true, downgradeReason: "evidence_lines_unchanged" }),
+              mockFinding({ id: "g", severity: "STOP", claim: "Command fails at runtime — weak evidence, no banner", receivedAt: Date.now() - 5_000, weakEvidence: "no_cited_lines" }),
             ]}
             onDismissStop={() => {}}
             nowMs={Date.now()}

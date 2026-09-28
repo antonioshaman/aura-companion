@@ -127,6 +127,10 @@ function downgradeReasonHuman(reason: NonNullable<ObserverFinding["downgradeReas
       return "evidence not on disk";
     case "evidence_not_in_modified_set":
       return "not in modified files";
+    case "evidence_lines_out_of_range":
+      return "cited lines not in file";
+    case "evidence_lines_unchanged":
+      return "cited lines unchanged this phase";
     case "wake_version_mismatch":
       return "schema mismatch — review may be stale";
     default: {
@@ -155,6 +159,39 @@ function DowngradedChip({ reason }: { reason: NonNullable<ObserverFinding["downg
   );
 }
 
+/** B2: why the server kept a STOP but flagged its evidence as weak. Exhaustive. */
+function weakEvidenceHuman(reason: NonNullable<ObserverFinding["weakEvidence"]>): string {
+  switch (reason) {
+    case "no_cited_lines":
+      return "no cited lines";
+    case "claim_symbols_not_on_cited_lines":
+      return "claim not on cited lines";
+    case "cited_lines_unreadable":
+      return "cited lines unreadable";
+    default: {
+      const _exhaustive: never = reason;
+      void _exhaustive;
+      return "weak evidence";
+    }
+  }
+}
+
+function WeakEvidenceChip({ reason }: { reason: NonNullable<ObserverFinding["weakEvidence"]> }) {
+  const human = weakEvidenceHuman(reason);
+  // Same visible-text + aria-label pattern as DowngradedChip: the reason is
+  // readable without hover.
+  return (
+    <span
+      className="ml-1 inline-flex items-center gap-1 text-[9px] uppercase tracking-wide font-mono-code px-1.5 py-0.5 rounded bg-cc-muted/10 text-cc-muted border border-cc-border"
+      title={`Weak evidence, not raised as a blocker — ${human}`}
+      aria-label={`Weak evidence, not raised as a blocker — ${human}`}
+    >
+      weak evidence
+      <span className="opacity-70 normal-case font-normal tracking-normal">· {human}</span>
+    </span>
+  );
+}
+
 function FindingRow({
   finding,
   nowMs,
@@ -176,6 +213,7 @@ function FindingRow({
       data-testid={`finding-row-${finding.id}`}
       data-severity={finding.severity}
       data-downgraded={finding.wasDowngraded ? "true" : "false"}
+      data-weak-evidence={finding.weakEvidence ? "true" : "false"}
       className={`group flex items-center gap-2 px-3 py-2 border-b border-cc-border last:border-b-0 hover:bg-cc-hover transition-colors ${rowClass}`}
     >
       <SeverityDot finding={finding} />
@@ -192,6 +230,7 @@ function FindingRow({
         <span className="truncate">{finding.claim}</span>
       </button>
       {finding.wasDowngraded && finding.downgradeReason && <DowngradedChip reason={finding.downgradeReason} />}
+      {!finding.wasDowngraded && finding.weakEvidence && <WeakEvidenceChip reason={finding.weakEvidence} />}
       <span className="text-[10px] text-cc-muted shrink-0 font-mono-code">
         {formatRelativeTime(finding.receivedAt, nowMs)}
       </span>

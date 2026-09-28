@@ -591,7 +591,14 @@ export interface BrowserObserverFinding {
   /** True when grounding validation downgraded this from STOP → NOTE. */
   wasDowngraded?: boolean;
   /** Why grounding downgraded this finding. Set iff wasDowngraded. */
-  downgradeReason?: "evidence_not_in_modified_set" | "evidence_missing_on_disk" | "wake_version_mismatch";
+  downgradeReason?: BrowserObserverDowngradeReason;
+  /**
+   * B2 (meta-diet): set on a STOP that survived every grounding downgrade but
+   * is only weakly grounded (no cited lines / claim names nothing on them /
+   * lines unreadable). Severity stays STOP; the browser keeps it out of the
+   * blocker banner and shows it in the findings log with a chip.
+   */
+  weakEvidence?: BrowserObserverWeakEvidenceReason;
   /**
    * Real event time (ms epoch), server-stamped from the review FILE's mtime.
    * Stamped on BOTH paths: REST bootstrap (`getGroupReviewsForBootstrap`) and
@@ -608,8 +615,20 @@ export interface BrowserObserverFinding {
 export interface BrowserObserverDowngrade {
   /** Finding id (correlates with `findings[].id` when downgraded entry kept in stream). */
   id: string;
-  reason: "evidence_not_in_modified_set" | "evidence_missing_on_disk" | "wake_version_mismatch";
+  reason: BrowserObserverDowngradeReason;
 }
+
+export type BrowserObserverDowngradeReason =
+  | "evidence_not_in_modified_set"
+  | "evidence_missing_on_disk"
+  | "evidence_lines_out_of_range"
+  | "evidence_lines_unchanged"
+  | "wake_version_mismatch";
+
+export type BrowserObserverWeakEvidenceReason =
+  | "no_cited_lines"
+  | "claim_symbols_not_on_cited_lines"
+  | "cited_lines_unreadable";
 
 /**
  * Council Mode group — browser wire shape. The subset of the coordinator's

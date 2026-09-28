@@ -174,7 +174,8 @@ export function deriveObserverPanelState(args: {
 }
 
 /**
- * Pure helper: list STOP findings the user hasn't dismissed. Exported
+ * Pure helper: list STOP findings the user hasn't dismissed (excluding
+ * downgraded and weak-evidence STOPs). Exported
  * separately so the unread-count rail (collapsed panel) and the panel
  * header derive from the same source.
  *
@@ -190,6 +191,9 @@ export function findUnresolvedStops(
   for (const f of findings) {
     if (f.severity !== "STOP") continue;
     if (f.wasDowngraded === true) continue;
+    // B2: weakly-grounded STOPs stay in the findings log but are not blockers
+    // until a human reads them (a path-only STOP once raised a false banner).
+    if (f.weakEvidence !== undefined) continue;
     if (dismissedStopIds.has(f.id)) continue;
     out.push(f);
   }

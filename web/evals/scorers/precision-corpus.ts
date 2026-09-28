@@ -50,6 +50,10 @@ export const PRECISION_LABELS_FILE = "labels.jsonl";
 export function buildScorableFindings(sidecar: EvalSidecarArtifact): ScorableFinding[] {
   const rerun = rerunGrounding(sidecar);
   const downgradedIndices = new Set(rerun.recomputed.map((d) => d.index));
+  const pathOnlyDowngraded = new Set(
+    rerunGrounding(sidecar, { lineChecks: false }).recomputed.map((d) => d.index),
+  );
+  const weakIndices = new Set(rerun.weak_evidence.map((w) => w.index));
   return sidecar.raw_findings.map((f, i) => ({
     id: computeFindingId(
       sidecar.session_group_id,
@@ -62,6 +66,8 @@ export function buildScorableFindings(sidecar: EvalSidecarArtifact): ScorableFin
     evidence_path: f.evidence_path,
     raw_severity: f.severity,
     grounded_severity: downgradedIndices.has(i) ? "NOTE" : f.severity,
+    path_only_grounded_severity: pathOnlyDowngraded.has(i) ? "NOTE" : f.severity,
+    ...(weakIndices.has(i) ? { weak_evidence: true } : {}),
   }));
 }
 
@@ -85,7 +91,12 @@ export interface SerialTier {
 /** The full precision score reduced to a flat, byte-stable shape for baselining. */
 export interface PrecisionSummary {
   raw: SerialTier;
+  /** Before B2: path-only grounding. */
+  grounded_path_only: SerialTier;
+  /** After B2: path + line grounding. */
   grounded: SerialTier;
+  /** STOPs that raise the blocker banner (grounded, not weak evidence). */
+  banner: SerialTier;
   delta: ObserverPrecisionScore["delta"];
   missed_blockers: number;
   orphan_verdict_labels: number;
@@ -116,7 +127,9 @@ export function summarizePrecision(
 ): PrecisionSummary {
   return {
     raw: serialTier(score.raw),
+    grounded_path_only: serialTier(score.grounded_path_only),
     grounded: serialTier(score.grounded),
+    banner: serialTier(score.banner),
     delta: score.delta,
     missed_blockers: score.missed_blockers,
     orphan_verdict_labels: score.orphan_verdict_labels,

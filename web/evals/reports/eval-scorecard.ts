@@ -70,3 +70,54 @@ export function buildEvalScorecard(summary: PrecisionSummary): Scorecard {
   ];
   return buildScorecard(metrics, summary.labels);
 }
+
+const fmt = (v: number | "unavailable"): string => (typeof v === "number" ? v.toFixed(3) : "unavailable");
+
+/**
+ * B2 before/after: the STOP tier at each gate stage — raw observer output,
+ * path-only grounding (before B2), path + line grounding (after B2), and what
+ * actually raises the blocker banner (after B2, minus weak evidence). Text, or
+ * a markdown table with `markdown: true`. Pure.
+ */
+export function renderGroundingBeforeAfter(summary: PrecisionSummary, markdown = false): string {
+  const rows: [string, PrecisionSummary["raw"]][] = [
+    ["raw", summary.raw],
+    ["grounded (path-only, before B2)", summary.grounded_path_only],
+    ["grounded (path + lines, after B2)", summary.grounded],
+    ["banner (after B2, minus weak evidence)", summary.banner],
+  ];
+  if (markdown) {
+    const lines = [
+      "| stage | STOPs surfaced | false STOP rate | precision | recall |",
+      "|---|---|---|---|---|",
+      ...rows.map(
+        ([name, t]) => `| ${name} | ${t.surfaced} | ${fmt(t.false_stop_rate)} | ${fmt(t.precision)} | ${fmt(t.recall)} |`,
+      ),
+    ];
+    return lines.join("\n");
+  }
+  return [
+    "grounding before/after (STOP tier):",
+    ...rows.map(
+      ([name, t]) =>
+        `  ${name.padEnd(40)} surfaced=${t.surfaced} false_stop_rate=${fmt(t.false_stop_rate)} precision=${fmt(t.precision)} recall=${fmt(t.recall)}`,
+    ),
+  ].join("\n");
+}
+
+/**
+ * The B2 recall guard: the full gate must not surface fewer real blockers than
+ * the path-only gate on the same corpus. Returns a failure message, or `null`
+ * when recall held. `unavailable` on both sides (no known blockers) holds.
+ */
+export function groundingRecallRegression(summary: PrecisionSummary): string | null {
+  const before = summary.grounded_path_only;
+  const after = summary.grounded;
+  if (after.true_positive < before.true_positive) {
+    return (
+      `line grounding silenced real blockers: true_positive ${before.true_positive} → ${after.true_positive} ` +
+      `(recall ${fmt(before.recall)} → ${fmt(after.recall)})`
+    );
+  }
+  return null;
+}

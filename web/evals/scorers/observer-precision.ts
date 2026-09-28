@@ -50,6 +50,15 @@ export interface ScorableFinding {
   raw_severity: EvalFindingSeverity;
   /** Severity after the server's grounding downgrade pass. */
   grounded_severity: EvalFindingSeverity;
+  /**
+   * Severity after the PATH-ONLY gate (pre-B2: modified set + on disk, no line
+   * checks) — the "before" of the B2 before/after. Defaults to
+   * `grounded_severity` when absent (no line facts → both gates agree).
+   */
+  path_only_grounded_severity?: EvalFindingSeverity;
+  /** True when the gate kept this STOP but marked it weak evidence (B2) — it
+   *  stays STOP for recall, but never reaches the blocker banner. */
+  weak_evidence?: boolean;
 }
 
 /** A ratio that knows its numerator/denominator, or is unavailable because the
@@ -83,7 +92,12 @@ export interface TierScore {
 
 export interface ObserverPrecisionScore {
   raw: TierScore;
+  /** Path-only gate (before B2 line checks). */
+  grounded_path_only: TierScore;
+  /** Full gate (after B2): path + line checks. */
   grounded: TierScore;
+  /** What actually raises the blocker banner: grounded STOP, not weak evidence. */
+  banner: TierScore;
   /** What the grounding gate changed, STOP tier only. */
   delta: {
     /** STOPs that were downgraded out of the STOP tier by grounding. */
@@ -172,7 +186,9 @@ export function scoreObserverPrecision(
   };
 
   const raw = tier((f) => f.raw_severity === STOP);
+  const groundedPathOnly = tier((f) => (f.path_only_grounded_severity ?? f.grounded_severity) === STOP);
   const grounded = tier((f) => f.grounded_severity === STOP);
+  const banner = tier((f) => f.grounded_severity === STOP && f.weak_evidence !== true);
 
   // Delta: STOPs raw-surfaced but grounded-OUT of the STOP tier.
   let downgraded = 0;
@@ -195,7 +211,9 @@ export function scoreObserverPrecision(
 
   return {
     raw,
+    grounded_path_only: groundedPathOnly,
     grounded,
+    banner,
     delta: {
       downgraded,
       downgraded_false_positive: downFp,

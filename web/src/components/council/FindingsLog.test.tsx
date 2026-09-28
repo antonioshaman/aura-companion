@@ -147,6 +147,41 @@ describe("FindingsLog", () => {
     expect(screen.getByTestId("finding-row-d")).toHaveAttribute("data-downgraded", "true");
   });
 
+  // B2: the new line-grounding downgrade reasons render their own
+  // human-readable chip text (exhaustive map, no fall-through).
+  it.each([
+    ["evidence_lines_out_of_range", /cited lines not in file/],
+    ["evidence_lines_unchanged", /cited lines unchanged this phase/],
+  ] as const)("renders the %s downgrade reason", (reason, text) => {
+    render(<FindingsLog findings={[finding({ id: "d", severity: "STOP", wasDowngraded: true, downgradeReason: reason })]} />);
+    expect(screen.getByLabelText(text)).toBeInTheDocument();
+  });
+
+  // B2: a weakly-grounded STOP stays a STOP in the log (label + dismissable)
+  // but carries a visible, labelled "weak evidence" chip naming why.
+  it("renders a weak-evidence STOP as STOP with a labelled weak-evidence chip", () => {
+    const f = finding({ id: "w", severity: "STOP", weakEvidence: "no_cited_lines" });
+    render(<FindingsLog findings={[f]} onDismissStop={() => {}} />);
+    const row = screen.getByTestId("finding-row-w");
+    expect(row).toHaveAttribute("data-severity", "STOP");
+    expect(row).toHaveAttribute("data-weak-evidence", "true");
+    expect(screen.getByLabelText(/Weak evidence, not raised as a blocker — no cited lines/)).toBeInTheDocument();
+  });
+
+  it("passes accessibility scan with weak-evidence and line-downgraded rows", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(
+      <FindingsLog
+        findings={[
+          finding({ id: "w", severity: "STOP", claim: "weak", weakEvidence: "claim_symbols_not_on_cited_lines" }),
+          finding({ id: "d", severity: "STOP", claim: "range", wasDowngraded: true, downgradeReason: "evidence_lines_out_of_range" }),
+        ]}
+        onDismissStop={() => {}}
+      />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
   it("calls onSelect with the finding when the claim button is clicked", () => {
     const onSelect = vi.fn();
     const f = finding({ id: "x", claim: "click me" });

@@ -128,6 +128,7 @@ export function hydrateObserverFinding(
     phase: context.phase,
     ...(wire.wasDowngraded === true ? { wasDowngraded: true } : {}),
     ...(wire.downgradeReason !== undefined ? { downgradeReason: wire.downgradeReason } : {}),
+    ...(wire.weakEvidence !== undefined ? { weakEvidence: wire.weakEvidence } : {}),
     observerModel: context.observerModel,
     observerProvider: context.observerProvider,
   };

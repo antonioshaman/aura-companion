@@ -48,6 +48,7 @@ import { watchCheckpoints, buildCheckpointFilename } from "./checkpoint-watcher.
 import { findReviewForCheckpointSync, watchReviews } from "./review-watcher.js";
 import { DEFAULT_REARM_DELAY_MS, runResilientWatch } from "./resilient-watch.js";
 import { validateObserverFindings } from "./observer-grounding.js";
+import { CheckpointLineSnapshots } from "./observer-line-snapshots.js";
 import { maybeEmitEvalSidecar } from "./eval-sidecar.js";
 import { buildObserverContextManifest, buildObserverWakePayload } from "./observer-prompt.js";
 import { ObserverReplyCapture } from "./observer-reply.js";
@@ -662,6 +663,8 @@ export class SessionOrchestrator {
    * the review envelope and writes the file (see `observer-reply.ts`).
    * Deps resolve `this.*` lazily at call time.
    */
+  /** B2: per-group checkpoint content snapshots feeding line-level grounding. */
+  private checkpointLineSnapshots = new CheckpointLineSnapshots();
   private observerReplyCapture = new ObserverReplyCapture({
     now: () => new Date(),
     writeReview: (path, payload) => writeAtomicJson(path, payload),
@@ -1360,6 +1363,7 @@ export class SessionOrchestrator {
         if (!entry.lastCheckpoint || highest.sequence > entry.lastCheckpoint.sequence) {
           entry.previousCheckpoint = entry.lastCheckpoint;
           entry.lastCheckpoint = highest;
+          this.checkpointLineSnapshots.capture(groupId, highest.checkpoint_id, entry.cwd, highest.artifact_paths);
         }
         // Council Review 2026-06-14 (live-test Finding #1 — restart-catchup
         // races the codex adapter attach): the catchup scan runs synchronously
@@ -2515,6 +2519,7 @@ export class SessionOrchestrator {
     }
     const observerSessionId = this.councilGroupMeta.get(sessionGroupId)?.observerSessionId;
     if (observerSessionId) this.observerReplyCapture.forget(observerSessionId);
+    this.checkpointLineSnapshots.forget(sessionGroupId);
     this.councilWatchers.delete(sessionGroupId);
   }
 
@@ -2555,6 +2560,7 @@ export class SessionOrchestrator {
     // grounding can use the delta manifest, not the cumulative paths set.
     entry.previousCheckpoint = entry.lastCheckpoint;
     entry.lastCheckpoint = payload;
+    this.checkpointLineSnapshots.capture(sessionGroupId, payload.checkpoint_id, entry.cwd, payload.artifact_paths);
     const meta = this.councilGroupMeta.get(sessionGroupId);
     if (meta) meta.lastCheckpointReceivedAt = Date.now();
     companionBus.emit("group:checkpoint", {
@@ -3312,7 +3318,8 @@ export class SessionOrchestrator {
         ? manifest.delta
         : (entry.lastCheckpoint?.artifact_paths ?? []));
 
-      const result = validateObserverFindings(payload, { workspaceRoot: entry.cwd, modifiedFiles });
+      const lineFacts = this.checkpointLineSnapshots.providerFor(sessionGroupId, payload.checkpoint_id, entry.cwd);
+      const result = validateObserverFindings(payload, { workspaceRoot: entry.cwd, modifiedFiles, lineFacts });
 
       // Willison P1-1 (council review #6): deterministic finding ids
       // derived from review identity + finding position + content hash
@@ -3329,6 +3336,7 @@ export class SessionOrchestrator {
           claim: f.claim,
         });
         const downgrade = result.downgrades.find((d) => d.index === idx);
+        const weak = result.weakEvidence.find((w) => w.index === idx);
         const out: BrowserObserverFinding = {
           id,
           severity: f.severity,
@@ -3337,6 +3345,7 @@ export class SessionOrchestrator {
           ...(f.evidence_lines !== undefined ? { evidence_lines: f.evidence_lines } : {}),
           ...(f.confidence !== undefined ? { confidence: f.confidence } : {}),
           ...(downgrade ? { wasDowngraded: true, downgradeReason: downgrade.reason } : {}),
+          ...(weak ? { weakEvidence: weak.reason } : {}),
           // Server-observed real event time (review file mtime). Mirrors the
           // bootstrap path so live findings carry the file's landing time, not
           // the browser's per-batch ingestion clock. Falls back to now() if the
@@ -3427,6 +3436,8 @@ export class SessionOrchestrator {
             observerPromptSource: meta.observerPromptSource,
             observerPromptVersion: meta.observerPromptVersion,
           }),
+          // B2: grounded STOPs kept out of the blocker banner as weak evidence.
+          stopCountWeak: findings.filter((f) => f.severity === "STOP" && f.weakEvidence !== undefined).length,
         });
       }
 
@@ -3450,6 +3461,7 @@ export class SessionOrchestrator {
         manifest,
         grounding: result,
         observerPromptSha256: meta?.observerPromptSha256 ?? "",
+        lineFacts,
       });
 
       companionBus.emit("group:review", {
@@ -4471,7 +4483,11 @@ export class SessionOrchestrator {
       const modifiedFiles = new Set(manifest.delta.length > 0
         ? manifest.delta
         : (watcher.lastCheckpoint?.artifact_paths ?? []));
-      const result = validateObserverFindings(payload, { workspaceRoot: watcher.cwd, modifiedFiles });
+      const result = validateObserverFindings(payload, {
+        workspaceRoot: watcher.cwd,
+        modifiedFiles,
+        lineFacts: this.checkpointLineSnapshots.providerFor(sessionGroupId, payload.checkpoint_id, watcher.cwd),
+      });
       result.findings.forEach((f, idx) => {
         const id = deterministicFindingId({
           sessionGroupId,
@@ -4482,6 +4498,7 @@ export class SessionOrchestrator {
           claim: f.claim,
         });
         const downgrade = result.downgrades.find((d) => d.index === idx);
+        const weak = result.weakEvidence.find((w) => w.index === idx);
         const out: BrowserObserverFinding = {
           id,
           severity: f.severity,
@@ -4490,6 +4507,7 @@ export class SessionOrchestrator {
           ...(f.evidence_lines !== undefined ? { evidence_lines: f.evidence_lines } : {}),
           ...(f.confidence !== undefined ? { confidence: f.confidence } : {}),
           ...(downgrade ? { wasDowngraded: true, downgradeReason: downgrade.reason } : {}),
+          ...(weak ? { weakEvidence: weak.reason } : {}),
           reviewedAt,
         };
         allFindings.push(out);
