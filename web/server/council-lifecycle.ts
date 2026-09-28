@@ -221,6 +221,26 @@ export interface CouncilLifecycleDeps {
   autoProceedHoldApplies?: (sessionGroupId: string) => boolean;
 }
 
+/**
+ * FINDINGS-DEDUP: review filenames ordered oldest first by mtime, ties and
+ * unstat-able files broken by name, so the bootstrap is chronological and
+ * does not depend on readdir order. An unstat-able file sorts first (mtime 0);
+ * the read below then reports it as a gap as before.
+ */
+export function sortReviewFilesOldestFirst(reviewsDir: string, files: readonly string[]): string[] {
+  const mtimeOf = new Map<string, number>();
+  for (const file of files) {
+    let mtime = 0;
+    try {
+      mtime = statSync(join(reviewsDir, file)).mtimeMs;
+    } catch {
+      // keep 0
+    }
+    mtimeOf.set(file, mtime);
+  }
+  return [...files].sort((a, b) => (mtimeOf.get(a)! - mtimeOf.get(b)!) || (a < b ? -1 : a > b ? 1 : 0));
+}
+
 export class CouncilLifecycle {
   constructor(private readonly deps: CouncilLifecycleDeps) {}
 
@@ -1409,6 +1429,17 @@ export class CouncilLifecycle {
       });
       return { sessionGroupId, findings: [], downgrades: [], reviewCount: 0, unfrozenRawStopIds, gaps: [...gaps, "reviews_readdir_failed"], gapFingerprints };
     }
+    // FINDINGS-DEDUP: readdir order is filesystem order (hash order on ext4),
+    // which the panel rendered as-is — a 115-day-old review between two fresh
+    // STOPs. Oldest review first (mtime, then name) makes the backlog
+    // chronological and identical on every reload.
+    entries = sortReviewFilesOldestFirst(reviewsDir, entries);
+    // FINDINGS-DEDUP: two review files for the same checkpoint (a re-wake, or
+    // a legacy file next to its renamed copy) produce the same deterministic
+    // id per finding. Emitting both gave the browser duplicate React keys, and
+    // React multiplies rows under duplicate keys. One entry per id; a later
+    // file replaces the earlier copy, so the newest review's view wins.
+    const findingIndexById = new Map<string, number>();
     for (const file of entries) {
       const filePath = join(reviewsDir, file);
       let raw: string;
@@ -1486,9 +1517,17 @@ export class CouncilLifecycle {
           reviewedAt,
         };
         const verdict = frozen.get(id);
-        if (!verdict && payload.findings[idx]?.severity === "STOP") unfrozenRawStopIds.push(id);
+        if (!verdict && payload.findings[idx]?.severity === "STOP" && !unfrozenRawStopIds.includes(id)) unfrozenRawStopIds.push(id);
         const out = verdict ? applyFrozenVerdict(regrounded, verdict) : regrounded;
-        allFindings.push(out);
+        const seenAt = findingIndexById.get(id);
+        if (seenAt === undefined) {
+          findingIndexById.set(id, allFindings.length);
+          allFindings.push(out);
+        } else {
+          allFindings[seenAt] = out;
+        }
+        const downgradeAt = allDowngrades.findIndex((d) => d.id === id);
+        if (downgradeAt !== -1) allDowngrades.splice(downgradeAt, 1);
         if (out.wasDowngraded && out.downgradeReason) {
           allDowngrades.push({ id, reason: out.downgradeReason });
         }

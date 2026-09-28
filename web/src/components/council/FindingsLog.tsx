@@ -13,6 +13,9 @@
 
 import { useEffect, useState } from "react";
 import type { ObserverFinding } from "../../types.js";
+import { orderFindingsForDisplay } from "../../observer-panel-state.js";
+
+const EMPTY_DISMISSED: ReadonlySet<string> = new Set();
 
 export interface FindingsLogProps {
   findings: readonly ObserverFinding[];
@@ -394,13 +397,12 @@ export function FindingsLog({
       </>
     );
   }
-  // Newest-first display: the source `findings` array is append-ordered
-  // (each review batch pushed onto the end by the council slice), so the
-  // most recent finding is last. Render a reversed copy so fresh findings
-  // surface at the top of the rail. The reversal is display-only — the
-  // announcer effect above still reads the original array (order-independent,
-  // keyed by a Set of ids).
-  const orderedFindings = [...findings].reverse();
+  // FINDINGS-DEDUP: unresolved STOPs on top, then newest first by the
+  // server-stamped review time. The old display reversed the append order,
+  // which after a bootstrap was readdir order — a 115-day-old review sat
+  // between two fresh STOPs. Display-only: the announcer effect above still
+  // reads the original array (order-independent, keyed by a Set of ids).
+  const orderedFindings = orderFindingsForDisplay(findings, dismissedStopIds ?? EMPTY_DISMISSED);
   // role="log" must live on a generic container (axe aria-allowed-role —
   // role=log on <ul> is rejected). Wrap the list in a div that owns the
   // log semantics; the inner <ul> retains its native list semantics.

@@ -191,6 +191,32 @@ export function findUnresolvedStops(
 }
 
 /**
+ * FINDINGS-DEDUP: the FindingsLog display order. Unresolved STOPs (the same
+ * predicate as the banner) first, then newest first by `receivedAt`; findings
+ * of one review keep the observer's order. The order depends only on the
+ * findings themselves, never on arrival order, so it is the same after a
+ * reload or reconnect. An id seen twice is shown once (first copy) — a
+ * duplicate React key would multiply the row.
+ */
+export function orderFindingsForDisplay(
+  findings: readonly ObserverFinding[],
+  dismissedStopIds: ReadonlySet<string>,
+): ObserverFinding[] {
+  const seen = new Set<string>();
+  const rows: { f: ObserverFinding; idx: number; unresolved: boolean }[] = [];
+  findings.forEach((f, idx) => {
+    if (seen.has(f.id)) return;
+    seen.add(f.id);
+    rows.push({ f, idx, unresolved: isUnresolvedStop(f, dismissedStopIds) });
+  });
+  rows.sort((a, b) =>
+    (a.unresolved === b.unresolved ? 0 : a.unresolved ? -1 : 1)
+    || (b.f.receivedAt - a.f.receivedAt)
+    || (a.idx - b.idx));
+  return rows.map((r) => r.f);
+}
+
+/**
  * Pure predicate behind {@link findUnresolvedStops}, shared with the Sidebar
  * unread count so the banner, the title and the rail never disagree.
  */
