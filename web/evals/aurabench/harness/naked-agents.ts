@@ -50,7 +50,10 @@ export interface NakedDeps {
   present: (path: string) => boolean;
   /** Fresh per-cell Codex home (default {@link prepareIsolatedCodexHome}). */
   prepareCodexHome?: (home: string, realCodexDir: string) => Record<string, unknown>;
-  /** Post-cell auth write-back (default {@link propagateRotatedCodexAuth}). */
+  /** Register the cell home for write-back WHILE the cell runs (the runner's
+   *  `CodexAuthKeeper.watch`); absent → only the post-cell write-back. */
+  watchCodexHome?: (home: string, authShaAtStart: string | null) => void;
+  /** Post-cell auth write-back, run in `finally` (default {@link propagateRotatedCodexAuth}). */
   finishCodexHome?: (home: string, realCodexDir: string, authShaAtStart: string | null) => string;
   /** sha256 of the real auth.json (default {@link realAuthSha}). */
   authSha?: (realCodexDir: string) => string | null;
@@ -153,6 +156,7 @@ export function nakedCodexRunner(d: NakedDeps): AgentRunner {
     const codexHome = join(ctx.artifactDir, "codex-home");
     const authShaAtStart = (d.authSha ?? realAuthSha)(d.realCodexDir);
     const seeded = (d.prepareCodexHome ?? prepareIsolatedCodexHome)(codexHome, d.realCodexDir);
+    d.watchCodexHome?.(codexHome, authShaAtStart);
     // Probed before the run: what the agent could see at start.
     const confounds = codexConfounds(codexHome, d.present);
     let r: SpawnResult;

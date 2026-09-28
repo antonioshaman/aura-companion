@@ -31,7 +31,8 @@ export function getStatsBaseUrl(): string {
 /**
  * Resolve whether telemetry is on. The COMPANION_TELEMETRY env var is an
  * explicit override (managed deployments): "1"/"true" forces on, "0"/"false"
- * forces off. Absent → fall back to the user's opt-in setting (default false).
+ * forces off. Absent → fall back to the user's setting (default TRUE — opt-out,
+ * see `settings-manager.ts`).
  */
 export function isTelemetryEnabled(): boolean {
   const env = process.env.COMPANION_TELEMETRY?.trim().toLowerCase();
