@@ -19,7 +19,9 @@
  *     base), never a `git worktree`: from a linked worktree Claude Code loads
  *     the main checkout's `.claude/skills` and `git log --all` exposes the
  *     merge commit. The merge commit is fetched only AFTER the agent ran;
- *   - the checkout is removed on every path.
+ *   - the checkout is removed on every path;
+ *   - FIX-D2-3: the record carries its checkout path and the harness-level
+ *     confounds (appended after the agent's).
  */
 
 import { describe, it, expect } from "vitest";
@@ -192,6 +194,18 @@ describe("runCell", () => {
     if (out.kind !== "record") throw new Error("expected record");
     expect(out.record).toMatchObject({ status: "timeout", success: false, confounds: ["c"] });
     expect(out.record.hidden?.passed).toBe(true);
+  });
+
+  it("FIX-D2-3: the record names its checkout and carries the harness-level confounds after the agent's", async () => {
+    // The per-cell checkout path is evidence that no two cells shared a
+    // project directory; the unsandboxed-paths residue is stated, not hidden.
+    const { deps } = harness({
+      agent: { kind: "done", status: "completed", metrics: emptyMetrics(), isolation: { isolated: true }, confounds: ["agent-c"] },
+    });
+    const out = await runCell(task, VARIANTS.B, 1, { ...deps, confounds: ["harness-c"] });
+    if (out.kind !== "record") throw new Error("expected record");
+    expect(out.record.isolation).toEqual({ isolated: true, worktree: WT });
+    expect(out.record.confounds).toEqual(["agent-c", "harness-c"]);
   });
 
   it("a failed checkout is a harness_error and the agent never runs", async () => {

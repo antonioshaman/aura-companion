@@ -73,8 +73,11 @@ export type Baseline = ReadonlyMap<string, "pass" | "fail">;
 export interface CellDeps {
   /** Repo whose object store holds the task commits. */
   repo: string;
+  /** Fresh per cell, outside the bench root and the repo (see `cell-paths.ts`). */
   worktree: string;
   artifactDir: string;
+  /** Harness-level confounds recorded on every cell (e.g. unsandboxed paths). */
+  confounds?: readonly string[];
   exec: AsyncExec;
   runAgent: AgentRunner;
   baseline: (task: AuraBenchTask) => Promise<Baseline>;
@@ -232,8 +235,8 @@ export async function runCell(task: AuraBenchTask, variant: Variant, rep: number
     });
     if (agent.kind === "limit") return { kind: "limit", limit: agent.limit };
     base.metrics = agent.metrics;
-    base.isolation = agent.isolation;
-    base.confounds = agent.confounds;
+    base.isolation = { ...agent.isolation, worktree: d.worktree };
+    base.confounds = [...agent.confounds, ...(d.confounds ?? [])];
 
     // Diff against the prepared commit, new files included.
     await git(["add", "-A", "-N"], d.worktree);

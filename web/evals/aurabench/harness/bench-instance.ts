@@ -37,6 +37,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   symlinkSync,
   unlinkSync,
@@ -127,12 +128,43 @@ export function rewriteSkillProdUrls(skillsDir: string, port: number): { files: 
   return out;
 }
 
+/**
+ * Move the persisted sessions of a previous bench run out of the bench HOME
+ * (FIX-D2-3). Every cell deletes its sessions, so anything left there is from
+ * an interrupted run — and on boot the server would relaunch those sessions
+ * into their cell checkouts, which no longer exist (or, worse, into a cell
+ * path reused later). Moved, not deleted, to `<bench-root>/stale-sessions/`.
+ * Also covers the legacy `$TMPDIR/vibe-sessions` the server migrates from.
+ * Returns how many entries were moved.
+ */
+export function retireStaleSessions(paths: BenchInstancePaths, stamp: string = new Date().toISOString().replace(/[:.]/g, "-")): number {
+  let moved = 0;
+  for (const [name, dir] of [
+    ["sessions", join(paths.home, ".companion", "sessions")],
+    ["vibe-sessions", join(paths.tmp, "vibe-sessions")],
+  ] as const) {
+    let entries: string[];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      continue;
+    }
+    if (entries.length === 0) continue;
+    const dest = join(paths.benchRoot, "stale-sessions", stamp);
+    mkdirSync(dest, { recursive: true });
+    renameSync(dir, join(dest, name));
+    moved += entries.length;
+  }
+  return moved;
+}
+
 export function prepareBenchHome(
   paths: BenchInstancePaths,
   realHome: string,
   port: number = BENCH_PORT,
-): { skillUrlRewrites: ReturnType<typeof rewriteSkillProdUrls> } {
+): { skillUrlRewrites: ReturnType<typeof rewriteSkillProdUrls>; staleSessionsRetired: number } {
   for (const d of [paths.home, paths.tmp, paths.recordings, paths.councilStats]) mkdirSync(d, { recursive: true });
+  const staleSessionsRetired = retireStaleSessions(paths);
   const claude = join(paths.home, ".claude");
   mkdirSync(claude, { recursive: true, mode: 0o700 });
   // Refreshed on every start: prod keeps rotating the real credentials.
@@ -144,7 +176,7 @@ export function prepareBenchHome(
   }
   const skillUrlRewrites = rewriteSkillProdUrls(join(claude, "skills"), port);
   prepareBenchCodexHome(join(paths.home, ".codex"), join(realHome, ".codex"));
-  return { skillUrlRewrites };
+  return { skillUrlRewrites, staleSessionsRetired };
 }
 
 /** The bench HOME's `.codex`: a real directory with only an `auth.json`
@@ -175,7 +207,7 @@ export async function startBenchInstance(opts: {
 }): Promise<RunningInstance> {
   const port = opts.port ?? BENCH_PORT;
   const paths = benchInstancePaths(opts.benchRoot);
-  const { skillUrlRewrites } = prepareBenchHome(paths, opts.realHome, port);
+  const { skillUrlRewrites, staleSessionsRetired } = prepareBenchHome(paths, opts.realHome, port);
   if (skillUrlRewrites.remaining > 0) throw new Error(`bench skills still reference the prod API after rewrite (${skillUrlRewrites.remaining})`);
   const env = benchInstanceEnv(process.env, paths, port);
   const baseUrl = `http://127.0.0.1:${port}`;
@@ -211,6 +243,7 @@ export async function startBenchInstance(opts: {
       codex_home: "bench-owned ~/.codex (auth.json symlink only)",
       prod_port: PROD_PORT,
       skill_prod_url_rewrites: skillUrlRewrites,
+      stale_sessions_retired: staleSessionsRetired,
     },
     stop: async () => {
       if (!child.pid || child.exitCode !== null) return;

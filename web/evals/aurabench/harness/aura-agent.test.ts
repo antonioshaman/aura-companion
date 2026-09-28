@@ -14,7 +14,12 @@
  *     messages before the prompt (init probe) are ignored;
  *   - metrics sum across primary + observer (the observer is Aura's cost);
  *   - permission requests are auto-allowed; a limit result yields `limit`;
- *     the wall clock yields `timeout`; sessions are killed + deleted always;
+ *     the wall clock yields `timeout`; sessions are archived + deleted always;
+ *   - FIX-D2-3: teardown never uses `POST /kill` (not an intentional kill
+ *     server-side → keepalive relaunch into the deleted checkout); it
+ *     archives every session (group-aware, marks the pair intentional) before
+ *     any delete, then re-reads the list — `isolation.teardown.still_present`
+ *     proves nothing survived;
  *   - FIX-D2-2: observer-loop variants (D, E) append the checkpoint → review
  *     directive with the pair's concrete orchestrator id, group id and the
  *     BENCH url (C's prompt is untouched); a council create without a group
@@ -121,7 +126,7 @@ describe("AuraSessionTracker", () => {
 });
 
 /** Fake Companion: records REST calls; sockets deliver scripted messages when prompted. */
-function fakeCompanion(opts: { council?: boolean; noGroup?: boolean; onPrompt?: (emit: (id: string, m: unknown) => void) => void; connectAfter?: number }) {
+function fakeCompanion(opts: { council?: boolean; noGroup?: boolean; survivors?: string[]; onPrompt?: (emit: (id: string, m: unknown) => void) => void; connectAfter?: number }) {
   const calls: string[] = [];
   const sent: { id: string; data: unknown }[] = [];
   const handlers = new Map<string, (d: string) => void>();
@@ -138,6 +143,9 @@ function fakeCompanion(opts: { council?: boolean; noGroup?: boolean; onPrompt?: 
           status: 200,
           json: opts.council ? (opts.noGroup ? pair : { sessionGroupId: "grp_abc", ...pair }) : { sessionId: "p" },
         };
+      }
+      if (method === "GET" && path === "/api/sessions") {
+        return { status: 200, json: opts.survivors?.map((sessionId) => ({ sessionId })) ?? [] };
       }
       if (method === "GET") {
         polls++;
@@ -192,18 +200,33 @@ describe("auraRunner", () => {
     const create = f.calls.find((c) => c.startsWith("POST /api/sessions/create"))!;
     expect(create).toContain('"cwd":"/wt/cell"');
     expect(create).toContain('"knowledge":"on"');
-    expect(f.calls.filter((c) => c.startsWith("GET")).length).toBe(3); // waited for connect
+    expect(f.calls.filter((c) => c === "GET /api/sessions/p").length).toBe(3); // waited for connect
     expect(f.sent[0]).toMatchObject({ id: "p", data: { type: "user_message", content: "fix it" } });
     expect(f.sent).toContainEqual({ id: "p", data: { type: "permission_response", request_id: "r1", behavior: "allow" } });
-    expect(f.calls).toEqual(expect.arrayContaining(["POST /api/sessions/p/kill", "DELETE /api/sessions/p", "close p"]));
+    expect(f.calls).toEqual(expect.arrayContaining(["POST /api/sessions/p/archive {}", "DELETE /api/sessions/p", "close p"]));
+    expect(f.calls.some((c) => c.includes("/kill"))).toBe(false);
+    expect(r).toMatchObject({ isolation: { teardown: { archived: ["p"], deleted: ["p"], still_present: [] } } });
   });
 
-  it("council: observes both halves and kills both", async () => {
+  it("council: observes both halves, archives both before deleting either", async () => {
     const f = fakeCompanion({ council: true, onPrompt: (emit) => emit("p", result()) });
     const r = await auraRunner(f.d)(ctx("D"));
     expect(r).toMatchObject({ kind: "done", status: "completed" });
     expect(f.calls.find((c) => c.startsWith("POST /api/sessions/create"))).toContain('"councilMode":"council"');
     for (const id of ["p", "o"]) expect(f.calls).toContain(`DELETE /api/sessions/${id}`);
+    // EC-2 on the bench: both halves are archived (marked intentional) before
+    // either is deleted, so neither exit can schedule a keepalive relaunch.
+    const lastArchive = Math.max(...["p", "o"].map((id) => f.calls.indexOf(`POST /api/sessions/${id}/archive {}`)));
+    const firstDelete = Math.min(...["p", "o"].map((id) => f.calls.indexOf(`DELETE /api/sessions/${id}`)));
+    expect(f.calls.indexOf("POST /api/sessions/p/archive {}")).toBeGreaterThanOrEqual(0);
+    expect(lastArchive).toBeLessThan(firstDelete);
+    expect(f.calls.some((c) => c.includes("/kill"))).toBe(false);
+  });
+
+  it("a session still listed after teardown is reported, not hidden", async () => {
+    const f = fakeCompanion({ council: true, survivors: ["o", "someone-else"], onPrompt: (emit) => emit("p", result()) });
+    const r = await auraRunner(f.d)(ctx("D"));
+    expect(r).toMatchObject({ isolation: { teardown: { still_present: ["o"] } } });
   });
 
   it("a limit result is reported as limit, not as a cell result", async () => {
@@ -215,7 +238,7 @@ describe("auraRunner", () => {
     const f = fakeCompanion({ onPrompt: (emit) => emit("p", { type: "status_change", status: "running" }) });
     const r = await auraRunner(f.d)(ctx("C", 30_000));
     expect(r).toMatchObject({ kind: "done", status: "timeout" });
-    expect(f.calls).toContain("POST /api/sessions/p/kill");
+    expect(f.calls).toContain("POST /api/sessions/p/archive {}");
   });
 
   it("a failed create is an agent_error with the server's reason", async () => {

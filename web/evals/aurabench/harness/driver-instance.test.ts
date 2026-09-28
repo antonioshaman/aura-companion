@@ -14,7 +14,10 @@
  *     off, loopback only, AURA_* stripped — and the prod port is refused;
  *   - FIX-D2-2: the bench copy of the skills is re-pointed from the prod API
  *     (`localhost:3456`, which the `/council-*` checkpoint emit hardcodes) to
- *     the bench instance, and the real `~/.claude/skills` is never touched.
+ *     the bench instance, and the real `~/.claude/skills` is never touched;
+ *   - FIX-D2-3: sessions persisted by an interrupted run are moved out of the
+ *     bench HOME before the instance boots (else the server relaunches them
+ *     into cell checkouts that no longer exist); an empty store is left alone.
  */
 
 import { describe, it, expect } from "vitest";
@@ -22,7 +25,7 @@ import { runAblation, type DriverDeps } from "./driver.js";
 import { CELL_RECORD_VERSION, type CellRecord } from "./cells.js";
 import { emptyMetrics } from "./agent-metrics.js";
 import type { CellOutcome } from "./run-cell.js";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -31,6 +34,7 @@ import {
   benchInstanceEnv,
   benchInstancePaths,
   prepareBenchHome,
+  retireStaleSessions,
   rewriteSkillProdUrls,
 } from "./bench-instance.js";
 import { benchChildEnv } from "./proc.js";
@@ -210,5 +214,30 @@ describe("bench skills point at the bench instance (FIX-D2-2)", () => {
     expect(skillUrlRewrites).toMatchObject({ files: 1, replaced: 3, remaining: 0 });
     expect(readFileSync(join(real, ".claude", "skills", "council-plan-aura", "SKILL.md"), "utf8")).toBe(SKILL);
     expect(readFileSync(join(bench.home, ".claude", "skills", "council-plan-aura", "SKILL.md"), "utf8")).not.toMatch(/localhost:3456\b/);
+  });
+
+  it("retireStaleSessions moves an interrupted run's sessions out of the bench HOME", () => {
+    const paths = benchInstancePaths(mkdtempSync(join(tmpdir(), "aurabench-root-")));
+    const store = join(paths.home, ".companion", "sessions");
+    mkdirSync(store, { recursive: true });
+    writeFileSync(join(store, "s1.json"), "{}");
+    writeFileSync(join(store, "launcher.json"), "{}");
+    mkdirSync(join(paths.tmp, "vibe-sessions"), { recursive: true });
+    writeFileSync(join(paths.tmp, "vibe-sessions", "s0.json"), "{}");
+    expect(retireStaleSessions(paths, "stamp")).toBe(3);
+    // The server boots with no session to relaunch.
+    expect(existsSync(store)).toBe(false);
+    expect(existsSync(join(paths.tmp, "vibe-sessions"))).toBe(false);
+    // Kept for forensics, not deleted.
+    expect(readdirSync(join(paths.benchRoot, "stale-sessions", "stamp", "sessions")).sort()).toEqual(["launcher.json", "s1.json"]);
+    expect(readdirSync(join(paths.benchRoot, "stale-sessions", "stamp", "vibe-sessions"))).toEqual(["s0.json"]);
+  });
+
+  it("retireStaleSessions leaves a missing or empty store alone", () => {
+    const paths = benchInstancePaths(mkdtempSync(join(tmpdir(), "aurabench-root-")));
+    expect(retireStaleSessions(paths, "stamp")).toBe(0);
+    mkdirSync(join(paths.home, ".companion", "sessions"), { recursive: true });
+    expect(retireStaleSessions(paths, "stamp")).toBe(0);
+    expect(existsSync(join(paths.benchRoot, "stale-sessions"))).toBe(false);
   });
 });
