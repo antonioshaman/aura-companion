@@ -7,10 +7,14 @@
  *     the real ~/.claude, nothing else) and the isolating flags
  *     (`--strict-mcp-config`, `--include-hook-events`, no session persistence);
  *     the init-frame isolation verdict lands in the result;
- *   - B runs `codex exec --json --ephemeral --ignore-user-config` with a
+ *   - B runs `codex exec --json --ignore-user-config` (NOT `--ephemeral`:
+ *     P6/FIX-D2-4 — the rollout is the only place naming the model used) with a
  *     FRESH per-cell CODEX_HOME (P6/FIX-D2-1: pilot 1 let B write the real
  *     ~/.codex); the rotated-auth write-back runs even when the spawn throws;
  *     anything the isolated home still exposes is a confound AND a violation;
+ *   - B's `models` is the model from the cell's rollout `turn_context`, and
+ *     stays [] (unknown) without one — never the pinned `-m` (pilot 1 wrote
+ *     `models: []` for every B cell);
  *   - exit states map to completed / timeout / agent_error, and a usage limit
  *     in the FINAL message becomes `limit` (not a failure).
  */
@@ -112,7 +116,7 @@ describe("model pinning", () => {
 });
 
 describe("naked Codex (B)", () => {
-  it("runs codex exec ephemerally in a fresh per-cell CODEX_HOME and writes auth back after", async () => {
+  it("runs codex exec in a fresh per-cell CODEX_HOME and writes auth back after", async () => {
     const stdout = line({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 2 } });
     const calls: string[] = [];
     const { d, spawned } = deps(
@@ -126,7 +130,9 @@ describe("naked Codex (B)", () => {
     const r = await nakedCodexRunner(d)(ctx("B"));
     expect(spawned[0]!.cmd).toBe("codex");
     expect(spawned[0]!.args).toEqual(codexNakedArgs("do the thing", "/wt/cell"));
-    expect(spawned[0]!.args).toEqual(expect.arrayContaining(["--json", "--ephemeral", "--ignore-user-config"]));
+    expect(spawned[0]!.args).toEqual(expect.arrayContaining(["--json", "--ignore-user-config"]));
+    // The rollout must persist (in the cell home) — it is the model's only source.
+    expect(spawned[0]!.args).not.toContain("--ephemeral");
     // The cell's own home, never the real ~/.codex.
     expect(spawned[0]!.o.env?.CODEX_HOME).toBe("/cells/t1/A-1/codex-home");
     expect(calls).toEqual([
@@ -171,6 +177,47 @@ describe("naked Codex (B)", () => {
   it("a usage-limit turn failure is a limit, not a result", async () => {
     const stdout = line({ type: "turn.failed", error: { message: "You've hit your usage limit. Try again in 3 hours." } });
     expect(await nakedCodexRunner(deps({ stdout, code: 1 }).d)(ctx("B"))).toMatchObject({ kind: "limit", limit: { resetAt: 3 * 3_600_000 } });
+  });
+
+  // P6/FIX-D2-4: `codex exec --json` never names the model; it is read from
+  // the rollout the run left in the CELL's CODEX_HOME.
+  it("records the model the rollout says ran, not the pinned one", async () => {
+    const stdout = line({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 2 } });
+    const read: string[] = [];
+    const rollout = [
+      line({ type: "session_meta", payload: { id: "x", model_provider: "openai" } }),
+      line({ type: "turn_context", payload: { turn_id: "t1", model: "gpt-5.5" } }),
+      line({ type: "turn_context", payload: { turn_id: "t2", model: "gpt-5.5" } }),
+    ].join("\n");
+    const { d } = deps(
+      { stdout },
+      {
+        codexModel: "gpt-5.4",
+        prepareCodexHome: () => ({}),
+        finishCodexHome: () => "unchanged",
+        authSha: () => null,
+        readRollouts: (home) => (read.push(home), [rollout]),
+      },
+    );
+    const r = await nakedCodexRunner(d)(ctx("B"));
+    if (r.kind !== "done") throw new Error("expected done");
+    expect(read).toEqual(["/cells/t1/A-1/codex-home"]);
+    expect(r.metrics.models).toEqual(["gpt-5.5"]);
+    expect(r.isolation).toMatchObject({ model_source: "rollout turn_context" });
+  });
+
+  it("leaves models unknown ([]) without a rollout model — never back-fills the pinned one", async () => {
+    const stdout = line({ type: "turn.completed", usage: {} });
+    for (const readRollouts of [() => [], () => { throw new Error("EACCES"); }]) {
+      const { d } = deps(
+        { stdout },
+        { codexModel: "gpt-5.4", prepareCodexHome: () => ({}), finishCodexHome: () => "unchanged", authSha: () => null, readRollouts },
+      );
+      const r = await nakedCodexRunner(d)(ctx("B"));
+      if (r.kind !== "done") throw new Error("expected done");
+      expect(r.metrics.models).toEqual([]);
+      expect(r.isolation).toMatchObject({ model_source: "unknown (no rollout model)" });
+    }
   });
 
   it("codexConfounds is empty when the home injects nothing", () => {

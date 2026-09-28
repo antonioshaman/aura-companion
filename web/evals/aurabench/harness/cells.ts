@@ -34,9 +34,11 @@ export interface AgentMetrics {
   tokens_out: number | null;
   tokens_cache_read: number | null;
   tokens_cache_write: number | null;
-  /** API-equivalent USD (Claude: `total_cost_usd`; Codex: null — priced in D3 from tokens). */
+  /** API-equivalent USD (Claude: `total_cost_usd`; Codex: null — priced in D3 from tokens).
+   *  Every numeric field here: null = UNKNOWN, never averaged as 0. */
   cost_usd: number | null;
-  /** Model(s) reported by the agent (init frame / session). */
+  /** Model(s) the agent reported actually using (init frame / session /
+   *  Codex rollout); [] = unknown, never back-filled from the pinned model. */
   models: string[];
 }
 

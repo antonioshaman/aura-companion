@@ -114,6 +114,72 @@ describe("AuraSessionTracker", () => {
     expect(t.metrics()).toMatchObject({ turns: 3, tool_calls: 1, cost_usd: 1.5, tokens_out: 14 });
   });
 
+  // P6/FIX-D2-4 (pilot 1: F/G wrote tokens/cost 0). The bridge synthesises
+  // every Codex `result` with placeholder zeros; the real token totals ride on
+  // `session_update.codex_token_details` and the cost is unknown.
+  const codexResult = () => ({
+    type: "result",
+    data: { subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0, usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } },
+  });
+  const codexTokens = (inputTokens: number, outputTokens: number, cachedInputTokens: number) => ({
+    type: "session_update",
+    session: { codex_token_details: { inputTokens, outputTokens, cachedInputTokens, reasoningOutputTokens: 0, modelContextWindow: 258400 } },
+  });
+
+  it("Codex session: placeholder zeros are ignored — tokens from codex_token_details, cost null", () => {
+    const t = new AuraSessionTracker("p", [], 10, "codex");
+    t.promptSent(0);
+    t.onMessage("p", { type: "assistant", message: { model: "gpt-5.5", content: [{ type: "tool_use" }] } }, 1);
+    t.onMessage("p", codexTokens(1000, 50, 800), 2);
+    t.onMessage("p", codexTokens(3000, 120, 2500), 3); // cumulative — latest wins
+    t.onMessage("p", codexResult(), 4);
+    expect(t.metrics()).toEqual({
+      turns: 1,
+      tool_calls: 1,
+      tokens_in: 3000,
+      tokens_out: 120,
+      tokens_cache_read: 2500,
+      tokens_cache_write: null,
+      cost_usd: null,
+      models: ["gpt-5.5"],
+    });
+  });
+
+  it("Codex session without any token report: tokens unknown (null), not 0", () => {
+    const t = new AuraSessionTracker("p", [], 10, "codex");
+    t.promptSent(0);
+    t.onMessage("p", codexResult(), 1);
+    expect(t.metrics()).toMatchObject({ tokens_in: null, tokens_out: null, tokens_cache_read: null, cost_usd: null });
+  });
+
+  it("learns the backend from session_init even before the prompt, and banks a reset counter (new thread)", () => {
+    // Default backend claude, but the server says codex → placeholders ignored.
+    const t = new AuraSessionTracker("p", [], 10);
+    t.onMessage("p", { type: "session_init", session: { backend_type: "codex" } }, 0);
+    t.promptSent(1);
+    t.onMessage("p", codexTokens(500, 10, 100), 2);
+    t.onMessage("p", codexTokens(200, 5, 50), 3); // dropped → relaunch on a new thread
+    t.onMessage("p", codexResult(), 4);
+    expect(t.metrics()).toMatchObject({ tokens_in: 700, tokens_out: 15, tokens_cache_read: 150, cost_usd: null });
+  });
+
+  it("one unknown session makes the cell total unknown (no partial sums); idle sessions don't count", () => {
+    // Claude primary (known cost) + a Codex session that ran without a
+    // cost → the cell cost is unknown, not the primary's alone.
+    const t = new AuraSessionTracker("p", ["o", "idle"], 10);
+    t.onMessage("o", { type: "session_init", session: { backend_type: "codex" } }, 0);
+    t.promptSent(1);
+    t.onMessage("p", result(), 2);
+    t.onMessage("o", codexTokens(100, 1, 0), 3);
+    t.onMessage("o", codexResult(), 4);
+    expect(t.metrics()).toMatchObject({ tokens_in: 105, tokens_out: 8, cost_usd: null, tokens_cache_write: null });
+    // Without the Codex session the never-ran "idle" one does not poison the total.
+    const u = new AuraSessionTracker("p", ["idle"], 10);
+    u.promptSent(0);
+    u.onMessage("p", result(), 1);
+    expect(u.metrics()).toMatchObject({ tokens_in: 5, cost_usd: 1 });
+  });
+
   it("a limit-shaped primary error is a limit; a later success clears it", () => {
     const t = new AuraSessionTracker("p", [], 10);
     t.promptSent(0);

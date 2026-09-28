@@ -235,7 +235,7 @@ export function auraRunner(d: AuraDeps): AgentRunner {
         ? ctx.task.prompt + observerLoopDirective({ baseUrl: d.baseUrl, orchestratorId: ids.primary, groupId })
         : ctx.task.prompt;
     const all = [ids.primary, ...ids.others];
-    const tracker = new AuraSessionTracker(ids.primary, ids.others, quietWindowMs(v));
+    const tracker = new AuraSessionTracker(ids.primary, ids.others, quietWindowMs(v), v.provider);
     const sockets = new Map<string, BenchSocket>();
     const wsBase = d.baseUrl.replace(/^http/, "ws");
     try {
