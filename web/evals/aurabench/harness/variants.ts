@@ -3,7 +3,7 @@
  * of provider × Aura layers; the harness runs every task under every variant.
  *
  *   A  naked Claude     — `claude -p`, clean CLAUDE_CONFIG_DIR, Aura files scrubbed
- *   B  naked Codex      — `codex exec --json --ephemeral`, Aura files scrubbed
+ *   B  naked Codex      — `codex exec --json`, Aura files scrubbed
  *   C  Claude+knowledge — Companion session, KB on, everything else off
  *   D  Claude+Observer  — C + Council Mode observer pair (claude+claude) +
  *                         the observer-loop directive (see below)

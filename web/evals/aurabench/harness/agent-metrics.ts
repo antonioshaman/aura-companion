@@ -161,6 +161,23 @@ export function summarizeCodexStream(text: string): CodexStreamSummary {
   return { metrics: m, finishedOk: completedTurns > 0 && !failed, errorText: errors.join("\n") };
 }
 
+/**
+ * The model(s) a Codex run ACTUALLY used, from its session rollouts
+ * (`turn_context.payload.model`, one per turn; first-seen order, unique).
+ * `codex exec --json` never names the model in its stream.
+ */
+export function codexModelsFromRollouts(rollouts: readonly string[]): string[] {
+  const models: string[] = [];
+  for (const text of rollouts) {
+    for (const e of parseJsonLines(text)) {
+      if (e.type !== "turn_context" || !isObj(e.payload)) continue;
+      const model = e.payload.model;
+      if (typeof model === "string" && model && !models.includes(model)) models.push(model);
+    }
+  }
+  return models;
+}
+
 const LIMIT_RE =
   /usage limit|hit your (usage )?limit|limit reached|rate[ _-]?limit(ed)?|quota exceeded|too many requests|\b429\b|overloaded_error/i;
 

@@ -16,7 +16,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { detectLimit, limitSleepMs, summarizeClaudeStream, summarizeCodexStream } from "./agent-metrics.js";
+import { codexModelsFromRollouts, detectLimit, limitSleepMs, summarizeClaudeStream, summarizeCodexStream } from "./agent-metrics.js";
 
 const line = (o: unknown) => JSON.stringify(o);
 
@@ -123,5 +123,24 @@ describe("detectLimit / limitSleepMs", () => {
     expect(limitSleepMs({ resetAt: now - 5_000, message: "" }, now)).toBe(60_000);
     expect(limitSleepMs({ resetAt: now + 48 * 3_600_000, message: "" }, now)).toBe(6 * 3_600_000);
     expect(limitSleepMs({ resetAt: now + 10 * 60_000, message: "" }, now)).toBe(11 * 60_000);
+  });
+});
+
+// P6/FIX-D2-4: naked Codex (B) reads its model from the rollout — the shape
+// below is a trimmed real `~/.codex/sessions/.../rollout-*.jsonl` (codex-cli 0.142.5).
+describe("codexModelsFromRollouts", () => {
+  it("collects turn_context models in first-seen order, unique, across rollouts", () => {
+    const a = [
+      line({ timestamp: "t", type: "session_meta", payload: { cli_version: "0.142.5", model_provider: "openai" } }),
+      line({ timestamp: "t", type: "turn_context", payload: { turn_id: "1", model: "gpt-5.5", collaboration_mode: { settings: { model: "gpt-5.5" } } } }),
+      line({ timestamp: "t", type: "event_msg", payload: { type: "token_count", model: "not-this" } }),
+    ].join("\n");
+    const b = [line({ type: "turn_context", payload: { model: "gpt-5.4-mini" } }), line({ type: "turn_context", payload: { model: "gpt-5.5" } })].join("\n");
+    expect(codexModelsFromRollouts([a, b])).toEqual(["gpt-5.5", "gpt-5.4-mini"]);
+  });
+
+  it("is empty (unknown) for no rollouts, garbage, or a turn_context without a model", () => {
+    expect(codexModelsFromRollouts([])).toEqual([]);
+    expect(codexModelsFromRollouts(["not json", line({ type: "turn_context", payload: { model: "" } }), line({ type: "turn_context" })])).toEqual([]);
   });
 });

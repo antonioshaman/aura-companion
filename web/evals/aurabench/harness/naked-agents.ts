@@ -6,20 +6,26 @@
  *     memory, CLAUDE.md). `--strict-mcp-config` drops account MCP connectors,
  *     `--include-hook-events` makes any hook visible, and the init frame is
  *     checked by {@link checkNakedClaudeIsolation}.
- * B — `codex exec --json --ephemeral --ignore-user-config` with a FRESH
+ * B — `codex exec --json --ignore-user-config` with a FRESH
  *     per-cell `CODEX_HOME` holding only an `auth.json` symlink to the real
  *     one ({@link prepareIsolatedCodexHome}): no config, memories, skills,
  *     AGENTS.md or state from the real `~/.codex`, and nothing written back
  *     to it except a rotated OAuth token ({@link propagateRotatedCodexAuth}).
  *     That the real `~/.codex` stayed untouched is PROVEN per cell by
  *     `guardRealCodexHome` (wired in the runner for every variant).
+ *     NOT `--ephemeral`: the `--json` stream never names the model, so the
+ *     session rollout (kept in the per-cell home, never in `~/.codex`) is
+ *     where the ACTUALLY used model is read from ({@link codexModelsFromRollouts}).
+ *     No rollout / no model in it → `models: []` (unknown), never the pinned
+ *     `-m` value (that is what was asked for, not what ran).
  *
  * The worktree was already scrubbed of Aura files by `runCell`. The process
  * factory is injected (tests script it); fs probes too. Firewall-clean.
  */
 
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { detectLimit, summarizeClaudeStream, summarizeCodexStream } from "./agent-metrics.js";
+import { codexModelsFromRollouts, detectLimit, summarizeClaudeStream, summarizeCodexStream } from "./agent-metrics.js";
 import { checkNakedClaudeIsolation } from "./isolation.js";
 import { prepareIsolatedCodexHome, propagateRotatedCodexAuth, realAuthSha } from "./codex-home.js";
 import type { AgentContext, AgentRun, AgentRunner } from "./run-cell.js";
@@ -48,6 +54,8 @@ export interface NakedDeps {
   finishCodexHome?: (home: string, realCodexDir: string, authShaAtStart: string | null) => string;
   /** sha256 of the real auth.json (default {@link realAuthSha}). */
   authSha?: (realCodexDir: string) => string | null;
+  /** Contents of the session rollouts in a Codex home (default {@link readCodexRollouts}). */
+  readRollouts?: (codexHome: string) => string[];
   /** Pinned models — every variant of a provider must run the same model. */
   claudeModel?: string;
   codexModel?: string;
@@ -80,7 +88,6 @@ export function codexNakedArgs(prompt: string, worktree: string, model?: string)
     "exec",
     ...(model ? ["-m", model] : []),
     "--json",
-    "--ephemeral",
     "--ignore-user-config",
     "--dangerously-bypass-approvals-and-sandbox",
     "--skip-git-repo-check",
@@ -162,12 +169,20 @@ export function nakedCodexRunner(d: NakedDeps): AgentRunner {
       auth = (d.finishCodexHome ?? propagateRotatedCodexAuth)(codexHome, d.realCodexDir, authShaAtStart);
     }
     const s = summarizeCodexStream(r.stdout);
+    let rollouts: string[] = [];
+    try {
+      rollouts = (d.readRollouts ?? readCodexRollouts)(codexHome);
+    } catch {
+      // unreadable → model stays unknown
+    }
+    s.metrics.models = codexModelsFromRollouts(rollouts);
     const isolation = {
       isolated: confounds.length === 0,
       violations: confounds.map((c) => `visible to the agent: ${c}`),
       ...seeded,
       auth,
-      flags: ["--ephemeral", "--ignore-user-config"],
+      flags: ["--ignore-user-config"],
+      model_source: s.metrics.models.length ? "rollout turn_context" : "unknown (no rollout model)",
     };
     if (r.timedOut) return { kind: "done", status: "timeout", metrics: s.metrics, isolation, confounds };
     if (s.finishedOk && r.code === 0) return { kind: "done", status: "completed", metrics: s.metrics, isolation, confounds };
@@ -182,4 +197,25 @@ export function nakedCodexRunner(d: NakedDeps): AgentRunner {
       error: tail(s.errorText || r.stderr || `exit ${r.code}`, 500),
     };
   };
+}
+
+/** Every `*.jsonl` under `<codexHome>/sessions` (Codex writes
+ *  `sessions/YYYY/MM/DD/rollout-*.jsonl`); missing dir → []. */
+export function readCodexRollouts(codexHome: string): string[] {
+  const out: string[] = [];
+  const walk = (dir: string) => {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.isFile() && e.name.endsWith(".jsonl")) out.push(readFileSync(p, "utf8"));
+    }
+  };
+  walk(join(codexHome, "sessions"));
+  return out;
 }
