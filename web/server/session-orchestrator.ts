@@ -460,7 +460,18 @@ export class SessionOrchestrator {
         if (!meta || meta.observerSessionId !== sessionId) return;
         // Finalize the finished turn's reply BEFORE the drain dispatches the
         // next wake (which would replace the capture slot).
-        this.finalizeObserverReply(groupId, sessionId);
+        // FIX-B1-1: isolated — a finalize failure must not skip the drain.
+        try {
+          this.finalizeObserverReply(groupId, sessionId);
+        } catch (err) {
+          log.error("session-orchestrator", "observer reply finalize failed", {
+            event: "council.observer_reply.finalize_error",
+            sessionGroupId: groupId,
+            sessionId,
+            role: "observer",
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
         this.drainPendingObserverWake(groupId);
       } catch (err) {
         log.warn("session-orchestrator", "observer turn-done drain failed", {

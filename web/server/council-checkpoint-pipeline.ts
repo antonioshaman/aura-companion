@@ -739,6 +739,14 @@ export class CouncilCheckpointPipeline {
           file: outcome.file,
         });
         return;
+      case "filename_failed":
+        log.error("session-orchestrator", "host review filename could not be built", {
+          event: "council.observer_reply.filename_failed",
+          ...base,
+          phase: outcome.expectation.phase,
+          error: outcome.error,
+        });
+        return;
       case "write_failed":
         log.error("session-orchestrator", "host review write failed", {
           event: "council.observer_reply.write_failed",
