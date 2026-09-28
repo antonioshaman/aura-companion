@@ -402,6 +402,14 @@ export class CliLauncher {
   private processes = new Map<string, Subprocess>();
   /** Sidecar Node proxy processes used by Codex WebSocket transport. */
   private codexWsProxies = new Map<string, Subprocess>();
+  /**
+   * P4/FIX-AUTOHEAL-2: Codex WS spawns still awaiting their port pick. The
+   * processes are not in `processes` yet, so a `kill`/relaunch/delete landing
+   * in that gap had nothing to signal and the spawn then went ahead — a live
+   * app-server for an archived, deleted or stopped session. Those paths set
+   * `cancelled`; the spawn re-checks it before `Bun.spawn`.
+   */
+  private pendingCodexWsSpawns = new Map<string, { cancelled: boolean }>();
   /** Host-mode Codex WS listen ports currently reserved by active sessions. */
   private claimedCodexWsPorts = new Set<number>();
   /** Account- or runtime-rejected Codex models, remembered per session to avoid retry loops. */
@@ -729,6 +737,15 @@ export class CliLauncher {
 
   private claimCodexWsPort(port: number): void {
     this.claimedCodexWsPorts.add(port);
+  }
+
+  /** P4/FIX-AUTOHEAL-2: returns true when a pending Codex WS spawn was cancelled. */
+  private cancelPendingCodexWsSpawn(sessionId: string): boolean {
+    const pending = this.pendingCodexWsSpawns.get(sessionId);
+    if (!pending) return false;
+    pending.cancelled = true;
+    this.pendingCodexWsSpawns.delete(sessionId);
+    return true;
   }
 
   private releaseCodexWsPort(info: SdkSessionInfo | undefined): void {
@@ -2106,22 +2123,50 @@ export class CliLauncher {
       }
       proxyConnectPort = mappedPort;
     } else {
+      const pending = { cancelled: false };
+      // A previous spawn of this session still picking its port is superseded.
+      this.cancelPendingCodexWsSpawn(sessionId);
+      this.pendingCodexWsSpawns.set(sessionId, pending);
       try {
         proxyConnectPort = await findFreePort(
           4500,
           4600,
           (port) => this.claimedCodexWsPorts.has(port),
         );
-        this.claimCodexWsPort(proxyConnectPort);
-        // Set immediately after claiming so any downstream failure can release it.
-        info.codexWsPort = proxyConnectPort;
       } catch (err) {
         console.error(`[cli-launcher] Failed to find free port for Codex WS: ${err}`);
         info.state = "exited";
         info.exitCode = 1;
         this.persistState();
         return;
+      } finally {
+        if (this.pendingCodexWsSpawns.get(sessionId) === pending) this.pendingCodexWsSpawns.delete(sessionId);
       }
+      // P4/FIX-AUTOHEAL-2: killed, superseded, archived or deleted while the
+      // port was being picked — spawning now would leave an orphan no one
+      // tracks. Everything below up to the process registration is sync.
+      const deleted = this.sessions.get(sessionId) !== info;
+      if (pending.cancelled || deleted || info.archived) {
+        log.warn("cli-launcher", "Codex WS spawn cancelled before the process started", {
+          event: "codex.spawn_cancelled",
+          sessionId,
+          sessionGroupId: info.sessionGroupId,
+          role: info.sessionGroupRole,
+          reason: pending.cancelled ? "cancelled" : deleted ? "deleted" : "archived",
+        });
+        // The port was never claimed. A superseding relaunch owns `info` now
+        // (its own spawn pending or running) — leave its state alone.
+        if (!deleted && !this.pendingCodexWsSpawns.has(sessionId) && !this.processes.has(sessionId)) {
+          info.state = "exited";
+          info.exitCode = -1;
+          info.pid = undefined;
+          this.persistState();
+        }
+        return;
+      }
+      this.claimCodexWsPort(proxyConnectPort);
+      // Set immediately after claiming so any downstream failure can release it.
+      info.codexWsPort = proxyConnectPort;
       codexListenPort = proxyConnectPort;
     }
 
@@ -2670,6 +2715,7 @@ export class CliLauncher {
    * Kill a session's CLI process.
    */
   async kill(sessionId: string): Promise<boolean> {
+    const cancelledSpawn = this.cancelPendingCodexWsSpawn(sessionId);
     const proxy = this.codexWsProxies.get(sessionId);
     if (proxy) {
       try { proxy.kill("SIGTERM"); } catch {}
@@ -2702,7 +2748,7 @@ export class CliLauncher {
         this.persistState();
         return true;
       }
-      return !!proxy;
+      return !!proxy || cancelledSpawn;
     }
 
     proc.kill("SIGTERM");
@@ -2818,6 +2864,7 @@ export class CliLauncher {
    * Remove a session from the internal map (after kill or cleanup).
    */
   removeSession(sessionId: string) {
+    this.cancelPendingCodexWsSpawn(sessionId);
     this.releaseCodexWsPort(this.sessions.get(sessionId));
     this.sessions.delete(sessionId);
     this.processes.delete(sessionId);

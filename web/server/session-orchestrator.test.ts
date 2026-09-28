@@ -4959,10 +4959,13 @@ describe("SessionOrchestrator", () => {
       });
 
       // P4/FIX-AUTOHEAL-1 items 1 + 4: the heal relaunch goes through the
-      // single-flight gate (a manual relaunch clicked meanwhile joins it —
-      // one CLI, not two `--resume`s on one cliSessionId) and, unlike a
-      // manual relaunch, does not reset the auto-relaunch crash budget.
-      it("heal relaunch: a concurrent manual relaunch joins it, and the crash budget is not reset", async () => {
+      // single-flight gate and, unlike a manual relaunch, does not reset the
+      // auto-relaunch crash budget. P4/FIX-AUTOHEAL-2 (a): a manual relaunch
+      // clicked meanwhile no longer JOINS the heal (it may carry new
+      // credentials the heal's spawn never saw) — it waits for the heal to
+      // finish and then spawns its own CLI. Never two spawns at once, so
+      // still no two `--resume`s racing on one cliSessionId.
+      it("heal relaunch: a concurrent manual relaunch waits for it and then runs its own, and the crash budget is not reset", async () => {
         vi.useFakeTimers();
         try {
           deps.launcher.getSession.mockReturnValue({ archived: false, state: "running" } as any);
@@ -4989,11 +4992,17 @@ describe("SessionOrchestrator", () => {
           // The user clicks relaunch while the heal's spawn is still running.
           const manual = orchestrator.relaunchSession(OBS);
           await vi.advanceTimersByTimeAsync(0);
+          // Not overlapping the heal's spawn.
+          expect(deps.launcher.relaunch).toHaveBeenCalledTimes(1);
           adapterAttached = true;
+          finishRelaunch({ ok: true });
+          await vi.advanceTimersByTimeAsync(0);
+          // The heal finished → the manual relaunch spawns on its own.
+          expect(deps.launcher.relaunch).toHaveBeenCalledTimes(2);
           finishRelaunch({ ok: true });
           await expect(manual).resolves.toEqual({ ok: true });
           await vi.advanceTimersByTimeAsync(1_000);
-          expect(deps.launcher.relaunch).toHaveBeenCalledTimes(1);
+          expect(deps.launcher.relaunch).toHaveBeenCalledTimes(2);
           // The manual path still resets the budget (explicit user action).
           expect(clearBudget).toHaveBeenCalledWith(OBS);
         } finally {

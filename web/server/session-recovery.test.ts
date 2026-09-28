@@ -411,6 +411,130 @@ describe("SessionRecovery.relaunchOnce — single-flight (P4/FIX-AUTOHEAL-1)", (
     expect(recovery.isRelaunchInFlight("s1")).toBe(false);
   });
 
+  // P4/FIX-AUTOHEAL-2 (a): Settings → "apply credentials" relaunches WITHOUT
+  // a model change. The in-flight automatic relaunch already built its spawn
+  // env from the OLD settings, so joining it would silently drop the new
+  // credentials. A manual call must wait and then spawn on its own.
+  it("a manual relaunch without a model change waits for an in-flight automatic one and runs its own", async () => {
+    const sessions = new Map([["s1", info("s1")]]);
+    const { recovery, launcher, onRelaunchSucceeded } = makeRecovery(sessions);
+    const d = deferredRelaunch(launcher);
+
+    const heal = recovery.relaunchOnce("s1", "autoheal", {});
+    const manual = recovery.relaunchOnce("s1", "manual", {});
+    await vi.advanceTimersByTimeAsync(0);
+    // Not overlapping: the manual spawn has not started yet.
+    expect(launcher.relaunch).toHaveBeenCalledTimes(1);
+    d.pending[0]({ ok: true });
+    await heal;
+    await vi.advanceTimersByTimeAsync(0);
+    // Its own spawn — not the shared result of the automatic one.
+    expect(launcher.relaunch).toHaveBeenCalledTimes(2);
+    d.pending[1]({ ok: true });
+    await expect(manual).resolves.toEqual({ ok: true });
+    expect(d.maxConcurrent()).toBe(1);
+    expect(onRelaunchSucceeded).toHaveBeenCalledTimes(2);
+  });
+
+  // A double-clicked relaunch button: the second manual call is serialized
+  // behind the first (never two spawns at once; automatic callers still join).
+  it("two manual relaunches back to back run one after the other, never together", async () => {
+    const sessions = new Map([["s1", info("s1")]]);
+    const { recovery, launcher } = makeRecovery(sessions);
+    const d = deferredRelaunch(launcher);
+
+    const first = recovery.relaunchOnce("s1", "manual", {});
+    const second = recovery.relaunchOnce("s1", "manual", {});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(launcher.relaunch).toHaveBeenCalledTimes(1);
+    d.pending[0]({ ok: true });
+    await first;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(launcher.relaunch).toHaveBeenCalledTimes(2);
+    d.pending[1]({ ok: true });
+    await second;
+    expect(d.maxConcurrent()).toBe(1);
+  });
+
+  // P4/FIX-AUTOHEAL-2 (c): a CLI that hangs in `starting` (never attaches,
+  // never exits). The automatic trigger inside the settle window is skipped;
+  // without a re-check nothing would ever try again for an orchestrator.
+  it("an automatic trigger skipped inside the settle window re-checks when the window closes and recovers a hung CLI", async () => {
+    const sessions = new Map([["s1", info("s1", { state: "starting" })]]);
+    const { recovery, launcher } = makeRecovery(sessions);
+
+    await recovery.relaunchOnce("s1", "manual", {});
+    await expect(recovery.relaunchOnce("s1", "boot_watchdog")).resolves.toMatchObject({
+      skipped: "recently_relaunched",
+    });
+    // A second skip does not arm a second timer (one recovery, not two).
+    await recovery.relaunchOnce("s1", "autoheal", {});
+    expect(launcher.relaunch).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(RELAUNCH_SETTLE_MS - 1_000);
+    expect(launcher.relaunch).toHaveBeenCalledTimes(1);
+    // Window over → handleAutoRelaunch (with its grace period) relaunches.
+    await vi.advanceTimersByTimeAsync(1_000 + RELAUNCH_GRACE_MS);
+    expect(launcher.relaunch).toHaveBeenCalledTimes(2);
+  });
+
+  it("handleAutoRelaunch skipped while settling also re-checks after the window", async () => {
+    const sessions = new Map([["s1", info("s1", { state: "starting" })]]);
+    const { recovery, launcher } = makeRecovery(sessions);
+
+    await recovery.relaunchOnce("s1", "manual", {});
+    const auto = recovery.handleAutoRelaunch("s1");
+    await vi.advanceTimersByTimeAsync(RELAUNCH_GRACE_MS);
+    await auto;
+    expect(launcher.relaunch).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(RELAUNCH_SETTLE_MS + RELAUNCH_GRACE_MS);
+    expect(launcher.relaunch).toHaveBeenCalledTimes(2);
+  });
+
+  it("the settle re-check leaves a CLI alone that attached, was stopped by the user, or was archived", async () => {
+    // Attached: adapter present on the bridge session → nothing to recover.
+    {
+      const sessions = new Map([["s1", info("s1", { state: "starting" })]]);
+      const { recovery, launcher, wsBridge } = makeRecovery(sessions);
+      await recovery.relaunchOnce("s1", "manual", {});
+      await recovery.relaunchOnce("s1", "boot_watchdog");
+      wsBridge.getSession.mockReturnValue({ backendAdapter: {} } as never);
+      await vi.advanceTimersByTimeAsync(RELAUNCH_SETTLE_MS + RELAUNCH_GRACE_MS);
+      expect(launcher.relaunch).toHaveBeenCalledTimes(1);
+    }
+    // Stopped by the user in the meantime (P4/KILL-INTENTIONAL).
+    {
+      const sessions = new Map([["s1", info("s1", { state: "starting" })]]);
+      const { recovery, launcher } = makeRecovery(sessions);
+      await recovery.relaunchOnce("s1", "manual", {});
+      await recovery.relaunchOnce("s1", "boot_watchdog");
+      recovery.markStoppedByUser("s1");
+      await vi.advanceTimersByTimeAsync(RELAUNCH_SETTLE_MS + RELAUNCH_GRACE_MS);
+      expect(launcher.relaunch).toHaveBeenCalledTimes(1);
+    }
+    // Archived in the meantime.
+    {
+      const sessions = new Map([["s1", info("s1", { state: "starting" })]]);
+      const { recovery, launcher } = makeRecovery(sessions);
+      await recovery.relaunchOnce("s1", "manual", {});
+      await recovery.relaunchOnce("s1", "boot_watchdog");
+      sessions.set("s1", info("s1", { state: "starting", archived: true }));
+      await vi.advanceTimersByTimeAsync(RELAUNCH_SETTLE_MS + RELAUNCH_GRACE_MS);
+      expect(launcher.relaunch).toHaveBeenCalledTimes(1);
+    }
+    // Deleted: forgetSession drops the timer.
+    {
+      const sessions = new Map([["s1", info("s1", { state: "starting" })]]);
+      const { recovery, launcher } = makeRecovery(sessions);
+      await recovery.relaunchOnce("s1", "manual", {});
+      await recovery.relaunchOnce("s1", "boot_watchdog");
+      recovery.forgetSession("s1");
+      await vi.advanceTimersByTimeAsync(RELAUNCH_SETTLE_MS + RELAUNCH_GRACE_MS);
+      expect(launcher.relaunch).toHaveBeenCalledTimes(1);
+    }
+  });
+
   it("does not release a mark that existed before the relaunch (e.g. an idle-kill)", async () => {
     const sessions = new Map([["s1", info("s1")]]);
     const { recovery, intentionalKills } = makeRecovery(sessions);
