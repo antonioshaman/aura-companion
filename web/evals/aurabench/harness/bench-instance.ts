@@ -11,21 +11,28 @@
  *    `COMPANION_ALLOWED_ORIGIN`;
  *  - `COMPANION_ORPHAN_REAPER=off`: the reaper scans all of `/proc` and would
  *    SIGTERM prod's orphaned CLIs as "unknown";
- *  - `HOST=127.0.0.1`: not reachable from outside.
+ *  - `HOST=127.0.0.1`: not reachable from outside;
+ *  - `COMPANION_TELEMETRY=0` + a dead-end `COMPANION_STATS_URL`: the settings
+ *    default is `telemetryEnabled: true`, so without the override a bench or
+ *    smoke instance mints its own instance id and heartbeats into the public
+ *    install/online counter (it did in pilot 1). Forced, not inherited.
  *
  * The bench HOME gets `.claude/.credentials.json` + a dereferenced copy of
  * `.claude/skills` (the council skills are user-level) — NOT `settings.json`
- * (its hooks write into the real `~/.claude`). `.codex` is a symlink to the
- * real `~/.codex`, i.e. exactly how prod shares Codex auth (per-session
- * `auth.json` symlinks, see cli-launcher); nothing is copied or edited.
+ * (its hooks write into the real `~/.claude`). `.codex` is the bench's OWN
+ * directory holding only an `auth.json` symlink to the real one — the server
+ * seeds per-session Codex homes from `~/.codex`, so this is what F/G sessions
+ * see: no config, memories, skills or AGENTS.md, same as naked B. (Pilot 1
+ * symlinked the whole real `~/.codex` here; an old link is replaced.)
  *
  * Firewall-clean (spawns the server as a process; imports nothing from it).
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, openSync, rmSync, symlinkSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, openSync, rmSync, symlinkSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { benchChildEnv } from "./proc.js";
+import { CODEX_AUTH_FILE } from "./codex-home.js";
 
 export const BENCH_PORT = 3499;
 export const PROD_PORT = 3456;
@@ -68,6 +75,9 @@ export function benchInstanceEnv(
     COMPANION_COUNCIL_STATS_DIR: paths.councilStats,
     COMPANION_ALLOWED_ORIGIN: origin,
     COMPANION_ORPHAN_REAPER: "off",
+    COMPANION_TELEMETRY: "0",
+    // Belt and braces: even if the flag were ignored, beats go nowhere.
+    COMPANION_STATS_URL: "http://127.0.0.1:9",
   });
 }
 
@@ -82,8 +92,19 @@ export function prepareBenchHome(paths: BenchInstancePaths, realHome: string): v
     rmSync(join(claude, "skills"), { recursive: true, force: true });
     cpSync(skills, join(claude, "skills"), { recursive: true, dereference: true });
   }
-  const codexLink = join(paths.home, ".codex");
-  if (!existsSync(codexLink)) symlinkSync(join(realHome, ".codex"), codexLink);
+  prepareBenchCodexHome(join(paths.home, ".codex"), join(realHome, ".codex"));
+}
+
+/** The bench HOME's `.codex`: a real directory with only an `auth.json`
+ *  symlink. A pilot-1 symlink to the whole real `~/.codex` is unlinked (the
+ *  link only — never its target). Idempotent. */
+export function prepareBenchCodexHome(benchCodex: string, realCodexDir: string): void {
+  const st = lstatSync(benchCodex, { throwIfNoEntry: false });
+  if (st?.isSymbolicLink()) unlinkSync(benchCodex);
+  mkdirSync(benchCodex, { recursive: true, mode: 0o700 });
+  const link = join(benchCodex, CODEX_AUTH_FILE);
+  const realAuth = join(realCodexDir, CODEX_AUTH_FILE);
+  if (!lstatSync(link, { throwIfNoEntry: false }) && existsSync(realAuth)) symlinkSync(realAuth, link);
 }
 
 export interface RunningInstance {
@@ -133,6 +154,8 @@ export async function startBenchInstance(opts: {
       instance_home: paths.home,
       recordings_dir: paths.recordings,
       orphan_reaper: "off",
+      telemetry: "off",
+      codex_home: "bench-owned ~/.codex (auth.json symlink only)",
       prod_port: PROD_PORT,
     },
     stop: async () => {
