@@ -7,16 +7,16 @@ start_commit: 984aed2d6d24f0d057f92f652b339542a77e39bd
 prompt: |
   If the server receives SIGTERM/SIGINT while assistant replies are still
   streaming, the partial text is lost: after restart the history shows nothing
-  for that turn. The CLI-disconnect path already turns an in-flight stream into
-  an assistant message marked as interrupted; the server-shutdown path does not.
+  for that turn. (When the CLI disconnects mid-stream, by contrast, the partial
+  reply is kept as an assistant message marked as interrupted.)
 
   Add `WsBridge.flushInterruptedStreamsForShutdown()`: for every session with
   an in-flight streamed reply that has text, append one assistant message with
   `streamStatus: "interrupted"` to its history; clear every streaming tracker
   (even empty ones, which produce no message); return the number of messages
   synthesized. It must be a no-op with no streams and idempotent when called
-  twice. Call it during graceful shutdown early enough that the synthesized
-  messages are included in the final session-store flush.
+  twice. After a graceful shutdown and restart, those interrupted partial replies
+  must be in the session history.
 expected_files:
   - web/server/index.ts
   - web/server/ws-bridge.ts

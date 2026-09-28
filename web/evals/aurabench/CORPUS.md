@@ -2,9 +2,11 @@
 
 Generated from the mining + validation run of 2026-09-28. Every task below was mined from a merged PR, its hidden tests **fail on the base commit and pass on the merge commit** (validated in a throwaway worktree), and its prompt passed both leak checks: the deterministic `eval:aurabench leak` (every new name the hidden tests use is named, no other new name from the diff is) and an independent LLM review against the real diff (solution hints / under-specification). The LLM review ran twice: round 1 flagged 20 of 50 prompts (19 under-specified — exact strings, logger shapes, test ids, payload shapes; 1 leaking a private field name); 3 of those were dropped because their hidden tests pin a single implementation, the rest were revised; round 2 re-checked all 22 revised prompts, found 2 remaining gaps, which were fixed. The deterministic check was re-run after every revision.
 
-**47 tasks** — feature 13, bugfix 12, ui 7, debug 5, refactor 4, architecture 4, security 2.
+**43 tasks** — feature 13, bugfix 10, ui 7, debug 4, refactor 4, architecture 3, security 2.
 
-Base failure kind: assertion 35, missing-interface 12 (the prompt names the interface).
+**Re-review (P6/FIX-D2-5, 2026-09-28).** The first pilot showed prompts that give away the diagnosis or the fix in plain English, which the identifier-level check cannot see. All 47 prompts were re-judged by an LLM judge (`eval:aurabench judge`, rubric in `prompt-judge.ts`, calibrated on a human reviewer's rulings) against the PR diff and hidden tests: 25 kept as-is, 18 rewritten to symptom + required behaviour (re-judged until clean), 4 excluded because a passable prompt must state the fix. Every task's hidden tests also passed 3 of 3 runs on the merge commit. Verdicts, rewrites and stability: [`review/REPORT.md`](review/REPORT.md). The "LLM review" column below is the original D1 review.
+
+Base failure kind: assertion 31, missing-interface 12 (the prompt names the interface).
 
 Classes were assigned by hand (the miner's title heuristic labels ~85% as bugfix/feature). `debug` = the prompt gives only the symptom, the agent must locate the cause; `refactor` = behaviour-preserving extraction; `architecture` = a cross-cutting seam or subsystem change.
 
@@ -13,12 +15,10 @@ Classes were assigned by hand (the miner's title heuristic labels ~85% as bugfix
 
 | id | PR | class | base failure | src files | src ± lines | LLM review |
 |---|---|---|---|---|---|---|
-| `archive-council-pair-kills-one-half` | #50 | architecture | assertion | 1 | +89/−34 | revised → ok |
 | `sever-self-update-and-upstream-sync` | #97 | architecture | assertion | 15 | +22/−1614 | ok |
 | `council-watchers-die-silently` | #157 | architecture | missing-interface | 2 | +239/−34 | revised → ok |
 | `claude-cli-stdio-transport` | #169 | architecture | missing-interface | 7 | +608/−78 | revised → ok |
 | `council-degraded-pair-never-recovers` | #53 | bugfix | assertion | 2 | +71/−4 | revised → ok |
-| `ask-user-question-answers-dropped` | #82 | bugfix | assertion | 2 | +38/−15 | ok |
 | `archived-sessions-hold-memory` | #89 | bugfix | assertion | 3 | +66/−0 | ok |
 | `session-restore-crash-on-sidecar-json` | #98 | bugfix | assertion | 2 | +20/−1 | ok |
 | `codex-error-notification-shown-as-drift` | #112 | bugfix | assertion | 2 | +51/−1 | revised → ok |
@@ -27,13 +27,11 @@ Classes were assigned by hand (the miner's title heuristic labels ~85% as bugfix
 | `codex-observer-findings-dropped` | #122 | bugfix | assertion | 1 | +75/−2 | ok |
 | `council-lost-review-event-degrades-pair` | #165 | bugfix | assertion | 2 | +120/−21 | ok |
 | `codex-model-fallback-picks-mini` | #166 | bugfix | assertion | 1 | +27/−7 | ok |
-| `codex-observer-dies-not-initialized-race` | #172 | bugfix | assertion | 2 | +67/−2 | revised → ok |
 | `resume-discards-conversation-too-eagerly` | #194 | bugfix | missing-interface | 1 | +81/−8 | ok |
 | `codex-session-spawns-council-pair` | #125 | debug | assertion | 1 | +8/−5 | ok |
 | `resume-hiccup-loses-conversation` | #171 | debug | missing-interface | 1 | +64/−9 | revised → ok |
 | `deaf-session-after-server-restart` | #184 | debug | assertion | 1 | +16/−2 | ok |
 | `drift-detector-misses-dead-stdio` | #201 | debug | assertion | 3 | +119/−26 | ok |
-| `drift-detector-blind-on-underscore-cwd` | #204 | debug | assertion | 1 | +17/−2 | ok |
 | `council-checkpoint-producer-endpoint` | #10 | feature | assertion | 2 | +90/−0 | revised → ok |
 | `sessions-lost-on-reboot-tmpdir` | #37 | feature | assertion | 2 | +164/−4 | revised → ok |
 | `shutdown-loses-streaming-replies` | #38 | feature | assertion | 2 | +40/−0 | ok |
@@ -63,7 +61,7 @@ Classes were assigned by hand (the miner's title heuristic labels ~85% as bugfix
 
 ## Excluded
 
-194 merged PRs → 134 candidates → 130 validated → 47 selected.
+194 merged PRs → 134 candidates → 130 validated → 47 selected → 43 after the P6/FIX-D2-5 re-review.
 
 ### At mining (no agent-sized task)
 
@@ -138,6 +136,17 @@ Classes were assigned by hand (the miner's title heuristic labels ~85% as bugfix
 | #65 | hidden tests fail on merge commit |
 | #76 | hidden tests already pass on base commit |
 | #163 | hidden tests fail on merge commit |
+
+### Excluded at re-review (P6/FIX-D2-5)
+
+A passable prompt would have to hand over the fix (LLM judge verdict `exclude`, issue `contract_is_fix`; details in [`review/REPORT.md`](review/REPORT.md)).
+
+| PR | task | reason |
+|---|---|---|
+| #50 | `archive-council-pair-kills-one-half` | a source-grep canary and a two-method fake coordinator pin the exact calls inside `archiveSession`; stating them is the design of the fix |
+| #82 | `ask-user-question-answers-dropped` | the tests pin the SDK's `answers` keying (by question text), which the repo cannot reveal; stating it is the whole fix |
+| #172 | `codex-observer-dies-not-initialized-race` | the orchestrator-side tests overwrite private internals (pending set, the private poll method, coordinator/launcher lookups), pinning one implementation; a passable prompt must name them |
+| #204 | `drift-detector-blind-on-underscore-cwd` | the tests pin the CLI's underscore→dash slug rule, which the repo cannot reveal; stating it is the whole one-regex fix |
 
 ### Validated but not selected
 

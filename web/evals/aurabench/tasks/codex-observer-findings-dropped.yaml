@@ -7,16 +7,23 @@ start_commit: 82d855a051dbae7395a98d30c681d1597242e6ac
 prompt: |
   In a claude+codex Council pair, empty Codex observer reviews (spawn acks) parse
   fine, but any review that actually contains findings is dropped by the review
-  watcher with `frame_dropped field=findings.severity`. Codex writes findings in
-  its own native shape: `{ severity: "critical"|"high"|"medium"|"low", file,
-  line, title, detail }`.
+  watcher with `frame_dropped field=findings.severity`, so the user never sees a
+  Codex observer finding. Codex writes findings in its own native shape:
+  `{ severity: "critical"|"high"|"medium"|"low", file, line, title, detail }`.
 
-  Extend the existing server-side Codex review normalization so these reviews
-  parse: map severities critical→STOP, high→WARN, medium→NOTE, low→INFO (the
-  canonical tiers pass through, anything unrecognised becomes NOTE rather than
-  dropping the review), `file` → `evidence_path`, `line` → `evidence_lines`
-  `[line, line]`, and build `claim` from title and detail. Fields a finding
-  already carries in the canonical schema must win over the mapped ones.
+  Such reviews must be accepted and delivered with their findings intact:
+  - severities map critical→STOP, high→WARN, medium→NOTE, low→INFO; the canonical
+    tiers (STOP/WARN/NOTE/INFO) pass through; anything unrecognised becomes NOTE
+    instead of dropping the review;
+  - the finding keeps its location (a single `line` becomes the range
+    `[line, line]`) and its text (title and detail);
+  - a finding that already carries canonical-schema fields keeps them — they win
+    over anything derived from the native fields.
+
+  Contract pinned by the tests: the canonical review schema does not change —
+  `parseObserverReviewPayload` still rejects a payload in Codex's native shape;
+  the conversion belongs to the Codex review normalization step
+  (`normalizeCodexObserverReviewRaw`), whose output must then parse.
 expected_files:
   - web/server/council-types.ts
 expected_tests:

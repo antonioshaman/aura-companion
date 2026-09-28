@@ -31,15 +31,13 @@ prompt: |
   In the launcher, a stdio Claude spawn runs the CLI with `--print
   --output-format stream-json --input-format stream-json --verbose
   --include-partial-messages` (no `--sdk-url`, no `-p`) and piped stdio. The
-  launcher gets a `setStdioCliOpener(opener)` hook (wired by the server to the
-  WebSocket bridge) returning the session's adapter; without an
+  launcher gets a `setStdioCliOpener(opener)` hook returning the session's adapter; without an
   opener the launch fails (session `exited`, exit code 1) instead of spawning.
   Stdout lines go to the adapter's raw-message handler and the session becomes
   connected on output. A stdio Claude process that survives a server restart
   cannot be re-attached (its pipes died with the old server): on restore from
-  disk, terminate it (SIGTERM, after a process-identity check — the existing check
-  only recognises the `--sdk-url` argv, so extend it to recognise a stdio Claude
-  process by comparing its argv with a hash of the argv recorded at spawn), mark
+  disk, terminate it with SIGTERM — but only when the live pid is verifiably still
+  that session's stdio Claude process (never signal a reused pid) — mark
   the session exited with its pid cleared, keep its `cliSessionId` so the next
   message resumes the conversation, and do not count it as restored.
 expected_files:

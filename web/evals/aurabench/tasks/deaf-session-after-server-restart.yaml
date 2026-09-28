@@ -6,16 +6,14 @@ title: "Sessions whose backend link died in a server restart relaunch automatica
 start_commit: fb00f7d4d9282e5a9bf395bb841219a32a52c424
 prompt: |
   After the Bun server restarts under `KillMode=process`, some Codex and stdio
-  Claude sessions look connected but never answer; they only recover when the
-  user presses Reconnect. The CLI / app-server process survived the restart (its
-  PID is alive) but the backend adapter that talked to it died with the old
-  server process, so nothing is actually listening on its pipes.
+  Claude sessions whose CLI / app-server process survived the restart look
+  connected but never answer. They only recover when the user presses Reconnect,
+  even though the server's automatic relaunch (on `session:relaunch-needed`) runs
+  for them — including sessions still shown as `starting`.
 
-  The orchestrator's automatic relaunch path (the `session:relaunch-needed`
-  handling) treats a live PID as a healthy session and also refuses to relaunch
-  a session still in `starting`. Make automatic relaunch recover such "alive but
-  deaf" sessions, while still skipping sessions whose process is alive AND whose
-  backend adapter is attached.
+  Make automatic relaunch recover these sessions without a manual Reconnect.
+  Sessions that are genuinely healthy — their process is alive and the server is
+  actually talking to it — must not be relaunched.
 expected_files:
   - web/server/session-orchestrator.ts
 expected_tests:

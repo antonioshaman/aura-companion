@@ -7,6 +7,8 @@ Real tasks mined from merged PRs, used by the D2 ablation.
 3. `bun run eval:aurabench validate --candidates candidates.jsonl --results results.jsonl --wt-root <scratch>` — hidden tests must pass on the merge commit and fail on its parent. Resumable: PRs that already have a verdict are skipped.
 4. Validated candidates become `tasks/*.yaml` (schema: `task.ts`, an additive extension of the golden-task schema; loader: `loader.ts`). Prompts describe the problem and observable contract, never the fix.
 5. `bun run eval:aurabench leak --tasks evals/aurabench/tasks` — deterministic prompt check (`leak.ts`): every new identifier/file from the PR diff that the hidden tests reference must be named in the prompt (else the task is unpassable); any other new name is a leak. A second, independent LLM review against the real diff covers semantic hints and under-specification.
+6. `bun run eval:aurabench judge --tasks evals/aurabench/tasks --results <f>` — LLM solution-leak judge (`prompt-judge.ts`, `claude -p` with no tools and no settings): does the prompt give away the cause or the fix? Verdicts are keyed by prompt hash + rubric version; the committed `review/prompt-review.jsonl` must hold a clean verdict for every current prompt (gated in `loader.test.ts`).
+7. `bun run eval:aurabench stability --tasks evals/aurabench/tasks --results <f> --wt-root <dir>` — hidden tests 3× on the merge commit; `review/stability.jsonl` must show 3/3 for every task.
 
 The committed corpus and every exclusion (with its reason) are listed in [`CORPUS.md`](CORPUS.md).
 

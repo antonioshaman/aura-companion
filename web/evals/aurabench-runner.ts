@@ -5,6 +5,8 @@
  *   bun run eval:aurabench validate --candidates <candidates.jsonl> \
  *     --results <results.jsonl> --wt-root <dir> [--limit N] [--pr N]
  *   bun run eval:aurabench leak --tasks <dir> [--id <task-id>]
+ *   bun run eval:aurabench judge --tasks <dir> --results <f> [--model opus] [--id <task-id>]
+ *   bun run eval:aurabench stability --tasks <dir> --results <f> --wt-root <dir> [--runs 3]
  *   bun run eval:aurabench bench --bench-root <dir> [--variants A,B,…] [--reps 5]
  *     [--task-ids a,b] [--max-cells N] [--state <STATE.json>] [--timeout-min 60]
  *     [--claude-model claude-opus-5-5] [--codex-model gpt-5.5]
@@ -20,6 +22,16 @@
  * git (base→merge diff of `expected_files`, hidden tests at merge) and checks
  * the prompt: every new name the hidden tests use must be named, no other new
  * name may be. Exits 1 on any leak or unnamed interface.
+ *
+ * `judge` asks an LLM (`claude -p`, no tools, no user/project settings, cwd
+ * outside the repo) whether each prompt gives away the cause or the fix,
+ * comparing it with the PR diff and hidden tests (`prompt-judge.ts`). One
+ * record per task × prompt hash × rubric version is appended to `--results`;
+ * already-judged prompts are skipped. Exits 1 unless every task is "clean".
+ *
+ * `stability` runs every task's hidden tests `--runs` times (default 3) on its
+ * merge commit in a throwaway worktree and appends one verdict per task to
+ * `--results` (resumable; exits 1 if any task is unstable) — see `flake.ts`.
  *
  * `bench` is the D2 ablation (see `aurabench/harness/`): every task × variant
  * × rep cell in a fresh worktree under `<bench-root>/wt`, results appended to
@@ -42,6 +54,18 @@ import { join, resolve } from "node:path";
 import { minePrs, type Candidate, type ChangedFile, type MergedPr } from "./aurabench/mine.js";
 import { completedPrs, validateCandidate, type Exec } from "./aurabench/validate.js";
 import { checkPrompt, computeSurface } from "./aurabench/leak.js";
+import {
+  JUDGE_JSON_SCHEMA,
+  JUDGE_RUBRIC_VERSION,
+  JUDGE_SYSTEM_PROMPT,
+  buildJudgeRequest,
+  judgeKey,
+  parseJudgeReply,
+  promptSha256,
+  readJudgeRecords,
+  type JudgeRecord,
+} from "./aurabench/prompt-judge.js";
+import { checkMergeStability, readStabilityVerdicts, stabilityKey } from "./aurabench/flake.js";
 import { loadAuraBenchTasks } from "./aurabench/loader.js";
 import type { AuraBenchTask } from "./aurabench/task.js";
 import { runAblation } from "./aurabench/harness/driver.js";
@@ -399,6 +423,84 @@ async function bench(argv: string[], repo: string): Promise<number> {
   }
 }
 
+function judgeInput(repo: string, t: AuraBenchTask) {
+  const base = t.start_commit;
+  const merge = t.aurabench.merge_commit;
+  return {
+    id: t.id,
+    cls: t.aurabench.class,
+    title: t.title,
+    prompt: t.prompt,
+    requiredInterface: taskSurface(repo, t).required,
+    sourceDiff: git(repo, ["diff", "--no-color", "-U3", base, merge, "--", ...t.expected_files]).out,
+    hiddenTests: git(repo, ["diff", "--no-color", "-U15", base, merge, "--", ...t.aurabench.hidden_tests]).out,
+  };
+}
+
+async function judge(argv: string[], repo: string): Promise<number> {
+  const dir = arg(argv, "tasks");
+  const results = arg(argv, "results");
+  if (!dir || !results) {
+    console.error("usage: judge --tasks <dir> --results <f> [--model opus] [--id <task-id>] [--repo <dir>]");
+    return 2;
+  }
+  const model = arg(argv, "model") ?? "opus";
+  const only = arg(argv, "id");
+  const { tasks } = loadAuraBenchTasks(resolve(dir), (sha) => git(repo, ["cat-file", "-e", `${sha}^{commit}`]).ok);
+  const done = existsSync(results) ? readJudgeRecords(readFileSync(results, "utf8")) : new Map<string, JudgeRecord>();
+  // Outside the repo so no CLAUDE.md / .claude settings reach the judge.
+  const cwd = join(tmpdir(), "aurabench-judge");
+  mkdirSync(cwd, { recursive: true });
+  let notClean = 0;
+  for (const t of tasks.filter((x) => !only || x.id === only)) {
+    let rec = done.get(judgeKey(t.id, t.prompt));
+    for (let attempt = 1; !rec && attempt <= 3; attempt++) {
+      const r = spawnSync(
+        "claude",
+        [
+          "-p",
+          "--tools", "",
+          "--setting-sources", "",
+          "--system-prompt", JUDGE_SYSTEM_PROMPT,
+          "--output-format", "json",
+          "--json-schema", JSON.stringify(JUDGE_JSON_SCHEMA),
+          "--model", model,
+        ],
+        { cwd, env: childEnv(), input: buildJudgeRequest(judgeInput(repo, t)), encoding: "utf8", timeout: 15 * 60_000, maxBuffer: 64 * 1024 * 1024 },
+      );
+      let out: { structured_output?: unknown; modelUsage?: Record<string, unknown>; is_error?: boolean } = {};
+      try {
+        out = JSON.parse(r.stdout ?? "");
+      } catch {
+        console.log(`[aurabench] judge ${t.id}: unparseable CLI output (attempt ${attempt}): ${(r.stderr ?? "").slice(0, 300)}`);
+        continue;
+      }
+      const parsed = parseJudgeReply(out.structured_output);
+      if (!parsed.ok) {
+        console.log(`[aurabench] judge ${t.id}: rejected reply (attempt ${attempt}): ${parsed.error}`);
+        continue;
+      }
+      rec = {
+        id: t.id,
+        prompt_sha256: promptSha256(t.prompt),
+        rubric_version: JUDGE_RUBRIC_VERSION,
+        model: Object.keys(out.modelUsage ?? {})[0] ?? model,
+        judged_at: new Date().toISOString(),
+        ...parsed.value,
+      };
+      appendFileSync(results, JSON.stringify(rec) + "\n");
+    }
+    if (!rec) {
+      notClean++;
+      console.log(`[aurabench] ERROR   ${t.id}: no valid judge reply after 3 attempts`);
+      continue;
+    }
+    if (rec.verdict !== "clean") notClean++;
+    console.log(`[aurabench] ${rec.verdict.toUpperCase().padEnd(7)} ${t.id} ${rec.issues.map((i) => i.kind).join(",")}`);
+  }
+  return notClean === 0 ? 0 : 1;
+}
+
 async function main(argv: string[]): Promise<number> {
   const sub = argv[0];
   const repo = resolve(arg(argv, "repo") ?? join(import.meta.dir, "..", ".."));
@@ -468,8 +570,37 @@ async function main(argv: string[]): Promise<number> {
     }
     return bad === 0 ? 0 : 1;
   }
+  if (sub === "stability") {
+    const dir = arg(argv, "tasks");
+    const results = arg(argv, "results");
+    const wtRoot = arg(argv, "wt-root");
+    if (!dir || !results || !wtRoot) {
+      console.error("usage: stability --tasks <dir> --results <f> --wt-root <dir> [--runs 3] [--id <task-id>] [--repo <dir>]");
+      return 2;
+    }
+    mkdirSync(wtRoot, { recursive: true });
+    const runs = Number(arg(argv, "runs") ?? 3);
+    const { tasks } = loadAuraBenchTasks(resolve(dir), (sha) => git(repo, ["cat-file", "-e", `${sha}^{commit}`]).ok);
+    const done = existsSync(results) ? readStabilityVerdicts(readFileSync(results, "utf8")) : new Map();
+    const only = arg(argv, "id");
+    let unstable = 0;
+    for (const t of tasks.filter((x) => !only || x.id === only)) {
+      const target = { id: t.id, merge_commit: t.aurabench.merge_commit, hidden_tests: t.aurabench.hidden_tests };
+      let v = done.get(stabilityKey(target));
+      // A setup failure proves nothing about the tests — retry it.
+      if (!v || !v.setup_ok) {
+        await waitForMemory();
+        v = checkMergeStability(target, { repo, worktree: join(resolve(wtRoot), t.id), exec, runs });
+        appendFileSync(results, JSON.stringify(v) + "\n");
+      }
+      if (!v.stable) unstable++;
+      console.log(`[aurabench] ${v.stable ? "STABLE  " : "UNSTABLE"} ${t.id} ${v.passed}/${v.runs.length}${v.reason ? ` (${v.reason.split("\n")[0]})` : ""}`);
+    }
+    return unstable === 0 ? 0 : 1;
+  }
+  if (sub === "judge") return judge(argv, repo);
   if (sub === "bench") return bench(argv, repo);
-  console.error("usage: aurabench-runner.ts <mine|validate|leak|bench> …");
+  console.error("usage: aurabench-runner.ts <mine|validate|leak|stability|judge|bench> …");
   return 2;
 }
 

@@ -12,16 +12,12 @@ prompt: |
   checkpoint is refused for observer wake with `reason=group_not_active`, so the
   observer never reviews anything again until a server restart.
 
-  The group state machine already defines a recovery transition for exactly this
-  case (`degraded` × `half_respawned` → `active`), but nothing in production ever
-  triggers it.
-
-  Make a late reconnect of either half of a `degraded` pair bring the group back
-  to `active`, with the same side effects as a normal in-grace reconnect
-  (including draining an observer wake that was pending), logging the recovery
-  as a structured `group.half_respawned` entry (shaped like the reconnect one,
-  with the role). A reconnect for a
-  session that is not part of a degraded group must not change anything.
+  Required behaviour: a late reconnect of either half of a `degraded` pair brings
+  the group back to `active` (browsers are told the group reconnected, and
+  checkpoints wake the observer again). The recovery is logged as a structured
+  entry `{ event: "group.half_respawned", role, attempts: 1, … }` with the role of
+  the half that came back. A reconnect for a session that is not part of a
+  degraded group must not change anything.
 expected_files:
   - web/server/group-state-machine.ts
   - web/server/session-orchestrator.ts

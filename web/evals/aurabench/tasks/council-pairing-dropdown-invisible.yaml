@@ -8,12 +8,13 @@ prompt: |
   With Council Mode switched on in the new-session form, clicking the pairing
   row ("Orchestrator: Claude · Observer: Claude") flips `aria-expanded` to true
   and the option list is in the DOM, but nothing appears on screen, so the user
-  can't choose a pairing. The list is clipped by an ancestor with
-  `overflow-hidden` that the toggle uses for its expand/collapse animation
-  (`position: absolute` does not escape it).
+  can't choose a pairing.
 
-  Fix `CouncilToggle` so the open listbox is not inside any `overflow-hidden`
-  ancestor, stays anchored to its trigger, and keeps its current behaviour
+  Fix `CouncilToggle` so the open listbox is visible. Acceptance: the open
+  list is not clipped by any container (the tests run in jsdom, which has no
+  layout, so they check this structurally: the list must not sit inside an
+  element that clips its overflow), it stays anchored to its trigger, and it
+  keeps its current behaviour
   (selecting an option calls `onPairingChange` and closes the list; keyboard and
   outside-click handling keep working). Keep it accessible.
 expected_files:

@@ -11,8 +11,8 @@ prompt: |
 
   Add `POST /api/sessions/:id/council/checkpoint` that lets the orchestrator
   half of a Council pair publish a checkpoint payload into its workspace's
-  `.council/checkpoints/<phase>.json` (written atomically, like other Council
-  files), so the existing watcher picks it up. Responses (JSON with an `error`
+  `.council/checkpoints/<phase>.json`, where the observer's wake pipeline
+  picks it up. Responses (JSON with an `error`
   message on failure):
   - 404 when the session does not exist ("not found");
   - 409 when the session is not part of a Council group ("… council group …");

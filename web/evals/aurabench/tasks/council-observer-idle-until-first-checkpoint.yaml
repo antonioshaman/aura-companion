@@ -19,10 +19,11 @@ prompt: |
     current schema version and an ISO `emitted_at`, written synchronously; a write failure is logged,
     never thrown;
   - `scheduleSpawnCheckpointWhenObserverReady(sessionGroupId, observerSessionId,
-    cwd)` returns a promise and polls every 250 ms until the
-    observer's backend adapter is attached, then emits (bounded; give up after a
-    timeout).
-  The existing watcher → wake pipeline must take it from there.
+    cwd)` returns a promise that resolves once the spawn checkpoint has been
+    written. The checkpoint must not be written while the observer's bridge
+    session has no backend adapter attached; it is written soon after one is
+    attached. If the observer never becomes ready, it eventually gives up.
+  The observer must then be woken for this checkpoint like for any other.
 expected_files:
   - web/server/observer-prompt-bundled.ts
   - web/server/session-orchestrator.ts

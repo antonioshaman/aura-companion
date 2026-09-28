@@ -20,9 +20,8 @@ prompt: |
     (`>=`) that is above `lastFiredBytes`, or `null` (below the first tier,
     already advised, at the ceiling, or a tier without a message). Custom tier
     lists/messages can be passed in.
-  Then show each newly crossed tier once per session as a browser notice, from
-  the orchestrator's existing periodic check that already stats the session's
-  jsonl.
+  While a Claude session runs, each newly crossed tier of its jsonl transcript
+  is shown to the user once per session as a browser notice.
 expected_files:
   - web/server/context-size-suggester.ts
   - web/server/session-orchestrator.ts

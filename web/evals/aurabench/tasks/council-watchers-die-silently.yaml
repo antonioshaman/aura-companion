@@ -22,13 +22,13 @@ prompt: |
      "council watcher onDeath hook threw" and swallowed), waits via the
      injectable `sleep(ms, signal)` and re-arms. Nothing runs if already
      aborted. Also export `abortableSleep(ms, signal)`, which resolves early on
-     abort. Use it for the orchestrator's council watchers, and schedule a
-     catch-up scan after a death since `fs.watch` never replays missed files.
+     abort. The orchestrator's council watchers must survive such deaths, and a
+     checkpoint written while a watcher was down must still wake the observer.
   2. On orchestrator init, also start a recurring failsafe tick
      (default every 5 minutes, overridable via env within sane bounds) that
-     re-runs the existing missed-wake scan as
-     `scanForMissedObserverWakes("failsafe")` (the init-time call keeps no
-     argument). Keep the interval handle in a private `observerFailsafeTimer`
+     wakes the observer for any unprocessed checkpoint. Contract pinned by the
+     tests: each tick calls `scanForMissedObserverWakes("failsafe")`; the
+     init-time call of that method stays argument-less. Keep the interval handle in a private `observerFailsafeTimer`
      (`null` when not armed), arm it via an idempotent `startObserverFailsafe()`,
      and clear it (back to `null`) in `shutdown()`.
 expected_files:
