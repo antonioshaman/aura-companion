@@ -655,7 +655,7 @@ describe("POST /api/sessions/create — Council Mode branch", () => {
 
 // ─── Council Mode — group REST bootstrap (PR #68) ─────────────────────────
 //
-// Closes `BUG-council-mode-group-rest-bootstrap-gap.md`. Browser app-mount
+// Closes `docs/history/BUG-council-mode-group-rest-bootstrap-gap.md`. Browser app-mount
 // fetches this endpoint to repopulate `groupBySessionId` so the Sidebar
 // glyph + role suffix renders correctly even when the original
 // `group:created` push was lost across reload.

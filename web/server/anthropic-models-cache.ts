@@ -41,7 +41,7 @@
  *   no idle-kill, no stdio drain. Model validity is upstream's concern;
  *   CLI's spawn-time rejection is the only acceptable runtime check.
  *
- * Reference: PLAN-aura-dynamic-model-list.md — convergent recommendations from
+ * Reference: docs/history/PLAN-aura-dynamic-model-list.md — convergent recommendations from
  * Fowler (extract from routes.ts god-module), Backend (testability),
  * Deploy (file-granular coverage gate), Persistence (atomic write floor).
  */

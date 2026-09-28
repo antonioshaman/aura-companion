@@ -2,7 +2,7 @@
 //
 // Integration regression — PR #68 Phase 3β bootstrap-fix.
 //
-// `BUG-council-mode-group-rest-bootstrap-gap.md`: Council Mode pair
+// `docs/history/BUG-council-mode-group-rest-bootstrap-gap.md`: Council Mode pair
 // sessions in the Sidebar did NOT show the ☼/☽ glyph + " · orchestrator"/
 // " · observer" suffix after browser reload. Root cause: `group:created`
 // was the ONLY source of group records in the browser store; on reload,
@@ -180,7 +180,7 @@ describe("Council Mode — glyph render after reload (PR #68 BUG closure)", () =
   // group record is absent (REST bootstrap not yet dispatched OR not yet
   // shipped). `councilInfoFor()` returns role: undefined; SessionItem skips
   // the glyph branch. This is the exact failure mode that
-  // BUG-council-mode-group-rest-bootstrap-gap.md describes.
+  // docs/history/BUG-council-mode-group-rest-bootstrap-gap.md describes.
   it("WITHOUT hydrateGroups: glyph + role suffix are absent (bug reproduction)", () => {
     seedTwoHalvesIntoStore();
     const store = useStore.getState();

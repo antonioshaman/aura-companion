@@ -4871,7 +4871,7 @@ describe("SessionOrchestrator", () => {
     // `reconnect_ok` resolves it back to `active`. Watcher attach is best-
     // effort (mkdirSync of a missing cwd fails silently); the Task 6
     // contract is the coordinator state machine, not the filesystem watcher.
-    // PLAN-aura-consolidated-refactor.md Task 3 (FINAL-REVIEW 2026-05-12-2211
+    // docs/history/PLAN-aura-consolidated-refactor.md Task 3 (FINAL-REVIEW 2026-05-12-2211
     // P1 #1): partial-pair restart now lands directly in `degraded` rather
     // than arming a useless reconnect grace window. The `__missing_*`
     // placeholder sessionId cannot bind to any real handshake by

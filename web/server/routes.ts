@@ -869,7 +869,7 @@ export function createRoutes(
 
   // ─── Council Mode — REST bootstrap of group records ──────────────────────
   //
-  // Closes `BUG-council-mode-group-rest-bootstrap-gap.md` (PR #68). The
+  // Closes `docs/history/BUG-council-mode-group-rest-bootstrap-gap.md` (PR #68). The
   // browser's `groupBySessionId` map is populated EXCLUSIVELY by the live
   // `group:created` push, so a tab reloading after pair creation lands
   // without the Sidebar ☼/☽ glyph + role suffix and without ObserverPanel
