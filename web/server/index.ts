@@ -43,7 +43,7 @@ import { isOriginAllowed } from "./middleware/origin-allowlist.js";
 import { securityHeaders } from "./middleware/security-headers.js";
 
 import { CleanupScheduler } from "./cleanup/cleanup-scheduler.js";
-import { reapOrphans } from "./orphan-reaper.js";
+import { reapOrphans, resolveOrphanReaperGate } from "./orphan-reaper.js";
 import { reapStrandedTerminals } from "./terminal-orphan-reaper.js";
 import { imagePullManager } from "./image-pull-manager.js";
 import { restoreIfNeeded as restoreTailscaleFunnel, cleanup as cleanupTailscaleFunnel } from "./tailscale-manager.js";
@@ -276,11 +276,17 @@ startPresencePing(() => wsBridge.countDistinctBrowsers());
 // matters — this seam sits between orchestrator.initialize() (boot
 // reconcile complete) and the CleanupScheduler.start() that arms
 // downstream sweeps.
-void reapOrphans({
-  loadedSessions: launcher.listSessions(),
-  sentinelRoot: sessionStore.directory,
-  sessionsRoot: sessionStore.directory,
-}).catch((err) => {
+const orphanReaperGate = resolveOrphanReaperGate(process.env.COMPANION_ORPHAN_REAPER);
+if (orphanReaperGate.warning) console.warn(`[orphan-reaper] ${orphanReaperGate.warning}`);
+if (!orphanReaperGate.enabled) console.log("[orphan-reaper] disabled by COMPANION_ORPHAN_REAPER");
+void (orphanReaperGate.enabled
+  ? reapOrphans({
+      loadedSessions: launcher.listSessions(),
+      sentinelRoot: sessionStore.directory,
+      sessionsRoot: sessionStore.directory,
+    })
+  : Promise.resolve()
+).catch((err) => {
   // The reaper is structurally never-throw (every per-pid path catches
   // its own errors); this .catch is a belt-and-braces guard so a future
   // refactor that introduces a top-level throw doesn't crash bun init.

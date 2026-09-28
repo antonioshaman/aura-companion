@@ -77,6 +77,26 @@ import { ageMs, nowMs } from "./cleanup/age-ms.js";
 /** Hard cap on reaper total work — preserves systemd readiness window. */
 export const REAPER_BUDGET_MS = 5_000;
 
+/**
+ * Boot gate for the reaper (aura-meta-diet P6/D2). The reaper scans ALL of
+ * `/proc` for PPID=1 CLI processes, so a second Companion instance on the same
+ * host and user (the AuraBench bench instance on :3499) would see the prod
+ * instance's orphans as "no known session" and SIGTERM them. The bench
+ * instance therefore boots with `COMPANION_ORPHAN_REAPER=off`.
+ *
+ * Fail-closed like the layer flags: absent/empty → on (prod behaviour);
+ * only `off/0/false` disables; any other value keeps the reaper ON and warns.
+ */
+export function resolveOrphanReaperGate(raw: string | undefined): { enabled: boolean; warning?: string } {
+  const v = (raw ?? "").trim().toLowerCase();
+  if (v === "" || v === "on" || v === "1" || v === "true") return { enabled: true };
+  if (v === "off" || v === "0" || v === "false") return { enabled: false };
+  return {
+    enabled: true,
+    warning: `COMPANION_ORPHAN_REAPER=${JSON.stringify(raw)} is not one of on/off/1/0/true/false; keeping the reaper on`,
+  };
+}
+
 /** Per-process wait-for-exit budget after SIGTERM (SIGTERM-only at init
  *  per Backend-TS R11 / Subprocess R3; stragglers handled by next boot). */
 const REAP_POST_TERM_GRACE_MS = 1_500;
