@@ -38,6 +38,7 @@ import { containerManager } from "./container-manager.js";
 import { registerFsRoutes } from "./routes/fs-routes.js";
 import { registerSkillRoutes } from "./routes/skills-routes.js";
 import { registerEnvRoutes } from "./routes/env-routes.js";
+import { registerCouncilEconomyRoutes } from "./routes/council-economy-routes.js";
 import { registerSandboxRoutes } from "./routes/sandbox-routes.js";
 import { registerCronRoutes } from "./routes/cron-routes.js";
 import { registerAgentRoutes } from "./routes/agent-routes.js";
@@ -2081,6 +2082,7 @@ export function createRoutes(
 
   registerFsRoutes(api);
   registerEnvRoutes(api, { webDir: WEB_DIR });
+  registerCouncilEconomyRoutes(api, { launcher });
   registerSandboxRoutes(api);
 
   registerPromptRoutes(api);
