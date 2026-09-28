@@ -4,7 +4,7 @@ import { ProviderBadges, pairHalvesAfterBackendCollapse, providerChipClass } fro
 import { cliFailedCopy } from "../cli-failed-copy.js";
 import {
   CONVERGENCE_DISCLAIMER,
-  CONVERGENCE_NOT_COUNTED_COPY,
+  convergenceNotCountedInline,
   type CliFailedReason,
   type ConvergenceNotCountedReason,
 } from "../types.js";
@@ -148,7 +148,7 @@ function CouncilConvergenceBadge({ info }: { info: CouncilConvergenceInfo }) {
       </span>
     );
   }
-  const notCountedNote = info.notCounted ? ` Last review — ${CONVERGENCE_NOT_COUNTED_COPY[info.notCounted].toLowerCase()}.` : "";
+  const notCountedNote = info.notCounted ? ` Last review — ${convergenceNotCountedInline(info.notCounted)}.` : "";
   if (info.state === "converged") {
     const n = info.cycleNumber ?? info.threshold ?? 0;
     const label = `${n} reviews in a row without blockers. ${CONVERGENCE_DISCLAIMER}${notCountedNote}`;
@@ -180,13 +180,13 @@ function CouncilConvergenceBadge({ info }: { info: CouncilConvergenceInfo }) {
     );
   }
   if (info.notCounted) {
-    const copy = CONVERGENCE_NOT_COUNTED_COPY[info.notCounted];
+    const copy = convergenceNotCountedInline(info.notCounted);
     return (
       <span
         data-testid="council-convergence-badge"
         data-state="not-counted"
-        aria-label={`Last review ${copy.toLowerCase()}. ${CONVERGENCE_DISCLAIMER}`}
-        title={`Last review ${copy.toLowerCase()}. ${CONVERGENCE_DISCLAIMER}`}
+        aria-label={`Last review ${copy}. ${CONVERGENCE_DISCLAIMER}`}
+        title={`Last review ${copy}. ${CONVERGENCE_DISCLAIMER}`}
         className="flex items-center gap-0.5 text-[9px] font-semibold px-1.5 py-0.5 rounded bg-cc-hover text-cc-muted leading-none shrink-0"
       >
         <span>not counted</span>

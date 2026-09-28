@@ -344,7 +344,8 @@ export interface CompanionEventMap {
    *   - `converged`        →  counter reached threshold; UI flips badge to ✅
    *   - `revoked`          →  a STOP arrived after convergence; counter back to 0
    *   - `not-counted`      →  a clean review that reviewed nothing (no changed
-   *                           files / no host-observed reads); counter unchanged
+   *                           files / no host-observed reads) or whose STOP
+   *                           grounding downgraded; counter unchanged
    *
    * Subscribers fan out to browsers as `group_update` payloads carrying
    * the new `cycleNumber` + `convergenceState` fields on `GroupRecord`.
@@ -356,6 +357,6 @@ export interface CompanionEventMap {
     convergenceThreshold: number;
     convergenceState: "in-progress" | "converged" | "revoked";
     /** Set on `not-counted` only. */
-    notCountedReason?: "no_changed_files" | "no_files_read";
+    notCountedReason?: "no_changed_files" | "no_files_read" | "downgraded_stop";
   };
 }

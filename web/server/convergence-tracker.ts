@@ -9,8 +9,9 @@
  *   - `revoked`          a STOP arrived after convergence; counter ← 0
  *   - `not-counted`      a STOP-free review that reviewed nothing (P3/
  *                        CONV-HONEST): the checkpoint had no changed files,
- *                        or the host saw the observer read none of them.
- *                        Counter unchanged.
+ *                        or the host saw the observer read none of them;
+ *                        or grounding downgraded a STOP in it (ASK #13).
+ *                        Counter unchanged — neither advanced nor reset.
  *
  * "Converged" means "N reviews in a row without a blocker", nothing more —
  * the UI says so and never claims the work is ready to ship.
@@ -43,7 +44,7 @@ export interface ConvergenceGroupState {
 }
 
 /** Why a STOP-free review was not folded as a clean cycle. */
-export type ConvergenceNotCountedReason = "no_changed_files" | "no_files_read";
+export type ConvergenceNotCountedReason = "no_changed_files" | "no_files_read" | "downgraded_stop";
 
 export interface ConvergenceTransitionResult {
   next: ConvergenceGroupState;
@@ -152,13 +153,23 @@ export function reviewHasStop(findings: readonly BrowserObserverFinding[]): bool
  * the reason a review is NOT countable, or `null` when it is. STOP reviews
  * are always folded (a blocker resets the counter whether or not the
  * observer read anything), so this only gates clean reviews.
+ *
+ * P3/CONV-DOWNGRADE (human decision, ASK #13 option 2): a review whose STOP
+ * was downgraded to NOTE (`wasDowngraded`) is not a clean cycle either — the
+ * observer did raise a blocker, grounding merely could not confirm it. It is
+ * reported as `downgraded_stop` and leaves the counter untouched (no advance,
+ * no reset). A wake-version-mismatch downgrade also sets `wasDowngraded`; the
+ * review's severities are untrusted then, so not counting it is the
+ * conservative reading.
  */
 export function reviewNotCountedReason(
   artifactsChanged: number,
   artifactsRead: number,
+  findings: readonly BrowserObserverFinding[] = [],
 ): ConvergenceNotCountedReason | null {
   if (!(artifactsChanged > 0)) return "no_changed_files";
   if (!(artifactsRead > 0)) return "no_files_read";
+  if (findings.some((f) => f.wasDowngraded === true)) return "downgraded_stop";
   return null;
 }
 
@@ -242,11 +253,12 @@ export class ConvergenceTracker {
   ): void {
     const frozen = this.isFrozen(sessionGroupId);
     const hasStop = reviewHasStop(findings);
-    // P3/CONV-HONEST: a clean review that reviewed nothing never folds. It
+    // P3/CONV-HONEST: a clean review that reviewed nothing (or, per
+    // CONV-DOWNGRADE, carried a downgraded STOP) never folds. It
     // does NOT consume the got-045 dedup slot either — the counter is
     // untouched, so a later review of the same checkpoint that did read the
     // changes may still count (once).
-    const notCounted = hasStop ? null : reviewNotCountedReason(artifactsChanged, artifactsRead);
+    const notCounted = hasStop ? null : reviewNotCountedReason(artifactsChanged, artifactsRead, findings);
     if (!frozen && notCounted) {
       const prev = this.states.get(sessionGroupId)
         ?? initialConvergenceState(this.getThreshold(sessionGroupId));

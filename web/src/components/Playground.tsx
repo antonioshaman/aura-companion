@@ -36,7 +36,7 @@ import {
   ProviderBadges,
   type CouncilPairing,
 } from "./council/index.js";
-import type { GroupRecord, ObserverFinding } from "../types.js";
+import type { ConvergenceNotCountedReason, GroupRecord, ObserverFinding } from "../types.js";
 import { ToolExecutionBar } from "./ToolExecutionBar.js";
 import { ToolTurnSummary } from "./ToolTurnSummary.js";
 import type { ToolActivityEntry } from "../store/tasks-slice.js";
@@ -3306,7 +3306,12 @@ function CouncilModeSection() {
         </Card>
         <Card label="ObserverPanel — latest review not counted: no files read (CONV-HONEST)">
           <div className="h-[460px] bg-cc-bg rounded-md overflow-hidden">
-            <CouncilNotCountedPanelDemo />
+            <CouncilNotCountedPanelDemo reason="no_files_read" />
+          </div>
+        </Card>
+        <Card label="ObserverPanel — latest review not counted: downgraded STOP (CONV-DOWNGRADE)">
+          <div className="h-[460px] bg-cc-bg rounded-md overflow-hidden">
+            <CouncilNotCountedPanelDemo reason="downgraded_stop" />
           </div>
         </Card>
         {/* Worst-case header stack in a SHORT column — layout-stability spec rec 3.
@@ -3387,33 +3392,34 @@ function CouncilConvergedPanelDemo() {
 
 // P3/CONV-HONEST: a STOP-free review in which the observer read none of the
 // checkpoint's changed files does not advance the streak; the panel says so.
-const COUNCIL_NOT_COUNTED_SESSION = "playground-council-not-counted-orch";
-const COUNCIL_NOT_COUNTED_GROUP = "playground-council-not-counted-grp";
-
-function CouncilNotCountedPanelDemo() {
+// P3/CONV-DOWNGRADE: same for a review whose STOP grounding downgraded to NOTE
+// (not counted, but the streak is not reset either).
+function CouncilNotCountedPanelDemo({ reason }: { reason: ConvergenceNotCountedReason }) {
   const upsertGroup = useStore((s) => s.upsertGroup);
   const applyConvergence = useStore((s) => s.applyConvergence);
   const removeGroup = useStore((s) => s.removeGroup);
+  const session = `playground-council-not-counted-${reason}-orch`;
+  const group = `playground-council-not-counted-${reason}-grp`;
 
   useEffect(() => {
     upsertGroup({
-      sessionGroupId: COUNCIL_NOT_COUNTED_GROUP,
-      primarySessionId: COUNCIL_NOT_COUNTED_SESSION,
-      observerSessionId: "playground-council-not-counted-obs",
+      sessionGroupId: group,
+      primarySessionId: session,
+      observerSessionId: `playground-council-not-counted-${reason}-obs`,
       status: "active",
       pairing: "claude+codex",
     });
     applyConvergence({
-      sessionGroupId: COUNCIL_NOT_COUNTED_GROUP,
+      sessionGroupId: group,
       cycleNumber: 1,
       convergenceThreshold: 3,
       convergenceState: "in-progress",
-      notCountedReason: "no_files_read",
+      notCountedReason: reason,
     });
-    return () => removeGroup(COUNCIL_NOT_COUNTED_GROUP);
-  }, [upsertGroup, applyConvergence, removeGroup]);
+    return () => removeGroup(group);
+  }, [upsertGroup, applyConvergence, removeGroup, group, session, reason]);
 
-  return <ObserverPanel sessionId={COUNCIL_NOT_COUNTED_SESSION} onRespawnHalf={async () => {}} />;
+  return <ObserverPanel sessionId={session} onRespawnHalf={async () => {}} />;
 }
 
 const COUNCIL_DEGRADED_DEMO_SESSION = "playground-council-degraded-orch";
@@ -3844,6 +3850,27 @@ function PlaygroundSessionItems() {
             councilPairing="claude+claude"
             councilRole="orchestrator"
             councilConvergence={{ state: "in-progress", cycleNumber: 0, threshold: 3, degraded: false, notCounted: "no_files_read" }}
+            {...noopSessionItemProps}
+          />
+        </div>
+      </Card>
+
+      {/* P3/CONV-DOWNGRADE: latest review carried a grounding-downgraded STOP → "not counted", streak kept. */}
+      <Card label="Council pair — latest review not counted (downgraded STOP), streak kept">
+        <div className="bg-cc-sidebar rounded-lg p-1">
+          <SessionItem
+            session={mockSession({
+              isConnected: true,
+              status: "idle",
+              backendType: "claude",
+            })}
+            isActive={false}
+            sessionName="Observer STOP downgraded by grounding"
+            permCount={0}
+            isRecentlyRenamed={false}
+            councilPairing="claude+claude"
+            councilRole="orchestrator"
+            councilConvergence={{ state: "in-progress", cycleNumber: 2, threshold: 3, degraded: false, notCounted: "downgraded_stop" }}
             {...noopSessionItemProps}
           />
         </div>

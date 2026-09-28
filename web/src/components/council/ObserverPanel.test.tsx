@@ -353,6 +353,28 @@ describe("ObserverPanel — state pills (5 explicit states)", () => {
     expect(screen.getByTestId("convergence-not-counted")).toHaveTextContent("not counted: no changed files");
   });
 
+  // P3/CONV-DOWNGRADE: a review whose STOP grounding downgraded is shown as
+  // not counted, and the streak it did not reset is still displayed.
+  it("shows 'not counted: downgraded STOP' and keeps the streak", async () => {
+    seedGroup();
+    act(() => {
+      useStore.getState().applyConvergence({
+        sessionGroupId: GROUP.sessionGroupId,
+        cycleNumber: 2,
+        convergenceThreshold: 3,
+        convergenceState: "in-progress",
+        notCountedReason: "downgraded_stop",
+      });
+    });
+    const { container } = render(<ObserverPanel sessionId={SESSION} />);
+    const note = screen.getByTestId("convergence-not-counted");
+    expect(note).toHaveAttribute("data-reason", "downgraded_stop");
+    expect(note).toHaveTextContent("Last review — not counted: downgraded STOP");
+    expect(screen.getByTestId("status-pill")).toHaveTextContent(/Cycle 2\/3/);
+    const { axe } = await import("vitest-axe");
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
   it("a counted review clears the 'not counted' note", () => {
     seedGroup();
     act(() => {
