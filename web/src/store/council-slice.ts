@@ -133,6 +133,7 @@ export function hydrateObserverFinding(
     ...(wire.weakEvidence !== undefined ? { weakEvidence: wire.weakEvidence } : {}),
     ...(wire.disputed !== undefined ? { disputed: wire.disputed } : {}),
     ...(wire.holdsAutoProceed === true ? { holdsAutoProceed: true as const } : {}),
+    ...(wire.dismissed === true ? { dismissed: true as const } : {}),
     observerModel: context.observerModel,
     observerProvider: context.observerProvider,
   };
@@ -446,6 +447,17 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
       const seenDowngradeIds = new Set(priorDowngrades.map((d) => d.id));
       const newDowngrades = downgrades.filter((d) => !seenDowngradeIds.has(d.id));
       groundingDowngrades.set(sessionGroupId, [...priorDowngrades, ...newDowngrades]);
+      // BANNER-RESOLVED: a STOP the server reports as already dismissed joins
+      // the local dismissed set, so the banner, the title count and the
+      // Sidebar unread count agree — including for a copy that arrived live
+      // (without the flag) before this bootstrap. No request is sent: the
+      // resolution is already on the server.
+      const serverDismissed = wireFindings.filter((w) => w.dismissed === true && !s.dismissedStopIds.has(w.id));
+      if (serverDismissed.length > 0) {
+        const dismissedStopIds = new Set(s.dismissedStopIds);
+        for (const w of serverDismissed) dismissedStopIds.add(w.id);
+        return { groups, findings, groundingDowngrades, dismissedStopIds };
+      }
       return { groups, findings, groundingDowngrades };
     }),
 

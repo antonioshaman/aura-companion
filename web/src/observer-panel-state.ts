@@ -196,6 +196,8 @@ export function findUnresolvedStops(
  */
 export function isUnresolvedStop(f: ObserverFinding, dismissedStopIds: ReadonlySet<string>): boolean {
   if (dismissedStopIds.has(f.id)) return false;
+  // BANNER-RESOLVED: dismissed on the server (survives a reload).
+  if (f.dismissed === true) return false;
   // FIX-AP-3: the server says this finding holds auto-proceed. It is a
   // blocker whatever its re-grounded severity — an invisible hold could only
   // be released through REST.

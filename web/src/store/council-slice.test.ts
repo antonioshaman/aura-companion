@@ -48,6 +48,7 @@ import {
 } from "./council-slice.js";
 import type { BrowserObserverFinding, GroupRecord } from "../types.js";
 import { api } from "../api.js";
+import { countUnresolvedStopsAcrossGroups } from "../observer-panel-state.js";
 
 beforeEach(() => {
   useStore.getState().reset();
@@ -743,6 +744,71 @@ describe("observer panel preferences", () => {
     useStore.getState().dismissFirstRunHint();
     expect(useStore.getState().firstRunHintDismissed).toBe(true);
     expect(localStorage.getItem(COUNCIL_FIRST_RUN_DISMISSED_KEY)).toBe("true");
+  });
+});
+
+// ── BANNER-RESOLVED: server-side dismissals survive a reload ────────────────
+
+describe("appendObserverReview — server-dismissed STOPs (BANNER-RESOLVED)", () => {
+  // Human decision on ASK #14: after "Dismiss for now" the server stops
+  // holding auto-proceed, but the browser's dismissal lived only in tab
+  // memory, so a reload raised the banner again. The REST bootstrap now
+  // flags such findings `dismissed`; the slice must fold them into the
+  // dismissed set (the one source the banner, the title count and the
+  // Sidebar unread count read) without re-sending a resolution.
+  const bootstrap = (findings: BrowserObserverFinding[]) =>
+    useStore.getState().appendObserverReview({
+      sessionGroupId: "grp_abc",
+      checkpointId: "rest-bootstrap",
+      phase: "rest-bootstrap",
+      findings,
+      downgrades: [],
+      observerModel: "m",
+      observerProvider: "claude",
+      timestamp: 1_000,
+    });
+
+  it("folds server-dismissed STOPs into the dismissed set and keeps them in the log", () => {
+    const resolve = vi.spyOn(api, "resolveObserverStop").mockResolvedValue({ ok: true, released: true, persisted: true });
+    try {
+      useStore.getState().upsertGroup(group());
+      bootstrap([
+        wireFinding({ id: "done", severity: "STOP", dismissed: true }),
+        wireFinding({ id: "open", severity: "STOP" }),
+      ]);
+      const s = useStore.getState();
+      expect(s.dismissedStopIds.has("done")).toBe(true);
+      expect(s.dismissedStopIds.has("open")).toBe(false);
+      // Still in the findings log, carrying the flag for the "dismissed" chip.
+      expect(s.findings.get("grp_abc")!.map((f) => [f.id, f.dismissed])).toEqual([["done", true], ["open", undefined]]);
+      // The only unresolved STOP is the undismissed one — banner/title/rail agree.
+      expect(countUnresolvedStopsAcrossGroups(s.findings, s.dismissedStopIds)).toBe(1);
+      // Nothing is sent back: the resolution already lives on the server.
+      expect(resolve).not.toHaveBeenCalled();
+    } finally {
+      resolve.mockRestore();
+    }
+  });
+
+  // Edge: the STOP arrived live first (no flag), then a reconnect bootstrap
+  // reports it dismissed (another tab dismissed it). The existing row is kept
+  // (dedup by id) but the id still joins the dismissed set.
+  it("dismisses a live-arrived STOP when a later bootstrap reports it dismissed", () => {
+    useStore.getState().upsertGroup(group());
+    bootstrap([wireFinding({ id: "f1", severity: "STOP" })]);
+    expect(useStore.getState().dismissedStopIds.has("f1")).toBe(false);
+    bootstrap([wireFinding({ id: "f1", severity: "STOP", dismissed: true })]);
+    const s = useStore.getState();
+    expect(s.findings.get("grp_abc")).toHaveLength(1);
+    expect(s.dismissedStopIds.has("f1")).toBe(true);
+  });
+
+  // Without a server resolution nothing changes: the banner still shows it.
+  it("leaves the dismissed set untouched when no finding is flagged", () => {
+    useStore.getState().upsertGroup(group());
+    const before = useStore.getState().dismissedStopIds;
+    bootstrap([wireFinding({ id: "f1", severity: "STOP" })]);
+    expect(useStore.getState().dismissedStopIds).toBe(before);
   });
 });
 

@@ -248,6 +248,10 @@ export interface ObserverFinding {
    *  weak evidence would keep it off the banner. Shown as a blocker anyway so
    *  no hold is invisible; Dismiss / Dispute release it. */
   holdsAutoProceed?: true;
+  /** BANNER-RESOLVED: the server says a human already released this STOP with
+   *  "Dismiss for now" (persisted resolution). Never a blocker; the findings
+   *  log marks it "dismissed". */
+  dismissed?: true;
   observerModel: string;
   observerProvider: string;
 }

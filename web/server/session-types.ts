@@ -619,6 +619,14 @@ export interface BrowserObserverFinding {
    */
   holdsAutoProceed?: true;
   /**
+   * BANNER-RESOLVED (meta-diet): set (REST bootstrap only) on a finding a
+   * human released with "Dismiss for now" (`<group>-resolved-stops.json`).
+   * The browser keeps it out of the blocker banner, the title count and the
+   * Sidebar unread count, and marks it "dismissed" in the findings log.
+   * Never set together with `holdsAutoProceed`.
+   */
+  dismissed?: true;
+  /**
    * Real event time (ms epoch), server-stamped from the review FILE's mtime.
    * Stamped on BOTH paths: REST bootstrap (`getGroupReviewsForBootstrap`) and
    * the live `group:review` broadcast (via the review watcher's post-read stat).
