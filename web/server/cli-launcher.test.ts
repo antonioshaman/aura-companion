@@ -3229,7 +3229,7 @@ describe("EC-19 canaries — buildObserverSpawnOverrides routing + sentinel-path
   // Council Review 2026-05-15-1015 CR-8 (Backend P2): the typed
   // `session:relaunch-failed` channel contract is "relaunch-only" —
   // emit sites are confined to `cli-launcher.ts:relaunch()` and
-  // `session-orchestrator.ts:handleAutoRelaunch()`. Cold-start
+  // `session-recovery.ts:handleAutoRelaunch()`. Cold-start
   // (`cli-launcher.ts:launch()`) surfaces failures as REST 503 via
   // the orchestrator's spawn rollback; emitting from launch() would
   // race a listener that may not yet exist for the group. This canary
@@ -3238,7 +3238,9 @@ describe("EC-19 canaries — buildObserverSpawnOverrides routing + sentinel-path
     const fs = await import("node:fs");
     const path = await import("node:path");
     const serverDir = path.join(__dirname);
-    const allowedFiles = new Set(["cli-launcher.ts", "session-orchestrator.ts"]);
+    // P4/C1d: `handleAutoRelaunch` moved verbatim from session-orchestrator.ts
+    // into session-recovery.ts; the contract (relaunch-only emit sites) is unchanged.
+    const allowedFiles = new Set(["cli-launcher.ts", "session-recovery.ts"]);
     const entries = fs.readdirSync(serverDir, { withFileTypes: true });
     const offending: Array<{ file: string; lineNum: number; line: string }> = [];
     const emitRegex = /companionBus\.emit\(\s*["']session:relaunch-failed["']/;
@@ -3257,7 +3259,7 @@ describe("EC-19 canaries — buildObserverSpawnOverrides routing + sentinel-path
     }
     expect(
       offending,
-      `session:relaunch-failed must only be emitted from cli-launcher.ts:relaunch() or session-orchestrator.ts:handleAutoRelaunch(). Offenders:\n${offending.map((o) => `${o.file}:${o.lineNum} → ${o.line}`).join("\n")}`,
+      `session:relaunch-failed must only be emitted from cli-launcher.ts:relaunch() or session-recovery.ts:handleAutoRelaunch(). Offenders:\n${offending.map((o) => `${o.file}:${o.lineNum} → ${o.line}`).join("\n")}`,
     ).toEqual([]);
   });
 });
