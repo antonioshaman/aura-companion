@@ -177,19 +177,28 @@ export interface GroupRecord {
   /**
    * P3/CONV-HONEST: set when the LATEST review was not counted toward
    * convergence (the checkpoint had no changed files, or the host saw the
-   * observer read none of them). Cleared by the next counted review.
+   * observer read none of them, or a STOP in it was downgraded by grounding —
+   * CONV-DOWNGRADE). Cleared by the next counted review.
    */
   lastReviewNotCounted?: ConvergenceNotCountedReason;
 }
 
 /** P3/CONV-HONEST: why a STOP-free review did not advance the counter. */
-export type ConvergenceNotCountedReason = "no_changed_files" | "no_files_read";
+export type ConvergenceNotCountedReason = "no_changed_files" | "no_files_read" | "downgraded_stop";
 
 /** User-facing copy for {@link ConvergenceNotCountedReason}. */
 export const CONVERGENCE_NOT_COUNTED_COPY: Record<ConvergenceNotCountedReason, string> = {
   no_changed_files: "Not counted: no changed files",
   no_files_read: "Not counted: no files read",
+  downgraded_stop: "Not counted: downgraded STOP",
 };
+
+/** Inline form of {@link CONVERGENCE_NOT_COUNTED_COPY} ("…: downgraded STOP"
+ *  keeps the acronym; only the leading capital is dropped). */
+export function convergenceNotCountedInline(reason: ConvergenceNotCountedReason): string {
+  const copy = CONVERGENCE_NOT_COUNTED_COPY[reason];
+  return copy.charAt(0).toLowerCase() + copy.slice(1);
+}
 
 /** P3/CONV-HONEST: the counter is a streak, never a readiness verdict. */
 export const CONVERGENCE_DISCLAIMER =

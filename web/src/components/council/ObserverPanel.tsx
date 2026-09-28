@@ -29,7 +29,7 @@ import {
 } from "../../observer-panel-state.js";
 import {
   CONVERGENCE_DISCLAIMER,
-  CONVERGENCE_NOT_COUNTED_COPY,
+  convergenceNotCountedInline,
   type GroupRecord,
   type ObserverFinding,
   type ObserverPanelState,
@@ -424,7 +424,7 @@ export function ObserverPanel({
           className="shrink-0 px-3 py-1.5 border-b border-cc-border text-[11px] text-cc-muted"
           title={CONVERGENCE_DISCLAIMER}
         >
-          Last review — {CONVERGENCE_NOT_COUNTED_COPY[group.lastReviewNotCounted].toLowerCase()}
+          Last review — {convergenceNotCountedInline(group.lastReviewNotCounted)}
         </div>
       )}
 

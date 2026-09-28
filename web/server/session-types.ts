@@ -562,7 +562,8 @@ export type BrowserIncomingMessageBase =
      *   - `revoked`         STOP arrived post-convergence; back to in-progress
      *   - `not-counted`     P3/CONV-HONEST: a clean review that reviewed
      *                       nothing (no changed files / no host-observed
-     *                       reads); counter unchanged, `notCountedReason` set
+     *                       reads) or carried a grounding-downgraded STOP
+     *                       (CONV-DOWNGRADE); counter unchanged, `notCountedReason` set
      *
      * `cycleNumber` / `convergenceThreshold` / `convergenceState` carry
      * the full server-side state so the frontend can render without
@@ -574,7 +575,7 @@ export type BrowserIncomingMessageBase =
     cycleNumber: number;
     convergenceThreshold: number;
     convergenceState: "in-progress" | "converged" | "revoked";
-    notCountedReason?: "no_changed_files" | "no_files_read";
+    notCountedReason?: "no_changed_files" | "no_files_read" | "downgraded_stop";
     /** Wallclock (ms) the server processed the transition. */
     timestamp: number;
   };

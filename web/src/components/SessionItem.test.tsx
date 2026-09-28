@@ -787,6 +787,39 @@ describe("SessionItem", () => {
     expect(badge.getAttribute("title")).toContain("not counted: no changed files");
   });
 
+  // P3/CONV-DOWNGRADE: a downgraded STOP keeps the streak (2/3) and the
+  // tooltip names the reason with the STOP acronym intact.
+  it("keeps progress and explains a downgraded-STOP review in the tooltip", async () => {
+    const { container } = render(
+      <SessionItem
+        {...buildProps({
+          councilRole: "orchestrator",
+          councilConvergence: { state: "in-progress", cycleNumber: 2, threshold: 3, degraded: false, notCounted: "downgraded_stop" },
+        })}
+      />,
+    );
+    const badge = screen.getByTestId("council-convergence-badge");
+    expect(badge).toHaveAttribute("data-state", "cycle-progress");
+    expect(badge.textContent).toContain("2/3");
+    expect(badge.getAttribute("title")).toContain("not counted: downgraded STOP");
+    const { axe } = await import("vitest-axe");
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("renders the muted 'not counted' badge at cycle 0 for a downgraded-STOP review", () => {
+    render(
+      <SessionItem
+        {...buildProps({
+          councilRole: "orchestrator",
+          councilConvergence: { state: "in-progress", cycleNumber: 0, threshold: 3, degraded: false, notCounted: "downgraded_stop" },
+        })}
+      />,
+    );
+    const badge = screen.getByTestId("council-convergence-badge");
+    expect(badge).toHaveAttribute("data-state", "not-counted");
+    expect(badge.getAttribute("aria-label")).toContain("Last review not counted: downgraded STOP.");
+  });
+
   it("passes axe a11y checks with the 'not counted' badge rendered", async () => {
     const { axe } = await import("vitest-axe");
     const { container } = render(
