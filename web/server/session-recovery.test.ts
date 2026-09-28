@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CliLauncher, SdkSessionInfo } from "./cli-launcher.js";
 import type { WsBridge } from "./ws-bridge.js";
 import { companionBus } from "./event-bus.js";
+import { DEFAULT_LAG_TOLERANCE_MS } from "./silent-stdio-drift-detector.js";
 import {
+  DRIFT_DETECTOR_TICK_MS,
   KEEPALIVE_BASE_DELAY_MS,
   MAX_AUTO_RELAUNCHES,
   RECONNECT_GRACE_MS,
@@ -177,5 +179,27 @@ describe("SessionRecovery (P4/C1d DI seam)", () => {
     recovery.stopDriftDetector();
     expect(vi.getTimerCount()).toBe(0);
     expect(launcher.kill).not.toHaveBeenCalled();
+  });
+
+  it("drift detector ticks every 15s so silent-stdio drift heals within ~105s", async () => {
+    // P4/DRIFT-15S: the tick was 60s (auto-heal window ≈ 60 + 90 = 150s).
+    // Pin both the interval actually passed to setInterval (a tick fires at
+    // 15s, not before) and the resulting worst-case window: tick + the
+    // detector's lag tolerance must stay ≤ 105s, well under the 300s
+    // adapter watchdog.
+    expect(DRIFT_DETECTOR_TICK_MS).toBe(15_000);
+    expect(DRIFT_DETECTOR_TICK_MS + DEFAULT_LAG_TOLERANCE_MS).toBeLessThanOrEqual(105_000);
+
+    const { recovery } = makeRecovery(new Map());
+    const tick = vi.spyOn(recovery, "driftDetectorTick").mockImplementation(() => {});
+    recovery.startDriftDetector();
+
+    await vi.advanceTimersByTimeAsync(DRIFT_DETECTOR_TICK_MS - 1);
+    expect(tick).toHaveBeenCalledTimes(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(tick).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(DRIFT_DETECTOR_TICK_MS);
+    expect(tick).toHaveBeenCalledTimes(2);
+    recovery.stopDriftDetector();
   });
 });
