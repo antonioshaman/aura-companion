@@ -2696,6 +2696,8 @@ describe("SessionOrchestrator", () => {
         downgrades: [{ id: "f2", reason: "evidence_not_in_modified_set" }],
         observerModel: "gpt-5-codex",
         observerProvider: "codex",
+        artifactsChanged: 2,
+        artifactsRead: 2,
       });
       const calls = vi.mocked(deps.wsBridge.broadcastToGroup).mock.calls;
       const last = calls[calls.length - 1]!;

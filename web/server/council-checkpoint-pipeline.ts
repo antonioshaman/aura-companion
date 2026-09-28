@@ -20,6 +20,7 @@ import type { CheckpointLineSnapshots } from "./observer-line-snapshots.js";
 import { maybeEmitEvalSidecar } from "./eval-sidecar.js";
 import { buildObserverContextManifest, buildObserverWakePayload } from "./observer-prompt.js";
 import type { ObserverReplyCapture } from "./observer-reply.js";
+import { countArtifactsRead, type ObserverReadLedger } from "./observer-read-ledger.js";
 import { readCouncilWakeSentinel, writeCouncilWakeSentinel } from "./council-wake-sentinel.js";
 import { formatObserverInvocationLog } from "./observer-attribution.js";
 import type { BrowserObserverDowngrade, BrowserObserverFinding } from "./session-types.js";
@@ -184,6 +185,8 @@ export interface CouncilCheckpointPipelineDeps {
   isApiLimitReached: (sessionId: string) => boolean;
   replyCapture: ObserverReplyCapture;
   lineSnapshots: CheckpointLineSnapshots;
+  /** P3/CONV-HONEST: host-observed observer tool calls per dispatched wake. */
+  readLedger: Pick<ObserverReadLedger, "begin" | "touchesFor">;
 }
 
 export class CouncilCheckpointPipeline {
@@ -512,6 +515,8 @@ export class CouncilCheckpointPipeline {
         // forever. The watchdog degrades the group if no matching review
         // arrives within OBSERVER_WAKE_TIMEOUT_MS.
         this.armReviewDeadline(sessionGroupId, entry, payload.checkpoint_id);
+        // P3/CONV-HONEST: record what the observer reads for THIS wake.
+        this.deps.readLedger.begin(observerSessionId, payload.checkpoint_id);
         // P3/B1: the observer's reply to THIS wake becomes the review.
         this.deps.replyCapture.expect(observerSessionId, {
           sessionGroupId,
@@ -1024,6 +1029,18 @@ export class CouncilCheckpointPipeline {
         ? manifest.delta
         : (entry.lastCheckpoint?.artifact_paths ?? []));
 
+      // P3/CONV-HONEST: how many changed files the host SAW the observer
+      // read while answering this checkpoint's wake. A clean review with 0
+      // is not counted toward convergence (convergence-tracker.ts).
+      const meta = this.deps.groupMeta.get(sessionGroupId);
+      const artifactsRead = meta
+        ? countArtifactsRead(
+          this.deps.readLedger.touchesFor(meta.observerSessionId, payload.checkpoint_id),
+          modifiedFiles,
+          entry.cwd,
+        )
+        : 0;
+
       const lineFacts = this.deps.lineSnapshots.providerFor(sessionGroupId, payload.checkpoint_id, entry.cwd);
       const result = validateObserverFindings(payload, { workspaceRoot: entry.cwd, modifiedFiles, lineFacts });
 
@@ -1122,7 +1139,6 @@ export class CouncilCheckpointPipeline {
       // (`observerPromptSha256` captured per invocation) survives review
       // completion. EC-9 group-lifecycle structured log requirement also
       // honoured.
-      const meta = this.deps.groupMeta.get(sessionGroupId);
       if (meta) {
         const stopCountRaw = payload.findings.filter((f) => f.severity === "STOP").length;
         const stopCountGrounded = findings.filter((f) => f.severity === "STOP" && f.wasDowngraded !== true).length;
@@ -1133,7 +1149,7 @@ export class CouncilCheckpointPipeline {
             sessionGroupId,
             phase: payload.phase,
             checkpointId: payload.checkpoint_id,
-            artifactsRead: entry.lastCheckpoint?.artifact_paths.length ?? 0,
+            artifactsRead,
             findingsCount: findings.length,
             stopCountRaw,
             stopCountGrounded,
@@ -1149,6 +1165,7 @@ export class CouncilCheckpointPipeline {
           // B2: grounded STOPs kept out of the blocker banner as weak evidence.
           stopCountWeak: findings.filter((f) => f.severity === "STOP" && f.weakEvidence !== undefined).length,
           stopCountDisputed: findings.filter((f) => f.severity === "STOP" && f.disputed !== undefined).length,
+          artifactsChanged: modifiedFiles.size,
         });
       }
 
@@ -1183,6 +1200,8 @@ export class CouncilCheckpointPipeline {
         downgrades,
         observerModel: payload.observer_model,
         observerProvider: payload.observer_provider,
+        artifactsChanged: modifiedFiles.size,
+        artifactsRead,
       });
     } catch (err) {
       log.error("session-orchestrator", "handleCouncilReview failed", {

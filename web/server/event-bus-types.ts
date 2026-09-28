@@ -328,6 +328,11 @@ export interface CompanionEventMap {
     downgrades: import("./session-types.js").BrowserObserverDowngrade[];
     observerModel: string;
     observerProvider: string;
+    /** P3/CONV-HONEST: changed files in the reviewed checkpoint (0 = spawn/empty). */
+    artifactsChanged: number;
+    /** P3/CONV-HONEST: how many of those the HOST saw the observer read
+     *  (`observer-read-ledger.ts`), not what the model claims. */
+    artifactsRead: number;
   };
 
   /**
@@ -338,14 +343,19 @@ export interface CompanionEventMap {
    *   - `cycle-progress`   →  counter incremented (still below threshold)
    *   - `converged`        →  counter reached threshold; UI flips badge to ✅
    *   - `revoked`          →  a STOP arrived after convergence; counter back to 0
+   *   - `not-counted`      →  a clean review that reviewed nothing (no changed
+   *                           files / no host-observed reads); counter unchanged
    *
    * Subscribers fan out to browsers as `group_update` payloads carrying
    * the new `cycleNumber` + `convergenceState` fields on `GroupRecord`.
    */
   "group:convergence": {
     sessionGroupId: string;
-    transition: "cycle-progress" | "converged" | "revoked";
+    transition: "cycle-progress" | "converged" | "revoked" | "not-counted";
     cycleNumber: number;
     convergenceThreshold: number;
+    convergenceState: "in-progress" | "converged" | "revoked";
+    /** Set on `not-counted` only. */
+    notCountedReason?: "no_changed_files" | "no_files_read";
   };
 }

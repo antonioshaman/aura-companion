@@ -1797,6 +1797,11 @@ function handleParsedMessage(
         cycleNumber: data.cycleNumber,
         convergenceThreshold: data.convergenceThreshold,
         convergenceState: data.convergenceState,
+        // P3/CONV-HONEST: only a `not-counted` frame carries a reason; any
+        // other transition clears the "not counted" note.
+        ...(data.transition === "not-counted" && data.notCountedReason
+          ? { notCountedReason: data.notCountedReason }
+          : {}),
       });
       break;
     }

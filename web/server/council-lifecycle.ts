@@ -23,6 +23,7 @@ import { addDispute } from "./observer-disputes.js";
 import type { CheckpointLineSnapshots } from "./observer-line-snapshots.js";
 import { buildObserverContextManifest } from "./observer-prompt.js";
 import type { ObserverReplyCapture } from "./observer-reply.js";
+import type { ObserverReadLedger } from "./observer-read-ledger.js";
 import { deleteCouncilWakeSentinel } from "./council-wake-sentinel.js";
 import { buildBrowserGroupRecord } from "./browser-group-record.js";
 import { deterministicFindingId, type CouncilWatcherEntry } from "./council-checkpoint-pipeline.js";
@@ -183,6 +184,8 @@ export interface CouncilLifecycleDeps {
     opts: { log: boolean },
   ) => void;
   replyCapture: Pick<ObserverReplyCapture, "forget">;
+  /** P3/CONV-HONEST: dropped with the observer on group exit. */
+  readLedger: Pick<ObserverReadLedger, "forget">;
   lineSnapshots: CheckpointLineSnapshots;
 }
 
@@ -701,13 +704,7 @@ export class CouncilLifecycle {
     // payload carrying the new convergence fields. Frontend reads
     // them off `GroupRecord` (server-authoritative; no client-side
     // counter).
-    companionBus.on("group:convergence", ({ sessionGroupId, transition, cycleNumber, convergenceThreshold }) => {
-      const convergenceState: "in-progress" | "converged" | "revoked" =
-        transition === "converged"
-          ? "converged"
-          : transition === "revoked"
-            ? "revoked"
-            : "in-progress";
+    companionBus.on("group:convergence", ({ sessionGroupId, transition, cycleNumber, convergenceThreshold, convergenceState, notCountedReason }) => {
       this.wsBridge.broadcastToGroup(this.getGroupMemberIds(sessionGroupId), {
         type: "group_convergence",
         sessionGroupId,
@@ -715,6 +712,7 @@ export class CouncilLifecycle {
         cycleNumber,
         convergenceThreshold,
         convergenceState,
+        ...(notCountedReason ? { notCountedReason } : {}),
         timestamp: Date.now(),
       });
       log.info("session-orchestrator", "convergence transition", {
@@ -723,6 +721,7 @@ export class CouncilLifecycle {
         transition,
         cycleNumber,
         convergenceThreshold,
+        ...(notCountedReason ? { notCountedReason } : {}),
       });
     });
 
@@ -1042,7 +1041,10 @@ export class CouncilLifecycle {
       entry.pendingReviewDeadline = null;
     }
     const observerSessionId = this.deps.groupMeta.get(sessionGroupId)?.observerSessionId;
-    if (observerSessionId) this.deps.replyCapture.forget(observerSessionId);
+    if (observerSessionId) {
+      this.deps.replyCapture.forget(observerSessionId);
+      this.deps.readLedger.forget(observerSessionId);
+    }
     this.deps.lineSnapshots.forget(sessionGroupId);
     this.deps.watchers.delete(sessionGroupId);
   }

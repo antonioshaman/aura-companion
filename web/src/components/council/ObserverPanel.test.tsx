@@ -288,7 +288,9 @@ describe("ObserverPanel — state pills (5 explicit states)", () => {
     expect(await axe(container)).toHaveNoViolations();
   });
 
-  it("renders converged pill with ✅ ready-to-ship copy + emerald token", async () => {
+  // P3/CONV-HONEST: the converged pill states what was measured (N reviews in
+  // a row without blockers) and disclaims readiness; "ready to ship" is gone.
+  it("renders converged pill with honest streak copy, disclaimer + emerald token", async () => {
     seedGroup();
     act(() => {
       useStore.getState().applyConvergence({
@@ -302,12 +304,74 @@ describe("ObserverPanel — state pills (5 explicit states)", () => {
     const pill = screen.getByTestId("status-pill");
     expect(pill).toHaveAttribute("data-state", "converged");
     expect(pill).toHaveAttribute("role", "status");
-    expect(pill).toHaveAttribute("aria-label", "Converged — ready to ship after 3 clean cycles");
-    expect(pill).toHaveTextContent(/Converged — ready to ship/);
-    // Emerald token signals "ship-ready" per Story 4.1.5
+    expect(pill).toHaveTextContent("3 reviews in a row without blockers");
+    expect(pill.getAttribute("aria-label")).toMatch(/^3 reviews in a row without blockers\. Not a readiness guarantee/);
+    // The tooltip carries the same disclaimer for sighted mouse users.
+    expect(pill.getAttribute("title")).toContain("Not a readiness guarantee");
+    expect(pill.textContent).not.toMatch(/ready to ship/i);
+    expect(pill.getAttribute("aria-label")).not.toMatch(/ready to ship/i);
+    // Emerald token signals "streak reached" per Story 4.1.5
     expect(pill.className).toContain("text-emerald-500");
     const { axe } = await import("vitest-axe");
     expect(await axe(container)).toHaveNoViolations();
+  });
+
+  // P3/CONV-HONEST: a review that read nothing is visibly "not counted".
+  it("shows a 'not counted: no files read' note when the latest review was not counted", async () => {
+    seedGroup();
+    act(() => {
+      useStore.getState().applyConvergence({
+        sessionGroupId: GROUP.sessionGroupId,
+        cycleNumber: 1,
+        convergenceThreshold: 3,
+        convergenceState: "in-progress",
+        notCountedReason: "no_files_read",
+      });
+    });
+    const { container } = render(<ObserverPanel sessionId={SESSION} />);
+    const note = screen.getByTestId("convergence-not-counted");
+    expect(note).toHaveAttribute("data-reason", "no_files_read");
+    expect(note).toHaveTextContent("Last review — not counted: no files read");
+    // The streak itself is unchanged by an uncounted review.
+    expect(screen.getByTestId("status-pill")).toHaveTextContent(/Cycle 1\/3/);
+    const { axe } = await import("vitest-axe");
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("shows 'no changed files' for an uncounted spawn/empty checkpoint review", () => {
+    seedGroup();
+    act(() => {
+      useStore.getState().applyConvergence({
+        sessionGroupId: GROUP.sessionGroupId,
+        cycleNumber: 0,
+        convergenceThreshold: 3,
+        convergenceState: "in-progress",
+        notCountedReason: "no_changed_files",
+      });
+    });
+    render(<ObserverPanel sessionId={SESSION} />);
+    expect(screen.getByTestId("convergence-not-counted")).toHaveTextContent("not counted: no changed files");
+  });
+
+  it("a counted review clears the 'not counted' note", () => {
+    seedGroup();
+    act(() => {
+      useStore.getState().applyConvergence({
+        sessionGroupId: GROUP.sessionGroupId,
+        cycleNumber: 0,
+        convergenceThreshold: 3,
+        convergenceState: "in-progress",
+        notCountedReason: "no_files_read",
+      });
+      useStore.getState().applyConvergence({
+        sessionGroupId: GROUP.sessionGroupId,
+        cycleNumber: 1,
+        convergenceThreshold: 3,
+        convergenceState: "in-progress",
+      });
+    });
+    render(<ObserverPanel sessionId={SESSION} />);
+    expect(screen.queryByTestId("convergence-not-counted")).toBeNull();
   });
 
   it("degraded short-circuits over converged (Story 4.1.5 freeze precedence in UI)", () => {

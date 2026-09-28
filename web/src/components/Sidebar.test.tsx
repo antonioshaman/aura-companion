@@ -2185,6 +2185,7 @@ describe("Sidebar — Council convergence badge", () => {
       convergenceState?: "in-progress" | "converged" | "revoked";
       cycleNumber?: number;
       convergenceThreshold?: number;
+      lastReviewNotCounted?: "no_changed_files" | "no_files_read";
     },
   ) {
     const groupId = `grp_for_${sessionId}`;
@@ -2225,6 +2226,22 @@ describe("Sidebar — Council convergence badge", () => {
     render(<Sidebar />);
     const badge = screen.getAllByTestId("council-convergence-badge")[0];
     expect(badge).toHaveAttribute("data-state", "converged");
+  });
+
+  // P3/CONV-HONEST: an uncounted latest review is threaded from GroupRecord
+  // (lastReviewNotCounted) through councilInfoFor to the row badge.
+  it("threads lastReviewNotCounted to a 'not counted' badge", () => {
+    seedConvergenceSession("s_not_counted", {
+      pairing: "claude+claude",
+      status: "active",
+      convergenceState: "in-progress",
+      cycleNumber: 0,
+      convergenceThreshold: 3,
+      lastReviewNotCounted: "no_files_read",
+    });
+    render(<Sidebar />);
+    const badge = screen.getAllByTestId("council-convergence-badge")[0];
+    expect(badge).toHaveAttribute("data-state", "not-counted");
   });
 
   it("renders the frozen degraded badge when the group status is degraded", () => {

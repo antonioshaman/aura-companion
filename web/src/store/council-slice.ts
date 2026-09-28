@@ -3,6 +3,7 @@ import type { AppState } from "./index.js";
 import type {
   BrowserObserverDowngrade,
   BrowserObserverFinding,
+  ConvergenceNotCountedReason,
   GroupRecord,
   ObserverFinding,
   SessionGroupStatus,
@@ -216,6 +217,8 @@ export interface CouncilSlice {
     cycleNumber: number;
     convergenceThreshold: number;
     convergenceState: "in-progress" | "converged" | "revoked";
+    /** P3/CONV-HONEST: present iff the latest review was not counted. */
+    notCountedReason?: ConvergenceNotCountedReason;
   }) => void;
 
   // Actions — panel state
@@ -426,16 +429,19 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
       return { groups, findings, groundingDowngrades };
     }),
 
-  applyConvergence: ({ sessionGroupId, cycleNumber, convergenceThreshold, convergenceState }) =>
+  applyConvergence: ({ sessionGroupId, cycleNumber, convergenceThreshold, convergenceState, notCountedReason }) =>
     set((s) => {
       const existing = s.groups.get(sessionGroupId);
       if (!existing) return {};
       const groups = new Map(s.groups);
+      const { lastReviewNotCounted: _prev, ...rest } = existing;
+      void _prev;
       groups.set(sessionGroupId, {
-        ...existing,
+        ...rest,
         cycleNumber,
         convergenceThreshold,
         convergenceState,
+        ...(notCountedReason ? { lastReviewNotCounted: notCountedReason } : {}),
       });
       return { groups };
     }),
