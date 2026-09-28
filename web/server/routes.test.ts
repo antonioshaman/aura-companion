@@ -760,6 +760,41 @@ describe("POST /api/groups/:groupId/disputes", () => {
   });
 });
 
+// FIX-AP-1: "Dismiss for now" releases a STOP's hold on auto-proceed. The
+// route validates the body and maps controller outcomes to HTTP; the hold
+// semantics are covered in council-auto-proceed-wiring.test.ts.
+describe("POST /api/groups/:groupId/stops/resolve", () => {
+  const post = (body: unknown, groupId = "grp_x") =>
+    app.request(`/api/groups/${groupId}/stops/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    });
+
+  it("forwards the finding id and returns the release outcome", async () => {
+    orchestrator.resolveObserverStop = vi.fn(() => ({ ok: true, released: true, persisted: true }));
+    const res = await post({ finding_id: "fnd_1" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, released: true, persisted: true });
+    expect(orchestrator.resolveObserverStop).toHaveBeenCalledWith("grp_x", "fnd_1");
+  });
+
+  it("rejects a malformed body with 400 without touching the orchestrator", async () => {
+    orchestrator.resolveObserverStop = vi.fn();
+    expect((await post({})).status).toBe(400);
+    expect((await post({ finding_id: 5 })).status).toBe(400);
+    expect((await post("not json")).status).toBe(400);
+    expect(orchestrator.resolveObserverStop).not.toHaveBeenCalled();
+  });
+
+  it("maps unknown group to 404 and invalid input to 400", async () => {
+    orchestrator.resolveObserverStop = vi.fn(() => ({ ok: false, reason: "unknown_group" }));
+    expect((await post({ finding_id: "f" })).status).toBe(404);
+    orchestrator.resolveObserverStop = vi.fn(() => ({ ok: false, reason: "invalid_input" }));
+    expect((await post({ finding_id: "" })).status).toBe(400);
+  });
+});
+
 describe("GET /api/sessions", () => {
   it("returns the list of sessions enriched with names", async () => {
     const sessions = [

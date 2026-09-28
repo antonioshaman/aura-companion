@@ -160,6 +160,24 @@ describe("CouncilLifecycle (P4/C1e DI seam)", () => {
     );
   });
 
+  // FIX-AP-1 (5): the per-pair auto-proceed opt-in rides the shared base body
+  // into BOTH spawns with the role attached; the launcher keeps it only on the
+  // orchestrator half (cli-launcher.test pins that side), which is what the
+  // controller reads via launcher.getSession.
+  it("createCouncilGroup passes the autoProceedOnIdle opt-in through to the spawn with the half's role", async () => {
+    const ctx = makeLifecycle();
+    const cwd = tmpWorkspace();
+    const autoProceedOnIdle = { idleMs: 90_000, maxIterations: 2 };
+    const result = await ctx.lifecycle.createCouncilGroup({
+      pairing: "claude+codex",
+      base: { cwd, autoProceedOnIdle } as never,
+    });
+    expect(result.ok).toBe(true);
+    const bodies = ctx.deps.createSession.mock.calls.map((c) => c[0] as { sessionGroupRole?: string; autoProceedOnIdle?: unknown });
+    expect(bodies.map((b) => b.sessionGroupRole)).toEqual(["orchestrator", "observer"]);
+    expect(bodies[0]!.autoProceedOnIdle).toEqual(autoProceedOnIdle);
+  });
+
   it("createCouncilGroup spawns both halves via the injected createSession and registers the pair in the injected maps", async () => {
     const ctx = makeLifecycle();
     const cwd = tmpWorkspace();

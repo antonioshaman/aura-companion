@@ -3090,6 +3090,83 @@ describe("SessionOrchestrator", () => {
     //   - FIX-B2b-1: the same command quoted in a STOP about ANOTHER file is a
     //     new claim and is not marked (B2b matched on any path);
     //   - disputing twice is idempotent and an unknown group is refused.
+    // FIX-AP-1 (5): the orchestrator wires the bus into the auto-proceed
+    // controller end-to-end. Real coordinator + controller; only the manager is
+    // a spy. Pins, through the orchestrator's own listeners and public API:
+    //   - the hold is restored from the REST-bootstrap view before arming;
+    //   - orchestrator:turn-done arms an opted-in orchestrator only when clear;
+    //   - a group:review STOP holds, and a later clean review does not release;
+    //   - disputeObserverFinding (B2b) and resolveObserverStop release it.
+    it("FIX-AP-1: bus → controller wiring (restore, STOP hold across a clean review, dispute + dismissal release)", async () => {
+      const { mkdtempSync, rmSync, realpathSync } = require("node:fs") as typeof import("node:fs");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      const workspace = realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-orch-ap-")));
+      const groupId = "grp_0123456789abcdef0123456789abcdef";
+      const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+      const stopFinding = (id: string, path = "src/a.ts") => ({
+        id, severity: "STOP" as const, claim: `\`${id}\` drops the error`, evidence_path: path, evidence_lines: [1, 1] as [number, number],
+      });
+      try {
+        const arm = vi.fn(() => ({ kind: "armed" as const }));
+        const cancel = vi.fn();
+        orchestrator.setIdleTimerManager({
+          arm, cancel,
+          noteUserMessage: () => {}, resetIterationCount: () => {}, getIterationCount: () => 0,
+          clearPendingSyntheticTurn: () => {}, disposeAll: () => {}, isApiLimitReached: () => false,
+        } as any);
+        deps.launcher.getSession.mockImplementation((sid: string) =>
+          sid === "sess_orch"
+            ? ({ sessionId: sid, autoProceedOnIdle: { idleMs: 60_000, maxIterations: 3 } } as any)
+            : undefined,
+        );
+        seedGroup(groupId, { cwd: workspace });
+        const internals = orchestrator as unknown as {
+          councilGroupBySessionId: Map<string, string>;
+          councilLifecycle: { getGroupReviewsForBootstrap: (g: string) => Promise<unknown> };
+          getOrCreateCoordinatorSync: () => { registerExternalGroup: (r: unknown) => void };
+        };
+        internals.councilGroupBySessionId.set("sess_orch", groupId);
+        internals.councilGroupBySessionId.set("sess_obs", groupId);
+        internals.getOrCreateCoordinatorSync().registerExternalGroup({
+          sessionGroupId: groupId,
+          primary: { sessionId: "sess_orch", backendType: "claude" },
+          observer: { sessionId: "sess_obs", backendType: "codex" },
+          status: "active",
+          createdAt: 1,
+        });
+        // "Restart": a STOP from before is still in the reviews on disk.
+        const bootstrap = vi.spyOn(internals.councilLifecycle, "getGroupReviewsForBootstrap")
+          .mockResolvedValue({ sessionGroupId: groupId, findings: [stopFinding("old")], downgrades: [], reviewCount: 1 });
+        orchestrator.initialize();
+
+        const turnDone = () => companionBus.emit("orchestrator:turn-done", { sessionId: "sess_orch", blockedByStop: false });
+        const review = (findings: unknown[]) => companionBus.emit("group:review", {
+          sessionGroupId: groupId, checkpointId: "chk", phase: "council-implement", findings: findings as any,
+          downgrades: [], observerModel: "m", observerProvider: "codex", artifactsChanged: 1, artifactsRead: 1,
+        });
+
+        turnDone();
+        await flush();
+        expect(bootstrap).toHaveBeenCalledWith(groupId);
+        expect(arm).not.toHaveBeenCalled(); // restored STOP holds
+
+        review([stopFinding("new", "src/b.ts")]);
+        expect(cancel).toHaveBeenCalledWith("sess_orch");
+        review([{ ...stopFinding("clean"), severity: "NOTE" }]);
+        turnDone();
+        expect(arm).not.toHaveBeenCalled(); // a clean review does not release
+
+        expect(orchestrator.disputeObserverFinding(groupId, { claim: "`old` drops the error", evidencePath: "src/a.ts", findingId: "old" }))
+          .toEqual({ ok: true, added: true });
+        expect(arm).not.toHaveBeenCalled(); // "new" still open
+        expect(orchestrator.resolveObserverStop(groupId, "new")).toEqual({ ok: true, released: true, persisted: true });
+        expect(arm).toHaveBeenCalledWith("sess_orch", { idleMs: 60_000, maxIterations: 3 });
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
     it("B2b: a dismissed STOP is persisted and marks re-raised copies as disputed (live + bootstrap)", async () => {
       const { mkdtempSync, writeFileSync, mkdirSync, rmSync, realpathSync, existsSync } = require("node:fs") as typeof import("node:fs");
       const { tmpdir } = require("node:os") as typeof import("node:os");

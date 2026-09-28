@@ -736,6 +736,11 @@ describe("observer panel preferences", () => {
 
 // ── dismissStop ─────────────────────────────────────────────────────────────
 
+const cleanupsResolve: Array<() => void> = [];
+afterEach(() => {
+  while (cleanupsResolve.length) cleanupsResolve.pop()!();
+});
+
 describe("dismissStop", () => {
   it("adds finding ids to the dismissed set", () => {
     useStore.getState().dismissStop("f1");
@@ -753,9 +758,12 @@ describe("dismissStop", () => {
 
   // FIX-B2b-1: "Dismiss for now" is local and temporary. It must NOT create a
   // server-side dispute (B2b did, so any dismissal permanently silenced every
-  // later STOP quoting the same command).
-  it("does not persist anything server-side", () => {
+  // later STOP quoting the same command). Since FIX-AP-1 it does tell the
+  // server to release the auto-proceed hold — see the block below.
+  it("does not create a server-side dispute", () => {
     const spy = vi.spyOn(api, "disputeObserverFinding").mockResolvedValue({ ok: true, added: true });
+    const resolve = vi.spyOn(api, "resolveObserverStop").mockResolvedValue({ ok: true, released: true, persisted: true });
+    cleanupsResolve.push(() => resolve.mockRestore());
     try {
       useStore.getState().upsertGroup(group());
       appendStop();
@@ -764,6 +772,53 @@ describe("dismissStop", () => {
       expect(spy).not.toHaveBeenCalled();
     } finally {
       spy.mockRestore();
+    }
+  });
+});
+
+describe("dismissStop → auto-proceed hold release (FIX-AP-1)", () => {
+  // The server holds auto-proceed while the banner would show a STOP, so a
+  // dismissal must reach it — as a resolution, never as a dispute. A failed
+  // request keeps the local dismissal (the banner stays hidden).
+  it("sends a resolve (not a dispute) once, for the finding's group", async () => {
+    const resolve = vi.spyOn(api, "resolveObserverStop").mockRejectedValue(new Error("offline"));
+    const dispute = vi.spyOn(api, "disputeObserverFinding").mockResolvedValue({ ok: true, added: true });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      useStore.getState().upsertGroup(group());
+      appendStop();
+      useStore.getState().dismissStop("f1");
+      useStore.getState().dismissStop("f1");
+      expect(resolve).toHaveBeenCalledTimes(1);
+      expect(resolve).toHaveBeenCalledWith("grp_abc", "f1");
+      expect(dispute).not.toHaveBeenCalled();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(warn).toHaveBeenCalled();
+      expect(useStore.getState().dismissedStopIds.has("f1")).toBe(true);
+      // An id with no known finding stays local-only.
+      useStore.getState().dismissStop("unknown");
+      expect(resolve).toHaveBeenCalledTimes(1);
+    } finally {
+      resolve.mockRestore();
+      dispute.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  // A dispute releases the hold server-side by itself; no extra resolve call.
+  it("disputeStop does not also send a resolve", () => {
+    const resolve = vi.spyOn(api, "resolveObserverStop").mockResolvedValue({ ok: true, released: true, persisted: true });
+    const dispute = vi.spyOn(api, "disputeObserverFinding").mockResolvedValue({ ok: true, added: true });
+    try {
+      useStore.getState().upsertGroup(group());
+      appendStop();
+      useStore.getState().disputeStop("f1");
+      expect(dispute).toHaveBeenCalledTimes(1);
+      expect(resolve).not.toHaveBeenCalled();
+    } finally {
+      resolve.mockRestore();
+      dispute.mockRestore();
     }
   });
 });

@@ -11,8 +11,9 @@
  *  - Reasoning visible — evidence path + line range + observer attribution
  *    are spelled out. Not a verdict in isolation.
  *  - Dismissable but not snoozable; dismissed STOPs remain in the
- *    FindingsLog permanently. "Dismiss for now" only hides this banner in
- *    this tab. "Dispute" is the separate, explicit "this claim is wrong"
+ *    FindingsLog permanently. "Dismiss for now" hides this banner in this
+ *    tab and releases the STOP's hold on auto-proceed (FIX-AP-1); it does
+ *    not mark the claim wrong. "Dispute" is the separate, explicit "this claim is wrong"
  *    action: it is remembered server-side and keeps a re-raise of the claim
  *    on the same evidence file out of the banner (FIX-B2b-1).
  *  - Renders ONLY through JSX text content; never `dangerouslySetInnerHTML`.

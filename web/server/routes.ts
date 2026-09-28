@@ -914,6 +914,30 @@ export function createRoutes(
     return c.json({ ok: true, added: result.added });
   });
 
+  // ─── Council Mode — release an observer STOP's auto-proceed hold (FIX-AP-1) ─
+  //
+  // The browser calls this on "Dismiss for now". Auto-proceed holds while the
+  // blocker banner would show a STOP; a dismissal is the human saying "go on".
+  // Not a dispute: the claim is not marked wrong and a re-raise is shown.
+  api.post("/groups/:groupId/stops/resolve", async (c) => {
+    const groupId = c.req.param("groupId");
+    const body = (await c.req.json().catch(() => null)) as { finding_id?: unknown } | null;
+    if (!body || typeof body.finding_id !== "string") {
+      return respondError(c, 400, "bad_request", {
+        module: "council.stops",
+        detail: { reason: "finding_id (string) required" },
+      });
+    }
+    const result = orchestrator.resolveObserverStop(groupId, body.finding_id);
+    if (!result.ok) {
+      if (result.reason === "unknown_group") {
+        return respondError(c, 404, "not_found", { module: "council.stops", detail: { groupId } });
+      }
+      return respondError(c, 400, "bad_request", { module: "council.stops", detail: { reason: "finding_id empty or too long" } });
+    }
+    return c.json(result);
+  });
+
   // ─── Council Mode — REST bootstrap of group records ──────────────────────
   //
   // Closes `docs/history/BUG-council-mode-group-rest-bootstrap-gap.md` (PR #68). The

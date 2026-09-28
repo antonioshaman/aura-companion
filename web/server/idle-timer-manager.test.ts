@@ -388,6 +388,44 @@ describe("IdleTimerManager — cap enforcement", () => {
   });
 });
 
+describe("IdleTimerManager — resetIterationCount (FIX-AP-1)", () => {
+  // A human message ends the unattended episode: the counter and cappedAt
+  // clear, and the zeroed trace is persisted so the boot reconcile does not
+  // rehydrate the old count. Callers pass only human-origin frames.
+  it("clears the count and cap, persists the zeroed trace, and lets the next arm fire", () => {
+    const h = buildHarness();
+    const m = new IdleTimerManager(h.deps);
+    const opts = { idleMs: 1000, maxIterations: 1 };
+    m.arm("sess-orch-1", opts);
+    h.clock.advance(opts.idleMs);
+    m.arm("sess-orch-1", opts);
+    h.clock.advance(opts.idleMs); // cap reached → cappedAt persisted
+    expect(h.sendCalls.length).toBe(1);
+
+    m.resetIterationCount("sess-orch-1");
+    expect(m.getIterationCount("sess-orch-1")).toBe(0);
+    const last = h.persistCalls.at(-1)!.trace;
+    expect(last.iterationCount).toBe(0);
+    expect(last.cappedAt).toBeNull();
+    expect(last.firedAt).toHaveLength(1); // history kept
+    expect(h.logEntries.some((e) => e.event === "idle-timer.iterations-reset" && e.iteration === 1)).toBe(true);
+
+    m.arm("sess-orch-1", opts);
+    h.clock.advance(opts.idleMs);
+    expect(h.sendCalls.length).toBe(2);
+  });
+
+  it("is a no-op for a session that never fired", () => {
+    const h = buildHarness();
+    const m = new IdleTimerManager(h.deps);
+    m.resetIterationCount("sess-orch-1");
+    m.arm("sess-orch-1", VALID_OPTS);
+    m.resetIterationCount("sess-orch-1");
+    expect(h.persistCalls).toHaveLength(0);
+    expect(h.logEntries.some((e) => e.event === "idle-timer.iterations-reset")).toBe(false);
+  });
+});
+
 describe("IdleTimerManager — persist failure aborts send", () => {
   // The cap is the structural bound. A persist failure mid-fire would
   // let the in-memory counter and the on-disk counter diverge — the
