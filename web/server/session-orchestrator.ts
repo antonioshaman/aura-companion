@@ -50,6 +50,7 @@ import { DEFAULT_REARM_DELAY_MS, runResilientWatch } from "./resilient-watch.js"
 import { validateObserverFindings } from "./observer-grounding.js";
 import { maybeEmitEvalSidecar } from "./eval-sidecar.js";
 import { buildObserverContextManifest, buildObserverWakePayload } from "./observer-prompt.js";
+import { ObserverReplyCapture } from "./observer-reply.js";
 import type { BridgeObserverWakeOutcome } from "./ws-bridge.js";
 import {
   deleteCouncilWakeSentinel,
@@ -312,6 +313,13 @@ export interface DeleteSessionResult {
 }
 
 // ── Council Mode internal state shapes ─────────────────────────────────────
+
+/**
+ * P3/B1: consecutive unusable observer replies tolerated before the
+ * wake→review watchdog is allowed to degrade the group. One bad answer is
+ * noise; three in a row is a broken observer the operator must see.
+ */
+export const OBSERVER_REPLY_REJECTIONS_BEFORE_DEGRADE = 3;
 
 interface CouncilWatcherEntry {
   cwd: string;
@@ -649,6 +657,24 @@ export class SessionOrchestrator {
    * slice already has this pattern; this is the server-side mirror.
    */
   private councilGroupBySessionId = new Map<string, string>();
+  /**
+   * P3/B1: the observer replies with a bare findings array; the host builds
+   * the review envelope and writes the file (see `observer-reply.ts`).
+   * Deps resolve `this.*` lazily at call time.
+   */
+  private observerReplyCapture = new ObserverReplyCapture({
+    now: () => new Date(),
+    writeReview: (path, payload) => writeAtomicJson(path, payload),
+    findExistingReview: (directory, checkpointId, sessionGroupId) => {
+      const found = findReviewForCheckpointSync({
+        directory,
+        checkpointId,
+        normalizeRaw: (raw, provider) => this.normalizeObserverReviewRaw(sessionGroupId, raw, provider),
+      });
+      return found && found.payload.session_group_id === sessionGroupId ? found.file : null;
+    },
+    resolveCliVersion: (sessionId) => this.wsBridge.getSession(sessionId)?.state.claude_code_version || undefined,
+  });
   private councilGroupDegradedReason = new Map<string, "observer_exited" | "wake_send_failed" | "reconnect_failed" | "wake_produced_no_review" | "foreign_group_review">();
   /**
    * #9: which half died, persisted symmetrically with
@@ -758,6 +784,11 @@ export class SessionOrchestrator {
     // Council Review 2026-05-13 Backend #21: reverse-map via the
     // `councilGroupBySessionId` index instead of iterating
     // `councilGroupMeta` — O(1) lookup.
+    // P3/B1: feed observer assistant frames to the reply capture. No-op for
+    // every session without an outstanding wake.
+    companionBus.on("message:assistant", ({ sessionId, message }) => {
+      this.observerReplyCapture.onAssistant(sessionId, message);
+    });
     companionBus.on("observer:turn-done", ({ sessionId }) => {
       try {
         const groupId = this.councilGroupBySessionId.get(sessionId);
@@ -767,6 +798,9 @@ export class SessionOrchestrator {
         // currently they don't) must not trigger observer-side drain.
         const meta = this.councilGroupMeta.get(groupId);
         if (!meta || meta.observerSessionId !== sessionId) return;
+        // Finalize the finished turn's reply BEFORE the drain dispatches the
+        // next wake (which would replace the capture slot).
+        this.finalizeObserverReply(groupId, sessionId);
         this.drainPendingObserverWake(groupId);
       } catch (err) {
         log.warn("session-orchestrator", "observer turn-done drain failed", {
@@ -2479,6 +2513,8 @@ export class SessionOrchestrator {
       clearTimeout(entry.pendingReviewDeadline.timer);
       entry.pendingReviewDeadline = null;
     }
+    const observerSessionId = this.councilGroupMeta.get(sessionGroupId)?.observerSessionId;
+    if (observerSessionId) this.observerReplyCapture.forget(observerSessionId);
     this.councilWatchers.delete(sessionGroupId);
   }
 
@@ -2772,6 +2808,15 @@ export class SessionOrchestrator {
         // forever. The watchdog degrades the group if no matching review
         // arrives within OBSERVER_WAKE_TIMEOUT_MS.
         this.armReviewDeadline(sessionGroupId, entry, payload.checkpoint_id);
+        // P3/B1: the observer's reply to THIS wake becomes the review.
+        this.observerReplyCapture.expect(observerSessionId, {
+          sessionGroupId,
+          checkpointId: payload.checkpoint_id,
+          phase: payload.phase,
+          provider: meta.pairing.split("+")[1] === "codex" ? "codex" : "claude",
+          cwd: entry.cwd,
+          fallbackModel: meta.observerModel,
+        });
         const outcome: WakeDispatchOutcome = {
           kind: "dispatched",
           checkpointId: payload.checkpoint_id,
@@ -2949,6 +2994,78 @@ export class SessionOrchestrator {
     // that is otherwise idle should still be allowed to exit.
     if (typeof timer.unref === "function") timer.unref();
     entry.pendingReviewDeadline = { checkpointId, timer };
+  }
+
+  /**
+   * P3/B1: the observer's turn ended — turn its reply into a review file
+   * (host-built envelope, atomic write; the review watcher takes it from
+   * there) or record why it could not.
+   *
+   * One bad answer must not degrade the group: an observer that DID reply,
+   * just not with a usable findings list, has proven liveness, so the
+   * wake→review watchdog for that checkpoint is disarmed. After
+   * {@link OBSERVER_REPLY_REJECTIONS_BEFORE_DEGRADE} rejections in a row the
+   * watchdog is left armed and the existing `wake_produced_no_review` path
+   * degrades the group (after its own disk rescan). An EMPTY reply (no text
+   * after the last tool call, e.g. a watchdog force-release) never disarms —
+   * that is the silence the watchdog exists to catch.
+   */
+  private finalizeObserverReply(sessionGroupId: string, observerSessionId: string): void {
+    const outcome = this.observerReplyCapture.finalize(observerSessionId);
+    if (outcome.kind === "no_expectation") return;
+    const base = {
+      sessionGroupId,
+      sessionId: observerSessionId,
+      role: "observer" as const,
+      checkpointId: outcome.expectation.checkpointId,
+    };
+    switch (outcome.kind) {
+      case "written":
+        log.info("session-orchestrator", "observer reply recorded as review", {
+          event: "council.observer_reply.review_written",
+          ...base,
+          file: outcome.file,
+          findingCount: outcome.findingCount,
+        });
+        return;
+      case "skipped_existing":
+        log.info("session-orchestrator", "observer wrote its own review file — host stands down", {
+          event: "council.observer_reply.observer_wrote_file",
+          ...base,
+          file: outcome.file,
+        });
+        return;
+      case "write_failed":
+        log.error("session-orchestrator", "host review write failed", {
+          event: "council.observer_reply.write_failed",
+          ...base,
+          file: outcome.file,
+          error: outcome.error,
+        });
+        return;
+      case "rejected": {
+        const entry = this.councilWatchers.get(sessionGroupId);
+        const deadline = entry?.pendingReviewDeadline;
+        const disarm =
+          outcome.reason !== "empty_reply" &&
+          outcome.consecutive < OBSERVER_REPLY_REJECTIONS_BEFORE_DEGRADE &&
+          deadline?.checkpointId === outcome.expectation.checkpointId;
+        if (disarm && entry && deadline) {
+          clearTimeout(deadline.timer);
+          entry.pendingReviewDeadline = null;
+        }
+        metricsCollector.recordError("council.observer_reply.rejected");
+        log.warn("session-orchestrator", "observer reply rejected — no review written", {
+          event: "council.observer_reply.rejected",
+          ...base,
+          reason: outcome.reason,
+          ...(outcome.field ? { field: outcome.field } : {}),
+          consecutive: outcome.consecutive,
+          deadlineDisarmed: disarm,
+        });
+        return;
+      }
+    }
   }
 
   /**

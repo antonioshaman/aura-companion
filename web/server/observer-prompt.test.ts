@@ -506,11 +506,14 @@ describe("buildObserverWakePayload", () => {
     });
     expect(result.textBody.startsWith("# Council Checkpoint — council-implement")).toBe(true);
     expect(result.textBody).toContain("```json");
-    expect(result.textBody).toContain("You MUST use your `Write` tool to create the file");
-    // Council review 2026-09-08 #1: the wake names a group-scoped review path
-    // (`<phase>-<session_group_id>-<provider>-observer.md`) so pairs sharing a
-    // workspace don't collide on the review file.
-    expect(result.textBody).toContain(".council/reviews/council-implement-grp_test-claude-observer.md");
+    // P3/B1: the terminator names the reply channel (a bare findings array as
+    // the final message) and forbids file writes — the HOST now names and
+    // writes the group-scoped review file (`observer-reply.ts`), so the
+    // observer is no longer told any review path.
+    expect(result.textBody).toContain("Reply with your findings as a JSON array, as your final message");
+    expect(result.textBody).toContain("Do not write or edit any file");
+    expect(result.textBody).not.toContain(".council/reviews/");
+    expect(result.textBody).not.toContain("observer.md");
     expect(result.droppedPaths).toEqual([]);
     expect(result.sha256).toMatch(/^[0-9a-f]{64}$/);
   });
@@ -707,5 +710,44 @@ describe("dispatchObserverWake call-site canary (Beck Council Rec 4)", () => {
     // handler body; if it grows beyond that, the canary is the canary.
     const handlerBody = source.slice(handlerStart, handlerStart + 4000);
     expect(handlerBody).toMatch(/this\.dispatchObserverWake\s*\(/);
+  });
+});
+
+// ── P3/B1: observer prompt = judgement only ─────────────────────────────────
+//
+// AC (specs/aura-meta-diet.md, Story B1): the observer system prompt is
+// ≤ 5 KB and carries no protocol — no review-file names, group ids, schema
+// versions or sequencing. The host owns all of that (`observer-reply.ts`).
+// Pinned against BOTH the workspace file and the bundled fallback, so a
+// protocol instruction cannot creep back in through either source.
+describe("observer system prompt budget (P3/B1)", () => {
+  const WORKSPACE_PROMPT = fileURLToPath(new URL("../../.council/prompts/observer-system.md", import.meta.url));
+  const PROTOCOL_TERMS = [
+    "schema_version",
+    "observer_wake_payload_version",
+    "session_group_id",
+    "checkpoint_id",
+    "reviewed_at",
+    "observer_model",
+    "observer_cli_version",
+    ".council/reviews",
+    "observer.md",
+    "sequence",
+    "ObserverReviewPayload",
+    "Write` tool",
+  ];
+
+  it.each([
+    ["workspace", () => _readFileSync(WORKSPACE_PROMPT, "utf-8")],
+    ["bundled", () => BUNDLED_OBSERVER_PROMPT],
+  ] as const)("%s prompt is ≤ 5 KB and protocol-free", (_label, load) => {
+    const text = load();
+    expect(Buffer.byteLength(text, "utf8")).toBeLessThanOrEqual(5 * 1024);
+    for (const term of PROTOCOL_TERMS) {
+      expect(text, `prompt mentions protocol term ${term}`).not.toContain(term);
+    }
+    // The reply contract and the EC-13 observer-side Failsafe section stay.
+    expect(text).toContain("## Reply format");
+    expect(text).toContain("## Failsafe");
   });
 });
