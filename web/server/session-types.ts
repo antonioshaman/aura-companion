@@ -560,6 +560,9 @@ export type BrowserIncomingMessageBase =
      *   - `cycle-progress`  counter changed (may be increment or reset)
      *   - `converged`       threshold reached; UI flips ☼ row to ✅ badge
      *   - `revoked`         STOP arrived post-convergence; back to in-progress
+     *   - `not-counted`     P3/CONV-HONEST: a clean review that reviewed
+     *                       nothing (no changed files / no host-observed
+     *                       reads); counter unchanged, `notCountedReason` set
      *
      * `cycleNumber` / `convergenceThreshold` / `convergenceState` carry
      * the full server-side state so the frontend can render without
@@ -567,10 +570,11 @@ export type BrowserIncomingMessageBase =
      */
     type: "group_convergence";
     sessionGroupId: string;
-    transition: "cycle-progress" | "converged" | "revoked";
+    transition: "cycle-progress" | "converged" | "revoked" | "not-counted";
     cycleNumber: number;
     convergenceThreshold: number;
     convergenceState: "in-progress" | "converged" | "revoked";
+    notCountedReason?: "no_changed_files" | "no_files_read";
     /** Wallclock (ms) the server processed the transition. */
     timestamp: number;
   };

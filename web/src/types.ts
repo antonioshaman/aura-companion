@@ -174,7 +174,26 @@ export interface GroupRecord {
   cycleNumber?: number;
   convergenceThreshold?: number;
   convergenceState?: "in-progress" | "converged" | "revoked";
+  /**
+   * P3/CONV-HONEST: set when the LATEST review was not counted toward
+   * convergence (the checkpoint had no changed files, or the host saw the
+   * observer read none of them). Cleared by the next counted review.
+   */
+  lastReviewNotCounted?: ConvergenceNotCountedReason;
 }
+
+/** P3/CONV-HONEST: why a STOP-free review did not advance the counter. */
+export type ConvergenceNotCountedReason = "no_changed_files" | "no_files_read";
+
+/** User-facing copy for {@link ConvergenceNotCountedReason}. */
+export const CONVERGENCE_NOT_COUNTED_COPY: Record<ConvergenceNotCountedReason, string> = {
+  no_changed_files: "Not counted: no changed files",
+  no_files_read: "Not counted: no files read",
+};
+
+/** P3/CONV-HONEST: the counter is a streak, never a readiness verdict. */
+export const CONVERGENCE_DISCLAIMER =
+  "Not a readiness guarantee — only reviews in which the observer read changed files are counted.";
 
 /**
  * Browser-side finding record. Adds `receivedAt`, `checkpointId`, `phase`
@@ -261,8 +280,9 @@ export type ObserverPanelState =
    */
   | { name: "cycle-progress"; cycleNumber: number; threshold: number }
   /**
-   * Bidirectional pipeline Story 4.1 — pair has converged. Pill renders
-   * `✅ Converged — ready to ship` (emerald-500 token). Slots BELOW
+   * Bidirectional pipeline Story 4.1 — pair reached the threshold. Pill
+   * renders `✅ N reviews in a row without blockers` (emerald-500 token) —
+   * P3/CONV-HONEST: a streak, NOT "ready to ship". Slots BELOW
    * `degraded` so a half going dead immediately re-asserts the warning.
    */
   | { name: "converged"; cycleNumber: number; threshold: number }

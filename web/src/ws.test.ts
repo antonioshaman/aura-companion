@@ -3183,3 +3183,40 @@ describe("post-reconnect group bootstrap refetch", () => {
     expect(mockFetchGroups).toHaveBeenCalledTimes(1);
   });
 });
+
+// ===========================================================================
+// handleMessage: group_convergence (P3/CONV-HONEST)
+// ===========================================================================
+describe("handleMessage: group_convergence", () => {
+  // The server marks a clean review that reviewed nothing as `not-counted`
+  // with a reason; the store keeps that reason on the GroupRecord so the
+  // UI can say "not counted". Any other transition clears it.
+  function seedGroup() {
+    useStore.getState().upsertGroup({
+      sessionGroupId: "grp_ws",
+      primarySessionId: "s1",
+      observerSessionId: "s1_obs",
+      pairing: "claude+codex",
+      status: "active",
+    } as never);
+  }
+
+  it("stores the not-counted reason, then clears it on a counted transition", () => {
+    wsModule.connectSession("s1");
+    seedGroup();
+    fireMessage({
+      type: "group_convergence", sessionGroupId: "grp_ws", transition: "not-counted",
+      cycleNumber: 0, convergenceThreshold: 3, convergenceState: "in-progress",
+      notCountedReason: "no_files_read", timestamp: 1,
+    });
+    expect(useStore.getState().groups.get("grp_ws")?.lastReviewNotCounted).toBe("no_files_read");
+
+    fireMessage({
+      type: "group_convergence", sessionGroupId: "grp_ws", transition: "cycle-progress",
+      cycleNumber: 1, convergenceThreshold: 3, convergenceState: "in-progress", timestamp: 2,
+    });
+    const g = useStore.getState().groups.get("grp_ws");
+    expect(g?.lastReviewNotCounted).toBeUndefined();
+    expect(g?.cycleNumber).toBe(1);
+  });
+});

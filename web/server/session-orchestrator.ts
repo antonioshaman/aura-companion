@@ -34,6 +34,7 @@ import { writeAtomicJson } from "./atomic-write.js";
 import { findReviewForCheckpointSync } from "./review-watcher.js";
 import { CheckpointLineSnapshots } from "./observer-line-snapshots.js";
 import { ObserverReplyCapture } from "./observer-reply.js";
+import { ObserverReadLedger } from "./observer-read-ledger.js";
 import {
   CouncilCheckpointPipeline,
   type CouncilWatcherEntry,
@@ -292,6 +293,8 @@ export class SessionOrchestrator {
     },
     resolveCliVersion: (sessionId) => this.wsBridge.getSession(sessionId)?.state.claude_code_version || undefined,
   });
+  /** P3/CONV-HONEST: host-observed observer reads per dispatched wake. */
+  private observerReadLedger = new ObserverReadLedger();
   /** P4/C1a: checkpoint → wake → review pipeline; reads the group maps above. */
   private checkpointPipeline = new CouncilCheckpointPipeline({
     watchers: this.councilWatchers,
@@ -301,6 +304,7 @@ export class SessionOrchestrator {
     isApiLimitReached: (sessionId) => this.autoProceed.isApiLimitReached(sessionId),
     replyCapture: this.observerReplyCapture,
     lineSnapshots: this.checkpointLineSnapshots,
+    readLedger: this.observerReadLedger,
   });
   /**
    * P4/C1b: observer wake scheduling outside the live watcher (missed-
@@ -408,6 +412,7 @@ export class SessionOrchestrator {
         this.checkpointPipeline.markDisputedStops(sessionGroupId, cwd, findings, opts),
       replyCapture: this.observerReplyCapture,
       lineSnapshots: this.checkpointLineSnapshots,
+      readLedger: this.observerReadLedger,
     });
   }
 
@@ -469,6 +474,7 @@ export class SessionOrchestrator {
     // every session without an outstanding wake.
     companionBus.on("message:assistant", ({ sessionId, message }) => {
       this.observerReplyCapture.onAssistant(sessionId, message);
+      this.observerReadLedger.onAssistant(sessionId, message);
     });
     companionBus.on("observer:turn-done", ({ sessionId }) => {
       try {

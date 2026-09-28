@@ -2,11 +2,18 @@
  * Convergence tracker — bidirectional pipeline Story 4.1.
  *
  * Folds the `group:review` event stream into a per-group clean-cycle
- * counter. Three transitions:
+ * counter. Four transitions:
  *
  *   - `cycle-progress`   counter incremented (still below threshold)
  *   - `converged`        counter reached threshold (default 3)
  *   - `revoked`          a STOP arrived after convergence; counter ← 0
+ *   - `not-counted`      a STOP-free review that reviewed nothing (P3/
+ *                        CONV-HONEST): the checkpoint had no changed files,
+ *                        or the host saw the observer read none of them.
+ *                        Counter unchanged.
+ *
+ * "Converged" means "N reviews in a row without a blocker", nothing more —
+ * the UI says so and never claims the work is ready to ship.
  *
  * Pure-function core (`nextStateAfterReview`) makes the state-machine
  * transitions trivially table-driven from tests. The live wiring
@@ -34,6 +41,9 @@ export interface ConvergenceGroupState {
   convergenceState: ConvergenceState;
   threshold: number;
 }
+
+/** Why a STOP-free review was not folded as a clean cycle. */
+export type ConvergenceNotCountedReason = "no_changed_files" | "no_files_read";
 
 export interface ConvergenceTransitionResult {
   next: ConvergenceGroupState;
@@ -136,6 +146,23 @@ export function reviewHasStop(findings: readonly BrowserObserverFinding[]): bool
 }
 
 /**
+ * P3/CONV-HONEST: a review only counts toward convergence when the observer
+ * demonstrably reviewed something — the checkpoint changed ≥1 file AND the
+ * host saw the observer read ≥1 of them (`observer-read-ledger.ts`). Returns
+ * the reason a review is NOT countable, or `null` when it is. STOP reviews
+ * are always folded (a blocker resets the counter whether or not the
+ * observer read anything), so this only gates clean reviews.
+ */
+export function reviewNotCountedReason(
+  artifactsChanged: number,
+  artifactsRead: number,
+): ConvergenceNotCountedReason | null {
+  if (!(artifactsChanged > 0)) return "no_changed_files";
+  if (!(artifactsRead > 0)) return "no_files_read";
+  return null;
+}
+
+/**
  * Live wiring: bind a per-group state map to the companion bus.
  * Caller provides a getter for the current `frozen` flag (e.g.,
  * `() => coordinator.getGroupStatus(sid) === "degraded"`) so the
@@ -181,6 +208,8 @@ export class ConvergenceTracker {
         payload.checkpointId,
         payload.observerProvider,
         payload.findings,
+        payload.artifactsChanged,
+        payload.artifactsRead,
       );
     });
   }
@@ -208,8 +237,30 @@ export class ConvergenceTracker {
     checkpointId: string,
     observerProvider: string,
     findings: readonly BrowserObserverFinding[],
+    artifactsChanged: number,
+    artifactsRead: number,
   ): void {
     const frozen = this.isFrozen(sessionGroupId);
+    const hasStop = reviewHasStop(findings);
+    // P3/CONV-HONEST: a clean review that reviewed nothing never folds. It
+    // does NOT consume the got-045 dedup slot either — the counter is
+    // untouched, so a later review of the same checkpoint that did read the
+    // changes may still count (once).
+    const notCounted = hasStop ? null : reviewNotCountedReason(artifactsChanged, artifactsRead);
+    if (!frozen && notCounted) {
+      const prev = this.states.get(sessionGroupId)
+        ?? initialConvergenceState(this.getThreshold(sessionGroupId));
+      this.states.set(sessionGroupId, prev);
+      companionBus.emit("group:convergence", {
+        sessionGroupId,
+        transition: "not-counted",
+        cycleNumber: prev.cleanCycleCount,
+        convergenceThreshold: prev.threshold,
+        convergenceState: prev.convergenceState,
+        notCountedReason: notCounted,
+      });
+      return;
+    }
     // got-045: dedup a checkpoint's review per provider. A distinct
     // (checkpointId, provider) pair folds exactly once; a replay of the same
     // pair — the restart catch-up signature — is dropped before it can touch
@@ -230,7 +281,6 @@ export class ConvergenceTracker {
     }
     const prev = this.states.get(sessionGroupId)
       ?? initialConvergenceState(this.getThreshold(sessionGroupId));
-    const hasStop = reviewHasStop(findings);
     const { next, emit } = nextStateAfterReview(prev, hasStop, frozen);
     this.states.set(sessionGroupId, next);
     if (emit !== "noop") {
@@ -239,6 +289,7 @@ export class ConvergenceTracker {
         transition: emit,
         cycleNumber: next.cleanCycleCount,
         convergenceThreshold: next.threshold,
+        convergenceState: next.convergenceState,
       });
     }
   }

@@ -738,7 +738,8 @@ describe("SessionItem", () => {
     expect(badge).toHaveAttribute("aria-label", "Convergence cycle 2 of 3 clean cycles");
   });
 
-  it("renders the converged badge (✅) when convergenceState is converged", () => {
+  // P3/CONV-HONEST: the converged badge reports a streak, never readiness.
+  it("renders the converged badge (✅) as an honest streak, with a not-a-guarantee tooltip", () => {
     render(
       <SessionItem
         {...buildProps({
@@ -749,8 +750,54 @@ describe("SessionItem", () => {
     );
     const badge = screen.getByTestId("council-convergence-badge");
     expect(badge).toHaveAttribute("data-state", "converged");
-    expect(badge.textContent).toContain("Converged");
-    expect(badge).toHaveAttribute("aria-label", "Converged — ready to ship");
+    expect(badge.textContent).toContain("3× no blockers");
+    expect(badge.getAttribute("aria-label")).toMatch(/^3 reviews in a row without blockers\. Not a readiness guarantee/);
+    expect(badge.getAttribute("title")).toContain("Not a readiness guarantee");
+    expect(badge.textContent).not.toMatch(/ready to ship|converged/i);
+    expect(badge.getAttribute("aria-label")).not.toMatch(/ready to ship/i);
+  });
+
+  it("renders a muted 'not counted' badge at cycle 0 when the latest review read nothing", () => {
+    render(
+      <SessionItem
+        {...buildProps({
+          councilRole: "orchestrator",
+          councilConvergence: { state: "in-progress", cycleNumber: 0, threshold: 3, degraded: false, notCounted: "no_files_read" },
+        })}
+      />,
+    );
+    const badge = screen.getByTestId("council-convergence-badge");
+    expect(badge).toHaveAttribute("data-state", "not-counted");
+    expect(badge.textContent).toBe("not counted");
+    expect(badge.getAttribute("aria-label")).toContain("not counted: no files read");
+  });
+
+  it("keeps mid-cycle progress and explains an uncounted latest review in the tooltip", () => {
+    render(
+      <SessionItem
+        {...buildProps({
+          councilRole: "orchestrator",
+          councilConvergence: { state: "in-progress", cycleNumber: 2, threshold: 3, degraded: false, notCounted: "no_changed_files" },
+        })}
+      />,
+    );
+    const badge = screen.getByTestId("council-convergence-badge");
+    expect(badge).toHaveAttribute("data-state", "cycle-progress");
+    expect(badge.textContent).toContain("2/3");
+    expect(badge.getAttribute("title")).toContain("not counted: no changed files");
+  });
+
+  it("passes axe a11y checks with the 'not counted' badge rendered", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(
+      <SessionItem
+        {...buildProps({
+          councilRole: "orchestrator",
+          councilConvergence: { state: "in-progress", cycleNumber: 0, threshold: 3, degraded: false, notCounted: "no_files_read" },
+        })}
+      />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
   });
 
   it("shows the degraded badge (⚠️) with the counter frozen, taking priority over cycle progress (AC 193)", () => {

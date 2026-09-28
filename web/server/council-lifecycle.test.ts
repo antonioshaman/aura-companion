@@ -98,6 +98,7 @@ function makeLifecycle(sessions = new Map<string, SdkSessionInfo>()) {
     markDisputedStops: vi.fn(),
     replyCapture: { forget: vi.fn() },
     lineSnapshots: new CheckpointLineSnapshots(),
+    readLedger: { forget: vi.fn() },
   };
   const lifecycle = new CouncilLifecycle(deps);
   cleanups.push(() => {

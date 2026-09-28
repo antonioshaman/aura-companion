@@ -35,3 +35,5 @@ core `CLAUDE.md` under "Council Mode convention floor" so reviewers always load 
 
 Full conventions list in `conventions.md`. Council review artefacts (per-expert findings + synthesised `FINAL-REVIEW.md`) in `.council/review-output/<TIMESTAMP>/`.
 Archived process history (closed handoffs, plans, bug write-ups, past council batches) lives in `docs/history/` — see `docs/history/README.md`. It is history, not current rules: never treat it as a source of active conventions.
+
+**Convergence counter is a streak, not a verdict (P3/CONV-HONEST).** `convergence-tracker.ts` folds only STOP-free reviews in which the host saw the observer read ≥1 changed file of the checkpoint (`observer-read-ledger.ts`, fed by the observer's `message:assistant` tool_use frames — Claude `Read`/`Grep`/`Bash`, Codex `commandExecution` → `Bash`). Spawn/empty checkpoints and reviews with no reads emit `not-counted` (counter unchanged; UI shows "not counted: …"). A STOP always resets. The UI says "N reviews in a row without blockers" with a not-a-readiness-guarantee tooltip — never "ready to ship". Threshold (default 3, range 2–5) is unchanged.

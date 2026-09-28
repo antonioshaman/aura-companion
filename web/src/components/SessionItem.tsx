@@ -2,7 +2,12 @@ import { useState, useEffect, useCallback, useRef, type RefObject } from "react"
 import type { SessionItem as SessionItemType } from "../utils/project-grouping.js";
 import { ProviderBadges, pairHalvesAfterBackendCollapse, providerChipClass } from "./council/index.js";
 import { cliFailedCopy } from "../cli-failed-copy.js";
-import type { CliFailedReason } from "../types.js";
+import {
+  CONVERGENCE_DISCLAIMER,
+  CONVERGENCE_NOT_COUNTED_COPY,
+  type CliFailedReason,
+  type ConvergenceNotCountedReason,
+} from "../types.js";
 
 interface SessionItemProps {
   session: SessionItemType;
@@ -107,9 +112,13 @@ function StatusDot({ status }: { status: DerivedStatus }) {
  *
  * Priority ladder mirrors AC 191-193:
  *   degraded            →  ⚠️ Degraded   (amber-500, counter frozen)
- *   converged           →  ✅ Converged  (emerald-500)
+ *   converged           →  ✅ N× no blockers (emerald-500) — a streak, never
+ *                          "ready to ship" (P3/CONV-HONEST)
  *   cycleNumber > 0     →  🔄 N/T        (mid-cycle progress)
+ *   notCounted, cycle 0 →  ∅ not counted (muted; latest review read nothing)
  *   otherwise           →  nothing (cycle 0, no progress yet — no clutter)
+ *
+ * Whenever the latest review was not counted, the tooltip says why.
  *
  * The click-to-open popover (View final review / Reset counter / Dismiss) from
  * AC 194 needs server endpoints that do not exist yet and is a documented
@@ -120,6 +129,8 @@ export interface CouncilConvergenceInfo {
   cycleNumber?: number;
   threshold?: number;
   degraded: boolean;
+  /** P3/CONV-HONEST: latest review was not counted, and why. */
+  notCounted?: ConvergenceNotCountedReason;
 }
 
 function CouncilConvergenceBadge({ info }: { info: CouncilConvergenceInfo }) {
@@ -137,17 +148,20 @@ function CouncilConvergenceBadge({ info }: { info: CouncilConvergenceInfo }) {
       </span>
     );
   }
+  const notCountedNote = info.notCounted ? ` Last review — ${CONVERGENCE_NOT_COUNTED_COPY[info.notCounted].toLowerCase()}.` : "";
   if (info.state === "converged") {
+    const n = info.cycleNumber ?? info.threshold ?? 0;
+    const label = `${n} reviews in a row without blockers. ${CONVERGENCE_DISCLAIMER}${notCountedNote}`;
     return (
       <span
         data-testid="council-convergence-badge"
         data-state="converged"
-        aria-label="Converged — ready to ship"
-        title="Converged — ready to ship"
+        aria-label={label}
+        title={label}
         className="flex items-center gap-0.5 text-[9px] font-semibold px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-500 leading-none shrink-0"
       >
         <span aria-hidden="true">✅</span>
-        <span>Converged</span>
+        <span>{n}× no blockers</span>
       </span>
     );
   }
@@ -157,11 +171,25 @@ function CouncilConvergenceBadge({ info }: { info: CouncilConvergenceInfo }) {
         data-testid="council-convergence-badge"
         data-state="cycle-progress"
         aria-label={`Convergence cycle ${info.cycleNumber} of ${info.threshold} clean cycles`}
-        title={`Cycle ${info.cycleNumber} of ${info.threshold} clean cycles`}
+        title={`${info.cycleNumber} of ${info.threshold} reviews in a row without blockers. ${CONVERGENCE_DISCLAIMER}${notCountedNote}`}
         className="flex items-center gap-0.5 text-[9px] font-semibold px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-400 leading-none shrink-0"
       >
         <span aria-hidden="true">🔄</span>
         <span>{info.cycleNumber}/{info.threshold}</span>
+      </span>
+    );
+  }
+  if (info.notCounted) {
+    const copy = CONVERGENCE_NOT_COUNTED_COPY[info.notCounted];
+    return (
+      <span
+        data-testid="council-convergence-badge"
+        data-state="not-counted"
+        aria-label={`Last review ${copy.toLowerCase()}. ${CONVERGENCE_DISCLAIMER}`}
+        title={`Last review ${copy.toLowerCase()}. ${CONVERGENCE_DISCLAIMER}`}
+        className="flex items-center gap-0.5 text-[9px] font-semibold px-1.5 py-0.5 rounded bg-cc-hover text-cc-muted leading-none shrink-0"
+      >
+        <span>not counted</span>
       </span>
     );
   }

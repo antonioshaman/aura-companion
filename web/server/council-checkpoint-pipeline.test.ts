@@ -9,6 +9,7 @@ import {
 } from "./council-checkpoint-pipeline.js";
 import { CheckpointLineSnapshots } from "./observer-line-snapshots.js";
 import { ObserverReplyCapture } from "./observer-reply.js";
+import { ObserverReadLedger } from "./observer-read-ledger.js";
 import { readCouncilWakeSentinel } from "./council-wake-sentinel.js";
 import { companionBus } from "./event-bus.js";
 import type { SessionGroupCoordinator } from "./session-group-coordinator.js";
@@ -31,6 +32,7 @@ interface Harness {
   send: ReturnType<typeof vi.fn>;
   setCoordinator: (c: SessionGroupCoordinator | null) => void;
   setApiLimited: (v: boolean) => void;
+  ledger: ObserverReadLedger;
   cwd: string;
 }
 
@@ -50,6 +52,7 @@ function makeHarness(): Harness {
   let coordinator: SessionGroupCoordinator | null = null;
   let apiLimited = false;
   const send = vi.fn(() => ({ kind: "sent" as const }));
+  const ledger = new ObserverReadLedger();
   const pipeline = new CouncilCheckpointPipeline({
     watchers,
     groupMeta: meta,
@@ -63,6 +66,7 @@ function makeHarness(): Harness {
       resolveCliVersion: () => undefined,
     }),
     lineSnapshots: new CheckpointLineSnapshots(),
+    readLedger: ledger,
   });
   watchers.set(GROUP, {
     cwd,
@@ -86,13 +90,18 @@ function makeHarness(): Harness {
     rmSync(cwd, { recursive: true, force: true });
   });
   return {
-    pipeline, watchers, meta, send, cwd,
+    pipeline, watchers, meta, send, cwd, ledger,
     setCoordinator: (c) => { coordinator = c; },
     setApiLimited: (v) => { apiLimited = v; },
   };
 }
 
-function checkpoint(sequence: number, id = `chk_${sequence}`, group = GROUP): CheckpointPayload {
+function checkpoint(
+  sequence: number,
+  id = `chk_${sequence}`,
+  group = GROUP,
+  artifactPaths: string[] = [],
+): CheckpointPayload {
   return {
     schema_version: 1,
     checkpoint_id: id,
@@ -100,7 +109,7 @@ function checkpoint(sequence: number, id = `chk_${sequence}`, group = GROUP): Ch
     sequence,
     session_group_id: group,
     emitted_at: "2026-01-01T00:00:00Z",
-    artifact_paths: [],
+    artifact_paths: artifactPaths,
   } as CheckpointPayload;
 }
 
@@ -215,5 +224,78 @@ describe("CouncilCheckpointPipeline (standalone, DI only)", () => {
     expect(reviews.map((r) => r.checkpointId)).toEqual(["chk_1"]);
     expect(h.watchers.get(GROUP)!.pendingReviewDeadline).toBeNull();
     expect(h.meta.get(GROUP)!.lastReviewedCheckpointId).toBe("chk_1");
+  });
+
+  // P3/CONV-HONEST: the review event carries the HOST's count of changed
+  // files the observer read while answering this checkpoint's wake — fed by
+  // the observer's own tool_use frames, never by the review text. Spawn /
+  // empty checkpoints report 0 changed files; a review with no reads reports
+  // 0 reads; both are later refused by the convergence counter.
+  describe("host-observed reads on group:review (CONV-HONEST)", () => {
+    function review(checkpointId: string) {
+      return {
+        schema_version: 1,
+        observer_wake_payload_version_echo: 1,
+        checkpoint_id: checkpointId,
+        phase: "council-plan",
+        session_group_id: GROUP,
+        reviewed_at: "2026-01-01T00:00:00Z",
+        observer_provider: "claude",
+        observer_model: "m",
+        observer_cli_version: "1",
+        findings: [],
+      } as never;
+    }
+    function toolUse(name: string, input: Record<string, unknown>) {
+      return { type: "assistant", message: { content: [{ type: "tool_use", id: "t", name, input }] } };
+    }
+    function capture() {
+      const reviews: Array<{ artifactsChanged: number; artifactsRead: number }> = [];
+      cleanups.push(companionBus.on("group:review", (e) => { reviews.push(e); }));
+      return reviews;
+    }
+
+    it("spawn checkpoint (no artifact paths) → 0 changed, 0 read", () => {
+      const h = makeHarness();
+      h.setCoordinator(activeCoordinator());
+      const reviews = capture();
+      h.pipeline.handleCouncilCheckpoint(GROUP, checkpoint(1));
+      h.pipeline.handleCouncilReview(GROUP, review("chk_1"));
+      expect(reviews[0]).toMatchObject({ artifactsChanged: 0, artifactsRead: 0 });
+    });
+
+    it("observer that read nothing → changed counted, 0 read", () => {
+      const h = makeHarness();
+      h.setCoordinator(activeCoordinator());
+      const reviews = capture();
+      h.pipeline.handleCouncilCheckpoint(GROUP, checkpoint(1, "chk_1", GROUP, ["src/a.ts", "src/b.ts"]));
+      // A directory listing is activity, not a read of a changed file.
+      h.ledger.onAssistant(OBSERVER, toolUse("Bash", { command: "ls src" }));
+      h.pipeline.handleCouncilReview(GROUP, review("chk_1"));
+      expect(reviews[0]).toMatchObject({ artifactsChanged: 2, artifactsRead: 0 });
+    });
+
+    it("Claude Read and a Codex shell read of changed files are both counted", () => {
+      const h = makeHarness();
+      h.setCoordinator(activeCoordinator());
+      const reviews = capture();
+      h.pipeline.handleCouncilCheckpoint(GROUP, checkpoint(1, "chk_1", GROUP, ["src/a.ts", "src/b.ts"]));
+      h.ledger.onAssistant(OBSERVER, toolUse("Read", { file_path: join(h.cwd, "src/a.ts") }));
+      // Codex commandExecution items arrive as a Bash tool_use.
+      h.ledger.onAssistant(OBSERVER, toolUse("Bash", { command: "sed -n '1,80p' src/b.ts" }));
+      h.pipeline.handleCouncilReview(GROUP, review("chk_1"));
+      expect(reviews[0]).toMatchObject({ artifactsChanged: 2, artifactsRead: 2 });
+    });
+
+    it("reads recorded for an older wake do not count for a newer checkpoint", () => {
+      const h = makeHarness();
+      h.setCoordinator(activeCoordinator());
+      const reviews = capture();
+      h.pipeline.handleCouncilCheckpoint(GROUP, checkpoint(1, "chk_1", GROUP, ["src/a.ts"]));
+      h.ledger.onAssistant(OBSERVER, toolUse("Read", { file_path: "src/a.ts" }));
+      h.pipeline.handleCouncilCheckpoint(GROUP, checkpoint(2, "chk_2", GROUP, ["src/a.ts"]));
+      h.pipeline.handleCouncilReview(GROUP, review("chk_2"));
+      expect(reviews[0]).toMatchObject({ artifactsRead: 0 });
+    });
   });
 });

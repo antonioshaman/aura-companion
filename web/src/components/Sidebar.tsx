@@ -758,6 +758,7 @@ export function Sidebar() {
             cycleNumber: group.cycleNumber,
             threshold: group.convergenceThreshold,
             degraded,
+            ...(group.lastReviewNotCounted ? { notCounted: group.lastReviewNotCounted } : {}),
           }
         : undefined;
     return { pairing: group.pairing, unreadStops: unread, role, convergence };
