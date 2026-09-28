@@ -91,6 +91,16 @@ export class SessionRecovery {
   // Prevents repeated "keeps crashing" warnings for dead sessions.
   readonly relaunchExhaustedNotified = new Set<string>();
 
+  /**
+   * P4/KILL-INTENTIONAL (ASK #19): sessions the user stopped on purpose (REST
+   * `POST /sessions/:id/kill`, the UI kill button). Unlike an idle-kill, a
+   * returning browser or a transport-drop `session:relaunch-needed` must NOT
+   * bring them back — only an explicit relaunch or a new browser-typed user
+   * message does, and both clear the mark first (see the orchestrator's
+   * `resumeUserStopped`). In memory only: a server restart forgets it.
+   */
+  private readonly stoppedByUser = new Set<string>();
+
   // Timers for proactive keepalive relaunches (for cancellation on delete)
   private keepaliveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -164,8 +174,22 @@ export class SessionRecovery {
     this.relaunchExhaustedNotified.delete(sessionId);
   }
 
+  markStoppedByUser(sessionId: string): void {
+    this.stoppedByUser.add(sessionId);
+  }
+
+  /** Returns true when the session was marked (and is now cleared). */
+  clearStoppedByUser(sessionId: string): boolean {
+    return this.stoppedByUser.delete(sessionId);
+  }
+
+  isStoppedByUser(sessionId: string): boolean {
+    return this.stoppedByUser.has(sessionId);
+  }
+
   /** Drop all relaunch bookkeeping for a deleted session. */
   forgetSession(sessionId: string): void {
+    this.stoppedByUser.delete(sessionId);
     this.autoRelaunchCounts.delete(sessionId);
     this.relaunchExhaustedNotified.delete(sessionId);
     this.relaunchingSet.delete(sessionId);
@@ -311,6 +335,15 @@ export class SessionRecovery {
     if (this.relaunchingSet.has(sessionId)) return;
     const info = this.launcher.getSession(sessionId);
     if (info?.archived) return;
+    // P4/KILL-INTENTIONAL: a user-stopped session stays down until an explicit
+    // relaunch or a new user message clears the mark.
+    if (this.stoppedByUser.has(sessionId)) {
+      log.info("orchestrator", "auto-relaunch skipped: session stopped by user", {
+        event: "session.relaunch.skipped_user_stopped",
+        sessionId,
+      });
+      return;
+    }
 
     // If we've already notified the user about relaunch exhaustion, bail out
     // silently. Without this, every reconnect event from a dead session

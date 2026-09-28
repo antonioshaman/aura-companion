@@ -319,6 +319,7 @@ export class SessionOrchestrator {
     dispatchWake: (sessionGroupId, payload) => {
       this.dispatchObserverWake(sessionGroupId, payload);
     },
+    isSessionStoppedByUser: (sessionId) => this.recovery.isStoppedByUser(sessionId),
   });
   private councilGroupDegradedReason = new Map<string, CouncilDegradedReason>();
   /**
@@ -401,7 +402,8 @@ export class SessionOrchestrator {
       idleTimerEnactor: this.autoProceed.enactor,
       isRelaunchExhausted: (sessionId) => this.recovery.isRelaunchExhausted(sessionId),
       createSession: (body) => this.doCreateSession(body),
-      killSession: (sessionId) => this.killSession(sessionId),
+      // Coordinator rollback / archive kills are not user stops.
+      killSession: (sessionId) => this.killSessionProcess(sessionId),
       handleCouncilCheckpoint: (sessionGroupId, payload) => this.handleCouncilCheckpoint(sessionGroupId, payload),
       handleCouncilReview: (sessionGroupId, payload, reviewedAt) =>
         this.handleCouncilReview(sessionGroupId, payload, reviewedAt),
@@ -461,7 +463,15 @@ export class SessionOrchestrator {
     // (bridge → manager.noteUserMessage) and Task 11.8 sticky-token clear on
     // every session exit. See `council-auto-proceed-controller.ts`.
     this.autoProceed.wire({
-      onUserFrameObserved: (cb) => this.wsBridge.onUserFrameObserved(cb),
+      // P4/KILL-INTENTIONAL rides the same single subscription: only
+      // browser-typed frames reach it (cron/agent/REST/council-peer
+      // injections are filtered in the bridge), and such a frame to a
+      // user-stopped session brings it back.
+      onUserFrameObserved: (cb) =>
+        this.wsBridge.onUserFrameObserved((sessionId) => {
+          cb(sessionId);
+          this.resumeOnUserMessage(sessionId);
+        }),
       onSessionExited: (cb) => companionBus.on("session:exited", ({ sessionId }) => cb(sessionId)),
       onOrchestratorTurnDone: (cb) =>
         companionBus.on("orchestrator:turn-done", ({ sessionId, blockedByStop }) => cb(sessionId, blockedByStop)),
@@ -1250,12 +1260,94 @@ export class SessionOrchestrator {
 
   // ── Kill ───────────────────────────────────────────────────────────────────
 
+  /**
+   * User-driven stop (REST `POST /sessions/:id/kill`, the UI kill button).
+   *
+   * P4/KILL-INTENTIONAL (ASK #19): before this the kill was indistinguishable
+   * from a crash — proactive keepalive relaunched it 3 s later and a council
+   * half entered the reconnect ladder. Now every id is marked intentional AND
+   * stopped-by-user BEFORE any kill runs; for a council half that is BOTH
+   * halves (EC-2) and both are stopped, so the pair stays in a consistent
+   * "both down" state without reconnect/degraded churn. The marks are cleared
+   * by {@link resumeUserStopped} (explicit relaunch or a new user message), so
+   * a later real crash is healed by auto-relaunch again.
+   */
   async killSession(sessionId: string): Promise<{ ok: boolean }> {
+    if (!this.launcher.getSession(sessionId)) return this.killSessionProcess(sessionId);
+    const ids = this.stopScope(sessionId);
+    const group = this.coordinator?.findBySessionId(sessionId);
+    for (const id of ids) {
+      this.intentionalKills.add(id);
+      this.recovery.markStoppedByUser(id);
+      this.recovery.cancelKeepaliveTimer(id);
+      this.wsBridge.cancelDisconnectTimer(id);
+      log.info("orchestrator", "session stopped by user", {
+        event: "session.kill.user_stopped",
+        sessionId: id,
+        ...(group ? { sessionGroupId: group.sessionGroupId, role: this.groupRoleOf(group, id) } : {}),
+      });
+    }
+    // A pending auto-proceed fire would queue a synthetic turn into the dead
+    // orchestrator; cancel it (hold state is kept — this is not an archive).
+    if (group) this.autoProceed.getManager().cancel(group.primary.sessionId);
+    let clicked = { ok: false };
+    for (const id of ids) {
+      const result = await this.killSessionProcess(id);
+      if (id === sessionId) clicked = result;
+    }
+    return clicked;
+  }
+
+  /** Plain process kill (coordinator rollback/archive, sweep of the stopped pair). */
+  private async killSessionProcess(sessionId: string): Promise<{ ok: boolean }> {
     const killed = await this.launcher.kill(sessionId);
     if (killed) {
       containerManager.removeContainer(sessionId);
     }
     return { ok: killed };
+  }
+
+  /** The clicked session, or both halves of its live council group (EC-2). */
+  private stopScope(sessionId: string): string[] {
+    const group = this.coordinator?.findBySessionId(sessionId);
+    if (!group || group.status === "archived") return [sessionId];
+    return [group.primary.sessionId, group.observer.sessionId];
+  }
+
+  private groupRoleOf(
+    group: { primary: { sessionId: string } },
+    sessionId: string,
+  ): "orchestrator" | "observer" {
+    return group.primary.sessionId === sessionId ? "orchestrator" : "observer";
+  }
+
+  /**
+   * Clears the user-stop marks of `sessionId` and, for a council half, of its
+   * still-stopped partner (the pair was stopped together, it resumes
+   * together). Returns the ids that were resumed; the caller relaunches them.
+   */
+  private resumeUserStopped(sessionId: string, trigger: "manual_relaunch" | "user_message"): string[] {
+    if (!this.recovery.isStoppedByUser(sessionId)) return [];
+    const group = this.coordinator?.findBySessionId(sessionId);
+    const resumed = this.stopScope(sessionId).filter((id) => this.recovery.isStoppedByUser(id));
+    for (const id of resumed) {
+      this.recovery.clearStoppedByUser(id);
+      this.intentionalKills.delete(id);
+      log.info("orchestrator", "user stop cleared", {
+        event: "session.kill.user_stop_cleared",
+        trigger,
+        sessionId: id,
+        ...(group ? { sessionGroupId: group.sessionGroupId, role: this.groupRoleOf(group, id) } : {}),
+      });
+    }
+    return resumed;
+  }
+
+  /** A browser-typed message to a user-stopped session brings it (and its pair) back. */
+  private resumeOnUserMessage(sessionId: string): void {
+    for (const id of this.resumeUserStopped(sessionId, "user_message")) {
+      void this.recovery.handleAutoRelaunch(id);
+    }
   }
 
   // ── Relaunch ───────────────────────────────────────────────────────────────
@@ -1269,6 +1361,11 @@ export class SessionOrchestrator {
       return { ok: false, error: "Session is archived and cannot be relaunched" };
     }
     this.clearAutoRelaunchCount(sessionId);
+    // P4/KILL-INTENTIONAL: an explicit relaunch ends a user stop; a stopped
+    // council partner comes back through the regular auto-relaunch path.
+    for (const id of this.resumeUserStopped(sessionId, "manual_relaunch")) {
+      if (id !== sessionId) void this.recovery.handleAutoRelaunch(id);
+    }
     const session = this.wsBridge.getSession(sessionId);
     if (session?.stateMachine) {
       session.stateMachine.transition("starting", "relaunch_initiated");
@@ -1380,6 +1477,10 @@ export class SessionOrchestrator {
       // ladder instead of the absorbing intentional-kill path.
       this.intentionalKills.add(group.primary.sessionId);
       this.intentionalKills.add(group.observer.sessionId);
+      // Archive supersedes a user stop: after unarchive the pair must come
+      // back on browser open as before.
+      this.recovery.clearStoppedByUser(group.primary.sessionId);
+      this.recovery.clearStoppedByUser(group.observer.sessionId);
 
       this.recovery.cancelKeepaliveTimer(group.primary.sessionId);
       this.recovery.cancelKeepaliveTimer(group.observer.sessionId);
@@ -1432,6 +1533,7 @@ export class SessionOrchestrator {
     );
 
     this.intentionalKills.add(sessionId);
+    this.recovery.clearStoppedByUser(sessionId);
     this.recovery.cancelKeepaliveTimer(sessionId);
     this.wsBridge.cancelDisconnectTimer(sessionId);
     await this.launcher.kill(sessionId);

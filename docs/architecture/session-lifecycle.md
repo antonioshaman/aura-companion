@@ -20,3 +20,13 @@ token for WS sessions. stdio argv carries no sessionId at all, so the spawn-time
 `argvSha256` is the equivalent anchor — without it a healthy stdio CLI reads as `mismatch`
 and the orphan-reaper kills it.
 
+
+**User stop** (`POST /api/sessions/:id/kill`, the UI kill button) is not a crash. Before
+any kill runs, `killSession` marks the session intentional and "stopped by user". For a
+council half it marks BOTH halves and stops both (EC-2). Keepalive, `session:relaunch-needed`
+(a returning browser, a transport drop) and the observer catch-up scan skip such sessions,
+and the group gets no reconnect/degraded transition. The mark is cleared only by an explicit
+relaunch or by a new browser-typed user message. Either one brings back the whole stopped
+pair, so a later real crash is auto-relaunched again. Archive and delete drop the mark.
+The mark lives in memory: after a server restart a stopped session behaves as before
+(it relaunches when a browser opens it).
