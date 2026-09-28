@@ -27,7 +27,7 @@ import { metricsCollector } from "./metrics-collector.js";
 import { log } from "./logger.js";
 import type { SessionGroupCoordinator } from "./session-group-coordinator.js";
 import type { IdleTimerManager } from "./idle-timer-manager.js";
-import { CouncilAutoProceedController } from "./council-auto-proceed-controller.js";
+import { CouncilAutoProceedController, type ResolveStopResult } from "./council-auto-proceed-controller.js";
 import { SessionRecovery } from "./session-recovery.js";
 import type { CheckpointPayload, ObserverReviewPayload } from "./council-types.js";
 import { writeAtomicJson } from "./atomic-write.js";
@@ -373,6 +373,10 @@ export class SessionOrchestrator {
         this.coordinator?.applyEvent(sessionGroupId, event);
       },
       iterationCeiling: resolveIterationCeilingOnce(),
+      // FIX-AP-1: restore the unresolved-STOP hold after a restart from the
+      // same view the browser bootstraps its blocker banner from.
+      loadGroupFindings: async (sessionGroupId) =>
+        (await this.councilLifecycle.getGroupReviewsForBootstrap(sessionGroupId))?.findings ?? null,
     });
     this.recovery = new SessionRecovery({
       launcher: this.launcher,
@@ -1393,6 +1397,9 @@ export class SessionOrchestrator {
       // edge cases as belt-and-braces, not as the primary defence.
       // Idempotent on never-armed sessions.
       this.autoProceed.clearPendingSyntheticTurn(group.primary.sessionId);
+      // FIX-AP-1: cancel a pending idle timer explicitly (not only via the
+      // group status gate at fire time) and drop the STOP hold state.
+      this.autoProceed.noteArchived(group.primary.sessionId);
 
       await coord.archiveGroup(group.sessionGroupId);
 
@@ -1570,7 +1577,18 @@ export class SessionOrchestrator {
     sessionGroupId: string,
     input: { claim: string; evidencePath: string; findingId?: string },
   ): ReturnType<CouncilLifecycle["disputeObserverFinding"]> {
-    return this.councilLifecycle.disputeObserverFinding(sessionGroupId, input);
+    const result = this.councilLifecycle.disputeObserverFinding(sessionGroupId, input);
+    // FIX-AP-1: a disputed STOP no longer holds auto-proceed.
+    if (result.ok) this.autoProceed.noteDispute(sessionGroupId, input);
+    return result;
+  }
+
+  /**
+   * FIX-AP-1: a human dismissed an observer STOP ("Dismiss for now"). Releases
+   * the auto-proceed hold for that finding; not a dispute.
+   */
+  resolveObserverStop(sessionGroupId: string, findingId: string): ResolveStopResult {
+    return this.autoProceed.resolveStop(sessionGroupId, findingId);
   }
 
   // ── Cleanup ────────────────────────────────────────────────────────────────

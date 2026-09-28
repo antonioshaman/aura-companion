@@ -976,6 +976,14 @@ export const api = {
   disputeObserverFinding: (groupId: string, finding: { finding_id: string; claim: string; evidence_path: string }) =>
     post<{ ok: true; added: boolean }>(`/groups/${encodeURIComponent(groupId)}/disputes`, finding),
 
+  // Council Mode (FIX-AP-1) — "Dismiss for now": release the STOP's hold on
+  // auto-proceed. Not a dispute; the claim is not recorded as wrong.
+  resolveObserverStop: (groupId: string, findingId: string) =>
+    post<{ ok: true; released: boolean; persisted: boolean }>(
+      `/groups/${encodeURIComponent(groupId)}/stops/resolve`,
+      { finding_id: findingId },
+    ),
+
   // Council Mode — REST bootstrap of group records on app mount. Closes
   // `docs/history/BUG-council-mode-group-rest-bootstrap-gap.md` (PR #68). The browser's
   // `groupBySessionId` map was previously populated EXCLUSIVELY by the

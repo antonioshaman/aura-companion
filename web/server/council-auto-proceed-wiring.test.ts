@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   CouncilAutoProceedController,
   isBlockingStopFinding,
@@ -13,6 +16,8 @@ import {
   resolveAutoProceedIterationCeiling,
 } from "./auto-proceed-types.js";
 import type { BrowserObserverFinding } from "./session-types.js";
+import { log } from "./logger.js";
+import { readStopResolutions } from "./auto-proceed-stop-resolutions.js";
 
 // aura-meta-diet P4/AP-WIRE (ASK #9). Before this step nothing emitted
 // `orchestrator_turn_idle`, so auto-proceed never armed in prod even for
@@ -29,8 +34,28 @@ const ORCH = "sess-orch";
 const OBS = "sess-obs";
 const IDLE_MS = 60_000;
 
+const cleanups: Array<() => void> = [];
+afterEach(() => {
+  while (cleanups.length) cleanups.pop()!();
+  vi.restoreAllMocks();
+});
+
+function tmpWorkspace(): string {
+  const dir = mkdtempSync(join(tmpdir(), "ap-hold-"));
+  cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
+
+/** Lets the async restore (loadGroupFindings) settle. */
+async function flush(): Promise<void> {
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+}
+
 interface Harness {
   clock: FakeClock;
+  /** Manager log events (fire-cap-reached, iterations-reset, …). */
+  managerLog: string[];
+  persisted: number[];
   manager: IdleTimerManager;
   controller: CouncilAutoProceedController;
   sent: string[];
@@ -46,9 +71,15 @@ function makeHarness(opts: {
   observerBackend?: "claude" | "codex";
   iterationCeiling?: number;
   layerAllowed?: boolean;
+  /** Workspace for persisted STOP resolutions (resolveStop). */
+  cwd?: string;
+  /** FIX-AP-1 restore source; omitted → nothing to restore. */
+  loadGroupFindings?: (gid: string) => Promise<readonly BrowserObserverFinding[] | null>;
 } = {}): Harness {
   const clock = new FakeClock(0);
   const sent: string[] = [];
+  const managerLog: string[] = [];
+  const persisted: number[] = [];
   const configs = new Map<string, AutoProceedOnIdleConfig>();
   if (opts.config) configs.set(ORCH, opts.config);
 
@@ -72,7 +103,10 @@ function makeHarness(opts: {
           }
         : null,
     getGroupStatus: () => coordinator.get(GROUP)?.status ?? "unknown",
-    persistTrace: () => ({ ok: true }),
+    persistTrace: (_ws, _gid, trace) => {
+      persisted.push(trace.iterationCount);
+      return { ok: true };
+    },
     appendSummary: () => ({ ok: true }),
     sendSyntheticFrame: (_sid, body) => {
       sent.push(body);
@@ -80,7 +114,9 @@ function makeHarness(opts: {
       h.turnState = { kind: "in-flight" };
       return { ok: true };
     },
-    logEvent: () => undefined,
+    logEvent: (e) => {
+      managerLog.push(e.event);
+    },
   });
 
   const groupMeta = new Map([[GROUP, { primarySessionId: ORCH }]]);
@@ -88,7 +124,8 @@ function makeHarness(opts: {
   const controller = new CouncilAutoProceedController({
     manager,
     groupMeta,
-    watchers: new Map(),
+    watchers: new Map(opts.cwd ? [[GROUP, { cwd: opts.cwd }]] : []),
+    loadGroupFindings: opts.loadGroupFindings,
     isAutoProceedAllowed: () => opts.layerAllowed ?? true,
     getAutoProceedConfig: (sid) => configs.get(sid),
     getGroupIdForSession: (sid) => (sid === ORCH || sid === OBS ? GROUP : undefined),
@@ -131,6 +168,8 @@ function makeHarness(opts: {
   });
 
   h.clock = clock;
+  h.managerLog = managerLog;
+  h.persisted = persisted;
   h.manager = manager;
   h.controller = controller;
   h.sent = sent;
@@ -258,10 +297,14 @@ describe("auto-proceed wiring (AP-WIRE)", () => {
     expect(h.manager.isArmed(ORCH)).toBe(false);
   });
 
-  // Safety: a blocking observer STOP cancels the pending timer and holds
-  // re-arming; a later clean review resumes (re-arms while idle).
-  it("a blocking STOP cancels and holds; a clean review re-arms", () => {
-    const h = makeHarness({ config: { idleMs: IDLE_MS, maxIterations: 3 } });
+  // Safety (rewritten for FIX-AP-1; was "a clean review re-arms"): a blocking
+  // observer STOP cancels the pending timer and holds re-arming. A later
+  // review without a STOP does NOT release it — the browser's banner keeps
+  // showing every unresolved STOP across reviews, so auto-proceed firing then
+  // would act past a blocker the human can still see. Only a human dismissal
+  // releases it (the dismissal path re-arms while idle).
+  it("a blocking STOP cancels and holds; a clean review does not release; a dismissal re-arms", () => {
+    const h = makeHarness({ config: { idleMs: IDLE_MS, maxIterations: 3 }, cwd: tmpWorkspace() });
     h.turnDone();
     expect(h.manager.isArmed(ORCH)).toBe(true);
 
@@ -272,10 +315,216 @@ describe("auto-proceed wiring (AP-WIRE)", () => {
     h.clock.advance(IDLE_MS * 2);
     expect(h.sent).toHaveLength(0);
 
-    h.review([{ ...stop(), severity: "WARN" }]);
+    h.review([{ ...stop(), id: "f-warn", severity: "WARN" }]);
+    h.turnDone();
+    expect(h.manager.isArmed(ORCH)).toBe(false);
+
+    expect(h.controller.resolveStop(GROUP, "f1")).toEqual({ ok: true, released: true, persisted: true });
     expect(h.manager.isArmed(ORCH)).toBe(true);
     h.clock.advance(IDLE_MS);
     expect(h.sent).toHaveLength(1);
+  });
+
+  // The supervisor's scenario, verbatim: STOP in review A, NOTE in review B →
+  // the timer must not fire, however long the orchestrator stays idle.
+  it("STOP in review A, NOTE in review B → never fires", () => {
+    const h = makeHarness({ config: { idleMs: IDLE_MS, maxIterations: 3 } });
+    h.review([stop({ id: "a-stop" })]);
+    h.review([stop({ id: "b-note", severity: "NOTE" })]);
+    h.turnDone();
+    h.clock.advance(IDLE_MS * 10);
+    expect(h.sent).toHaveLength(0);
+    expect(h.controller.getUnresolvedStopIds(GROUP)).toEqual(["a-stop"]);
+  });
+
+  // Every unresolved STOP holds; releasing one of two keeps holding.
+  it("holds until the last unresolved STOP is released", () => {
+    const h = makeHarness({ config: { idleMs: IDLE_MS, maxIterations: 3 }, cwd: tmpWorkspace() });
+    h.review([stop({ id: "s1" })]);
+    h.review([stop({ id: "s2", claim: "`other` leaks", evidence_path: "web/server/y.ts" })]);
+    h.turnDone();
+    h.controller.resolveStop(GROUP, "s1");
+    expect(h.manager.isArmed(ORCH)).toBe(false);
+    h.controller.resolveStop(GROUP, "s2");
+    expect(h.manager.isArmed(ORCH)).toBe(true);
+  });
+
+  // (5) B2b dispute → controller: the disputed STOP and a held re-raise of the
+  // same claim on the same file are both released (what the banner hides);
+  // a STOP about another file keeps holding.
+  it("a dispute releases the disputed STOP and matching re-raises, not other files", () => {
+    const h = makeHarness({ config: { idleMs: IDLE_MS, maxIterations: 3 } });
+    h.review([stop({ id: "d1" })]);
+    h.review([stop({ id: "d2" }), stop({ id: "other", evidence_path: "web/server/z.ts" })]);
+    h.controller.noteDispute(GROUP, { findingId: "d1", claim: stop().claim, evidencePath: stop().evidence_path });
+    expect(h.controller.getUnresolvedStopIds(GROUP)).toEqual(["other"]);
+    h.controller.noteDispute(GROUP, { findingId: "other", claim: stop().claim, evidencePath: "web/server/z.ts" });
+    h.turnDone();
+    expect(h.manager.isArmed(ORCH)).toBe(true);
+  });
+
+  // A dismissed id never holds again, even if the same finding is replayed.
+  it("a resolved finding id does not re-hold when the review is replayed", () => {
+    const h = makeHarness({ config: { idleMs: IDLE_MS, maxIterations: 3 }, cwd: tmpWorkspace() });
+    h.review([stop()]);
+    h.controller.resolveStop(GROUP, "f1");
+    h.review([stop()]);
+    h.turnDone();
+    expect(h.manager.isArmed(ORCH)).toBe(true);
+  });
+
+  it("resolveStop validates input and the group", () => {
+    const h = makeHarness({ config: { idleMs: IDLE_MS, maxIterations: 3 }, cwd: tmpWorkspace() });
+    expect(h.controller.resolveStop(GROUP, "")).toEqual({ ok: false, reason: "invalid_input" });
+    expect(h.controller.resolveStop(GROUP, "x".repeat(300))).toEqual({ ok: false, reason: "invalid_input" });
+    expect(h.controller.resolveStop("grp_ffffffffffffffffffffffffffffffff", "f1")).toEqual({
+      ok: false,
+      reason: "unknown_group",
+    });
+  });
+
+  // (2) Restart: the hold is rebuilt from what is on disk — the reviews as the
+  // banner bootstraps them, minus persisted dismissals — before anything arms.
+  it("after a restart, a persisted STOP holds and a persisted dismissal does not", async () => {
+    const cwd = tmpWorkspace();
+    // Session 1: STOP s1 dismissed, STOP s2 still open.
+    const before = makeHarness({ config: { idleMs: IDLE_MS, maxIterations: 3 }, cwd });
+    before.review([stop({ id: "s1" }), stop({ id: "s2", evidence_path: "web/server/y.ts" })]);
+    before.controller.resolveStop(GROUP, "s1");
+    expect(readStopResolutions(cwd, GROUP)).toEqual({ ok: true, findingIds: ["s1"] });
+
+    // Session 2 (fresh controller = restarted server): reviews still on disk.
+    const onDisk = [stop({ id: "s1" }), stop({ id: "s2", evidence_path: "web/server/y.ts" })];
+    const after = makeHarness({ config: { idleMs: IDLE_MS, maxIterations: 3 }, cwd, loadGroupFindings: async () => onDisk });
+    after.turnDone();
+    expect(after.manager.isArmed(ORCH)).toBe(false); // fail-closed while restoring
+    await flush();
+    expect(after.manager.isArmed(ORCH)).toBe(false);
+    expect(after.controller.getUnresolvedStopIds(GROUP)).toEqual(["s2"]);
+
+    after.controller.resolveStop(GROUP, "s2");
+    expect(after.manager.isArmed(ORCH)).toBe(true);
+  });
+
+  // Restore with nothing blocking: the idle edge that arrived during the
+  // restore is re-tried, so a clean group still arms after a restart.
+  it("after a restart with no open STOP, the idle edge seen during the restore arms", async () => {
+    const h = makeHarness({
+      config: { idleMs: IDLE_MS, maxIterations: 3 },
+      loadGroupFindings: async () => [stop({ weakEvidence: "no_cited_lines" }), stop({ id: "n", severity: "NOTE" })],
+    });
+    h.turnDone();
+    expect(h.manager.isArmed(ORCH)).toBe(false);
+    await flush();
+    expect(h.manager.isArmed(ORCH)).toBe(true);
+  });
+
+  // A failed restore keeps holding (never fires past STOPs it could not read)
+  // and is retried on the next idle edge.
+  it("a failed restore holds and is retried on the next edge", async () => {
+    let calls = 0;
+    const h = makeHarness({
+      config: { idleMs: IDLE_MS, maxIterations: 3 },
+      loadGroupFindings: async () => {
+        calls++;
+        if (calls === 1) throw new Error("disk gone");
+        return [];
+      },
+    });
+    h.turnDone();
+    await flush();
+    expect(h.manager.isArmed(ORCH)).toBe(false);
+    h.turnDone();
+    await flush();
+    expect(calls).toBe(2);
+    expect(h.manager.isArmed(ORCH)).toBe(true);
+  });
+
+  // (4) A real (browser-typed) user message ends the unattended episode: the
+  // cap counter restarts, and the zeroed trace is persisted so a restart does
+  // not bring the old count back.
+  it("a human message resets the iteration counter and persists it", () => {
+    const h = makeHarness({ config: { idleMs: IDLE_MS, maxIterations: 1 } });
+    h.turnDone();
+    h.clock.advance(IDLE_MS);
+    expect(h.sent).toHaveLength(1);
+    h.turnDone();
+    h.clock.advance(IDLE_MS);
+    expect(h.sent).toHaveLength(1); // capped
+
+    h.userFrame();
+    expect(h.manager.getIterationCount(ORCH)).toBe(0);
+    expect(h.persisted.at(-1)).toBe(0);
+    expect(h.managerLog).toContain("idle-timer.iterations-reset");
+    h.turnDone();
+    h.clock.advance(IDLE_MS);
+    expect(h.sent).toHaveLength(2);
+  });
+
+  // (4) Past the cap nothing arms, so the manager never logs fire-cap-reached
+  // on each idle edge; the controller logs the cap once per episode.
+  it("does not arm past the cap and logs the cap once", () => {
+    const info = vi.spyOn(log, "info");
+    const h = makeHarness({ config: { idleMs: IDLE_MS, maxIterations: 1 } });
+    h.turnDone();
+    h.clock.advance(IDLE_MS);
+    for (let i = 0; i < 4; i++) {
+      h.turnDone();
+      expect(h.manager.isArmed(ORCH)).toBe(false);
+      h.clock.advance(IDLE_MS);
+    }
+    expect(h.managerLog).not.toContain("idle-timer.fire-cap-reached");
+    const capLogs = info.mock.calls.filter((c) => (c[2] as { event?: string })?.event === "auto-proceed.cap-reached");
+    expect(capLogs).toHaveLength(1);
+  });
+
+  // (3) EC-9: arm / refuse(reason) / hold / release are structured logs with
+  // event + sessionGroupId + sessionId + role.
+  it("logs arm, refusal, hold and release as EC-9 entries", () => {
+    const info = vi.spyOn(log, "info");
+    const h = makeHarness({ config: { idleMs: IDLE_MS, maxIterations: 3 }, cwd: tmpWorkspace() });
+    h.turnDone();
+    h.review([stop()]);
+    h.turnDone();
+    h.turnState = { kind: "in-flight" };
+    h.controller.resolveStop(GROUP, "f1"); // release → re-try → refused (in-flight)
+    const byEvent = (e: string) =>
+      info.mock.calls.map((c) => c[2] as Record<string, unknown>).filter((x) => x?.event === e);
+    for (const e of ["auto-proceed.armed", "auto-proceed.stop-held", "auto-proceed.hold", "auto-proceed.stop-released", "auto-proceed.arm-refused"]) {
+      const [entry] = byEvent(e);
+      expect(entry, e).toMatchObject({ sessionGroupId: GROUP, sessionId: ORCH, role: "orchestrator" });
+    }
+    expect(byEvent("auto-proceed.arm-refused")[0]).toMatchObject({ reason: "in-flight" });
+    expect(byEvent("auto-proceed.hold")[0]).toMatchObject({ reason: "unresolved_stop", findingIds: ["f1"] });
+    expect(byEvent("auto-proceed.stop-released")[0]).toMatchObject({ via: "dismissed", findingIds: ["f1"] });
+  });
+
+  // (5) Archive cancels a pending timer explicitly and drops the hold.
+  it("archiving cancels the pending timer", () => {
+    const h = makeHarness({ config: { idleMs: IDLE_MS, maxIterations: 3 } });
+    h.turnDone();
+    expect(h.manager.isArmed(ORCH)).toBe(true);
+    h.controller.noteArchived(ORCH);
+    expect(h.manager.isArmed(ORCH)).toBe(false);
+    h.clock.advance(IDLE_MS * 2);
+    expect(h.sent).toHaveLength(0);
+
+    h.review([stop({ id: "held" })]);
+    expect(h.controller.getUnresolvedStopIds(GROUP)).toEqual(["held"]);
+    h.controller.noteArchived(ORCH);
+    expect(h.controller.getUnresolvedStopIds(GROUP)).toEqual([]);
+  });
+
+  // A resolutions file that cannot be parsed fails toward holding.
+  it("an unreadable resolutions file holds on every restored STOP", async () => {
+    const cwd = tmpWorkspace();
+    mkdirSync(join(cwd, ".council", "state"), { recursive: true });
+    writeFileSync(join(cwd, ".council", "state", `${GROUP}-resolved-stops.json`), "{not json");
+    const h = makeHarness({ config: { idleMs: IDLE_MS, maxIterations: 3 }, cwd, loadGroupFindings: async () => [stop()] });
+    h.turnDone();
+    await flush();
+    expect(h.controller.getUnresolvedStopIds(GROUP)).toEqual(["f1"]);
+    expect(h.manager.isArmed(ORCH)).toBe(false);
   });
 
   // Weak-evidence (B2) and disputed (B2b) STOPs are not in the blocker banner,

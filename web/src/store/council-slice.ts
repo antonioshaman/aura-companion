@@ -226,7 +226,11 @@ export interface CouncilSlice {
   toggleObserverPanel: (sessionId: string) => void;
   setObserverPanelWidth: (sessionId: string, widthPx: number) => void;
   dismissFirstRunHint: () => void;
-  /** Hide a STOP from the banner in this tab only. Never persisted, never sent to the server. */
+  /**
+   * Hide a STOP from the banner in this tab. Not a dispute: nothing marks the
+   * claim wrong. The server is told only so the STOP stops holding
+   * auto-proceed (FIX-AP-1: the hold lives exactly as long as the banner).
+   */
   dismissStop: (findingId: string) => void;
   /**
    * The human says the STOP's claim is wrong: dismiss it locally and persist a
@@ -238,6 +242,21 @@ export interface CouncilSlice {
   // inside `sessions-slice.removeSession` (single write path; React
   // council review #12 — eliminating the parallel `cleanupCouncilForSession`
   // export the prior commit shipped unused).
+}
+
+function hideStopLocally(set: (fn: (s: AppState) => Partial<AppState>) => void, findingId: string): void {
+  set((s) => {
+    const dismissedStopIds = new Set(s.dismissedStopIds);
+    dismissedStopIds.add(findingId);
+    return { dismissedStopIds };
+  });
+}
+
+function findGroupOfFinding(findings: ReadonlyMap<string, ObserverFinding[]>, findingId: string): string | undefined {
+  for (const [groupId, list] of findings) {
+    if (list.some((f) => f.id === findingId)) return groupId;
+  }
+  return undefined;
 }
 
 export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = (set, get) => ({
@@ -484,16 +503,20 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
 
   dismissStop: (findingId) => {
     if (get().dismissedStopIds.has(findingId)) return;
-    set((s) => {
-      const dismissedStopIds = new Set(s.dismissedStopIds);
-      dismissedStopIds.add(findingId);
-      return { dismissedStopIds };
+    hideStopLocally(set, findingId);
+    // FIX-AP-1: release the STOP's auto-proceed hold. Best effort: the banner
+    // is already hidden; a failed request only keeps auto-proceed held.
+    const groupId = findGroupOfFinding(get().findings, findingId);
+    if (groupId === undefined) return;
+    api.resolveObserverStop(groupId, findingId).catch((err: unknown) => {
+      console.warn("[council] STOP dismissal not sent", err);
     });
   },
 
   disputeStop: (findingId) => {
     if (get().dismissedStopIds.has(findingId)) return;
-    get().dismissStop(findingId);
+    // A dispute releases the auto-proceed hold server-side by itself.
+    hideStopLocally(set, findingId);
     // B2b: tell the server, so the dispute survives a reload and a re-raised
     // copy of the claim on the same file stays out of the banner. Best effort:
     // the local dismissal above already hid this banner.

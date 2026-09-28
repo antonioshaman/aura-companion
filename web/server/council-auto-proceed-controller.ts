@@ -9,6 +9,12 @@ import {
 import type { GroupEvent } from "./group-state-machine.js";
 import type { BrowserObserverFinding } from "./session-types.js";
 import { AUTO_PROCEED_MAX_ITERATIONS_CEILING } from "./auto-proceed-types.js";
+import { matchDispute } from "./observer-disputes.js";
+import {
+  MAX_FINDING_ID_LEN,
+  addStopResolution,
+  readStopResolutions,
+} from "./auto-proceed-stop-resolutions.js";
 import { log } from "./logger.js";
 
 /** Validated per-session opt-in (routes.ts boundary parser output). */
@@ -77,7 +83,33 @@ export interface CouncilAutoProceedControllerDeps {
   /** AP-WIRE — `COMPANION_ORCH_AUTO_PROCEED_MAX_ITERATIONS_CEILING`, already
    *  resolved; clamps the per-session `maxIterations`. Defaults to the hard cap. */
   iterationCeiling?: number;
+  /**
+   * FIX-AP-1 — every finding of the group as the blocker banner sees it after
+   * a reload (REST bootstrap: grounding + disputes applied). Restores the
+   * unresolved-STOP hold after a server restart. Omitted → nothing to restore
+   * (tests / non-council wiring).
+   */
+  loadGroupFindings?: (sessionGroupId: string) => Promise<readonly BrowserObserverFinding[] | null>;
 }
+
+/**
+ * Per-group mirror of the blocker banner (FIX-AP-1). A blocking STOP stays
+ * here until a human dismisses or disputes it; a later clean review does not
+ * release it, because the banner keeps showing it too.
+ */
+interface GroupStopHold {
+  /** `undefined` → not restored from disk yet; `pending` → restore in flight. */
+  restore: "pending" | "done" | undefined;
+  unresolved: Map<string, BrowserObserverFinding>;
+  /** Finding ids a human dismissed (persisted in `<group>-resolved-stops.json`). */
+  resolved: Set<string>;
+  /** An idle edge arrived while restoring; re-tried when the restore lands. */
+  idleWaiting: boolean;
+}
+
+export type ResolveStopResult =
+  | { ok: true; released: boolean; persisted: boolean }
+  | { ok: false; reason: "unknown_group" | "invalid_input" };
 
 /** The subscription points {@link CouncilAutoProceedController.wire} needs. */
 export interface AutoProceedWiring {
@@ -98,13 +130,14 @@ export class CouncilAutoProceedController {
   private readonly getGroupIdForSession?: (sessionId: string) => string | undefined;
   private readonly applyGroupEvent?: (sessionGroupId: string, event: GroupEvent) => void;
   private readonly iterationCeiling: number;
+  private readonly loadGroupFindings?: (sessionGroupId: string) => Promise<readonly BrowserObserverFinding[] | null>;
   /**
-   * Orchestrator sessions whose group's latest observer review carries a
-   * blocking STOP. In-memory only: a server restart forgets it until the
-   * next review lands (the adapter's own `blockedByStop` axis is reset on
-   * every turn edge, so it cannot hold this).
+   * Unresolved blocking STOPs per group (FIX-AP-1). The adapter's own
+   * `blockedByStop` axis is reset on every turn edge, so it cannot hold this.
    */
-  private readonly stopBlocked = new Set<string>();
+  private readonly holds = new Map<string, GroupStopHold>();
+  /** Orchestrators whose cap refusal was already logged this episode. */
+  private readonly capLogged = new Set<string>();
 
   /**
    * PLAN Task 8: route applyEvent's auto-proceed idle-timer descriptors into
@@ -113,14 +146,36 @@ export class CouncilAutoProceedController {
    */
   readonly enactor: IdleTimerEnactor = {
     arm: (sessionId, options) => {
+      const sessionGroupId = this.getGroupIdForSession?.(sessionId);
       if (this.isAutoProceedAllowed && !this.isAutoProceedAllowed(sessionId)) {
         log.info("auto-proceed", "arm refused: autoProceed layer disabled", {
           event: "auto-proceed.layer-disabled",
+          sessionGroupId,
           sessionId,
+          role: "orchestrator",
         });
         return;
       }
-      this.manager.arm(sessionId, options);
+      // EC-9: the manager's verdict is logged, not dropped (FIX-AP-1).
+      const result = this.manager.arm(sessionId, options);
+      if (result?.kind === "armed") {
+        log.info("auto-proceed", "idle timer armed", {
+          event: "auto-proceed.armed",
+          sessionGroupId,
+          sessionId,
+          role: "orchestrator",
+          idleMs: options.idleMs,
+          maxIterations: options.maxIterations,
+        });
+      } else {
+        log.info("auto-proceed", "arm refused", {
+          event: "auto-proceed.arm-refused",
+          sessionGroupId,
+          sessionId,
+          role: "orchestrator",
+          reason: result?.kind === "refused" ? result.reason : "unknown",
+        });
+      }
     },
     cancel: (sessionId) => this.manager.cancel(sessionId),
     noteUserMessage: (sessionId) => this.manager.noteUserMessage(sessionId),
@@ -142,6 +197,7 @@ export class CouncilAutoProceedController {
       deps.iterationCeiling ?? AUTO_PROCEED_MAX_ITERATIONS_CEILING,
       AUTO_PROCEED_MAX_ITERATIONS_CEILING,
     );
+    this.loadGroupFindings = deps.loadGroupFindings;
   }
 
   getManager(): IdleTimerManager {
@@ -168,6 +224,12 @@ export class CouncilAutoProceedController {
     // shipped with unit tests but no production wiring.
     wiring.onUserFrameObserved((sessionId) => {
       this.manager.noteUserMessage(sessionId);
+      // FIX-AP-1: a human message ends the unattended episode, so the
+      // iteration budget starts again. Only browser-typed frames reach here.
+      if (this.getAutoProceedConfig?.(sessionId)) {
+        this.manager.resetIterationCount(sessionId);
+        this.capLogged.delete(sessionId);
+      }
     });
 
     // Task 11.8 — clear the pending-synthetic-turn sticky token on every
@@ -192,10 +254,9 @@ export class CouncilAutoProceedController {
       this.noteOrchestratorIdle(sessionId, blockedByStop);
     });
 
-    // AP-WIRE — the producer of `stop_finding_raised` / `_resolved`. A
-    // blocking STOP cancels the pending timer and holds re-arming until a
-    // review without one lands; that edge re-tries the arm (the manager's
-    // gate refuses if the orchestrator is mid-turn).
+    // AP-WIRE — the producer of `stop_finding_raised`. A blocking STOP
+    // cancels the pending timer and holds re-arming until a human dismisses
+    // or disputes it (FIX-AP-1: same lifetime as the blocker banner).
     wiring.onGroupReview?.((sessionGroupId, findings) => {
       this.noteGroupReview(sessionGroupId, findings);
     });
@@ -205,32 +266,249 @@ export class CouncilAutoProceedController {
   noteOrchestratorIdle(sessionId: string, blockedByStop: boolean): void {
     const config = this.getAutoProceedConfig?.(sessionId);
     if (!config) return; // not opted in (or layer off at create) — nothing arms
-    if (blockedByStop || this.stopBlocked.has(sessionId)) return;
+    if (blockedByStop) return;
     const sessionGroupId = this.getGroupIdForSession?.(sessionId);
     if (!sessionGroupId) return;
+    const hold = this.holdFor(sessionGroupId);
+    if (!this.ensureRestored(sessionGroupId, sessionId)) {
+      // Fail closed until the persisted STOPs are known.
+      hold.idleWaiting = true;
+      this.logHold(sessionGroupId, sessionId, "restoring", []);
+      return;
+    }
+    if (hold.unresolved.size > 0) {
+      this.logHold(sessionGroupId, sessionId, "unresolved_stop", [...hold.unresolved.keys()]);
+      return;
+    }
+    const maxIterations = Math.min(config.maxIterations, this.iterationCeiling);
+    // FIX-AP-1: past the cap there is nothing to arm. The manager would only
+    // refuse at fire time and log `fire-cap-reached` on every idle edge.
+    const iteration = this.manager.getIterationCount(sessionId);
+    if (iteration >= maxIterations) {
+      if (!this.capLogged.has(sessionId)) {
+        this.capLogged.add(sessionId);
+        log.info("auto-proceed", "not arming: iteration cap reached", {
+          event: "auto-proceed.cap-reached",
+          sessionGroupId,
+          sessionId,
+          role: "orchestrator",
+          iteration,
+          maxIterations,
+        });
+      }
+      return;
+    }
     this.applyGroupEvent?.(sessionGroupId, {
       type: "orchestrator_turn_idle",
       sessionId,
       idleMs: config.idleMs,
-      maxIterations: Math.min(config.maxIterations, this.iterationCeiling),
+      maxIterations,
     });
   }
 
-  /** Tracks blocking STOPs per orchestrator from each processed review. */
+  /**
+   * Adds each blocking STOP of a processed review to the group's hold. A
+   * review without one releases nothing: the banner still shows the earlier
+   * STOP (FIX-AP-1 — "STOP in A, NOTE in B" must not fire).
+   */
   noteGroupReview(sessionGroupId: string, findings: readonly BrowserObserverFinding[]): void {
     const primary = this.groupMeta.get(sessionGroupId)?.primarySessionId;
     if (!primary || !this.getAutoProceedConfig?.(primary)) return;
-    const blocking = findings.some(isBlockingStopFinding);
-    const wasBlocked = this.stopBlocked.has(primary);
-    if (blocking) {
-      this.stopBlocked.add(primary);
-      this.applyGroupEvent?.(sessionGroupId, { type: "stop_finding_raised", sessionId: primary });
-      return;
+    const hold = this.holdFor(sessionGroupId);
+    this.ensureRestored(sessionGroupId, primary);
+    const added: string[] = [];
+    for (const f of findings) {
+      if (!isBlockingStopFinding(f) || hold.resolved.has(f.id) || hold.unresolved.has(f.id)) continue;
+      hold.unresolved.set(f.id, f);
+      added.push(f.id);
     }
-    if (!wasBlocked) return;
-    this.stopBlocked.delete(primary);
+    if (added.length === 0) return;
+    log.info("auto-proceed", "observer STOP holds auto-proceed", {
+      event: "auto-proceed.stop-held",
+      sessionGroupId,
+      sessionId: primary,
+      role: "orchestrator",
+      findingIds: added,
+      unresolvedStops: hold.unresolved.size,
+    });
+    this.applyGroupEvent?.(sessionGroupId, { type: "stop_finding_raised", sessionId: primary });
+  }
+
+  /**
+   * A human dismissed a STOP ("Dismiss for now"). Persists the resolution so
+   * a restart does not re-hold on it, then releases the hold for that id.
+   * The in-memory release happens even when the write fails: the human's
+   * decision is known now; only its survival across a restart is lost.
+   */
+  resolveStop(sessionGroupId: string, findingId: string): ResolveStopResult {
+    if (typeof findingId !== "string" || findingId.length === 0 || findingId.length > MAX_FINDING_ID_LEN) {
+      return { ok: false, reason: "invalid_input" };
+    }
+    const primary = this.groupMeta.get(sessionGroupId)?.primarySessionId;
+    const cwd = this.watchers.get(sessionGroupId)?.cwd;
+    if (!primary || !cwd) return { ok: false, reason: "unknown_group" };
+    const written = addStopResolution(cwd, sessionGroupId, findingId);
+    if (!written.ok) {
+      log.warn("auto-proceed", "STOP resolution not persisted", {
+        event: "auto-proceed.resolution-persist-failed",
+        sessionGroupId,
+        sessionId: primary,
+        role: "orchestrator",
+        findingId,
+        reason: written.reason,
+      });
+    }
+    this.holds.get(sessionGroupId)?.resolved.add(findingId);
+    const released = this.release(sessionGroupId, primary, [findingId], "dismissed");
+    return { ok: true, released, persisted: written.ok };
+  }
+
+  /**
+   * A human disputed a STOP (B2b). Releases that finding and every held STOP
+   * the dispute now matches — the same ones the banner stops showing.
+   */
+  noteDispute(sessionGroupId: string, input: { claim: string; evidencePath: string; findingId?: string }): void {
+    const hold = this.holds.get(sessionGroupId);
+    const primary = this.groupMeta.get(sessionGroupId)?.primarySessionId;
+    if (!hold || !primary) return;
+    const record = { claim: input.claim, evidencePath: input.evidencePath, source: "browser_dispute" as const, disputedAt: "" };
+    const ids = [...hold.unresolved.values()]
+      .filter((f) => f.id === input.findingId || matchDispute([record], f.claim, f.evidence_path) !== null)
+      .map((f) => f.id);
+    this.release(sessionGroupId, primary, ids, "disputed");
+  }
+
+  /**
+   * The pair is being archived: cancel any pending timer explicitly and drop
+   * the group's hold state. Unarchive re-restores from disk on the next edge.
+   */
+  noteArchived(sessionId: string): void {
+    if (!this.getAutoProceedConfig?.(sessionId)) return;
+    const sessionGroupId = this.getGroupIdForSession?.(sessionId);
+    this.manager.cancel(sessionId);
+    if (sessionGroupId) this.holds.delete(sessionGroupId);
+    this.capLogged.delete(sessionId);
+    log.info("auto-proceed", "timer cancelled on archive", {
+      event: "auto-proceed.archived",
+      sessionGroupId,
+      sessionId,
+      role: "orchestrator",
+    });
+  }
+
+  /** Test / diagnostics: the finding ids currently holding the group. */
+  getUnresolvedStopIds(sessionGroupId: string): string[] {
+    return [...(this.holds.get(sessionGroupId)?.unresolved.keys() ?? [])];
+  }
+
+  private holdFor(sessionGroupId: string): GroupStopHold {
+    let hold = this.holds.get(sessionGroupId);
+    if (!hold) {
+      hold = { restore: undefined, unresolved: new Map(), resolved: new Set(), idleWaiting: false };
+      this.holds.set(sessionGroupId, hold);
+    }
+    return hold;
+  }
+
+  /**
+   * Restores the hold from what is on disk (reviews as the banner sees them,
+   * minus persisted dismissals) once per group. Returns true when the hold is
+   * complete; false while the restore is in flight. A failed restore keeps
+   * holding and is retried on the next event (fail-closed).
+   */
+  private ensureRestored(sessionGroupId: string, primary: string): boolean {
+    const hold = this.holdFor(sessionGroupId);
+    if (hold.restore === "done") return true;
+    if (hold.restore === "pending") return false;
+    const load = this.loadGroupFindings;
+    if (!load) {
+      hold.restore = "done";
+      return true;
+    }
+    hold.restore = "pending";
+    const cwd = this.watchers.get(sessionGroupId)?.cwd;
+    void (async () => {
+      try {
+        const findings = await load(sessionGroupId);
+        if (this.holds.get(sessionGroupId) !== hold) return; // archived meanwhile
+        if (cwd) {
+          const read = readStopResolutions(cwd, sessionGroupId);
+          if (read.ok) {
+            for (const id of read.findingIds) hold.resolved.add(id);
+          } else {
+            log.warn("auto-proceed", "STOP resolutions unreadable; holding on every STOP", {
+              event: "auto-proceed.resolutions-unreadable",
+              sessionGroupId,
+              sessionId: primary,
+              role: "orchestrator",
+              reason: read.reason,
+            });
+          }
+        }
+        for (const f of findings ?? []) {
+          if (isBlockingStopFinding(f) && !hold.unresolved.has(f.id)) hold.unresolved.set(f.id, f);
+        }
+        for (const id of hold.resolved) hold.unresolved.delete(id);
+        hold.restore = "done";
+        log.info("auto-proceed", "STOP hold restored", {
+          event: "auto-proceed.hold-restored",
+          sessionGroupId,
+          sessionId: primary,
+          role: "orchestrator",
+          unresolvedStops: hold.unresolved.size,
+        });
+        const waiting = hold.idleWaiting;
+        hold.idleWaiting = false;
+        if (hold.unresolved.size > 0) {
+          this.applyGroupEvent?.(sessionGroupId, { type: "stop_finding_raised", sessionId: primary });
+        } else if (waiting) {
+          this.noteOrchestratorIdle(primary, false);
+        }
+      } catch (err) {
+        hold.restore = undefined;
+        log.warn("auto-proceed", "STOP hold restore failed; holding", {
+          event: "auto-proceed.hold-restore-failed",
+          sessionGroupId,
+          sessionId: primary,
+          role: "orchestrator",
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    })();
+    return false;
+  }
+
+  /** Removes ids from the hold; the last one out re-tries the arm. */
+  private release(sessionGroupId: string, primary: string, ids: readonly string[], via: "dismissed" | "disputed"): boolean {
+    const hold = this.holds.get(sessionGroupId);
+    if (!hold) return false;
+    const removed = ids.filter((id) => hold.unresolved.delete(id));
+    if (removed.length === 0) return false;
+    log.info("auto-proceed", "observer STOP released by a human", {
+      event: "auto-proceed.stop-released",
+      sessionGroupId,
+      sessionId: primary,
+      role: "orchestrator",
+      findingIds: removed,
+      via,
+      unresolvedStops: hold.unresolved.size,
+    });
+    if (hold.unresolved.size > 0) return true;
     this.applyGroupEvent?.(sessionGroupId, { type: "stop_finding_resolved", sessionId: primary });
-    this.noteOrchestratorIdle(primary, false);
+    // The manager's gate refuses if the orchestrator is mid-turn.
+    if (hold.restore === "done") this.noteOrchestratorIdle(primary, false);
+    return true;
+  }
+
+  private logHold(sessionGroupId: string, sessionId: string, reason: "restoring" | "unresolved_stop", findingIds: string[]): void {
+    log.info("auto-proceed", "not arming: held", {
+      event: "auto-proceed.hold",
+      sessionGroupId,
+      sessionId,
+      role: "orchestrator",
+      reason,
+      ...(findingIds.length > 0 ? { findingIds } : {}),
+    });
   }
 
   /**

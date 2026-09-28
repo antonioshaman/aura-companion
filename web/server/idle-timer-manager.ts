@@ -379,6 +379,31 @@ export class IdleTimerManager implements IdleTimerProbe {
   }
 
   /**
+   * A human wrote to the orchestrator (aura-meta-diet FIX-AP-1): the
+   * unattended episode is over, so the iteration budget starts again. Clears
+   * `cappedAt` and persists the zeroed trace, so a restart does not
+   * rehydrate the old count. `firedAt` stays as history. Only human-origin
+   * frames may call this: synthetic and server-injected frames never reach
+   * the bridge's user-frame observers. No-op when nothing has fired.
+   */
+  resetIterationCount(sessionId: string): void {
+    const state = this.states.get(sessionId);
+    if (!state || (state.iterationCount === 0 && state.cappedAt === null)) return;
+    const previous = state.iterationCount;
+    state.iterationCount = 0;
+    state.cappedAt = null;
+    const view = this.deps.getSession(sessionId);
+    if (view) this.persistOrLog(view, state);
+    this.deps.logEvent({
+      event: "idle-timer.iterations-reset",
+      sessionId,
+      sessionGroupId: view?.sessionGroupId ?? undefined,
+      role: "orchestrator",
+      iteration: previous,
+    });
+  }
+
+  /**
    * Stop unattended auto-proceed after a terminal API limit surface
    * (Claude 429 session limit / billing exhaustion). Existing timers are
    * cancelled immediately; future arm/fire attempts refuse until the
