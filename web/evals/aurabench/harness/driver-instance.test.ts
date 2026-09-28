@@ -11,7 +11,10 @@
  *   - the memory gate waits while MemAvailable < 1.5 GB;
  *   - `maxCells` bounds a pilot; progress is reported after every record;
  *   - the instance env: its own HOME/TMPDIR/recordings/stats/origin, reaper
- *     off, loopback only, AURA_* stripped — and the prod port is refused.
+ *     off, loopback only, AURA_* stripped — and the prod port is refused;
+ *   - FIX-D2-2: the bench copy of the skills is re-pointed from the prod API
+ *     (`localhost:3456`, which the `/council-*` checkpoint emit hardcodes) to
+ *     the bench instance, and the real `~/.claude/skills` is never touched.
  */
 
 import { describe, it, expect } from "vitest";
@@ -19,7 +22,17 @@ import { runAblation, type DriverDeps } from "./driver.js";
 import { CELL_RECORD_VERSION, type CellRecord } from "./cells.js";
 import { emptyMetrics } from "./agent-metrics.js";
 import type { CellOutcome } from "./run-cell.js";
-import { BENCH_PORT, PROD_PORT, benchInstanceEnv, benchInstancePaths } from "./bench-instance.js";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  BENCH_PORT,
+  PROD_PORT,
+  benchInstanceEnv,
+  benchInstancePaths,
+  prepareBenchHome,
+  rewriteSkillProdUrls,
+} from "./bench-instance.js";
 import { benchChildEnv } from "./proc.js";
 
 const rec = (key: string): CellRecord => {
@@ -157,5 +170,45 @@ describe("bench instance env", () => {
     const env = benchChildEnv({ CLAUDECODE: "1", CLAUDE_CODE_ENTRYPOINT: "cli", CLAUDE_CONFIG_DIR: "/x", CODEX_THREAD_ID: "t", AURA_X: "1", KEEP: "k" }, { CLAUDE_CONFIG_DIR: "/cell" });
     expect(env).toMatchObject({ KEEP: "k", CLAUDE_CONFIG_DIR: "/cell", CI: "1" });
     for (const k of ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CODEX_THREAD_ID", "AURA_X"]) expect(env[k]).toBeUndefined();
+  });
+});
+
+describe("bench skills point at the bench instance (FIX-D2-2)", () => {
+  // Shapes taken from the live council-*-aura skills: scheme'd, bare and ws.
+  const SKILL = [
+    "1. Run `curl -fsS http://localhost:3456/api/sessions`.",
+    'curl -fsS -X POST localhost:3456/api/council/x -d "$P"',
+    "connect to `ws://127.0.0.1:3456/ws` and",
+    "prod diagnostic: `ss -tlnp 'sport = :3456'`", // no host → not an API URL, left alone
+    "http://localhost:34567/other", // a different port is not the prod port
+  ].join("\n");
+
+  it("rewrites every prod host:port in text files, keeps the scheme, reports 0 remaining", () => {
+    const dir = mkdtempSync(join(tmpdir(), "aurabench-skills-"));
+    mkdirSync(join(dir, "council-implement-aura", "references"), { recursive: true });
+    writeFileSync(join(dir, "council-implement-aura", "SKILL.md"), SKILL);
+    writeFileSync(join(dir, "council-implement-aura", "references", "ops.md"), "see localhost:3456/api/sessions");
+    writeFileSync(join(dir, "council-implement-aura", "logo.png"), "localhost:3456"); // not a text skill file
+    const r = rewriteSkillProdUrls(dir, BENCH_PORT);
+    expect(r).toEqual({ files: 2, replaced: 4, remaining: 0 });
+    const out = readFileSync(join(dir, "council-implement-aura", "SKILL.md"), "utf8");
+    expect(out).toContain(`curl -fsS http://127.0.0.1:${BENCH_PORT}/api/sessions`);
+    expect(out).toContain(`POST 127.0.0.1:${BENCH_PORT}/api/council/x`);
+    expect(out).toContain(`ws://127.0.0.1:${BENCH_PORT}/ws`);
+    expect(out).toContain("sport = :3456");
+    expect(out).toContain("http://localhost:34567/other");
+    expect(readFileSync(join(dir, "council-implement-aura", "logo.png"), "utf8")).toBe("localhost:3456");
+  });
+
+  it("prepareBenchHome rewrites only the bench copy; the real skills stay byte-identical", () => {
+    const real = mkdtempSync(join(tmpdir(), "aurabench-realhome-"));
+    mkdirSync(join(real, ".claude", "skills", "council-plan-aura"), { recursive: true });
+    writeFileSync(join(real, ".claude", ".credentials.json"), "{}");
+    writeFileSync(join(real, ".claude", "skills", "council-plan-aura", "SKILL.md"), SKILL);
+    const bench = benchInstancePaths(mkdtempSync(join(tmpdir(), "aurabench-root-")));
+    const { skillUrlRewrites } = prepareBenchHome(bench, real, BENCH_PORT);
+    expect(skillUrlRewrites).toMatchObject({ files: 1, replaced: 3, remaining: 0 });
+    expect(readFileSync(join(real, ".claude", "skills", "council-plan-aura", "SKILL.md"), "utf8")).toBe(SKILL);
+    expect(readFileSync(join(bench.home, ".claude", "skills", "council-plan-aura", "SKILL.md"), "utf8")).not.toMatch(/localhost:3456\b/);
   });
 });
