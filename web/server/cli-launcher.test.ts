@@ -3610,3 +3610,126 @@ describe("resumeTranscriptExists", () => {
     expect(resumeTranscriptExists("/x/cli.jsonl", () => { throw new Error("ENOENT"); })).toBe(false);
   });
 });
+
+// aura-meta-diet P4/C3 — layer flags at spawn. Validates the launcher half of
+// the contract: default flags leave argv byte-identical (prod parity),
+// knowledge/council OFF add Claude permission deny rules + one appended
+// directive, the flags persist on SdkSessionInfo and survive relaunch, and
+// Codex (no per-tool deny flag) receives the directive as thread instructions.
+describe("layer flags at spawn (P4/C3)", () => {
+  const ALL_ON = { knowledge: true, observer: true, council: true, autoProceed: true } as const;
+
+  function argvOf(call: number): string[] {
+    return mockSpawn.mock.calls[call][0] as string[];
+  }
+  function denyRules(argv: string[]): string[] {
+    return argv.flatMap((a, i) => (a === "--disallowedTools" ? [argv[i + 1]] : []));
+  }
+
+  it("default flags produce the same argv as a launch without flags", () => {
+    // Prod parity: a session created through the flag-aware route (which
+    // always passes resolved flags) must spawn exactly like before C3.
+    launcher.launch({ cwd: "/tmp/project", model: "claude-sonnet-4-6" });
+    const baseline = argvOf(0);
+    // Fresh proc: the default mock proc's stdout stream can only be read once.
+    mockSpawn.mockReturnValueOnce(createMockProc(12346));
+    launcher.launch({ cwd: "/tmp/project", model: "claude-sonnet-4-6", layers: ALL_ON });
+    expect(argvOf(1)).toEqual(baseline);
+    expect(baseline).not.toContain("--append-system-prompt");
+  });
+
+  it("knowledge=off denies KB file access + KB skills and appends one directive", () => {
+    const info = launcher.launch({ cwd: "/tmp/project", layers: { ...ALL_ON, knowledge: false } });
+    const argv = argvOf(0);
+    const rules = denyRules(argv);
+    expect(rules).toEqual(expect.arrayContaining([
+      "Read(./.agents/knowledge/**)",
+      "Edit(./.agents/knowledge/**)",
+      "Write(./.agents/knowledge/**)",
+      "Skill(prime)",
+      "Skill(learn)",
+      "Skill(self-reflect)",
+    ]));
+    // council stays on → no council skill denied
+    expect(rules.some((r) => r.startsWith("Skill(council-"))).toBe(false);
+    expect(argv.filter((a) => a === "--append-system-prompt")).toHaveLength(1);
+    expect(argv[argv.indexOf("--append-system-prompt") + 1]).toContain("knowledge layer is disabled");
+    // persisted for relaunch
+    expect(info.layers).toEqual({ ...ALL_ON, knowledge: false });
+  });
+
+  it("council=off denies every council skill", () => {
+    launcher.launch({ cwd: "/tmp/project", layers: { ...ALL_ON, council: false } });
+    const rules = denyRules(argvOf(0));
+    expect(rules).toEqual(expect.arrayContaining([
+      "Skill(council-review)",
+      "Skill(council-review-aura)",
+      "Skill(council-plan-aura)",
+      "Skill(_council-experts)",
+    ]));
+    expect(rules).not.toContain("Skill(prime)");
+  });
+
+  it("observer role keeps its profile and gets the layer directive composed into the single append flag", () => {
+    // Observer overrides REPLACE disallowedTools; layer rules must be added
+    // on top (never dropped), and the prompt must stay one flag (a second
+    // --append-system-prompt would silently last-win on the CLI).
+    launcher.launch({
+      cwd: tempDir,
+      sessionGroupRole: "observer",
+      sessionGroupId: "grp_c3_obs",
+      layers: { ...ALL_ON, knowledge: false },
+    });
+    const argv = argvOf(0);
+    expect(argv.filter((a) => a === "--append-system-prompt")).toHaveLength(1);
+    const body = argv[argv.indexOf("--append-system-prompt") + 1];
+    expect(body).toContain("knowledge layer is disabled");
+    expect(body.length).toBeGreaterThan("# Aura layer flags".length + 200); // observer prompt still there
+    expect(denyRules(argv)).toContain("Skill(prime)");
+  });
+
+  it("relaunch re-applies the persisted deny rules (directive skipped on --resume)", async () => {
+    let resolveFirst: (code: number) => void;
+    const firstProc = {
+      pid: 12345,
+      kill: vi.fn(() => { resolveFirst(0); }),
+      exited: new Promise<number>((r) => { resolveFirst = r; }),
+      stdout: null,
+      stderr: null,
+    };
+    mockSpawn.mockReturnValueOnce(firstProc);
+    launcher.launch({ cwd: "/tmp/project", layers: { ...ALL_ON, knowledge: false } });
+    launcher.setCLISessionId("test-session-id", "cli-resume-id");
+    mockSpawn.mockReturnValueOnce(createMockProc(54321));
+
+    expect(await launcher.relaunch("test-session-id")).toEqual({ ok: true });
+    const argv = argvOf(1);
+    expect(argv).toContain("--resume");
+    expect(denyRules(argv)).toContain("Read(./.agents/knowledge/**)");
+    // CR-3 rule: the prompt is baked at the original spawn; not re-emitted on resume.
+    expect(argv).not.toContain("--append-system-prompt");
+  });
+
+  it("codex: knowledge=off reaches the adapter as thread instructions", async () => {
+    mockSpawn.mockReturnValueOnce(createMockCodexProc());
+    let captured: any;
+    companionBus.on("backend:codex-adapter-created", ({ adapter }) => { captured ??= adapter; });
+    launcher.launch({
+      cwd: "/tmp/project",
+      backendType: "codex",
+      layers: { ...ALL_ON, knowledge: false },
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(captured).toBeDefined();
+    expect(captured.options.systemPrompt).toContain("knowledge layer is disabled");
+  });
+
+  it("codex: default flags leave instructions unset", async () => {
+    mockSpawn.mockReturnValueOnce(createMockCodexProc());
+    let captured: any;
+    companionBus.on("backend:codex-adapter-created", ({ adapter }) => { captured ??= adapter; });
+    launcher.launch({ cwd: "/tmp/project", backendType: "codex", layers: ALL_ON });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(captured.options.systemPrompt).toBeUndefined();
+  });
+});

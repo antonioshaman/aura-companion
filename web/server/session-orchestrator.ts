@@ -56,6 +56,7 @@ import { CouncilLifecycle, type CouncilDegradedReason, type CouncilGroupMeta } f
 import type { OrphanTimerRef } from "./sweep-orphans.js";
 import type { BrowserGroupRecord } from "./session-types.js";
 import { hasNonEmptyEnvVar, hasAnyClaudeAuthEnv } from "./provider-auth-env.js";
+import { getServerLayerFlags, type LayerFlags } from "./layer-flags.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
 const VSCODE_EDITOR_CONTAINER_PORT = 13337;
@@ -123,6 +124,12 @@ export interface CreateSessionRequest {
    * the canonical "is auto-proceed enabled for this session" test.
    */
   autoProceedOnIdle?: { readonly idleMs: number; readonly maxIterations: number };
+  /**
+   * aura-meta-diet C3 — layer flags, already resolved (server default +
+   * per-session override, fail-closed) by the boundary in `routes.ts`.
+   * Absent → all layers on (prod behaviour). See `layer-flags.ts`.
+   */
+  layers?: LayerFlags;
 }
 
 export interface RelaunchSessionRequest {
@@ -341,6 +348,10 @@ export class SessionOrchestrator {
       manager: deps.idleTimerManager,
       groupMeta: this.councilGroupMeta,
       watchers: this.councilWatchers,
+      // C3: per-session flags (persisted on the launcher info) win; legacy
+      // sessions without them follow the server default.
+      isAutoProceedAllowed: (sessionId) =>
+        (this.launcher.getSession(sessionId)?.layers ?? getServerLayerFlags()).autoProceed,
     });
     this.recovery = new SessionRecovery({
       launcher: this.launcher,
@@ -1145,6 +1156,7 @@ export class SessionOrchestrator {
           // regular createSession; the coordinator generates them server-side.
           sessionGroupId: body.sessionGroupId,
           sessionGroupRole: body.sessionGroupRole,
+          layers: body.layers,
         });
       } catch (e) {
         // Clean up container if it was created but launch failed

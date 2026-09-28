@@ -61,6 +61,7 @@ Read the matching doc before changing that area:
 - [docs/architecture/recordings-and-eval-sidecar.md](docs/architecture/recordings-and-eval-sidecar.md) — raw protocol recordings (`~/.companion/recordings/`, JSONL, `origin` field) and the opt-in `COMPANION_EVAL_SIDECAR`.
 - [docs/architecture/council-mode.md](docs/architecture/council-mode.md) — `.council/` filesystem protocol, server + browser pipelines, reconnect grace.
 - [docs/architecture/production-deployment.md](docs/architecture/production-deployment.md) — systemd `KillMode=process`, `COMPANION_ALLOWED_ORIGIN`, the `browsers=0` diagnostic.
+- [docs/architecture/layer-flags.md](docs/architecture/layer-flags.md) — `COMPANION_LAYER_*` / per-session `layers` switches for knowledge, observer, council, auto-proceed (fail-closed, default = prod).
 
 ### Council Mode convention floor (do not re-flag in council reviews)
 

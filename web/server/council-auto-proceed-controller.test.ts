@@ -182,3 +182,34 @@ describe("CouncilAutoProceedController", () => {
     expect(manager.getIterationCount("any")).toBe(0);
   });
 });
+
+// aura-meta-diet P4/C3 — auto-proceed layer gate at the enactor (the single
+// arm choke point, AP-2). A disabled session must never get a timer armed;
+// cancel/noteUserMessage stay unconditional so a stale timer can still be
+// cleared. Omitting the predicate keeps the pre-C3 behaviour (always arm).
+describe("CouncilAutoProceedController — autoProceed layer gate (P4/C3)", () => {
+  it("refuses arm for a session whose autoProceed layer is off; other sessions still arm", () => {
+    const spy = spyManager();
+    const controller = new CouncilAutoProceedController({
+      manager: asManager(spy),
+      groupMeta: new Map(),
+      watchers: new Map(),
+      isAutoProceedAllowed: (sid) => sid !== "s-off",
+    });
+
+    controller.enactor.arm("s-off", { idleMs: 1_000, maxIterations: 3 });
+    controller.enactor.arm("s-on", { idleMs: 1_000, maxIterations: 3 });
+    controller.enactor.cancel("s-off");
+
+    expect(spy.arm).toHaveBeenCalledTimes(1);
+    expect(spy.arm).toHaveBeenCalledWith("s-on", { idleMs: 1_000, maxIterations: 3 });
+    expect(spy.cancel).toHaveBeenCalledWith("s-off");
+  });
+
+  it("without the predicate every arm is forwarded (prod default)", () => {
+    const spy = spyManager();
+    const { controller } = makeController(asManager(spy));
+    controller.enactor.arm("s1", { idleMs: 1_000, maxIterations: 3 });
+    expect(spy.arm).toHaveBeenCalledOnce();
+  });
+});

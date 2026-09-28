@@ -39,6 +39,11 @@ export interface CouncilAutoProceedControllerDeps {
   /** Orchestrator-owned group maps — the boot reconcile reads them. */
   groupMeta: ReadonlyMap<string, OrchestratorGroupMetaForRehydrate>;
   watchers: ReadonlyMap<string, OrchestratorWatcherForRehydrate>;
+  /**
+   * aura-meta-diet C3 — auto-proceed layer gate. Consulted on every `arm`;
+   * `false` refuses the arm (logged). Omitted → always allowed (prod default).
+   */
+  isAutoProceedAllowed?: (sessionId: string) => boolean;
 }
 
 /** The two subscription points {@link CouncilAutoProceedController.wire} needs. */
@@ -51,6 +56,7 @@ export class CouncilAutoProceedController {
   private manager: IdleTimerManager;
   private readonly groupMeta: ReadonlyMap<string, OrchestratorGroupMetaForRehydrate>;
   private readonly watchers: ReadonlyMap<string, OrchestratorWatcherForRehydrate>;
+  private readonly isAutoProceedAllowed?: (sessionId: string) => boolean;
 
   /**
    * PLAN Task 8: route applyEvent's auto-proceed idle-timer descriptors into
@@ -58,7 +64,16 @@ export class CouncilAutoProceedController {
    * this seam is the enactor that drains its effects.
    */
   readonly enactor: IdleTimerEnactor = {
-    arm: (sessionId, options) => this.manager.arm(sessionId, options),
+    arm: (sessionId, options) => {
+      if (this.isAutoProceedAllowed && !this.isAutoProceedAllowed(sessionId)) {
+        log.info("auto-proceed", "arm refused: autoProceed layer disabled", {
+          event: "auto-proceed.layer-disabled",
+          sessionId,
+        });
+        return;
+      }
+      this.manager.arm(sessionId, options);
+    },
     cancel: (sessionId) => this.manager.cancel(sessionId),
     noteUserMessage: (sessionId) => this.manager.noteUserMessage(sessionId),
   };
@@ -71,6 +86,7 @@ export class CouncilAutoProceedController {
     this.manager = deps.manager ?? buildNoopIdleTimerManager();
     this.groupMeta = deps.groupMeta;
     this.watchers = deps.watchers;
+    this.isAutoProceedAllowed = deps.isAutoProceedAllowed;
   }
 
   getManager(): IdleTimerManager {

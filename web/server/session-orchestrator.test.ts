@@ -347,6 +347,41 @@ describe("SessionOrchestrator", () => {
       expect(replacement.getIterationCount("any-session")).toBe(0);
     });
 
+    // aura-meta-diet P4/C3: the orchestrator wires the auto-proceed layer
+    // gate to the per-session flags persisted on the launcher info; legacy
+    // sessions (no `layers`) follow the COMPANION_LAYER_* server default.
+    it("auto-proceed enactor honours per-session layers, legacy sessions follow the server default", async () => {
+      const { _resetServerLayerFlagsForTest } = await import("./layer-flags.js");
+      const arm = vi.fn();
+      orchestrator.setIdleTimerManager({ arm } as unknown as Parameters<typeof orchestrator.setIdleTimerManager>[0]);
+      deps.launcher.getSession.mockImplementation((sid: string) =>
+        sid === "s-off"
+          ? { sessionId: sid, layers: { knowledge: true, observer: true, council: true, autoProceed: false } }
+          : sid === "s-on"
+            ? { sessionId: sid, layers: { knowledge: true, observer: true, council: true, autoProceed: true } }
+            : { sessionId: sid });
+      const enactor = (orchestrator as unknown as { autoProceed: { enactor: { arm: (s: string, o: object) => void } } })
+        .autoProceed.enactor;
+      const opts = { idleMs: 1_000, maxIterations: 2 };
+
+      try {
+        _resetServerLayerFlagsForTest();
+        vi.stubEnv("COMPANION_LAYER_AUTO_PROCEED", "off");
+        enactor.arm("s-off", opts);
+        enactor.arm("s-legacy", opts);
+        enactor.arm("s-on", opts); // explicit per-session "on" outranks the server "off"
+        expect(arm.mock.calls.map((c) => c[0])).toEqual(["s-on"]);
+
+        _resetServerLayerFlagsForTest();
+        vi.unstubAllEnvs();
+        enactor.arm("s-legacy", opts);
+        expect(arm.mock.calls.map((c) => c[0])).toEqual(["s-on", "s-legacy"]);
+      } finally {
+        vi.unstubAllEnvs();
+        _resetServerLayerFlagsForTest();
+      }
+    });
+
     it("CLI session ID callback delegates to launcher.setCLISessionId", () => {
       orchestrator.initialize();
 

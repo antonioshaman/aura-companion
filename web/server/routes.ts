@@ -65,6 +65,7 @@ import { verifyToken, getToken, regenerateToken, getAllAddresses } from "./auth-
 import QRCode from "qrcode";
 import { VSCODE_EDITOR_CONTAINER_PORT, NOVNC_CONTAINER_PORT } from "./constants.js";
 import { probePairingCapability, type ProbeRunner, type PairingCapability } from "./preflight-probe.js";
+import { applyLayerFlagsToCreateBody, getServerLayerFlags } from "./layer-flags.js";
 
 const ROUTES_DIR = dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = dirname(ROUTES_DIR);
@@ -428,25 +429,30 @@ export function createRoutes(
    */
   function normaliseCreateSessionBody(
     body: Record<string, unknown>,
-  ): { ok: true; body: Record<string, unknown> } | { ok: false; error: string } {
+  ): { ok: true; body: Record<string, unknown> } | { ok: false; error: string; status: 400 | 409 } {
     const rawAuto = (body as { autoProceedOnIdle?: unknown }).autoProceedOnIdle;
     const parsed = parseAutoProceedOnIdleAtBoundary(rawAuto);
     if (parsed.kind === "invalid") {
-      return { ok: false, error: formatAutoProceedConfigError(parsed.error) };
+      return { ok: false, error: formatAutoProceedConfigError(parsed.error), status: 400 };
     }
     // Strip the raw field; replace with parsed value or omit entirely.
     const { autoProceedOnIdle: _stripped, ...rest } = body as Record<string, unknown>;
-    if (parsed.kind === "absent") {
-      return { ok: true, body: rest };
+    const autoBody = parsed.kind === "absent" ? rest : { ...rest, autoProceedOnIdle: parsed.value };
+    // aura-meta-diet C3: resolve layer flags (fail-closed, warn) and apply
+    // the host-side gates (observer → no council pair, autoProceed → strip).
+    const layered = applyLayerFlagsToCreateBody(autoBody, getServerLayerFlags());
+    for (const w of layered.warnings) console.warn(`[layer-flags] ${w}`);
+    if (!layered.ok) {
+      return { ok: false, error: layered.error, status: layered.status };
     }
-    return { ok: true, body: { ...rest, autoProceedOnIdle: parsed.value } };
+    return { ok: true, body: layered.body };
   }
 
   api.post("/sessions/create", async (c) => {
     const rawBody = await c.req.json().catch(() => ({}));
     const norm = normaliseCreateSessionBody(rawBody);
     if (!norm.ok) {
-      return c.json({ error: norm.error }, 400 as any);
+      return c.json({ error: norm.error }, norm.status as any);
     }
     const body = norm.body;
     // Council Mode branch — the browser opts in by setting
@@ -482,7 +488,7 @@ export function createRoutes(
     const rawBody = await c.req.json().catch(() => ({}));
     const norm = normaliseCreateSessionBody(rawBody);
     if (!norm.ok) {
-      return c.json({ error: norm.error }, 400 as any);
+      return c.json({ error: norm.error }, norm.status as any);
     }
     const body = norm.body;
 

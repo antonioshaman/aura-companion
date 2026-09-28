@@ -30,6 +30,7 @@ import { CronScheduler } from "./cron-scheduler.js";
 import { AgentExecutor } from "./agent-executor.js";
 import { SessionOrchestrator } from "./session-orchestrator.js";
 import { IdleTimerManager } from "./idle-timer-manager.js";
+import { initServerLayerFlags, isDefaultLayerFlags } from "./layer-flags.js";
 import { SystemClock } from "./clock-source.js";
 import { writeAutoProceedTrace, appendAfkSummary } from "./auto-proceed-state.js";
 import { log as appLog } from "./logger.js";
@@ -90,6 +91,13 @@ const linearAgentBridge = new LinearAgentBridge(agentExecutor, wsBridge);
 // rehydrate path calls into manager — and late-injection is the cleanest
 // pattern for that without sacrificing type safety (a generic `Lazy<T>` or
 // proxy would push the cycle off the type system and onto runtime checks).
+// aura-meta-diet C3: resolve COMPANION_LAYER_* once at boot — unknown values
+// fail closed to the default and are warned about here.
+{
+  const { flags } = initServerLayerFlags();
+  if (!isDefaultLayerFlags(flags)) console.log(`[layer-flags] server defaults: ${JSON.stringify(flags)}`);
+}
+
 const orchestrator = new SessionOrchestrator({
   launcher, wsBridge, sessionStore, worktreeTracker,
   prPoller, agentExecutor,

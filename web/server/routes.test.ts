@@ -1,4 +1,4 @@
-import { vi, describe, it, expect, beforeEach } from "vitest";
+import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 
 // Mock auth-manager so all test requests pass the auth middleware
 vi.mock("./auth-manager.js", () => ({
@@ -295,6 +295,7 @@ import * as modelRegistry from "./model-registry.js";
 import * as linearProjectManager from "./linear-project-manager.js";
 import { resolveApiKey } from "./linear-connections.js";
 import { containerManager } from "./container-manager.js";
+import { _resetServerLayerFlagsForTest } from "./layer-flags.js";
 
 // ─── Mock factories ──────────────────────────────────────────────────────────
 
@@ -5686,5 +5687,99 @@ describe("GET /api/sweep/preview + POST /api/sweep/execute", () => {
     const result = await res.json();
     expect(result).toMatchObject({ requested: 0, swept: 0, skipped: 0 });
     expect(orchestrator.killSession).not.toHaveBeenCalled();
+  });
+});
+
+// aura-meta-diet P4/C3 — layer flags at the create-session boundary. The
+// route must (a) forward resolved per-session flags to the orchestrator,
+// (b) refuse a Council Mode pair when the observer layer is off (409, never
+// a silent solo downgrade), (c) strip autoProceedOnIdle when auto-proceed is
+// off, and (d) honour the COMPANION_LAYER_* server default.
+describe("POST /api/sessions/create — layer flags (P4/C3)", () => {
+  const ALL_ON = { knowledge: true, observer: true, council: true, autoProceed: true };
+  const post = (path: string, body: unknown) =>
+    app.request(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  beforeEach(() => {
+    _resetServerLayerFlagsForTest();
+    orchestrator.createSession.mockResolvedValue({
+      ok: true,
+      session: { sessionId: "s1", state: "starting", cwd: "/test", createdAt: 0 },
+    });
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    _resetServerLayerFlagsForTest();
+  });
+
+  it("forwards resolved per-session flags to the orchestrator", async () => {
+    const res = await post("/api/sessions/create", { cwd: "/test", layers: { knowledge: "off" } });
+    expect(res.status).toBe(200);
+    expect(orchestrator.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ layers: { ...ALL_ON, knowledge: false } }),
+    );
+  });
+
+  it("unknown flag value falls back to the default, warns, and does not fail the request", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const res = await post("/api/sessions/create", { cwd: "/test", layers: { knowledge: "maybe" } });
+    expect(res.status).toBe(200);
+    // All-default → body forwarded without a layers key (prod parity).
+    expect(orchestrator.createSession.mock.calls[0]![0]).not.toHaveProperty("layers");
+    expect(warn.mock.calls.flat().join(" ")).toContain("layers.knowledge");
+    warn.mockRestore();
+  });
+
+  it("observer=off refuses Council Mode with 409 on both create routes", async () => {
+    for (const path of ["/api/sessions/create", "/api/sessions/create-stream"]) {
+      const res = await post(path, {
+        cwd: "/work/repo",
+        councilMode: "council",
+        councilPairing: "claude+claude",
+        layers: { observer: "off" },
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toContain("Observer layer is disabled");
+    }
+    expect(orchestrator.createCouncilGroup).not.toHaveBeenCalled();
+    expect(orchestrator.createSession).not.toHaveBeenCalled();
+  });
+
+  it("COMPANION_LAYER_OBSERVER=off (server default) also refuses Council Mode", async () => {
+    vi.stubEnv("COMPANION_LAYER_OBSERVER", "off");
+    const res = await post("/api/sessions/create", {
+      cwd: "/work/repo",
+      councilMode: "council",
+      councilPairing: "claude+claude",
+    });
+    expect(res.status).toBe(409);
+  });
+
+  it("autoProceed=off strips autoProceedOnIdle before the coordinator sees it", async () => {
+    await post("/api/sessions/create", {
+      cwd: "/work/repo",
+      councilMode: "council",
+      councilPairing: "claude+claude",
+      autoProceedOnIdle: { idleMs: 60_000, maxIterations: 3 },
+      layers: { autoProceed: "off" },
+    });
+    const base = orchestrator.createCouncilGroup.mock.calls[0]![0]!.base;
+    expect(base).not.toHaveProperty("autoProceedOnIdle");
+    expect(base.layers).toEqual({ ...ALL_ON, autoProceed: false });
+  });
+
+  it("an invalid autoProceedOnIdle is still a 400 even when the layer is off", async () => {
+    // Validation order: the boundary parse runs first, so a malformed
+    // payload is never masked by the layer strip.
+    const res = await post("/api/sessions/create", {
+      cwd: "/test",
+      autoProceedOnIdle: { idleMs: "soon" },
+      layers: { autoProceed: "off" },
+    });
+    expect(res.status).toBe(400);
   });
 });
