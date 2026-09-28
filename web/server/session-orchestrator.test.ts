@@ -3123,7 +3123,7 @@ describe("SessionOrchestrator", () => {
         seedGroup(groupId, { cwd: workspace });
         const internals = orchestrator as unknown as {
           councilGroupBySessionId: Map<string, string>;
-          councilLifecycle: { getGroupReviewsForBootstrap: (g: string) => Promise<unknown> };
+          councilLifecycle: { getGroupStopHoldView: (g: string) => unknown };
           getOrCreateCoordinatorSync: () => { registerExternalGroup: (r: unknown) => void };
         };
         internals.councilGroupBySessionId.set("sess_orch", groupId);
@@ -3136,8 +3136,10 @@ describe("SessionOrchestrator", () => {
           createdAt: 1,
         });
         // "Restart": a STOP from before is still in the reviews on disk.
-        const bootstrap = vi.spyOn(internals.councilLifecycle, "getGroupReviewsForBootstrap")
-          .mockResolvedValue({ sessionGroupId: groupId, findings: [stopFinding("old")], downgrades: [], reviewCount: 1 });
+        // FIX-AP-2: the restore reads the hold view (frozen verdicts), not the
+        // re-grounded REST bootstrap; the real path is pinned in its own test.
+        const bootstrap = vi.spyOn(internals.councilLifecycle, "getGroupStopHoldView")
+          .mockReturnValue({ findings: [stopFinding("old")], unfrozenRawStopIds: [], gaps: [] });
         orchestrator.initialize();
 
         const turnDone = () => companionBus.emit("orchestrator:turn-done", { sessionId: "sess_orch", blockedByStop: false });
@@ -3161,6 +3163,112 @@ describe("SessionOrchestrator", () => {
           .toEqual({ ok: true, added: true });
         expect(arm).not.toHaveBeenCalled(); // "new" still open
         expect(orchestrator.resolveObserverStop(groupId, "new")).toEqual({ ok: true, released: true, persisted: true });
+        expect(arm).toHaveBeenCalledWith("sess_orch", { idleMs: 60_000, maxIterations: 3 });
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
+    // FIX-AP-2 (re-review of PR #245, STOP). After a restart the hold used to
+    // be rebuilt from the REST bootstrap, which RE-grounds every old review
+    // against the LATEST checkpoint: a STOP from checkpoint A whose file is not
+    // in checkpoint B became NOTE, the hold dropped and auto-proceed fired.
+    // This drives the real path end to end — no stubbed loader:
+    //   handleCouncilReview (A, grounded STOP) → verdicts frozen on disk →
+    //   checkpoint B no longer touches the file and its lines shift →
+    //   initialize() + turn-done → restore via getGroupStopHoldView.
+    it("FIX-AP-2: a STOP from checkpoint A still holds after a restart when B no longer touches its file", async () => {
+      const { mkdtempSync, writeFileSync, mkdirSync, rmSync, realpathSync, existsSync, renameSync } = require("node:fs") as typeof import("node:fs");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      const workspace = realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-orch-ap2-")));
+      const groupId = "grp_0123456789abcdef0123456789abcdef";
+      const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+      const review = {
+        schema_version: 1,
+        observer_wake_payload_version_echo: 1,
+        checkpoint_id: "chk_a",
+        phase: "council-implement",
+        session_group_id: groupId,
+        reviewed_at: "2026-01-01T00:00:00Z",
+        observer_provider: "codex",
+        observer_model: "gpt-5.5",
+        observer_cli_version: "1.0.0",
+        findings: [{ severity: "STOP", claim: "`alpha` swallows the error", evidence_path: "src/a.ts", evidence_lines: [1, 1] }],
+      };
+      try {
+        mkdirSync(pathJoin(workspace, "src"), { recursive: true });
+        writeFileSync(pathJoin(workspace, "src/a.ts"), "export function alpha() { try { run(); } catch {} }\n");
+        writeFileSync(pathJoin(workspace, "src/b.ts"), "export const beta = 2;\n");
+        mkdirSync(pathJoin(workspace, ".council", "reviews"), { recursive: true });
+        writeFileSync(pathJoin(workspace, ".council", "reviews", `council-implement-codex-observer.md`), JSON.stringify(review));
+        // Checkpoint A changed src/a.ts: the live review grounds a real STOP.
+        seedGroup(groupId, { cwd: workspace, artifactPaths: ["src/a.ts"] });
+        const emitted: Array<{ findings: Array<{ id: string; severity: string; weakEvidence?: string; wasDowngraded?: boolean }> }> = [];
+        companionBus.on("group:review", (e: unknown) => { emitted.push(e as (typeof emitted)[number]); });
+        (orchestrator as unknown as { handleCouncilReview: (g: string, p: Record<string, unknown>) => void })
+          .handleCouncilReview.call(orchestrator, groupId, review);
+        const live = emitted[0]!.findings[0]!;
+        expect(live).toMatchObject({ severity: "STOP" });
+        expect(live.weakEvidence).toBeUndefined();
+        expect(live.wasDowngraded).toBeFalsy();
+        expect(existsSync(pathJoin(workspace, ".council", "state", `${groupId}-review-verdicts.json`))).toBe(true);
+
+        // Checkpoint B: only src/b.ts changed, and a.ts's lines moved down.
+        seedGroup(groupId, { cwd: workspace, artifactPaths: ["src/b.ts"] });
+        writeFileSync(pathJoin(workspace, "src/a.ts"), "// header\n// header\nexport function alpha() { try { run(); } catch {} }\n");
+
+        // Precondition — without the frozen verdict the re-grounded view is no
+        // longer a blocking STOP (this is what released the hold before).
+        const verdictsFile = pathJoin(workspace, ".council", "state", `${groupId}-review-verdicts.json`);
+        renameSync(verdictsFile, `${verdictsFile}.off`);
+        const regrounded = await orchestrator.getGroupReviewsForBootstrap(groupId);
+        const r0 = regrounded!.findings[0]!;
+        expect(r0.id).toBe(live.id);
+        expect(r0.severity === "STOP" && !r0.weakEvidence).toBe(false);
+        renameSync(`${verdictsFile}.off`, verdictsFile);
+
+        // The banner bootstrap now shows the verdict reached at review time.
+        const frozenView = await orchestrator.getGroupReviewsForBootstrap(groupId);
+        expect(frozenView!.findings[0]).toMatchObject({ id: live.id, severity: "STOP" });
+        expect(frozenView!.findings[0]!.weakEvidence).toBeUndefined();
+        expect(frozenView!.downgrades).toEqual([]);
+
+        // "Restart": opted-in orchestrator goes idle; the hold is restored.
+        const arm = vi.fn(() => ({ kind: "armed" as const }));
+        orchestrator.setIdleTimerManager({
+          arm, cancel: vi.fn(),
+          noteUserMessage: () => {}, resetIterationCount: () => {}, getIterationCount: () => 0,
+          clearPendingSyntheticTurn: () => {}, disposeAll: () => {}, isApiLimitReached: () => false,
+        } as any);
+        deps.launcher.getSession.mockImplementation((sid: string) =>
+          sid === "sess_orch"
+            ? ({ sessionId: sid, autoProceedOnIdle: { idleMs: 60_000, maxIterations: 3 } } as any)
+            : undefined,
+        );
+        const internals = orchestrator as unknown as {
+          councilGroupBySessionId: Map<string, string>;
+          getOrCreateCoordinatorSync: () => { registerExternalGroup: (r: unknown) => void };
+          autoProceed: { getUnresolvedStopIds: (g: string) => string[] };
+        };
+        internals.councilGroupBySessionId.set("sess_orch", groupId);
+        internals.councilGroupBySessionId.set("sess_obs", groupId);
+        internals.getOrCreateCoordinatorSync().registerExternalGroup({
+          sessionGroupId: groupId,
+          primary: { sessionId: "sess_orch", backendType: "claude" },
+          observer: { sessionId: "sess_obs", backendType: "codex" },
+          status: "active",
+          createdAt: 1,
+        });
+        orchestrator.initialize();
+        companionBus.emit("orchestrator:turn-done", { sessionId: "sess_orch", blockedByStop: false });
+        await flush();
+        companionBus.emit("orchestrator:turn-done", { sessionId: "sess_orch", blockedByStop: false });
+        expect(arm).not.toHaveBeenCalled();
+        expect(internals.autoProceed.getUnresolvedStopIds(groupId)).toEqual([live.id]);
+
+        // The human can still release it: the banner shows it, dismissal works.
+        expect(orchestrator.resolveObserverStop(groupId, live.id)).toEqual({ ok: true, released: true, persisted: true });
         expect(arm).toHaveBeenCalledWith("sess_orch", { idleMs: 60_000, maxIterations: 3 });
       } finally {
         rmSync(workspace, { recursive: true, force: true });

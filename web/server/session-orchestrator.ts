@@ -373,10 +373,10 @@ export class SessionOrchestrator {
         this.coordinator?.applyEvent(sessionGroupId, event);
       },
       iterationCeiling: resolveIterationCeilingOnce(),
-      // FIX-AP-1: restore the unresolved-STOP hold after a restart from the
-      // same view the browser bootstraps its blocker banner from.
-      loadGroupFindings: async (sessionGroupId) =>
-        (await this.councilLifecycle.getGroupReviewsForBootstrap(sessionGroupId))?.findings ?? null,
+      // FIX-AP-1/FIX-AP-2: restore the unresolved-STOP hold after a restart
+      // from the same view the browser bootstraps its blocker banner from,
+      // with the verdicts frozen at review time (no re-grounding).
+      loadGroupStopHoldView: async (sessionGroupId) => this.councilLifecycle.getGroupStopHoldView(sessionGroupId),
     });
     this.recovery = new SessionRecovery({
       launcher: this.launcher,

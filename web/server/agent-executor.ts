@@ -221,7 +221,9 @@ export class AgentExecutor {
 
       // Send the prompt with agent prefix for traceability
       const fullPrompt = `[agent:${agent.id} ${agent.name}]\n\n${resolvedPrompt}`;
-      this.wsBridge.injectUserMessage(sessionInfo.sessionId, fullPrompt);
+      // FIX-AP-2: agent runs are not a human typing — they must not reset
+      // the auto-proceed iteration cap or advance the user turn-token.
+      this.wsBridge.injectUserMessage(sessionInfo.sessionId, fullPrompt, "server:agent");
 
       // Update agent tracking
       agentStore.updateAgent(agentId, {

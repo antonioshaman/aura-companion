@@ -84,12 +84,24 @@ export interface CouncilAutoProceedControllerDeps {
    *  resolved; clamps the per-session `maxIterations`. Defaults to the hard cap. */
   iterationCeiling?: number;
   /**
-   * FIX-AP-1 — every finding of the group as the blocker banner sees it after
-   * a reload (REST bootstrap: grounding + disputes applied). Restores the
-   * unresolved-STOP hold after a server restart. Omitted → nothing to restore
-   * (tests / non-council wiring).
+   * FIX-AP-1/FIX-AP-2 — restores the unresolved-STOP hold after a server
+   * restart from the group's findings as the blocker banner sees them after a
+   * reload (verdicts frozen at review time, disputes applied — no
+   * re-grounding). `null` → the group is unknown (restore incomplete).
+   * Omitted → nothing to restore (tests / non-council wiring).
    */
-  loadGroupFindings?: (sessionGroupId: string) => Promise<readonly BrowserObserverFinding[] | null>;
+  loadGroupStopHoldView?: (sessionGroupId: string) => Promise<GroupStopHoldView | null>;
+}
+
+/** What the hold restore reads from disk (FIX-AP-2). */
+export interface GroupStopHoldView {
+  findings: readonly BrowserObserverFinding[];
+  /** Raw STOPs whose grounding verdict was never frozen: they hold as STOP
+   *  unless disputed (fail-closed; never re-grounded into a release). */
+  unfrozenRawStopIds: readonly string[];
+  /** Why the view may be incomplete (unreadable review / verdicts file, …).
+   *  Any gap keeps the restore incomplete, so auto-proceed stays held. */
+  gaps: readonly string[];
 }
 
 /**
@@ -130,7 +142,7 @@ export class CouncilAutoProceedController {
   private readonly getGroupIdForSession?: (sessionId: string) => string | undefined;
   private readonly applyGroupEvent?: (sessionGroupId: string, event: GroupEvent) => void;
   private readonly iterationCeiling: number;
-  private readonly loadGroupFindings?: (sessionGroupId: string) => Promise<readonly BrowserObserverFinding[] | null>;
+  private readonly loadGroupStopHoldView?: (sessionGroupId: string) => Promise<GroupStopHoldView | null>;
   /**
    * Unresolved blocking STOPs per group (FIX-AP-1). The adapter's own
    * `blockedByStop` axis is reset on every turn edge, so it cannot hold this.
@@ -197,7 +209,7 @@ export class CouncilAutoProceedController {
       deps.iterationCeiling ?? AUTO_PROCEED_MAX_ITERATIONS_CEILING,
       AUTO_PROCEED_MAX_ITERATIONS_CEILING,
     );
-    this.loadGroupFindings = deps.loadGroupFindings;
+    this.loadGroupStopHoldView = deps.loadGroupStopHoldView;
   }
 
   getManager(): IdleTimerManager {
@@ -413,14 +425,19 @@ export class CouncilAutoProceedController {
   /**
    * Restores the hold from what is on disk (reviews as the banner sees them,
    * minus persisted dismissals) once per group. Returns true when the hold is
-   * complete; false while the restore is in flight. A failed restore keeps
-   * holding and is retried on the next event (fail-closed).
+   * complete; false while the restore is in flight or incomplete.
+   *
+   * Fail-closed (FIX-AP-2): an unknown group, a missing workspace, an
+   * unreadable review / verdicts file or a thrown load leaves the restore
+   * incomplete — every STOP it did find still holds, nothing arms, and the
+   * restore is re-tried on the next event. Unreadable dismissals are not a
+   * gap: they only ever release, so holding on every STOP is the safe side.
    */
   private ensureRestored(sessionGroupId: string, primary: string): boolean {
     const hold = this.holdFor(sessionGroupId);
     if (hold.restore === "done") return true;
     if (hold.restore === "pending") return false;
-    const load = this.loadGroupFindings;
+    const load = this.loadGroupStopHoldView;
     if (!load) {
       hold.restore = "done";
       return true;
@@ -429,8 +446,12 @@ export class CouncilAutoProceedController {
     const cwd = this.watchers.get(sessionGroupId)?.cwd;
     void (async () => {
       try {
-        const findings = await load(sessionGroupId);
+        const view = await load(sessionGroupId);
         if (this.holds.get(sessionGroupId) !== hold) return; // archived meanwhile
+        const gaps: string[] = [];
+        if (!view) gaps.push("group_unknown");
+        if (!cwd) gaps.push("no_workspace");
+        if (view) gaps.push(...view.gaps);
         if (cwd) {
           const read = readStopResolutions(cwd, sessionGroupId);
           if (read.ok) {
@@ -445,10 +466,27 @@ export class CouncilAutoProceedController {
             });
           }
         }
-        for (const f of findings ?? []) {
-          if (isBlockingStopFinding(f) && !hold.unresolved.has(f.id)) hold.unresolved.set(f.id, f);
+        const unfrozen = new Set(view?.unfrozenRawStopIds ?? []);
+        for (const f of view?.findings ?? []) {
+          if (hold.unresolved.has(f.id)) continue;
+          if (isBlockingStopFinding(f) || (unfrozen.has(f.id) && !f.disputed)) hold.unresolved.set(f.id, f);
         }
         for (const id of hold.resolved) hold.unresolved.delete(id);
+        if (gaps.length > 0) {
+          hold.restore = undefined;
+          log.warn("auto-proceed", "STOP hold restore incomplete; holding", {
+            event: "auto-proceed.hold-restore-incomplete",
+            sessionGroupId,
+            sessionId: primary,
+            role: "orchestrator",
+            gaps,
+            unresolvedStops: hold.unresolved.size,
+          });
+          if (hold.unresolved.size > 0) {
+            this.applyGroupEvent?.(sessionGroupId, { type: "stop_finding_raised", sessionId: primary });
+          }
+          return;
+        }
         hold.restore = "done";
         log.info("auto-proceed", "STOP hold restored", {
           event: "auto-proceed.hold-restored",
@@ -456,6 +494,7 @@ export class CouncilAutoProceedController {
           sessionId: primary,
           role: "orchestrator",
           unresolvedStops: hold.unresolved.size,
+          ...(unfrozen.size > 0 ? { unfrozenRawStops: unfrozen.size } : {}),
         });
         const waiting = hold.idleWaiting;
         hold.idleWaiting = false;

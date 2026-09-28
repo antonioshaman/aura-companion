@@ -385,6 +385,9 @@ describe("AgentExecutor", () => {
       const sentPrompt = wsBridge.injectUserMessage.mock.calls[0][1] as string;
       expect(sentPrompt).toContain("[agent:exec-agent Exec Agent]");
       expect(sentPrompt).toContain("Run the tests");
+      // FIX-AP-2: an agent run is not a human typing — the server origin keeps
+      // it from resetting the auto-proceed iteration cap.
+      expect(wsBridge.injectUserMessage.mock.calls[0][2]).toBe("server:agent");
 
       // Should update agent tracking (lastRunAt, totalRuns, etc.)
       expect(mockAgentStore.updateAgent).toHaveBeenCalledWith("exec-agent", expect.objectContaining({
