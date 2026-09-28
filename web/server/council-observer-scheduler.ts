@@ -154,8 +154,13 @@ export class CouncilObserverScheduler {
    * pass the stale sentinel check and stack another 30s poller for the SAME
    * checkpoint, racing a duplicate send. A key is added before launching the
    * poll and cleared in its `finally`.
+   *
+   * P4/FIX-AUTOHEAL-1: the value is the owning poll's token. A poll releases
+   * its key BEFORE it re-dispatches the wake (a fresh `adapter_missing` must
+   * be able to start a new poll instead of being dropped as a duplicate for
+   * up to 5 min), and its `finally` only removes a key it still owns.
    */
-  private readonly catchupWakesInFlight = new Set<string>();
+  private readonly catchupWakesInFlight = new Map<string, object>();
   /**
    * Council review 2026-09-11 P1-1: consecutive catch-up-poll timeouts per
    * `${sessionGroupId}:${checkpointId}`. Bumped when a poll expires without
@@ -495,7 +500,11 @@ export class CouncilObserverScheduler {
     // await-free `void this.schedule(...)`), cleared in the `finally` that
     // covers every exit including the meta-null early return.
     const inFlightKey = `${sessionGroupId}:${payload.checkpoint_id}`;
-    this.catchupWakesInFlight.add(inFlightKey);
+    const token = {};
+    this.catchupWakesInFlight.set(inFlightKey, token);
+    const releaseInFlight = () => {
+      if (this.catchupWakesInFlight.get(inFlightKey) === token) this.catchupWakesInFlight.delete(inFlightKey);
+    };
     try {
       const meta = this.deps.groupMeta.get(sessionGroupId);
       if (!meta) {
@@ -519,6 +528,7 @@ export class CouncilObserverScheduler {
       try {
         while (Date.now() < deadline) {
           if (this.deps.isObserverReadyForWake(observerSessionId)) {
+            releaseInFlight();
             this.deps.dispatchWake(sessionGroupId, payload);
             // P1-1: a successful wake clears the consecutive-timeout strike
             // count for this checkpoint — the observer is demonstrably alive.
@@ -562,6 +572,7 @@ export class CouncilObserverScheduler {
           );
           if (heal.kind === "healed") {
             this.catchupWakeTimeouts.delete(inFlightKey);
+            releaseInFlight();
             if (this.deps.groupMeta.has(sessionGroupId)) this.deps.dispatchWake(sessionGroupId, payload);
             return;
           }
@@ -594,7 +605,7 @@ export class CouncilObserverScheduler {
         });
       }
     } finally {
-      this.catchupWakesInFlight.delete(inFlightKey);
+      releaseInFlight();
     }
   }
 

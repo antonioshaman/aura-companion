@@ -30,3 +30,18 @@ relaunch or by a new browser-typed user message. Either one brings back the whol
 pair, so a later real crash is auto-relaunched again. Archive and delete drop the mark.
 The mark lives in memory: after a server restart a stopped session behaves as before
 (it relaunches when a browser opens it).
+
+**One relaunch at a time** (P4/FIX-AUTOHEAL-1). Every relaunch path goes through
+`SessionRecovery.relaunchOnce`: a manual relaunch (REST, the UI button), the observer
+auto-heal, the auto-relaunch (keepalive, a returning browser) and the boot watchdog. A call
+made while another relaunch of the same session runs joins it and gets its result, so only
+one CLI is spawned. A manual relaunch with a different model waits for the running one and
+then relaunches. Before this, after a server restart the boot watchdog and the observer
+catch-up poll both fired at ~30 s and spawned two CLIs with `--resume` on one cliSessionId.
+Automatic paths also skip a session whose last successful relaunch is under 60 s old while
+its new CLI is still `starting`: a Codex CLI needs ~16 s to attach, and the deaf-session check
+would otherwise read it as dead. A CLI that crashed (`exited`) is relaunched as usual; a
+manual relaunch always runs. The relaunch marks the session intentional only for its own
+old-process kill. If archive, delete or a user kill marks it meanwhile, that mark stays, and
+a process spawned for a session archived mid-relaunch is killed. The observer auto-heal
+does not reset the auto-relaunch crash budget; only a manual relaunch does.

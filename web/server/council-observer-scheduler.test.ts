@@ -326,6 +326,40 @@ describe("CouncilObserverScheduler (DI seam)", () => {
     expect(h.dispatchWake).toHaveBeenCalledTimes(1);
   });
 
+  // P4/FIX-AUTOHEAL-1 item 2: after `healed` the re-sent wake can hit
+  // `adapter_missing` again (the fresh adapter dropped once more). The live
+  // pipeline answers that with requestCatchupWake — which used to be dropped
+  // as a duplicate because the healing poll still held the in-flight key,
+  // losing the wake until the next 5-min failsafe tick. The poll now releases
+  // its key before re-dispatching, and its `finally` must not delete the key
+  // the NEW poll took.
+  it("a re-sent wake that hits adapter_missing again after healed starts a new poll (not dropped as a duplicate)", async () => {
+    vi.useFakeTimers();
+    let h!: Harness;
+    const autoheal = fakeAutoheal({ kind: "healed", attempts: 1 });
+    h = makeHarness({ autoheal });
+    h.setCoordinator(coordinatorWithStatus("active"));
+    // First re-dispatch: the adapter is gone again → the pipeline asks for a
+    // catch-up (synchronously, as dispatchObserverWake does). Later ones succeed.
+    h.dispatchWake.mockImplementationOnce((gid: string, payload: CheckpointPayload) => {
+      h.scheduler.requestCatchupWake(gid, payload);
+    });
+    await runOnePoll(h, checkpoint(11));
+    expect(h.dispatchWake).toHaveBeenCalledTimes(1);
+    // A new poll for the checkpoint is running (the request was not dropped)
+    // and it still owns its in-flight key after the healing poll's finally.
+    const inFlight = (h.scheduler as unknown as { catchupWakesInFlight: Map<string, object> }).catchupWakesInFlight;
+    expect(inFlight.has(`${GROUP}:chk_11`)).toBe(true);
+    // So a duplicate request is deduped against it...
+    const before = h.dispatchWake.mock.calls.length;
+    h.scheduler.requestCatchupWake(GROUP, checkpoint(11));
+    // ...and once the adapter attaches it delivers the wake exactly once.
+    h.setReady(true);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(h.dispatchWake.mock.calls.length).toBe(before + 1);
+    expect(h.dispatchWake.mock.calls.at(-1)![1].checkpoint_id).toBe("chk_11");
+  });
+
   it("forgetGroup also drops the auto-heal's per-group history", () => {
     const autoheal = fakeAutoheal({ kind: "healed", attempts: 1 });
     const h = makeHarness({ autoheal });
