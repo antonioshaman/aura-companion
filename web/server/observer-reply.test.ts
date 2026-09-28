@@ -17,7 +17,7 @@
  *    `__fixtures__/observer-reply/`, provenance in its README).
  */
 
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -237,6 +237,35 @@ describe("ObserverReplyCapture", () => {
     failing.expect("obs", expectation());
     failing.onAssistant("obs", assistant([{ type: "text", text: "[]" }]));
     expect(failing.finalize("obs")).toMatchObject({ kind: "write_failed", error: "EACCES" });
+  });
+
+  // FIX-B1-1 regression: phase + `-grp_<32hex>` used to overflow the 64-char
+  // filename prefix for any phase over 27 chars; the RangeError escaped
+  // finalize() and the observer's findings were lost. A real-shaped group id
+  // and a 40-char phase must still produce a written, findable review whose
+  // payload keeps the FULL phase (only the filename is shortened).
+  it("writes the review for a phase too long to sit beside a real group id", () => {
+    const groupId = `grp_${"a".repeat(32)}`;
+    const phase = "council-implement-task-07-review-fixpass"; // 40 chars
+    capture.expect("obs", { ...expectation(), sessionGroupId: groupId, phase });
+    capture.onAssistant("obs", assistant([{ type: "text", text: JSON.stringify([STOP]) }]));
+    const out = capture.finalize("obs");
+    expect(out).toMatchObject({ kind: "written", findingCount: 1 });
+    if (out.kind !== "written") throw new Error("unreachable");
+    expect(out.file).toMatch(new RegExp(`^council-implement-.*\\.[0-9a-f]{8}-${groupId}-claude-observer\\.md$`));
+    expect(readReview(out.file)).toMatchObject({ phase, session_group_id: groupId, checkpoint_id: "chk_cap" });
+    // The disk rescan (watchdog failsafe) finds it by checkpoint id.
+    expect(findReviewForCheckpointSync({ directory: join(cwd, ".council", "reviews"), checkpointId: "chk_cap" })?.file).toBe(out.file);
+  });
+
+  // A name that cannot be built at all comes back as an outcome instead of
+  // throwing out of the turn-done handler. A 70-char group id is a valid
+  // payload token (≤128) but leaves no room in the 64-char filename prefix.
+  it("reports a filename failure as an outcome without throwing", () => {
+    capture.expect("obs", { ...expectation(), sessionGroupId: `grp_${"b".repeat(66)}` });
+    capture.onAssistant("obs", assistant([{ type: "text", text: "[]" }]));
+    expect(capture.finalize("obs")).toMatchObject({ kind: "filename_failed", error: expect.stringMatching(/combined prefix exceeds 64/) });
+    expect(existsSync(join(cwd, ".council", "reviews"))).toBe(false); // nothing written
   });
 
   // ── EC-6 replay: captured observer turns, both providers ─────────────────

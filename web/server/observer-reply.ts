@@ -174,7 +174,8 @@ export type ObserverReplyOutcome =
       /** Rejections in a row for this observer session, this one included. */
       consecutive: number;
     }
-  | { kind: "write_failed"; expectation: ObserverReplyExpectation; file: string; error: string };
+  | { kind: "write_failed"; expectation: ObserverReplyExpectation; file: string; error: string }
+  | { kind: "filename_failed"; expectation: ObserverReplyExpectation; error: string };
 
 export interface ObserverReplyCaptureDeps {
   now(): Date;
@@ -272,7 +273,14 @@ export class ObserverReplyCapture {
     });
     if (!built.ok) return this.reject(sessionId, expectation, "invalid_findings", built.field ?? built.dropReason);
 
-    const file = buildObserverReviewFilename(expectation.phase, expectation.provider, expectation.sessionGroupId);
+    // FIX-B1-1: a naming failure must come back as an outcome, not throw out
+    // of the turn-done handler (which would skip the wake drain).
+    let file: string;
+    try {
+      file = buildObserverReviewFilename(expectation.phase, expectation.provider, expectation.sessionGroupId);
+    } catch (err) {
+      return { kind: "filename_failed", expectation, error: err instanceof Error ? err.message : String(err) };
+    }
     const path = join(reviewsDir, file);
     try {
       this.deps.writeReview(path, built.payload);

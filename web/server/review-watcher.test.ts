@@ -370,6 +370,34 @@ describe("buildObserverReviewFilename — producer-side helper", () => {
     expect(OBSERVER_REVIEW_FILE_PATTERN.exec(groupA)?.[1]).toBe("claude");
   });
 
+  // FIX-B1-1: the 64-char prefix must hold `<phase>-grp_<32hex>`. Phases up to
+  // 27 chars fit as-is; longer valid phases (≤64) are shortened to
+  // `<head>.<sha256[:8]>` — deterministic, pattern-valid, collision-resistant.
+  describe("long phase beside a real group id", () => {
+    const groupId = `grp_${"0123456789abcdef".repeat(2)}`;
+
+    it("leaves a phase that fits untouched (27 chars is the boundary)", () => {
+      const phase = "p".repeat(27);
+      expect(buildObserverReviewFilename(phase, "claude", groupId)).toBe(`${phase}-${groupId}-claude-observer.md`);
+    });
+
+    it.each([28, 40, 64])("shortens a %d-char phase into a pattern-valid name", (len) => {
+      const phase = "x".repeat(len);
+      const name = buildObserverReviewFilename(phase, "codex", groupId);
+      expect(OBSERVER_REVIEW_FILE_PATTERN.test(name)).toBe(true);
+      expect(OBSERVER_REVIEW_FILE_PATTERN.exec(name)?.[1]).toBe("codex");
+      expect(name.endsWith(`-${groupId}-codex-observer.md`)).toBe(true);
+      expect(name.length - `-${groupId}-codex-observer.md`.length).toBe(27);
+    });
+
+    it("is deterministic and keeps distinct phases with a shared head distinct", () => {
+      const a = "council-implement-task-07-review-a";
+      const b = "council-implement-task-07-review-b";
+      expect(buildObserverReviewFilename(a, "claude", groupId)).toBe(buildObserverReviewFilename(a, "claude", groupId));
+      expect(buildObserverReviewFilename(a, "claude", groupId)).not.toBe(buildObserverReviewFilename(b, "claude", groupId));
+    });
+  });
+
   it("throws on empty phase", () => {
     expect(() => buildObserverReviewFilename("", "claude")).toThrow(/non-empty/);
   });

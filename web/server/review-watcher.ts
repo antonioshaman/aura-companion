@@ -15,6 +15,7 @@
  * was killed, restarted, re-emitted on re-read).
  */
 
+import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { readFile, stat, watch } from "node:fs/promises";
 import { join } from "node:path";
@@ -75,7 +76,7 @@ export function buildObserverReviewFilename(
   // prompt still writes the group-less name, which the pattern below (and the
   // reader) both accept; the group segment is just extra prefix characters.
   const filename = sessionGroupId
-    ? `${phase}-${sessionGroupId}-${provider}-observer.md`
+    ? `${fitPhaseBesideGroup(phase, sessionGroupId)}-${sessionGroupId}-${provider}-observer.md`
     : `${phase}-${provider}-observer.md`;
   if (!OBSERVER_REVIEW_FILE_PATTERN.test(filename)) {
     throw new RangeError(
@@ -83,6 +84,29 @@ export function buildObserverReviewFilename(
     );
   }
   return filename;
+}
+
+/** Room the pattern's 64-char prefix leaves beside `-<group>`; hash suffix length. */
+const PHASE_HASH_LEN = 8;
+
+/**
+ * FIX-B1-1: a valid phase (≤64) plus `-grp_<32hex>` can overflow the pattern's
+ * 64-char prefix — any phase over 27 chars did, and the throw lost the review.
+ * When it would overflow, shorten the phase deterministically to
+ * `<head>.<sha256(phase)[:8]>` so the name still fits, stays stable for the
+ * same phase, and distinct phases sharing a head do not collide. Readers match
+ * reviews by the payload's `checkpoint_id`, never by the phase in the name, so
+ * shortening is invisible to them. Phases that already fit are untouched.
+ */
+function fitPhaseBesideGroup(phase: string, sessionGroupId: string): string {
+  const room = 64 - 1 - sessionGroupId.length;
+  if (phase.length <= room) return phase;
+  const headLen = room - 1 - PHASE_HASH_LEN;
+  // A group id too long to leave a head falls through unchanged; the pattern
+  // check below then throws with the "combined prefix" diagnostic.
+  if (headLen < 1) return phase;
+  const hash = createHash("sha256").update(phase).digest("hex").slice(0, PHASE_HASH_LEN);
+  return `${phase.slice(0, headLen)}.${hash}`;
 }
 
 /**

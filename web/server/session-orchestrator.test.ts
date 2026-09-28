@@ -4793,6 +4793,33 @@ describe("SessionOrchestrator", () => {
       }
     });
 
+    // FIX-B1-1: a throw while turning the observer's reply into a review
+    // (e.g. an unforeseen naming error) must not skip the drain — otherwise
+    // the queued checkpoint is never dispatched and the pair degrades later.
+    it("observer:turn-done still drains when reply finalize throws (FIX-B1-1)", () => {
+      orchestrator.initialize();
+      const { workspace, ws } = setupGroup("grp_lt3");
+      try {
+        ws.councilWatchers.get("grp_lt3")!.pendingCheckpoint = {
+          schema_version: 1, checkpoint_id: "chk_queued", phase: "p", sequence: 1,
+          session_group_id: "grp_lt3", emitted_at: "2026-01-01T00:00:00Z", artifact_paths: [],
+        };
+        vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReset();
+        vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "sent" });
+        (orchestrator as any).coordinator = {
+          get: vi.fn(() => ({ sessionGroupId: "grp_lt3", status: "active" })),
+        };
+        vi.spyOn((orchestrator as any).checkpointPipeline, "finalizeObserverReply").mockImplementation(() => {
+          throw new RangeError("boom");
+        });
+        companionBus.emit("observer:turn-done", { sessionId: "obs_id" });
+        expect(ws.councilWatchers.get("grp_lt3")?.pendingCheckpoint).toBeNull();
+        expect(deps.wsBridge.sendObserverWakeFrame).toHaveBeenCalled();
+      } finally {
+        fs.rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
     it("observer:turn-done from non-observer sessionId is ignored (Backend #21 guard)", () => {
       orchestrator.initialize();
       const { workspace, ws } = setupGroup("grp_lt2");
