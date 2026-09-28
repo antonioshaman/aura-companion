@@ -5,13 +5,25 @@
  *   A  naked Claude     — `claude -p`, clean CLAUDE_CONFIG_DIR, Aura files scrubbed
  *   B  naked Codex      — `codex exec --json --ephemeral`, Aura files scrubbed
  *   C  Claude+knowledge — Companion session, KB on, everything else off
- *   D  Claude+Observer  — C + Council Mode observer pair (claude+claude)
- *   E  Claude+Council   — D + `/council-*` skills + auto-proceed (full stack)
+ *   D  Claude+Observer  — C + Council Mode observer pair (claude+claude) +
+ *                         the observer-loop directive (see below)
+ *   E  Claude+Council   — D + `/council-*` skills + auto-proceed (full stack;
+ *                         `autoProceedOnIdle` is sent on create and armed by
+ *                         the server since AP-WIRE)
  *   F  Codex+Aura       — Companion Codex session, KB on
  *   G  Codex+Council    — F + `/council-*` skills (see note below)
  *
  * Layer ladder for the report: A → C → D → E (each adds exactly one layer
  * group on top of the previous one).
+ *
+ * Observer loop (D, E): nothing in a plain task prompt makes the orchestrator
+ * emit checkpoints — only the `/council-*` skills do — so without help the
+ * observer sees just the spawn checkpoint, before any code exists, and D is
+ * indistinguishable from C (pilot 1). `observerLoop` makes the runner append
+ * a minimal directive: POST a checkpoint after changing code, wait for the
+ * observer's review, address it. It uses no council skill, so the D → E step
+ * still adds exactly the skills + auto-proceed. Whether the loop actually ran
+ * is recorded per cell (`layer_evidence`), never assumed.
  *
  * G caveat: Council Mode only supports a Claude orchestrator (`claude+claude`,
  * `claude+codex` — the Codex half is always the observer), so a Codex-primary
@@ -51,6 +63,8 @@ export interface AuraVariant {
   layers: VariantLayers;
   /** Council Mode pair; absent = solo session. */
   councilPairing?: "claude+claude";
+  /** Append the checkpoint → review directive to the prompt (Council pairs). */
+  observerLoop?: true;
   /** Sent as `autoProceedOnIdle` when the autoProceed layer is on. */
   autoProceedOnIdle?: { idleMs: number; maxIterations: number };
 }
@@ -75,6 +89,7 @@ export const VARIANTS: Readonly<Record<VariantId, Variant>> = Object.freeze({
     mode: "aura",
     layers: layers({ knowledge: true, observer: true }),
     councilPairing: "claude+claude",
+    observerLoop: true,
   },
   E: {
     id: "E",
@@ -83,6 +98,7 @@ export const VARIANTS: Readonly<Record<VariantId, Variant>> = Object.freeze({
     mode: "aura",
     layers: layers({ knowledge: true, observer: true, council: true, autoProceed: true }),
     councilPairing: "claude+claude",
+    observerLoop: true,
     autoProceedOnIdle: { idleMs: 120_000, maxIterations: 3 },
   },
   F: { id: "F", label: "Codex+Aura", provider: "codex", mode: "aura", layers: layers({ knowledge: true }) },

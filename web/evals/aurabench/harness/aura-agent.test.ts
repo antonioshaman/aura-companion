@@ -14,14 +14,32 @@
  *     messages before the prompt (init probe) are ignored;
  *   - metrics sum across primary + observer (the observer is Aura's cost);
  *   - permission requests are auto-allowed; a limit result yields `limit`;
- *     the wall clock yields `timeout`; sessions are killed + deleted always.
+ *     the wall clock yields `timeout`; sessions are killed + deleted always;
+ *   - FIX-D2-2: observer-loop variants (D, E) append the checkpoint → review
+ *     directive with the pair's concrete orchestrator id, group id and the
+ *     BENCH url (C's prompt is untouched); a council create without a group
+ *     id fails the cell instead of silently measuring C under D's name; the
+ *     pair's `.council/` traces become `isolation.layer_evidence`, scoped to
+ *     the pair's group, so "D/E measured the observer / auto-proceed" is
+ *     proven per cell, not assumed.
  */
 
 import { describe, it, expect } from "vitest";
+import { mkdirSync, mkdtempSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AuraBenchTask } from "../task.js";
 import { VARIANTS, type AuraVariant } from "./variants.js";
 import { AuraSessionTracker } from "./aura-session-tracker.js";
-import { auraRunner, createBody, quietWindowMs, sessionIdsFromCreate, type AuraDeps } from "./aura-agent.js";
+import {
+  auraRunner,
+  createBody,
+  observerLoopDirective,
+  quietWindowMs,
+  readLayerEvidence,
+  sessionIdsFromCreate,
+  type AuraDeps,
+} from "./aura-agent.js";
 
 const result = (extra: object = {}) => ({
   type: "result",
@@ -54,6 +72,12 @@ describe("createBody / sessionIdsFromCreate / quietWindowMs", () => {
     expect(sessionIdsFromCreate({ sessionId: "s1" })).toEqual({ primary: "s1", others: [] });
     expect(sessionIdsFromCreate({ primary: { sessionId: "p" }, observer: { sessionId: "o" } })).toEqual({ primary: "p", others: ["o"] });
     expect(sessionIdsFromCreate({ error: "x" })).toBeNull();
+    // The group id is what the observer-loop directive and the evidence need.
+    expect(sessionIdsFromCreate({ sessionGroupId: "grp_1", primary: { sessionId: "p" }, observer: { sessionId: "o" } })).toEqual({
+      primary: "p",
+      others: ["o"],
+      groupId: "grp_1",
+    });
   });
   it("quiet window grows for council and auto-proceed", () => {
     expect(quietWindowMs(VARIANTS.C as AuraVariant)).toBe(60_000);
@@ -97,7 +121,7 @@ describe("AuraSessionTracker", () => {
 });
 
 /** Fake Companion: records REST calls; sockets deliver scripted messages when prompted. */
-function fakeCompanion(opts: { council?: boolean; onPrompt?: (emit: (id: string, m: unknown) => void) => void; connectAfter?: number }) {
+function fakeCompanion(opts: { council?: boolean; noGroup?: boolean; onPrompt?: (emit: (id: string, m: unknown) => void) => void; connectAfter?: number }) {
   const calls: string[] = [];
   const sent: { id: string; data: unknown }[] = [];
   const handlers = new Map<string, (d: string) => void>();
@@ -109,7 +133,11 @@ function fakeCompanion(opts: { council?: boolean; onPrompt?: (emit: (id: string,
     http: async (method, path, body) => {
       calls.push(`${method} ${path}${body ? ` ${JSON.stringify(body)}` : ""}`);
       if (path === "/api/sessions/create") {
-        return { status: 200, json: opts.council ? { primary: { sessionId: "p" }, observer: { sessionId: "o" } } : { sessionId: "p" } };
+        const pair = { primary: { sessionId: "p" }, observer: { sessionId: "o" } };
+        return {
+          status: 200,
+          json: opts.council ? (opts.noGroup ? pair : { sessionGroupId: "grp_abc", ...pair }) : { sessionId: "p" },
+        };
       }
       if (method === "GET") {
         polls++;
@@ -140,10 +168,10 @@ function fakeCompanion(opts: { council?: boolean; onPrompt?: (emit: (id: string,
   return { d, calls, sent, emit };
 }
 
-const ctx = (variant: "C" | "D", timeoutMs = 3_600_000) => ({
+const ctx = (variant: "C" | "D" | "E", timeoutMs = 3_600_000, worktree = "/wt/cell") => ({
   task: { id: "t", prompt: "fix it" } as AuraBenchTask,
   variant: VARIANTS[variant],
-  worktree: "/wt/cell",
+  worktree,
   timeoutMs,
   artifactDir: "/cells",
 });
@@ -194,5 +222,128 @@ describe("auraRunner", () => {
     const f = fakeCompanion({});
     f.d.http = async () => ({ status: 409, json: { error: "observer layer is off" } });
     expect(await auraRunner(f.d)(ctx("D"))).toMatchObject({ kind: "done", status: "agent_error", error: expect.stringContaining("409") });
+  });
+});
+
+describe("observer loop (FIX-D2-2)", () => {
+  it("C sends the task prompt verbatim — no directive for a solo variant", async () => {
+    const f = fakeCompanion({ onPrompt: (emit) => emit("p", result()) });
+    await auraRunner(f.d)(ctx("C"));
+    expect(f.sent[0]).toMatchObject({ data: { type: "user_message", content: "fix it" } });
+  });
+
+  it("D appends the directive with the pair's ids and the bench URL, never the prod port", async () => {
+    const f = fakeCompanion({ council: true, onPrompt: (emit) => emit("p", result()) });
+    await auraRunner(f.d)(ctx("D"));
+    const content = (f.sent[0].data as { content: string }).content;
+    expect(content.startsWith("fix it\n")).toBe(true);
+    expect(content).toContain("http://127.0.0.1:3499/api/sessions/p/council/checkpoint");
+    expect(content).toContain('"session_group_id":"grp_abc"');
+    expect(content).toContain('"phase":"bench-implement"');
+    expect(content).not.toContain("3456");
+    // The D → E step must still add the skills: the directive names none.
+    expect(content).not.toMatch(/council-(implement|plan|review)/);
+  });
+
+  it("the directive's checkpoint body is a valid CheckpointPayload once the placeholders are filled", () => {
+    // Guards against the directive drifting from the server's parser
+    // (schema_version / field names) — a drifted directive = 400 on every POST.
+    const text = observerLoopDirective({ baseUrl: "http://127.0.0.1:3499", orchestratorId: "p", groupId: "grp_abc" });
+    const body = text.split("\n").find((l) => l.trim().startsWith("{"))!.trim();
+    const filled = body
+      .replace("bench-<n>-<8 random hex>", "bench-1-deadbeef")
+      .replace("<n>", "1")
+      .replace(/<UTC now[^"]*>/, "2026-09-28T12:00:00Z")
+      .replace("[<workspace-relative paths of the files you changed, at most 50>]", '["web/server/x.ts"]');
+    expect(JSON.parse(filled)).toEqual({
+      schema_version: 1,
+      checkpoint_id: "bench-1-deadbeef",
+      phase: "bench-implement",
+      sequence: 1,
+      session_group_id: "grp_abc",
+      emitted_at: "2026-09-28T12:00:00Z",
+      artifact_paths: ["web/server/x.ts"],
+    });
+  });
+
+  it("a council create without sessionGroupId fails the cell and cleans up both halves", async () => {
+    const f = fakeCompanion({ council: true, noGroup: true, onPrompt: (emit) => emit("p", result()) });
+    const r = await auraRunner(f.d)(ctx("D"));
+    expect(r).toMatchObject({ kind: "done", status: "agent_error", error: expect.stringContaining("sessionGroupId") });
+    expect(f.sent).toEqual([]); // never prompted
+    for (const id of ["p", "o"]) expect(f.calls).toContain(`DELETE /api/sessions/${id}`);
+  });
+
+  it("E: confounds name the bench directive and the unattended STOP hold", async () => {
+    const f = fakeCompanion({ council: true, onPrompt: (emit) => emit("p", result()) });
+    const r = await auraRunner(f.d)(ctx("E"));
+    expect(r.kind === "done" && r.confounds.join("\n")).toMatch(/bench directive[\s\S]*holds auto-proceed/);
+  });
+
+  it("records layer_evidence from the worktree's .council/ for the pair's group", async () => {
+    const wt = mkdtempSync(join(tmpdir(), "aurabench-ev-"));
+    const f = fakeCompanion({
+      council: true,
+      onPrompt: (emit) => {
+        // What a working loop leaves behind by the time the cell ends.
+        mkdirSync(join(wt, ".council", "checkpoints"), { recursive: true });
+        mkdirSync(join(wt, ".council", "reviews"), { recursive: true });
+        writeFileSync(join(wt, ".council", "checkpoints", "bench-implement.grp_abc.json"), JSON.stringify({ phase: "bench-implement", sequence: 1 }));
+        writeFileSync(join(wt, ".council", "reviews", "bench-implement-grp_abc-claude-observer.md"), "[]");
+        emit("p", result());
+      },
+    });
+    const r = await auraRunner(f.d)(ctx("D", 3_600_000, wt));
+    expect(r).toMatchObject({ kind: "done", status: "completed" });
+    expect(r.kind === "done" && r.isolation.layer_evidence).toMatchObject({ observer_loop_ran: true, reviews: 1, auto_proceed_fires: null });
+  });
+});
+
+describe("readLayerEvidence", () => {
+  const setup = () => {
+    const wt = mkdtempSync(join(tmpdir(), "aurabench-ev-"));
+    for (const d of ["checkpoints", "reviews", "state"]) mkdirSync(join(wt, ".council", d), { recursive: true });
+    const put = (rel: string, body: string, mtimeSec?: number) => {
+      const p = join(wt, ".council", rel);
+      writeFileSync(p, body);
+      if (mtimeSec !== undefined) utimesSync(p, mtimeSec, mtimeSec);
+    };
+    return { wt, put };
+  };
+
+  it("missing .council → empty evidence, no throw", () => {
+    expect(readLayerEvidence("/nonexistent/wt", "grp_x")).toEqual({ checkpoints: [], reviews: 0, observer_loop_ran: false, auto_proceed_fires: null });
+  });
+
+  it("only the spawn checkpoint + its review → the loop did NOT run (pilot-1 shape of D)", () => {
+    const { wt, put } = setup();
+    put("checkpoints/spawn.grp_a.json", JSON.stringify({ phase: "spawn", sequence: 0 }), 1000);
+    put("reviews/spawn-grp_a-claude-observer.md", "[]", 1001);
+    const ev = readLayerEvidence(wt, "grp_a");
+    expect(ev.observer_loop_ran).toBe(false);
+    expect(ev.checkpoints).toEqual([{ file: "spawn.grp_a.json", phase: "spawn", sequence: 0 }]);
+  });
+
+  it("a work checkpoint with no review written after it → not ran", () => {
+    const { wt, put } = setup();
+    put("reviews/spawn-grp_a-claude-observer.md", "[]", 1000);
+    put("checkpoints/bench-implement.grp_a.json", JSON.stringify({ phase: "bench-implement", sequence: 1 }), 2000);
+    expect(readLayerEvidence(wt, "grp_a").observer_loop_ran).toBe(false);
+  });
+
+  it("work checkpoint + later review → ran; auto-proceed fires from the trace", () => {
+    const { wt, put } = setup();
+    put("checkpoints/bench-implement.grp_a.json", JSON.stringify({ phase: "bench-implement", sequence: 2 }), 2000);
+    put("reviews/bench-implement-grp_a-claude-observer.md", "[]", 2100);
+    put("state/grp_a-auto-proceed-trace.json", JSON.stringify({ iterationCount: 2 }));
+    expect(readLayerEvidence(wt, "grp_a")).toMatchObject({ observer_loop_ran: true, reviews: 1, auto_proceed_fires: 2 });
+  });
+
+  it("another pair's files in the same workspace are ignored", () => {
+    const { wt, put } = setup();
+    put("checkpoints/bench-implement.grp_other.json", JSON.stringify({ phase: "bench-implement", sequence: 1 }), 2000);
+    put("reviews/bench-implement-grp_other-claude-observer.md", "[]", 2100);
+    put("state/grp_other-auto-proceed-trace.json", JSON.stringify({ iterationCount: 3 }));
+    expect(readLayerEvidence(wt, "grp_a")).toEqual({ checkpoints: [], reviews: 0, observer_loop_ran: false, auto_proceed_fires: null });
   });
 });

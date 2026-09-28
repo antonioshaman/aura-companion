@@ -29,7 +29,19 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { cpSync, existsSync, lstatSync, mkdirSync, openSync, rmSync, symlinkSync, unlinkSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
 import { benchChildEnv } from "./proc.js";
 import { CODEX_AUTH_FILE } from "./codex-home.js";
@@ -81,7 +93,45 @@ export function benchInstanceEnv(
   });
 }
 
-export function prepareBenchHome(paths: BenchInstancePaths, realHome: string): void {
+/** A prod host:port as the skills spell it (`http://localhost:3456/api/…`,
+ *  bare `localhost:3456/api/…`, `ws://…`); the scheme, if any, is kept. */
+const PROD_API_URL = new RegExp(`\\b(?:localhost|127\\.0\\.0\\.1):${PROD_PORT}\\b`, "g");
+
+/**
+ * Point the bench copy of the skills at the bench instance: the `/council-*`
+ * skills hardcode `http://localhost:3456` for their checkpoint emit, so on
+ * the bench a skill would query PROD's session list (and never reach its own
+ * pair — E would lose its checkpoints). Rewrites text files under `skillsDir`
+ * in place (the copy only — never `~/.claude`). Returns what it did + what is
+ * left (must be 0), stored as isolation evidence.
+ */
+export function rewriteSkillProdUrls(skillsDir: string, port: number): { files: number; replaced: number; remaining: number } {
+  const out = { files: 0, replaced: 0, remaining: 0 };
+  const walk = (dir: string) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (e.isFile() && /\.(md|txt|sh|json|ya?ml|ts|js|py)$/.test(e.name)) {
+        const text = readFileSync(p, "utf8");
+        const hits = text.match(PROD_API_URL)?.length ?? 0;
+        if (!hits) continue;
+        const next = text.replace(PROD_API_URL, `127.0.0.1:${port}`);
+        writeFileSync(p, next);
+        out.files++;
+        out.replaced += hits;
+        out.remaining += next.match(PROD_API_URL)?.length ?? 0;
+      }
+    }
+  };
+  if (existsSync(skillsDir)) walk(skillsDir);
+  return out;
+}
+
+export function prepareBenchHome(
+  paths: BenchInstancePaths,
+  realHome: string,
+  port: number = BENCH_PORT,
+): { skillUrlRewrites: ReturnType<typeof rewriteSkillProdUrls> } {
   for (const d of [paths.home, paths.tmp, paths.recordings, paths.councilStats]) mkdirSync(d, { recursive: true });
   const claude = join(paths.home, ".claude");
   mkdirSync(claude, { recursive: true, mode: 0o700 });
@@ -92,7 +142,9 @@ export function prepareBenchHome(paths: BenchInstancePaths, realHome: string): v
     rmSync(join(claude, "skills"), { recursive: true, force: true });
     cpSync(skills, join(claude, "skills"), { recursive: true, dereference: true });
   }
+  const skillUrlRewrites = rewriteSkillProdUrls(join(claude, "skills"), port);
   prepareBenchCodexHome(join(paths.home, ".codex"), join(realHome, ".codex"));
+  return { skillUrlRewrites };
 }
 
 /** The bench HOME's `.codex`: a real directory with only an `auth.json`
@@ -123,7 +175,8 @@ export async function startBenchInstance(opts: {
 }): Promise<RunningInstance> {
   const port = opts.port ?? BENCH_PORT;
   const paths = benchInstancePaths(opts.benchRoot);
-  prepareBenchHome(paths, opts.realHome);
+  const { skillUrlRewrites } = prepareBenchHome(paths, opts.realHome, port);
+  if (skillUrlRewrites.remaining > 0) throw new Error(`bench skills still reference the prod API after rewrite (${skillUrlRewrites.remaining})`);
   const env = benchInstanceEnv(process.env, paths, port);
   const baseUrl = `http://127.0.0.1:${port}`;
   // Refuse to attach to something already listening there (could be anything).
@@ -157,6 +210,7 @@ export async function startBenchInstance(opts: {
       telemetry: "off",
       codex_home: "bench-owned ~/.codex (auth.json symlink only)",
       prod_port: PROD_PORT,
+      skill_prod_url_rewrites: skillUrlRewrites,
     },
     stop: async () => {
       if (!child.pid || child.exitCode !== null) return;

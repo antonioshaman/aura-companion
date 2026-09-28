@@ -8,6 +8,8 @@
  *     per-layer table in D3 measures one change at a time);
  *   - naked variants carry no layers, Codex variants never get the observer
  *     (Council Mode rejects a Codex primary);
+ *   - Council pairs (D, E) carry the observer-loop directive flag; only E
+ *     requests auto-proceed (FIX-D2-2);
  *   - `--variants` parsing rejects unknown ids instead of dropping them;
  *   - the cell plan is repetition-major and keys are unique;
  *   - resume: `completedCellKeys` reads keys back, ignores torn lines and
@@ -47,6 +49,21 @@ describe("VARIANTS", () => {
       if (v.mode !== "aura") continue;
       expect(v.layers.observer === "on").toBe(v.councilPairing !== undefined);
     }
+  });
+
+  it("every Council pair runs the observer loop (FIX-D2-2: otherwise D ≡ C, observer sees no code)", () => {
+    for (const v of Object.values(VARIANTS)) {
+      if (v.mode !== "aura") continue;
+      expect(v.observerLoop === true).toBe(v.councilPairing !== undefined);
+    }
+  });
+
+  it("E really requests auto-proceed (FIX-D2-2: armed since AP-WIRE, measured, not merely labelled)", () => {
+    const e = VARIANTS.E as AuraVariant;
+    expect(e.layers.autoProceed).toBe("on");
+    expect(e.autoProceedOnIdle).toEqual({ idleMs: 120_000, maxIterations: 3 });
+    // Only E: the ladder's D step must not already include auto-proceed.
+    for (const v of Object.values(VARIANTS)) if (v.mode === "aura" && v.id !== "E") expect(v.autoProceedOnIdle).toBeUndefined();
   });
 
   it("Codex variants never request the observer (unsupported for a Codex primary)", () => {
