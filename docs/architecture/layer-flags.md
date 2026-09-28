@@ -18,3 +18,16 @@ Four Aura meta-layers can be switched on and off independently. This supports ab
   - **Codex** — the directive is sent again on `thread/resume`, because a server restart resumes the thread.
 - **Known confound.** The workspace `CLAUDE.md`/`AGENTS.md` still mentions the KB. The directive tells the agent to ignore those instructions. The bench harness removes the files entirely for the "naked" variants.
 - **Usage.** `POST /api/sessions/create` with `{"cwd": "...", "layers": {"knowledge": "off"}}`. The flags are not exposed in the UI; they are an operator/bench API.
+
+## Auto-proceed wiring (AP-WIRE)
+
+Auto-proceed is **opt-in per Council pair** and off by default. Before AP-WIRE the server accepted `autoProceedOnIdle` and nothing emitted `orchestrator_turn_idle`, so it never armed.
+
+- **Opt-in.** Send `{"councilMode": "council", "autoProceedOnIdle": {"idleMs": …, "maxIterations": …}}` on `POST /api/sessions/create`. The value is validated at the boundary and stored on the orchestrator-half's `SdkSessionInfo.autoProceedOnIdle` (only that half). Because it is persisted, it survives relaunches and server restarts.
+- **Arm.** On each `orchestrator:turn-done` (the in-flight → awaiting-input edge) for an opted-in orchestrator, `CouncilAutoProceedController` routes `orchestrator_turn_idle` through `coordinator.applyEvent`. The state machine arms only while the group is `active`. After `idleMs` the manager sends the existing `[auto-proceed:idle-timeout v1]` frame (recording origin `server:auto-proceed`), and that turn's `result` re-arms.
+- **Cancel.**
+  - A browser `user_message` cancels the pending timer (`noteUserMessage`).
+  - A mid-turn orchestrator is refused by the manager's gate.
+  - A **blocking** observer STOP (`severity: STOP`, not `weakEvidence`, not `disputed` — the banner predicate) emits `stop_finding_raised` and holds re-arming. The next review with no blocking STOP emits `stop_finding_resolved` and re-tries the arm. This hold lives in memory only: after a restart it is empty until the next review lands.
+- **Cap.** The per-session `maxIterations` (≤ 10) is clamped by `COMPANION_ORCH_AUTO_PROCEED_MAX_ITERATIONS_CEILING`. That variable can only lower the cap: a value outside `[1, 10]` keeps 10 and logs a warning.
+- **Pairings.** Both supported pairings (`claude+claude`, `claude+codex`) have a Claude orchestrator, and only the orchestrator's turn edges drive the timer.

@@ -3658,6 +3658,26 @@ describe("layer flags at spawn (P4/C3)", () => {
     expect(info.layers).toEqual({ ...ALL_ON, knowledge: false });
   });
 
+  // aura-meta-diet AP-WIRE: the validated auto-proceed opt-in is stored on the
+  // orchestrator-half's info (persisted with the launcher state, so it
+  // survives relaunch/restart) and dropped for every other session — a
+  // non-orchestrator session must never carry an arm-able opt-in.
+  it("stores autoProceedOnIdle only on a council orchestrator-half", () => {
+    const opt = { idleMs: 60_000, maxIterations: 3 };
+    const orch = launcher.launch({
+      cwd: "/tmp/project",
+      sessionGroupId: "grp_0123456789abcdef0123456789abcdef",
+      sessionGroupRole: "orchestrator",
+      autoProceedOnIdle: opt,
+    });
+    expect(orch.autoProceedOnIdle).toEqual(opt);
+    // (An observer-half launch needs real council prompt files; the solo case
+    // below exercises the same `role !== "orchestrator"` branch.)
+    mockSpawn.mockReturnValueOnce(createMockProc(12346));
+    const solo = launcher.launch({ cwd: "/tmp/project", autoProceedOnIdle: opt });
+    expect(solo.autoProceedOnIdle).toBeUndefined();
+  });
+
   it("council=off denies every council skill", () => {
     launcher.launch({ cwd: "/tmp/project", layers: { ...ALL_ON, council: false } });
     const rules = denyRules(argvOf(0));
