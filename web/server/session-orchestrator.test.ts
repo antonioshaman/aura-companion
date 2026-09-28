@@ -4893,8 +4893,9 @@ describe("SessionOrchestrator", () => {
       const fs = await import("node:fs");
       const path = await import("node:path");
       const url = await import("node:url");
+      // P4/C1e: the watcher lifecycle moved to council-lifecycle.ts verbatim.
       const src = fs.readFileSync(
-        path.join(path.dirname(url.fileURLToPath(import.meta.url)), "session-orchestrator.ts"),
+        path.join(path.dirname(url.fileURLToPath(import.meta.url)), "council-lifecycle.ts"),
         "utf-8",
       );
       // The re-arm closure must dispatch the watcher-rearm trigger.

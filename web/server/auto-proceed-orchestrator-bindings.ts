@@ -68,7 +68,7 @@ export interface AutoProceedReconcileBindingsOptions {
 /**
  * Minimal shape the rehydrate driver reads from the orchestrator's
  * per-group meta cache. Narrowed so the bindings module never sees the
- * full `CouncilGroupMeta` type from session-orchestrator.ts (which
+ * full `CouncilGroupMeta` type from council-lifecycle.ts (which
  * carries observer-prompt-sha256 and other unrelated fields).
  */
 export interface OrchestratorGroupMetaForRehydrate {
