@@ -697,14 +697,15 @@ describe("assertWakeManifestPathAllowed (EC-7 wrapper)", () => {
 // handler body, regardless of the wrapper's name.
 
 describe("dispatchObserverWake call-site canary (Beck Council Rec 4)", () => {
-  it("session-orchestrator.handleCouncilCheckpoint invokes dispatchObserverWake in its body", () => {
-    const filePath = fileURLToPath(new URL("./session-orchestrator.ts", import.meta.url));
+  it("council-checkpoint-pipeline.handleCouncilCheckpoint invokes dispatchObserverWake in its body", () => {
+    // P4/C1a: the handler moved with the pipeline out of session-orchestrator.ts.
+    const filePath = fileURLToPath(new URL("./council-checkpoint-pipeline.ts", import.meta.url));
     const source = _readFileSync(filePath, "utf-8");
-    // Find the body of handleCouncilCheckpoint — anchored on the private
-    // method declaration, terminated by the next method declaration's
+    // Find the body of handleCouncilCheckpoint — anchored on the method
+    // declaration, terminated by the next method declaration's
     // signature OR the class brace. Using regex with `\w+` placeholders
     // per `feedback_static_grep_canary_regex_over_substring`.
-    const handlerStart = source.indexOf("private handleCouncilCheckpoint(");
+    const handlerStart = source.indexOf("  handleCouncilCheckpoint(sessionGroupId: string");
     expect(handlerStart).toBeGreaterThan(0);
     // Search the next 4000 characters of source — generous bound for the
     // handler body; if it grows beyond that, the canary is the canary.

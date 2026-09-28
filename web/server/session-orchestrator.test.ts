@@ -3431,8 +3431,8 @@ describe("SessionOrchestrator", () => {
       companionBus.on("group:review", (e: unknown) => { reviews.push(e); });
       const metricSpy = vi.spyOn(metricsCollector, "recordError");
       try {
-        (orchestrator as unknown as { handleReviewDeadlineExpired: (g: string, c: string) => void })
-          .handleReviewDeadlineExpired("grp_dl_mine", "chk_dl");
+        (orchestrator as unknown as { checkpointPipeline: { handleReviewDeadlineExpired: (g: string, c: string) => void } })
+          .checkpointPipeline.handleReviewDeadlineExpired("grp_dl_mine", "chk_dl");
         // (a) degrades, with the foreign-review reason, not the generic silence one
         expect(degraded).toHaveLength(1);
         expect(degraded[0]!.reason).toBe("foreign_group_review");
@@ -3456,8 +3456,8 @@ describe("SessionOrchestrator", () => {
       companionBus.on("group:degraded", (e: unknown) => { degraded.push(e); });
       companionBus.on("group:review", (e: unknown) => { reviews.push(e); });
       try {
-        (orchestrator as unknown as { handleReviewDeadlineExpired: (g: string, c: string) => void })
-          .handleReviewDeadlineExpired("grp_dl_own", "chk_dl");
+        (orchestrator as unknown as { checkpointPipeline: { handleReviewDeadlineExpired: (g: string, c: string) => void } })
+          .checkpointPipeline.handleReviewDeadlineExpired("grp_dl_own", "chk_dl");
         expect(reviews).toHaveLength(1); // recovered_by_deadline_rescan
         expect(degraded).toHaveLength(0);
       } finally {
