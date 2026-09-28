@@ -9,10 +9,9 @@ prompt: |
   switch, but the dropdown's trigger label keeps showing the old model until the
   next message is sent, so users think the switch didn't work.
 
-  Make the `ModelSwitcher` label reflect a Claude model selection immediately
-  (optimistically), using the store's existing session-update action for the
-  runtime session. Selecting the model that is already active must not send
-  anything.
+  The `ModelSwitcher` trigger label must show the newly selected Claude model
+  immediately after selection, without waiting for any response. Selecting the
+  model that is already active must not send anything.
 expected_files:
   - web/src/components/ModelSwitcher.tsx
 expected_tests:

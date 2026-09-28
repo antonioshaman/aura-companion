@@ -7,23 +7,24 @@ start_commit: 01f144b93b79c61efcbb51aff731c578163ee49c
 prompt: |
   The in-session model dropdown lists models from the API-key model list, but
   sessions run on the user's subscription. Switching a Claude session to a model
-  the subscription cannot use appears to succeed (the switch is optimistic), then
-  every following turn fails with a 404 and the session is stuck.
+  the subscription cannot use appears to succeed, then every following turn fails
+  with a 404 and the session is stuck on that model.
 
-  Track in-flight Claude model switches in the browser store and revert on
-  failure:
-  - in `web/src/store/cli-status-slice.ts` add `pendingClaudeModelSwitches`
+  Required behaviour:
+  - `web/src/store/cli-status-slice.ts` exposes `pendingClaudeModelSwitches`
     (a Map keyed by session id of `{ requestedModel, previousModel }`),
     `setPendingClaudeModelSwitch(sessionId, requestedModel, previousModel)` and
     `clearPendingClaudeModelSwitch(sessionId)` (no-op, same Map instance, when
-    absent); also clear it on session removal and store reset;
-  - the model switcher records a pending switch when the user picks a different
-    Claude model;
-  - when the next `result` frame reports API error status 404 while a switch is
-    pending, restore the previous model in the session and sidebar state,
-    send `set_model` back to the previous model, clear the pending switch and add
-    a system message naming both models. A successful result just clears the
-    pending switch; a 404 with no pending switch does nothing.
+    absent); an entry is also dropped on session removal and store reset;
+  - when the user picks a different Claude model in the model switcher,
+    `setPendingClaudeModelSwitch` is called with the session id, the new model
+    and the model it replaces;
+  - when the next `result` frame for that session carries
+    `api_error_status: 404` while a switch is pending, the session goes back to
+    the previous model (in the session and sidebar state, and via `set_model` to
+    the CLI), the pending switch is cleared, and a system message names both
+    models. A successful result just clears the pending switch; a 404 with no
+    pending switch does nothing.
 expected_files:
   - web/server/session-types.ts
   - web/src/components/ModelSwitcher.tsx

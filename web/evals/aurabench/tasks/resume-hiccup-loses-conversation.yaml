@@ -5,11 +5,11 @@ id: resume-hiccup-loses-conversation
 title: "One transient crash on resume no longer throws away the conversation"
 start_commit: d6f31c5f7f3a3a261e4774b46ac71aa3221935b5
 prompt: |
-  When a Claude CLI spawned with `--resume` exits within 5 seconds, the launcher
-  assumes the resume target is gone and discards `cliSessionId`, so the next
-  message starts a brand-new conversation. But a transient error, a model 400 or
-  a version/transport mismatch produce exactly the same fast exit, and users lose
-  their whole conversation to a one-off hiccup.
+  When a Claude CLI spawned with `--resume` exits within 5 seconds, the session's
+  conversation is dropped: the next message starts a brand-new conversation. A
+  fast exit like that is often just a transient error, a model 400 or a
+  version/transport mismatch, and users lose their whole conversation to a
+  one-off hiccup.
 
   Require two consecutive fast resume-deaths before discarding. Put the decision
   in an exported pure function in `web/server/cli-launcher.ts`,
@@ -18,8 +18,8 @@ prompt: |
   to discard, and keep the streak on the session as
   `resumeImmediateFailures` (a new optional field of the session info). A spawn
   that outlives the 5 s window resets the streak to 0; a fast death that was not
-  a resume never counts and also leaves the streak at 0. Both CLI exit handlers (WebSocket and stdio transports)
-  must use it.
+  a resume never counts and also leaves the streak at 0. This must hold for both the WebSocket and the stdio
+  transport.
 expected_files:
   - web/server/cli-launcher.ts
 expected_tests:

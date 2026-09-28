@@ -6,18 +6,18 @@ title: "Archiving a session after a server restart actually stops its CLI proces
 start_commit: 1bb028fd9c61b163396333d07f3a57b042bc2741
 prompt: |
   Under systemd `KillMode=process`, CLI child processes survive a server restart.
-  After the restart the launcher restores those sessions from disk with their
-  live `pid`, but `CliLauncher.kill()` only signals the in-memory subprocess
-  handle, which no longer exists — so archiving or deleting such a session
-  leaves the CLI process running forever.
+  After such a restart, archiving or deleting one of the restored sessions leaves
+  its CLI process running forever; nothing ever terminates it.
 
-  Make `kill()` handle a restored session that has a pid but no subprocess
-  handle: SIGTERM it, wait a grace period for it to exit, escalate to SIGKILL,
-  then mark the session exited and clear its pid, and return whether it
-  signalled. For Claude sessions, reuse the existing process-identity check used
-  when relaunching over a previous instance's pid — if the identity does not
-  match (pid reuse), do not signal anything. Codex sessions have no argv
-  identity anchor; signal them best-effort.
+  Required behaviour of `CliLauncher.kill(sessionId)` for a session restored from
+  disk whose CLI process is still alive:
+  - the process receives SIGTERM, and SIGKILL if it has not exited after a grace
+    period;
+  - the session ends up `exited` with its `pid` cleared, and `kill()` returns
+    whether it signalled the process;
+  - for a Claude session whose pid now belongs to some unrelated process (pid
+    reuse), nothing is signalled;
+  - Codex sessions are still terminated (best-effort).
 expected_files:
   - web/server/cli-launcher.ts
 expected_tests:
