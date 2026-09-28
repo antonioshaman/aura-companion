@@ -3541,6 +3541,67 @@ describe("SessionOrchestrator", () => {
       }
     });
 
+    // FINDINGS-DEDUP (human report 2026-09-28, confirmed on a real bootstrap
+    // response of 84 findings / 79 unique ids): the bootstrap listed review
+    // files in readdir order, so the panel mixed 115-day-old findings between
+    // fresh STOPs, and two review files for the same checkpoint (a re-wake)
+    // emitted the same deterministic id twice — duplicate React keys, which
+    // React renders as multiplied rows. Now: files oldest first by mtime
+    // (name breaks ties), one entry per id with the newest file's copy, and
+    // the result is identical on every call (reload / reconnect).
+    it("FINDINGS-DEDUP: the bootstrap is chronological by review mtime and emits each finding id once", async () => {
+      const { mkdtempSync, writeFileSync, mkdirSync, rmSync, realpathSync, utimesSync } = require("node:fs") as typeof import("node:fs");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      const workspace = realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-orch-dedup-")));
+      const groupId = "grp_0123456789abcdef0123456789abcdef";
+      const review = (checkpointId: string, claims: string[]) => JSON.stringify({
+        schema_version: 1,
+        observer_wake_payload_version_echo: 1,
+        checkpoint_id: checkpointId,
+        phase: "council-review",
+        session_group_id: groupId,
+        reviewed_at: "2026-01-01T00:00:00Z",
+        observer_provider: "codex",
+        observer_model: "gpt-5.5",
+        observer_cli_version: "1.0.0",
+        findings: claims.map((claim) => ({ severity: "NOTE", claim, evidence_path: "docs/review.md" })),
+      });
+      try {
+        const reviewsDir = pathJoin(workspace, ".council", "reviews");
+        mkdirSync(reviewsDir, { recursive: true });
+        // Names sort opposite to mtimes, so a name-ordered or readdir-ordered
+        // bootstrap cannot pass by accident.
+        const oldest = pathJoin(reviewsDir, "z-phase-codex-observer.md");
+        const rewake = pathJoin(reviewsDir, "m-phase-codex-observer.md");
+        const newest = pathJoin(reviewsDir, "a-phase-codex-observer.md");
+        writeFileSync(oldest, review("chk_old", ["table does not sum", "clause contradicts"]));
+        // Re-wake of the same checkpoint: same claims at the same indices → same ids.
+        writeFileSync(rewake, review("chk_old", ["table does not sum", "clause contradicts"]));
+        writeFileSync(newest, review("chk_new", ["fresh finding"]));
+        utimesSync(oldest, new Date(1_000_000_000), new Date(1_000_000_000));
+        utimesSync(rewake, new Date(2_000_000_000), new Date(2_000_000_000));
+        utimesSync(newest, new Date(3_000_000_000), new Date(3_000_000_000));
+        seedGroup(groupId, { cwd: workspace, artifactPaths: ["docs/review.md"] });
+        deps.launcher.getSession.mockImplementation(() => undefined);
+
+        const view = await orchestrator.getGroupReviewsForBootstrap(groupId);
+        expect(view!.reviewCount).toBe(3);
+        // One entry per id — the re-wake did not add copies.
+        const ids = view!.findings.map((f) => f.id);
+        expect(new Set(ids).size).toBe(ids.length);
+        expect(view!.findings.map((f) => f.claim)).toEqual(["table does not sum", "clause contradicts", "fresh finding"]);
+        // The surviving copy of a duplicated id is the newer file's.
+        expect(view!.findings.map((f) => f.reviewedAt)).toEqual([2_000_000_000, 2_000_000_000, 3_000_000_000]);
+
+        // Reload / reconnect: byte-identical bootstrap.
+        const again = await orchestrator.getGroupReviewsForBootstrap(groupId);
+        expect(again!.findings).toEqual(view!.findings);
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
     // FIX-AP-4 (fourth review of PR #249, WARN). A review file the restore
     // cannot parse — e.g. a LEGACY review written before `session_group_id`
     // existed — kept the hold restore incomplete forever, with nothing in the

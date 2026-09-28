@@ -3323,9 +3323,8 @@ function CouncilModeSection() {
         </Card>
         <Card label="FindingsLog — full mix (STOP / WARN / NOTE / INFO / downgraded / weak evidence / dismissed)">
           <FindingsLog
-            // Append-ordered (index 0 = oldest), matching the council slice's
-            // push-onto-end convention; FindingsLog renders newest-first, so
-            // "e" (10s ago) surfaces at the top of the rail.
+            // FINDINGS-DEDUP: unresolved blockers first ("a" and the held
+            // "i"), then everything else newest first by receivedAt.
             findings={[
               mockFinding({ id: "a", severity: "STOP", claim: "Race condition in session-orchestrator.ts", receivedAt: Date.now() - 240_000 }),
               mockFinding({ id: "b", severity: "WARN", claim: "Helper has no negative-path test", receivedAt: Date.now() - 180_000 }),
@@ -3337,6 +3336,22 @@ function CouncilModeSection() {
               mockFinding({ id: "h", severity: "STOP", claim: "Same command fails again — disputed earlier, no banner", receivedAt: Date.now() - 3_000, disputed: "shared_anchor" }),
               mockFinding({ id: "i", severity: "NOTE", claim: "Unfrozen STOP re-checked as NOTE — still holds auto-proceed", receivedAt: Date.now() - 1_000, wasDowngraded: true, downgradeReason: "evidence_not_in_modified_set", holdsAutoProceed: true }),
               mockFinding({ id: "j", severity: "STOP", claim: "STOP dismissed before a reload — kept in the log, no banner", receivedAt: Date.now() - 500, dismissed: true }),
+            ]}
+            onDismissStop={() => {}}
+            nowMs={Date.now()}
+          />
+        </Card>
+        <Card label="FindingsLog — old backlog after a reload (sorted, fresh STOPs on top, a repeated id shown once)">
+          <FindingsLog
+            // Arrival order mimics the pre-fix readdir-ordered bootstrap:
+            // 18d, 1m STOP, 103d, 39m STOP, 1d, and "old-18d" twice.
+            findings={[
+              mockFinding({ id: "old-18d", severity: "NOTE", claim: "The 'Findings Breakdown by Expert' table does not sum to its TOTAL row", receivedAt: Date.now() - 18 * 86_400_000 }),
+              mockFinding({ id: "stop-1m", severity: "STOP", claim: "Fresh STOP — surfaces on top", receivedAt: Date.now() - 60_000 }),
+              mockFinding({ id: "old-103d", severity: "WARN", claim: "A 103-day-old review", receivedAt: Date.now() - 103 * 86_400_000 }),
+              mockFinding({ id: "stop-39m", severity: "STOP", claim: "Second unresolved STOP", receivedAt: Date.now() - 39 * 60_000 }),
+              mockFinding({ id: "note-1d", severity: "NOTE", claim: "Yesterday's note", receivedAt: Date.now() - 86_400_000 }),
+              mockFinding({ id: "old-18d", severity: "NOTE", claim: "The 'Findings Breakdown by Expert' table does not sum to its TOTAL row", receivedAt: Date.now() - 18 * 86_400_000 }),
             ]}
             onDismissStop={() => {}}
             nowMs={Date.now()}

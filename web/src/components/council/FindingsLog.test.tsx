@@ -89,16 +89,17 @@ describe("FindingsLog", () => {
     expect(screen.getByTestId("finding-row-b")).toHaveAttribute("data-severity", "NOTE");
   });
 
-  // Newest-first ordering: the source `findings` array is append-ordered
-  // (council slice pushes each review batch onto the end), so the most
-  // recent finding is last. The rail renders a reversed copy so fresh
-  // findings appear at the top. This pins the DOM order independent of the
-  // (possibly stale) per-finding receivedAt timestamps.
-  it("renders findings newest-first (reverses the append-ordered source array)", () => {
+  // Newest-first ordering. FINDINGS-DEDUP (human decision 2026-09-28)
+  // replaced "reverse the append order" with "newest first by receivedAt":
+  // after a bootstrap the append order was readdir order, so the reversed
+  // rail mixed 18d / 1m / 103d / 1d. receivedAt is now the server-stamped
+  // review time on both the live and the bootstrap path, so it is the
+  // reliable key. Appended out of time order on purpose.
+  it("renders findings newest-first by receivedAt, not by append order", () => {
     const findings = [
-      finding({ id: "oldest", claim: "first appended" }),
-      finding({ id: "middle", claim: "second appended" }),
-      finding({ id: "newest", claim: "last appended" }),
+      finding({ id: "oldest", claim: "first appended", receivedAt: 100 }),
+      finding({ id: "newest", claim: "second appended", receivedAt: 300 }),
+      finding({ id: "middle", claim: "last appended", receivedAt: 200 }),
     ];
     const { container } = render(<FindingsLog findings={findings} nowMs={2_000} />);
     const rows = Array.from(container.querySelectorAll("li[data-testid^='finding-row-']"));
@@ -107,6 +108,67 @@ describe("FindingsLog", () => {
       "finding-row-middle",
       "finding-row-oldest",
     ]);
+  });
+
+  // FINDINGS-DEDUP: the screenshot showed fresh STOPs (1m, 39m) lost in the
+  // middle of an old backlog. An unresolved STOP (same predicate as the
+  // banner) is always on top, even when older than every other finding; a
+  // dismissed STOP and a downgraded one are not blockers and sort by time.
+  // Findings of one review (same receivedAt) keep the observer's order.
+  it("puts unresolved STOPs on top, then newest first, one review in the observer's order", () => {
+    const findings = [
+      finding({ id: "old-stop", severity: "STOP", receivedAt: 10 }),
+      finding({ id: "review-1", severity: "WARN", receivedAt: 500 }),
+      finding({ id: "review-2", severity: "NOTE", receivedAt: 500 }),
+      finding({ id: "dismissed-stop", severity: "STOP", receivedAt: 400 }),
+      finding({ id: "downgraded-stop", severity: "STOP", wasDowngraded: true, receivedAt: 50 }),
+      finding({ id: "fresh-stop", severity: "STOP", receivedAt: 900 }),
+    ];
+    const { container } = render(
+      <FindingsLog findings={findings} nowMs={2_000} dismissedStopIds={new Set(["dismissed-stop"])} />,
+    );
+    const rows = Array.from(container.querySelectorAll("li[data-testid^='finding-row-']"));
+    expect(rows.map((r) => r.getAttribute("data-testid"))).toEqual([
+      "finding-row-fresh-stop",
+      "finding-row-old-stop",
+      "finding-row-review-1",
+      "finding-row-review-2",
+      "finding-row-dismissed-stop",
+      "finding-row-downgraded-stop",
+    ]);
+  });
+
+  // FINDINGS-DEDUP: a reload or reconnect re-delivers the same findings in a
+  // different arrival order (bootstrap first, live events after, or the
+  // reverse). The rendered order must not change; a repeated id renders once.
+  it("renders the same order for any arrival order and shows a repeated id once", () => {
+    const a = finding({ id: "a", receivedAt: 100 });
+    const b = finding({ id: "b", severity: "STOP", receivedAt: 50 });
+    const c = finding({ id: "c", receivedAt: 300 });
+    const order = (list: ObserverFinding[]) => {
+      const { container, unmount } = render(<FindingsLog findings={list} nowMs={2_000} />);
+      const ids = Array.from(container.querySelectorAll("li[data-testid^='finding-row-']")).map((r) => r.getAttribute("data-testid"));
+      unmount();
+      return ids;
+    };
+    const expected = ["finding-row-b", "finding-row-c", "finding-row-a"];
+    expect(order([a, b, c])).toEqual(expected);
+    expect(order([c, a, b])).toEqual(expected);
+    expect(order([b, c, a, c, a])).toEqual(expected);
+  });
+
+  it("passes accessibility scan with a sorted mixed log", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(
+      <FindingsLog
+        findings={[
+          finding({ id: "n", receivedAt: 100 }),
+          finding({ id: "s", severity: "STOP", claim: "blocker", receivedAt: 50 }),
+        ]}
+        onDismissStop={() => {}}
+      />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
   });
 
   // Task 12 (a11y cadence response): the row container keeps `role="log"`

@@ -418,6 +418,7 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
       // indices in the `prior` array.
       const priorIdxById = new Map<string, number>(prior.map((f, i) => [f.id, i]));
       const newOnes: ObserverFinding[] = [];
+      const newIdsInBatch = new Set<string>();
       // Track whether an attribution upgrade occurred so we can decide
       // whether to write a fresh array reference (React #24 optimization).
       let upgraded = false;
@@ -426,7 +427,11 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
       for (const wire of wireFindings) {
         const existingIdx = priorIdxById.get(wire.id);
         if (existingIdx === undefined) {
-          // Genuinely new finding — append as before.
+          // FINDINGS-DEDUP: an id repeated INSIDE one batch (an older server
+          // emitted a re-woken checkpoint's findings twice) is kept once; a
+          // second copy would be a duplicate React key in the FindingsLog.
+          if (newIdsInBatch.has(wire.id)) continue;
+          newIdsInBatch.add(wire.id);
           newOnes.push(hydrateObserverFinding(wire, ctx));
           continue;
         }

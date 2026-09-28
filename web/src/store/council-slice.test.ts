@@ -562,6 +562,30 @@ describe("appendObserverReview", () => {
     expect(useStore.getState().findings.get("grp_abc")).toHaveLength(1);
   });
 
+  // FINDINGS-DEDUP: a real bootstrap (before the server fix) carried the same
+  // id twice in ONE batch — two review files for one re-woken checkpoint. The
+  // cross-batch dedup above never saw it, so both copies reached the
+  // FindingsLog as duplicate React keys. Repeated bootstraps (every reconnect)
+  // must not grow the list either.
+  it("keeps one copy of an id repeated inside one batch, and repeated bootstraps add nothing", () => {
+    useStore.getState().upsertGroup(group());
+    const bootstrap = {
+      sessionGroupId: "grp_abc",
+      checkpointId: "",
+      phase: "",
+      findings: [wireFinding({ id: "f1" }), wireFinding({ id: "f2" }), wireFinding({ id: "f1" })],
+      downgrades: [],
+      observerModel: "",
+      observerProvider: "",
+      timestamp: 1_000,
+    };
+    useStore.getState().appendObserverReview(bootstrap);
+    expect(useStore.getState().findings.get("grp_abc")!.map((f) => f.id)).toEqual(["f1", "f2"]);
+    useStore.getState().appendObserverReview(bootstrap);
+    useStore.getState().appendObserverReview(bootstrap);
+    expect(useStore.getState().findings.get("grp_abc")!.map((f) => f.id)).toEqual(["f1", "f2"]);
+  });
+
   it("is a no-op for an unknown group id", () => {
     useStore.getState().appendObserverReview({
       sessionGroupId: "grp_missing",
