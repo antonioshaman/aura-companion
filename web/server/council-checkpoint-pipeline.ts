@@ -23,6 +23,7 @@ import type { ObserverReplyCapture } from "./observer-reply.js";
 import { countArtifactsRead, type ObserverReadLedger } from "./observer-read-ledger.js";
 import { readCouncilWakeSentinel, writeCouncilWakeSentinel } from "./council-wake-sentinel.js";
 import { formatObserverInvocationLog } from "./observer-attribution.js";
+import { recordReviewVerdicts } from "./observer-review-verdicts.js";
 import type { BrowserObserverDowngrade, BrowserObserverFinding } from "./session-types.js";
 
 /**
@@ -1191,6 +1192,23 @@ export class CouncilCheckpointPipeline {
         observerPromptSha256: meta?.observerPromptSha256 ?? "",
         lineFacts,
       });
+
+      // FIX-AP-2: freeze this review's grounding verdicts BEFORE the fan-out,
+      // so a restart restores the hold / banner from what was decided now,
+      // not from a re-grounding against a later checkpoint. A failed write is
+      // logged; the restore then falls back to raw severity (fail-closed).
+      const frozen = recordReviewVerdicts(entry.cwd, sessionGroupId, payload.checkpoint_id, findings);
+      if (!frozen.ok) {
+        log.warn("session-orchestrator", "review verdicts not persisted", {
+          event: "council.review-verdicts.persist-failed",
+          sessionGroupId,
+          sessionId: meta?.observerSessionId,
+          role: "observer",
+          checkpointId: payload.checkpoint_id,
+          reason: frozen.reason,
+          ...(frozen.detail ? { detail: frozen.detail } : {}),
+        });
+      }
 
       companionBus.emit("group:review", {
         sessionGroupId,

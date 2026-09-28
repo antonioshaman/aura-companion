@@ -27,6 +27,7 @@ import type { ObserverReadLedger } from "./observer-read-ledger.js";
 import { deleteCouncilWakeSentinel } from "./council-wake-sentinel.js";
 import { buildBrowserGroupRecord } from "./browser-group-record.js";
 import { deterministicFindingId, type CouncilWatcherEntry } from "./council-checkpoint-pipeline.js";
+import { applyFrozenVerdict, readReviewVerdicts, type FrozenVerdict } from "./observer-review-verdicts.js";
 import type {
   CreateCouncilGroupRequest,
   CreateCouncilGroupResult,
@@ -1279,14 +1280,54 @@ export class CouncilLifecycle {
     observerProvider?: string;
     observerModel?: string;
   } | null> {
+    const collected = this.collectGroupReviews(sessionGroupId);
+    if (!collected) return null;
+    const { gaps: _gaps, unfrozenRawStopIds: _unfrozen, ...view } = collected;
+    return view;
+  }
+
+  /**
+   * FIX-AP-2 — what the auto-proceed hold restore needs after a restart: the
+   * bootstrap findings (frozen verdicts applied), the ids whose raw severity
+   * was STOP but whose verdict was never frozen (they hold on raw severity),
+   * and every reason the view may be incomplete (the restore fails closed on
+   * any). `null` → the group is unknown to this orchestrator.
+   */
+  getGroupStopHoldView(sessionGroupId: string): {
+    findings: BrowserObserverFinding[];
+    unfrozenRawStopIds: string[];
+    gaps: string[];
+  } | null {
+    const collected = this.collectGroupReviews(sessionGroupId);
+    if (!collected) return null;
+    return { findings: collected.findings, unfrozenRawStopIds: collected.unfrozenRawStopIds, gaps: collected.gaps };
+  }
+
+  private collectGroupReviews(sessionGroupId: string): {
+    sessionGroupId: string;
+    findings: BrowserObserverFinding[];
+    downgrades: BrowserObserverDowngrade[];
+    reviewCount: number;
+    observerProvider?: string;
+    observerModel?: string;
+    unfrozenRawStopIds: string[];
+    gaps: string[];
+  } | null {
     const meta = this.deps.groupMeta.get(sessionGroupId);
     if (!meta) return null;
     const watcher = this.deps.watchers.get(sessionGroupId);
     if (!watcher) return null;
+    const gaps: string[] = [];
+    const unfrozenRawStopIds: string[] = [];
     const reviewsDir = join(watcher.cwd, ".council", "reviews");
     if (!existsSync(reviewsDir)) {
-      return { sessionGroupId, findings: [], downgrades: [], reviewCount: 0 };
+      return { sessionGroupId, findings: [], downgrades: [], reviewCount: 0, unfrozenRawStopIds, gaps };
     }
+    // FIX-AP-2: the verdicts grounding reached at review time. Without them a
+    // finding is re-grounded for display, and its raw STOP still holds.
+    const frozenRead = readReviewVerdicts(watcher.cwd, sessionGroupId);
+    const frozen = frozenRead.ok ? frozenRead.verdicts : new Map<string, FrozenVerdict>();
+    if (!frozenRead.ok) gaps.push(`verdicts_${frozenRead.reason}`);
     // Pinned filename shape from review-watcher: `<phase>-<provider>-observer.md`.
     // Duplicated here intentionally — extracting to a shared constant would
     // touch review-watcher (out of scope for this fix); revisit per EC-20.
@@ -1305,7 +1346,7 @@ export class CouncilLifecycle {
         reviewsDir,
         error: err instanceof Error ? err.message : String(err),
       });
-      return { sessionGroupId, findings: [], downgrades: [], reviewCount: 0 };
+      return { sessionGroupId, findings: [], downgrades: [], reviewCount: 0, unfrozenRawStopIds, gaps: [...gaps, "reviews_readdir_failed"] };
     }
     for (const file of entries) {
       const filePath = join(reviewsDir, file);
@@ -1313,10 +1354,14 @@ export class CouncilLifecycle {
       try {
         raw = readFileSync(filePath, "utf-8");
       } catch {
+        gaps.push(`review_unreadable:${file}`);
         continue;
       }
       const payload = parseObserverReviewPayload(raw);
-      if (!payload) continue;
+      if (!payload) {
+        gaps.push(`review_unparseable:${file}`);
+        continue;
+      }
       reviewCount++;
       // Real event time = the review FILE's mtime (server-observed), NOT the
       // observer's self-reported `reviewed_at` (observer-authored, unreliable —
@@ -1334,6 +1379,7 @@ export class CouncilLifecycle {
       // Apply same grounding validation as the WS path so REST-bootstrapped
       // findings match WS-arrived findings byte-for-byte after deterministic
       // ID dedup. Re-use `validateObserverFindings` from observer-grounding.
+      // FIX-AP-2: only a finding without a frozen verdict keeps this result.
       const manifest = buildObserverContextManifest({
         current: watcher.lastCheckpoint ?? { artifact_paths: [] },
         previous: watcher.previousCheckpoint ?? undefined,
@@ -1357,7 +1403,7 @@ export class CouncilLifecycle {
         });
         const downgrade = result.downgrades.find((d) => d.index === idx);
         const weak = result.weakEvidence.find((w) => w.index === idx);
-        const out: BrowserObserverFinding = {
+        const regrounded: BrowserObserverFinding = {
           id,
           severity: f.severity,
           claim: f.claim,
@@ -1368,9 +1414,12 @@ export class CouncilLifecycle {
           ...(weak ? { weakEvidence: weak.reason } : {}),
           reviewedAt,
         };
+        const verdict = frozen.get(id);
+        if (!verdict && payload.findings[idx]?.severity === "STOP") unfrozenRawStopIds.push(id);
+        const out = verdict ? applyFrozenVerdict(regrounded, verdict) : regrounded;
         allFindings.push(out);
-        if (downgrade) {
-          allDowngrades.push({ id, reason: downgrade.reason });
+        if (out.wasDowngraded && out.downgradeReason) {
+          allDowngrades.push({ id, reason: out.downgradeReason });
         }
       });
     }
@@ -1382,6 +1431,8 @@ export class CouncilLifecycle {
       reviewCount,
       ...(observerProvider !== undefined && { observerProvider }),
       ...(observerModel !== undefined && { observerModel }),
+      unfrozenRawStopIds,
+      gaps,
     };
   }
 

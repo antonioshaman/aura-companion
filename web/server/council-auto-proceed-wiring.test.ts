@@ -6,6 +6,7 @@ import {
   CouncilAutoProceedController,
   isBlockingStopFinding,
   type AutoProceedOnIdleConfig,
+  type GroupStopHoldView,
 } from "./council-auto-proceed-controller.js";
 import { IdleTimerManager, type IdleTimerSessionView } from "./idle-timer-manager.js";
 import { SessionGroupCoordinator } from "./session-group-coordinator.js";
@@ -73,8 +74,12 @@ function makeHarness(opts: {
   layerAllowed?: boolean;
   /** Workspace for persisted STOP resolutions (resolveStop). */
   cwd?: string;
-  /** FIX-AP-1 restore source; omitted → nothing to restore. */
+  /** FIX-AP-1 restore source (a complete view); omitted → nothing to restore. */
   loadGroupFindings?: (gid: string) => Promise<readonly BrowserObserverFinding[] | null>;
+  /** FIX-AP-2 restore source with unfrozen raw STOPs and gaps. */
+  loadGroupStopHoldView?: (gid: string) => Promise<GroupStopHoldView | null>;
+  /** FIX-AP-2: drop the group's workspace (watcher) even when restoring. */
+  noWorkspace?: boolean;
 } = {}): Harness {
   const clock = new FakeClock(0);
   const sent: string[] = [];
@@ -121,11 +126,22 @@ function makeHarness(opts: {
 
   const groupMeta = new Map([[GROUP, { primarySessionId: ORCH }]]);
   let coordinator!: SessionGroupCoordinator;
+  // A known group always has a workspace in prod; a restore without one is a
+  // gap (FIX-AP-2), so restoring harnesses get a temp workspace by default.
+  const legacyLoad = opts.loadGroupFindings;
+  const loadView = opts.loadGroupStopHoldView
+    ?? (legacyLoad
+      ? async (gid: string): Promise<GroupStopHoldView | null> => {
+          const findings = await legacyLoad(gid);
+          return findings ? { findings, unfrozenRawStopIds: [], gaps: [] } : null;
+        }
+      : undefined);
+  const cwd = opts.noWorkspace ? undefined : opts.cwd ?? (loadView ? tmpWorkspace() : undefined);
   const controller = new CouncilAutoProceedController({
     manager,
     groupMeta,
-    watchers: new Map(opts.cwd ? [[GROUP, { cwd: opts.cwd }]] : []),
-    loadGroupFindings: opts.loadGroupFindings,
+    watchers: new Map(cwd ? [[GROUP, { cwd }]] : []),
+    loadGroupStopHoldView: loadView,
     isAutoProceedAllowed: () => opts.layerAllowed ?? true,
     getAutoProceedConfig: (sid) => configs.get(sid),
     getGroupIdForSession: (sid) => (sid === ORCH || sid === OBS ? GROUP : undefined),
@@ -438,6 +454,99 @@ describe("auto-proceed wiring (AP-WIRE)", () => {
     await flush();
     expect(calls).toBe(2);
     expect(h.manager.isArmed(ORCH)).toBe(true);
+  });
+
+  // FIX-AP-2 (1): a raw STOP whose grounding verdict was never frozen (the
+  // server died between writing the review and recording its verdict, or the
+  // review predates the verdicts file) holds on its RAW severity. The
+  // re-grounded view calls it NOTE, but that re-grounding ran against a later
+  // checkpoint, so it must not be what releases the hold.
+  it("an unfrozen raw STOP holds even when the re-grounded view shows NOTE", async () => {
+    const h = makeHarness({
+      config: { idleMs: IDLE_MS, maxIterations: 3 },
+      loadGroupStopHoldView: async () => ({
+        findings: [stop({ id: "u1", severity: "NOTE", wasDowngraded: true, downgradeReason: "evidence_not_in_modified_set" })],
+        unfrozenRawStopIds: ["u1"],
+        gaps: [],
+      }),
+    });
+    h.turnDone();
+    await flush();
+    expect(h.controller.getUnresolvedStopIds(GROUP)).toEqual(["u1"]);
+    expect(h.manager.isArmed(ORCH)).toBe(false);
+    // Still releasable by a human (the dismissal endpoint takes the id).
+    h.controller.resolveStop(GROUP, "u1");
+    expect(h.manager.isArmed(ORCH)).toBe(true);
+  });
+
+  // A human dispute is a real release, frozen or not.
+  it("an unfrozen raw STOP that a human disputed does not hold", async () => {
+    const h = makeHarness({
+      config: { idleMs: IDLE_MS, maxIterations: 3 },
+      loadGroupStopHoldView: async () => ({
+        findings: [stop({ id: "u1", disputed: "same_claim" })],
+        unfrozenRawStopIds: ["u1"],
+        gaps: [],
+      }),
+    });
+    h.turnDone();
+    await flush();
+    expect(h.manager.isArmed(ORCH)).toBe(true);
+  });
+
+  // FIX-AP-2 (2): every way the restore can be incomplete holds and logs the
+  // reason (EC-9), instead of silently reading as "no STOP".
+  describe("an incomplete restore holds, logs why, and is retried", () => {
+    const cases: Array<{ name: string; gap: string; opts: Parameters<typeof makeHarness>[0] }> = [
+      { name: "group unknown to the lifecycle (null view)", gap: "group_unknown",
+        opts: { loadGroupStopHoldView: async () => null } },
+      { name: "no workspace for the group", gap: "no_workspace",
+        opts: { noWorkspace: true, loadGroupStopHoldView: async () => ({ findings: [], unfrozenRawStopIds: [], gaps: [] }) } },
+      { name: "reviews directory unreadable", gap: "reviews_readdir_failed",
+        opts: { loadGroupStopHoldView: async () => ({ findings: [], unfrozenRawStopIds: [], gaps: ["reviews_readdir_failed"] }) } },
+      { name: "a review file that cannot be parsed", gap: "review_unparseable:x-codex-observer.md",
+        opts: { loadGroupStopHoldView: async () => ({ findings: [], unfrozenRawStopIds: [], gaps: ["review_unparseable:x-codex-observer.md"] }) } },
+      { name: "verdicts file corrupt", gap: "verdicts_invalid-json",
+        opts: { loadGroupStopHoldView: async () => ({ findings: [], unfrozenRawStopIds: [], gaps: ["verdicts_invalid-json"] }) } },
+    ];
+    for (const c of cases) {
+      it(c.name, async () => {
+        const warn = vi.spyOn(log, "warn");
+        const h = makeHarness({ config: { idleMs: IDLE_MS, maxIterations: 3 }, ...c.opts });
+        h.turnDone();
+        await flush();
+        h.turnDone();
+        await flush();
+        expect(h.manager.isArmed(ORCH)).toBe(false);
+        const incomplete = warn.mock.calls.filter(([, , data]) =>
+          (data as { event?: string } | undefined)?.event === "auto-proceed.hold-restore-incomplete");
+        // Retried on the second edge, logged each time with the reason.
+        expect(incomplete).toHaveLength(2);
+        expect(incomplete[0]![2]).toMatchObject({ sessionGroupId: GROUP, sessionId: ORCH, role: "orchestrator" });
+        expect((incomplete[0]![2] as { gaps: string[] }).gaps).toContain(c.gap);
+      });
+    }
+
+    // STOPs the partial view did find still hold, and the restore completes
+    // (and arms) once the gap is gone.
+    it("keeps the STOPs it found and completes when the gap clears", async () => {
+      let gaps = ["review_unreadable:y-claude-observer.md"];
+      let findings = [stop({ id: "s1" })];
+      const h = makeHarness({
+        config: { idleMs: IDLE_MS, maxIterations: 3 },
+        loadGroupStopHoldView: async () => ({ findings, unfrozenRawStopIds: [], gaps }),
+      });
+      h.turnDone();
+      await flush();
+      expect(h.controller.getUnresolvedStopIds(GROUP)).toEqual(["s1"]);
+      h.controller.resolveStop(GROUP, "s1");
+      expect(h.manager.isArmed(ORCH)).toBe(false); // still incomplete
+      gaps = [];
+      findings = [];
+      h.turnDone();
+      await flush();
+      expect(h.manager.isArmed(ORCH)).toBe(true);
+    });
   });
 
   // (4) A real (browser-typed) user message ends the unattended episode: the
