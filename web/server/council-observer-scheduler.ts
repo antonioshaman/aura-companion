@@ -104,6 +104,12 @@ export interface CouncilObserverSchedulerDeps {
   isObserverReadyForWake: (observerSessionId: string) => boolean;
   /** Drives a wake through the checkpoint pipeline's gated dispatcher. */
   dispatchWake: (sessionGroupId: string, payload: CheckpointPayload) => void;
+  /**
+   * P4/KILL-INTENTIONAL: the user stopped this session on purpose. A stopped
+   * observer gets no catch-up wake — polling it would time out and escalate
+   * the pair to `degraded` although nothing crashed.
+   */
+  isSessionStoppedByUser?: (sessionId: string) => boolean;
 }
 
 export class CouncilObserverScheduler {
@@ -268,6 +274,18 @@ export class CouncilObserverScheduler {
         // woken for. The dispatcher's Gate 0 would also skip, but
         // surfacing it here keeps the structured log self-contained.
         if (sentinel && sentinel.last_woken_sequence >= highest.sequence) {
+          continue;
+        }
+        const stoppedObserverId = this.deps.groupMeta.get(groupId)?.observerSessionId;
+        if (stoppedObserverId && this.deps.isSessionStoppedByUser?.(stoppedObserverId)) {
+          log.info("session-orchestrator", "catchup wake skipped: observer stopped by user", {
+            event: "council.wake.restart_catchup_skipped_user_stopped",
+            trigger,
+            sessionGroupId: groupId,
+            sessionId: stoppedObserverId,
+            role: "observer",
+            checkpointId: highest.checkpoint_id,
+          });
           continue;
         }
         log.info("session-orchestrator", "catchup wake fired for missed checkpoint", {

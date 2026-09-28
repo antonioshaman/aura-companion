@@ -49,7 +49,7 @@ function coordinatorWithStatus(status: string): SessionGroupCoordinator {
   } as unknown as SessionGroupCoordinator;
 }
 
-function makeHarness(): Harness {
+function makeHarness(opts: { stoppedByUser?: Set<string> } = {}): Harness {
   const cwd = realpathSync(mkdtempSync(join(tmpdir(), "council-scheduler-")));
   cleanups.push(() => rmSync(cwd, { recursive: true, force: true }));
   const watchers = new Map<string, CouncilWatcherEntry>();
@@ -64,6 +64,7 @@ function makeHarness(): Harness {
     lineSnapshots: new CheckpointLineSnapshots(),
     isObserverReadyForWake: () => ready,
     dispatchWake,
+    isSessionStoppedByUser: opts.stoppedByUser ? (id) => opts.stoppedByUser!.has(id) : undefined,
   });
   watchers.set(GROUP, {
     cwd,
@@ -121,6 +122,24 @@ describe("CouncilObserverScheduler (DI seam)", () => {
     expect(h.dispatchWake.mock.calls[0][0]).toBe(GROUP);
     expect(h.dispatchWake.mock.calls[0][1].checkpoint_id).toBe("chk_2");
     expect(h.watchers.get(GROUP)!.lastCheckpoint?.checkpoint_id).toBe("chk_2");
+  });
+
+  it("scan skips an observer the user stopped (P4/KILL-INTENTIONAL)", async () => {
+    // A user-stopped pair must not get a catch-up poll: it would time out on
+    // the dead observer and, after the strike threshold, degrade a pair that
+    // never crashed. Resumed (mark cleared) → the same checkpoint is woken.
+    const stopped = new Set([OBSERVER]);
+    const h = makeHarness({ stoppedByUser: stopped });
+    h.setCoordinator(coordinatorWithStatus("active"));
+    h.setReady(true);
+    writeCheckpoint(h.cwd, checkpoint(1));
+    h.scheduler.scanForMissedObserverWakes("failsafe");
+    await new Promise((r) => setTimeout(r, 20));
+    expect(h.dispatchWake).not.toHaveBeenCalled();
+
+    stopped.delete(OBSERVER);
+    h.scheduler.scanForMissedObserverWakes("failsafe");
+    await vi.waitFor(() => expect(h.dispatchWake).toHaveBeenCalledTimes(1));
   });
 
   it("scan skips a group the coordinator resolved at call time reports degraded", () => {

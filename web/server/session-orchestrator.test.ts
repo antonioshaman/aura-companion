@@ -1427,6 +1427,165 @@ describe("SessionOrchestrator", () => {
     });
   });
 
+  // P4/KILL-INTENTIONAL (ASK #19): a user kill (REST `POST /sessions/:id/kill`,
+  // UI kill button) used to be indistinguishable from a crash — proactive
+  // keepalive relaunched it 3s later and a council half entered the reconnect
+  // ladder. These tests drive the REAL SessionRecovery + coordinator wiring
+  // (only launcher/bridge are mocked) through `initialize()`'s bus listeners.
+  describe("killSession() — user stop is intentional (P4/KILL-INTENTIONAL)", () => {
+    type Internals = {
+      intentionalKills: Set<string>;
+      recovery: { isStoppedByUser: (id: string) => boolean };
+      councilGroupMeta: Map<string, unknown>;
+      getOrCreateCoordinatorSync: () => {
+        registerExternalGroup: (r: unknown) => void;
+        get: (id: string) => { status: string } | undefined;
+        getReconnectContext: (id: string) => unknown;
+      };
+    };
+    const internals = () => orchestrator as unknown as Internals;
+
+    // Registers a live council pair with the real coordinator + meta map, the
+    // same way `reconcileCouncilGroups` does on a server restart.
+    function registerPair(groupId: string, orch: string, obs: string) {
+      internals().councilGroupMeta.set(groupId, {
+        primarySessionId: orch,
+        observerSessionId: obs,
+        pairing: "claude+codex",
+        createdAt: Date.now(),
+        lastCheckpointReceivedAt: null,
+      });
+      const coord = internals().getOrCreateCoordinatorSync();
+      coord.registerExternalGroup({
+        sessionGroupId: groupId,
+        primary: { sessionId: orch, backendType: "claude" },
+        observer: { sessionId: obs, backendType: "codex" },
+        status: "active",
+        createdAt: Date.now(),
+      });
+      return coord;
+    }
+
+    it("single session: kill → exit → no keepalive relaunch, no relaunch on browser return", async () => {
+      vi.useFakeTimers();
+      try {
+        deps.launcher.getSession.mockReturnValue({ archived: false, state: "exited", pid: undefined } as any);
+        orchestrator.initialize();
+
+        const result = await orchestrator.killSession("s1");
+        expect(result.ok).toBe(true);
+        expect(internals().intentionalKills.has("s1")).toBe(true);
+        expect(internals().recovery.isStoppedByUser("s1")).toBe(true);
+
+        // The process exit the kill produces: keepalive must NOT schedule.
+        companionBus.emit("session:exited", { sessionId: "s1", exitCode: 0 });
+        // A returning browser / transport-drop debounce: must NOT relaunch either.
+        companionBus.emit("session:relaunch-needed", { sessionId: "s1" });
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(deps.launcher.relaunch).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("council half: marks BOTH halves before either kill, stops both, group stays active (EC-2)", async () => {
+      deps.launcher.getSession.mockReturnValue({ archived: false, state: "running" } as any);
+      orchestrator.initialize();
+      const coord = registerPair("grp_kill", "sess_orch_k", "sess_obs_k");
+
+      // Snapshot the marks at the moment of the FIRST kill — EC-2 ordering.
+      const marksAtFirstKill: string[][] = [];
+      deps.launcher.kill.mockImplementation(async () => {
+        marksAtFirstKill.push(Array.from(internals().intentionalKills));
+        return true;
+      });
+
+      const result = await orchestrator.killSession("sess_obs_k");
+      expect(result.ok).toBe(true);
+      expect(deps.launcher.kill).toHaveBeenCalledWith("sess_orch_k");
+      expect(deps.launcher.kill).toHaveBeenCalledWith("sess_obs_k");
+      expect(marksAtFirstKill[0]).toEqual(expect.arrayContaining(["sess_orch_k", "sess_obs_k"]));
+
+      // Both exits land: no reconnect ladder, no degrade — the pair is simply stopped.
+      companionBus.emit("session:exited", { sessionId: "sess_orch_k", exitCode: 0 });
+      companionBus.emit("session:exited", { sessionId: "sess_obs_k", exitCode: 0 });
+      expect(coord.get("grp_kill")?.status).toBe("active");
+      expect(coord.getReconnectContext("grp_kill")).toBeFalsy();
+      const degraded = vi
+        .mocked(deps.wsBridge.broadcastToGroup)
+        .mock.calls.find((c: unknown[]) => (c[1] as { type?: string }).type === "group_degraded");
+      expect(degraded).toBeUndefined();
+    });
+
+    it("explicit relaunch clears the marks (pair resumes together); a later crash is auto-relaunched", async () => {
+      vi.useFakeTimers();
+      try {
+        deps.launcher.getSession.mockReturnValue({ archived: false, state: "exited", pid: undefined } as any);
+        orchestrator.initialize();
+        registerPair("grp_resume", "sess_orch_r", "sess_obs_r");
+
+        await orchestrator.killSession("sess_orch_r");
+        const res = await orchestrator.relaunchSession("sess_orch_r");
+        expect(res.ok).toBe(true);
+        for (const id of ["sess_orch_r", "sess_obs_r"]) {
+          expect(internals().intentionalKills.has(id)).toBe(false);
+          expect(internals().recovery.isStoppedByUser(id)).toBe(false);
+        }
+        // The stopped partner comes back through the auto-relaunch path.
+        await vi.advanceTimersByTimeAsync(15_000);
+        expect(deps.launcher.relaunch).toHaveBeenCalledWith("sess_obs_r");
+
+        // A real crash afterwards: keepalive heals it again (mark is gone).
+        deps.launcher.relaunch.mockClear();
+        await vi.advanceTimersByTimeAsync(10_000); // past relaunch cooldowns
+        companionBus.emit("session:exited", { sessionId: "sess_orch_r", exitCode: 1 });
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(deps.launcher.relaunch).toHaveBeenCalledWith("sess_orch_r");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("a browser-typed user message to a stopped session clears the mark and relaunches it", async () => {
+      vi.useFakeTimers();
+      try {
+        let userFrame: ((sid: string) => void) | null = null;
+        (deps.wsBridge as any).onUserFrameObserved = vi.fn((cb: (sid: string) => void) => {
+          userFrame = cb;
+          return () => {};
+        });
+        deps.launcher.getSession.mockReturnValue({ archived: false, state: "exited", pid: undefined } as any);
+        orchestrator.initialize();
+
+        await orchestrator.killSession("s1");
+        expect(userFrame).not.toBeNull();
+        userFrame!("s1");
+        expect(internals().recovery.isStoppedByUser("s1")).toBe(false);
+        expect(internals().intentionalKills.has("s1")).toBe(false);
+        await vi.advanceTimersByTimeAsync(15_000);
+        expect(deps.launcher.relaunch).toHaveBeenCalledWith("s1");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("unknown session: no marks, ok=false", async () => {
+      deps.launcher.getSession.mockReturnValue(undefined);
+      deps.launcher.kill.mockResolvedValue(false);
+      const result = await orchestrator.killSession("ghost");
+      expect(result.ok).toBe(false);
+      expect(internals().intentionalKills.has("ghost")).toBe(false);
+      expect(internals().recovery.isStoppedByUser("ghost")).toBe(false);
+    });
+
+    it("archive supersedes a user stop so an unarchived session relaunches on browser open", async () => {
+      deps.launcher.getSession.mockReturnValue({ archived: false, state: "exited" } as any);
+      await orchestrator.killSession("s1");
+      await orchestrator.archiveSession("s1");
+      expect(internals().recovery.isStoppedByUser("s1")).toBe(false);
+    });
+  });
+
   // ── Relaunch ──────────────────────────────────────────────────────────────
 
   describe("relaunchSession()", () => {

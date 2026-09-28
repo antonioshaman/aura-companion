@@ -100,6 +100,30 @@ describe("SessionRecovery (P4/C1d DI seam)", () => {
     expect(intentionalKills.has("s1")).toBe(false);
   });
 
+  it("a user-stopped session is not auto-relaunched until the mark is cleared (P4/KILL-INTENTIONAL)", async () => {
+    // Unlike an idle-kill, a user stop must survive a returning browser and
+    // the transport-drop `session:relaunch-needed`; clearing the mark (explicit
+    // relaunch / new user message) makes the same path relaunch again.
+    const sessions = new Map([["s1", info("s1")]]);
+    const { recovery, launcher } = makeRecovery(sessions);
+    recovery.markStoppedByUser("s1");
+    await recovery.handleAutoRelaunch("s1");
+    await vi.advanceTimersByTimeAsync(RELAUNCH_GRACE_MS);
+    expect(launcher.relaunch).not.toHaveBeenCalled();
+
+    expect(recovery.clearStoppedByUser("s1")).toBe(true);
+    expect(recovery.clearStoppedByUser("s1")).toBe(false);
+    const p = recovery.handleAutoRelaunch("s1");
+    await vi.advanceTimersByTimeAsync(RELAUNCH_GRACE_MS);
+    await p;
+    expect(launcher.relaunch).toHaveBeenCalledWith("s1");
+
+    // Delete drops the mark with the rest of the bookkeeping.
+    recovery.markStoppedByUser("s1");
+    recovery.forgetSession("s1");
+    expect(recovery.isStoppedByUser("s1")).toBe(false);
+  });
+
   it("exhausts the budget, emits session:relaunch-failed once, and clearAutoRelaunchCount restores it", async () => {
     const sessions = new Map([["s1", info("s1")]]);
     const { recovery, launcher, onRelaunchSucceeded } = makeRecovery(sessions);
