@@ -32,6 +32,8 @@ export interface NakedDeps {
   realCodexDir: string;
   /** Names of the user's Claude skills (must be invisible to naked A). */
   userSkillNames: () => string[];
+  /** Skills the Aura repo ships (`.claude/skills`, `.agents/skills`) — must never reach a naked cell. */
+  projectSkillNames?: () => string[];
   /** Create a fresh config dir with only the credentials copied (mode 0600). */
   prepareClaudeConfig: (dir: string, credentialsFrom: string) => void;
   /** Non-empty directory / existing file probe. */
@@ -92,7 +94,9 @@ export function nakedClaudeRunner(d: NakedDeps): AgentRunner {
     const s = summarizeClaudeStream(r.stdout);
     const iso = checkNakedClaudeIsolation(s.init, {
       userSkillNames: d.userSkillNames(),
+      projectSkillNames: d.projectSkillNames?.() ?? [],
       realClaudeDir: d.realClaudeDir,
+      cwd: ctx.worktree,
       hookEvents: s.hookEvents,
     });
     const isolation = { isolated: iso.isolated, violations: iso.violations, ...iso.evidence };

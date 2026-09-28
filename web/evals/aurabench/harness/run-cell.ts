@@ -1,8 +1,8 @@
 /**
  * One AuraBench cell, end to end (P6/D2):
  *
- *   1. fresh `git worktree` at the task's base commit (a stale one from an
- *      interrupted run is removed first);
+ *   1. fresh sealed checkout of the task's base commit ({@link sealedCheckout};
+ *      a stale one from an interrupted run is removed first);
  *   2. naked variants: delete the Aura files ({@link NAKED_SCRUB_PATHS});
  *      commit the prepared tree locally so the agent's diff is measured
  *      against it (the scrub never counts as the agent's change);
@@ -13,10 +13,11 @@
  *   5. measure the diff (`git add -A -N` first so new files count; the base is
  *      the prepared commit, so agent-made commits count too) and note any
  *      hidden test file the agent modified;
- *   6. restore the hidden tests from the merge commit and run them;
+ *   6. fetch the merge commit (only now — the agent never had it), restore
+ *      the hidden tests from it and run them;
  *   7. regression check: `vitest related` of the agent-changed sources, minus
  *      the hidden tests, compared with the task's pristine-base baseline;
- *   8. remove the worktree.
+ *   8. remove the checkout.
  *
  * A usage limit is reported as `{ kind: "limit" }` and NO record is produced —
  * the runner sleeps and retries the same cell. Everything that spawns goes
@@ -84,6 +85,36 @@ export interface CellDeps {
   cellTimeoutMs?: number;
   testTimeoutMs?: number;
   installTimeoutMs?: number;
+}
+
+/**
+ * A standalone repo holding ONLY `sha` (depth 1, no remote, no other refs) —
+ * deliberately NOT a `git worktree`. From a linked worktree Claude Code
+ * resolves the project to the MAIN checkout: it loaded the main repo's
+ * `.claude/skills` into a "naked" cell and keyed auto-memory on it (pilot
+ * finding), and `git log --all` there would expose the merge commit, i.e. the
+ * reference solution. `dir` must be absolute and is wiped first.
+ */
+export async function sealedCheckout(exec: AsyncExec, repo: string, dir: string, sha: string): Promise<ExecResult> {
+  const steps: [string, string[], string][] = [
+    ["git", ["init", "-q", dir], repo],
+    ["git", ["fetch", "-q", "--depth=1", "--no-tags", repo, sha], dir],
+    ["git", ["checkout", "-q", "--detach", "FETCH_HEAD"], dir],
+  ];
+  const wiped = await removeCheckout(exec, repo, dir);
+  if (wiped.code !== 0) return wiped;
+  for (const [cmd, args, cwd] of steps) {
+    const r = await exec(cmd, args, { cwd, timeoutMs: 120_000 });
+    if (r.code !== 0) return r;
+  }
+  return { code: 0, output: "", timedOut: false };
+}
+
+export async function removeCheckout(exec: AsyncExec, repo: string, dir: string): Promise<ExecResult> {
+  if (!dir.startsWith("/") || dir.replace(/\/+$/, "").split("/").length < 3) {
+    return { code: 2, output: `refusing to remove suspicious checkout path: ${dir}`, timedOut: false };
+  }
+  return exec("rm", ["-rf", dir], { cwd: repo, timeoutMs: 120_000 });
 }
 
 export type CellOutcome = { kind: "record"; record: CellRecord } | { kind: "limit"; limit: LimitHit };
@@ -176,9 +207,8 @@ export async function runCell(task: AuraBenchTask, variant: Variant, rep: number
     return { kind: "record", record: rec };
   };
 
-  await git(["worktree", "remove", "--force", d.worktree]);
-  const added = await git(["worktree", "add", "--detach", d.worktree, task.start_commit]);
-  if (added.code !== 0) return finish("harness_error", { error: `git worktree add failed: ${added.output.slice(-300)}` });
+  const added = await sealedCheckout(d.exec, d.repo, d.worktree, task.start_commit);
+  if (added.code !== 0) return finish("harness_error", { error: `sealed checkout failed: ${added.output.slice(-300)}` });
   try {
     if (variant.mode === "naked") {
       const rm = await git(["rm", "-r", "-q", "--ignore-unmatch", "--", ...NAKED_SCRUB_PATHS], d.worktree);
@@ -215,7 +245,12 @@ export async function runCell(task: AuraBenchTask, variant: Variant, rep: number
     }
 
     // Hidden tests come back exactly as merged, whatever the agent did to them.
-    const restore = await git(["checkout", task.aurabench.merge_commit, "--", ...task.aurabench.hidden_tests], d.worktree);
+    // The merge commit enters the checkout only now, after the agent is done.
+    const fetched = await git(["fetch", "-q", "--depth=1", "--no-tags", d.repo, task.aurabench.merge_commit], d.worktree);
+    const restore =
+      fetched.code !== 0
+        ? fetched
+        : await git(["checkout", task.aurabench.merge_commit, "--", ...task.aurabench.hidden_tests], d.worktree);
     if (restore.code !== 0) {
       return finish("harness_error", { diff, error: `restoring hidden tests failed: ${restore.output.slice(-300)}` });
     }
@@ -257,7 +292,7 @@ export async function runCell(task: AuraBenchTask, variant: Variant, rep: number
     }
     return finish(agent.status, { diff, hidden, regressions, ...(agent.error ? { error: agent.error } : {}) });
   } finally {
-    await git(["worktree", "remove", "--force", d.worktree]);
+    await removeCheckout(d.exec, d.repo, d.worktree);
   }
 }
 
@@ -276,11 +311,9 @@ export async function computeBaseline(
   task: AuraBenchTask,
   d: Pick<CellDeps, "repo" | "exec" | "readText" | "reportFile" | "testTimeoutMs" | "installTimeoutMs"> & { worktree: string },
 ): Promise<Map<string, "pass" | "fail">> {
-  const git = (args: string[], cwd = d.repo) => d.exec("git", args, { cwd, timeoutMs: 120_000 });
   const web = `${d.worktree}/web`;
-  await git(["worktree", "remove", "--force", d.worktree]);
-  const added = await git(["worktree", "add", "--detach", d.worktree, task.start_commit]);
-  if (added.code !== 0) throw new Error(`baseline worktree add failed: ${added.output.slice(-300)}`);
+  const added = await sealedCheckout(d.exec, d.repo, d.worktree, task.start_commit);
+  if (added.code !== 0) throw new Error(`baseline sealed checkout failed: ${added.output.slice(-300)}`);
   try {
     const inst = await d.exec("bun", ["install", "--frozen-lockfile"], { cwd: web, timeoutMs: d.installTimeoutMs ?? 10 * 60_000 });
     if (inst.code !== 0) throw new Error(`baseline bun install failed: ${inst.output.slice(-300)}`);
@@ -293,6 +326,6 @@ export async function computeBaseline(
     if (verdicts.size === 0) throw new Error("baseline produced no test verdicts");
     return verdicts;
   } finally {
-    await git(["worktree", "remove", "--force", d.worktree]);
+    await removeCheckout(d.exec, d.repo, d.worktree);
   }
 }

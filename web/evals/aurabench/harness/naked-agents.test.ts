@@ -72,6 +72,20 @@ describe("naked Claude (A)", () => {
     expect(r).toMatchObject({ kind: "done", isolation: { isolated: false } });
   });
 
+  // Pilot regression: the runner must hand the checker the repo's project
+  // skills and the cell cwd, or a linked-worktree leak goes unnoticed.
+  it("checks Aura project skills and the memory project key against the cell cwd", async () => {
+    const init = { ...cleanInit, skills: ["simplify", "polish"], memory_paths: { auto: "/cells/t1/A-1/claude-config/projects/-repo/memory/" } };
+    const stdout = [line(init), line({ type: "result", subtype: "success", is_error: false })].join("\n");
+    const r = await nakedClaudeRunner(deps({ stdout }, { projectSkillNames: () => ["polish"] }).d)(ctx("A"));
+    if (r.kind !== "done") throw new Error("expected done");
+    expect(r.isolation.isolated).toBe(false);
+    expect(r.isolation.violations).toEqual([
+      "Aura project skills visible: polish",
+      expect.stringContaining("expected /projects/-wt-cell/"),
+    ]);
+  });
+
   it("maps timeout, limit and plain errors", async () => {
     expect(await nakedClaudeRunner(deps({ timedOut: true, code: 143 }).d)(ctx("A"))).toMatchObject({ kind: "done", status: "timeout" });
     const limited = line({ type: "result", subtype: "error_during_execution", is_error: true, result: "Claude AI usage limit reached|1000000600" });
