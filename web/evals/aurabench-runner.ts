@@ -82,7 +82,7 @@ import {
   realAuthSha,
   withCodexAuthWatch,
 } from "./aurabench/harness/codex-home.js";
-import { benchChildEnv, niceExec, spawnNice } from "./aurabench/harness/proc.js";
+import { benchChildEnv, killLiveChildren, niceExec, spawnNice, stopLiveChildren } from "./aurabench/harness/proc.js";
 import type { CellRecord } from "./aurabench/harness/cells.js";
 import {
   CELL_PATH_CONFOUND,
@@ -351,7 +351,12 @@ async function bench(argv: string[], repo: string): Promise<number> {
     instance = null;
     await i?.stop();
   };
-  const onSignal = authSafeSignalHandler(authKeeper, stopInstance, (code) => process.exit(code));
+  // Agents run detached (own process group): stop them before the cell
+  // homes are released, so auth.json never vanishes under a live Codex.
+  const onSignal = authSafeSignalHandler(authKeeper, stopInstance, (code) => process.exit(code), {
+    stop: () => stopLiveChildren(),
+    killNow: () => killLiveChildren(),
+  });
   for (const sig of ["SIGINT", "SIGTERM"] as const) process.on(sig, onSignal);
   // Every variant — naked or Aura — is fingerprinted against the real
   // ~/.codex before/after the cell; any write but auth.json is a violation.

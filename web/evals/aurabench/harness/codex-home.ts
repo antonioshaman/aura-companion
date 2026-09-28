@@ -22,7 +22,9 @@
  *    artifacts); a copy that could not be written back is stashed, never
  *    deleted (FIX-D2-1b).
  *  - {@link CodexAuthKeeper}: writes rotations back while the cell RUNS (poll),
- *    on a signal and after an exception, and recovers after a hard kill.
+ *    on a signal and after an exception, and recovers after a hard kill. A
+ *    copy that already existed when the watch started is never written back
+ *    (FIX-D2-1c): its origin is unknown, so it only goes to the stash.
  *  - {@link snapshotDir} / {@link diffSnapshots}: mtime + size + sha256 of every
  *    file of the real `~/.codex` before and after the cell. Any change other
  *    than `auth.json` is an isolation violation.
@@ -166,6 +168,9 @@ export type AuthPropagation =
   | "propagated"
   | "skipped_real_changed"
   | "skipped_not_newer"
+  | "skipped_real_missing"
+  /** A copy older than the watch: never written back, only stashed. */
+  | "skipped_foreign"
   | "no_auth";
 
 /** One non-destructive write-back pass over a cell home. */
@@ -182,21 +187,32 @@ export interface AuthSync {
  * — only when the real file still has `base`, i.e. the cell's token derives
  * from the live one and nobody rotated the real file meanwhile.
  *
- *  - symlink → `unchanged`, base follows the real file;
+ *  - symlink → `unchanged`; base moves to the real sha only when that sha is
+ *    in `trusted` (the cell-start sha and what the keeper itself wrote). A
+ *    real file changed by someone else (a prod re-login) leaves base pinned,
+ *    so a later rotation of the OLD family is not written over it (FIX-D2-1c);
  *  - regular file equal to the real one → `skipped_not_newer` (in sync);
+ *  - real file absent or empty → `skipped_real_missing`: never written (a
+ *    `codex logout` is not undone by a cell);
  *  - real still at `base` → `propagated`, base = the new real sha;
  *  - otherwise → `skipped_real_changed`, base kept (the copy is NOT dropped).
  */
-export function syncRotatedCodexAuth(cellHome: string, realCodexDir: string, base: string | null): AuthSync {
+export function syncRotatedCodexAuth(
+  cellHome: string,
+  realCodexDir: string,
+  base: string | null,
+  trusted: ReadonlySet<string> = new Set(),
+): AuthSync {
   const cellAuth = join(cellHome, CODEX_AUTH_FILE);
   const realAuth = join(realCodexDir, CODEX_AUTH_FILE);
   const st = lstatSync(cellAuth, { throwIfNoEntry: false });
   if (!st) return { outcome: "no_auth", base };
-  const realNow = existsSync(realAuth) ? readFileSync(realAuth) : null;
+  const realNow = readRealAuth(realCodexDir);
   const realSha = realNow ? sha256(realNow) : null;
-  if (st.isSymbolicLink()) return { outcome: "unchanged", base: realSha };
+  if (st.isSymbolicLink()) return { outcome: "unchanged", base: realSha !== null && trusted.has(realSha) ? realSha : base };
   const rotated = readFileSync(cellAuth);
   if (realNow && sha256(rotated) === realSha) return { outcome: "skipped_not_newer", base: realSha };
+  if (realSha === null) return { outcome: "skipped_real_missing", base };
   if (realSha !== base) return { outcome: "skipped_real_changed", base };
   const tmp = `${realAuth}.aurabench-${process.pid}.tmp`;
   writeFileSync(tmp, rotated, { mode: 0o600 });
@@ -216,15 +232,39 @@ export function finishCellCodexAuth(
   realCodexDir: string,
   base: string | null,
   stashDir?: string,
+  trusted?: ReadonlySet<string>,
 ): AuthPropagation {
-  const { outcome } = syncRotatedCodexAuth(cellHome, realCodexDir, base);
+  const { outcome } = syncRotatedCodexAuth(cellHome, realCodexDir, base, trusted);
   const cellAuth = join(cellHome, CODEX_AUTH_FILE);
-  if (outcome === "skipped_real_changed") {
+  if (outcome === "skipped_real_changed" || outcome === "skipped_real_missing") {
     if (stashDir) stashCodexAuth(cellAuth, base, stashDir);
   } else if (outcome !== "no_auth") {
     rmSync(cellAuth, { force: true });
   }
   return outcome;
+}
+
+/**
+ * End of a copy whose origin is unknown (it existed before the watch started,
+ * FIX-D2-1c): it is NEVER written into the real file. Equal to the real one →
+ * removed; otherwise stashed as `foreign` (never auto-restored, left for a
+ * human) — or left in place without a stash dir. A symlink is removed.
+ */
+export function finishForeignCodexAuth(cellHome: string, realCodexDir: string, stashDir?: string): AuthPropagation {
+  const cellAuth = join(cellHome, CODEX_AUTH_FILE);
+  const st = lstatSync(cellAuth, { throwIfNoEntry: false });
+  if (!st) return "no_auth";
+  if (st.isSymbolicLink()) {
+    rmSync(cellAuth, { force: true });
+    return "unchanged";
+  }
+  const real = readRealAuth(realCodexDir);
+  if (real && sha256(readFileSync(cellAuth)) === sha256(real)) {
+    rmSync(cellAuth, { force: true });
+    return "skipped_not_newer";
+  }
+  if (stashDir) stashCodexAuth(cellAuth, null, stashDir, true);
+  return "skipped_foreign";
 }
 
 /** Back-compat name: {@link finishCellCodexAuth}. */
@@ -236,15 +276,18 @@ interface StashMeta {
   stashedAt: string;
   /** base64 of the token file. */
   auth: string;
+  /** Origin unknown (pre-existing copy): never written back automatically. */
+  foreign?: boolean;
 }
 
-function stashCodexAuth(cellAuth: string, base: string | null, stashDir: string): string {
+function stashCodexAuth(cellAuth: string, base: string | null, stashDir: string, foreign = false): string {
   mkdirSync(stashDir, { recursive: true, mode: 0o700 });
   const body: StashMeta = {
     from: cellAuth,
     base,
     stashedAt: new Date().toISOString(),
     auth: readFileSync(cellAuth).toString("base64"),
+    ...(foreign ? { foreign: true } : {}),
   };
   const file = join(stashDir, `auth-${Date.now()}-${process.pid}-${Math.random().toString(16).slice(2, 10)}.json`);
   writeFileSync(`${file}.tmp`, JSON.stringify(body), { mode: 0o600 });
@@ -264,6 +307,9 @@ export interface StashRetry {
 /**
  * Retry every stashed token: written back when the real file is still at the
  * stash's base, dropped when the real file already holds it, kept otherwise.
+ * Never written when the real file is absent or empty (a `codex logout` is a
+ * decision, not a gap to fill — FIX-D2-1c), when the stash has no base, or
+ * when it is `foreign` (a copy of unknown origin).
  */
 export function retryStashedCodexAuth(stashDir: string, realCodexDir: string): StashRetry {
   const out: StashRetry = { propagated: [], dropped_in_sync: [], kept: [] };
@@ -287,7 +333,7 @@ export function retryStashedCodexAuth(stashDir: string, realCodexDir: string): S
     if (realSha !== null && sha256(token) === realSha) {
       rmSync(file, { force: true });
       out.dropped_in_sync.push(name);
-    } else if (realSha === meta.base) {
+    } else if (realSha !== null && !meta.foreign && meta.base != null && realSha === meta.base) {
       const realAuth = join(realCodexDir, CODEX_AUTH_FILE);
       const tmp = `${realAuth}.aurabench-${process.pid}.tmp`;
       writeFileSync(tmp, token, { mode: 0o600 });
@@ -337,12 +383,24 @@ export function propagateFromSessionHomes(
   return out;
 }
 
+/** Ledger schema version; a watch without it (pre-FIX-D2-1c) is recovered fail-closed. */
+const WATCH_VERSION = 2;
+
 interface Watch {
+  v?: number;
   kind: "home" | "homes";
-  /** Real sha at watch start: the base of homes first seen with a regular file. */
+  /** Real sha at watch start, PINNED: the base of copies that appear during the watch. */
   startSha: string | null;
   /** Per cell home: real sha its token derives from (see {@link syncRotatedCodexAuth}). */
   bases: Record<string, string | null>;
+  /**
+   * Homes that already held a regular `auth.json` when the watch started
+   * (FIX-D2-1c): their token's origin is unknown — a stale copy from an
+   * earlier run would log prod out — so they are never written back.
+   */
+  foreign: string[];
+  /** Real shas the base may follow: `startSha` plus every sha the keeper itself wrote. */
+  trusted: string[];
 }
 
 export interface CodexAuthKeeperOptions {
@@ -383,8 +441,21 @@ export class CodexAuthKeeper {
     return this.stashDir;
   }
 
+  /**
+   * Start watching a cell home (or a dir of session homes). The start sha is
+   * pinned; an existing watch of the same path is kept as is. Every home that
+   * already holds a REGULAR `auth.json` now is foreign (never written back).
+   */
   watch(path: string, kind: "home" | "homes", startSha: string | null): void {
-    this.watches.set(path, { kind, startSha, bases: this.watches.get(path)?.bases ?? {} });
+    if (this.watches.has(path)) return;
+    const w: Watch = { v: WATCH_VERSION, kind, startSha, bases: {}, foreign: [], trusted: startSha ? [startSha] : [] };
+    for (const home of homesOf(path, kind)) {
+      const st = lstatSync(join(home, CODEX_AUTH_FILE), { throwIfNoEntry: false });
+      if (st && !st.isSymbolicLink()) w.foreign.push(home);
+      else if (st) w.bases[home] = startSha;
+    }
+    if (w.foreign.length) this.o.log?.(`[aurabench] codex auth: ${w.foreign.length} pre-existing auth copy(ies) under ${path} will never be written back`);
+    this.watches.set(path, w);
     this.persist();
   }
 
@@ -393,10 +464,15 @@ export class CodexAuthKeeper {
     let changed = false;
     for (const [path, w] of this.watches) {
       for (const home of homesOf(path, w.kind)) {
+        if (w.foreign.includes(home)) continue;
         try {
           const prev = home in w.bases ? w.bases[home] : w.startSha;
-          const r = syncRotatedCodexAuth(home, this.o.realCodexDir, prev);
-          if (r.outcome === "propagated") this.o.log?.(`[aurabench] codex auth: rotated token written back from ${home}`);
+          const r = syncRotatedCodexAuth(home, this.o.realCodexDir, prev, new Set(w.trusted));
+          if (r.outcome === "propagated") {
+            this.o.log?.(`[aurabench] codex auth: rotated token written back from ${home}`);
+            this.trustWritten(r.base);
+            changed = true;
+          }
           if (r.outcome !== "no_auth" && (!(home in w.bases) || w.bases[home] !== r.base)) {
             w.bases[home] = r.base;
             changed = true;
@@ -406,7 +482,13 @@ export class CodexAuthKeeper {
         }
       }
     }
-    if (changed) this.persist();
+    if (changed) this.persistSafe();
+  }
+
+  /** A sha the keeper wrote into the real file is a legitimate base for every watch. */
+  private trustWritten(sha: string | null): void {
+    if (!sha) return;
+    for (const w of this.watches.values()) if (!w.trusted.includes(sha)) w.trusted.push(sha);
   }
 
   /** Finish one watch: final write-back, clean copies, stash what can't be written. */
@@ -416,9 +498,12 @@ export class CodexAuthKeeper {
     const out: Record<string, AuthPropagation> = {};
     for (const home of homesOf(path, w.kind)) {
       try {
-        const r = finishCellCodexAuth(home, this.o.realCodexDir, home in w.bases ? w.bases[home] : w.startSha, this.stashDir);
+        const r = w.foreign.includes(home)
+          ? finishForeignCodexAuth(home, this.o.realCodexDir, this.stashDir)
+          : finishCellCodexAuth(home, this.o.realCodexDir, home in w.bases ? w.bases[home] : w.startSha, this.stashDir, new Set(w.trusted));
+        if (r === "propagated") this.trustWritten(realAuthSha(this.o.realCodexDir));
         if (r !== "no_auth") out[w.kind === "home" ? CODEX_AUTH_FILE : relative(path, home)] = r;
-        if (r === "skipped_real_changed") this.o.log?.(`[aurabench] codex auth: token from ${home} could not be written back — stashed in ${this.stashDir}`);
+        if (r.startsWith("skipped_") && r !== "skipped_not_newer") this.o.log?.(`[aurabench] codex auth: token from ${home} not written back (${r}) — stashed in ${this.stashDir}`);
       } catch (e) {
         this.o.log?.(`[aurabench] codex auth: release of ${home} failed: ${(e as Error).message}`);
         // Left in the ledger: the next start retries it.
@@ -426,7 +511,7 @@ export class CodexAuthKeeper {
       }
     }
     this.watches.delete(path);
-    this.persist();
+    this.persistSafe();
     return out;
   }
 
@@ -443,7 +528,19 @@ export class CodexAuthKeeper {
       // no ledger (clean previous exit) or unreadable
     }
     for (const [path, w] of Object.entries(left)) {
-      if (!this.watches.has(path)) this.watches.set(path, w);
+      if (this.watches.has(path)) continue;
+      // A pre-FIX-D2-1c ledger may hold a base the old keeper gave a stale
+      // copy (its first-seen rule): nothing from it is trusted — every copy
+      // is foreign (stash only).
+      const legacy = w.v !== WATCH_VERSION;
+      this.watches.set(path, {
+        v: WATCH_VERSION,
+        kind: w.kind,
+        startSha: legacy ? null : w.startSha,
+        bases: legacy ? {} : (w.bases ?? {}),
+        foreign: legacy ? homesOf(path, w.kind) : (w.foreign ?? []),
+        trusted: legacy ? [] : (w.trusted ?? []),
+      });
     }
     const released = Object.keys(left);
     for (const path of released) this.release(path);
@@ -452,7 +549,14 @@ export class CodexAuthKeeper {
 
   start(intervalMs = 2000): void {
     if (this.timer) return;
-    this.timer = setInterval(() => this.syncAll(), intervalMs);
+    // syncAll never throws; the guard keeps a bug from killing the runner.
+    this.timer = setInterval(() => {
+      try {
+        this.syncAll();
+      } catch (e) {
+        this.o.log?.(`[aurabench] codex auth: poll failed: ${(e as Error).message}`);
+      }
+    }, intervalMs);
     this.timer.unref?.();
   }
 
@@ -467,14 +571,31 @@ export class CodexAuthKeeper {
     writeFileSync(tmp, JSON.stringify(Object.fromEntries(this.watches)), { mode: 0o600 });
     renameSync(tmp, this.ledger);
   }
+
+  /** {@link persist} for the poll / release paths: a full disk is logged, not thrown. */
+  private persistSafe(): void {
+    try {
+      this.persist();
+    } catch (e) {
+      this.o.log?.(`[aurabench] codex auth: ledger write failed: ${(e as Error).message}`);
+    }
+  }
 }
 
 const sha256 = (b: Buffer) => createHash("sha256").update(b).digest("hex");
 
-/** sha256 of the real `auth.json`, or null when absent. */
-export function realAuthSha(realCodexDir: string): string | null {
+/** The real `auth.json`, or null when absent or empty (logged out). */
+function readRealAuth(realCodexDir: string): Buffer | null {
   const p = join(realCodexDir, CODEX_AUTH_FILE);
-  return existsSync(p) ? sha256(readFileSync(p)) : null;
+  if (!existsSync(p)) return null;
+  const b = readFileSync(p);
+  return b.length ? b : null;
+}
+
+/** sha256 of the real `auth.json`, or null when absent or empty. */
+export function realAuthSha(realCodexDir: string): string | null {
+  const b = readRealAuth(realCodexDir);
+  return b ? sha256(b) : null;
 }
 
 export interface CodexGuardDeps {
@@ -550,30 +671,51 @@ export function withCodexAuthWatch(
   };
 }
 
+/** The agent processes a signal must stop before the cell homes are released. */
+export interface ChildControl {
+  /** SIGTERM every live agent group, wait (bounded), SIGKILL what is left. */
+  stop(): Promise<void>;
+  /** SIGKILL every live agent group now (second signal). */
+  killNow(): void;
+}
+
 /**
  * SIGINT/SIGTERM handler for the runner. `process.exit` skips every pending
  * `finally`, so pilot fix #248 lost a rotated token on Ctrl-C (FIX-D2-1b item
  * 1). Order: write back NOW (synchronous — nothing can pre-empt it), then stop
- * the instance, then finish every watch (clean or stash copies), then exit. A
- * second signal while stopping skips the wait but not the write-back.
+ * the agent processes and the instance, write back again (a Codex may rotate
+ * while shutting down), then finish every watch (clean or stash copies), then
+ * exit. Agents run in their own process group, so the terminal's SIGINT does
+ * not reach them: releasing first would pull `auth.json` from under a live
+ * Codex B (FIX-D2-1c). A second signal while stopping SIGKILLs the agents and
+ * skips the wait, but not the write-back.
  */
 export function authSafeSignalHandler(
   keeper: Pick<CodexAuthKeeper, "syncAll" | "releaseAll" | "stop">,
   stopInstance: () => Promise<void>,
   exit: (code: number) => void,
+  children?: ChildControl,
 ): () => void {
   let stopping = false;
+  let finished = false;
   const finish = () => {
+    if (finished) return;
+    finished = true;
     keeper.stop();
     keeper.releaseAll();
     exit(130);
   };
   return () => {
     keeper.syncAll();
-    if (stopping) return finish();
+    if (stopping) {
+      children?.killNow();
+      return finish();
+    }
     stopping = true;
-    void stopInstance()
-      .catch(() => undefined)
-      .finally(finish);
+    void Promise.allSettled([children?.stop() ?? Promise.resolve(), stopInstance()]).then(() => {
+      if (finished) return;
+      keeper.syncAll();
+      finish();
+    });
   };
 }
