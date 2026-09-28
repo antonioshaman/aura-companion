@@ -867,6 +867,46 @@ export function createRoutes(
     return c.json(result);
   });
 
+  // ─── Council Mode — dispute an observer STOP (meta-diet B2b) ──────────────
+  //
+  // The browser calls this when a human dismisses a STOP. The server persists
+  // the claim per group (`.council/state/<group>-disputes.json`); a later STOP
+  // repeating it is marked `disputed` and kept out of the blocker banner. The
+  // browser sends the claim text it was shown: the server has no finding-id
+  // index, and the claim is what the match runs on anyway.
+  api.post("/groups/:groupId/disputes", async (c) => {
+    const groupId = c.req.param("groupId");
+    const body = (await c.req.json().catch(() => null)) as
+      | { claim?: unknown; evidence_path?: unknown; finding_id?: unknown }
+      | null;
+    if (
+      !body ||
+      typeof body.claim !== "string" ||
+      typeof body.evidence_path !== "string" ||
+      (body.finding_id !== undefined && typeof body.finding_id !== "string")
+    ) {
+      return respondError(c, 400, "bad_request", {
+        module: "council.disputes",
+        detail: { reason: "claim and evidence_path (strings) required; finding_id optional string" },
+      });
+    }
+    const result = orchestrator.disputeObserverFinding(groupId, {
+      claim: body.claim,
+      evidencePath: body.evidence_path,
+      ...(typeof body.finding_id === "string" ? { findingId: body.finding_id } : {}),
+    });
+    if (!result.ok) {
+      if (result.reason === "unknown_group") {
+        return respondError(c, 404, "not_found", { module: "council.disputes", detail: { groupId } });
+      }
+      if (result.reason === "invalid_input") {
+        return respondError(c, 400, "bad_request", { module: "council.disputes", detail: { reason: "claim or evidence_path empty or too long" } });
+      }
+      return respondError(c, 500, "internal_error", { module: "council.disputes", detail: { groupId } });
+    }
+    return c.json({ ok: true, added: result.added });
+  });
+
   // ─── Council Mode — REST bootstrap of group records ──────────────────────
   //
   // Closes `docs/history/BUG-council-mode-group-rest-bootstrap-gap.md` (PR #68). The

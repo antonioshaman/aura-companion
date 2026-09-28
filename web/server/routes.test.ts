@@ -720,6 +720,45 @@ describe("GET /api/groups", () => {
   });
 });
 
+// B2b (meta-diet): the browser persists a human dismissal of an observer STOP.
+// The route only validates the body shape and maps orchestrator outcomes to
+// HTTP; matching / persistence is covered in observer-disputes.test.ts and the
+// orchestrator's B2b test.
+describe("POST /api/groups/:groupId/disputes", () => {
+  const post = (body: unknown, groupId = "grp_x") =>
+    app.request(`/api/groups/${groupId}/disputes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    });
+
+  it("forwards claim, evidence_path and finding_id and returns the add outcome", async () => {
+    orchestrator.disputeObserverFinding = vi.fn(() => ({ ok: true, added: true }));
+    const res = await post({ claim: "c", evidence_path: "src/a.ts", finding_id: "fnd_1" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, added: true });
+    expect(orchestrator.disputeObserverFinding).toHaveBeenCalledWith("grp_x", { claim: "c", evidencePath: "src/a.ts", findingId: "fnd_1" });
+  });
+
+  it("rejects a malformed body with 400 without touching the orchestrator", async () => {
+    orchestrator.disputeObserverFinding = vi.fn();
+    expect((await post({ claim: 1, evidence_path: "a" })).status).toBe(400);
+    expect((await post({ claim: "c" })).status).toBe(400);
+    expect((await post({ claim: "c", evidence_path: "a", finding_id: 5 })).status).toBe(400);
+    expect((await post("not json")).status).toBe(400);
+    expect(orchestrator.disputeObserverFinding).not.toHaveBeenCalled();
+  });
+
+  it("maps unknown group to 404, invalid input to 400 and persistence failure to 500", async () => {
+    orchestrator.disputeObserverFinding = vi.fn(() => ({ ok: false, reason: "unknown_group" }));
+    expect((await post({ claim: "c", evidence_path: "a" })).status).toBe(404);
+    orchestrator.disputeObserverFinding = vi.fn(() => ({ ok: false, reason: "invalid_input" }));
+    expect((await post({ claim: "", evidence_path: "a" })).status).toBe(400);
+    orchestrator.disputeObserverFinding = vi.fn(() => ({ ok: false, reason: "persist_failed" }));
+    expect((await post({ claim: "c", evidence_path: "a" })).status).toBe(500);
+  });
+});
+
 describe("GET /api/sessions", () => {
   it("returns the list of sessions enriched with names", async () => {
     const sessions = [

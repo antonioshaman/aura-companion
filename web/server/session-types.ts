@@ -600,6 +600,12 @@ export interface BrowserObserverFinding {
    */
   weakEvidence?: BrowserObserverWeakEvidenceReason;
   /**
+   * B2b (meta-diet): set on a live STOP whose claim matches one a human already
+   * dismissed in this group (see `observer-disputes.ts`). Severity stays STOP;
+   * the browser keeps it out of the blocker banner and marks it in the log.
+   */
+  disputed?: BrowserObserverDisputeMatch;
+  /**
    * Real event time (ms epoch), server-stamped from the review FILE's mtime.
    * Stamped on BOTH paths: REST bootstrap (`getGroupReviewsForBootstrap`) and
    * the live `group:review` broadcast (via the review watcher's post-read stat).
@@ -624,6 +630,9 @@ export type BrowserObserverDowngradeReason =
   | "evidence_lines_out_of_range"
   | "evidence_lines_unchanged"
   | "wake_version_mismatch";
+
+/** How a re-raised STOP matched an earlier dispute (`observer-disputes.ts`). */
+export type BrowserObserverDisputeMatch = "same_claim" | "shared_anchor";
 
 export type BrowserObserverWeakEvidenceReason =
   | "no_cited_lines"

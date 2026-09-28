@@ -194,6 +194,8 @@ export function findUnresolvedStops(
     // B2: weakly-grounded STOPs stay in the findings log but are not blockers
     // until a human reads them (a path-only STOP once raised a false banner).
     if (f.weakEvidence !== undefined) continue;
+    // B2b: a re-raised claim a human already dismissed in this group.
+    if (f.disputed !== undefined) continue;
     if (dismissedStopIds.has(f.id)) continue;
     out.push(f);
   }

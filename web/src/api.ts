@@ -971,6 +971,11 @@ export const api = {
       observerModel?: string;
     }>(`/groups/${encodeURIComponent(groupId)}/findings`),
 
+  // Council Mode (meta-diet B2b) — persist a human dismissal of an observer
+  // STOP so a re-raised copy of the claim no longer raises the blocker banner.
+  disputeObserverFinding: (groupId: string, finding: { finding_id: string; claim: string; evidence_path: string }) =>
+    post<{ ok: true; added: boolean }>(`/groups/${encodeURIComponent(groupId)}/disputes`, finding),
+
   // Council Mode — REST bootstrap of group records on app mount. Closes
   // `docs/history/BUG-council-mode-group-rest-bootstrap-gap.md` (PR #68). The browser's
   // `groupBySessionId` map was previously populated EXCLUSIVELY by the

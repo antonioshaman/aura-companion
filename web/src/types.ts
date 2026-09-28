@@ -211,6 +211,10 @@ export interface ObserverFinding {
    *  STOP in the findings log; never raises the blocker banner or the unread
    *  blocker count. */
   weakEvidence?: "no_cited_lines" | "claim_symbols_not_on_cited_lines" | "cited_lines_unreadable";
+  /** B2b: a STOP repeating a claim a human already dismissed in this group
+   *  (server match: identical claim, or the same quoted command/code span).
+   *  Stays a STOP in the findings log; never raises the blocker banner. */
+  disputed?: "same_claim" | "shared_anchor";
   observerModel: string;
   observerProvider: string;
 }

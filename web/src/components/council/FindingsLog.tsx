@@ -192,6 +192,21 @@ function WeakEvidenceChip({ reason }: { reason: NonNullable<ObserverFinding["wea
   );
 }
 
+/** B2b: this STOP repeats a claim a human already dismissed in this group. */
+function DisputedChip({ via }: { via: NonNullable<ObserverFinding["disputed"]> }) {
+  const human = via === "same_claim" ? "same claim" : "same quoted code";
+  return (
+    <span
+      className="ml-1 inline-flex items-center gap-1 text-[9px] uppercase tracking-wide font-mono-code px-1.5 py-0.5 rounded bg-cc-muted/10 text-cc-muted border border-cc-border"
+      title={`Dismissed earlier, not raised as a blocker — ${human}`}
+      aria-label={`Dismissed earlier, not raised as a blocker — ${human}`}
+    >
+      dismissed earlier
+      <span className="opacity-70 normal-case font-normal tracking-normal">· {human}</span>
+    </span>
+  );
+}
+
 function FindingRow({
   finding,
   nowMs,
@@ -214,6 +229,7 @@ function FindingRow({
       data-severity={finding.severity}
       data-downgraded={finding.wasDowngraded ? "true" : "false"}
       data-weak-evidence={finding.weakEvidence ? "true" : "false"}
+      data-disputed={finding.disputed ? "true" : "false"}
       className={`group flex items-center gap-2 px-3 py-2 border-b border-cc-border last:border-b-0 hover:bg-cc-hover transition-colors ${rowClass}`}
     >
       <SeverityDot finding={finding} />
@@ -231,6 +247,7 @@ function FindingRow({
       </button>
       {finding.wasDowngraded && finding.downgradeReason && <DowngradedChip reason={finding.downgradeReason} />}
       {!finding.wasDowngraded && finding.weakEvidence && <WeakEvidenceChip reason={finding.weakEvidence} />}
+      {!finding.wasDowngraded && finding.disputed && <DisputedChip via={finding.disputed} />}
       <span className="text-[10px] text-cc-muted shrink-0 font-mono-code">
         {formatRelativeTime(finding.receivedAt, nowMs)}
       </span>

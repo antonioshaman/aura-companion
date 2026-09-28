@@ -60,6 +60,17 @@ describe("findUnresolvedStops", () => {
     expect(findUnresolvedStops(all, new Set()).map((f) => f.id)).toEqual(["strong"]);
   });
 
+  // B2b: a STOP repeating a claim a human already dismissed in this group
+  // (server-marked `disputed`) is not a blocker either, even with a new id.
+  it("excludes disputed STOPs", () => {
+    const all = [
+      finding({ id: "again", severity: "STOP", disputed: "shared_anchor" }),
+      finding({ id: "same", severity: "STOP", disputed: "same_claim" }),
+      finding({ id: "fresh", severity: "STOP" }),
+    ];
+    expect(findUnresolvedStops(all, new Set()).map((f) => f.id)).toEqual(["fresh"]);
+  });
+
   // Beck F4 — empty case (early-return branch).
   it("returns an empty array when findings list is empty", () => {
     expect(findUnresolvedStops([], new Set())).toEqual([]);

@@ -2099,7 +2099,11 @@ describe("auraIsActiveSession", () => {
 // ─── Council Mode — per-session badge & unread counter ─────────────────────
 
 describe("Sidebar — Council Mode badges", () => {
-  function seedCouncilSession(sessionId: string, pairing: string, stops: { id: string; wasDowngraded?: boolean }[] = []) {
+  function seedCouncilSession(
+    sessionId: string,
+    pairing: string,
+    stops: { id: string; wasDowngraded?: boolean; weakEvidence?: string; disputed?: string }[] = [],
+  ) {
     const groupId = `grp_for_${sessionId}`;
     const sdkSession = makeSdkSession(sessionId);
     mockState.sessions = new Map([[sessionId, makeSession(sessionId)]]);
@@ -2114,6 +2118,8 @@ describe("Sidebar — Council Mode badges", () => {
       claim: "test",
       evidence_path: "src/x.ts",
       wasDowngraded: s.wasDowngraded,
+      weakEvidence: s.weakEvidence,
+      disputed: s.disputed,
     }))]]);
     mockState.dismissedStopIds = new Set();
   }
@@ -2138,6 +2144,19 @@ describe("Sidebar — Council Mode badges", () => {
     ]);
     render(<Sidebar />);
     expect(screen.queryByTestId("council-unread-count")).toBeNull();
+  });
+
+  // B2/B2b: weak-evidence and disputed STOPs never raise the banner, so the
+  // Sidebar's unread blocker counter must not count them either (it used to
+  // count every non-downgraded STOP).
+  it("counts neither weak-evidence nor disputed STOPs as unread", () => {
+    seedCouncilSession("s_mixed", "claude+codex", [
+      { id: "f1" },
+      { id: "f2", weakEvidence: "no_cited_lines" },
+      { id: "f3", disputed: "shared_anchor" },
+    ]);
+    render(<Sidebar />);
+    expect(screen.getAllByTestId("council-unread-count")[0]).toHaveTextContent("1");
   });
 
   it("does not render any council badge when the session is not in a group", () => {

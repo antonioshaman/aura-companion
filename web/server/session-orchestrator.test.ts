@@ -3042,6 +3042,95 @@ describe("SessionOrchestrator", () => {
       }
     });
 
+    // B2b (meta-diet): the observer has no channel for "this claim was already
+    // refuted", so it re-raises it (diet-A3-104 repeated the disputed
+    // `bun run --cwd web` claim of diet-A2-103 with new wording and a new
+    // evidence path). A human dismissal is persisted per group; afterwards
+    //   - the REST bootstrap (tab reload) marks the ORIGINAL STOP disputed, so a
+    //     reload no longer resurrects the dismissed banner;
+    //   - a live review repeating the claim (reworded, same quoted command) is
+    //     marked `shared_anchor`, while an unrelated STOP and a NOTE are not;
+    //   - disputing twice is idempotent and an unknown group is refused.
+    it("B2b: a dismissed STOP is persisted and marks re-raised copies as disputed (live + bootstrap)", async () => {
+      const { mkdtempSync, writeFileSync, mkdirSync, rmSync, realpathSync, existsSync } = require("node:fs") as typeof import("node:fs");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      const workspace = realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-orch-b2b-")));
+      // resolveCouncilStatePath only accepts real group ids (grp_ + 32 hex).
+      const groupId = "grp_0123456789abcdef0123456789abcdef";
+      const originalClaim = "`bun run --cwd web kb:record` fails: bun ignores --cwd after run";
+      try {
+        mkdirSync(pathJoin(workspace, "src"), { recursive: true });
+        writeFileSync(pathJoin(workspace, "src/a.ts"), "export function alpha() { return 1; }\n");
+        mkdirSync(pathJoin(workspace, ".council", "reviews"), { recursive: true });
+        writeFileSync(
+          pathJoin(workspace, ".council", "reviews", `council-plan-${groupId}-codex-observer.md`),
+          JSON.stringify({
+            schema_version: 1,
+            observer_wake_payload_version_echo: 1,
+            checkpoint_id: "chk_a",
+            phase: "council-plan",
+            session_group_id: groupId,
+            reviewed_at: "2026-01-01T00:00:00Z",
+            observer_provider: "codex",
+            observer_model: "gpt-5.5",
+            observer_cli_version: "1.0.0",
+            findings: [{ severity: "STOP", claim: originalClaim, evidence_path: "src/a.ts" }],
+          }),
+        );
+        seedGroup(groupId, { cwd: workspace, artifactPaths: ["src/a.ts"] });
+
+        const before = await orchestrator.getGroupReviewsForBootstrap(groupId);
+        expect(before!.findings).toHaveLength(1);
+        const original = before!.findings[0]!;
+        expect(original).toMatchObject({ severity: "STOP", claim: originalClaim });
+        expect(original.disputed).toBeUndefined();
+
+        expect(orchestrator.disputeObserverFinding(groupId, { claim: originalClaim, evidencePath: "src/a.ts", findingId: original.id }))
+          .toEqual({ ok: true, added: true });
+        // Idempotent: a second dismissal (another tab) adds nothing.
+        expect(orchestrator.disputeObserverFinding(groupId, { claim: originalClaim, evidencePath: "src/a.ts", findingId: original.id }))
+          .toEqual({ ok: true, added: false });
+        expect(existsSync(pathJoin(workspace, ".council", "state", `${groupId}-disputes.json`))).toBe(true);
+        expect(orchestrator.disputeObserverFinding("grp_ffffffffffffffffffffffffffffffff", { claim: "x", evidencePath: "src/a.ts" }))
+          .toEqual({ ok: false, reason: "unknown_group" });
+
+        // Reload: the same finding id comes back, now marked disputed.
+        const after = await orchestrator.getGroupReviewsForBootstrap(groupId);
+        expect(after!.findings[0]).toMatchObject({ id: original.id, severity: "STOP", disputed: "same_claim" });
+
+        const emitted: Array<{ findings: Array<{ severity: string; claim: string; disputed?: string }> }> = [];
+        companionBus.on("group:review", (e: unknown) => { emitted.push(e as (typeof emitted)[number]); });
+        const handleReview = (orchestrator as unknown as {
+          handleCouncilReview: (g: string, p: Record<string, unknown>) => void;
+        }).handleCouncilReview;
+        handleReview.call(orchestrator, groupId, {
+          schema_version: 1,
+          observer_wake_payload_version_echo: 1,
+          checkpoint_id: "chk_a",
+          phase: "council-plan",
+          session_group_id: groupId,
+          reviewed_at: "2026-01-01T00:00:00Z",
+          observer_provider: "codex",
+          observer_model: "gpt-5.5",
+          observer_cli_version: "1.0.0",
+          findings: [
+            { severity: "STOP", claim: "The mandatory `bun run --cwd web kb:record` step will fail for every /prime", evidence_path: "src/a.ts" },
+            { severity: "STOP", claim: "alpha returns the wrong value", evidence_path: "src/a.ts" },
+            { severity: "NOTE", claim: originalClaim, evidence_path: "src/a.ts" },
+          ],
+        });
+        expect(emitted).toHaveLength(1);
+        const [repeat, unrelated, note] = emitted[0]!.findings;
+        expect(repeat).toMatchObject({ severity: "STOP", disputed: "shared_anchor" });
+        expect(unrelated!.disputed).toBeUndefined();
+        // Only live STOPs are marked — a NOTE never raises the banner anyway.
+        expect(note!.disputed).toBeUndefined();
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
     // got-051 (prod 2026-09-08). Several council pairs can share one
     // workspace, and every pair's review watcher then watches the SAME
     // `.council/reviews/` directory — so one observer's review file is

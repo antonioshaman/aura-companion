@@ -48,6 +48,7 @@ import { watchCheckpoints, buildCheckpointFilename } from "./checkpoint-watcher.
 import { findReviewForCheckpointSync, watchReviews } from "./review-watcher.js";
 import { DEFAULT_REARM_DELAY_MS, runResilientWatch } from "./resilient-watch.js";
 import { validateObserverFindings } from "./observer-grounding.js";
+import { addDispute, applyDisputes, readDisputes } from "./observer-disputes.js";
 import { CheckpointLineSnapshots } from "./observer-line-snapshots.js";
 import { maybeEmitEvalSidecar } from "./eval-sidecar.js";
 import { buildObserverContextManifest, buildObserverWakePayload } from "./observer-prompt.js";
@@ -3407,6 +3408,10 @@ export class SessionOrchestrator {
         }
       }
 
+      // B2b: a STOP that repeats a claim already dismissed in this group stays
+      // a STOP in the log but never raises the banner again.
+      this.markDisputedStops(sessionGroupId, entry.cwd, findings, { checkpointId: payload.checkpoint_id, log: true });
+
       // Willison P1-4 item 3 (council review #2): emit the structured
       // invocation log entry so the forensic re-run guarantee
       // (`observerPromptSha256` captured per invocation) survives review
@@ -3438,6 +3443,7 @@ export class SessionOrchestrator {
           }),
           // B2: grounded STOPs kept out of the blocker banner as weak evidence.
           stopCountWeak: findings.filter((f) => f.severity === "STOP" && f.weakEvidence !== undefined).length,
+          stopCountDisputed: findings.filter((f) => f.severity === "STOP" && f.disputed !== undefined).length,
         });
       }
 
@@ -4516,6 +4522,7 @@ export class SessionOrchestrator {
         }
       });
     }
+    this.markDisputedStops(sessionGroupId, watcher.cwd, allFindings, { log: false });
     return {
       sessionGroupId,
       findings: allFindings,
@@ -4524,6 +4531,81 @@ export class SessionOrchestrator {
       ...(observerProvider !== undefined && { observerProvider }),
       ...(observerModel !== undefined && { observerModel }),
     };
+  }
+
+  /**
+   * B2b: record a human dismissal of an observer STOP as a persistent dispute
+   * for the group, so a re-raised copy of the claim (next checkpoint, other
+   * wording or path, or a page reload) no longer raises the blocker banner.
+   */
+  disputeObserverFinding(
+    sessionGroupId: string,
+    input: { claim: string; evidencePath: string; findingId?: string },
+  ): { ok: true; added: boolean } | { ok: false; reason: "unknown_group" | "invalid_input" | "persist_failed" } {
+    const meta = this.councilGroupMeta.get(sessionGroupId);
+    const watcher = this.councilWatchers.get(sessionGroupId);
+    if (!meta || !watcher) return { ok: false, reason: "unknown_group" };
+    const res = addDispute(watcher.cwd, sessionGroupId, { ...input, source: "browser_dismiss" });
+    if (!res.ok) {
+      log.warn("session-orchestrator", "observer dispute not recorded", {
+        event: "council.finding.dispute_failed",
+        sessionGroupId,
+        sessionId: meta.primarySessionId,
+        role: "orchestrator",
+        findingId: input.findingId,
+        reason: res.reason,
+        detail: res.detail,
+      });
+      return { ok: false, reason: res.reason === "invalid-input" ? "invalid_input" : "persist_failed" };
+    }
+    log.info("session-orchestrator", "observer finding disputed", {
+      event: "council.finding.disputed",
+      sessionGroupId,
+      sessionId: meta.primarySessionId,
+      role: "orchestrator",
+      findingId: input.findingId,
+      evidencePath: input.evidencePath,
+      added: res.added,
+      disputeCount: res.count,
+    });
+    return { ok: true, added: res.added };
+  }
+
+  /** In place: mark live STOPs matching one of the group's disputes (B2b). */
+  private markDisputedStops(
+    sessionGroupId: string,
+    cwd: string,
+    findings: BrowserObserverFinding[],
+    opts: { checkpointId?: string; log: boolean },
+  ): void {
+    const read = readDisputes(cwd, sessionGroupId);
+    if (!read.ok) {
+      // Fail toward showing the banner: an unreadable dispute list suppresses nothing.
+      log.warn("session-orchestrator", "observer disputes unreadable", {
+        event: "council.finding.disputes_unreadable",
+        sessionGroupId,
+        reason: read.reason,
+      });
+      return;
+    }
+    const { findings: marked, applied } = applyDisputes(findings, read.records);
+    for (const a of applied) {
+      const f = marked[a.index];
+      if (!f) continue;
+      findings[a.index] = f;
+      if (opts.log) {
+        log.info("session-orchestrator", "observer STOP repeats a disputed claim", {
+          event: "council.finding.dispute_matched",
+          sessionGroupId,
+          sessionId: this.councilGroupMeta.get(sessionGroupId)?.observerSessionId,
+          role: "observer",
+          checkpointId: opts.checkpointId,
+          findingId: f.id,
+          via: a.via,
+          disputedFindingId: a.record.findingId,
+        });
+      }
+    }
   }
 
   // ── Cleanup ────────────────────────────────────────────────────────────────
