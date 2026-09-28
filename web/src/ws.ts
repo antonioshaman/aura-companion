@@ -2,6 +2,7 @@ import { useStore } from "./store.js";
 import type { BrowserIncomingMessage, BrowserOutgoingMessage, ContentBlock, ChatMessage, TaskItem, ProcessItem, ProcessStatus, SdkSessionInfo, McpServerConfig } from "./types.js";
 import { generateUniqueSessionName } from "./utils/names.js";
 import { playNotificationSound } from "./utils/notification-sound.js";
+import { isResumeInterruptedResult } from "./utils/resume-interrupted.js";
 import { getPreview } from "./components/ToolBlock.js";
 import type { ToolActivityEntry } from "./store/tasks-slice.js";
 import { api } from "./api.js";
@@ -689,6 +690,28 @@ function upsertAssistantMessage(sessionId: string, incoming: ChatMessage) {
  */
 export type ModelRuntimeFailure = "retired" | "blocked" | "overloaded";
 
+/**
+ * The chat line for an errored result frame, or null when the frame carries no
+ * error text. The `--resume` bookkeeping frame for a turn a restart cut off
+ * (`isResumeInterruptedResult`) becomes a muted "resume-interrupted" note
+ * instead of a red error; everything else stays a real "error". Shared by the
+ * live and history-replay paths so both render a frame identically.
+ */
+export function resultErrorMessage(
+  r: { is_error?: boolean; terminal_reason?: string; errors?: string[] },
+  id: string,
+  timestamp: number,
+): ChatMessage | null {
+  if (!r.is_error || !r.errors?.length) return null;
+  return {
+    id,
+    role: "system",
+    content: `Error: ${r.errors.join(", ")}`,
+    timestamp,
+    systemVariant: isResumeInterruptedResult(r) ? "resume-interrupted" : "error",
+  };
+}
+
 export function classifyModelRuntimeError(status: number | undefined): ModelRuntimeFailure | null {
   if (status === 404) return "retired";
   if (status === 403) return "blocked";
@@ -1172,20 +1195,19 @@ function handleParsedMessage(
       store.setStreamingStats(sessionId, null);
       store.clearToolProgress(sessionId);
       store.setSessionStatus(sessionId, "idle");
+      // The --resume bookkeeping frame closes a turn a restart already cut
+      // off — nothing finished just now, so it must not ping the user.
+      const resumeInterrupted = isResumeInterruptedResult(r);
       // Play notification sound if enabled and tab is not focused
-      if (!document.hasFocus() && store.notificationSound) {
+      if (!resumeInterrupted && !document.hasFocus() && store.notificationSound) {
         playNotificationSound();
       }
-      if (!document.hasFocus() && store.notificationDesktop) {
+      if (!resumeInterrupted && !document.hasFocus() && store.notificationDesktop) {
         sendBrowserNotification("Session completed", "Claude finished the task", sessionId);
       }
-      if (r.is_error && r.errors?.length) {
-        store.appendMessage(sessionId, {
-          id: nextId(),
-          role: "system",
-          content: `Error: ${r.errors.join(", ")}`,
-          timestamp: Date.now(),
-        });
+      const resultError = resultErrorMessage(r, nextId(), Date.now());
+      if (resultError) {
+        store.appendMessage(sessionId, resultError);
       }
       break;
     }
@@ -1531,13 +1553,9 @@ function handleParsedMessage(
           }
         } else if (histMsg.type === "result") {
           const r = histMsg.data;
-          if (r.is_error && r.errors?.length) {
-            chatMessages.push({
-              id: `hist-error-${i}`,
-              role: "system",
-              content: `Error: ${r.errors.join(", ")}`,
-              timestamp: Date.now(),
-            });
+          const resultError = resultErrorMessage(r, `hist-error-${i}`, Date.now());
+          if (resultError) {
+            chatMessages.push(resultError);
           }
           // Track cost/turns from history result, same as the live result handler
           const resultUpdates: Partial<{ total_cost_usd: number; num_turns: number; context_used_percent: number; total_lines_added: number; total_lines_removed: number }> = {

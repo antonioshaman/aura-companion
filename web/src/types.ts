@@ -59,6 +59,14 @@ export interface ChatMessage {
    * on a synthesised partial frame after a CLI disconnect.
    */
   streamStatus?: "complete" | "interrupted" | "errored";
+  /**
+   * Rendering hint for system messages built from an errored result frame.
+   * "error" — a real execution error (red). "resume-interrupted" — the
+   * bookkeeping frame `--resume` emits for a turn a restart cut off; shown as
+   * a muted, collapsed note with `content` as the expandable diagnostic
+   * (see `utils/resume-interrupted.ts`). Absent → the plain muted divider.
+   */
+  systemVariant?: "error" | "resume-interrupted";
 }
 
 export interface TaskItem {
