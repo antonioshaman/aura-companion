@@ -36,12 +36,24 @@ export function writeJsonAtomic(
   if (opts?.maxBytes !== undefined && byteLen > opts.maxBytes) {
     throw new Error(`${opts.label ?? "atomic-json"}: payload (${byteLen} bytes) exceeds ${opts.maxBytes}`);
   }
+  writeFileAtomic(dir, target, json, 0o600);
+}
+
+// Same tmp+fsync+rename discipline for arbitrary text (e.g. JSONL stores) living
+// in a directory we must NOT re-mode — an in-repo dir keeps its existing perms.
+export function writeTextAtomic(target: string, text: string): void {
+  const dir = dirname(target);
+  mkdirSync(dir, { recursive: true });
+  writeFileAtomic(dir, target, text, 0o644);
+}
+
+function writeFileAtomic(dir: string, target: string, text: string, mode: number): void {
   const tmp = join(dir, `.${randomBytes(8).toString("hex")}.tmp`);
   let fd = -1;
   let renamed = false;
   try {
-    fd = openSync(tmp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, 0o600);
-    writeSync(fd, json);
+    fd = openSync(tmp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL, mode);
+    writeSync(fd, text);
     fsyncSync(fd);
     closeSync(fd);
     fd = -1;

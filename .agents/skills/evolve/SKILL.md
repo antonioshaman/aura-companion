@@ -15,7 +15,7 @@ Analyze and evolve the knowledge base and project configuration. This is the met
 
 ### 1. Audit Knowledge Base Health
 
-Read all `.agents/knowledge/*.jsonl` files and compute:
+Start from the mechanical report — `bun run --cwd web kb:health` (total, used≥1, helpful≥1, promoted, stale, never-surfaced, idle, confidence; non-zero exit on corrupt lines). Then read all `.agents/knowledge/*.jsonl` files and add:
 
 - **Total entries** per category
 - **Confidence distribution** (how many high/medium/low)
@@ -44,8 +44,10 @@ An entry is stale when:
 - `outdatedReports >= helpfulCount` and `outdatedReports >= 2` (the field-driven signal — at least two flags and no fresh confirmations to balance them)
 - `usageCount >= 10` and `helpfulCount == 0` (surfaced often but never re-confirmed → too generic to be useful)
 
+- Not surfaced by `/prime` for 20 consecutive sessions — `bun run --cwd web kb:prune --dry-run` lists them, `kb:prune` archives them
+
 **Actions:**
-- Remove clearly stale entries
+- Archive clearly stale entries: move the row to `.agents/knowledge/archive/<store>.jsonl` with `archivedAt` + `archiveReason` (never delete)
 - Downgrade confidence on questionable entries
 - Flag uncertain entries for human review
 
