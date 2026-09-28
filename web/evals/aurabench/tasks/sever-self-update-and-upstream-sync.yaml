@@ -1,0 +1,81 @@
+# AuraBench task mined from PR #97 ("chore: sever CLI self-update and upstream-sync apparatus").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: sever-self-update-and-upstream-sync
+title: "Companion no longer self-updates or carries upstream-sync tooling, and installs as aura-companion"
+start_commit: af23ff6f1edad2d32d931f12b9f194a56016bd55
+prompt: |
+  This fork no longer tracks the upstream `the-companion` project, but it still
+  ships two subsystems that exist only for that coupling:
+
+  - CLI self-update: the update checker, the `/update-check` and `/update` REST
+    routes, the update banner/overlay components, the "Updates" section of the
+    Settings page, its store slice state and API client calls, and their
+    Playground mocks;
+  - upstream-sync/branding tooling: the drift-check and apply-branding scripts
+    and their package.json scripts and config.
+
+  Remove both subsystems cleanly (no dead routes, UI, store state or scripts
+  left behind; the Docker update dialog component may stay, dormant). Also
+  rename the installed service from `the-companion` to `aura-companion` in
+  `web/server/service.ts` (systemd unit name, the binary looked up with
+  `which`, help text); leave the macOS launchd label and the sandbox image name
+  as they are. Everything else must keep working.
+expected_files:
+  - web/scripts/apply-aura-branding.ts
+  - web/scripts/aura-drift-check.ts
+  - web/server/index.ts
+  - web/server/routes.ts
+  - web/server/routes/system-routes.ts
+  - web/server/service.ts
+  - web/server/update-checker.ts
+  - web/src/App.tsx
+  - web/src/api.ts
+  - web/src/components/DockerUpdateDialog.tsx
+  - web/src/components/Playground.tsx
+  - web/src/components/SettingsPage.tsx
+  - web/src/components/UpdateBanner.tsx
+  - web/src/components/UpdateOverlay.tsx
+  - web/src/store/updates-slice.ts
+expected_tests:
+  - web/server/routes.test.ts
+  - web/server/routes/system-routes.test.ts
+  - web/server/service.test.ts
+  - web/src/App.test.tsx
+  - web/src/api.test.ts
+  - web/src/components/SettingsPage.test.tsx
+  - web/src/store.test.ts
+  - web/src/store/updates-slice.test.ts
+failure_modes:
+  - "removal leaves dangling imports/routes that 404 in the UI"
+  - "unrelated Settings sections are removed"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 97
+  merge_commit: bbeb50e60b87b0370b6c774e1bd72f74a175c7b2
+  class: architecture
+  hidden_tests:
+    - web/server/routes.test.ts
+    - web/server/routes/system-routes.test.ts
+    - web/server/service.test.ts
+    - web/src/App.test.tsx
+    - web/src/api.test.ts
+    - web/src/components/SettingsPage.test.tsx
+    - web/src/store.test.ts
+    - web/src/store/updates-slice.test.ts
+  validation:
+    base: fail
+    merge: pass
+    base_failure: assertion
+    checked_at: "2026-09-28T07:25:24.105Z"

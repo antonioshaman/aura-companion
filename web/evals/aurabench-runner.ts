@@ -4,6 +4,7 @@
  *   bun run eval:aurabench mine --prs <prs.json> --out <candidates.jsonl>
  *   bun run eval:aurabench validate --candidates <candidates.jsonl> \
  *     --results <results.jsonl> --wt-root <dir> [--limit N] [--pr N]
+ *   bun run eval:aurabench leak --tasks <dir> [--id <task-id>]
  *
  * `prs.json` is `gh pr list --state merged --base main --limit 300
  *   --json number,title,body,mergeCommit`. `mine` writes one candidate per
@@ -11,6 +12,11 @@
  * `validate` runs each candidate's hidden tests on base and merge in a
  * throwaway worktree under `--wt-root` and APPENDS one verdict per PR to
  * `--results`; PRs already present are skipped, so it resumes after a restart.
+ *
+ * `leak` loads a task corpus and, per task, derives the PR's new surface from
+ * git (base→merge diff of `expected_files`, hidden tests at merge) and checks
+ * the prompt: every new name the hidden tests use must be named, no other new
+ * name may be. Exits 1 on any leak or unnamed interface.
  *
  * Child processes run under `nice -n 10` with every `AURA_*` variable unset and
  * a bounded Node heap; before each candidate it waits while MemAvailable is
@@ -25,6 +31,9 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { join, resolve } from "node:path";
 import { minePrs, type Candidate, type ChangedFile, type MergedPr } from "./aurabench/mine.js";
 import { completedPrs, validateCandidate, type Exec } from "./aurabench/validate.js";
+import { checkPrompt, computeSurface } from "./aurabench/leak.js";
+import { loadAuraBenchTasks } from "./aurabench/loader.js";
+import type { AuraBenchTask } from "./aurabench/task.js";
 
 const MIN_AVAILABLE_KB = 1.5 * 1024 * 1024;
 
@@ -82,6 +91,29 @@ function gitChangedFiles(repo: string): (oid: string) => ChangedFile[] {
   };
 }
 
+function git(repo: string, args: string[]): { ok: boolean; out: string } {
+  const r = spawnSync("git", args, { cwd: repo, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
+  return { ok: r.status === 0, out: r.stdout ?? "" };
+}
+
+function taskSurface(repo: string, t: AuraBenchTask) {
+  const base = t.start_commit;
+  const merge = t.aurabench.merge_commit;
+  const diff = git(repo, ["diff", "--no-color", "-U0", base, merge, "--", ...t.expected_files]).out;
+  const addedSourceText = diff
+    .split("\n")
+    .filter((l) => l.startsWith("+") && !l.startsWith("+++"))
+    .map((l) => l.slice(1))
+    .join("\n");
+  const newSourceFiles = git(repo, ["diff", "--name-only", "--diff-filter=A", base, merge, "--", ...t.expected_files])
+    .out.split("\n")
+    .filter(Boolean);
+  const hiddenTestText = t.aurabench.hidden_tests.map((f) => git(repo, ["show", `${merge}:${f}`]).out).join("\n");
+  // `git grep` exits 0 on a match, 1 on none — anything present in the base tree is not new surface.
+  const existsOnBase = (id: string) => git(repo, ["grep", "-qwF", id, base, "--", "web"]).ok;
+  return computeSurface({ addedSourceText, newSourceFiles, hiddenTestText, existsOnBase });
+}
+
 function readJsonl<T>(file: string): T[] {
   return readFileSync(file, "utf8")
     .split("\n")
@@ -135,7 +167,30 @@ async function main(argv: string[]): Promise<number> {
     }
     return 0;
   }
-  console.error("usage: aurabench-runner.ts <mine|validate> …");
+  if (sub === "leak") {
+    const dir = arg(argv, "tasks");
+    if (!dir) {
+      console.error("usage: leak --tasks <dir> [--id <task-id>] [--repo <dir>]");
+      return 2;
+    }
+    const { tasks, excluded } = loadAuraBenchTasks(resolve(dir), (sha) => git(repo, ["cat-file", "-e", `${sha}^{commit}`]).ok);
+    for (const e of excluded) console.log(`[aurabench] EXCLUDED ${e.file}: ${e.reason}`);
+    const only = arg(argv, "id");
+    let bad = excluded.length;
+    for (const t of tasks.filter((x) => !only || x.id === only)) {
+      const surface = taskSurface(repo, t);
+      const r = checkPrompt(t.prompt, surface);
+      const clean = r.leaks.length === 0 && r.unnamed.length === 0;
+      if (!clean) bad++;
+      console.log(
+        `[aurabench] ${clean ? "OK  " : "FAIL"} ${t.id} required=[${surface.required.join(", ")}]` +
+          (r.leaks.length ? ` LEAKS=[${r.leaks.join(", ")}]` : "") +
+          (r.unnamed.length ? ` UNNAMED=[${r.unnamed.join(", ")}]` : ""),
+      );
+    }
+    return bad === 0 ? 0 : 1;
+  }
+  console.error("usage: aurabench-runner.ts <mine|validate|leak> …");
   return 2;
 }
 

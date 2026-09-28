@@ -1,0 +1,55 @@
+# AuraBench task mined from PR #201 ("fix(server): drift detector uses adapter's last-frame-received ts, not transcript mtime").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: drift-detector-misses-dead-stdio
+title: "The silent-stdio drift detector fires when the CLI keeps working but Bun stops receiving frames"
+start_commit: 7b7192a090080462bc9d634e0cafefb449fa2f3f
+prompt: |
+  Several Claude pairs sat for hours with a dead stdio pipe: the CLI's own jsonl
+  kept growing with real assistant turns while Bun received zero frames, and the
+  drift detector (`web/server/silent-stdio-drift-detector.ts`) never fired. It
+  compares the CLI jsonl's mtime against the mtime of Bun's session transcript
+  file — but Bun rewrites that file on many events unrelated to the CLI (browser
+  subscribe/disconnect, state changes), so it always looks fresh.
+
+  Base the check on when Bun last actually received a CLI frame:
+  - the Claude adapter keeps an in-memory timestamp of the last non-empty CLI
+    line it received (set when a transport attaches, advanced on every frame)
+    and exposes it via a getter;
+  - the detector's per-session state carries it as `bunLastFrameMs` (0 = the
+    adapter has not attached yet → never drifted) instead of the transcript path,
+    and every verdict reports `bunLastFrameMs` and `jsonlMtimeMs`;
+  - a drift reason reads like
+    `jsonl mtime 170s newer than bun's last frame …`.
+expected_files:
+  - web/server/claude-adapter.ts
+  - web/server/session-orchestrator.ts
+  - web/server/silent-stdio-drift-detector.ts
+expected_tests:
+  - web/server/silent-stdio-drift-detector.test.ts
+failure_modes:
+  - "drift fires on sessions whose adapter never attached"
+  - "healthy sessions with recent frames are flagged"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 201
+  merge_commit: 4f47e7aa738e35d500ed38e159b4307d09e951e0
+  class: debug
+  hidden_tests:
+    - web/server/silent-stdio-drift-detector.test.ts
+  validation:
+    base: fail
+    merge: pass
+    base_failure: assertion
+    checked_at: "2026-09-28T07:46:33.400Z"

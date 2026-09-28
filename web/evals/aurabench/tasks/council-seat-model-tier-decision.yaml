@@ -1,0 +1,58 @@
+# AuraBench task mined from PR #207 ("feat(council): fail-closed per-seat model tier decision (PRO economy Story 2)").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: council-seat-model-tier-decision
+title: "Council review seats can be downgraded to a cheaper model only when the data proves it safe"
+start_commit: f34865e587838e89a8ba0b018d03ae9c23d92304
+prompt: |
+  The Council review pipeline runs every expert seat on the top model. Add the
+  decision mechanism for per-seat model tiers as a new pure module
+  `web/scripts/tier-policy.ts` (it builds on `computeComplexity` / `Complexity`
+  from `web/scripts/complexity.ts`). It must be fail-closed:
+
+  - `TierPolicy` = `{ entries: Record<string, { cheapEligible: boolean;
+    sampleSize: number }> }`, keyed by `policyKey(seatId, band)`;
+    `emptyTierPolicy()` returns a policy with no entries;
+  - `MIN_SAMPLES_FOR_CHEAP` — the minimum sample size for a cheap decision;
+  - `decideTier({ seatId, guaranteed }, complexity | null, policy =
+    emptyTierPolicy())` returns `{ tier: "top" | "cheap", reason }`:
+    a guaranteed seat is always `{ tier: "top", reason: "fail-closed-lens" }`
+    (checked first); a missing complexity gives reason `"missing-complexity"`;
+    `cheap` with reason `"data-derived-cheap"` only when the entry for exactly
+    this seat and complexity band has `cheapEligible === true` (strictly) and a
+    integer `sampleSize >= MIN_SAMPLES_FOR_CHEAP`; everything else is top with
+    reason `"insufficient-data"`;
+  - `DEFAULT_TIER_MODEL_MAP` — `{ top: null, cheap: <cheap model alias> }`
+    (`null` = no override, keep the pipeline's default top model) — and
+    `resolveModelForTier(tier, map = DEFAULT_TIER_MODEL_MAP)` returning
+    `map[tier]`.
+expected_files:
+  - web/scripts/tier-policy.ts
+expected_tests:
+  - web/scripts/tier-policy.test.ts
+failure_modes:
+  - "a guaranteed security/LLM lens can be tiered down"
+  - "a truthy non-boolean cheapEligible or NaN sampleSize enables cheap"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 207
+  merge_commit: b36f1f732ee31b18c43861366037835d9299dd82
+  class: feature
+  hidden_tests:
+    - web/scripts/tier-policy.test.ts
+  validation:
+    base: fail
+    merge: pass
+    base_failure: missing-interface
+    checked_at: "2026-09-28T07:46:56.827Z"

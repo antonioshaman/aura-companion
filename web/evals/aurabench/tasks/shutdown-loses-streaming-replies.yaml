@@ -1,0 +1,50 @@
+# AuraBench task mined from PR #38 ("feat(persistence): flush in-flight streams as interrupted on SIGTERM/SIGINT").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: shutdown-loses-streaming-replies
+title: "Partial replies streaming during a server shutdown are kept as interrupted messages"
+start_commit: 984aed2d6d24f0d057f92f652b339542a77e39bd
+prompt: |
+  If the server receives SIGTERM/SIGINT while assistant replies are still
+  streaming, the partial text is lost: after restart the history shows nothing
+  for that turn. The CLI-disconnect path already turns an in-flight stream into
+  an assistant message marked as interrupted; the server-shutdown path does not.
+
+  Add `WsBridge.flushInterruptedStreamsForShutdown()`: for every session with
+  an in-flight streamed reply that has text, append one assistant message with
+  `streamStatus: "interrupted"` to its history; clear every streaming tracker
+  (even empty ones, which produce no message); return the number of messages
+  synthesized. It must be a no-op with no streams and idempotent when called
+  twice. Call it during graceful shutdown early enough that the synthesized
+  messages are included in the final session-store flush.
+expected_files:
+  - web/server/index.ts
+  - web/server/ws-bridge.ts
+expected_tests:
+  - web/server/ws-bridge.test.ts
+failure_modes:
+  - "interrupted messages are appended twice on repeated signals"
+  - "they are synthesized after the final persistence flush and lost"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 38
+  merge_commit: 9a7fd272107cf855201f2712b4ae515fa10b1da7
+  class: feature
+  hidden_tests:
+    - web/server/ws-bridge.test.ts
+  validation:
+    base: fail
+    merge: pass
+    base_failure: assertion
+    checked_at: "2026-09-28T07:18:10.830Z"

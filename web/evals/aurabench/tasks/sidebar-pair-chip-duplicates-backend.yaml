@@ -1,0 +1,56 @@
+# AuraBench task mined from PR #44 ("fix(council): suppress pair-chip half that duplicates backend indicator").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: sidebar-pair-chip-duplicates-backend
+title: "The sidebar pair chip no longer repeats the provider already shown by the backend chip"
+start_commit: 9b955420bd8c0485bb6b8f490fae88b2d84db389
+prompt: |
+  In the sidebar, a `claude+codex` Council session on the Claude backend renders
+  `[CC] [CLAUDE] + [CODEX]` — the CLAUDE chip repeats what the green `CC` backend
+  chip already says (same on the Codex backend with CODEX). Only the other
+  provider should be shown: `[CC] [CODEX]`, `[CX] [CLAUDE]`; homogeneous pairs on
+  their matching backend show no pair chip at all (current behaviour).
+
+  Export a pure helper `pairHalvesAfterBackendCollapse(pairing, backend)` from
+  `web/src/components/council/ProviderBadges.tsx` returning the lower-cased
+  halves still to render, in orchestrator-then-observer order: the half(s)
+  matching the backend are dropped, both halves are kept if neither matches, and
+  malformed input gives `[]`. Use it in the sidebar session row so the badge
+  (`data-testid="council-session-badge"`) shows only the remaining provider
+  without a `+`, and is absent when nothing remains. Top bar and observer panel
+  keep the full pairing.
+expected_files:
+  - web/src/components/Playground.tsx
+  - web/src/components/SessionItem.tsx
+  - web/src/components/council/ProviderBadges.tsx
+  - web/src/components/council/index.ts
+expected_tests:
+  - web/src/components/SessionItem.test.tsx
+  - web/src/components/council/ProviderBadges.test.tsx
+failure_modes:
+  - "top bar/observer panel lose the full pairing label"
+  - "half order is reversed"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 44
+  merge_commit: d2f59be6f1e0a19ff2eab961ffc045b1caa7ee0e
+  class: ui
+  hidden_tests:
+    - web/src/components/SessionItem.test.tsx
+    - web/src/components/council/ProviderBadges.test.tsx
+  validation:
+    base: fail
+    merge: pass
+    base_failure: assertion
+    checked_at: "2026-09-28T07:18:55.902Z"

@@ -1,0 +1,48 @@
+# AuraBench task mined from PR #184 ("fix(server): relaunch surviving-but-deaf sessions after Bun restart (live PID, dead adapter)").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: deaf-session-after-server-restart
+title: "Sessions whose backend link died in a server restart relaunch automatically"
+start_commit: fb00f7d4d9282e5a9bf395bb841219a32a52c424
+prompt: |
+  After the Bun server restarts under `KillMode=process`, some Codex and stdio
+  Claude sessions look connected but never answer; they only recover when the
+  user presses Reconnect. The CLI / app-server process survived the restart (its
+  PID is alive) but the backend adapter that talked to it died with the old
+  server process, so nothing is actually listening on its pipes.
+
+  The orchestrator's automatic relaunch path (the `session:relaunch-needed`
+  handling) treats a live PID as a healthy session and also refuses to relaunch
+  a session still in `starting`. Make automatic relaunch recover such "alive but
+  deaf" sessions, while still skipping sessions whose process is alive AND whose
+  backend adapter is attached.
+expected_files:
+  - web/server/session-orchestrator.ts
+expected_tests:
+  - web/server/session-orchestrator.test.ts
+failure_modes:
+  - "healthy attached sessions get relaunched in a loop"
+  - "relaunch loses the resume anchor (fresh session instead of --resume)"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 184
+  merge_commit: 856dbbbb9ed9a5ddb559ffc204accd4465814682
+  class: debug
+  hidden_tests:
+    - web/server/session-orchestrator.test.ts
+  validation:
+    base: fail
+    merge: pass
+    base_failure: assertion
+    checked_at: "2026-09-28T07:43:58.007Z"

@@ -7,10 +7,12 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { classifyAuraBenchTaskSource, loadAuraBenchTasks } from "./loader.js";
+import { AURABENCH_CLASSES } from "./task.js";
 
 const BASE = "a".repeat(40);
 const MERGE = "b".repeat(40);
@@ -79,6 +81,35 @@ describe("loadAuraBenchTasks", () => {
       ]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("committed AuraBench corpus (web/evals/aurabench/tasks)", () => {
+  // Story D1 gate: >= 30 validated tasks (target 50) spread over the task
+  // classes, every one schema-valid. The commit probe is stubbed so this stays
+  // git-history-independent (shallow clones); `eval:aurabench leak` does the
+  // git-backed prompt check against the real diffs.
+  const TASKS_DIR = join(dirname(fileURLToPath(import.meta.url)), "tasks");
+  const loaded = loadAuraBenchTasks(TASKS_DIR, () => true);
+
+  it("parses every committed task with no exclusions", () => {
+    expect(loaded.excluded).toEqual([]);
+    expect(loaded.tasks.length).toBeGreaterThanOrEqual(30);
+  });
+
+  it("covers every task class", () => {
+    const classes = new Set(loaded.tasks.map((t) => t.aurabench.class));
+    for (const c of AURABENCH_CLASSES) expect(classes.has(c)).toBe(true);
+  });
+
+  it("uses each source PR at most once and names the file after the task id", () => {
+    // Two tasks from one PR would double-count it in the per-class lift; the
+    // results JSONL is keyed by id, so the filename must match it.
+    const prs = loaded.tasks.map((t) => t.aurabench.pr);
+    expect(new Set(prs).size).toBe(prs.length);
+    for (const t of loaded.tasks) {
+      expect(readFileSync(join(TASKS_DIR, `${t.id}.yaml`), "utf8")).toContain(`id: ${t.id}`);
     }
   });
 });

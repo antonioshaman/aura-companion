@@ -1,0 +1,49 @@
+# AuraBench task mined from PR #187 ("feat(server): orphan-reaper recognises stdio-transport Claude subprocesses").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: orphan-reaper-misses-stdio-claude
+title: "The orphan reaper also cleans up leaked stdio-transport Claude processes"
+start_commit: eea5a0c91f13f561079c5172f566ce3e121efce5
+prompt: |
+  After a server restart under `KillMode=process`, leaked Claude CLI processes
+  keep running and spending API tokens. The orphan reaper
+  (`web/server/orphan-reaper.ts`) only recognises Companion-spawned Claude
+  processes by the `--sdk-url` flag of the legacy WebSocket transport; the
+  default transport is now stdio (`claude --print --output-format stream-json
+  --input-format stream-json …`), which has no such flag, so those orphans are
+  invisible to it.
+
+  Teach the argv classifier to recognise stdio-transport Claude subprocesses as
+  Companion-managed, without misclassifying a user's own `claude` invocations or
+  unrelated tools that happen to use similar flags. The model id must not affect
+  classification.
+expected_files:
+  - web/server/orphan-reaper.ts
+expected_tests:
+  - web/server/orphan-reaper.test.ts
+failure_modes:
+  - "any process with --print is treated as Companion-managed"
+  - "argv secrets stop being redacted"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 187
+  merge_commit: 9af8794f7a83ae1ba9edc98aa146dbb0400ee8f0
+  class: feature
+  hidden_tests:
+    - web/server/orphan-reaper.test.ts
+  validation:
+    base: fail
+    merge: pass
+    base_failure: assertion
+    checked_at: "2026-09-28T07:45:03.092Z"

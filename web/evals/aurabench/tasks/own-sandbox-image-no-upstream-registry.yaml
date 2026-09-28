@@ -1,0 +1,73 @@
+# AuraBench task mined from PR #96 ("chore(container): own sandbox image, drop upstream stangirard registry").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: own-sandbox-image-no-upstream-registry
+title: "Sandboxes use Companion's own local image and never contact the upstream registry"
+start_commit: 7f688bb3116aff0827582f33a7349e406373a504
+prompt: |
+  This fork must not depend on the upstream project's container registry, but
+  the sandbox/container runtime still defaults to the upstream image
+  `the-companion:latest` and resolves a remote pull source under
+  `docker.io/stangirard`.
+
+  Make `aura-companion-sandbox:latest` the single default sandbox image, defined
+  in one place and used everywhere the old default is hard-coded (server
+  orchestration and session creation, sandbox/env/system routes, and the
+  frontend's home page, sandbox manager and Docker update dialog). The container
+  manager must no longer map the default image to any remote registry (its
+  registry lookup returns `null`, and the upstream registry constant goes away);
+  the existing image-pull flow stays, and when the default image cannot be
+  pulled it falls back to building it locally as it already does; other images
+  keep today's behaviour. Remove the upstream registry references from mocks too.
+expected_files:
+  - web/server/container-manager.ts
+  - web/server/image-pull-manager.ts
+  - web/server/routes.ts
+  - web/server/routes/env-routes.ts
+  - web/server/routes/sandbox-routes.ts
+  - web/server/routes/system-routes.ts
+  - web/server/sandbox-image.ts
+  - web/server/session-creation-service.ts
+  - web/server/session-orchestrator.ts
+  - web/src/components/DockerUpdateDialog.tsx
+  - web/src/components/HomePage.tsx
+  - web/src/components/Playground.tsx
+  - web/src/components/SandboxManager.tsx
+expected_tests:
+  - web/server/container-manager.test.ts
+  - web/server/image-pull-manager.test.ts
+  - web/server/routes/env-routes.test.ts
+  - web/src/components/DockerUpdateDialog.test.tsx
+  - web/src/components/HomePage.test.tsx
+  - web/src/components/SandboxManager.test.tsx
+failure_modes:
+  - "some call sites still default to the upstream image"
+  - "the local-build fallback breaks"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 96
+  merge_commit: af23ff6f1edad2d32d931f12b9f194a56016bd55
+  class: refactor
+  hidden_tests:
+    - web/server/container-manager.test.ts
+    - web/server/image-pull-manager.test.ts
+    - web/server/routes/env-routes.test.ts
+    - web/src/components/DockerUpdateDialog.test.tsx
+    - web/src/components/HomePage.test.tsx
+    - web/src/components/SandboxManager.test.tsx
+  validation:
+    base: fail
+    merge: pass
+    base_failure: assertion
+    checked_at: "2026-09-28T07:24:50.373Z"

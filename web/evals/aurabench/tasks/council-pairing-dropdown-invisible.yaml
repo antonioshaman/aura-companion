@@ -1,0 +1,48 @@
+# AuraBench task mined from PR #25 ("fix(council): unclip pairing dropdown from overflow-hidden animation wrapper").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: council-pairing-dropdown-invisible
+title: "The Council provider-pairing dropdown opens visibly"
+start_commit: 8c62001a214687daff7022f3def33020d5019f2d
+prompt: |
+  With Council Mode switched on in the new-session form, clicking the pairing
+  row ("Orchestrator: Claude · Observer: Claude") flips `aria-expanded` to true
+  and the option list is in the DOM, but nothing appears on screen, so the user
+  can't choose a pairing. The list is clipped by an ancestor with
+  `overflow-hidden` that the toggle uses for its expand/collapse animation
+  (`position: absolute` does not escape it).
+
+  Fix `CouncilToggle` so the open listbox is not inside any `overflow-hidden`
+  ancestor, stays anchored to its trigger, and keeps its current behaviour
+  (selecting an option calls `onPairingChange` and closes the list; keyboard and
+  outside-click handling keep working). Keep it accessible.
+expected_files:
+  - web/src/components/council/CouncilToggle.tsx
+expected_tests:
+  - web/src/components/council/CouncilToggle.test.tsx
+failure_modes:
+  - "the expand/collapse animation is removed"
+  - "the listbox loses its accessible role/labels"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 25
+  merge_commit: be86831b063da9c0d766aa120e76af92559c41a3
+  class: ui
+  hidden_tests:
+    - web/src/components/council/CouncilToggle.test.tsx
+  validation:
+    base: fail
+    merge: pass
+    base_failure: assertion
+    checked_at: "2026-09-28T07:15:54.043Z"

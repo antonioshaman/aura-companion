@@ -1,0 +1,65 @@
+# AuraBench task mined from PR #116 ("fix(model-switch): auto-revert Claude model when CLI 404s on next turn").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: claude-model-switch-404-strands-session
+title: "Switching to a model the subscription can't use reverts instead of stranding the session"
+start_commit: 01f144b93b79c61efcbb51aff731c578163ee49c
+prompt: |
+  The in-session model dropdown lists models from the API-key model list, but
+  sessions run on the user's subscription. Switching a Claude session to a model
+  the subscription cannot use appears to succeed (the switch is optimistic), then
+  every following turn fails with a 404 and the session is stuck.
+
+  Track in-flight Claude model switches in the browser store and revert on
+  failure:
+  - in `web/src/store/cli-status-slice.ts` add `pendingClaudeModelSwitches`
+    (a Map keyed by session id of `{ requestedModel, previousModel }`),
+    `setPendingClaudeModelSwitch(sessionId, requestedModel, previousModel)` and
+    `clearPendingClaudeModelSwitch(sessionId)` (no-op, same Map instance, when
+    absent); also clear it on session removal and store reset;
+  - the model switcher records a pending switch when the user picks a different
+    Claude model;
+  - when the next `result` frame reports API error status 404 while a switch is
+    pending, restore the previous model in the session and sidebar state,
+    send `set_model` back to the previous model, clear the pending switch and add
+    a system message naming both models. A successful result just clears the
+    pending switch; a 404 with no pending switch does nothing.
+expected_files:
+  - web/server/session-types.ts
+  - web/src/components/ModelSwitcher.tsx
+  - web/src/store/cli-status-slice.ts
+  - web/src/store/index.ts
+  - web/src/store/sessions-slice.ts
+  - web/src/ws.ts
+expected_tests:
+  - web/src/components/ModelSwitcher.test.tsx
+  - web/src/store/cli-status-slice.test.ts
+  - web/src/ws.test.ts
+failure_modes:
+  - "Codex model switching behaviour changes"
+  - "every 404 triggers a revert even without a pending switch"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 116
+  merge_commit: 455bb17b01372e2bca3707fcc59d4e4289a00634
+  class: bugfix
+  hidden_tests:
+    - web/src/components/ModelSwitcher.test.tsx
+    - web/src/store/cli-status-slice.test.ts
+    - web/src/ws.test.ts
+  validation:
+    base: fail
+    merge: pass
+    base_failure: assertion
+    checked_at: "2026-09-28T07:28:33.771Z"
