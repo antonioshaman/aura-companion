@@ -52,7 +52,7 @@ Append to the appropriate file in `.agents/knowledge/`. Field order matches `.ag
 }
 ```
 
-`usageCount` is bumped by `/prime` when surfacing, `helpfulCount` by `/learn` on re-confirmation, `outdatedReports` by `/self-reflect` or the user when an entry is flagged stale.
+`usageCount` is a frozen baseline (new rows: 0) — `/prime` surfacings go to the gitignored `usage.log`, not the store; `helpfulCount` by `/learn` on re-confirmation, `outdatedReports` by `/self-reflect` or the user when an entry is flagged stale.
 
 ### 4. Confirm
 

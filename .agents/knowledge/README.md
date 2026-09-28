@@ -13,7 +13,7 @@ Curated, machine-readable learnings that grow with every session. Read by `/prim
 ├── anti-patterns.jsonl   # approaches to avoid
 ├── codebase-facts.jsonl  # structural knowledge about the repo
 ├── api-behaviors.jsonl   # model / tool / API quirks
-├── usage-state.json      # session clock: number of recorded /prime runs
+├── usage.log             # gitignored telemetry: one NDJSON line per /prime run (session clock + surfaced ids)
 └── archive/              # retired entries (same store names), never read by /prime
 ```
 
@@ -55,13 +55,10 @@ One JSON object per line. No comments inside JSONL files — keep all schema doc
 | `affectedFiles`   | no       | Glob or path list — used by `/prime` to filter by current diff                                 |
 | `createdAt`       | yes      | ISO 8601 UTC                                                                                   |
 | `updatedAt`       | yes      | ISO 8601 UTC — bumped by `/learn` on re-confirmation, by `/self-reflect` on edits              |
-| `usageCount`      | yes      | Times this entry was surfaced by `/prime`. Cheap relevance signal                              |
+| `usageCount`      | yes      | Frozen pre-log baseline of `/prime` surfacings. Tooling no longer writes it; effective usage = this + `usage.log` lines naming the entry |
 | `helpfulCount`    | yes      | Times the user/agent confirmed it helped. Bumped by `/learn` re-confirmation                   |
 | `outdatedReports` | yes      | Times this entry was flagged stale. `/evolve` prunes when this exceeds re-confirmations        |
 | `promoted`        | no       | `true` once `/evolve` promoted it into `CLAUDE.md`; kept for history, exempt from idle pruning |
-| `lastSurfacedSession` | no   | Session number (from `usage-state.json`) of the last `/prime` that surfaced it. Set by `kb:record` |
-| `lastSurfacedAt`  | no       | ISO time of that surfacing. Set by `kb:record`                                                  |
-| `trackedSinceSession` | no   | Session at which idle tracking started for a never-surfaced entry. Set by `kb:record`           |
 | `archivedAt` / `archiveReason` | archive only | Set by `kb:prune` when the row moves to `archive/`                         |
 
 ### Confidence levels
@@ -79,8 +76,8 @@ One JSON object per line. No comments inside JSONL files — keep all schema doc
 3. **Session end** — `/self-reflect` consolidates new learnings, dedupes, and prunes obviously stale entries.
 4. **Health & pruning** — mechanical, in `web/scripts/kb-health.ts`:
    - `bun run --cwd web kb:health` — total, used≥1, helpful≥1, promoted, stale, never-surfaced, idle, confidence distribution. Corrupt lines are reported as `file:line`, the rest is still counted, exit code 1.
-   - `bun run --cwd web kb:record -- <ids>` — called by `/prime` once per run; bumps `usageCount` on surfaced ids and advances the session clock.
-   - `bun run --cwd web kb:prune [--dry-run]` — entries not surfaced for 20 consecutive `/prime` sessions (`--threshold N`) move to `archive/<store>.jsonl` with a reason. Promoted and never-tracked entries are exempt. Nothing is deleted.
+   - `bun run --cwd web kb:record -- <ids>` — called by `/prime` once per run; appends one line to the gitignored `usage.log` (single O_APPEND write). Stores are never written, so telemetry stays out of git and concurrent runs lose nothing. Line order is the session clock.
+   - `bun run --cwd web kb:prune [--dry-run]` — entries not surfaced for 20 consecutive `/prime` sessions (`--threshold N`) move to `archive/<store>.jsonl` with a reason. Idle age counts only sessions logged at/after the entry's `createdAt`, so a fresh `/learn` row is never instantly prunable; promoted entries and rows with neither `createdAt` nor a surfacing are exempt. Nothing is deleted — this is the only command that rewrites a store.
 5. **Periodic** — `/evolve` audits health, promotes recurring patterns into `CLAUDE.md`, downgrades or removes entries with high `outdatedReports`, and surfaces coverage gaps.
 
 ## Conventions
