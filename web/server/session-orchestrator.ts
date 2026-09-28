@@ -57,8 +57,17 @@ import type { OrphanTimerRef } from "./sweep-orphans.js";
 import type { BrowserGroupRecord } from "./session-types.js";
 import { hasNonEmptyEnvVar, hasAnyClaudeAuthEnv } from "./provider-auth-env.js";
 import { getServerLayerFlags, type LayerFlags } from "./layer-flags.js";
+import { resolveAutoProceedIterationCeiling } from "./auto-proceed-types.js";
 
 // ── Constants ────────────────────────────────────────────────────────────────
+/** AP-WIRE: resolve `COMPANION_ORCH_AUTO_PROCEED_MAX_ITERATIONS_CEILING` at
+ *  construction; a bad value keeps the hard cap and is warned about. */
+function resolveIterationCeilingOnce(): number {
+  const { ceiling, warning } = resolveAutoProceedIterationCeiling(process.env);
+  if (warning) log.warn("auto-proceed", warning, { event: "auto-proceed.ceiling-invalid" });
+  return ceiling;
+}
+
 const VSCODE_EDITOR_CONTAINER_PORT = 13337;
 const CODEX_APP_SERVER_CONTAINER_PORT = Number(
   process.env.COMPANION_CODEX_CONTAINER_WS_PORT || "4502",
@@ -352,6 +361,14 @@ export class SessionOrchestrator {
       // sessions without them follow the server default.
       isAutoProceedAllowed: (sessionId) =>
         (this.launcher.getSession(sessionId)?.layers ?? getServerLayerFlags()).autoProceed,
+      // AP-WIRE: the opt-in, the group index and the coordinator — the
+      // controller is the producer of the auto-proceed group events.
+      getAutoProceedConfig: (sessionId) => this.launcher.getSession(sessionId)?.autoProceedOnIdle,
+      getGroupIdForSession: (sessionId) => this.councilGroupBySessionId.get(sessionId),
+      applyGroupEvent: (sessionGroupId, event) => {
+        this.coordinator?.applyEvent(sessionGroupId, event);
+      },
+      iterationCeiling: resolveIterationCeilingOnce(),
     });
     this.recovery = new SessionRecovery({
       launcher: this.launcher,
@@ -434,6 +451,10 @@ export class SessionOrchestrator {
     this.autoProceed.wire({
       onUserFrameObserved: (cb) => this.wsBridge.onUserFrameObserved(cb),
       onSessionExited: (cb) => companionBus.on("session:exited", ({ sessionId }) => cb(sessionId)),
+      onOrchestratorTurnDone: (cb) =>
+        companionBus.on("orchestrator:turn-done", ({ sessionId, blockedByStop }) => cb(sessionId, blockedByStop)),
+      onGroupReview: (cb) =>
+        companionBus.on("group:review", ({ sessionGroupId, findings }) => cb(sessionGroupId, findings)),
     });
 
     // Council Mode auto-wake (Task 4 drain hook): when the observer
@@ -1168,6 +1189,7 @@ export class SessionOrchestrator {
           sessionGroupId: body.sessionGroupId,
           sessionGroupRole: body.sessionGroupRole,
           layers: body.layers,
+          autoProceedOnIdle: body.autoProceedOnIdle,
         });
       } catch (e) {
         // Clean up container if it was created but launch failed

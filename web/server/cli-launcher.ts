@@ -270,6 +270,9 @@ export interface SdkSessionInfo {
   /** aura-meta-diet C3 — non-default layer flags (absent = all layers on).
    *  Persisted so a relaunch re-applies the same restrictions. */
   layers?: LayerFlags;
+  /** aura-meta-diet AP-WIRE — validated auto-proceed opt-in; set only on a
+   *  council orchestrator-half. Persisted so the opt-in survives restarts. */
+  autoProceedOnIdle?: { idleMs: number; maxIterations: number };
 
   // Codex WebSocket transport fields
   /** Port used for Codex WebSocket transport (host mode). */
@@ -382,6 +385,9 @@ export interface LaunchOptions {
   /** aura-meta-diet C3 — resolved layer flags. Absent or all-default →
    *  spawn argv unchanged. See `layer-flags.ts`. */
   layers?: LayerFlags;
+  /** AP-WIRE — auto-proceed opt-in; stored only when `sessionGroupRole` is
+   *  `orchestrator` (the manager's gate refuses any other half anyway). */
+  autoProceedOnIdle?: { idleMs: number; maxIterations: number };
   /** Internal: layer directive composed by `applyLayerSpawnOverrides`;
    *  appended to Claude's system prompt / Codex `developerInstructions`. */
   layerSystemPrompt?: string;
@@ -1050,6 +1056,12 @@ export class CliLauncher {
     // per-session choice survives relaunch and outranks a later env change.
     if (options.layers) {
       info.layers = options.layers;
+    }
+    if (options.autoProceedOnIdle && options.sessionGroupRole === "orchestrator") {
+      info.autoProceedOnIdle = {
+        idleMs: options.autoProceedOnIdle.idleMs,
+        maxIterations: options.autoProceedOnIdle.maxIterations,
+      };
     }
     const effectiveOptions = this.applyLayerSpawnOverrides(
       this.buildObserverSpawnOverrides(sessionId, info, {
