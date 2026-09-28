@@ -49,7 +49,8 @@ import { runCell, computeBaseline, type AgentRunner, type Baseline } from "./aur
 import { VARIANTS, parseVariantList } from "./aurabench/harness/variants.js";
 import { nakedClaudeRunner, nakedCodexRunner, type NakedDeps } from "./aurabench/harness/naked-agents.js";
 import { auraRunner, type BenchSocket } from "./aurabench/harness/aura-agent.js";
-import { startBenchInstance, type RunningInstance } from "./aurabench/harness/bench-instance.js";
+import { benchInstancePaths, startBenchInstance, type RunningInstance } from "./aurabench/harness/bench-instance.js";
+import { guardRealCodexHome, propagateFromSessionHomes, realAuthSha } from "./aurabench/harness/codex-home.js";
 import { benchChildEnv, niceExec, spawnNice } from "./aurabench/harness/proc.js";
 import type { CellRecord } from "./aurabench/harness/cells.js";
 import { chmodSync, copyFileSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
@@ -286,13 +287,19 @@ async function bench(argv: string[], repo: string): Promise<number> {
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
     process.on(sig, () => void stopInstance().finally(() => process.exit(130)));
   }
+  const realCodexDir = join(realHome, ".codex");
+  // Every variant — naked or Aura — is fingerprinted against the real
+  // ~/.codex before/after the cell; any write but auth.json is a violation.
+  const guard = (r: AgentRunner) => guardRealCodexHome(r, { realCodexDir });
+  const benchSessionCodexHomes = join(benchInstancePaths(benchRoot).home, ".companion", "codex-home");
   const runners: Record<"A" | "B" | "aura", AgentRunner> = {
-    A: nakedClaudeRunner(nakedDeps),
-    B: nakedCodexRunner(nakedDeps),
-    aura: async (ctx) => {
+    A: guard(nakedClaudeRunner(nakedDeps)),
+    B: guard(nakedCodexRunner(nakedDeps)),
+    aura: guard(async (ctx) => {
       if (!instance) instance = await startBenchInstance({ webDir: join(repo, "web"), benchRoot, realHome });
       const inst = instance;
-      return auraRunner({
+      const authShaAtStart = realAuthSha(realCodexDir);
+      const run = await auraRunner({
         baseUrl: inst.baseUrl,
         http: (m, p, b) => http(inst.baseUrl, m, p, b),
         openSocket,
@@ -304,7 +311,10 @@ async function bench(argv: string[], repo: string): Promise<number> {
             ? ["knowledge layer on, but the base commit has no .agents/knowledge"]
             : [],
       })(ctx);
-    },
+      // Codex sessions of the bench instance may have rotated the shared token.
+      const auth = propagateFromSessionHomes(benchSessionCodexHomes, realCodexDir, authShaAtStart);
+      return run.kind === "done" ? { ...run, isolation: { ...run.isolation, codex_auth: auth } } : run;
+    }),
   };
   const baselineCache = new Map<string, Baseline>();
   const baseline = async (task: AuraBenchTask): Promise<Baseline> => {

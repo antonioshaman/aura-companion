@@ -134,9 +134,19 @@ describe("bench instance env", () => {
       COMPANION_ORPHAN_REAPER: "off",
       PATH: "/bin",
     });
-    // Prod's AURA_* tuning and COMPANION_* settings never leak into the bench.
+    // Prod's AURA_* tuning never leaks into the bench.
     expect(env.AURA_SILENT_STDIO_TIMEOUT_MS).toBeUndefined();
-    expect(env.COMPANION_TELEMETRY).toBeUndefined();
+  });
+
+  // P6/FIX-D2-1: the settings default is telemetryEnabled=true, so pilot-1
+  // bench/smoke instances heartbeated into the public install counter.
+  // Telemetry is forced OFF (fail-closed) whatever the parent env says.
+  it("forces telemetry off and points the stats URL at a dead end, even if the parent enables it", () => {
+    for (const parent of [{}, { COMPANION_TELEMETRY: "1" }, { COMPANION_TELEMETRY: "true", COMPANION_STATS_URL: "https://stats.example" }]) {
+      const env = benchInstanceEnv(parent, paths);
+      expect(env.COMPANION_TELEMETRY).toBe("0");
+      expect(env.COMPANION_STATS_URL).toBe("http://127.0.0.1:9");
+    }
   });
 
   it("refuses the prod port", () => {

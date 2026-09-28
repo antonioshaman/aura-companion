@@ -7,9 +7,10 @@
  *     the real ~/.claude, nothing else) and the isolating flags
  *     (`--strict-mcp-config`, `--include-hook-events`, no session persistence);
  *     the init-frame isolation verdict lands in the result;
- *   - B runs `codex exec --json --ephemeral --ignore-user-config` and never
- *     points CODEX_HOME anywhere (shared ~/.codex is read, never copied);
- *     global ~/.codex instructions/skills/memories are reported as confounds;
+ *   - B runs `codex exec --json --ephemeral --ignore-user-config` with a
+ *     FRESH per-cell CODEX_HOME (P6/FIX-D2-1: pilot 1 let B write the real
+ *     ~/.codex); the rotated-auth write-back runs even when the spawn throws;
+ *     anything the isolated home still exposes is a confound AND a violation;
  *   - exit states map to completed / timeout / agent_error, and a usage limit
  *     in the FINAL message becomes `limit` (not a failure).
  */
@@ -47,6 +48,11 @@ function deps(result: Partial<SpawnResult>, extra: Partial<NakedDeps> = {}) {
     prepareClaudeConfig: (dir, from) => prepared.push([dir, from]),
     present: () => false,
     now: () => 0,
+    // Codex-home fs work is proven against real files in codex-home.test.ts;
+    // here it is stubbed so no test mkdirs the fake /cells paths.
+    prepareCodexHome: () => ({}),
+    finishCodexHome: () => "unchanged",
+    authSha: () => null,
     ...extra,
   };
   return { d, spawned, prepared };
@@ -106,16 +112,60 @@ describe("model pinning", () => {
 });
 
 describe("naked Codex (B)", () => {
-  it("runs codex exec ephemerally without touching CODEX_HOME and reports confounds", async () => {
+  it("runs codex exec ephemerally in a fresh per-cell CODEX_HOME and writes auth back after", async () => {
     const stdout = line({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 2 } });
-    const { d, spawned } = deps({ stdout }, { present: (p) => p.endsWith("/AGENTS.md") || p.endsWith("/memories") });
+    const calls: string[] = [];
+    const { d, spawned } = deps(
+      { stdout },
+      {
+        authSha: () => "sha0",
+        prepareCodexHome: (home, real) => (calls.push(`prepare ${home} ${real}`), { codex_home: home, seeded: ["auth.json"] }),
+        finishCodexHome: (home, real, sha) => (calls.push(`finish ${home} ${real} ${sha}`), "unchanged"),
+      },
+    );
     const r = await nakedCodexRunner(d)(ctx("B"));
     expect(spawned[0]!.cmd).toBe("codex");
     expect(spawned[0]!.args).toEqual(codexNakedArgs("do the thing", "/wt/cell"));
     expect(spawned[0]!.args).toEqual(expect.arrayContaining(["--json", "--ephemeral", "--ignore-user-config"]));
-    expect(spawned[0]!.o.env && "CODEX_HOME" in spawned[0]!.o.env).toBe(false);
-    expect(r).toMatchObject({ kind: "done", status: "completed" });
-    if (r.kind === "done") expect(r.confounds).toEqual(["~/.codex/AGENTS.md (global instructions)", "~/.codex/memories (codex memories)"]);
+    // The cell's own home, never the real ~/.codex.
+    expect(spawned[0]!.o.env?.CODEX_HOME).toBe("/cells/t1/A-1/codex-home");
+    expect(calls).toEqual([
+      "prepare /cells/t1/A-1/codex-home /home/u/.codex",
+      "finish /cells/t1/A-1/codex-home /home/u/.codex sha0",
+    ]);
+    expect(r).toMatchObject({ kind: "done", status: "completed", confounds: [], isolation: { isolated: true, auth: "unchanged" } });
+  });
+
+  it("reports anything the isolated home still exposes as a confound and a violation", async () => {
+    const stdout = line({ type: "turn.completed", usage: {} });
+    const { d } = deps(
+      { stdout },
+      {
+        prepareCodexHome: () => ({}),
+        finishCodexHome: () => "unchanged",
+        authSha: () => null,
+        present: (p) => p === "/cells/t1/A-1/codex-home/AGENTS.md",
+      },
+    );
+    const r = await nakedCodexRunner(d)(ctx("B"));
+    if (r.kind !== "done") throw new Error("expected done");
+    expect(r.confounds).toEqual(["CODEX_HOME/AGENTS.md (global instructions)"]);
+    expect(r.isolation).toMatchObject({ isolated: false, violations: ["visible to the agent: CODEX_HOME/AGENTS.md (global instructions)"] });
+  });
+
+  // A crashed spawn must still remove the cell's auth copy / write back a rotated token.
+  it("runs the auth write-back even when the spawn throws", async () => {
+    const finished: string[] = [];
+    const { d } = deps({}, {
+      spawn: async () => {
+        throw new Error("spawn EACCES");
+      },
+      prepareCodexHome: () => ({}),
+      finishCodexHome: (home) => (finished.push(home), "unchanged"),
+      authSha: () => null,
+    });
+    await expect(nakedCodexRunner(d)(ctx("B"))).rejects.toThrow("spawn EACCES");
+    expect(finished).toEqual(["/cells/t1/A-1/codex-home"]);
   });
 
   it("a usage-limit turn failure is a limit, not a result", async () => {
@@ -123,7 +173,7 @@ describe("naked Codex (B)", () => {
     expect(await nakedCodexRunner(deps({ stdout, code: 1 }).d)(ctx("B"))).toMatchObject({ kind: "limit", limit: { resetAt: 3 * 3_600_000 } });
   });
 
-  it("codexConfounds is empty when ~/.codex injects nothing", () => {
+  it("codexConfounds is empty when the home injects nothing", () => {
     expect(codexConfounds("/h/.codex", () => false)).toEqual([]);
   });
 });

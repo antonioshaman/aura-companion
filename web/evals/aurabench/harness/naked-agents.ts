@@ -6,10 +6,13 @@
  *     memory, CLAUDE.md). `--strict-mcp-config` drops account MCP connectors,
  *     `--include-hook-events` makes any hook visible, and the init frame is
  *     checked by {@link checkNakedClaudeIsolation}.
- * B — `codex exec --json --ephemeral --ignore-user-config`. `~/.codex` is
- *     NEVER copied or edited (refresh-token rotation would break prod), so
- *     whatever it still injects (global AGENTS.md, skills, memories) is
- *     recorded as a confound instead.
+ * B — `codex exec --json --ephemeral --ignore-user-config` with a FRESH
+ *     per-cell `CODEX_HOME` holding only an `auth.json` symlink to the real
+ *     one ({@link prepareIsolatedCodexHome}): no config, memories, skills,
+ *     AGENTS.md or state from the real `~/.codex`, and nothing written back
+ *     to it except a rotated OAuth token ({@link propagateRotatedCodexAuth}).
+ *     That the real `~/.codex` stayed untouched is PROVEN per cell by
+ *     `guardRealCodexHome` (wired in the runner for every variant).
  *
  * The worktree was already scrubbed of Aura files by `runCell`. The process
  * factory is injected (tests script it); fs probes too. Firewall-clean.
@@ -18,6 +21,7 @@
 import { join } from "node:path";
 import { detectLimit, summarizeClaudeStream, summarizeCodexStream } from "./agent-metrics.js";
 import { checkNakedClaudeIsolation } from "./isolation.js";
+import { prepareIsolatedCodexHome, propagateRotatedCodexAuth, realAuthSha } from "./codex-home.js";
 import type { AgentContext, AgentRun, AgentRunner } from "./run-cell.js";
 import type { SpawnOptions, SpawnResult } from "./proc.js";
 
@@ -28,7 +32,7 @@ export interface NakedDeps {
   env: (extra: Record<string, string>) => Record<string, string>;
   /** The real `~/.claude` (credentials source; isolation reference). */
   realClaudeDir: string;
-  /** The real `~/.codex` (confound probe only — never written). */
+  /** The real `~/.codex` (auth source; written only to propagate a rotated token). */
   realCodexDir: string;
   /** Names of the user's Claude skills (must be invisible to naked A). */
   userSkillNames: () => string[];
@@ -38,6 +42,12 @@ export interface NakedDeps {
   prepareClaudeConfig: (dir: string, credentialsFrom: string) => void;
   /** Non-empty directory / existing file probe. */
   present: (path: string) => boolean;
+  /** Fresh per-cell Codex home (default {@link prepareIsolatedCodexHome}). */
+  prepareCodexHome?: (home: string, realCodexDir: string) => Record<string, unknown>;
+  /** Post-cell auth write-back (default {@link propagateRotatedCodexAuth}). */
+  finishCodexHome?: (home: string, realCodexDir: string, authShaAtStart: string | null) => string;
+  /** sha256 of the real auth.json (default {@link realAuthSha}). */
+  authSha?: (realCodexDir: string) => string | null;
   /** Pinned models — every variant of a provider must run the same model. */
   claudeModel?: string;
   codexModel?: string;
@@ -115,34 +125,48 @@ export function nakedClaudeRunner(d: NakedDeps): AgentRunner {
   };
 }
 
-/** What a shared `~/.codex` may still inject into a "naked" Codex run. */
-export function codexConfounds(realCodexDir: string, present: (p: string) => boolean): string[] {
+/** What a Codex home may inject into a "naked" run (probed in the cell's
+ *  isolated home — expected empty; anything found is a confound). */
+export function codexConfounds(codexHome: string, present: (p: string) => boolean): string[] {
   const out: string[] = [];
   for (const [rel, label] of [
-    ["AGENTS.md", "~/.codex/AGENTS.md (global instructions)"],
-    ["skills", "~/.codex/skills (user skills)"],
-    ["memories", "~/.codex/memories (codex memories)"],
-    ["plugins", "~/.codex/plugins"],
+    ["AGENTS.md", "CODEX_HOME/AGENTS.md (global instructions)"],
+    ["skills", "CODEX_HOME/skills (user skills)"],
+    ["memories", "CODEX_HOME/memories (codex memories)"],
+    ["plugins", "CODEX_HOME/plugins"],
+    ["config.toml", "CODEX_HOME/config.toml"],
   ] as const) {
-    if (present(join(realCodexDir, rel))) out.push(label);
+    if (present(join(codexHome, rel))) out.push(label);
   }
   return out;
 }
 
 export function nakedCodexRunner(d: NakedDeps): AgentRunner {
   return async (ctx: AgentContext): Promise<AgentRun> => {
-    const r = await d.spawn(d.codexBin ?? "codex", codexNakedArgs(ctx.task.prompt, ctx.worktree, d.codexModel), {
-      cwd: ctx.worktree,
-      timeoutMs: ctx.timeoutMs,
-      env: d.env({}),
-      stdoutFile: join(ctx.artifactDir, "agent.jsonl"),
-      stderrFile: join(ctx.artifactDir, "agent.stderr"),
-    });
+    const codexHome = join(ctx.artifactDir, "codex-home");
+    const authShaAtStart = (d.authSha ?? realAuthSha)(d.realCodexDir);
+    const seeded = (d.prepareCodexHome ?? prepareIsolatedCodexHome)(codexHome, d.realCodexDir);
+    // Probed before the run: what the agent could see at start.
+    const confounds = codexConfounds(codexHome, d.present);
+    let r: SpawnResult;
+    let auth: string;
+    try {
+      r = await d.spawn(d.codexBin ?? "codex", codexNakedArgs(ctx.task.prompt, ctx.worktree, d.codexModel), {
+        cwd: ctx.worktree,
+        timeoutMs: ctx.timeoutMs,
+        env: d.env({ CODEX_HOME: codexHome }),
+        stdoutFile: join(ctx.artifactDir, "agent.jsonl"),
+        stderrFile: join(ctx.artifactDir, "agent.stderr"),
+      });
+    } finally {
+      auth = (d.finishCodexHome ?? propagateRotatedCodexAuth)(codexHome, d.realCodexDir, authShaAtStart);
+    }
     const s = summarizeCodexStream(r.stdout);
-    const confounds = codexConfounds(d.realCodexDir, d.present);
     const isolation = {
-      isolated: true,
-      codex_home: "shared ~/.codex (read by codex, never copied/edited by the harness)",
+      isolated: confounds.length === 0,
+      violations: confounds.map((c) => `visible to the agent: ${c}`),
+      ...seeded,
+      auth,
       flags: ["--ephemeral", "--ignore-user-config"],
     };
     if (r.timedOut) return { kind: "done", status: "timeout", metrics: s.metrics, isolation, confounds };
