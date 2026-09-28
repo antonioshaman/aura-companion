@@ -197,6 +197,12 @@ export interface CouncilLifecycleDeps {
     sessionGroupId: string,
     view: { findings: readonly BrowserObserverFinding[]; unfrozenRawStopIds: readonly string[] },
   ) => ReadonlySet<string>;
+  /**
+   * BANNER-RESOLVED — ids of STOPs a human released with "Dismiss for now"
+   * (`<group>-resolved-stops.json` + in-memory). The REST bootstrap flags
+   * them `dismissed`. Omitted → none.
+   */
+  resolvedStopIds?: (sessionGroupId: string) => ReadonlySet<string>;
 }
 
 export class CouncilLifecycle {
@@ -1295,10 +1301,17 @@ export class CouncilLifecycle {
     // FIX-AP-3: no invisible holds — a finding that holds auto-proceed is
     // shown as a blocker even when its re-grounded severity would hide it.
     const held = this.deps.invisibleHeldStopIds?.(sessionGroupId, { findings: view.findings, unfrozenRawStopIds });
-    if (!held || held.size === 0) return view;
+    // BANNER-RESOLVED: a STOP a human dismissed stays dismissed after a
+    // reload. The flag outranks `holdsAutoProceed` (a resolved STOP holds
+    // nothing), so the browser keeps it in the log only.
+    const resolved = this.deps.resolvedStopIds?.(sessionGroupId);
+    if ((!held || held.size === 0) && (!resolved || resolved.size === 0)) return view;
     return {
       ...view,
-      findings: view.findings.map((f) => (held.has(f.id) ? { ...f, holdsAutoProceed: true as const } : f)),
+      findings: view.findings.map((f) => {
+        if (resolved?.has(f.id)) return { ...f, dismissed: true as const };
+        return held?.has(f.id) ? { ...f, holdsAutoProceed: true as const } : f;
+      }),
     };
   }
 

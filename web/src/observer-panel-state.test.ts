@@ -84,6 +84,18 @@ describe("findUnresolvedStops", () => {
     expect(findUnresolvedStops(all, new Set(["note"])).map((f) => f.id)).toEqual(["weak"]);
   });
 
+  // BANNER-RESOLVED: a STOP the server reports as dismissed (persisted
+  // "Dismiss for now") is never a blocker, even with an empty local dismissed
+  // set (fresh tab after reload) and even if also flagged as holding.
+  it("excludes server-dismissed STOPs", () => {
+    const all = [
+      finding({ id: "done", severity: "STOP", dismissed: true }),
+      finding({ id: "done-held", severity: "NOTE", holdsAutoProceed: true, dismissed: true }),
+      finding({ id: "open", severity: "STOP" }),
+    ];
+    expect(findUnresolvedStops(all, new Set()).map((f) => f.id)).toEqual(["open"]);
+  });
+
   // Beck F4 — empty case (early-return branch).
   it("returns an empty array when findings list is empty", () => {
     expect(findUnresolvedStops([], new Set())).toEqual([]);

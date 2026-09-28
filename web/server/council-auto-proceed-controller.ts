@@ -431,18 +431,30 @@ export class CouncilAutoProceedController {
     if (!primary || !this.getAutoProceedConfig?.(primary)) return out;
     if (this.isAutoProceedAllowed && !this.isAutoProceedAllowed(primary)) return out;
     const hold = this.holds.get(sessionGroupId);
-    const resolved = new Set(hold?.resolved ?? []);
-    const cwd = this.watchers.get(sessionGroupId)?.cwd;
-    if (cwd) {
-      const read = readStopResolutions(cwd, sessionGroupId);
-      if (read.ok) for (const id of read.findingIds) resolved.add(id);
-    }
+    const resolved = this.resolvedStopIds(sessionGroupId);
     const unfrozen = new Set(view.unfrozenRawStopIds);
     for (const f of view.findings) {
       if (isBlockingStopFinding(f) || resolved.has(f.id)) continue;
       if (holdsOnRestore(f, unfrozen) || hold?.unresolved.has(f.id)) out.add(f.id);
     }
     return out;
+  }
+
+  /**
+   * BANNER-RESOLVED — every STOP a human released with "Dismiss for now":
+   * the persisted resolutions plus the in-memory ones (a failed write still
+   * released the hold in this process). Independent of the auto-proceed
+   * opt-in: the REST bootstrap marks these findings `dismissed` so a reload
+   * does not raise the banner again for a STOP the human already let go.
+   */
+  resolvedStopIds(sessionGroupId: string): Set<string> {
+    const resolved = new Set(this.holds.get(sessionGroupId)?.resolved ?? []);
+    const cwd = this.watchers.get(sessionGroupId)?.cwd;
+    if (cwd) {
+      const read = readStopResolutions(cwd, sessionGroupId);
+      if (read.ok) for (const id of read.findingIds) resolved.add(id);
+    }
+    return resolved;
   }
 
   /** Test / diagnostics: the finding ids currently holding the group. */

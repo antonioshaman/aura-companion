@@ -217,6 +217,37 @@ describe("FindingsLog", () => {
     expect(screen.queryByLabelText("Dismiss STOP: held")).toBeNull();
   });
 
+  // BANNER-RESOLVED: a STOP dismissed on the server (flag from the REST
+  // bootstrap) or locally stays in the log, dimmed, with a "dismissed" chip
+  // and no Dismiss control; an undismissed STOP shows neither.
+  it("marks server-dismissed and locally dismissed STOPs as dismissed", () => {
+    render(
+      <FindingsLog
+        findings={[
+          finding({ id: "srv", severity: "STOP", claim: "server dismissed", dismissed: true }),
+          finding({ id: "loc", severity: "STOP", claim: "locally dismissed" }),
+          finding({ id: "open", severity: "STOP", claim: "open" }),
+        ]}
+        onDismissStop={() => {}}
+        dismissedStopIds={new Set(["loc"])}
+      />,
+    );
+    const chipIn = (id: string) => screen.getByTestId(`finding-row-${id}`).querySelector("[data-testid='finding-dismissed-chip']");
+    expect(chipIn("srv")).not.toBeNull();
+    expect(chipIn("loc")).not.toBeNull();
+    expect(chipIn("open")).toBeNull();
+    expect(screen.queryByLabelText("Dismiss STOP: server dismissed")).toBeNull();
+    expect(screen.getByLabelText("Dismiss STOP: open")).toBeInTheDocument();
+  });
+
+  it("passes accessibility scan with a dismissed row", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(
+      <FindingsLog findings={[finding({ id: "d", severity: "STOP", claim: "dismissed", dismissed: true })]} onDismissStop={() => {}} />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
   it("passes accessibility scan with a row holding auto-proceed", async () => {
     const { axe } = await import("vitest-axe");
     const { container } = render(

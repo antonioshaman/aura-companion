@@ -3279,7 +3279,7 @@ function CouncilModeSection() {
         <Card label="FindingsLog — empty state">
           <FindingsLog findings={[]} />
         </Card>
-        <Card label="FindingsLog — full mix (STOP / WARN / NOTE / INFO / downgraded / weak evidence)">
+        <Card label="FindingsLog — full mix (STOP / WARN / NOTE / INFO / downgraded / weak evidence / dismissed)">
           <FindingsLog
             // Append-ordered (index 0 = oldest), matching the council slice's
             // push-onto-end convention; FindingsLog renders newest-first, so
@@ -3294,6 +3294,7 @@ function CouncilModeSection() {
               mockFinding({ id: "g", severity: "STOP", claim: "Command fails at runtime — weak evidence, no banner", receivedAt: Date.now() - 5_000, weakEvidence: "no_cited_lines" }),
               mockFinding({ id: "h", severity: "STOP", claim: "Same command fails again — disputed earlier, no banner", receivedAt: Date.now() - 3_000, disputed: "shared_anchor" }),
               mockFinding({ id: "i", severity: "NOTE", claim: "Unfrozen STOP re-checked as NOTE — still holds auto-proceed", receivedAt: Date.now() - 1_000, wasDowngraded: true, downgradeReason: "evidence_not_in_modified_set", holdsAutoProceed: true }),
+              mockFinding({ id: "j", severity: "STOP", claim: "STOP dismissed before a reload — kept in the log, no banner", receivedAt: Date.now() - 500, dismissed: true }),
             ]}
             onDismissStop={() => {}}
             nowMs={Date.now()}

@@ -220,6 +220,20 @@ function HoldsAutoProceedChip() {
   );
 }
 
+/** BANNER-RESOLVED: a human released this STOP with "Dismiss for now". */
+function DismissedChip() {
+  return (
+    <span
+      data-testid="finding-dismissed-chip"
+      className="ml-1 inline-flex items-center gap-1 text-[9px] uppercase tracking-wide font-mono-code px-1.5 py-0.5 rounded bg-cc-muted/10 text-cc-muted border border-cc-border"
+      title="Dismissed — not a blocker, kept in the log"
+      aria-label="Dismissed — not a blocker, kept in the log"
+    >
+      dismissed
+    </span>
+  );
+}
+
 function FindingRow({
   finding,
   nowMs,
@@ -264,6 +278,7 @@ function FindingRow({
       {!finding.wasDowngraded && finding.weakEvidence && <WeakEvidenceChip reason={finding.weakEvidence} />}
       {!finding.wasDowngraded && finding.disputed && <DisputedChip via={finding.disputed} />}
       {finding.holdsAutoProceed && !isDismissed && <HoldsAutoProceedChip />}
+      {isDismissed && <DismissedChip />}
       <span className="text-[10px] text-cc-muted shrink-0 font-mono-code">
         {formatRelativeTime(finding.receivedAt, nowMs)}
       </span>
@@ -404,7 +419,7 @@ export function FindingsLog({
               nowMs={now}
               onSelect={onSelect}
               onDismissStop={onDismissStop}
-              isDismissed={dismissedStopIds?.has(f.id) ?? false}
+              isDismissed={f.dismissed === true || (dismissedStopIds?.has(f.id) ?? false)}
             />
           ))}
         </ul>

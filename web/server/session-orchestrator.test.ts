@@ -3382,6 +3382,80 @@ describe("SessionOrchestrator", () => {
       }
     });
 
+    // BANNER-RESOLVED (human decision on ASK #14): "Dismiss for now" writes
+    // `<group>-resolved-stops.json`, but the browser's dismissal lived only in
+    // tab memory — after a reload the banner raised the same STOP again while
+    // auto-proceed no longer held on it. The REST bootstrap must carry the
+    // server's resolution so the browser can keep the STOP off the banner.
+    // Real path: review file on disk → resolveObserverStop → bootstrap.
+    // Edge cases: a pair that never opted in to auto-proceed still gets the
+    // flag (dismissal is a UI fact, not an auto-proceed one); an undismissed
+    // STOP in the same review stays unflagged; the flag survives a new
+    // orchestrator instance reading the same workspace (the "restart").
+    it("BANNER-RESOLVED: the bootstrap flags a STOP a human dismissed, and only that one", async () => {
+      const { mkdtempSync, writeFileSync, mkdirSync, rmSync, realpathSync } = require("node:fs") as typeof import("node:fs");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      const workspace = realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-orch-banner-resolved-")));
+      const groupId = "grp_00112233445566778899aabbccddeeff";
+      try {
+        mkdirSync(pathJoin(workspace, "src"), { recursive: true });
+        writeFileSync(pathJoin(workspace, "src/a.ts"), "export function alpha() { try { run(); } catch {} }\nexport function gamma() { try { go(); } catch {} }\n");
+        const reviewsDir = pathJoin(workspace, ".council", "reviews");
+        mkdirSync(reviewsDir, { recursive: true });
+        writeFileSync(pathJoin(reviewsDir, "council-implement-claude-observer.md"), JSON.stringify({
+          schema_version: 1,
+          observer_wake_payload_version_echo: 1,
+          checkpoint_id: "chk_banner",
+          phase: "council-implement",
+          session_group_id: groupId,
+          reviewed_at: "2026-01-01T00:00:00Z",
+          observer_provider: "claude",
+          observer_model: "claude-opus",
+          observer_cli_version: "1.0.0",
+          findings: [
+            { severity: "STOP", claim: "`alpha` swallows the error", evidence_path: "src/a.ts", evidence_lines: [1, 1] },
+            { severity: "STOP", claim: "`gamma` swallows the error", evidence_path: "src/a.ts", evidence_lines: [2, 2] },
+          ],
+        }));
+        seedGroup(groupId, { cwd: workspace, artifactPaths: ["src/a.ts"] });
+        // Not opted in to auto-proceed: the dismissal must still be reflected.
+        deps.launcher.getSession.mockImplementation(() => undefined);
+
+        const before = await orchestrator.getGroupReviewsForBootstrap(groupId);
+        expect(before!.findings).toHaveLength(2);
+        expect(before!.findings.every((f) => f.severity === "STOP" && f.dismissed === undefined)).toBe(true);
+
+        const [alpha, gamma] = before!.findings;
+        const res = orchestrator.resolveObserverStop(groupId, alpha!.id);
+        expect(res).toMatchObject({ ok: true, persisted: true });
+
+        const after = await orchestrator.getGroupReviewsForBootstrap(groupId);
+        const byId = new Map(after!.findings.map((f) => [f.id, f]));
+        expect(byId.get(alpha!.id)!.dismissed).toBe(true);
+        // A resolved STOP holds nothing, so it is never flagged as holding.
+        expect(byId.get(alpha!.id)!.holdsAutoProceed).toBeUndefined();
+        expect(byId.get(gamma!.id)!.dismissed).toBeUndefined();
+
+        // "Restart": a fresh orchestrator on the same workspace reads the
+        // persisted resolution, not in-memory state.
+        const fresh = new SessionOrchestrator(deps);
+        const freshInternals = fresh as unknown as {
+          councilWatchers: Map<string, unknown>;
+          councilGroupMeta: Map<string, unknown>;
+        };
+        const oldInternals = orchestrator as unknown as typeof freshInternals;
+        freshInternals.councilWatchers.set(groupId, oldInternals.councilWatchers.get(groupId));
+        freshInternals.councilGroupMeta.set(groupId, oldInternals.councilGroupMeta.get(groupId));
+        const reloaded = await fresh.getGroupReviewsForBootstrap(groupId);
+        expect(reloaded!.findings.find((f) => f.id === alpha!.id)!.dismissed).toBe(true);
+        expect(reloaded!.findings.find((f) => f.id === gamma!.id)!.dismissed).toBeUndefined();
+        fresh.shutdown();
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
     it("B2b: a dismissed STOP is persisted and marks re-raised copies as disputed (live + bootstrap)", async () => {
       const { mkdtempSync, writeFileSync, mkdirSync, rmSync, realpathSync, existsSync } = require("node:fs") as typeof import("node:fs");
       const { tmpdir } = require("node:os") as typeof import("node:os");

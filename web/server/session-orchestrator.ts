@@ -418,6 +418,7 @@ export class SessionOrchestrator {
       lineSnapshots: this.checkpointLineSnapshots,
       readLedger: this.observerReadLedger,
       invisibleHeldStopIds: (sessionGroupId, view) => this.autoProceed.invisibleHeldStopIds(sessionGroupId, view),
+      resolvedStopIds: (sessionGroupId) => this.autoProceed.resolvedStopIds(sessionGroupId),
     });
   }
 
