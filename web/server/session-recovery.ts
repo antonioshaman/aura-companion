@@ -52,11 +52,13 @@ export const RECURRING_SILENCE_ROTATE_THRESHOLD = 2;
 
 /**
  * Interval for the silent-stdio drift detector tick (see
- * `silent-stdio-drift-detector.ts`). 60s is a middle ground — fast
- * enough to catch drift well before the 300s silence watchdog would,
- * slow enough to keep the cost of per-session `stat()` calls negligible.
+ * `silent-stdio-drift-detector.ts`). 15s tightens the silent-stdio
+ * drift auto-heal window to ~105s (15s tick + 90s
+ * `DEFAULT_LAG_TOLERANCE_MS`) vs the old ~150s (60s + 90s) — still well
+ * inside the 300s silence watchdog. Per-session `stat()` on every tick is
+ * negligible at any realistic session count.
  */
-export const DRIFT_DETECTOR_TICK_MS = 60_000;
+export const DRIFT_DETECTOR_TICK_MS = 15_000;
 
 // Proactive keepalive: base delay before relaunching a crashed CLI (doubles per attempt)
 export const KEEPALIVE_BASE_DELAY_MS = 3_000;
