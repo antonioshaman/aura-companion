@@ -74,7 +74,14 @@ import { VARIANTS, parseVariantList } from "./aurabench/harness/variants.js";
 import { nakedClaudeRunner, nakedCodexRunner, type NakedDeps } from "./aurabench/harness/naked-agents.js";
 import { auraRunner, type BenchSocket } from "./aurabench/harness/aura-agent.js";
 import { benchInstancePaths, startBenchInstance, type RunningInstance } from "./aurabench/harness/bench-instance.js";
-import { guardRealCodexHome, propagateFromSessionHomes, realAuthSha } from "./aurabench/harness/codex-home.js";
+import {
+  CODEX_AUTH_FILE,
+  CodexAuthKeeper,
+  authSafeSignalHandler,
+  guardRealCodexHome,
+  realAuthSha,
+  withCodexAuthWatch,
+} from "./aurabench/harness/codex-home.js";
 import { benchChildEnv, niceExec, spawnNice } from "./aurabench/harness/proc.js";
 import type { CellRecord } from "./aurabench/harness/cells.js";
 import {
@@ -285,11 +292,29 @@ async function bench(argv: string[], repo: string): Promise<number> {
   console.log(`[aurabench] cell checkouts under ${wtRoot}${swept.length ? ` (swept ${swept.length} stale)` : ""}`);
 
   const realHome = homedir();
+  const realCodexDir = join(realHome, ".codex");
+  // Rotated Codex tokens go back to the real auth.json while the cell runs,
+  // on a signal and after an exception; a killed run is recovered here.
+  const authKeeper = new CodexAuthKeeper({
+    realCodexDir,
+    stateDir: join(benchRoot, "codex-auth"),
+    log: (l) => console.log(l),
+  });
+  const recovered = authKeeper.recover();
+  if (recovered.released.length || recovered.stash.propagated.length || recovered.stash.kept.length) {
+    console.log(`[aurabench] codex auth recovery: ${JSON.stringify(recovered)}`);
+  }
+  if (recovered.stash.kept.length) {
+    console.log(`[aurabench] WARNING: ${recovered.stash.kept.length} stashed Codex token(s) could not be written back — see ${authKeeper.stash}`);
+  }
+  authKeeper.start();
   const nakedDeps: NakedDeps = {
     spawn: spawnNice,
     env: (extra) => benchChildEnv(process.env, extra),
     realClaudeDir: join(realHome, ".claude"),
-    realCodexDir: join(realHome, ".codex"),
+    realCodexDir,
+    watchCodexHome: (home, sha) => authKeeper.watch(home, "home", sha),
+    finishCodexHome: (home) => authKeeper.release(home)[CODEX_AUTH_FILE] ?? "no_auth",
     projectSkillNames: () => {
       const names = new Set<string>();
       for (const d of [join(repo, ".claude", "skills"), join(repo, ".agents", "skills")]) {
@@ -326,24 +351,31 @@ async function bench(argv: string[], repo: string): Promise<number> {
     instance = null;
     await i?.stop();
   };
-  for (const sig of ["SIGINT", "SIGTERM"] as const) {
-    process.on(sig, () => void stopInstance().finally(() => process.exit(130)));
-  }
-  const realCodexDir = join(realHome, ".codex");
+  const onSignal = authSafeSignalHandler(authKeeper, stopInstance, (code) => process.exit(code));
+  for (const sig of ["SIGINT", "SIGTERM"] as const) process.on(sig, onSignal);
   // Every variant — naked or Aura — is fingerprinted against the real
   // ~/.codex before/after the cell; any write but auth.json is a violation.
-  const guard = (r: AgentRunner) => guardRealCodexHome(r, { realCodexDir });
+  // A limit outcome has no record, so its violation is logged separately.
+  const violationsFile = join(benchRoot, "results", "isolation-violations.jsonl");
+  const guard = (r: AgentRunner) =>
+    guardRealCodexHome(r, {
+      realCodexDir,
+      onLimitViolation: (diff, ctx) => {
+        console.log(`[aurabench] WARNING: real ~/.codex changed during a limit-interrupted cell (${ctx.task.id} ${ctx.variant.id})`);
+        appendFileSync(violationsFile, JSON.stringify({ at: new Date().toISOString(), task: ctx.task.id, variant: ctx.variant.id, outcome: "limit", real_codex_home: diff }) + "\n");
+      },
+    });
   const benchSessionCodexHomes = join(benchInstancePaths(benchRoot).home, ".companion", "codex-home");
   const runners: Record<"A" | "B" | "aura", AgentRunner> = {
     A: guard(nakedClaudeRunner(nakedDeps)),
     B: guard(nakedCodexRunner(nakedDeps)),
     // Unique checkout per cell → fresh `projects/<cwd>` in the shared bench
     // HOME; the wrapper proves it and moves it into the cell's artifacts.
-    aura: guard(withCleanClaudeProject(async (ctx) => {
+    // Codex sessions of the bench instance may rotate the shared token.
+    aura: guard(withCleanClaudeProject(withCodexAuthWatch(async (ctx) => {
       if (!instance) instance = await startBenchInstance({ webDir: join(repo, "web"), benchRoot, realHome });
       const inst = instance;
-      const authShaAtStart = realAuthSha(realCodexDir);
-      const run = await auraRunner({
+      return auraRunner({
         baseUrl: inst.baseUrl,
         http: (m, p, b) => http(inst.baseUrl, m, p, b),
         openSocket,
@@ -355,10 +387,7 @@ async function bench(argv: string[], repo: string): Promise<number> {
             ? ["knowledge layer on, but the base commit has no .agents/knowledge"]
             : [],
       })(ctx);
-      // Codex sessions of the bench instance may have rotated the shared token.
-      const auth = propagateFromSessionHomes(benchSessionCodexHomes, realCodexDir, authShaAtStart);
-      return run.kind === "done" ? { ...run, isolation: { ...run.isolation, codex_auth: auth } } : run;
-    }, join(benchInstancePaths(benchRoot).home, ".claude", "projects"))),
+    }, authKeeper, benchSessionCodexHomes, () => realAuthSha(realCodexDir)), join(benchInstancePaths(benchRoot).home, ".claude", "projects"))),
   };
   const baselineCache = new Map<string, Baseline>();
   const baseline = async (task: AuraBenchTask): Promise<Baseline> => {
@@ -419,7 +448,10 @@ async function bench(argv: string[], repo: string): Promise<number> {
     console.log(`[aurabench] ${JSON.stringify(summary)}`);
     return summary.stoppedOnLimit ? 3 : 0;
   } finally {
+    authKeeper.syncAll();
     await stopInstance();
+    authKeeper.stop();
+    authKeeper.releaseAll();
   }
 }
 

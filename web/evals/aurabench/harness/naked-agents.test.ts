@@ -124,6 +124,8 @@ describe("naked Codex (B)", () => {
       {
         authSha: () => "sha0",
         prepareCodexHome: (home, real) => (calls.push(`prepare ${home} ${real}`), { codex_home: home, seeded: ["auth.json"] }),
+        // FIX-D2-1b: registered for write-back WHILE the cell runs, before the spawn.
+        watchCodexHome: (home, sha) => calls.push(`watch ${home} ${sha}`),
         finishCodexHome: (home, real, sha) => (calls.push(`finish ${home} ${real} ${sha}`), "unchanged"),
       },
     );
@@ -137,6 +139,7 @@ describe("naked Codex (B)", () => {
     expect(spawned[0]!.o.env?.CODEX_HOME).toBe("/cells/t1/A-1/codex-home");
     expect(calls).toEqual([
       "prepare /cells/t1/A-1/codex-home /home/u/.codex",
+      "watch /cells/t1/A-1/codex-home sha0",
       "finish /cells/t1/A-1/codex-home /home/u/.codex sha0",
     ]);
     expect(r).toMatchObject({ kind: "done", status: "completed", confounds: [], isolation: { isolated: true, auth: "unchanged" } });
