@@ -16,6 +16,9 @@
  *    not mark the claim wrong. "Dispute" is the separate, explicit "this claim is wrong"
  *    action: it is remembered server-side and keeps a re-raise of the claim
  *    on the same evidence file out of the banner (FIX-B2b-1).
+ *  - FIX-AP-3: a finding the server flags `holdsAutoProceed` (a raw STOP
+ *    whose verdict was never frozen, now re-checked as NOTE / weak) is shown
+ *    here too, labelled as holding auto-proceed, so no hold is invisible.
  *  - Renders ONLY through JSX text content; never `dangerouslySetInnerHTML`.
  */
 
@@ -34,6 +37,17 @@ export interface BlockerBannerProps {
   onOpenEvidence?: (finding: ObserverFinding) => void;
   /** Optional callback when user marks the STOP addressed (same as dismiss in v1; reserved for future status). */
   onMarkAddressed?: (finding: ObserverFinding) => void;
+}
+
+/** Why a held finding is on the banner although it no longer reads as a STOP. */
+function holdReason(finding: ObserverFinding): string {
+  if (finding.severity === "STOP" && finding.weakEvidence) {
+    return "Re-checked: its evidence is weak now, but the STOP was never confirmed or released.";
+  }
+  if (finding.severity !== "STOP" || finding.wasDowngraded) {
+    return "Re-checked as a note now, but the STOP was never confirmed or released.";
+  }
+  return "The STOP was never confirmed or released.";
 }
 
 function formatEvidenceLine(finding: ObserverFinding): string {
@@ -72,7 +86,7 @@ export function BlockerBanner({
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 mb-1">
               <span className="text-[10px] uppercase tracking-wide font-mono-code text-cc-error font-semibold">
-                Blocker from observer
+                {finding.holdsAutoProceed ? "Holding auto-proceed" : "Blocker from observer"}
               </span>
               <span className="text-[10px] text-cc-muted font-mono-code">
                 · {formatRelativeTime(finding.receivedAt, now)}
@@ -81,6 +95,11 @@ export function BlockerBanner({
             <p className="text-sm text-cc-fg leading-relaxed mb-2 whitespace-pre-wrap break-words">
               {finding.claim}
             </p>
+            {finding.holdsAutoProceed && (
+              <p data-testid="blocker-hold-reason" className="text-xs text-cc-muted mb-2">
+                {holdReason(finding)} Auto-proceed stays paused until you dismiss or dispute it.
+              </p>
+            )}
             <div className="text-xs text-cc-muted font-mono-code mb-2">
               Evidence: <span data-testid="blocker-evidence" className="text-cc-fg">{formatEvidenceLine(finding)}</span>
             </div>

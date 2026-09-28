@@ -188,6 +188,15 @@ export interface CouncilLifecycleDeps {
   /** P3/CONV-HONEST: dropped with the observer on group exit. */
   readLedger: Pick<ObserverReadLedger, "forget">;
   lineSnapshots: CheckpointLineSnapshots;
+  /**
+   * FIX-AP-3 — ids of bootstrap findings that hold auto-proceed although the
+   * banner predicate would hide them (the auto-proceed controller decides).
+   * The REST bootstrap flags them `holdsAutoProceed`. Omitted → none.
+   */
+  invisibleHeldStopIds?: (
+    sessionGroupId: string,
+    view: { findings: readonly BrowserObserverFinding[]; unfrozenRawStopIds: readonly string[] },
+  ) => ReadonlySet<string>;
 }
 
 export class CouncilLifecycle {
@@ -1282,8 +1291,15 @@ export class CouncilLifecycle {
   } | null> {
     const collected = this.collectGroupReviews(sessionGroupId);
     if (!collected) return null;
-    const { gaps: _gaps, unfrozenRawStopIds: _unfrozen, ...view } = collected;
-    return view;
+    const { gaps: _gaps, unfrozenRawStopIds, ...view } = collected;
+    // FIX-AP-3: no invisible holds — a finding that holds auto-proceed is
+    // shown as a blocker even when its re-grounded severity would hide it.
+    const held = this.deps.invisibleHeldStopIds?.(sessionGroupId, { findings: view.findings, unfrozenRawStopIds });
+    if (!held || held.size === 0) return view;
+    return {
+      ...view,
+      findings: view.findings.map((f) => (held.has(f.id) ? { ...f, holdsAutoProceed: true as const } : f)),
+    };
   }
 
   /**
@@ -1362,6 +1378,11 @@ export class CouncilLifecycle {
         gaps.push(`review_unparseable:${file}`);
         continue;
       }
+      // FIX-AP-3: pairs sharing a workspace share `.council/reviews/`. The
+      // live path rejects a foreign group's review (`council.review
+      // .foreign_group`); the bootstrap and the hold restore must too, or
+      // another pair's STOP holds this pair's auto-proceed after a restart.
+      if (payload.session_group_id !== sessionGroupId) continue;
       reviewCount++;
       // Real event time = the review FILE's mtime (server-observed), NOT the
       // observer's self-reported `reviewed_at` (observer-authored, unreliable —

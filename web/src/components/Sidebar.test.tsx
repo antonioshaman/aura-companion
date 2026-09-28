@@ -2102,7 +2102,7 @@ describe("Sidebar — Council Mode badges", () => {
   function seedCouncilSession(
     sessionId: string,
     pairing: string,
-    stops: { id: string; wasDowngraded?: boolean; weakEvidence?: string; disputed?: string }[] = [],
+    stops: { id: string; severity?: string; wasDowngraded?: boolean; weakEvidence?: string; disputed?: string; holdsAutoProceed?: true }[] = [],
   ) {
     const groupId = `grp_for_${sessionId}`;
     const sdkSession = makeSdkSession(sessionId);
@@ -2114,12 +2114,13 @@ describe("Sidebar — Council Mode badges", () => {
     mockState.groups = new Map([[groupId, { pairing }]]);
     mockState.findings = new Map([[groupId, stops.map((s) => ({
       id: s.id,
-      severity: "STOP",
+      severity: s.severity ?? "STOP",
       claim: "test",
       evidence_path: "src/x.ts",
       wasDowngraded: s.wasDowngraded,
       weakEvidence: s.weakEvidence,
       disputed: s.disputed,
+      holdsAutoProceed: s.holdsAutoProceed,
     }))]]);
     mockState.dismissedStopIds = new Set();
   }
@@ -2154,6 +2155,17 @@ describe("Sidebar — Council Mode badges", () => {
       { id: "f1" },
       { id: "f2", weakEvidence: "no_cited_lines" },
       { id: "f3", disputed: "shared_anchor" },
+    ]);
+    render(<Sidebar />);
+    expect(screen.getAllByTestId("council-unread-count")[0]).toHaveTextContent("1");
+  });
+
+  // FIX-AP-3: a finding holding auto-proceed is on the banner, so the rail
+  // counts it too, even when it now reads as a downgraded NOTE.
+  it("counts a finding holding auto-proceed as unread", () => {
+    seedCouncilSession("s_held", "claude+codex", [
+      { id: "f1", severity: "NOTE", wasDowngraded: true, holdsAutoProceed: true },
+      { id: "f2", severity: "NOTE", wasDowngraded: true },
     ]);
     render(<Sidebar />);
     expect(screen.getAllByTestId("council-unread-count")[0]).toHaveTextContent("1");

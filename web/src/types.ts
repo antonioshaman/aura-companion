@@ -243,6 +243,11 @@ export interface ObserverFinding {
    *  (server match: identical claim, or the same quoted command/code span).
    *  Stays a STOP in the findings log; never raises the blocker banner. */
   disputed?: "same_claim" | "shared_anchor";
+  /** FIX-AP-3: this finding holds the pair's auto-proceed (a STOP whose
+   *  grounding verdict was never frozen) even though its current severity or
+   *  weak evidence would keep it off the banner. Shown as a blocker anyway so
+   *  no hold is invisible; Dismiss / Dispute release it. */
+  holdsAutoProceed?: true;
   observerModel: string;
   observerProvider: string;
 }

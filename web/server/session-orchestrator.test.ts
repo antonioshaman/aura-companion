@@ -3275,6 +3275,113 @@ describe("SessionOrchestrator", () => {
       }
     });
 
+    // FIX-AP-3 (third review of PR #247, WARN confirmed by a probe test). Two
+    // pairs sharing one workspace share `.council/reviews/`. The live path
+    // rejects a foreign group's review, but the bootstrap / hold restore read
+    // every file in the directory — so after a restart ANOTHER pair's raw STOP
+    // held this pair's auto-proceed. And a raw STOP of our own pair whose
+    // verdict was never frozen held while the banner showed it as NOTE (no
+    // Dismiss button): an invisible hold, releasable only through REST.
+    // Real path end to end (no stubbed loader): reviews on disk → initialize()
+    // + turn-done restore → REST bootstrap → dismissal.
+    it("FIX-AP-3: a foreign pair's review never holds, and an unfrozen held STOP is flagged visible in the bootstrap", async () => {
+      const { mkdtempSync, writeFileSync, mkdirSync, rmSync, realpathSync } = require("node:fs") as typeof import("node:fs");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      const workspace = realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-orch-ap3-")));
+      const groupId = "grp_0123456789abcdef0123456789abcdef";
+      const foreignGroupId = "grp_fedcba9876543210fedcba9876543210";
+      const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+      const reviewFor = (gid: string, checkpointId: string, claim: string, path: string) => ({
+        schema_version: 1,
+        observer_wake_payload_version_echo: 1,
+        checkpoint_id: checkpointId,
+        phase: "council-implement",
+        session_group_id: gid,
+        reviewed_at: "2026-01-01T00:00:00Z",
+        observer_provider: "codex",
+        observer_model: "gpt-5.5",
+        observer_cli_version: "1.0.0",
+        findings: [{ severity: "STOP", claim, evidence_path: path, evidence_lines: [1, 1] }],
+      });
+      try {
+        mkdirSync(pathJoin(workspace, "src"), { recursive: true });
+        writeFileSync(pathJoin(workspace, "src/a.ts"), "export function alpha() { try { run(); } catch {} }\n");
+        writeFileSync(pathJoin(workspace, "src/b.ts"), "export function beta() { try { go(); } catch {} }\n");
+        const reviewsDir = pathJoin(workspace, ".council", "reviews");
+        mkdirSync(reviewsDir, { recursive: true });
+        // Ours: a raw STOP with NO frozen verdict (review predates the verdicts
+        // file); the latest checkpoint no longer touches src/a.ts, so the
+        // re-grounded view downgrades it to NOTE.
+        writeFileSync(pathJoin(reviewsDir, "council-implement-codex-observer.md"),
+          JSON.stringify(reviewFor(groupId, "chk_ours", "`alpha` swallows the error", "src/a.ts")));
+        // The other pair's: a STOP on a file OUR checkpoint did change.
+        writeFileSync(pathJoin(reviewsDir, "council-implement-claude-observer.md"),
+          JSON.stringify({ ...reviewFor(foreignGroupId, "chk_theirs", "`beta` swallows the error", "src/b.ts"), observer_provider: "claude" }));
+        seedGroup(groupId, { cwd: workspace, artifactPaths: ["src/b.ts"] });
+
+        // A pair that never opted in holds nothing, so nothing is flagged.
+        deps.launcher.getSession.mockImplementation(() => undefined);
+        const optedOut = await orchestrator.getGroupReviewsForBootstrap(groupId);
+        expect(optedOut!.findings).toHaveLength(1);
+        expect(optedOut!.findings[0]!.holdsAutoProceed).toBeUndefined();
+
+        const arm = vi.fn(() => ({ kind: "armed" as const }));
+        orchestrator.setIdleTimerManager({
+          arm, cancel: vi.fn(),
+          noteUserMessage: () => {}, resetIterationCount: () => {}, getIterationCount: () => 0,
+          clearPendingSyntheticTurn: () => {}, disposeAll: () => {}, isApiLimitReached: () => false,
+        } as any);
+        deps.launcher.getSession.mockImplementation((sid: string) =>
+          sid === "sess_orch"
+            ? ({ sessionId: sid, autoProceedOnIdle: { idleMs: 60_000, maxIterations: 3 } } as any)
+            : undefined,
+        );
+        const internals = orchestrator as unknown as {
+          councilGroupBySessionId: Map<string, string>;
+          getOrCreateCoordinatorSync: () => { registerExternalGroup: (r: unknown) => void };
+          autoProceed: { getUnresolvedStopIds: (g: string) => string[] };
+        };
+        internals.councilGroupBySessionId.set("sess_orch", groupId);
+        internals.councilGroupBySessionId.set("sess_obs", groupId);
+        internals.getOrCreateCoordinatorSync().registerExternalGroup({
+          sessionGroupId: groupId,
+          primary: { sessionId: "sess_orch", backendType: "claude" },
+          observer: { sessionId: "sess_obs", backendType: "codex" },
+          status: "active",
+          createdAt: 1,
+        });
+
+        // The bootstrap sees only our review, and flags our held STOP: its
+        // re-grounded severity is NOTE, yet it holds auto-proceed.
+        const view = await orchestrator.getGroupReviewsForBootstrap(groupId);
+        expect(view!.reviewCount).toBe(1);
+        expect(view!.findings).toHaveLength(1);
+        const ours = view!.findings[0]!;
+        expect(ours.evidence_path).toBe("src/a.ts");
+        expect(ours.severity).toBe("NOTE");
+        expect(ours.holdsAutoProceed).toBe(true);
+
+        // "Restart": the restored hold is exactly the finding the bootstrap
+        // shows as holding — never the foreign pair's STOP.
+        orchestrator.initialize();
+        companionBus.emit("orchestrator:turn-done", { sessionId: "sess_orch", blockedByStop: false });
+        await flush();
+        companionBus.emit("orchestrator:turn-done", { sessionId: "sess_orch", blockedByStop: false });
+        expect(internals.autoProceed.getUnresolvedStopIds(groupId)).toEqual([ours.id]);
+        expect(arm).not.toHaveBeenCalled();
+
+        // The visible Dismiss releases it; the flag is gone after a reload.
+        expect(orchestrator.resolveObserverStop(groupId, ours.id)).toEqual({ ok: true, released: true, persisted: true });
+        expect(arm).toHaveBeenCalledWith("sess_orch", { idleMs: 60_000, maxIterations: 3 });
+        const after = await orchestrator.getGroupReviewsForBootstrap(groupId);
+        expect(after!.findings[0]!.holdsAutoProceed).toBeUndefined();
+
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
     it("B2b: a dismissed STOP is persisted and marks re-raised copies as disputed (live + bootstrap)", async () => {
       const { mkdtempSync, writeFileSync, mkdirSync, rmSync, realpathSync, existsSync } = require("node:fs") as typeof import("node:fs");
       const { tmpdir } = require("node:os") as typeof import("node:os");

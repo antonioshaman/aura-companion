@@ -132,6 +132,7 @@ export function hydrateObserverFinding(
     ...(wire.downgradeReason !== undefined ? { downgradeReason: wire.downgradeReason } : {}),
     ...(wire.weakEvidence !== undefined ? { weakEvidence: wire.weakEvidence } : {}),
     ...(wire.disputed !== undefined ? { disputed: wire.disputed } : {}),
+    ...(wire.holdsAutoProceed === true ? { holdsAutoProceed: true as const } : {}),
     observerModel: context.observerModel,
     observerProvider: context.observerProvider,
   };

@@ -611,6 +611,14 @@ export interface BrowserObserverFinding {
    */
   disputed?: BrowserObserverDisputeMatch;
   /**
+   * FIX-AP-3 (meta-diet): set (REST bootstrap only) on a finding that holds the
+   * group's auto-proceed although the banner predicate alone would hide it —
+   * a raw STOP whose grounding verdict was never frozen and that re-grounding
+   * now shows as NOTE / weak. The browser shows it as a blocker so no hold is
+   * invisible; "Dismiss for now" / "Dispute" release it.
+   */
+  holdsAutoProceed?: true;
+  /**
    * Real event time (ms epoch), server-stamped from the review FILE's mtime.
    * Stamped on BOTH paths: REST bootstrap (`getGroupReviewsForBootstrap`) and
    * the live `group:review` broadcast (via the review watcher's post-read stat).

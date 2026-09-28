@@ -71,6 +71,19 @@ describe("findUnresolvedStops", () => {
     expect(findUnresolvedStops(all, new Set()).map((f) => f.id)).toEqual(["fresh"]);
   });
 
+  // FIX-AP-3: the server flags a finding that holds auto-proceed although its
+  // re-grounded severity / weak evidence would hide it. It is a blocker (banner,
+  // title count, rail) until dismissed — no invisible holds.
+  it("includes a finding holding auto-proceed whatever its severity, until dismissed", () => {
+    const all = [
+      finding({ id: "note", severity: "NOTE", wasDowngraded: true, downgradeReason: "evidence_not_in_modified_set", holdsAutoProceed: true }),
+      finding({ id: "weak", severity: "STOP", weakEvidence: "no_cited_lines", holdsAutoProceed: true }),
+      finding({ id: "plain-note", severity: "NOTE" }),
+    ];
+    expect(findUnresolvedStops(all, new Set()).map((f) => f.id)).toEqual(["note", "weak"]);
+    expect(findUnresolvedStops(all, new Set(["note"])).map((f) => f.id)).toEqual(["weak"]);
+  });
+
   // Beck F4 — empty case (early-return branch).
   it("returns an empty array when findings list is empty", () => {
     expect(findUnresolvedStops([], new Set())).toEqual([]);
