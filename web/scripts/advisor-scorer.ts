@@ -63,7 +63,7 @@ function intersectSorted(a: string[], b: Set<string>): string[] {
  * not free text, so scoring stays deterministic.
  */
 export function scoreAdvisors(
-  fingerprint: Fingerprint,
+  fingerprint: Pick<Fingerprint, "signals">,
   featureDomains: string[],
   profiles: AdvisorProfile[],
 ): RankedCandidate[] {

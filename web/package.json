@@ -46,6 +46,7 @@
     "build-observer-prompt-bundle": "bun scripts/build-observer-prompt-bundle.ts",
     "build-council-skill-fixture": "bun scripts/build-council-skill-fixture.ts",
     "guardrail:ci": "bun scripts/guardrail.ts --ci",
+    "council:dispatch-report": "bun scripts/dispatch-policy.ts report",
     "eval:replay": "bun evals/replay-runner.ts",
     "eval:findings": "bun evals/findings-runner.ts",
     "eval:scorecard": "bun evals/scorecard-runner.ts",
