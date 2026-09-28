@@ -103,7 +103,7 @@ Always use `agent-browser` CLI command to explore the browser. Never use playwri
 ## Self-Learning System
 
 The knowledge base in `.agents/knowledge/*.jsonl` (patterns, gotchas, decisions, anti-patterns, codebase-facts, api-behaviors) is the single source of truth for learnings.
-- `/prime [focus]` at session start (loads relevant entries, records usage via `bun run kb:record`).
+- `/prime [focus]` at session start (loads relevant entries, records usage via `bun run --cwd web kb:record`).
 - `/learn <insight>` immediately on surprising behavior, test failures, or user corrections.
 - `/self-reflect [scope]` at session end — the step that closes the feedback loop.
 
