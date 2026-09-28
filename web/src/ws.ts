@@ -1706,6 +1706,9 @@ function handleParsedMessage(
       // with REST-bootstrapped findings without double-render.
       import("./api.js").then(({ api }) => {
         api.fetchGroupFindings(data.sessionGroupId).then((res) => {
+          // FIX-AP-4: an incomplete hold restore may have no parseable review
+          // at all, so the pause is reported before the reviewCount check.
+          store.setAutoProceedRestoreGaps(res.sessionGroupId, res.autoProceedRestoreGaps ?? []);
           if (res.reviewCount === 0) return; // nothing to bootstrap
           // Bootstrap calls appendObserverReview with a synthetic
           // checkpoint envelope per review — slice already dedups by

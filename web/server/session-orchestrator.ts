@@ -27,7 +27,7 @@ import { metricsCollector } from "./metrics-collector.js";
 import { log } from "./logger.js";
 import type { SessionGroupCoordinator } from "./session-group-coordinator.js";
 import type { IdleTimerManager } from "./idle-timer-manager.js";
-import { CouncilAutoProceedController, type ResolveStopResult } from "./council-auto-proceed-controller.js";
+import { CouncilAutoProceedController, type IgnoreRestoreGapResult, type ResolveStopResult } from "./council-auto-proceed-controller.js";
 import { SessionRecovery } from "./session-recovery.js";
 import type { CheckpointPayload, ObserverReviewPayload } from "./council-types.js";
 import { writeAtomicJson } from "./atomic-write.js";
@@ -419,6 +419,7 @@ export class SessionOrchestrator {
       readLedger: this.observerReadLedger,
       invisibleHeldStopIds: (sessionGroupId, view) => this.autoProceed.invisibleHeldStopIds(sessionGroupId, view),
       resolvedStopIds: (sessionGroupId) => this.autoProceed.resolvedStopIds(sessionGroupId),
+      autoProceedHoldApplies: (sessionGroupId) => this.autoProceed.autoProceedHoldApplies(sessionGroupId),
     });
   }
 
@@ -1591,6 +1592,11 @@ export class SessionOrchestrator {
    */
   resolveObserverStop(sessionGroupId: string, findingId: string): ResolveStopResult {
     return this.autoProceed.resolveStop(sessionGroupId, findingId);
+  }
+
+  /** FIX-AP-4: a human ignored a review file that keeps the hold restore incomplete. */
+  ignoreAutoProceedRestoreGap(sessionGroupId: string, file: string, fingerprint: string): IgnoreRestoreGapResult {
+    return this.autoProceed.ignoreRestoreGap(sessionGroupId, file, fingerprint);
   }
 
   // ── Cleanup ────────────────────────────────────────────────────────────────

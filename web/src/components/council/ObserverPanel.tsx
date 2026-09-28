@@ -36,6 +36,7 @@ import {
 } from "../../types.js";
 import { FindingsLog, formatRelativeTime } from "./FindingsLog.js";
 import { DegradedBanner } from "./DegradedBanner.js";
+import { AutoProceedRestoreNotice } from "./AutoProceedRestoreNotice.js";
 import { ProviderBadges } from "./ProviderBadges.js";
 
 export interface ObserverPanelProps {
@@ -330,6 +331,8 @@ export function ObserverPanel({
   const setOpen = useStore((s) => s.setObserverPanelOpen);
   const dismissStop = useStore((s) => s.dismissStop);
   const dismissFirstRunHint = useStore((s) => s.dismissFirstRunHint);
+  const restoreGaps = useStore((s) => (groupId ? s.autoProceedRestoreGaps.get(groupId) : undefined)) ?? [];
+  const ignoreRestoreGap = useStore((s) => s.ignoreRestoreGap);
 
   const handleExpand = useCallback(() => setOpen(sessionId, true), [sessionId, setOpen]);
   const handleCollapse = useCallback(() => setOpen(sessionId, false), [sessionId, setOpen]);
@@ -460,6 +463,13 @@ export function ObserverPanel({
           </button>
         </div>
       )}
+
+      {/* FIX-AP-4: auto-proceed paused by an incomplete hold restore — no
+          STOP carries this hold, so the panel says why and offers "ignore". */}
+      <AutoProceedRestoreNotice
+        gaps={restoreGaps}
+        onIgnore={(gap) => ignoreRestoreGap(group.sessionGroupId, gap)}
+      />
 
       {/* First-run microcopy (dismissable, per-user) */}
       {!firstRunDismissed && (

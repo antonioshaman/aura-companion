@@ -682,3 +682,42 @@ describe("ObserverPanel — accessibility", () => {
     expect(results).toHaveNoViolations();
   });
 });
+
+// FIX-AP-4: an incomplete STOP-hold restore pauses auto-proceed with no
+// finding to show. The panel must surface the store's gap list (filled by the
+// findings bootstrap) and route "Ignore this file" to the slice action for
+// THIS group; with no gaps nothing extra renders.
+describe("ObserverPanel — auto-proceed restore gaps (FIX-AP-4)", () => {
+  const gap = {
+    gap: "review_unparseable:phase-3-claude-observer.md",
+    reason: "review file is not a valid review for this pair (unparseable or legacy format)",
+    file: "phase-3-claude-observer.md",
+    fingerprint: "0".repeat(64),
+  };
+
+  it("shows no notice without gaps", () => {
+    seedGroup();
+    render(<ObserverPanel sessionId={SESSION} />);
+    expect(screen.queryByTestId("auto-proceed-restore-notice")).toBeNull();
+  });
+
+  it("shows the notice, ignores a file for this group, and passes axe accessibility scan", async () => {
+    seedGroup();
+    const ignore = vi.fn();
+    const original = useStore.getState().ignoreRestoreGap;
+    act(() => {
+      useStore.getState().setAutoProceedRestoreGaps(GROUP.sessionGroupId, [gap]);
+      useStore.setState({ ignoreRestoreGap: ignore });
+    });
+    try {
+      const { container } = render(<ObserverPanel sessionId={SESSION} />);
+      expect(screen.getByText("Auto-proceed paused: restore incomplete")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: /Ignore phase-3-claude-observer\.md/ }));
+      expect(ignore).toHaveBeenCalledWith(GROUP.sessionGroupId, gap);
+      const { axe } = await import("vitest-axe");
+      expect(await axe(container)).toHaveNoViolations();
+    } finally {
+      useStore.setState({ ignoreRestoreGap: original });
+    }
+  });
+});

@@ -795,6 +795,46 @@ describe("POST /api/groups/:groupId/stops/resolve", () => {
   });
 });
 
+// FIX-AP-4: "Ignore this file" for a review file that keeps the auto-proceed
+// hold restore incomplete. The route validates the body and maps controller
+// outcomes to HTTP; persistence + re-arm are covered in
+// council-auto-proceed-wiring.test.ts and session-orchestrator.test.ts.
+describe("POST /api/groups/:groupId/restore-gaps/ignore", () => {
+  const post = (body: unknown, groupId = "grp_x") =>
+    app.request(`/api/groups/${groupId}/restore-gaps/ignore`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    });
+  const ok = { file: "p-claude-observer.md", fingerprint: "a".repeat(64) };
+
+  it("forwards file + fingerprint and returns the outcome", async () => {
+    orchestrator.ignoreAutoProceedRestoreGap = vi.fn(() => ({ ok: true, added: true }));
+    const res = await post(ok);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, added: true });
+    expect(orchestrator.ignoreAutoProceedRestoreGap).toHaveBeenCalledWith("grp_x", ok.file, ok.fingerprint);
+  });
+
+  it("rejects a malformed body with 400 without touching the orchestrator", async () => {
+    orchestrator.ignoreAutoProceedRestoreGap = vi.fn();
+    expect((await post({})).status).toBe(400);
+    expect((await post({ file: "x" })).status).toBe(400);
+    expect((await post({ file: 1, fingerprint: "a" })).status).toBe(400);
+    expect((await post("not json")).status).toBe(400);
+    expect(orchestrator.ignoreAutoProceedRestoreGap).not.toHaveBeenCalled();
+  });
+
+  it("maps unknown group → 404, invalid input → 400, write failure → 500", async () => {
+    orchestrator.ignoreAutoProceedRestoreGap = vi.fn(() => ({ ok: false, reason: "unknown_group" }));
+    expect((await post(ok)).status).toBe(404);
+    orchestrator.ignoreAutoProceedRestoreGap = vi.fn(() => ({ ok: false, reason: "invalid_input" }));
+    expect((await post(ok)).status).toBe(400);
+    orchestrator.ignoreAutoProceedRestoreGap = vi.fn(() => ({ ok: false, reason: "write_failed" }));
+    expect((await post(ok)).status).toBe(500);
+  });
+});
+
 describe("GET /api/sessions", () => {
   it("returns the list of sessions enriched with names", async () => {
     const sessions = [
