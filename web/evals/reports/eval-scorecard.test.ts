@@ -13,7 +13,12 @@
 import { describe, it, expect } from "vitest";
 import { fileURLToPath } from "node:url";
 import { scorePrecisionCorpus, type PrecisionSummary } from "../scorers/precision-corpus.js";
-import { buildEvalScorecard, ADVISORY_THRESHOLDS } from "./eval-scorecard.js";
+import {
+  buildEvalScorecard,
+  ADVISORY_THRESHOLDS,
+  groundingRecallRegression,
+  renderGroundingBeforeAfter,
+} from "./eval-scorecard.js";
 import { renderScorecardMarkdown, renderScorecardText } from "./scorecard.js";
 
 const CORPUS_DIR = fileURLToPath(new URL("../__fixtures__/precision", import.meta.url));
@@ -75,3 +80,33 @@ describe("buildEvalScorecard guards", () => {
     expect(card.rows.find((r) => r.name === "stop_recall")!.status).toBe("fail");
   });
 });
+
+// B2 before/after output + the recall guard the CI gate enforces.
+describe("B2 grounding before/after", () => {
+  it("renders every gate stage for the committed corpus, in text and markdown", () => {
+    const { summary } = scorePrecisionCorpus(CORPUS_DIR);
+    const text = renderGroundingBeforeAfter(summary);
+    for (const stage of ["raw", "path-only, before B2", "path + lines, after B2", "banner"]) {
+      expect(text).toContain(stage);
+    }
+    expect(text).toContain(`false_stop_rate=${(summary.grounded.false_stop_rate as number).toFixed(3)}`);
+    expect(renderGroundingBeforeAfter(summary, true).split("\n")[0]).toMatch(/^\| stage \|/);
+  });
+
+  it("the committed corpus: line grounding lowers false STOPs without losing recall", () => {
+    const { summary } = scorePrecisionCorpus(CORPUS_DIR);
+    expect(groundingRecallRegression(summary)).toBeNull();
+    expect(summary.grounded.recall).toEqual(summary.grounded_path_only.recall);
+    expect(summary.grounded.false_stop_rate).toBeLessThan(summary.grounded_path_only.false_stop_rate as number);
+  });
+
+  it("flags a summary where the full gate surfaced fewer true positives than path-only", () => {
+    const { summary } = scorePrecisionCorpus(CORPUS_DIR);
+    const regressed: PrecisionSummary = {
+      ...summary,
+      grounded: { ...summary.grounded, true_positive: summary.grounded_path_only.true_positive - 1 },
+    };
+    expect(groundingRecallRegression(regressed)).toMatch(/silenced real blockers/);
+  });
+});
+

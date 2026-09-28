@@ -186,6 +186,16 @@ describe("hydrateObserverFinding", () => {
     expect(out.wasDowngraded).toBe(true);
     expect(out.downgradeReason).toBe("evidence_missing_on_disk");
   });
+
+  // B2: the weak-evidence mark survives hydration (it gates the banner).
+  it("preserves the weak-evidence mark and a B2 downgrade reason", () => {
+    const ctx = { receivedAt: 1_000, checkpointId: "chk", phase: "p", observerModel: "m", observerProvider: "codex" };
+    expect(hydrateObserverFinding(wireFinding({ weakEvidence: "no_cited_lines" }), ctx).weakEvidence).toBe("no_cited_lines");
+    expect(
+      hydrateObserverFinding(wireFinding({ wasDowngraded: true, downgradeReason: "evidence_lines_unchanged" }), ctx).downgradeReason,
+    ).toBe("evidence_lines_unchanged");
+    expect(hydrateObserverFinding(wireFinding(), ctx)).not.toHaveProperty("weakEvidence");
+  });
 });
 
 // ── group lifecycle ─────────────────────────────────────────────────────────

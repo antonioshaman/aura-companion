@@ -201,7 +201,16 @@ export interface ObserverFinding {
    *  `wake_version_mismatch` (Task 10) is a global downgrade applied to
    *  every finding when the observer's echo of the wake-payload version
    *  disagrees with what the server dispatched. */
-  downgradeReason?: "evidence_not_in_modified_set" | "evidence_missing_on_disk" | "wake_version_mismatch";
+  downgradeReason?:
+    | "evidence_not_in_modified_set"
+    | "evidence_missing_on_disk"
+    | "evidence_lines_out_of_range"
+    | "evidence_lines_unchanged"
+    | "wake_version_mismatch";
+  /** B2: a STOP the server kept but could not tie to its cited lines. Stays a
+   *  STOP in the findings log; never raises the blocker banner or the unread
+   *  blocker count. */
+  weakEvidence?: "no_cited_lines" | "claim_symbols_not_on_cited_lines" | "cited_lines_unreadable";
   observerModel: string;
   observerProvider: string;
 }

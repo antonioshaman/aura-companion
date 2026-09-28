@@ -49,6 +49,17 @@ describe("findUnresolvedStops", () => {
     expect(out.map((f) => f.id)).toEqual(["f1"]);
   });
 
+  // B2: a weak-evidence STOP (path-only / claim not on cited lines) is not a
+  // blocker — it must not drive the banner, the blocker-found panel state, or
+  // the unread count. The same STOP without the mark still is.
+  it("excludes weak-evidence STOPs", () => {
+    const all = [
+      finding({ id: "weak", severity: "STOP", weakEvidence: "no_cited_lines" }),
+      finding({ id: "strong", severity: "STOP" }),
+    ];
+    expect(findUnresolvedStops(all, new Set()).map((f) => f.id)).toEqual(["strong"]);
+  });
+
   // Beck F4 — empty case (early-return branch).
   it("returns an empty array when findings list is empty", () => {
     expect(findUnresolvedStops([], new Set())).toEqual([]);

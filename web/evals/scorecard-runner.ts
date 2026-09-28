@@ -22,7 +22,7 @@
 
 import { fileURLToPath } from "node:url";
 import { scorePrecisionCorpus } from "./scorers/precision-corpus.js";
-import { buildEvalScorecard } from "./reports/eval-scorecard.js";
+import { buildEvalScorecard, renderGroundingBeforeAfter } from "./reports/eval-scorecard.js";
 import { renderScorecardMarkdown, renderScorecardText } from "./reports/scorecard.js";
 
 const DEFAULT_CORPUS_DIR = fileURLToPath(new URL("./__fixtures__/precision", import.meta.url));
@@ -59,7 +59,7 @@ function main(): number {
   const { summary } = scorePrecisionCorpus(args.dir);
   const card = buildEvalScorecard(summary);
   const out = args.markdown ? renderScorecardMarkdown(card) : renderScorecardText(card);
-  process.stdout.write(out + "\n");
+  process.stdout.write(out + "\n\n" + renderGroundingBeforeAfter(summary, args.markdown) + "\n");
   return card.passed ? 0 : 1;
 }
 
