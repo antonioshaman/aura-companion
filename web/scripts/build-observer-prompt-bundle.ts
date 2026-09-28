@@ -6,7 +6,7 @@
  * workspace doesn't ship its own `.council/prompts/observer-system.md`.
  * Embedding it as a TS string constant (compile-time, not filesystem)
  * is the right primitive per Council Plan
- * `PLAN-aura-observer-prompt-bundled-fallback.md` D1: works identically
+ * `docs/history/council/handoffs/PLAN-aura-observer-prompt-bundled-fallback.md` D1: works identically
  * under npm package, Docker control-plane, and dev container — the three
  * shipping paths. A `__resources__/observer-system.md` file would be
  * silently dropped by `platform/.dockerignore`'s `*.md` rule.

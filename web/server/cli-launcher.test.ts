@@ -2782,7 +2782,7 @@ describe("isCmdScript platform guard", () => {
   });
 });
 
-// Council Plan PLAN-aura-observer-prompt-bundled-fallback.md Task 9 —
+// Council Plan docs/history/council/handoffs/PLAN-aura-observer-prompt-bundled-fallback.md Task 9 —
 // integration test for `applyCouncilObserverSpawnConfig` through the
 // public `launch()` surface. Exercised on the Claude backend (the
 // codex variant lives in `codex websocket launcher` describe above
