@@ -3085,6 +3085,8 @@ describe("SessionOrchestrator", () => {
     //     reload no longer resurrects the dismissed banner;
     //   - a live review repeating the claim (reworded, same quoted command) is
     //     marked `shared_anchor`, while an unrelated STOP and a NOTE are not;
+    //   - FIX-B2b-1: the same command quoted in a STOP about ANOTHER file is a
+    //     new claim and is not marked (B2b matched on any path);
     //   - disputing twice is idempotent and an unknown group is refused.
     it("B2b: a dismissed STOP is persisted and marks re-raised copies as disputed (live + bootstrap)", async () => {
       const { mkdtempSync, writeFileSync, mkdirSync, rmSync, realpathSync, existsSync } = require("node:fs") as typeof import("node:fs");
@@ -3097,6 +3099,7 @@ describe("SessionOrchestrator", () => {
       try {
         mkdirSync(pathJoin(workspace, "src"), { recursive: true });
         writeFileSync(pathJoin(workspace, "src/a.ts"), "export function alpha() { return 1; }\n");
+        writeFileSync(pathJoin(workspace, "src/b.ts"), "export function beta() { return 2; }\n");
         mkdirSync(pathJoin(workspace, ".council", "reviews"), { recursive: true });
         writeFileSync(
           pathJoin(workspace, ".council", "reviews", `council-plan-${groupId}-codex-observer.md`),
@@ -3113,7 +3116,7 @@ describe("SessionOrchestrator", () => {
             findings: [{ severity: "STOP", claim: originalClaim, evidence_path: "src/a.ts" }],
           }),
         );
-        seedGroup(groupId, { cwd: workspace, artifactPaths: ["src/a.ts"] });
+        seedGroup(groupId, { cwd: workspace, artifactPaths: ["src/a.ts", "src/b.ts"] });
 
         const before = await orchestrator.getGroupReviewsForBootstrap(groupId);
         expect(before!.findings).toHaveLength(1);
@@ -3134,7 +3137,7 @@ describe("SessionOrchestrator", () => {
         const after = await orchestrator.getGroupReviewsForBootstrap(groupId);
         expect(after!.findings[0]).toMatchObject({ id: original.id, severity: "STOP", disputed: "same_claim" });
 
-        const emitted: Array<{ findings: Array<{ severity: string; claim: string; disputed?: string }> }> = [];
+        const emitted: Array<{ findings: Array<{ severity: string; claim: string; disputed?: string; wasDowngraded?: boolean }> }> = [];
         companionBus.on("group:review", (e: unknown) => { emitted.push(e as (typeof emitted)[number]); });
         const handleReview = (orchestrator as unknown as {
           handleCouncilReview: (g: string, p: Record<string, unknown>) => void;
@@ -3153,10 +3156,15 @@ describe("SessionOrchestrator", () => {
             { severity: "STOP", claim: "The mandatory `bun run --cwd web kb:record` step will fail for every /prime", evidence_path: "src/a.ts" },
             { severity: "STOP", claim: "alpha returns the wrong value", evidence_path: "src/a.ts" },
             { severity: "NOTE", claim: originalClaim, evidence_path: "src/a.ts" },
+            { severity: "STOP", claim: originalClaim, evidence_path: "src/b.ts" },
           ],
         });
         expect(emitted).toHaveLength(1);
-        const [repeat, unrelated, note] = emitted[0]!.findings;
+        const [repeat, unrelated, note, otherFile] = emitted[0]!.findings;
+        // A live STOP (not grounding-downgraded) that is simply not disputed.
+        expect(otherFile).toMatchObject({ severity: "STOP", claim: originalClaim, evidence_path: "src/b.ts" });
+        expect(otherFile!.wasDowngraded).toBeFalsy();
+        expect(otherFile!.disputed).toBeUndefined();
         expect(repeat).toMatchObject({ severity: "STOP", disputed: "shared_anchor" });
         expect(unrelated!.disputed).toBeUndefined();
         // Only live STOPs are marked — a NOTE never raises the banner anyway.

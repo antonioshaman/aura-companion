@@ -3186,6 +3186,7 @@ function CouncilModeSection() {
             finding={liveBlockerFinding}
             nowMs={Date.now()}
             onDismiss={() => { /* noop in playground */ }}
+            onDispute={() => { /* noop in playground */ }}
             onOpenEvidence={() => { /* noop */ }}
             onMarkAddressed={() => { /* noop */ }}
           />
@@ -3275,7 +3276,7 @@ function CouncilModeSection() {
               mockFinding({ id: "e", severity: "INFO", claim: "Spec coverage matches phase A boundaries", receivedAt: Date.now() - 10_000 }),
               mockFinding({ id: "f", severity: "STOP", claim: "Cited lines untouched this phase — downgraded", receivedAt: Date.now() - 8_000, wasDowngraded: true, downgradeReason: "evidence_lines_unchanged" }),
               mockFinding({ id: "g", severity: "STOP", claim: "Command fails at runtime — weak evidence, no banner", receivedAt: Date.now() - 5_000, weakEvidence: "no_cited_lines" }),
-              mockFinding({ id: "h", severity: "STOP", claim: "Same command fails again — dismissed earlier, no banner", receivedAt: Date.now() - 3_000, disputed: "shared_anchor" }),
+              mockFinding({ id: "h", severity: "STOP", claim: "Same command fails again — disputed earlier, no banner", receivedAt: Date.now() - 3_000, disputed: "shared_anchor" }),
             ]}
             onDismissStop={() => {}}
             nowMs={Date.now()}

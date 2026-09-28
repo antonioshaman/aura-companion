@@ -16,9 +16,17 @@
  * or drops the finding: the recall-side cost of a wrong match is one blocker
  * that shows only in the log.
  *
- * Matching is deterministic and deliberately coarse, because a re-raised claim
- * is re-worded and usually cites a different file (each phase has its own diff):
- *   - `same_claim`: the normalised claim text equals a disputed one (any path);
+ * Only an explicit "Dispute" action writes here (FIX-B2b-1). "Dismiss for
+ * now" hides one banner in one tab and nothing else. Rows written by the B2b
+ * build, where every dismissal became a dispute, carry `source:
+ * "browser_dismiss"`; they are still parsed but never match, because the human
+ * never said the claim was wrong.
+ *
+ * Matching is deterministic and scoped to the disputed evidence file: a STOP
+ * about another file is a new claim and is always shown (FIX-B2b-1: the B2b
+ * any-path match let one quoted `bun run typecheck` silence every later STOP
+ * quoting it, in any file). Within the same (normalised) evidence path:
+ *   - `same_claim`: the normalised claim text equals a disputed one;
  *   - `shared_anchor`: both claims quote the same distinctive code span in
  *     backticks, e.g. `bun run --cwd web kb:record`. Short single tokens such
  *     as `kb:record` are not anchors: they are too common to identify a claim.
@@ -39,7 +47,12 @@ const MIN_SINGLE_TOKEN_ANCHOR_LEN = 12;
 const MIN_ANCHOR_LEN = 6;
 const DISPUTES_SUFFIX = "-disputes.json";
 
-export type DisputeSource = "browser_dismiss";
+/**
+ * `browser_dispute`: the human pressed "Dispute" on the STOP. `browser_dismiss`:
+ * legacy B2b row from a plain dismissal; kept readable, never matched.
+ */
+export type DisputeSource = "browser_dispute" | "browser_dismiss";
+const MATCHING_SOURCES: ReadonlySet<DisputeSource> = new Set(["browser_dispute"]);
 export type DisputeMatchKind = BrowserObserverDisputeMatch;
 
 export interface DisputeRecord {
@@ -68,6 +81,16 @@ export function normalizeClaim(claim: string): string {
 }
 
 /**
+ * Comparable form of an evidence path: trimmed, `\\` → `/`, leading `./`
+ * dropped, repeated slashes collapsed. Case is kept (paths are case-sensitive).
+ */
+export function normalizeEvidencePath(path: string): string {
+  let out = path.trim().replace(/\\/g, "/").replace(/\/{2,}/g, "/");
+  while (out.startsWith("./")) out = out.slice(2);
+  return out;
+}
+
+/**
  * Distinctive code spans quoted in backticks. A span is an anchor when it
  * contains whitespace (a command / expression) or is at least
  * {@link MIN_SINGLE_TOKEN_ANCHOR_LEN} characters long.
@@ -83,19 +106,27 @@ export function claimAnchors(claim: string): Set<string> {
   return out;
 }
 
-/** First dispute the claim matches, `same_claim` preferred over `shared_anchor`. */
+/**
+ * First dispute the claim matches among explicit disputes on the same evidence
+ * path, `same_claim` preferred over `shared_anchor`.
+ */
 export function matchDispute(
   records: readonly DisputeRecord[],
   claim: string,
+  evidencePath: string,
 ): DisputeMatch | null {
-  if (records.length === 0) return null;
+  const path = normalizeEvidencePath(evidencePath);
+  const candidates = records.filter(
+    (r) => MATCHING_SOURCES.has(r.source) && normalizeEvidencePath(r.evidencePath) === path,
+  );
+  if (candidates.length === 0) return null;
   const normalized = normalizeClaim(claim);
-  for (const record of records) {
+  for (const record of candidates) {
     if (normalizeClaim(record.claim) === normalized) return { record, via: "same_claim" };
   }
   const anchors = claimAnchors(claim);
   if (anchors.size === 0) return null;
-  for (const record of records) {
+  for (const record of candidates) {
     for (const a of claimAnchors(record.claim)) {
       if (anchors.has(a)) return { record, via: "shared_anchor" };
     }
@@ -123,7 +154,7 @@ export function applyDisputes(
   const applied: AppliedDispute[] = [];
   const out = findings.map((f, index) => {
     if (records.length === 0 || f.severity !== "STOP" || f.wasDowngraded === true) return f;
-    const m = matchDispute(records, f.claim);
+    const m = matchDispute(records, f.claim, f.evidence_path);
     if (!m) return f;
     applied.push({ index, via: m.via, record: m.record });
     return { ...f, disputed: m.via };
@@ -140,7 +171,7 @@ function parseRecord(v: unknown): DisputeRecord | null {
   const o = v as Record<string, unknown>;
   if (!isBoundedString(o.claim, MAX_DISPUTE_CLAIM_LEN)) return null;
   if (!isBoundedString(o.evidencePath, MAX_DISPUTE_PATH_LEN)) return null;
-  if (o.source !== "browser_dismiss") return null;
+  if (o.source !== "browser_dispute" && o.source !== "browser_dismiss") return null;
   if (typeof o.disputedAt !== "string") return null;
   if (o.findingId !== undefined && !isBoundedString(o.findingId, 256)) return null;
   return {
@@ -227,7 +258,12 @@ export function addDispute(
   const existing = readDisputes(workspaceRoot, groupId);
   const records = existing.ok ? existing.records : [];
   const key = normalizeClaim(input.claim);
-  if (records.some((r) => r.evidencePath === input.evidencePath && normalizeClaim(r.claim) === key)) {
+  const path = normalizeEvidencePath(input.evidencePath);
+  if (
+    records.some(
+      (r) => r.source === input.source && normalizeEvidencePath(r.evidencePath) === path && normalizeClaim(r.claim) === key,
+    )
+  ) {
     return { ok: true, added: false, count: records.length };
   }
   records.push({

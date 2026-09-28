@@ -183,12 +183,13 @@ function setupStore(overrides: {
     setCliReconnecting: mockSetCliReconnecting,
     sessions: sessionsMap,
     // Council Mode slice — ChatView reads `groupBySessionId`, `findings`,
-    // `dismissedStopIds`, and `dismissStop` to render the BlockerBanner
+    // `dismissedStopIds`, `dismissStop` and `disputeStop` to render the BlockerBanner
     // in the permission slot. Empty maps mean no blocker is shown.
     groupBySessionId: new Map(),
     findings: new Map(),
     dismissedStopIds: new Set(),
     dismissStop: vi.fn(),
+    disputeStop: vi.fn(),
     // PLAN T12 (Phase G) - cli-status-slice state + draft-stash actions
     // that the cli-failed primary action wires.
     cliFailures: cliFailureReason

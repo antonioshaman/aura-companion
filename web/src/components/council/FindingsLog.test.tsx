@@ -169,7 +169,7 @@ describe("FindingsLog", () => {
   });
 
   // B2b: a STOP the server matched to an earlier dismissal stays in the log
-  // as a STOP (still dismissable) with a labelled "dismissed earlier" chip
+  // as a STOP (still dismissable) with a labelled "disputed earlier" chip
   // naming how it matched.
   it.each([
     ["same_claim", "same claim"],
@@ -180,13 +180,13 @@ describe("FindingsLog", () => {
     const row = screen.getByTestId("finding-row-r");
     expect(row).toHaveAttribute("data-severity", "STOP");
     expect(row).toHaveAttribute("data-disputed", "true");
-    expect(screen.getByLabelText(`Dismissed earlier, not raised as a blocker — ${text}`)).toBeInTheDocument();
+    expect(screen.getByLabelText(`Disputed earlier, not raised as a blocker — ${text}`)).toBeInTheDocument();
   });
 
   it("renders no disputed chip on an ordinary STOP", () => {
     render(<FindingsLog findings={[finding({ id: "o", severity: "STOP" })]} />);
     expect(screen.getByTestId("finding-row-o")).toHaveAttribute("data-disputed", "false");
-    expect(screen.queryByText("dismissed earlier")).toBeNull();
+    expect(screen.queryByText("disputed earlier")).toBeNull();
   });
 
   it("passes accessibility scan with a disputed row", async () => {

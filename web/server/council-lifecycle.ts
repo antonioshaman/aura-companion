@@ -1384,9 +1384,10 @@ export class CouncilLifecycle {
   }
 
   /**
-   * B2b: record a human dismissal of an observer STOP as a persistent dispute
-   * for the group, so a re-raised copy of the claim (next checkpoint, other
-   * wording or path, or a page reload) no longer raises the blocker banner.
+   * B2b: record a human's explicit "Dispute" of an observer STOP as a
+   * persistent dispute for the group, so a re-raised copy of the claim on the
+   * same evidence file (next checkpoint, other wording, or a page reload) no
+   * longer raises the blocker banner. "Dismiss for now" never calls this.
    */
   disputeObserverFinding(
     sessionGroupId: string,
@@ -1395,7 +1396,7 @@ export class CouncilLifecycle {
     const meta = this.deps.groupMeta.get(sessionGroupId);
     const watcher = this.deps.watchers.get(sessionGroupId);
     if (!meta || !watcher) return { ok: false, reason: "unknown_group" };
-    const res = addDispute(watcher.cwd, sessionGroupId, { ...input, source: "browser_dismiss" });
+    const res = addDispute(watcher.cwd, sessionGroupId, { ...input, source: "browser_dispute" });
     if (!res.ok) {
       log.warn("session-orchestrator", "observer dispute not recorded", {
         event: "council.finding.dispute_failed",

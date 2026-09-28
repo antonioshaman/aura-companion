@@ -223,7 +223,14 @@ export interface CouncilSlice {
   toggleObserverPanel: (sessionId: string) => void;
   setObserverPanelWidth: (sessionId: string, widthPx: number) => void;
   dismissFirstRunHint: () => void;
+  /** Hide a STOP from the banner in this tab only. Never persisted, never sent to the server. */
   dismissStop: (findingId: string) => void;
+  /**
+   * The human says the STOP's claim is wrong: dismiss it locally and persist a
+   * group dispute server-side, so a re-raise of the claim on the same evidence
+   * file stays out of the banner (FIX-B2b-1: split from `dismissStop`).
+   */
+  disputeStop: (findingId: string) => void;
   // Council slice cross-slice cleanup is canonically performed inline
   // inside `sessions-slice.removeSession` (single write path; React
   // council review #12 — eliminating the parallel `cleanupCouncilForSession`
@@ -476,9 +483,14 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
       dismissedStopIds.add(findingId);
       return { dismissedStopIds };
     });
-    // B2b: tell the server, so the dismissal survives a reload and a re-raised
-    // copy of the claim at a later checkpoint stays out of the banner. Best
-    // effort: the local dismissal above already hid this banner.
+  },
+
+  disputeStop: (findingId) => {
+    if (get().dismissedStopIds.has(findingId)) return;
+    get().dismissStop(findingId);
+    // B2b: tell the server, so the dispute survives a reload and a re-raised
+    // copy of the claim on the same file stays out of the banner. Best effort:
+    // the local dismissal above already hid this banner.
     for (const [groupId, list] of get().findings) {
       const f = list.find((x) => x.id === findingId);
       if (!f) continue;
