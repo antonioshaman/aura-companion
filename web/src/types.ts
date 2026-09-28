@@ -256,6 +256,22 @@ export interface ObserverFinding {
   observerProvider: string;
 }
 
+/**
+ * FIX-AP-4 — why a pair's auto-proceed stays paused after a server restart:
+ * the server could not fully restore its STOP hold from `.council/reviews/`.
+ * Wire shape of `autoProceedRestoreGaps` in `GET /api/groups/:id/findings`.
+ */
+export interface AutoProceedRestoreGap {
+  /** Raw gap code, as in the server log `auto-proceed.hold-restore-incomplete`. */
+  gap: string;
+  /** Human-readable reason. */
+  reason: string;
+  /** Review file name (review-file gaps only). */
+  file?: string;
+  /** Present iff the gap can be ignored; sent back with "Ignore this file". */
+  fingerprint?: string;
+}
+
 export type ObserverPanelStateName =
   | "never-checkpointed-yet"
   | "spawning"

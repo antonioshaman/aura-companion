@@ -28,6 +28,15 @@ import { deleteCouncilWakeSentinel } from "./council-wake-sentinel.js";
 import { buildBrowserGroupRecord } from "./browser-group-record.js";
 import { deterministicFindingId, type CouncilWatcherEntry } from "./council-checkpoint-pipeline.js";
 import { applyFrozenVerdict, readReviewVerdicts, type FrozenVerdict } from "./observer-review-verdicts.js";
+import {
+  OBSERVER_REVIEW_FILENAME_PATTERN,
+  claimedGroupIdOf,
+  describeRestoreGap,
+  fingerprintReview,
+  isRestoreGapIgnored,
+  readIgnoredRestoreGaps,
+  type RestoreGapView,
+} from "./auto-proceed-restore-gaps.js";
 import type {
   CreateCouncilGroupRequest,
   CreateCouncilGroupResult,
@@ -203,6 +212,13 @@ export interface CouncilLifecycleDeps {
    * them `dismissed`. Omitted → none.
    */
   resolvedStopIds?: (sessionGroupId: string) => ReadonlySet<string>;
+  /**
+   * FIX-AP-4 — true when the group's orchestrator opted into auto-proceed
+   * with the layer on, i.e. restore gaps actually hold it. The REST bootstrap
+   * then reports the gaps so the ObserverPanel can show why auto-proceed is
+   * paused. Omitted → never reported.
+   */
+  autoProceedHoldApplies?: (sessionGroupId: string) => boolean;
 }
 
 export class CouncilLifecycle {
@@ -1294,10 +1310,16 @@ export class CouncilLifecycle {
     reviewCount: number;
     observerProvider?: string;
     observerModel?: string;
+    autoProceedRestoreGaps?: RestoreGapView[];
   } | null> {
     const collected = this.collectGroupReviews(sessionGroupId);
     if (!collected) return null;
-    const { gaps: _gaps, unfrozenRawStopIds, ...view } = collected;
+    const { gaps, gapFingerprints, unfrozenRawStopIds, ...rest } = collected;
+    // FIX-AP-4: an incomplete restore holds auto-proceed without any finding
+    // to show; report why, so the panel can say so (and offer "ignore").
+    const view = gaps.length > 0 && this.deps.autoProceedHoldApplies?.(sessionGroupId)
+      ? { ...rest, autoProceedRestoreGaps: gaps.map((g) => describeRestoreGap(g, gapFingerprints)) }
+      : rest;
     // FIX-AP-3: no invisible holds — a finding that holds auto-proceed is
     // shown as a blocker even when its re-grounded severity would hide it.
     const held = this.deps.invisibleHeldStopIds?.(sessionGroupId, { findings: view.findings, unfrozenRawStopIds });
@@ -1341,26 +1363,36 @@ export class CouncilLifecycle {
     observerModel?: string;
     unfrozenRawStopIds: string[];
     gaps: string[];
+    /** FIX-AP-4: review file → fingerprint of the content behind its gap. */
+    gapFingerprints: Map<string, string>;
   } | null {
     const meta = this.deps.groupMeta.get(sessionGroupId);
     if (!meta) return null;
     const watcher = this.deps.watchers.get(sessionGroupId);
     if (!watcher) return null;
     const gaps: string[] = [];
+    const gapFingerprints = new Map<string, string>();
     const unfrozenRawStopIds: string[] = [];
     const reviewsDir = join(watcher.cwd, ".council", "reviews");
     if (!existsSync(reviewsDir)) {
-      return { sessionGroupId, findings: [], downgrades: [], reviewCount: 0, unfrozenRawStopIds, gaps };
+      return { sessionGroupId, findings: [], downgrades: [], reviewCount: 0, unfrozenRawStopIds, gaps, gapFingerprints };
     }
+    // FIX-AP-4: review files a human chose to ignore (exact content only).
+    // Unreadable → none ignored: every gap keeps holding (fail-closed).
+    const ignoredRead = readIgnoredRestoreGaps(watcher.cwd, sessionGroupId);
+    const ignored = ignoredRead.ok ? ignoredRead.entries : [];
+    const noteFileGap = (kind: "review_unreadable" | "review_unparseable", file: string, fingerprint: string) => {
+      if (isRestoreGapIgnored(ignored, file, fingerprint)) return;
+      gaps.push(`${kind}:${file}`);
+      gapFingerprints.set(file, fingerprint);
+    };
     // FIX-AP-2: the verdicts grounding reached at review time. Without them a
     // finding is re-grounded for display, and its raw STOP still holds.
     const frozenRead = readReviewVerdicts(watcher.cwd, sessionGroupId);
     const frozen = frozenRead.ok ? frozenRead.verdicts : new Map<string, FrozenVerdict>();
     if (!frozenRead.ok) gaps.push(`verdicts_${frozenRead.reason}`);
     // Pinned filename shape from review-watcher: `<phase>-<provider>-observer.md`.
-    // Duplicated here intentionally — extracting to a shared constant would
-    // touch review-watcher (out of scope for this fix); revisit per EC-20.
-    const filenamePattern = /^[A-Za-z0-9_-][A-Za-z0-9_.\-]{0,63}-(claude|codex)-observer\.md$/;
+    const filenamePattern = OBSERVER_REVIEW_FILENAME_PATTERN;
     const allFindings: BrowserObserverFinding[] = [];
     const allDowngrades: BrowserObserverDowngrade[] = [];
     let observerProvider: string | undefined;
@@ -1375,7 +1407,7 @@ export class CouncilLifecycle {
         reviewsDir,
         error: err instanceof Error ? err.message : String(err),
       });
-      return { sessionGroupId, findings: [], downgrades: [], reviewCount: 0, unfrozenRawStopIds, gaps: [...gaps, "reviews_readdir_failed"] };
+      return { sessionGroupId, findings: [], downgrades: [], reviewCount: 0, unfrozenRawStopIds, gaps: [...gaps, "reviews_readdir_failed"], gapFingerprints };
     }
     for (const file of entries) {
       const filePath = join(reviewsDir, file);
@@ -1383,12 +1415,17 @@ export class CouncilLifecycle {
       try {
         raw = readFileSync(filePath, "utf-8");
       } catch {
-        gaps.push(`review_unreadable:${file}`);
+        noteFileGap("review_unreadable", file, fingerprintReview(null));
         continue;
       }
       const payload = parseObserverReviewPayload(raw);
       if (!payload) {
-        gaps.push(`review_unparseable:${file}`);
+        // FIX-AP-4 foreign rule: a broken review that names ANOTHER pair's
+        // group belongs to that pair (same as a parsed foreign review below).
+        // One naming no group at all (legacy) stays a gap for this group.
+        const claimed = claimedGroupIdOf(raw);
+        if (claimed !== null && claimed !== sessionGroupId) continue;
+        noteFileGap("review_unparseable", file, fingerprintReview(raw));
         continue;
       }
       // FIX-AP-3: pairs sharing a workspace share `.council/reviews/`. The
@@ -1467,6 +1504,7 @@ export class CouncilLifecycle {
       ...(observerModel !== undefined && { observerModel }),
       unfrozenRawStopIds,
       gaps,
+      gapFingerprints,
     };
   }
 

@@ -34,8 +34,10 @@ vi.mock("./utils/names.js", () => ({
 // imports `./api.js` so we mock the api surface here to capture the
 // fetchGroups call without touching the real REST client.
 const mockFetchGroups = vi.hoisted(() => vi.fn().mockResolvedValue({ groups: [] }));
+// FIX-AP-4: the `group_created` handler bootstraps findings (and restore gaps).
+const mockFetchGroupFindings = vi.hoisted(() => vi.fn());
 vi.mock("./api.js", () => ({
-  api: { fetchGroups: mockFetchGroups },
+  api: { fetchGroups: mockFetchGroups, fetchGroupFindings: mockFetchGroupFindings },
 }));
 
 let wsModule: typeof import("./ws.js");
@@ -3218,5 +3220,27 @@ describe("handleMessage: group_convergence", () => {
     const g = useStore.getState().groups.get("grp_ws");
     expect(g?.lastReviewNotCounted).toBeUndefined();
     expect(g?.cycleNumber).toBe(1);
+  });
+});
+
+// ===========================================================================
+// FIX-AP-4 — restore gaps from the findings bootstrap
+// ===========================================================================
+// An incomplete auto-proceed hold restore can happen with NO parseable review
+// (reviewCount 0: the only file is broken). The bootstrap handler used to
+// return early on reviewCount 0; the gaps must reach the store anyway, or the
+// pause stays invisible — exactly the case FIX-AP-4 exists for.
+describe("group_created findings bootstrap → auto-proceed restore gaps", () => {
+  it("stores the gaps even when no review could be counted", async () => {
+    const gap = { gap: "review_unparseable:p-claude-observer.md", reason: "r", file: "p-claude-observer.md", fingerprint: "a".repeat(64) };
+    mockFetchGroupFindings.mockResolvedValue({
+      sessionGroupId: "grp_gap", findings: [], downgrades: [], reviewCount: 0, autoProceedRestoreGaps: [gap],
+    });
+    wsModule.connectSession("s1");
+    fireMessage({ type: "group_created", sessionGroupId: "grp_gap", primarySessionId: "s1", observerSessionId: "s2", pairing: "claude+claude" });
+    await vi.waitFor(() => {
+      expect(useStore.getState().autoProceedRestoreGaps.get("grp_gap")).toEqual([gap]);
+    });
+    expect(mockFetchGroupFindings).toHaveBeenCalledWith("grp_gap");
   });
 });

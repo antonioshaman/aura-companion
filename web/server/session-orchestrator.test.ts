@@ -3382,6 +3382,99 @@ describe("SessionOrchestrator", () => {
       }
     });
 
+    // FIX-AP-4 (fourth review of PR #249, WARN). A review file the restore
+    // cannot parse — e.g. a LEGACY review written before `session_group_id`
+    // existed — kept the hold restore incomplete forever, with nothing in the
+    // UI (no finding to Dismiss). Now: (1) the REST bootstrap reports the gap
+    // with a reason and a content fingerprint, only for a pair whose hold it
+    // actually is (opted in); (2) a broken review that names ANOTHER pair's
+    // group is that pair's business and is skipped (documented foreign rule);
+    // (3) "ignore this file" persists for that exact content, the waiting idle
+    // edge arms without another turn, and a rewritten-but-still-broken file
+    // blocks again (the human never saw it). Real path, no stubbed loader.
+    it("FIX-AP-4: an unparseable review is shown as a restore gap, a foreign one is skipped, and ignoring the file re-arms", async () => {
+      const { mkdtempSync, writeFileSync, mkdirSync, rmSync, realpathSync } = require("node:fs") as typeof import("node:fs");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      const { createHash } = require("node:crypto") as typeof import("node:crypto");
+      const workspace = realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-orch-ap4-")));
+      const groupId = "grp_0123456789abcdef0123456789abcdef";
+      const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+      const legacyFile = "council-implement-claude-observer.md";
+      // Legacy: an otherwise plausible review with no `session_group_id`.
+      const legacy = JSON.stringify({ schema_version: 1, checkpoint_id: "chk_old", phase: "council-implement", findings: [] });
+      try {
+        const reviewsDir = pathJoin(workspace, ".council", "reviews");
+        mkdirSync(reviewsDir, { recursive: true });
+        writeFileSync(pathJoin(reviewsDir, legacyFile), legacy);
+        // Foreign and broken (missing required fields): not a gap for us.
+        writeFileSync(pathJoin(reviewsDir, "council-implement-codex-observer.md"),
+          JSON.stringify({ session_group_id: "grp_fedcba9876543210fedcba9876543210", findings: "oops" }));
+        seedGroup(groupId, { cwd: workspace, artifactPaths: [] });
+
+        // Not opted in: the gap holds nothing, so nothing is reported.
+        deps.launcher.getSession.mockImplementation(() => undefined);
+        const optedOut = await orchestrator.getGroupReviewsForBootstrap(groupId);
+        expect(optedOut!.autoProceedRestoreGaps).toBeUndefined();
+
+        const arm = vi.fn(() => ({ kind: "armed" as const }));
+        orchestrator.setIdleTimerManager({
+          arm, cancel: vi.fn(),
+          noteUserMessage: () => {}, resetIterationCount: () => {}, getIterationCount: () => 0,
+          clearPendingSyntheticTurn: () => {}, disposeAll: () => {}, isApiLimitReached: () => false,
+        } as any);
+        deps.launcher.getSession.mockImplementation((sid: string) =>
+          sid === "sess_orch"
+            ? ({ sessionId: sid, autoProceedOnIdle: { idleMs: 60_000, maxIterations: 3 } } as any)
+            : undefined,
+        );
+        const internals = orchestrator as unknown as {
+          councilGroupBySessionId: Map<string, string>;
+          getOrCreateCoordinatorSync: () => { registerExternalGroup: (r: unknown) => void };
+        };
+        internals.councilGroupBySessionId.set("sess_orch", groupId);
+        internals.councilGroupBySessionId.set("sess_obs", groupId);
+        internals.getOrCreateCoordinatorSync().registerExternalGroup({
+          sessionGroupId: groupId,
+          primary: { sessionId: "sess_orch", backendType: "claude" },
+          observer: { sessionId: "sess_obs", backendType: "codex" },
+          status: "active",
+          createdAt: 1,
+        });
+
+        // Opted in: exactly the legacy file is reported, with its fingerprint.
+        const view = await orchestrator.getGroupReviewsForBootstrap(groupId);
+        expect(view!.reviewCount).toBe(0);
+        const fp = createHash("sha256").update(legacy).digest("hex");
+        expect(view!.autoProceedRestoreGaps).toEqual([{
+          gap: `review_unparseable:${legacyFile}`,
+          reason: expect.stringContaining("legacy"),
+          file: legacyFile,
+          fingerprint: fp,
+        }]);
+
+        // "Restart": the gap holds (fail-closed) …
+        orchestrator.initialize();
+        companionBus.emit("orchestrator:turn-done", { sessionId: "sess_orch", blockedByStop: false });
+        await flush();
+        expect(arm).not.toHaveBeenCalled();
+
+        // … until the human ignores that file; the waiting edge then arms.
+        expect(orchestrator.ignoreAutoProceedRestoreGap(groupId, legacyFile, fp)).toEqual({ ok: true, added: true });
+        await flush();
+        expect(arm).toHaveBeenCalledWith("sess_orch", { idleMs: 60_000, maxIterations: 3 });
+        expect((await orchestrator.getGroupReviewsForBootstrap(groupId))!.autoProceedRestoreGaps).toBeUndefined();
+
+        // New broken content under the same name blocks again.
+        writeFileSync(pathJoin(reviewsDir, legacyFile), legacy + " ");
+        const rewritten = await orchestrator.getGroupReviewsForBootstrap(groupId);
+        expect(rewritten!.autoProceedRestoreGaps).toHaveLength(1);
+        expect(rewritten!.autoProceedRestoreGaps![0]!.fingerprint).not.toBe(fp);
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
     // BANNER-RESOLVED (human decision on ASK #14): "Dismiss for now" writes
     // `<group>-resolved-stops.json`, but the browser's dismissal lived only in
     // tab memory — after a reload the banner raised the same STOP again while

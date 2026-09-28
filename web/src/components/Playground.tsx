@@ -28,6 +28,7 @@ import { AiValidationToggle } from "./AiValidationToggle.js";
 import { ModelFallbackBanner } from "./ModelFallbackBanner.js";
 import { UpdateAvailableBanner } from "./UpdateAvailableBanner.js";
 import {
+  AutoProceedRestoreNotice,
   BlockerBanner,
   CouncilToggle,
   DegradedBanner,
@@ -3216,6 +3217,23 @@ function CouncilModeSection() {
         </Card>
         <Card label="DegradedBanner — controlled respawning state">
           <DegradedBanner deadRole="observer" onRespawn={() => {}} isRespawning={true} />
+        </Card>
+
+        {/* FIX-AP-4 — auto-proceed paused by an incomplete STOP-hold restore:
+            an ignorable legacy review file + a non-ignorable verdicts gap. */}
+        <Card label="AutoProceedRestoreNotice — restore incomplete (ignorable file + verdicts gap)">
+          <AutoProceedRestoreNotice
+            gaps={[
+              {
+                gap: "review_unparseable:phase-3-claude-observer.md",
+                reason: "review file is not a valid review for this pair (unparseable or legacy format)",
+                file: "phase-3-claude-observer.md",
+                fingerprint: "0".repeat(64),
+              },
+              { gap: "verdicts_invalid-json", reason: "the review verdicts file is not valid JSON" },
+            ]}
+            onIgnore={() => { /* noop in playground */ }}
+          />
         </Card>
 
         {/* PLAN-aura-model-registry Task 8 — model fallback notice. Warning

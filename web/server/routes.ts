@@ -938,6 +938,37 @@ export function createRoutes(
     return c.json(result);
   });
 
+  // ─── Council Mode — ignore a restore gap (meta-diet P4/FIX-AP-4) ─────────
+  //
+  // A review file the server cannot read or parse keeps the auto-proceed hold
+  // restore incomplete (fail-closed). The ObserverPanel lists it with an
+  // "Ignore this file" action; this persists that decision for the exact
+  // content the human saw (`fingerprint` from the findings bootstrap).
+  api.post("/groups/:groupId/restore-gaps/ignore", async (c) => {
+    const groupId = c.req.param("groupId");
+    const body = (await c.req.json().catch(() => null)) as { file?: unknown; fingerprint?: unknown } | null;
+    if (!body || typeof body.file !== "string" || typeof body.fingerprint !== "string") {
+      return respondError(c, 400, "bad_request", {
+        module: "council.restore-gaps",
+        detail: { reason: "file and fingerprint (strings) required" },
+      });
+    }
+    const result = orchestrator.ignoreAutoProceedRestoreGap(groupId, body.file, body.fingerprint);
+    if (!result.ok) {
+      if (result.reason === "unknown_group") {
+        return respondError(c, 404, "not_found", { module: "council.restore-gaps", detail: { groupId } });
+      }
+      if (result.reason === "invalid_input") {
+        return respondError(c, 400, "bad_request", {
+          module: "council.restore-gaps",
+          detail: { reason: "file is not a review file name or fingerprint is malformed" },
+        });
+      }
+      return respondError(c, 500, "internal_error", { module: "council.restore-gaps", detail: { reason: "not persisted" } });
+    }
+    return c.json(result);
+  });
+
   // ─── Council Mode — REST bootstrap of group records ──────────────────────
   //
   // Closes `docs/history/BUG-council-mode-group-rest-bootstrap-gap.md` (PR #68). The

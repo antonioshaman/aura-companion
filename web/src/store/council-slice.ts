@@ -1,6 +1,7 @@
 import type { StateCreator } from "zustand";
 import type { AppState } from "./index.js";
 import type {
+  AutoProceedRestoreGap,
   BrowserObserverDowngrade,
   BrowserObserverFinding,
   ConvergenceNotCountedReason,
@@ -165,6 +166,12 @@ export interface CouncilSlice {
   firstRunHintDismissed: boolean;
   /** STOP finding ids the user has dismissed from the blocker banner. Per-process; not persisted. */
   dismissedStopIds: Set<string>;
+  /**
+   * FIX-AP-4 — per group: why auto-proceed is paused after a server restart
+   * (the STOP hold restore is incomplete). Filled by the findings bootstrap;
+   * absent → nothing paused (or the pair never opted in).
+   */
+  autoProceedRestoreGaps: Map<string, AutoProceedRestoreGap[]>;
 
   // Actions — group lifecycle
   upsertGroup: (group: GroupRecord) => void;
@@ -240,6 +247,14 @@ export interface CouncilSlice {
    * file stays out of the banner (FIX-B2b-1: split from `dismissStop`).
    */
   disputeStop: (findingId: string) => void;
+  /** FIX-AP-4: replace a group's restore gaps with the bootstrap's list. */
+  setAutoProceedRestoreGaps: (sessionGroupId: string, gaps: AutoProceedRestoreGap[]) => void;
+  /**
+   * FIX-AP-4 — "Ignore this file": the server stops counting this exact
+   * review file content as a restore gap. Optimistic; restored on failure,
+   * because a gap the server still counts still pauses auto-proceed.
+   */
+  ignoreRestoreGap: (sessionGroupId: string, gap: AutoProceedRestoreGap) => void;
   // Council slice cross-slice cleanup is canonically performed inline
   // inside `sessions-slice.removeSession` (single write path; React
   // council review #12 — eliminating the parallel `cleanupCouncilForSession`
@@ -270,6 +285,7 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
   observerPanelWidth: getInitialPanelWidth(),
   firstRunHintDismissed: getInitialFirstRunDismissed(),
   dismissedStopIds: new Set(),
+  autoProceedRestoreGaps: new Map(),
 
   upsertGroup: (group) =>
     set((s) => {
@@ -337,7 +353,9 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
       // exited-then-recreated group doesn't inherit stale "already
       // announced" ids.
       clearAnnouncerScope(sessionGroupId);
-      return { groups, groupBySessionId, findings, groundingDowngrades };
+      const autoProceedRestoreGaps = new Map(s.autoProceedRestoreGaps);
+      autoProceedRestoreGaps.delete(sessionGroupId);
+      return { groups, groupBySessionId, findings, groundingDowngrades, autoProceedRestoreGaps };
     }),
 
   setGroupStatus: (sessionGroupId, status, opts) =>
@@ -523,6 +541,26 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
     if (groupId === undefined) return;
     api.resolveObserverStop(groupId, findingId).catch((err: unknown) => {
       console.warn("[council] STOP dismissal not sent", err);
+    });
+  },
+
+  setAutoProceedRestoreGaps: (sessionGroupId, gaps) =>
+    set((s) => {
+      const autoProceedRestoreGaps = new Map(s.autoProceedRestoreGaps);
+      if (gaps.length > 0) autoProceedRestoreGaps.set(sessionGroupId, gaps);
+      else autoProceedRestoreGaps.delete(sessionGroupId);
+      return { autoProceedRestoreGaps };
+    }),
+
+  ignoreRestoreGap: (sessionGroupId, gap) => {
+    const { file, fingerprint } = gap;
+    if (!file || !fingerprint) return; // not ignorable
+    const without = (list: AutoProceedRestoreGap[] | undefined) => (list ?? []).filter((g) => g.gap !== gap.gap);
+    get().setAutoProceedRestoreGaps(sessionGroupId, without(get().autoProceedRestoreGaps.get(sessionGroupId)));
+    api.ignoreAutoProceedRestoreGap(sessionGroupId, { file, fingerprint }).catch((err: unknown) => {
+      console.warn("[council] restore gap ignore not recorded", err);
+      if (!get().groups.has(sessionGroupId)) return;
+      get().setAutoProceedRestoreGaps(sessionGroupId, [...without(get().autoProceedRestoreGaps.get(sessionGroupId)), gap]);
     });
   },
 

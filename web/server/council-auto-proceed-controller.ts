@@ -15,6 +15,7 @@ import {
   addStopResolution,
   readStopResolutions,
 } from "./auto-proceed-stop-resolutions.js";
+import { addIgnoredRestoreGap } from "./auto-proceed-restore-gaps.js";
 import { log } from "./logger.js";
 
 /** Validated per-session opt-in (routes.ts boundary parser output). */
@@ -127,6 +128,10 @@ interface GroupStopHold {
   /** An idle edge arrived while restoring; re-tried when the restore lands. */
   idleWaiting: boolean;
 }
+
+export type IgnoreRestoreGapResult =
+  | { ok: true; added: boolean }
+  | { ok: false; reason: "unknown_group" | "invalid_input" | "write_failed" };
 
 export type ResolveStopResult =
   | { ok: true; released: boolean; persisted: boolean }
@@ -438,6 +443,57 @@ export class CouncilAutoProceedController {
       if (holdsOnRestore(f, unfrozen) || hold?.unresolved.has(f.id)) out.add(f.id);
     }
     return out;
+  }
+
+  /**
+   * FIX-AP-4 — true when the group's orchestrator opted in with the layer on:
+   * only then does an incomplete restore hold anything, so only then does the
+   * REST bootstrap report the restore gaps to the ObserverPanel.
+   */
+  autoProceedHoldApplies(sessionGroupId: string): boolean {
+    const primary = this.groupMeta.get(sessionGroupId)?.primarySessionId;
+    if (!primary || !this.getAutoProceedConfig?.(primary)) return false;
+    return !this.isAutoProceedAllowed || this.isAutoProceedAllowed(primary);
+  }
+
+  /**
+   * FIX-AP-4 — a human chose "ignore this file" for a review file that keeps
+   * the hold restore incomplete. Persists the decision (file + fingerprint of
+   * the content the human saw), then re-runs the restore so a waiting idle
+   * edge can arm. Unlike a STOP dismissal, an unpersisted ignore changes
+   * nothing: the restore reads the decision from disk.
+   */
+  ignoreRestoreGap(sessionGroupId: string, file: string, fingerprint: string): IgnoreRestoreGapResult {
+    const primary = this.groupMeta.get(sessionGroupId)?.primarySessionId;
+    const cwd = this.watchers.get(sessionGroupId)?.cwd;
+    if (!primary || !cwd) return { ok: false, reason: "unknown_group" };
+    const written = addIgnoredRestoreGap(cwd, sessionGroupId, { file, fingerprint });
+    if (!written.ok) {
+      if (written.reason === "invalid-input") return { ok: false, reason: "invalid_input" };
+      log.warn("auto-proceed", "restore gap ignore not persisted", {
+        event: "auto-proceed.restore-gap-ignore-failed",
+        sessionGroupId,
+        sessionId: primary,
+        role: "orchestrator",
+        file,
+        reason: written.reason,
+      });
+      return { ok: false, reason: "write_failed" };
+    }
+    log.info("auto-proceed", "restore gap ignored by a human", {
+      event: "auto-proceed.restore-gap-ignored",
+      sessionGroupId,
+      sessionId: primary,
+      role: "orchestrator",
+      file,
+    });
+    const hold = this.holds.get(sessionGroupId);
+    // An in-flight restore re-tries on the next event; an incomplete one
+    // (restore undefined) re-runs now and re-tries a waiting idle edge.
+    if (hold && hold.restore === undefined && this.autoProceedHoldApplies(sessionGroupId)) {
+      this.ensureRestored(sessionGroupId, primary);
+    }
+    return { ok: true, added: written.added };
   }
 
   /**

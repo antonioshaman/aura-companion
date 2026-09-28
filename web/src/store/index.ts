@@ -95,6 +95,7 @@ export const useStore = create<AppState>((...args) => ({
       findings: new Map(),
       groundingDowngrades: new Map(),
       dismissedStopIds: new Set(),
+      autoProceedRestoreGaps: new Map(),
       // CLI terminal failures — reset to empty on hard store reset.
       cliFailures: new Map(),
       pendingCodexModelSwitches: new Map(),

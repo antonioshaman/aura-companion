@@ -974,3 +974,69 @@ describe("cross-slice cleanup", () => {
     }
   });
 });
+
+// ── auto-proceed restore gaps (FIX-AP-4) ────────────────────────────────────
+
+describe("autoProceedRestoreGaps (FIX-AP-4)", () => {
+  // An incomplete hold restore pauses auto-proceed with no STOP to show. The
+  // slice keeps the bootstrap's gap list per group; "Ignore this file" drops
+  // the gap optimistically and restores it if the server did not record the
+  // decision (a gap the server still counts still pauses auto-proceed).
+  const fileGap = {
+    gap: "review_unparseable:p-claude-observer.md",
+    reason: "review file is not a valid review for this pair (unparseable or legacy format)",
+    file: "p-claude-observer.md",
+    fingerprint: "a".repeat(64),
+  };
+  const verdictsGap = { gap: "verdicts_invalid-json", reason: "the review verdicts file is not valid JSON" };
+
+  it("stores a non-empty list and clears the entry on an empty one", () => {
+    useStore.getState().setAutoProceedRestoreGaps("grp_abc", [fileGap]);
+    expect(useStore.getState().autoProceedRestoreGaps.get("grp_abc")).toEqual([fileGap]);
+    useStore.getState().setAutoProceedRestoreGaps("grp_abc", []);
+    expect(useStore.getState().autoProceedRestoreGaps.has("grp_abc")).toBe(false);
+  });
+
+  it("ignoreRestoreGap sends file + fingerprint and drops only that gap", async () => {
+    const ignore = vi.spyOn(api, "ignoreAutoProceedRestoreGap").mockResolvedValue({ ok: true, added: true });
+    try {
+      useStore.getState().upsertGroup(group());
+      useStore.getState().setAutoProceedRestoreGaps("grp_abc", [fileGap, verdictsGap]);
+      useStore.getState().ignoreRestoreGap("grp_abc", fileGap);
+      expect(ignore).toHaveBeenCalledWith("grp_abc", { file: fileGap.file, fingerprint: fileGap.fingerprint });
+      expect(useStore.getState().autoProceedRestoreGaps.get("grp_abc")).toEqual([verdictsGap]);
+      await Promise.resolve();
+      expect(useStore.getState().autoProceedRestoreGaps.get("grp_abc")).toEqual([verdictsGap]);
+      // A non-ignorable gap sends nothing.
+      useStore.getState().ignoreRestoreGap("grp_abc", verdictsGap);
+      expect(ignore).toHaveBeenCalledTimes(1);
+    } finally {
+      ignore.mockRestore();
+    }
+  });
+
+  it("puts the gap back when the server did not record the ignore", async () => {
+    const ignore = vi.spyOn(api, "ignoreAutoProceedRestoreGap").mockRejectedValue(new Error("500"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      useStore.getState().upsertGroup(group());
+      useStore.getState().setAutoProceedRestoreGaps("grp_abc", [fileGap]);
+      useStore.getState().ignoreRestoreGap("grp_abc", fileGap);
+      expect(useStore.getState().autoProceedRestoreGaps.has("grp_abc")).toBe(false);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(useStore.getState().autoProceedRestoreGaps.get("grp_abc")).toEqual([fileGap]);
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      ignore.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it("removeGroup drops the group's gaps", () => {
+    useStore.getState().upsertGroup(group());
+    useStore.getState().setAutoProceedRestoreGaps("grp_abc", [fileGap]);
+    useStore.getState().removeGroup("grp_abc");
+    expect(useStore.getState().autoProceedRestoreGaps.has("grp_abc")).toBe(false);
+  });
+});

@@ -19,6 +19,7 @@ import {
 import type { BrowserObserverFinding } from "./session-types.js";
 import { log } from "./logger.js";
 import { readStopResolutions } from "./auto-proceed-stop-resolutions.js";
+import { readIgnoredRestoreGaps } from "./auto-proceed-restore-gaps.js";
 
 // aura-meta-diet P4/AP-WIRE (ASK #9). Before this step nothing emitted
 // `orchestrator_turn_idle`, so auto-proceed never armed in prod even for
@@ -591,6 +592,67 @@ describe("auto-proceed wiring (AP-WIRE)", () => {
       h.turnDone();
       await flush();
       expect(h.manager.isArmed(ORCH)).toBe(true);
+    });
+  });
+
+  // FIX-AP-4: a gap-only hold (a broken review file, no STOP) used to be
+  // invisible and permanent. A human can now ignore the file; the decision is
+  // persisted for that exact content and the waiting idle edge arms at once.
+  describe("ignoreRestoreGap (FIX-AP-4)", () => {
+    const FILE = "phase-2-codex-observer.md";
+    const FP = "a".repeat(64);
+    /** Mirrors the lifecycle: the gap disappears once the file is ignored on disk. */
+    function gapHarness(extra: Parameters<typeof makeHarness>[0] = {}) {
+      const cwd = tmpWorkspace();
+      mkdirSync(join(cwd, ".council", "state"), { recursive: true });
+      const h = makeHarness({
+        config: { idleMs: IDLE_MS, maxIterations: 3 },
+        cwd,
+        loadGroupStopHoldView: async () => {
+          const ignored = readIgnoredRestoreGaps(cwd, GROUP);
+          const skip = ignored.ok && ignored.entries.some((e) => e.file === FILE && e.fingerprint === FP);
+          return { findings: [], unfrozenRawStopIds: [], gaps: skip ? [] : [`review_unparseable:${FILE}`] };
+        },
+        ...extra,
+      });
+      return { h, cwd };
+    }
+
+    it("persists the decision and arms the idle edge that was waiting on the restore", async () => {
+      const { h, cwd } = gapHarness();
+      h.turnDone();
+      await flush();
+      expect(h.manager.isArmed(ORCH)).toBe(false); // held by the gap alone
+      expect(h.controller.ignoreRestoreGap(GROUP, FILE, FP)).toEqual({ ok: true, added: true });
+      await flush();
+      // No new turn-done needed: the restore re-ran and completed.
+      expect(h.manager.isArmed(ORCH)).toBe(true);
+      expect(readIgnoredRestoreGaps(cwd, GROUP)).toEqual({ ok: true, entries: [{ file: FILE, fingerprint: FP }] });
+      // Idempotent.
+      expect(h.controller.ignoreRestoreGap(GROUP, FILE, FP)).toEqual({ ok: true, added: false });
+    });
+
+    it("a different fingerprint (content the human never saw) keeps holding", async () => {
+      const { h } = gapHarness();
+      h.turnDone();
+      await flush();
+      expect(h.controller.ignoreRestoreGap(GROUP, FILE, "b".repeat(64))).toMatchObject({ ok: true });
+      await flush();
+      expect(h.manager.isArmed(ORCH)).toBe(false);
+    });
+
+    it("rejects a non-review file name, a malformed fingerprint and an unknown group", () => {
+      const { h } = gapHarness();
+      expect(h.controller.ignoreRestoreGap(GROUP, "../../etc/passwd", FP)).toEqual({ ok: false, reason: "invalid_input" });
+      expect(h.controller.ignoreRestoreGap(GROUP, FILE, "nothex")).toEqual({ ok: false, reason: "invalid_input" });
+      expect(h.controller.ignoreRestoreGap("grp_ffffffffffffffffffffffffffffffff", FILE, FP))
+        .toEqual({ ok: false, reason: "unknown_group" });
+    });
+
+    it("autoProceedHoldApplies only for an opted-in pair with the layer on", () => {
+      expect(gapHarness().h.controller.autoProceedHoldApplies(GROUP)).toBe(true);
+      expect(gapHarness({ config: undefined }).h.controller.autoProceedHoldApplies(GROUP)).toBe(false);
+      expect(gapHarness({ layerAllowed: false }).h.controller.autoProceedHoldApplies(GROUP)).toBe(false);
     });
   });
 
