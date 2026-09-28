@@ -18,6 +18,7 @@
  */
 
 import type { ExtractedFinding } from "./scorers/findings-extractor.js";
+import { labelSource, type LabelSource } from "./label-triage.js";
 
 export interface LabelKeys {
   findingIds: Set<string>;
@@ -93,6 +94,10 @@ export interface LabeledStops {
   truePositive: number;
   /** truePositive / stops, or "unavailable" at zero. */
   precision: number | "unavailable";
+  /** The same counts split by who produced the label. Precision is never
+   *  reported without it: an orchestrator checking code is not a human
+   *  confirming the observer (P3/FIX-B3-1). */
+  bySource: Record<LabelSource, { stops: number; truePositive: number }>;
 }
 
 /**
@@ -108,7 +113,7 @@ export interface LabeledStops {
  */
 export function countLabeledStops(logs: string[], findings: ExtractedFinding[]): LabeledStops {
   const byId = new Map(findings.map((f) => [f.id, f] as const));
-  const verdicts = new Map<string, string>();
+  const verdicts = new Map<string, { verdict: string; source: LabelSource }>();
   for (const text of logs) {
     for (const line of text.split("\n")) {
       if (line.trim() === "") continue;
@@ -126,18 +131,42 @@ export function countLabeledStops(logs: string[], findings: ExtractedFinding[]):
         // Resolve to coordinates so the same finding labeled in both logs
         // collapses to one key.
         const f = byId.get(r.finding_id);
-        if (f?.severity === "STOP") verdicts.set(coordKey(f.checkpoint_id, "STOP", f.evidence_path), verdict);
+        if (f?.severity === "STOP") {
+          verdicts.set(coordKey(f.checkpoint_id, "STOP", f.evidence_path), { verdict, source: labelSource(r) });
+        }
       } else if (
         typeof r.severity === "string" &&
         r.severity.toUpperCase() === "STOP" &&
         typeof r.checkpoint_id === "string" &&
         typeof r.evidence_path === "string"
       ) {
-        verdicts.set(coordKey(r.checkpoint_id, "STOP", r.evidence_path), verdict);
+        verdicts.set(coordKey(r.checkpoint_id, "STOP", r.evidence_path), { verdict, source: labelSource(r) });
       }
     }
   }
+  const bySource: LabeledStops["bySource"] = {
+    human: { stops: 0, truePositive: 0 },
+    orchestrator: { stops: 0, truePositive: 0 },
+    unknown: { stops: 0, truePositive: 0 },
+  };
+  for (const v of verdicts.values()) {
+    bySource[v.source].stops++;
+    if (v.verdict === "true_positive") bySource[v.source].truePositive++;
+  }
   const stops = verdicts.size;
-  const truePositive = [...verdicts.values()].filter((v) => v === "true_positive").length;
-  return { stops, truePositive, precision: stops === 0 ? "unavailable" : truePositive / stops };
+  const truePositive = [...verdicts.values()].filter((v) => v.verdict === "true_positive").length;
+  return { stops, truePositive, precision: stops === 0 ? "unavailable" : truePositive / stops, bySource };
+}
+
+/** One line per label source that has any labeled STOP, e.g.
+ *  `STOP precision by label source: human 1/1 (100%) · orchestrator 0/2 (0%)`.
+ *  Printed next to every precision figure the exporter emits. */
+export function renderPrecisionBySource(l: LabeledStops): string {
+  const parts = (Object.keys(l.bySource) as LabelSource[])
+    .filter((k) => l.bySource[k].stops > 0)
+    .map((k) => {
+      const { stops, truePositive } = l.bySource[k];
+      return `${k} ${truePositive}/${stops} (${Math.round((truePositive / stops) * 100)}%)`;
+    });
+  return `STOP precision by label source: ${parts.length > 0 ? parts.join(" · ") : "no labeled STOPs"}`;
 }

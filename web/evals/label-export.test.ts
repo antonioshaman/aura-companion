@@ -9,7 +9,7 @@
 
 import { describe, it, expect } from "vitest";
 import type { ExtractedFinding } from "./scorers/findings-extractor.js";
-import { collectLabelKeys, countLabeledStops, selectUnlabeled } from "./label-export.js";
+import { collectLabelKeys, countLabeledStops, renderPrecisionBySource, selectUnlabeled } from "./label-export.js";
 
 function finding(id: string, over: Partial<ExtractedFinding> = {}): ExtractedFinding {
   return {
@@ -86,6 +86,34 @@ describe("countLabeledStops", () => {
         { checkpoint_id: "cp-1", severity: null, label: "false_negative" },
       ),
     ];
-    expect(countLabeledStops(logs, findings)).toEqual({ stops: 0, truePositive: 0, precision: "unavailable" });
+    expect(countLabeledStops(logs, findings)).toMatchObject({ stops: 0, truePositive: 0, precision: "unavailable" });
+    expect(renderPrecisionBySource(countLabeledStops(logs, findings))).toBe(
+      "STOP precision by label source: no labeled STOPs",
+    );
+  });
+
+  // P3/FIX-B3-1: precision is never shown without who labeled. An
+  // orchestrator verifying code is not a human confirming the observer.
+  it("splits labeled STOPs by label source; the last label of a finding decides its source", () => {
+    const b = finding("b");
+    const logs = [
+      jsonl(
+        { checkpoint_id: "cp-1", severity: "STOP", evidence_path: "src/a.ts", label: "false_positive", labeled_by: "orchestrator-x" },
+        { checkpoint_id: "cp-2", severity: "STOP", evidence_path: "y", label: "true_positive", labeled_by: "human-decision" },
+        { checkpoint_id: "cp-3", severity: "STOP", evidence_path: "z", label: "true_positive" },
+      ),
+      // Ingest log: a human re-labels "a" → the human verdict wins.
+      jsonl({ finding_id: "a", verdict: "true_positive", labeler: "human-anton" }, { finding_id: "b", verdict: "false_positive", labeler: "orchestrator-y" }),
+    ];
+    const out = countLabeledStops(logs, [...findings, b]);
+    expect(out.stops).toBe(4);
+    expect(out.bySource).toEqual({
+      human: { stops: 2, truePositive: 2 },
+      orchestrator: { stops: 1, truePositive: 0 },
+      unknown: { stops: 1, truePositive: 1 },
+    });
+    expect(renderPrecisionBySource(out)).toBe(
+      "STOP precision by label source: human 2/2 (100%) · orchestrator 0/1 (0%) · unknown 1/1 (100%)",
+    );
   });
 });
