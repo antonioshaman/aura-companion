@@ -18,9 +18,8 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { execFileSync } from "node:child_process";
 import { extractFindings, type ExtractedFinding } from "./scorers/findings-extractor.js";
-import { resolveWithinWorkspace } from "./schema/eval-paths.js";
+import { resolveSnippet } from "./evidence-source.js";
 import { renderLabelSheet, type LabelSheetItem } from "./label-sheet.js";
 import { parseLabelLog } from "./schema/parse-artifact.js";
 
@@ -82,94 +81,6 @@ function reviewFilesFor(workspace: string): string[] {
   } catch {
     return [];
   }
-}
-
-const shaCache = new Map<string, string | null>();
-
-/** Commit sha at-or-before `reviewedAt` on the workspace's HEAD line, or null
- *  when git/timestamp unavailable. Cached per (workspace, reviewedAt). */
-function commitAt(workspace: string, reviewedAt: string): string | null {
-  if (!reviewedAt) return null;
-  const key = `${workspace}\0${reviewedAt}`;
-  if (shaCache.has(key)) return shaCache.get(key)!;
-  let sha: string | null = null;
-  try {
-    const out = execFileSync("git", ["-C", workspace, "rev-list", "-1", `--before=${reviewedAt}`, "HEAD"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-    }).trim();
-    sha = out.length > 0 ? out : null;
-  } catch {
-    sha = null;
-  }
-  shaCache.set(key, sha);
-  return sha;
-}
-
-function gitFileAt(workspace: string, relPath: string, sha: string): string[] | null {
-  try {
-    const content = execFileSync("git", ["-C", workspace, "show", `${sha}:${relPath}`], {
-      encoding: "utf8",
-      maxBuffer: 32 * 1024 * 1024,
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    return content.split("\n");
-  } catch {
-    return null;
-  }
-}
-
-function sliceLines(all: string[], lines: [number, number] | undefined, context: number): string {
-  if (!lines) {
-    return all.slice(0, 40).map((l, i) => `${String(i + 1).padStart(5)}  ${l}`).join("\n");
-  }
-  const [a, b] = lines;
-  const from = Math.max(1, a - context);
-  const to = Math.min(all.length, b + context);
-  const out: string[] = [];
-  for (let n = from; n <= to; n++) {
-    const marker = n >= a && n <= b ? "▶" : " ";
-    out.push(`${marker}${String(n).padStart(5)}  ${all[n - 1] ?? ""}`);
-  }
-  return out.join("\n");
-}
-
-/** Resolve the evidence snippet, PREFERRING the code as of the review commit
- *  (so an actively-developed file's drift doesn't show the wrong code), and
- *  falling back to the current file with a loud "may have drifted" note. */
-function resolveSnippet(
-  workspace: string,
-  evidencePath: string,
-  lines: [number, number] | undefined,
-  reviewedAt: string,
-  context: number,
-): { snippet: string | null; note: string } {
-  const range = lines ? `lines ${lines[0]}–${lines[1]} (±${context})` : "first 40 lines";
-
-  // 1. Exact: the file content at the review-time commit.
-  const sha = commitAt(workspace, reviewedAt);
-  if (sha) {
-    const at = gitFileAt(workspace, evidencePath, sha);
-    if (at !== null) {
-      return { snippet: sliceLines(at, lines, context), note: `${range} as of review commit ${sha.slice(0, 8)}` };
-    }
-  }
-
-  // 2. Fallback: the current working-tree file (may have drifted).
-  const abs = resolveWithinWorkspace(workspace, evidencePath);
-  if (abs === null) {
-    return { snippet: null, note: `not found within ${workspace} (and no review-commit copy)` };
-  }
-  let text: string;
-  try {
-    text = readFileSync(abs, "utf8");
-  } catch {
-    return { snippet: null, note: `unreadable: ${evidencePath}` };
-  }
-  return {
-    snippet: sliceLines(text.split("\n"), lines, context),
-    note: `${range} from CURRENT file — ⚠ may have drifted since review`,
-  };
 }
 
 function toItems(workspace: string, findings: ExtractedFinding[], context: number): LabelSheetItem[] {
