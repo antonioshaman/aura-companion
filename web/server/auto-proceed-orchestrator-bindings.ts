@@ -4,7 +4,7 @@
  * (PLAN-aura-orchestrator-idle-auto-proceed Task 9).
  *
  * Lives in a sibling file rather than inside `session-orchestrator.ts`
- * because that module is a 1900+ line god-module whose file-level
+ * because that module is a multi-thousand-line god-module whose file-level
  * coverage gate cascades any new untested lines past the 80% threshold
  * — `feedback_file_level_coverage_gate_cascade` documents the pattern.
  * Pulling these helpers out keeps the orchestrator file lean and lets
@@ -87,7 +87,7 @@ export interface OrchestratorWatcherForRehydrate {
  * concrete production bindings.
  *
  * Lives here rather than as a private method on `SessionOrchestrator`
- * because the orchestrator is a 1900+ line god-module whose file-level
+ * because the orchestrator is a multi-thousand-line god-module whose file-level
  * coverage gate cascades any new untested lines past the 80% threshold
  * — `feedback_file_level_coverage_gate_cascade`. Pulling the rehydrate
  * loop out lets the unit test exercise the loop directly without

@@ -3,7 +3,7 @@
  * orchestrator's restart-recovery path
  * (PLAN-aura-orchestrator-idle-auto-proceed Task 9).
  *
- * Why a separate module: `session-orchestrator.ts` is 1900+ lines and the
+ * Why a separate module: `session-orchestrator.ts` is a very large module and the
  * reconcile logic only needs three injected callables (readTrace, listFiles,
  * rehydrate) plus a logger. Lifting it out keeps the orchestrator's mixin
  * surface small and lets the test exercise the real filesystem + real
