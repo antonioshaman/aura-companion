@@ -2,9 +2,11 @@
 
 Generated from the mining + validation run of 2026-09-28. Every task below was mined from a merged PR, its hidden tests **fail on the base commit and pass on the merge commit** (validated in a throwaway worktree), and its prompt passed both leak checks: the deterministic `eval:aurabench leak` (every new name the hidden tests use is named, no other new name from the diff is) and an independent LLM review against the real diff (solution hints / under-specification). The LLM review ran twice: round 1 flagged 20 of 50 prompts (19 under-specified — exact strings, logger shapes, test ids, payload shapes; 1 leaking a private field name); 3 of those were dropped because their hidden tests pin a single implementation, the rest were revised; round 2 re-checked all 22 revised prompts, found 2 remaining gaps, which were fixed. The deterministic check was re-run after every revision.
 
-**43 tasks** — feature 13, bugfix 10, ui 7, debug 4, refactor 4, architecture 3, security 2.
+**41 tasks** — feature 13, bugfix 10, ui 6, refactor 4, architecture 3, debug 3, security 2.
 
 **Re-review (P6/FIX-D2-5, 2026-09-28).** The first pilot showed prompts that give away the diagnosis or the fix in plain English, which the identifier-level check cannot see. All 47 prompts were re-judged by an LLM judge (`eval:aurabench judge`, rubric in `prompt-judge.ts`, calibrated on a human reviewer's rulings) against the PR diff and hidden tests: 25 kept as-is, 18 rewritten to symptom + required behaviour (re-judged until clean), 4 excluded because a passable prompt must state the fix. Every task's hidden tests also passed 3 of 3 runs on the merge commit. Verdicts, rewrites and stability: [`review/REPORT.md`](review/REPORT.md). The "LLM review" column below is the original D1 review.
+
+**Spec-completeness check (P6/CORPUS-SPEC-CHECK, 2026-09-29).** The converse question: does the prompt state (or does the base repo fix) every behaviour the hidden tests assert? The pilot and probe had cells failing on behaviour no prompt specified. An LLM checker (`eval:aurabench spec-check`, `spec-check.ts`) went through all 43 tasks: 36 ok, 7 underspecified; 5 prompts were extended with the missing observable behaviour (re-checked ok and re-judged clean for leaks), 2 excluded because the tests pin one implementation. Details: [`docs/aurabench/review/SPEC-CHECK.md`](../../../docs/aurabench/review/SPEC-CHECK.md).
 
 Base failure kind: assertion 31, missing-interface 12 (the prompt names the interface).
 
@@ -30,7 +32,6 @@ Classes were assigned by hand (the miner's title heuristic labels ~85% as bugfix
 | `resume-discards-conversation-too-eagerly` | #194 | bugfix | missing-interface | 1 | +81/−8 | ok |
 | `codex-session-spawns-council-pair` | #125 | debug | assertion | 1 | +8/−5 | ok |
 | `resume-hiccup-loses-conversation` | #171 | debug | missing-interface | 1 | +64/−9 | revised → ok |
-| `deaf-session-after-server-restart` | #184 | debug | assertion | 1 | +16/−2 | ok |
 | `drift-detector-misses-dead-stdio` | #201 | debug | assertion | 3 | +119/−26 | ok |
 | `council-checkpoint-producer-endpoint` | #10 | feature | assertion | 2 | +90/−0 | revised → ok |
 | `sessions-lost-on-reboot-tmpdir` | #37 | feature | assertion | 2 | +164/−4 | revised → ok |
@@ -55,7 +56,6 @@ Classes were assigned by hand (the miner's title heuristic labels ~85% as bugfix
 | `sidebar-duplicate-provider-chips` | #27 | ui | assertion | 3 | +64/−40 | revised → ok |
 | `sidebar-pair-chip-duplicates-backend` | #44 | ui | assertion | 4 | +157/−12 | ok |
 | `task-panel-stale-snapshot-hint` | #99 | ui | assertion | 4 | +58/−20 | ok |
-| `model-switcher-label-lags` | #115 | ui | assertion | 1 | +8/−2 | ok |
 | `observer-findings-oldest-first` | #138 | ui | assertion | 2 | +15/−5 | revised → ok |
 | `claude-context-usage-meter` | #193 | ui | assertion | 2 | +33/−2 | ok |
 
@@ -147,6 +147,15 @@ A passable prompt would have to hand over the fix (LLM judge verdict `exclude`, 
 | #82 | `ask-user-question-answers-dropped` | the tests pin the SDK's `answers` keying (by question text), which the repo cannot reveal; stating it is the whole fix |
 | #172 | `codex-observer-dies-not-initialized-race` | the orchestrator-side tests overwrite private internals (pending set, the private poll method, coordinator/launcher lookups), pinning one implementation; a passable prompt must name them |
 | #204 | `drift-detector-blind-on-underscore-cwd` | the tests pin the CLI's underscore→dash slug rule, which the repo cannot reveal; stating it is the whole one-regex fix |
+
+### Excluded at spec check (P6/CORPUS-SPEC-CHECK)
+
+The hidden tests pin one implementation, and a prompt that states it would hand over the fix (details in [`docs/aurabench/review/SPEC-CHECK.md`](../../../docs/aurabench/review/SPEC-CHECK.md)).
+
+| PR | task | reason |
+|---|---|---|
+| #184 | `deaf-session-after-server-restart` | the skip/relaunch tests tell a live session from a deaf one only by the bridge session's `backendAdapter`, while the existing `isCliConnected` signal returns false in the skip case; stating that anchor is the fix the FIX-D2-5 re-review had to remove |
+| #115 | `model-switcher-label-lags` | the test requires the store's `updateSession(sessionId, { model })` with that exact payload, and its mocked store has no other setter; other correct fixes (local optimistic label, a different setter) fail or crash |
 
 ### Validated but not selected
 

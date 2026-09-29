@@ -13,8 +13,8 @@ prompt: |
   Required:
   - in `web/server/review-watcher.ts` export a synchronous
     `findReviewForCheckpointSync({ directory, checkpointId, normalizeRaw? })`
-    returning `{ payload, file, reviewedAt }` (reviewedAt = the file's mtime in
-    ms) for the first review file in `directory` whose payload answers
+    returning `{ payload, file, reviewedAt }` (`file` = the bare filename inside
+      `directory`, not a path; reviewedAt = the file's mtime in ms) for the first review file in `directory` whose payload answers
     `checkpointId`, or `null`. Only files matching the review filename pattern
     count; a missing directory returns `null`; unreadable or corrupt files are
     skipped. `normalizeRaw(raw, provider)` (provider taken from the filename) is

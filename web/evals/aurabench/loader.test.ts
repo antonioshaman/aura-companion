@@ -15,6 +15,7 @@ import { classifyAuraBenchTaskSource, loadAuraBenchTasks } from "./loader.js";
 import { AURABENCH_CLASSES } from "./task.js";
 import { checkCorpusReviewed, type JudgeRecord } from "./prompt-judge.js";
 import { readStabilityVerdicts, stabilityKey } from "./flake.js";
+import { checkCorpusSpecified, type SpecRecord } from "./spec-check.js";
 
 const BASE = "a".repeat(40);
 const MERGE = "b".repeat(40);
@@ -138,5 +139,17 @@ describe("committed AuraBench corpus (web/evals/aurabench/tasks)", () => {
       .filter(({ v }) => !v || !v.stable || v.runs.length < 3)
       .map(({ id }) => id);
     expect(unstable).toEqual([]);
+  });
+
+  it("every prompt carries an ok spec-completeness verdict for its CURRENT text", () => {
+    // P6/CORPUS-SPEC-CHECK: every behaviour the hidden tests assert must be
+    // stated by the prompt or fixed by the base repo, otherwise a cell measures
+    // a guess (pilot: resume-hiccup's streak value after a discard). Editing a
+    // prompt changes its hash, so a rewrite must be re-checked, not just re-judged.
+    const records = readFileSync(join(REVIEW_DIR, "spec-check.jsonl"), "utf8")
+      .split("\n")
+      .filter((l) => l.trim())
+      .map((l) => JSON.parse(l) as SpecRecord);
+    expect(checkCorpusSpecified(loaded.tasks, records)).toEqual([]);
   });
 });

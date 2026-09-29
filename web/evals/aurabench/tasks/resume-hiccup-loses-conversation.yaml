@@ -18,7 +18,10 @@ prompt: |
   to discard, and keep the streak on the session as
   `resumeImmediateFailures` (a new optional field of the session info). A spawn
   that outlives the 5 s window resets the streak to 0; a fast death that was not
-  a resume never counts and also leaves the streak at 0. This must hold for both the WebSocket and the stdio
+  a resume never counts and also leaves the streak at 0. Each fast resume-death
+  adds one to the streak, including the one that triggers the discard: after the
+  call that returns "discard", the streak reads 2 (the discard itself does not
+  reset it; only a spawn that outlives the window does). This must hold for both the WebSocket and the stdio
   transport.
 expected_files:
   - web/server/cli-launcher.ts

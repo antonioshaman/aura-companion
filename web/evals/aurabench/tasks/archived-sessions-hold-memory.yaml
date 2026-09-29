@@ -15,11 +15,13 @@ prompt: |
 
   - In `web/server/ws-bridge-persist.ts` export `ARCHIVED_HISTORY_RETENTION`
     (the number of most recent messages an archived session keeps; use 100) and
-    a pure, idempotent `trimArchivedSessionState(session, retention?)` that keeps
-    only the last `retention` entries of the message history and empties the
-    event buffer.
+    an idempotent `trimArchivedSessionState(session, retention?)` that keeps
+      only the last `retention` entries of the message history and empties the
+      event buffer, changing the session object it is given in place (callers
+      ignore its return value).
   - Add a public `WsBridge.trimArchivedSessionMemory(sessionId)` that applies it
-    to a live in-memory session (no-op for unknown ids).
+    to a live in-memory session (no-op for unknown ids): a reference to that
+      session taken earlier sees the trimmed history and the empty buffer.
   - Archived sessions must be trimmed when the bridge restores from disk (active
     sessions untouched) and when a session or council pair is archived.
 expected_files:

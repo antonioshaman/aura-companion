@@ -23,7 +23,8 @@ prompt: |
     channel without touching the pipe; `bufferedAmount()` is 0;
   - `createLineAccumulator(onLine)` with `push(chunk)` emitting only complete
     newline-terminated lines (newline included) and `flush()` emitting a
-    non-blank unterminated tail;
+    non-blank unterminated tail; blank or whitespace-only lines are never
+    emitted, whether complete or a tail;
   - `pumpStdoutLines(stream, onLine, onError?)` — reads a byte stream to EOF,
     decoding UTF-8 correctly across chunk boundaries, emits lines, flushes the
     tail at EOF, and routes stream errors to `onError` (never rejects).
@@ -31,13 +32,18 @@ prompt: |
   In the launcher, a stdio Claude spawn runs the CLI with `--print
   --output-format stream-json --input-format stream-json --verbose
   --include-partial-messages` (no `--sdk-url`, no `-p`) and piped stdio. The
-  launcher gets a `setStdioCliOpener(opener)` hook returning the session's adapter; without an
+  launcher gets a `setStdioCliOpener(opener)` hook, `opener(sessionId, transport)`
+  returning the session's adapter already bound to that transport; without an
   opener the launch fails (session `exited`, exit code 1) instead of spawning.
-  Stdout lines go to the adapter's raw-message handler and the session becomes
-  connected on output. A stdio Claude process that survives a server restart
+  The launcher uses only two methods of the returned adapter: each stdout line
+  goes to `handleRawMessage(line)` and the end of the pipe to
+  `handleTransportClose()`. The session becomes connected on output. A stdio Claude process that survives a server restart
   cannot be re-attached (its pipes died with the old server): on restore from
   disk, terminate it with SIGTERM — but only when the live pid is verifiably still
-  that session's stdio Claude process (never signal a reused pid) — mark
+  that session's stdio Claude process (never signal a reused pid). This must also
+    work for launcher records saved before this change: they have no field saying
+    which transport the session used, and nothing new is added to them before the
+    restart — so mark
   the session exited with its pid cleared, keep its `cliSessionId` so the next
   message resumes the conversation, and do not count it as restored.
 expected_files:
