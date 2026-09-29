@@ -9,11 +9,15 @@ prompt: |
   process loads the history but never answers the user message that was in
   flight when the pipe died; the user has to notice and re-send it.
 
-  Make the Claude adapter recover this: when a fresh CLI comes up after a
-  respawn (its `system` init frame) and the user's last text-only message was
-  never answered, send it again exactly once, and tell the browser via the
+  Make the Claude adapter recover this: when a fresh CLI comes up (any later
+  `system` init frame, whatever caused the respawn, including a plain transport
+  close) and the user's last text-only message was never answered, send it again
+  once on that init, and tell the browser via the
   existing error-notice channel with a message containing "replaying your last
-  message". A turn that completed with a `result` must not be replayed, and
+  message". The unanswered message stays pending across a transport close,
+  and a replayed message still counts as unanswered until a `result` arrives, so
+  each further respawn without a `result` replays it again (one replay per
+  init). A turn that completed with a `result` must not be replayed, and
   messages with images are never replayed.
 expected_files:
   - web/server/claude-adapter.ts

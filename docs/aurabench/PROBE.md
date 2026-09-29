@@ -122,3 +122,9 @@ hidden-тестами merge-коммита `c675c7f`:
 
 Сырые записи ячеек лежат в `$WORK/bench/results/cells.jsonl` (вне репо) и
 попадут в `docs/aurabench/data/` на шаге D3 без секретов и прод-путей.
+
+> **Пометка CORPUS-SPEC-CHECK (2026-09-29):** промпты `claude-cli-stdio-transport`
+> (все три группы выше) и `council-lost-review-event-degrades-pair` (`file` —
+> голое имя файла) дописаны. Результаты пробы по этим задачам получены на
+> неоднозначной спеке, их ячейки вынесены из `cells.jsonl`. Подробности:
+> [`review/SPEC-CHECK.md`](review/SPEC-CHECK.md).

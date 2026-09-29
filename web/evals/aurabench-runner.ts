@@ -6,6 +6,7 @@
  *     --results <results.jsonl> --wt-root <dir> [--limit N] [--pr N]
  *   bun run eval:aurabench leak --tasks <dir> [--id <task-id>]
  *   bun run eval:aurabench judge --tasks <dir> --results <f> [--model opus] [--id <task-id>]
+ *   bun run eval:aurabench spec-check --tasks <dir> --results <f> [--model opus] [--id <task-id>]
  *   bun run eval:aurabench stability --tasks <dir> --results <f> --wt-root <dir> [--runs 3]
  *   bun run eval:aurabench bench --bench-root <dir> [--variants A,B,…] [--reps 5]
  *     [--task-ids a,b] [--max-cells N] [--state <STATE.json>] [--timeout-min 60]
@@ -28,6 +29,11 @@
  * comparing it with the PR diff and hidden tests (`prompt-judge.ts`). One
  * record per task × prompt hash × rubric version is appended to `--results`;
  * already-judged prompts are skipped. Exits 1 unless every task is "clean".
+ *
+ * `spec-check` is the converse LLM check (`spec-check.ts`): is every behaviour
+ * the hidden tests assert stated by the prompt or determined by the base
+ * repository? Same call shape, keying and resume as `judge`; exits 1 unless
+ * every task is "ok".
  *
  * `stability` runs every task's hidden tests `--runs` times (default 3) on its
  * merge commit in a throwaway worktree and appends one verdict per task to
@@ -68,6 +74,16 @@ import {
   readJudgeRecords,
   type JudgeRecord,
 } from "./aurabench/prompt-judge.js";
+import {
+  SPEC_JSON_SCHEMA,
+  SPEC_RUBRIC_VERSION,
+  SPEC_SYSTEM_PROMPT,
+  buildSpecRequest,
+  parseSpecReply,
+  readSpecRecords,
+  specKey,
+  type SpecRecord,
+} from "./aurabench/spec-check.js";
 import { checkMergeStability, readStabilityVerdicts, stabilityKey } from "./aurabench/flake.js";
 import { loadAuraBenchTasks } from "./aurabench/loader.js";
 import type { AuraBenchTask } from "./aurabench/task.js";
@@ -545,6 +561,71 @@ async function judge(argv: string[], repo: string): Promise<number> {
   return notClean === 0 ? 0 : 1;
 }
 
+async function specCheck(argv: string[], repo: string): Promise<number> {
+  const dir = arg(argv, "tasks");
+  const results = arg(argv, "results");
+  if (!dir || !results) {
+    console.error("usage: spec-check --tasks <dir> --results <f> [--model opus] [--id <task-id>] [--repo <dir>]");
+    return 2;
+  }
+  const model = arg(argv, "model") ?? "opus";
+  const only = arg(argv, "id");
+  const { tasks } = loadAuraBenchTasks(resolve(dir), (sha) => git(repo, ["cat-file", "-e", `${sha}^{commit}`]).ok);
+  const done = existsSync(results) ? readSpecRecords(readFileSync(results, "utf8")) : new Map<string, SpecRecord>();
+  // Outside the repo so no CLAUDE.md / .claude settings reach the checker.
+  const cwd = join(tmpdir(), "aurabench-spec-check");
+  mkdirSync(cwd, { recursive: true });
+  let notOk = 0;
+  for (const t of tasks.filter((x) => !only || x.id === only)) {
+    let rec = done.get(specKey(t.id, t.prompt));
+    for (let attempt = 1; !rec && attempt <= 3; attempt++) {
+      await waitForMemory();
+      const r = spawnSync(
+        "claude",
+        [
+          "-p",
+          "--tools", "",
+          "--setting-sources", "",
+          "--system-prompt", SPEC_SYSTEM_PROMPT,
+          "--output-format", "json",
+          "--json-schema", JSON.stringify(SPEC_JSON_SCHEMA),
+          "--model", model,
+        ],
+        { cwd, env: childEnv(), input: buildSpecRequest(judgeInput(repo, t)), encoding: "utf8", timeout: 15 * 60_000, maxBuffer: 64 * 1024 * 1024 },
+      );
+      let out: { structured_output?: unknown; modelUsage?: Record<string, unknown> } = {};
+      try {
+        out = JSON.parse(r.stdout ?? "");
+      } catch {
+        console.log(`[aurabench] spec-check ${t.id}: unparseable CLI output (attempt ${attempt}): ${(r.stderr ?? "").slice(0, 300)}`);
+        continue;
+      }
+      const parsed = parseSpecReply(out.structured_output);
+      if (!parsed.ok) {
+        console.log(`[aurabench] spec-check ${t.id}: rejected reply (attempt ${attempt}): ${parsed.error}`);
+        continue;
+      }
+      rec = {
+        id: t.id,
+        prompt_sha256: promptSha256(t.prompt),
+        rubric_version: SPEC_RUBRIC_VERSION,
+        model: Object.keys(out.modelUsage ?? {})[0] ?? model,
+        checked_at: new Date().toISOString(),
+        ...parsed.value,
+      };
+      appendFileSync(results, JSON.stringify(rec) + "\n");
+    }
+    if (!rec) {
+      notOk++;
+      console.log(`[aurabench] ERROR   ${t.id}: no valid spec-check reply after 3 attempts`);
+      continue;
+    }
+    if (rec.verdict !== "ok") notOk++;
+    console.log(`[aurabench] ${rec.verdict.toUpperCase().padEnd(14)} ${t.id} gaps=${rec.gaps.length}`);
+  }
+  return notOk === 0 ? 0 : 1;
+}
+
 async function main(argv: string[]): Promise<number> {
   const sub = argv[0];
   const repo = resolve(arg(argv, "repo") ?? join(import.meta.dir, "..", ".."));
@@ -643,8 +724,9 @@ async function main(argv: string[]): Promise<number> {
     return unstable === 0 ? 0 : 1;
   }
   if (sub === "judge") return judge(argv, repo);
+  if (sub === "spec-check") return specCheck(argv, repo);
   if (sub === "bench") return bench(argv, repo);
-  console.error("usage: aurabench-runner.ts <mine|validate|leak|stability|judge|bench> …");
+  console.error("usage: aurabench-runner.ts <mine|validate|leak|stability|judge|spec-check|bench> …");
   return 2;
 }
 

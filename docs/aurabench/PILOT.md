@@ -59,3 +59,9 @@ Codex `gpt-5.5` (codex-cli 0.142.5).
 
 Сырые записи ячеек лежат в `$WORK/bench/results/cells.jsonl` (вне репо) и
 попадут в `docs/aurabench/data/` на шаге D3 без секретов и прод-путей.
+
+> **Пометка CORPUS-SPEC-CHECK (2026-09-29):** спека `resume-hiccup-loses-conversation`
+> была неоднозначна: промпт не задавал значение счётчика после вызова, который
+> вернул «discard». Провалы C/D/E на этом ассерте не считаются промахом качества.
+> Промпт дописан, ячейки задачи вынесены из `cells.jsonl` и будут перепрогнаны в
+> D2-full. Подробности: [`review/SPEC-CHECK.md`](review/SPEC-CHECK.md).
