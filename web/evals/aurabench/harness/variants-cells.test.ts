@@ -18,7 +18,7 @@
 
 import { describe, it, expect } from "vitest";
 import { VARIANTS, VARIANT_IDS, parseVariantList, type AuraVariant } from "./variants.js";
-import { CELL_RECORD_VERSION, cellKey, completedCellKeys, planCells } from "./cells.js";
+import { CELL_RECORD_VERSION, cellKey, completedCellKeys, parseClassTimeouts, planCells, staleCellRecords } from "./cells.js";
 
 const onLayers = (v: AuraVariant) => Object.entries(v.layers).filter(([, s]) => s === "on").map(([k]) => k).sort();
 
@@ -112,5 +112,51 @@ describe("planCells / completedCellKeys", () => {
       JSON.stringify({ v: CELL_RECORD_VERSION, key: "t2|C|1" }),
     ].join("\n");
     expect([...completedCellKeys(jsonl)].sort()).toEqual(["t1|A|1", "t2|C|1"]);
+  });
+});
+
+// D2-full stage 1 reuses pilot/probe cells. The cell key has no prompt hash,
+// so without this guard a rewritten prompt (CORPUS-SPEC-CHECK rewrote five)
+// would let an old run count as "done" for a different task.
+describe("staleCellRecords", () => {
+  const rec = (task: string, variant: string, sha?: string) =>
+    JSON.stringify({ v: CELL_RECORD_VERSION, key: `${task}|${variant}|1`, task_id: task, ...(sha ? { prompt_sha256: sha } : {}) });
+  const current = new Map([["t1", "aaa"], ["t2", "bbb"]]);
+
+  it("flags a record stamped with another prompt sha, accepts a matching one", () => {
+    const jsonl = [rec("t1", "A", "aaa"), rec("t2", "A", "old")].join("\n");
+    expect(staleCellRecords(jsonl, current)).toEqual({
+      mismatched: [{ key: "t2|A|1", recorded: "old", current: "bbb" }],
+      unstamped: [],
+    });
+  });
+
+  it("lists legacy records without a stamp separately (reuse unverified, not rejected)", () => {
+    expect(staleCellRecords(rec("t1", "B"), current)).toEqual({ mismatched: [], unstamped: ["t1|B|1"] });
+  });
+
+  it("ignores tasks outside the run, torn lines and other schema versions", () => {
+    const jsonl = [rec("other", "A", "zzz"), "{torn", JSON.stringify({ v: 99, key: "t1|A|1", task_id: "t1", prompt_sha256: "x" })].join("\n");
+    expect(staleCellRecords(jsonl, current)).toEqual({ mismatched: [], unstamped: [] });
+  });
+});
+
+// Architecture tasks get 120 min (D2-PROBE: the two big ones need more than
+// the 60-min default); a typo must stop the run, not fall back to 60.
+describe("parseClassTimeouts", () => {
+  it("absent / empty → no overrides", () => {
+    expect(parseClassTimeouts(undefined)).toEqual({ ok: true, minutes: {} });
+    expect(parseClassTimeouts("")).toEqual({ ok: true, minutes: {} });
+  });
+
+  it("parses class=minutes pairs", () => {
+    expect(parseClassTimeouts("architecture=120, debug=90")).toEqual({ ok: true, minutes: { architecture: 120, debug: 90 } });
+  });
+
+  it("rejects unknown classes, zero and malformed entries (fail-closed)", () => {
+    expect(parseClassTimeouts("archtecture=120").ok).toBe(false);
+    expect(parseClassTimeouts("architecture=0").ok).toBe(false);
+    expect(parseClassTimeouts("architecture").ok).toBe(false);
+    expect(parseClassTimeouts("architecture=-5").ok).toBe(false);
   });
 });
