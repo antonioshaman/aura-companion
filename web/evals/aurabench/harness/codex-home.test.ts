@@ -29,6 +29,10 @@
  *     never refilled from a cell or the stash; the signal handler stops the
  *     agent processes BEFORE releasing homes; a failing ledger write in the
  *     poll does not throw.
+ *   - P6/ISO-ARG0: churn under `tmp/arg0/**` (per-process scratch of every
+ *     codex process, incl. prod's app-servers) is recorded as `ambient`, not a
+ *     violation; everything else — `tmp` itself, look-alike siblings, config,
+ *     sessions, memories, state — stays a violation even in the same cell.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -51,6 +55,8 @@ import { join } from "node:path";
 import {
   diffSnapshots,
   guardRealCodexHome,
+  isAmbientCodexPath,
+  splitAmbientCodexDiff,
   prepareIsolatedCodexHome,
   propagateFromSessionHomes,
   propagateRotatedCodexAuth,
@@ -231,6 +237,32 @@ describe("snapshotDir / diffSnapshots", () => {
   });
 });
 
+describe("ambient ~/.codex paths (P6/ISO-ARG0)", () => {
+  it("only tmp/arg0 and its descendants are ambient", () => {
+    expect(isAmbientCodexPath("tmp/arg0")).toBe(true);
+    expect(isAmbientCodexPath("tmp/arg0/codex-arg0tLKEaS/.lock")).toBe(true);
+    // Look-alikes and parents must stay strict: a prefix match without the
+    // path separator would silently whitelist e.g. `tmp/arg0-evil`.
+    expect(isAmbientCodexPath("tmp")).toBe(false);
+    expect(isAmbientCodexPath("tmp/arg0x")).toBe(false);
+    expect(isAmbientCodexPath("tmp/other/arg0")).toBe(false);
+    expect(isAmbientCodexPath("sessions/tmp/arg0")).toBe(false);
+  });
+
+  it("splits a diff into strict and ambient parts", () => {
+    expect(
+      splitAmbientCodexDiff({
+        added: ["tmp/arg0/codex-arg0B", "sessions/s.jsonl"],
+        removed: ["tmp/arg0/codex-arg0A"],
+        modified: ["tmp/arg0", "config.toml"],
+      }),
+    ).toEqual({
+      strict: { added: ["sessions/s.jsonl"], removed: [], modified: ["config.toml"] },
+      ambient: { added: ["tmp/arg0/codex-arg0B"], removed: ["tmp/arg0/codex-arg0A"], modified: ["tmp/arg0"] },
+    });
+  });
+});
+
 describe("guardRealCodexHome", () => {
   const ctx = { artifactDir: "/a" } as AgentContext;
   const done = (isolation: Record<string, unknown>): AgentRun => ({
@@ -286,6 +318,82 @@ describe("guardRealCodexHome", () => {
     )(ctx);
     if (dirty.kind !== "done") throw new Error("expected done");
     expect(dirty.isolation.isolated).toBe(false);
+  });
+
+  // Reproduces the D2-PROBE G/stdio record: while the cell ran, one
+  // codex-arg0* dir appeared and another vanished (another codex process
+  // started/exited), auth.json and everything else untouched.
+  const churnArg0 = () => {
+    rmSync(join(real, "tmp", "arg0", "codex-arg0wJFihq"), { recursive: true });
+    mkdirSync(join(real, "tmp", "arg0", "codex-arg0tLKEaS"));
+    writeFileSync(join(real, "tmp", "arg0", "codex-arg0tLKEaS", ".lock"), "");
+    symlinkSync("/usr/bin/codex", join(real, "tmp", "arg0", "codex-arg0tLKEaS", "apply_patch"));
+    // Make the parent's mtime change visible regardless of fs timestamp granularity.
+    utimesSync(join(real, "tmp", "arg0"), new Date(), new Date(Date.now() + 5000));
+  };
+  const seedArg0 = () => {
+    mkdirSync(join(real, "tmp", "arg0", "codex-arg0wJFihq"), { recursive: true });
+    writeFileSync(join(real, "tmp", "arg0", "codex-arg0wJFihq", ".lock"), "");
+  };
+
+  it("tmp/arg0 churn alone is ambient: isolated verdict kept, churn recorded (P6/ISO-ARG0)", async () => {
+    seedArg0();
+    const r = await guardRealCodexHome(async () => (churnArg0(), done({ isolated: true, violations: [] })), {
+      realCodexDir: real,
+    })(ctx);
+    if (r.kind !== "done") throw new Error("expected done");
+    expect(r.isolation.isolated).toBe(true);
+    expect(r.isolation.violations).toEqual([]);
+    expect(r.isolation.real_codex_home).toMatchObject({
+      unchanged: true,
+      added: [],
+      removed: [],
+      modified: [],
+      ambient: {
+        added: ["tmp/arg0/codex-arg0tLKEaS", "tmp/arg0/codex-arg0tLKEaS/.lock", "tmp/arg0/codex-arg0tLKEaS/apply_patch"],
+        removed: ["tmp/arg0/codex-arg0wJFihq", "tmp/arg0/codex-arg0wJFihq/.lock"],
+        modified: ["tmp/arg0"],
+      },
+    });
+  });
+
+  it("tmp/arg0 churn does not mask a real write in the same cell (P6/ISO-ARG0)", async () => {
+    seedArg0();
+    const runner: AgentRunner = async () => {
+      churnArg0();
+      mkdirSync(join(real, "sessions"));
+      writeFileSync(join(real, "sessions", "rollout.jsonl"), "{}");
+      writeFileSync(join(real, "config.toml"), 'trust_level = "trusted"\n');
+      writeFileSync(join(real, "state_5.sqlite"), "db");
+      return done({ isolated: true, violations: [] });
+    };
+    const r = await guardRealCodexHome(runner, { realCodexDir: real })(ctx);
+    if (r.kind !== "done") throw new Error("expected done");
+    expect(r.isolation.isolated).toBe(false);
+    // The violation names only the strict paths, never the ambient churn.
+    expect(r.isolation.violations).toEqual([
+      "real ~/.codex changed during the cell: sessions, sessions/rollout.jsonl, state_5.sqlite, config.toml",
+    ]);
+    expect(r.isolation.real_codex_home).toMatchObject({ unchanged: false, modified: ["config.toml"] });
+  });
+
+  it("creating tmp/ itself or a look-alike next to arg0 stays a violation (P6/ISO-ARG0)", async () => {
+    const r = await guardRealCodexHome(
+      async () => (mkdirSync(join(real, "tmp", "arg0x"), { recursive: true }), done({ isolated: true, violations: [] })),
+      { realCodexDir: real },
+    )(ctx);
+    if (r.kind !== "done") throw new Error("expected done");
+    expect(r.isolation.isolated).toBe(false);
+    expect(r.isolation.real_codex_home).toMatchObject({ added: ["tmp", "tmp/arg0x"] });
+  });
+
+  it("a limit outcome with only tmp/arg0 churn is not reported as a violation (P6/ISO-ARG0)", async () => {
+    seedArg0();
+    const onLimitViolation = vi.fn();
+    const limit = { kind: "limit" } as unknown as AgentRun;
+    const r = await guardRealCodexHome(async () => (churnArg0(), limit), { realCodexDir: real, onLimitViolation })(ctx);
+    expect(r).toBe(limit);
+    expect(onLimitViolation).not.toHaveBeenCalled();
   });
 
   it("limit outcomes pass through untouched", async () => {
