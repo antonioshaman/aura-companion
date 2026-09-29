@@ -27,7 +27,8 @@
  *    (FIX-D2-1c): its origin is unknown, so it only goes to the stash.
  *  - {@link snapshotDir} / {@link diffSnapshots}: mtime + size + sha256 of every
  *    file of the real `~/.codex` before and after the cell. Any change other
- *    than `auth.json` is an isolation violation.
+ *    than `auth.json` is an isolation violation, except the ambient per-process
+ *    scratch under `tmp/arg0/` ({@link splitAmbientCodexDiff}, P6/ISO-ARG0).
  *  - {@link guardRealCodexHome}: wraps ANY agent runner (naked or Aura) with
  *    that snapshot, so the evidence lands in every cell record.
  *
@@ -143,6 +144,34 @@ export function diffSnapshots(before: DirSnapshot, after: DirSnapshot, allow: re
   diff.removed.sort();
   diff.modified.sort();
   return diff;
+}
+
+/**
+ * Per-process scratch of EVERY codex process on the box (P6/ISO-ARG0): each
+ * `codex` start creates `tmp/arg0/codex-arg0<random>/` (apply_patch and
+ * sandbox helper links + `.lock`) in the real `~/.codex` and removes it on
+ * exit. Prod Companion's own Codex app-servers churn it while a cell runs, so
+ * the D2-PROBE G/stdio cell recorded a violation no bench agent caused.
+ * Changes here are recorded as `ambient`, not as a violation. Only this
+ * subtree: `tmp` itself, `auth.json` siblings, config, sessions, memories and
+ * state stay strict.
+ */
+export const AMBIENT_CODEX_PREFIXES: readonly string[] = ["tmp/arg0"];
+
+export const isAmbientCodexPath = (rel: string, prefixes: readonly string[] = AMBIENT_CODEX_PREFIXES) =>
+  prefixes.some((p) => rel === p || rel.startsWith(`${p}/`));
+
+/** Split a diff into the part that counts (`strict`) and ambient churn. */
+export function splitAmbientCodexDiff(
+  diff: SnapshotDiff,
+  prefixes: readonly string[] = AMBIENT_CODEX_PREFIXES,
+): { strict: SnapshotDiff; ambient: SnapshotDiff } {
+  const part = (keep: boolean): SnapshotDiff => ({
+    added: diff.added.filter((p) => isAmbientCodexPath(p, prefixes) !== keep),
+    removed: diff.removed.filter((p) => isAmbientCodexPath(p, prefixes) !== keep),
+    modified: diff.modified.filter((p) => isAmbientCodexPath(p, prefixes) !== keep),
+  });
+  return { strict: part(true), ambient: part(false) };
 }
 
 const countFiles = (s: DirSnapshot) => [...s.values()].filter((f) => f.sha256 !== "dir").length;
@@ -612,7 +641,8 @@ export interface CodexGuardDeps {
 /**
  * Wrap a runner with a before/after fingerprint of the real `~/.codex`. The
  * result's `isolation.real_codex_home` carries the diff; any change except
- * `auth.json` sets `isolated` to false and adds a violation. Limit outcomes
+ * `auth.json` and ambient `tmp/arg0/**` churn (kept in `ambient`) sets
+ * `isolated` to false and adds a violation. Limit outcomes
  * are compared too; they pass through unchanged (no record is written for
  * them) and a dirty diff goes to `onLimitViolation`.
  */
@@ -621,7 +651,7 @@ export function guardRealCodexHome(runner: AgentRunner, d: CodexGuardDeps): Agen
   return async (ctx): Promise<AgentRun> => {
     const before = snap(d.realCodexDir);
     const run = await runner(ctx);
-    const diff = diffSnapshots(before, snap(d.realCodexDir), [CODEX_AUTH_FILE]);
+    const { strict: diff, ambient } = splitAmbientCodexDiff(diffSnapshots(before, snap(d.realCodexDir), [CODEX_AUTH_FILE]));
     const clean = diffIsEmpty(diff);
     if (run.kind !== "done") {
       if (!clean) d.onLimitViolation?.(diff, ctx);
@@ -640,7 +670,7 @@ export function guardRealCodexHome(runner: AgentRunner, d: CodexGuardDeps): Agen
         // diff; a dirty diff is a violation for every runner.
         ...(clean ? {} : { isolated: false }),
         violations,
-        real_codex_home: { files: countFiles(before), dirs: before.size - countFiles(before), unchanged: clean, ...diff },
+        real_codex_home: { files: countFiles(before), dirs: before.size - countFiles(before), unchanged: clean, ...diff, ambient },
       },
     };
   };
