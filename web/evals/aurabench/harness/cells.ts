@@ -12,7 +12,7 @@
  * Firewall-clean. Never `server/`.
  */
 
-import type { AuraBenchClass } from "../task.js";
+import { isAuraBenchClass, type AuraBenchClass } from "../task.js";
 import type { VariantId } from "./variants.js";
 
 export const CELL_RECORD_VERSION = 1 as const;
@@ -88,6 +88,10 @@ export interface CellRecord {
   isolation: Record<string, unknown>;
   /** Known confounds for this cell (e.g. `~/.codex/AGENTS.md` present). */
   confounds: string[];
+  /** sha256 of the task prompt the agent was given. A record whose sha no
+   *  longer matches the corpus measured a different task and must not be
+   *  reused (see {@link staleCellRecords}). Absent on pre-D2-full records. */
+  prompt_sha256?: string;
   error?: string;
 }
 
@@ -131,4 +135,57 @@ export function completedCellKeys(jsonl: string): Set<string> {
     }
   }
   return done;
+}
+
+export interface StaleCellRecords {
+  /** Records stamped with a prompt sha that differs from the current prompt. */
+  mismatched: { key: string; recorded: string; current: string }[];
+  /** Records of a selected task with no prompt stamp (legacy) — reuse unproven. */
+  unstamped: string[];
+}
+
+/**
+ * Reuse guard: the cell key has no prompt hash, so a rewritten prompt would
+ * silently count an old run as done. Only tasks in `currentSha` are checked
+ * (records of unselected tasks are not this run's business).
+ */
+export function staleCellRecords(jsonl: string, currentSha: ReadonlyMap<string, string>): StaleCellRecords {
+  const out: StaleCellRecords = { mismatched: [], unstamped: [] };
+  for (const line of jsonl.split("\n")) {
+    if (!line.trim()) continue;
+    let v: Partial<CellRecord>;
+    try {
+      v = JSON.parse(line) as Partial<CellRecord>;
+    } catch {
+      continue; // torn line — reruns anyway
+    }
+    if (v.v !== CELL_RECORD_VERSION || typeof v.key !== "string" || typeof v.task_id !== "string") continue;
+    const current = currentSha.get(v.task_id);
+    if (current === undefined) continue;
+    if (typeof v.prompt_sha256 !== "string") out.unstamped.push(v.key);
+    else if (v.prompt_sha256 !== current) out.mismatched.push({ key: v.key, recorded: v.prompt_sha256, current });
+  }
+  return out;
+}
+
+/**
+ * `--timeout-min-class architecture=120,debug=90` → minutes per task class.
+ * Fail-closed: an unknown class or a non-positive / non-numeric value is an
+ * error, never a silently dropped override.
+ */
+export function parseClassTimeouts(
+  spec: string | undefined,
+): { ok: true; minutes: Partial<Record<AuraBenchClass, number>> } | { ok: false; reason: string } {
+  const minutes: Partial<Record<AuraBenchClass, number>> = {};
+  if (spec === undefined || spec.trim() === "") return { ok: true, minutes };
+  for (const part of spec.split(",")) {
+    const m = /^\s*([a-z]+)\s*=\s*(\d+(?:\.\d+)?)\s*$/.exec(part);
+    if (!m) return { ok: false, reason: `bad --timeout-min-class entry "${part}" (want class=minutes)` };
+    const [, cls, min] = m;
+    if (!isAuraBenchClass(cls)) return { ok: false, reason: `unknown task class "${cls}" in --timeout-min-class` };
+    const n = Number(min);
+    if (!(n > 0)) return { ok: false, reason: `--timeout-min-class ${cls} must be > 0 minutes` };
+    minutes[cls] = n;
+  }
+  return { ok: true, minutes };
 }

@@ -9,7 +9,7 @@
  *   bun run eval:aurabench spec-check --tasks <dir> --results <f> [--model opus] [--id <task-id>]
  *   bun run eval:aurabench stability --tasks <dir> --results <f> --wt-root <dir> [--runs 3]
  *   bun run eval:aurabench bench --bench-root <dir> [--variants A,B,…] [--reps 5]
- *     [--task-ids a,b] [--max-cells N] [--state <STATE.json>] [--timeout-min 60]
+ *     [--task-ids a,b] [--max-cells N] [--state <STATE.json>] [--timeout-min 60] [--timeout-min-class architecture=120]
  *     [--claude-model claude-opus-5-5] [--codex-model gpt-5.5]
  *
  * `prs.json` is `gh pr list --state merged --base main --limit 300
@@ -103,7 +103,7 @@ import {
   withCodexAuthWatch,
 } from "./aurabench/harness/codex-home.js";
 import { benchChildEnv, killLiveChildren, niceExec, spawnNice, stopLiveChildren } from "./aurabench/harness/proc.js";
-import type { CellRecord } from "./aurabench/harness/cells.js";
+import { parseClassTimeouts, staleCellRecords, type CellRecord } from "./aurabench/harness/cells.js";
 import {
   CELL_PATH_CONFOUND,
   checkWorktreeRoot,
@@ -259,7 +259,7 @@ function openSocket(url: string, onMessage: (d: string) => void, onClose: () => 
 async function bench(argv: string[], repo: string): Promise<number> {
   const benchRootArg = arg(argv, "bench-root");
   if (!benchRootArg) {
-    console.error("usage: bench --bench-root <dir> [--variants A,B,…] [--reps 5] [--task-ids a,b] [--max-cells N] [--state <STATE.json>] [--timeout-min 60] [--tasks <dir>] [--wt-root <dir outside bench-root and repo>]");
+    console.error("usage: bench --bench-root <dir> [--variants A,B,…] [--reps 5] [--task-ids a,b] [--max-cells N] [--state <STATE.json>] [--timeout-min 60] [--timeout-min-class architecture=120] [--tasks <dir>] [--wt-root <dir outside bench-root and repo>]");
     return 2;
   }
   const benchRoot = resolve(benchRootArg);
@@ -271,6 +271,11 @@ async function bench(argv: string[], repo: string): Promise<number> {
   const reps = Number(arg(argv, "reps") ?? 5);
   const maxCellsArg = arg(argv, "max-cells");
   const timeoutMs = Number(arg(argv, "timeout-min") ?? 60) * 60_000;
+  const classTimeouts = parseClassTimeouts(arg(argv, "timeout-min-class"));
+  if (!classTimeouts.ok) {
+    console.error(`[aurabench] ${classTimeouts.reason}`);
+    return 2;
+  }
   const stateFile = arg(argv, "state");
   // Every variant of a provider runs the SAME pinned model: Companion's own
   // default (claude-sonnet-4-6) differs from the CLI's, and `codex exec
@@ -298,6 +303,15 @@ async function bench(argv: string[], repo: string): Promise<number> {
   }
   const byId = new Map(selected.map((t) => [t.id, t]));
   const resultsFile = join(benchRoot, "results", "cells.jsonl");
+  // Reuse only cells that measured the prompt the corpus has now.
+  const promptSha = new Map(selected.map((t) => [t.id, promptSha256(t.prompt)]));
+  const stale = staleCellRecords(readTextOrNull(resultsFile) ?? "", promptSha);
+  if (stale.mismatched.length) {
+    console.error(`[aurabench] ${stale.mismatched.length} finished cell(s) ran an older prompt — move them out of ${resultsFile} before rerunning: ${stale.mismatched.map((m) => m.key).join(", ")}`);
+    return 2;
+  }
+  if (stale.unstamped.length) console.log(`[aurabench] WARNING: ${stale.unstamped.length} reused cell(s) carry no prompt sha — reuse unverified`);
+  if (Object.keys(classTimeouts.minutes).length) console.log(`[aurabench] per-class timeouts (min): ${JSON.stringify(classTimeouts.minutes)}`);
   for (const d of ["results", "cells", "wt", "baseline"]) mkdirSync(join(benchRoot, d), { recursive: true });
   // Cell checkouts live away from results and the repo (FIX-D2-3); a stale
   // one from an interrupted run is swept (its cell reruns from scratch).
@@ -445,7 +459,8 @@ async function bench(argv: string[], repo: string): Promise<number> {
       variants: variants.ids,
       reps,
       readResults: () => readTextOrNull(resultsFile) ?? "",
-      appendResult: (rec: CellRecord) => appendFileSync(resultsFile, JSON.stringify(rec) + "\n"),
+      appendResult: (rec: CellRecord) =>
+        appendFileSync(resultsFile, JSON.stringify({ ...rec, prompt_sha256: promptSha.get(rec.task_id) }) + "\n"),
       runCell: async (cell) => {
         const task = byId.get(cell.taskId)!;
         const variant = VARIANTS[cell.variant];
@@ -462,7 +477,7 @@ async function bench(argv: string[], repo: string): Promise<number> {
           baseline,
           reportFile: (n) => join(artifactDir, n),
           readText: readTextOrNull,
-          cellTimeoutMs: timeoutMs,
+          cellTimeoutMs: (classTimeouts.minutes[task.aurabench.class] ?? timeoutMs / 60_000) * 60_000,
         });
       },
       memAvailableKb,
