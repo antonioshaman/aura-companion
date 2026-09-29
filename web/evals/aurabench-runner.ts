@@ -38,7 +38,10 @@
  * `<bench-root>/results/cells.jsonl` (idempotent — finished cells are
  * skipped), raw transcripts in `<bench-root>/cells/`. Aura variants start the
  * isolated Companion instance on :3499 on demand. `--state` mirrors progress
- * into `STATE.bench.cells_done/cells_total`.
+ * into `STATE.bench.cells_done/cells_total`. Before every cell `bench` asks the
+ * prod `GET /api/usage-limits` (read-only) and holds while the Claude
+ * subscription is at/over `AURABENCH_WEEKLY_CEILING` (default 75%) weekly or
+ * `AURABENCH_FIVE_HOUR_CEILING` (default 90%) 5-hourly; fail-closed.
  *
  * Child processes run under `nice -n 10` with every `AURA_*` variable unset and
  * a bounded Node heap; before each candidate it waits while MemAvailable is
@@ -69,6 +72,7 @@ import { checkMergeStability, readStabilityVerdicts, stabilityKey } from "./aura
 import { loadAuraBenchTasks } from "./aurabench/loader.js";
 import type { AuraBenchTask } from "./aurabench/task.js";
 import { runAblation } from "./aurabench/harness/driver.js";
+import { fetchUsageGate, usageCeilingsFromEnv } from "./aurabench/harness/usage-ceiling.js";
 import { runCell, computeBaseline, type AgentRunner, type Baseline } from "./aurabench/harness/run-cell.js";
 import { VARIANTS, parseVariantList } from "./aurabench/harness/variants.js";
 import { nakedClaudeRunner, nakedCodexRunner, type NakedDeps } from "./aurabench/harness/naked-agents.js";
@@ -417,6 +421,8 @@ async function bench(argv: string[], repo: string): Promise<number> {
     return map;
   };
 
+  const ceilings = usageCeilingsFromEnv(process.env);
+  console.log(`[aurabench] usage ceilings: seven_day < ${ceilings.weekly}%, five_hour < ${ceilings.fiveHour}%`);
   try {
     const summary = await runAblation({
       taskIds: selected.map((t) => t.id),
@@ -444,6 +450,7 @@ async function bench(argv: string[], repo: string): Promise<number> {
         });
       },
       memAvailableKb,
+      usageGate: () => fetchUsageGate(fetch, ceilings),
       sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
       now: Date.now,
       log: (l) => console.log(l),
