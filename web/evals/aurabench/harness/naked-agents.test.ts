@@ -100,6 +100,17 @@ describe("naked Claude (A)", () => {
     expect(await nakedClaudeRunner(deps({ timedOut: true, code: 143 }).d)(ctx("A"))).toMatchObject({ kind: "done", status: "timeout" });
     const limited = line({ type: "result", subtype: "error_during_execution", is_error: true, result: "Claude AI usage limit reached|1000000600" });
     expect(await nakedClaudeRunner(deps({ stdout: limited, code: 1 }).d)(ctx("A"))).toMatchObject({ kind: "limit", limit: { resetAt: 1_000_000_600_000 } });
+    // P6/FIX-D2-LIMIT: the real pilot-2 frame (subtype "success" + is_error +
+    // api_error_status 429) was recorded as agent_error; it must pause instead.
+    const session = line({ type: "result", subtype: "success", is_error: true, api_error_status: 429, terminal_reason: "api_error", num_turns: 1, total_cost_usd: 0, duration_ms: 620, result: "You've hit your session limit · resets 12:10am (UTC)" });
+    const at2313 = Date.UTC(2026, 8, 28, 23, 13, 34);
+    expect(await nakedClaudeRunner(deps({ stdout: session, code: 1 }, { now: () => at2313 }).d)(ctx("A"))).toMatchObject({
+      kind: "limit",
+      limit: { resetAt: Date.UTC(2026, 8, 29, 0, 10) },
+    });
+    // 429 with wording no regex knows is still a limit (structural evidence).
+    const novel = line({ type: "result", subtype: "success", is_error: true, api_error_status: 429, result: "Slow down, friend" });
+    expect(await nakedClaudeRunner(deps({ stdout: novel, code: 1 }).d)(ctx("A"))).toMatchObject({ kind: "limit" });
     const broken = line({ type: "result", subtype: "error_during_execution", is_error: true, result: "boom" });
     expect(await nakedClaudeRunner(deps({ stdout: broken, code: 1 }).d)(ctx("A"))).toMatchObject({ kind: "done", status: "agent_error", error: "boom" });
   });

@@ -28,7 +28,7 @@
  * Pure (clock passed in). Firewall-clean.
  */
 
-import { ClaudeMetricsAccumulator, detectLimit, type LimitHit } from "./agent-metrics.js";
+import { ClaudeMetricsAccumulator, detectLimit, isLimitResult, type LimitHit } from "./agent-metrics.js";
 import type { AgentMetrics } from "./cells.js";
 
 type Obj = Record<string, unknown>;
@@ -136,7 +136,7 @@ export class AuraSessionTracker {
         const errs = Array.isArray(data.errors) ? data.errors.filter((e) => typeof e === "string").join("\n") : "";
         if (data.is_error === true) {
           this.lastPrimaryError = text || errs || String(data.subtype ?? "error");
-          const hit = detectLimit(`${text}\n${errs}`, now);
+          const hit = detectLimit(`${text}\n${errs}`, now, isLimitResult(data));
           if (hit) this.limit = hit;
         } else {
           this.lastPrimaryError = null;

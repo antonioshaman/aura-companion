@@ -180,6 +180,17 @@ describe("AuraSessionTracker", () => {
     expect(u.metrics()).toMatchObject({ tokens_in: 5, cost_usd: 1 });
   });
 
+  // P6/FIX-D2-LIMIT: variants C/D/E of pilot 2 got this exact result via the
+  // Companion bridge and were recorded as agent_error.
+  it("the real pilot-2 session-limit result (429) is a limit with the UTC reset", () => {
+    const t = new AuraSessionTracker("p", [], 10);
+    t.promptSent(0);
+    const at2313 = Date.UTC(2026, 8, 28, 23, 13, 34);
+    t.onMessage("p", result({ subtype: "success", is_error: true, api_error_status: 429, result: "You've hit your session limit · resets 12:10am (UTC)" }), at2313);
+    expect(t.limit).toMatchObject({ resetAt: Date.UTC(2026, 8, 29, 0, 10) });
+    expect(t.primaryError).toBeNull();
+  });
+
   it("a limit-shaped primary error is a limit; a later success clears it", () => {
     const t = new AuraSessionTracker("p", [], 10);
     t.promptSent(0);

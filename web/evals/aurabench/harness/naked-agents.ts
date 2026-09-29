@@ -122,7 +122,7 @@ export function nakedClaudeRunner(d: NakedDeps): AgentRunner {
     const isolation = { isolated: iso.isolated, violations: iso.violations, ...iso.evidence };
     if (r.timedOut) return { kind: "done", status: "timeout", metrics: s.metrics, isolation, confounds: [] };
     if (s.finishedOk && r.code === 0) return { kind: "done", status: "completed", metrics: s.metrics, isolation, confounds: [] };
-    const limit = detectLimit(`${s.resultText}\n${tail(r.stderr)}`, (d.now ?? Date.now)());
+    const limit = detectLimit(`${s.resultText}\n${tail(r.stderr)}`, (d.now ?? Date.now)(), s.limitResult);
     if (limit) return { kind: "limit", limit };
     return {
       kind: "done",

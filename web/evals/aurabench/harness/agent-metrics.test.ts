@@ -16,7 +16,18 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { codexModelsFromRollouts, detectLimit, limitSleepMs, summarizeClaudeStream, summarizeCodexStream } from "./agent-metrics.js";
+import {
+  codexModelsFromRollouts,
+  detectLimit,
+  isLimitResult,
+  limitSleepMs,
+  parseResetsAt,
+  summarizeClaudeStream,
+  summarizeCodexStream,
+} from "./agent-metrics.js";
+
+// Trimmed verbatim `result` frame from pilot-2 cell resume-hiccup-loses-conversation|A|1.
+const REAL_LIMIT_RESULT = { type: "result", subtype: "success", is_error: true, api_error_status: 429, terminal_reason: "api_error", num_turns: 1, total_cost_usd: 0, duration_ms: 620, result: "You've hit your session limit · resets 12:10am (UTC)" };
 
 const line = (o: unknown) => JSON.stringify(o);
 
@@ -117,6 +128,60 @@ describe("detectLimit / limitSleepMs", () => {
   it("ignores ordinary failures", () => {
     expect(detectLimit("TypeError: x is not a function", now)).toBeNull();
     expect(detectLimit("", now)).toBeNull();
+  });
+  // P6/FIX-D2-LIMIT: the verbatim Claude CLI text from pilot 2 (2026-09-28
+  // ~23:13 UTC). The old regex missed "session limit", so 5 cells were
+  // recorded as agent_error failures instead of pausing until the reset.
+  it("recognises the pilot-2 session-limit text and sleeps until the printed UTC reset", () => {
+    const at2313 = Date.UTC(2026, 8, 28, 23, 13, 34);
+    const hit = detectLimit("You've hit your session limit · resets 12:10am (UTC)", at2313);
+    expect(hit).not.toBeNull();
+    // 12:10am is the NEXT midnight-ish instant, not today's past 00:10.
+    expect(hit!.resetAt).toBe(Date.UTC(2026, 8, 29, 0, 10));
+    expect(limitSleepMs(hit!, at2313)).toBe(Date.UTC(2026, 8, 29, 0, 11) - at2313);
+  });
+  it("recognises other subscription-window wordings (Claude + Codex + Companion)", () => {
+    for (const text of [
+      "You've hit your weekly limit · resets Oct 3, 5pm (UTC)",
+      "5-hour limit reached ∙ resets 3pm",
+      "Opus limit reached",
+      "codex error: usage_limit_exceeded",
+      "Model hit a rate/session limit. Automatic fallback and AFK auto-proceed are paused; send a message manually after the reset.",
+    ]) {
+      expect(detectLimit(text, now), text).not.toBeNull();
+    }
+  });
+  it("structural evidence (429 result) is a limit even with unrecognised wording", () => {
+    expect(detectLimit("Something new from the API", now, true)).toMatchObject({ resetAt: null, message: "Something new from the API" });
+    expect(detectLimit("", now, true)?.message).toContain("429");
+    // Without the structural flag the same text is an ordinary failure.
+    expect(detectLimit("Something new from the API", now)).toBeNull();
+  });
+  it("isLimitResult reads api_error_status 429 / error rate_limit on an error result only", () => {
+    expect(isLimitResult(REAL_LIMIT_RESULT)).toBe(true);
+    expect(isLimitResult({ type: "result", is_error: true, error: "rate_limit" })).toBe(true);
+    expect(isLimitResult({ type: "result", is_error: false, api_error_status: 429 })).toBe(false);
+    expect(isLimitResult({ type: "result", is_error: true, api_error_status: 500 })).toBe(false);
+    expect(isLimitResult(null)).toBe(false);
+  });
+  it("summarizeClaudeStream flags the real limit result", () => {
+    const s = summarizeClaudeStream(JSON.stringify(REAL_LIMIT_RESULT));
+    expect(s.finishedOk).toBe(false);
+    expect(s.limitResult).toBe(true);
+  });
+  it("parseResetsAt: absolute forms, skew tolerance and untrusted zones", () => {
+    const t = Date.UTC(2026, 8, 28, 23, 13);
+    expect(parseResetsAt("resets 5pm", t)).toBe(Date.UTC(2026, 8, 29, 17, 0));
+    expect(parseResetsAt("resets 23:30 (UTC)", t)).toBe(Date.UTC(2026, 8, 28, 23, 30));
+    expect(parseResetsAt("resets Oct 3, 5pm (UTC)", t)).toBe(Date.UTC(2026, 9, 3, 17, 0));
+    expect(parseResetsAt("resets 12pm (GMT)", t)).toBe(Date.UTC(2026, 8, 29, 12, 0));
+    // Printed reset 2 min ago (late read) → that instant, not +24 h.
+    expect(parseResetsAt("resets 11:11pm (UTC)", t)).toBe(Date.UTC(2026, 8, 28, 23, 11));
+    // A non-UTC zone is not guessed: null → default 20-min re-probe.
+    expect(parseResetsAt("resets 5pm (Europe/Berlin)", t)).toBeNull();
+    expect(parseResetsAt("resets 3 things", t)).toBeNull();
+    expect(parseResetsAt("resets 13pm", t)).toBeNull();
+    expect(parseResetsAt("no reset here", t)).toBeNull();
   });
   it("clamps the sleep to [1 min, 6 h] and defaults to 20 min", () => {
     expect(limitSleepMs({ resetAt: null, message: "" }, now)).toBe(20 * 60_000);

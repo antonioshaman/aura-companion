@@ -102,6 +102,8 @@ export interface ClaudeStreamSummary {
   /** A `result` frame arrived and it was not an error. */
   finishedOk: boolean;
   resultText: string;
+  /** The last `result` is a structural limit refusal ({@link isLimitResult}). */
+  limitResult: boolean;
 }
 
 export function summarizeClaudeStream(text: string): ClaudeStreamSummary {
@@ -125,6 +127,7 @@ export function summarizeClaudeStream(text: string): ClaudeStreamSummary {
     hookEvents,
     finishedOk: !!last && last.is_error !== true && last.subtype === "success",
     resultText: typeof last?.result === "string" ? last.result : "",
+    limitResult: isLimitResult(last),
   };
 }
 
@@ -178,8 +181,13 @@ export function codexModelsFromRollouts(rollouts: readonly string[]): string[] {
   return models;
 }
 
+// P6/FIX-D2-LIMIT: pilot 2 recorded 5 cells as agent_error on the Claude CLI
+// text "You've hit your session limit · resets 12:10am (UTC)" — neither
+// "hit your (usage )?limit" nor "limit reached" matched it. Name every
+// subscription window (session / weekly / 5-hour / daily / Opus / usage) and
+// Codex's `usage_limit_exceeded` code.
 const LIMIT_RE =
-  /usage limit|hit your (usage )?limit|limit reached|rate[ _-]?limit(ed)?|quota exceeded|too many requests|\b429\b|overloaded_error/i;
+  /(?:usage|session|weekly|daily|5[- ]hour|opus|sonnet|subscription)(?: usage)? limit|hit your [\w -]{0,20}limit|limit reached|usage_limit_exceeded|rate[ _-]?limit(ed)?|quota exceeded|too many requests|\b429\b|overloaded_error/i;
 
 export interface LimitHit {
   /** Epoch ms when the limit resets, if the message carried one. */
@@ -187,26 +195,78 @@ export interface LimitHit {
   message: string;
 }
 
+/** Structured limit evidence from a Claude `result` frame: the CLI marks a
+ *  subscription/rate refusal with `api_error_status: 429` (and the synthetic
+ *  assistant message with `error: "rate_limit"`), whatever the wording. */
+export function isLimitResult(r: unknown): boolean {
+  if (!isObj(r) || r.is_error !== true) return false;
+  return r.api_error_status === 429 || r.error === "rate_limit" || r.error === "rate_limit_error";
+}
+
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+
+/**
+ * "resets 12:10am (UTC)" / "resets 5pm" / "resets Oct 3, 5pm (UTC)" → the next
+ * such instant after `now`. Only UTC/GMT (or no zone — the CLI prints UTC on
+ * this box) is trusted; any other zone returns null → the caller's default
+ * retry cadence re-probes instead of sleeping on a guessed offset.
+ */
+export function parseResetsAt(text: string, now: number): number | null {
+  const m =
+    /resets\s+(?:at\s+)?(?:([a-z]{3})[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(?:at\s+)?)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s*\(([^)]+)\))?/i.exec(
+      text,
+    );
+  if (!m) return null;
+  const zone = m[6]?.trim().toUpperCase();
+  if (zone && zone !== "UTC" && zone !== "GMT" && zone !== "ETC/UTC") return null;
+  let hour = Number(m[3]);
+  const minute = m[4] ? Number(m[4]) : 0;
+  const ampm = m[5]?.toLowerCase();
+  if (ampm) {
+    if (hour < 1 || hour > 12) return null;
+    hour = (hour % 12) + (ampm === "pm" ? 12 : 0);
+  } else if (!m[4] || hour > 23) return null; // bare "resets 3" is not a time
+  if (minute > 59) return null;
+  const d = new Date(now);
+  if (m[1]) {
+    const month = MONTHS.indexOf(m[1].toLowerCase());
+    if (month < 0) return null;
+    let at = Date.UTC(d.getUTCFullYear(), month, Number(m[2]), hour, minute);
+    if (at <= now - 24 * 3_600_000) at = Date.UTC(d.getUTCFullYear() + 1, month, Number(m[2]), hour, minute);
+    return at;
+  }
+  let at = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), hour, minute);
+  // A reset a few minutes in the past is clock skew / a late read (sleep the
+  // 1-min floor), not tomorrow.
+  if (at <= now - 5 * 60_000) at += 24 * 3_600_000;
+  return at;
+}
+
 /**
  * Detect a usage/rate limit in an agent's terminal message (Claude result
  * text, Codex error text, stderr). Only a limit that ENDED the run matters —
  * callers pass the final error/result text, not the whole transcript (an
  * agent grepping for "rate limit" in the repo must not trigger a pause).
+ * `structural` = the terminal frame itself says limit ({@link isLimitResult}),
+ * so the text only supplies the reset time.
  */
-export function detectLimit(text: string, now: number): LimitHit | null {
-  if (!text || !LIMIT_RE.test(text)) return null;
+export function detectLimit(text: string, now: number, structural = false): LimitHit | null {
+  if (!structural && (!text || !LIMIT_RE.test(text))) return null;
+  const message = (text.trim() || "rate limit (api_error_status 429)").slice(0, 300);
   // Claude legacy form: "Claude AI usage limit reached|1759000000".
   const epoch = /\|(\d{10})\b/.exec(text);
-  if (epoch) return { resetAt: Number(epoch[1]) * 1000, message: text.slice(0, 300) };
+  if (epoch) return { resetAt: Number(epoch[1]) * 1000, message };
+  const resets = parseResetsAt(text, now);
+  if (resets !== null) return { resetAt: resets, message };
   // "try again in 37 minutes" / "in 2 hours".
   const rel = /in (\d+)\s*(second|minute|min|hour|hr)s?\b/i.exec(text);
   if (rel) {
     const n = Number(rel[1]);
     const unit = rel[2]!.toLowerCase();
     const ms = unit.startsWith("s") ? 1000 : unit.startsWith("h") ? 3_600_000 : 60_000;
-    return { resetAt: now + n * ms, message: text.slice(0, 300) };
+    return { resetAt: now + n * ms, message };
   }
-  return { resetAt: null, message: text.slice(0, 300) };
+  return { resetAt: null, message };
 }
 
 /** How long to sleep for a limit: until reset (+1 min slack), clamped to
