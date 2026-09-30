@@ -1,11 +1,11 @@
-# COUNCIL-PANEL-BENCH — which council panel buys the most P1 recall per dollar (harness part 1; results pending)
+# COUNCIL-PANEL-BENCH — which council panel buys the most P1 recall per dollar (harness ready; results pending)
 
 B4 measured the economy dispatch policy only by replaying archived reviews
 (median seats 8 → 4, but 27/49 P1s lost under the assumption that experts are
 independent). The human's decision of 2026-09-29 asks for a live measurement:
 6 historical PRs with known defects × 3 panels = 18 runs of
 `/council-review-aura`. This file describes the offline half (cases, panels,
-scoring). The live runner and the results section come in the next step.
+scoring) and the live runner. The results section comes after the live runs.
 
 ## Cases
 
@@ -71,7 +71,7 @@ Observations from the plan alone (before any run):
 - MINIMAL always seats `dahl`. It has the highest rank on every case because
   this repo's fingerprint matches most of its signals.
 
-## Run protocol (live half, next step)
+## Run protocol (live half)
 
 `web/evals/aurabench/council-panel/prompt.ts` builds the Chair prompt. It
 contains `/council-review-aura` over `git diff <base>..HEAD` and a forced roster
@@ -81,17 +81,67 @@ names only the PR number, the PR's own title and the diff range. A test
 checks that no defect id, summary, fix sha or distinctive keyword leaks into
 the prompt.
 
-Still to build (runner step), following the D2 harness rules:
+The runner (`web/evals/aurabench/council-panel/run.ts`, `eval:council-panel run`)
+follows the D2 harness rules. One run = case × panel × rep:
 
-- a sealed checkout at `head`, so that the later fix commits are not reachable
-  (the same `git archive` approach as `diet-overlay.ts`);
-- a COPY of the council skills and `_council-experts` in the bench HOME, with
-  the port rewritten (as in FIX-D2-2). The live `~/.claude/skills` are never touched;
-- the Claude token handled access-only, as in FIX-D2-CLAUDE-AUTH, and the USAGE-CEILING gate;
-- per run: FINAL-REVIEW.md + expert files copied into the result, plus cost, wall time,
-  number of dispatched subagents (from the stream: the Chair must dispatch
-  exactly the forced seats, otherwise the run is invalid), idempotent by
-  case × panel.
+1. **Sealed checkout** (`sealed.ts`). `base` and `head` are materialised with
+   `git archive` in the main repo and committed into a fresh `git init` as two
+   commits, `base' → head'`. No fetch, no history, so no object of a later fix
+   commit reaches the checkout. Archived council artefacts are removed from
+   BOTH trees: `.council/{review-output,handoffs,implementation-logs,plan-output,reviews,abtest}`
+   and `docs/history`. This matters: the head of #91 carries
+   `.council/review-output/2026-06-04-1826/`, the very review that defines #91's
+   known defects. Smoke on this clone for pr91: 2 commits in the checkout, no
+   `2026-06-04-1826` object, the fix tree of #92 absent; the reviewed diff went
+   from 37 files to 23 (the 14 dropped are review artefacts). The prompt
+   names the sealed base.
+2. `bun install --frozen-lockfile` in `web/` (best effort; a failure is a
+   confound, since reviewers may want to run tests).
+3. **Skill copy in a per-run HOME.** `council-review-aura` and
+   `_council-experts` are copied (dereferenced) from the real
+   `~/.claude/skills`, which is only read. Every `localhost:3456` is rewritten
+   to `127.0.0.1:9` (nothing listens there, so the checkpoint-emit probe fails
+   and the phase is skipped). The skill spells its paths `~/.claude/skills/…`,
+   so both `HOME` and `CLAUDE_CONFIG_DIR` point into the run home. Run-stats
+   and the result cache (`~/.companion/…`) would land there too, never in
+   prod's dataset.
+4. **Chair**: `claude -p` with the pinned model (default `claude-opus-5-5`),
+   `--strict-mcp-config`, `--include-hook-events`, and the bare access token
+   in `CLAUDE_CODE_OAUTH_TOKEN`. The refresh token never leaves
+   `~/.claude/.credentials.json` (P6/FIX-D2-CLAUDE-AUTH).
+5. **Evidence and validity** (`dispatch.ts`). From the Chair's stream-json,
+   every top-level `Agent`/`Task` call is one dispatch. Its seat is read from the
+   prompt: the output path `review-output/<TS>/<seat>.md`, else the catalog
+   path. The seated set must equal the forced set, otherwise the status is
+   `invalid_roster`. The init frame must list `council-review-aura` and no
+   other user skill, no plugin, no MCP server and no hook event; the run home
+   must hold no credentials file afterwards. Otherwise the status is
+   `invalid_isolation`. No FINAL-REVIEW.md gives `no_review`. Only `completed`
+   runs are `valid`.
+6. **Record**: one JSONL line per run in `<bench-root>/council-panel/results.jsonl`.
+   It holds the forced seats, the dispatch check, per-seat expert files, the
+   score (recall, found-as-P1, unmatched-P1 candidates), cost / tokens / turns,
+   wall time, isolation evidence and the prompt sha. Artifacts go to
+   `<bench-root>/council-panel/runs/<case>/<panel>-<rep>/`: prompt, raw
+   transcript, the copied review directory, and the run home.
+
+The loop is idempotent by `case|panel|rep`, and a recorded run of any status
+is not redone. It uses the same gates as the D2 driver: the USAGE-CEILING hold
+(15-min recheck); the Claude token must outlive the run timeout + 10 min;
+a fatal gate (prod OAuth dead) is confirmed 3× and then exits 4. A usage
+limit sleeps until the reset and retries the same run. Memory below 1.5 GB
+waits. Checkouts live under `--wt-root`, outside the bench root and the repo.
+
+Command for the 18 live runs (only after D2-full stage 1, under the same gate):
+
+```bash
+cd web && env $(env | grep -oE '^AURA_[A-Z_]+' | sed 's/^/-u /') NODE_OPTIONS=--max-old-space-size=2560 \
+  bun run eval:council-panel run --bench-root /home/auracomp/aura-diet/bench \
+  --wt-root /home/auracomp/aura-diet/wt-cells --reps 1 --timeout-min 90
+```
+
+Start with `--max-runs 1` and check the first record: `status`, the init-frame
+skills, and `dispatch.seated`.
 
 ## Scoring
 
@@ -117,4 +167,4 @@ scores 0 on pr54.
 
 ## Results
 
-Pending: the live runner and the 18 runs (under the USAGE-CEILING gate).
+Pending: the 18 live runs (under the USAGE-CEILING gate, after D2-full stage 1).
