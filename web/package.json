@@ -56,6 +56,7 @@
     "eval:compare": "bun evals/compare-runner.ts",
     "eval:redteam": "bun evals/redteam-runner.ts",
     "eval:aurabench": "bun evals/aurabench-runner.ts",
+    "eval:council-panel": "bun evals/council-panel-runner.ts",
     "kb:health": "bun scripts/kb-health.ts report",
     "kb:record": "bun scripts/kb-health.ts record",
     "kb:prune": "bun scripts/kb-health.ts prune"
