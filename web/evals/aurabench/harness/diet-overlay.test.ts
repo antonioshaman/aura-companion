@@ -164,6 +164,31 @@ describe("applyDietOverlay — after", () => {
   });
 });
 
+describe("applyDietOverlay — portable tar", () => {
+  // FIX-MAC-TAR: `before` used GNU `tar --transform` for the .learnings rename,
+  // which BSD tar (macOS CI) rejects with a usage dump. GNU tar on Linux hid
+  // the bug, so this pins the argv: the rename is git's job (subtree archive +
+  // --prefix) and every tar call uses only the POSIX `-xf <file> -C <dir>`.
+  it("calls tar with POSIX flags only and still renames the learnings archive", async () => {
+    const tarCalls: string[][] = [];
+    const spy: AsyncExec = (cmd, args, opts) => {
+      if (cmd === "tar") tarCalls.push(args);
+      return exec(cmd, args, opts);
+    };
+    const wt = join(root, "wt-portable");
+    const scratch = join(root, "scratch-portable");
+    mkdirSync(scratch, { recursive: true });
+    expect((await sealedCheckout(exec, repo, wt, taskSha)).code).toBe(0);
+    const r = await applyDietOverlay(spy, repo, wt, scratch, { version: "before", ref: beforeSha, learningsRef: afterSha }, GIT_ID);
+    if (!r.ok) throw new Error(r.error);
+    expect(read(wt, ".learnings/LEARNINGS.md")).toBe("prod learnings");
+    expect(tarCalls.length).toBe(2);
+    for (const args of tarCalls) {
+      expect(args).toEqual(["-xf", expect.stringMatching(/\.tar$/), "-C", wt]);
+    }
+  });
+});
+
 describe("applyDietOverlay — failures", () => {
   it("fails closed when `before` has no learnings source", async () => {
     const { r } = await overlaid({ version: "before", ref: beforeSha });
