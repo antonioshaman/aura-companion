@@ -216,6 +216,28 @@ describe("bench skills point at the bench instance (FIX-D2-2)", () => {
     expect(readFileSync(join(bench.home, ".claude", "skills", "council-plan-aura", "SKILL.md"), "utf8")).not.toMatch(/localhost:3456\b/);
   });
 
+  // P6/FIX-D2-CLAUDE-AUTH: the incident copy lived at <bench>/aura-home/.claude/.credentials.json.
+  it("prepareBenchHome gives the bench HOME no Claude credentials and quarantines an old copy", () => {
+    const real = mkdtempSync(join(tmpdir(), "aurabench-realhome-"));
+    mkdirSync(join(real, ".claude"), { recursive: true });
+    const realCreds = '{"claudeAiOauth":{"accessToken":"at-1","refreshToken":"rt-1","expiresAt":1}}';
+    writeFileSync(join(real, ".claude", ".credentials.json"), realCreds);
+    const bench = benchInstancePaths(mkdtempSync(join(tmpdir(), "aurabench-root-")));
+    // Fresh bench HOME: nothing is copied.
+    expect(prepareBenchHome(bench, real, BENCH_PORT).claudeCredentialsQuarantined).toEqual([]);
+    expect(existsSync(join(bench.home, ".claude", ".credentials.json"))).toBe(false);
+    // A copy left by a pre-fix run is moved out, not refreshed and not deleted.
+    writeFileSync(join(bench.home, ".claude", ".credentials.json"), '{"claudeAiOauth":{"refreshToken":"rt-old"}}');
+    const moved = prepareBenchHome(bench, real, BENCH_PORT).claudeCredentialsQuarantined;
+    expect(moved).toEqual([join(bench.home, ".claude", ".credentials.json")]);
+    expect(existsSync(join(bench.home, ".claude", ".credentials.json"))).toBe(false);
+    const q = readdirSync(bench.claudeQuarantine);
+    expect(q).toHaveLength(1);
+    expect(readFileSync(join(bench.claudeQuarantine, q[0]!), "utf8")).toContain("rt-old");
+    // The real file is never touched.
+    expect(readFileSync(join(real, ".claude", ".credentials.json"), "utf8")).toBe(realCreds);
+  });
+
   it("retireStaleSessions moves an interrupted run's sessions out of the bench HOME", () => {
     const paths = benchInstancePaths(mkdtempSync(join(tmpdir(), "aurabench-root-")));
     const store = join(paths.home, ".companion", "sessions");

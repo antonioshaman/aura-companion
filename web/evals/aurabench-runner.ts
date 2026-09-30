@@ -59,7 +59,7 @@
 
 import { spawnSync } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { minePrs, type Candidate, type ChangedFile, type MergedPr } from "./aurabench/mine.js";
 import { completedPrs, validateCandidate, type Exec } from "./aurabench/validate.js";
 import { checkPrompt, computeSurface } from "./aurabench/leak.js";
@@ -89,6 +89,7 @@ import { loadAuraBenchTasks } from "./aurabench/loader.js";
 import type { AuraBenchTask } from "./aurabench/task.js";
 import { runAblation } from "./aurabench/harness/driver.js";
 import { fetchUsageGate, usageCeilingsFromEnv } from "./aurabench/harness/usage-ceiling.js";
+import { claudeTokenGate, quarantineClaudeCredentialCopies, readClaudeAccessToken } from "./aurabench/harness/claude-auth.js";
 import { runCell, computeBaseline, type AgentRunner, type Baseline } from "./aurabench/harness/run-cell.js";
 import { VARIANTS, parseVariantList } from "./aurabench/harness/variants.js";
 import { nakedClaudeRunner, nakedCodexRunner, type NakedDeps } from "./aurabench/harness/naked-agents.js";
@@ -111,7 +112,7 @@ import {
   sweepStaleCellWorktrees,
   withCleanClaudeProject,
 } from "./aurabench/harness/cell-paths.js";
-import { chmodSync, copyFileSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 
 const MIN_AVAILABLE_KB = 1.5 * 1024 * 1024;
@@ -217,6 +218,16 @@ function presentNonEmpty(path: string): boolean {
   }
 }
 
+/** A confirmed fatal auth gate stops the run; the human queue gets the why. */
+function appendAuthStopAsk(askFile: string, reason: string): void {
+  appendFileSync(
+    askFile,
+    `\n## AuraBench остановлен: прод-OAuth Claude недоступен (${new Date().toISOString()}, раннер D2)\n\n` +
+      `Раннер остановился (exit 4), а не ждёт молча: ${reason}. Проверить \`~/.claude/.credentials.json\` и прод-\`GET /api/usage-limits\`; ` +
+      `после восстановления логина перезапустить runner_cmd (ячейки идемпотентны).\n`,
+  );
+}
+
 /** Mirror progress into STATE.bench (only those two fields + updated_at), atomically. */
 function writeBenchProgress(stateFile: string, done: number, total: number): void {
   const text = readTextOrNull(stateFile);
@@ -229,7 +240,7 @@ function writeBenchProgress(stateFile: string, done: number, total: number): voi
   renameSync(tmp, stateFile);
 }
 
-async function http(baseUrl: string, method: "GET" | "POST" | "DELETE", path: string, body?: unknown) {
+async function http(baseUrl: string, method: "GET" | "POST" | "PUT" | "DELETE", path: string, body?: unknown) {
   const r = await fetch(`${baseUrl}${path}`, {
     method,
     headers: body === undefined ? {} : { "content-type": "application/json" },
@@ -327,6 +338,18 @@ async function bench(argv: string[], repo: string): Promise<number> {
 
   const realHome = homedir();
   const realCodexDir = join(realHome, ".codex");
+  const realClaudeDir = join(realHome, ".claude");
+  // P6/FIX-D2-CLAUDE-AUTH: no bench process may hold a refresh token of
+  // prod's Claude login. Copies left by older runs (bench HOME, A cells) are
+  // moved to quarantine — never written back, never deleted.
+  const claudeQuarantine = benchInstancePaths(benchRoot).claudeQuarantine;
+  const quarantined = quarantineClaudeCredentialCopies([benchRoot], claudeQuarantine);
+  if (quarantined.length) console.log(`[aurabench] quarantined ${quarantined.length} Claude credentials cop(ies) → ${claudeQuarantine}`);
+  const claudeAccessToken = () => {
+    const r = readClaudeAccessToken(realClaudeDir);
+    if (!r.ok) throw new Error(`no prod Claude access token: ${r.reason}`);
+    return r.accessToken;
+  };
   // Rotated Codex tokens go back to the real auth.json while the cell runs,
   // on a signal and after an exception; a killed run is recovered here.
   const authKeeper = new CodexAuthKeeper({
@@ -345,8 +368,9 @@ async function bench(argv: string[], repo: string): Promise<number> {
   const nakedDeps: NakedDeps = {
     spawn: spawnNice,
     env: (extra) => benchChildEnv(process.env, extra),
-    realClaudeDir: join(realHome, ".claude"),
+    realClaudeDir,
     realCodexDir,
+    claudeAccessToken,
     watchCodexHome: (home, sha) => authKeeper.watch(home, "home", sha),
     finishCodexHome: (home) => authKeeper.release(home)[CODEX_AUTH_FILE] ?? "no_auth",
     projectSkillNames: () => {
@@ -367,11 +391,9 @@ async function bench(argv: string[], repo: string): Promise<number> {
         return [];
       }
     },
-    prepareClaudeConfig: (dir, credentialsFrom) => {
+    prepareClaudeConfig: (dir) => {
       rmSync(dir, { recursive: true, force: true });
       mkdirSync(dir, { recursive: true, mode: 0o700 });
-      copyFileSync(credentialsFrom, join(dir, ".credentials.json"));
-      chmodSync(join(dir, ".credentials.json"), 0o600);
     },
     present: presentNonEmpty,
     claudeModel: models.claude,
@@ -414,6 +436,10 @@ async function bench(argv: string[], repo: string): Promise<number> {
     aura: guard(withCleanClaudeProject(withCodexAuthWatch(async (ctx) => {
       if (!instance) instance = await startBenchInstance({ webDir: join(repo, "web"), benchRoot, realHome });
       const inst = instance;
+      // Claude sessions of the instance get the bare access token through the
+      // setting the server injects as CLAUDE_CODE_OAUTH_TOKEN (create and relaunch).
+      const set = await http(inst.baseUrl, "PUT", "/api/settings", { claudeCodeOAuthToken: claudeAccessToken() });
+      if (set.status !== 200) throw new Error(`bench instance rejected the Claude token setting (HTTP ${set.status})`);
       return auraRunner({
         baseUrl: inst.baseUrl,
         http: (m, p, b) => http(inst.baseUrl, m, p, b),
@@ -481,7 +507,15 @@ async function bench(argv: string[], repo: string): Promise<number> {
         });
       },
       memAvailableKb,
-      usageGate: () => fetchUsageGate(fetch, ceilings),
+      usageGate: async (cell) => {
+        const g = await fetchUsageGate(fetch, ceilings);
+        if (!g.ok || cell.variant === "B") return g;
+        // Every Claude-driven cell must finish on the access token it starts with.
+        const task = byId.get(cell.taskId)!;
+        const needMs = (classTimeouts.minutes[task.aurabench.class] ?? timeoutMs / 60_000) * 60_000;
+        const t = claudeTokenGate(readClaudeAccessToken(realClaudeDir), needMs, Date.now());
+        return t.ok ? g : { ok: false, fatal: t.fatal, reason: t.reason, sevenDay: g.sevenDay, fiveHour: g.fiveHour, resetsAt: null };
+      },
       sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
       now: Date.now,
       log: (l) => console.log(l),
@@ -489,8 +523,14 @@ async function bench(argv: string[], repo: string): Promise<number> {
       maxCells: maxCellsArg === undefined ? undefined : Number(maxCellsArg),
     });
     console.log(`[aurabench] ${JSON.stringify(summary)}`);
+    if (summary.stoppedOnAuth) {
+      if (stateFile) appendAuthStopAsk(join(dirname(resolve(stateFile)), "ASK-FIRST.md"), summary.stoppedOnAuth);
+      return 4;
+    }
     return summary.stoppedOnLimit ? 3 : 0;
   } finally {
+    // Best effort: the bench HOME keeps no access token after the run.
+    if (instance) await http((instance as RunningInstance).baseUrl, "PUT", "/api/settings", { claudeCodeOAuthToken: "" }).catch(() => undefined);
     authKeeper.syncAll();
     await stopInstance();
     authKeeper.stop();

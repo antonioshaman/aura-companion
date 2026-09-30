@@ -1,9 +1,13 @@
 /**
  * Naked agent runners (variants A and B, P6/D2).
  *
- * A — `claude -p` with a FRESH per-cell `CLAUDE_CONFIG_DIR` holding only a
- *     copy of `.credentials.json` (no settings, hooks, skills, plugins,
- *     memory, CLAUDE.md). `--strict-mcp-config` drops account MCP connectors,
+ * A — `claude -p` with a FRESH, EMPTY per-cell `CLAUDE_CONFIG_DIR` (no
+ *     settings, hooks, skills, plugins, memory, CLAUDE.md — and no
+ *     `.credentials.json`: P6/FIX-D2-CLAUDE-AUTH, a copied refresh token
+ *     rotated prod out of its login). Auth is the bare access token in
+ *     `CLAUDE_CODE_OAUTH_TOKEN` (see `claude-auth.ts`); the cell records that
+ *     its config dir still holds no credentials file afterwards.
+ *     `--strict-mcp-config` drops account MCP connectors,
  *     `--include-hook-events` makes any hook visible, and the init frame is
  *     checked by {@link checkNakedClaudeIsolation}.
  * B — `codex exec --json --ignore-user-config` with a FRESH
@@ -27,6 +31,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { codexModelsFromRollouts, detectLimit, summarizeClaudeStream, summarizeCodexStream } from "./agent-metrics.js";
 import { checkNakedClaudeIsolation } from "./isolation.js";
+import { CLAUDE_TOKEN_ENV, claudeCredentialCopyEvidence } from "./claude-auth.js";
 import { prepareIsolatedCodexHome, propagateRotatedCodexAuth, realAuthSha } from "./codex-home.js";
 import type { AgentContext, AgentRun, AgentRunner } from "./run-cell.js";
 import type { SpawnOptions, SpawnResult } from "./proc.js";
@@ -36,7 +41,7 @@ export type Spawner = (cmd: string, args: string[], o: SpawnOptions) => Promise<
 export interface NakedDeps {
   spawn: Spawner;
   env: (extra: Record<string, string>) => Record<string, string>;
-  /** The real `~/.claude` (credentials source; isolation reference). */
+  /** The real `~/.claude` (isolation reference; never copied from). */
   realClaudeDir: string;
   /** The real `~/.codex` (auth source; written only to propagate a rotated token). */
   realCodexDir: string;
@@ -44,8 +49,12 @@ export interface NakedDeps {
   userSkillNames: () => string[];
   /** Skills the Aura repo ships (`.claude/skills`, `.agents/skills`) — must never reach a naked cell. */
   projectSkillNames?: () => string[];
-  /** Create a fresh config dir with only the credentials copied (mode 0600). */
-  prepareClaudeConfig: (dir: string, credentialsFrom: string) => void;
+  /** Create a fresh, EMPTY config dir (mode 0700) — no credentials file. */
+  prepareClaudeConfig: (dir: string) => void;
+  /** The current prod access token (never a refresh token); throws when none. */
+  claudeAccessToken: () => string;
+  /** Credentials files present in these dirs (default {@link claudeCredentialCopyEvidence}). */
+  credentialCopies?: (dirs: string[]) => string[];
   /** Non-empty directory / existing file probe. */
   present: (path: string) => boolean;
   /** Fresh per-cell Codex home (default {@link prepareIsolatedCodexHome}). */
@@ -103,11 +112,11 @@ export function codexNakedArgs(prompt: string, worktree: string, model?: string)
 export function nakedClaudeRunner(d: NakedDeps): AgentRunner {
   return async (ctx: AgentContext): Promise<AgentRun> => {
     const configDir = join(ctx.artifactDir, "claude-config");
-    d.prepareClaudeConfig(configDir, join(d.realClaudeDir, ".credentials.json"));
+    d.prepareClaudeConfig(configDir);
     const r = await d.spawn(d.claudeBin ?? "claude", claudeNakedArgs(ctx.task.prompt, d.claudeModel), {
       cwd: ctx.worktree,
       timeoutMs: ctx.timeoutMs,
-      env: d.env({ CLAUDE_CONFIG_DIR: configDir }),
+      env: d.env({ CLAUDE_CONFIG_DIR: configDir, [CLAUDE_TOKEN_ENV]: d.claudeAccessToken() }),
       stdoutFile: join(ctx.artifactDir, "agent.jsonl"),
       stderrFile: join(ctx.artifactDir, "agent.stderr"),
     });
@@ -119,7 +128,15 @@ export function nakedClaudeRunner(d: NakedDeps): AgentRunner {
       cwd: ctx.worktree,
       hookEvents: s.hookEvents,
     });
-    const isolation = { isolated: iso.isolated, violations: iso.violations, ...iso.evidence };
+    const copies = (d.credentialCopies ?? ((dirs) => claudeCredentialCopyEvidence(dirs).credential_copies))([configDir]);
+    const violations = [...iso.violations, ...copies.map((c) => `Claude credentials file in the cell config: ${c}`)];
+    const isolation = {
+      isolated: iso.isolated && copies.length === 0,
+      violations,
+      ...iso.evidence,
+      claude_auth: `${CLAUDE_TOKEN_ENV} access token only (no refresh token)`,
+      credential_copies: copies,
+    };
     if (r.timedOut) return { kind: "done", status: "timeout", metrics: s.metrics, isolation, confounds: [] };
     if (s.finishedOk && r.code === 0) return { kind: "done", status: "completed", metrics: s.metrics, isolation, confounds: [] };
     const limit = detectLimit(`${s.resultText}\n${tail(r.stderr)}`, (d.now ?? Date.now)(), s.limitResult);
