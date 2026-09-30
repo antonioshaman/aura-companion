@@ -98,6 +98,16 @@ PY
     log "bench runner exit=$?"
   fi
 
+  # While a bench run (pilot or full) is executing there is nothing for the
+  # executor to do but poll — every such iteration burns a model call. Wait
+  # for the runner instead and hand control back once it exits.
+  if pgrep -f '^bun (run eval:aurabench|evals/aurabench-runner\.ts) bench' >/dev/null; then
+    [ "${bench_wait_logged:-0}" = 1 ] || { log "bench runner active — pausing iterations until it exits"; bench_wait_logged=1; }
+    sleep 300
+    continue
+  fi
+  bench_wait_logged=0
+
   iter=$((iter+1))
   before=$(sha256sum "$STATE" | cut -d' ' -f1)
   out="$LOGS/iter-$(printf %04d $iter)-$(date +%Y%m%dT%H%M%S).jsonl"
@@ -112,8 +122,23 @@ PY
   log "iteration $iter exit=$rc"
 
   # Usage / rate limit → sleep until reset (epoch in "limit reached|<epoch>" if present), else 30 min.
-  if tail -c 4000 "$out" | grep -qiE 'usage limit|rate.?limit|limit reached|overloaded|429'; then
+  # Only a failed result counts as a limit hit: every healthy stream also carries
+  # informational `rate_limit_event` frames ({"status":"allowed"}), which used to
+  # trip this check and park a successful iteration for 30 min.
+  last_result=$(grep '"type":"result"' "$out" | tail -1)
+  if { [ -n "$last_result" ] && echo "$last_result" | grep -q '"is_error":true' \
+       && echo "$last_result" | grep -qiE 'rate_limit|usage limit|limit reached|overloaded|"api_error_status":(429|529)'; } \
+     || { [ -z "$last_result" ] && tail -c 4000 "$out" | grep -qiE 'usage limit|limit reached|overloaded|"api_error_status":(429|529)'; }; then
     reset=$(grep -oE 'limit reached\|[0-9]{10}' "$out" | tail -1 | cut -d'|' -f2)
+    # Newer CLIs say "resets 2:10pm (UTC)" instead of an epoch.
+    if [ -z "${reset:-}" ]; then
+      hm=$(grep -oE 'resets [0-9]{1,2}(:[0-9]{2})?(am|pm) \(UTC\)' "$out" | tail -1 | sed -E 's/resets ([^ ]+) .*/\1/')
+      if [ -n "$hm" ]; then
+        reset=$(date -u -d "$hm" +%s 2>/dev/null || true)
+        # A time already past today means tomorrow.
+        [ -n "$reset" ] && [ "$reset" -le "$(date +%s)" ] && reset=$((reset + 86400))
+      fi
+    fi
     now=$(date +%s)
     if [ -n "${reset:-}" ] && [ "$reset" -gt "$now" ]; then wait_s=$((reset-now+120)); else wait_s=1800; fi
     log "limit hit, sleeping ${wait_s}s"
