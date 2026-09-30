@@ -3278,9 +3278,11 @@ function CouncilModeSection() {
           <UpdateAvailableBanner onUpdate={() => {}} onDismiss={() => {}} />
         </Card>
 
-        {/* PLAN T12 (Phase G) - per-variant CliFailedBanner mocks. Five
+        {/* PLAN T12 (Phase G) - per-variant CliFailedBanner mocks. The
             cards mirror the closed CliFailedReason union; each carries
-            human-readable copy + drainedCount + (when present) SHA. */}
+            human-readable copy + drainedCount + (when present) SHA.
+            relaunch_exhausted / backend_dead also get the in-place
+            Relaunch action (P4/FIX-RECONNECT-RELAUNCH). */}
         <Card label="CliFailedBanner — relaunch_exhausted (retry budget spent)">
           <CliFailedBanner
             failure={{
@@ -3291,6 +3293,7 @@ function CouncilModeSection() {
               lastErrorSha256: "d4f5e8a912c0f1234567890abcdef1234567890abcdef1234567890abcdef1234",
             }}
             onStartNewSession={() => { /* noop */ }}
+            onRelaunch={() => { /* noop */ }}
           />
         </Card>
         <Card label="CliFailedBanner — container_missing (Docker container deleted)">
@@ -3315,6 +3318,29 @@ function CouncilModeSection() {
           <CliFailedBanner
             failure={{ reason: "browser_closed_no_reconnect", drainedCount: 5, subprocessAlive: true, firedAt: Date.now() - 60_000 }}
             onStartNewSession={() => { /* noop */ }}
+          />
+        </Card>
+        <Card label="CliFailedBanner — backend_dead (agent down past grace, Relaunch primary)">
+          <CliFailedBanner
+            failure={{ reason: "backend_dead", drainedCount: 1, subprocessAlive: false, firedAt: Date.now() - 60_000 }}
+            onStartNewSession={() => { /* noop */ }}
+            onRelaunch={() => { /* noop */ }}
+          />
+        </Card>
+        <Card label="CliFailedBanner — backend_dead (relaunch in flight)">
+          <CliFailedBanner
+            failure={{ reason: "backend_dead", drainedCount: 1, subprocessAlive: false, firedAt: Date.now() - 60_000 }}
+            onStartNewSession={() => { /* noop */ }}
+            onRelaunch={() => { /* noop */ }}
+            relaunching
+          />
+        </Card>
+        <Card label="CliFailedBanner — backend_dead (relaunch failed)">
+          <CliFailedBanner
+            failure={{ reason: "backend_dead", drainedCount: 2, subprocessAlive: false, firedAt: Date.now() - 60_000 }}
+            onStartNewSession={() => { /* noop */ }}
+            onRelaunch={() => { /* noop */ }}
+            relaunchError="Session not found"
           />
         </Card>
 

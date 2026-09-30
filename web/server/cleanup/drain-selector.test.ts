@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { selectDrainTargets, shouldSuppressDrain } from "./drain-selector.js";
+import { countUserQueuedMessages, selectDrainTargets, shouldSuppressDrain } from "./drain-selector.js";
 import type { Session } from "../ws-bridge-types.js";
 import { makeDefaultState } from "../ws-bridge-types.js";
 import { SessionStateMachine } from "../session-state-machine.js";
@@ -102,5 +102,35 @@ describe("shouldSuppressDrain — Story 2 AC suppression rule", () => {
     "binary_missing" as const,
   ])("fires %s even with drainedCount === 0 (always-fire)", (reason) => {
     expect(shouldSuppressDrain(reason, 0)).toBe(false);
+  });
+});
+
+describe("service frames are not the user's queued messages (P4/FIX-RECONNECT-RELAUNCH)", () => {
+  // Prod 2026-09-29: two `mcp_get_status` polls the browser sent on tab open
+  // were counted as "2 queued" and produced "You closed this tab too long"
+  // for a user who had typed nothing.
+  const poll = JSON.stringify({ type: "mcp_get_status" });
+  const typed = JSON.stringify({ type: "user_message", content: "hi" });
+
+  it("countUserQueuedMessages skips mcp_get_status and counts everything else", () => {
+    expect(countUserQueuedMessages([poll, poll])).toBe(0);
+    expect(countUserQueuedMessages([poll, typed, poll])).toBe(1);
+    expect(countUserQueuedMessages([JSON.stringify({ type: "mcp_toggle", serverName: "x", enabled: true })])).toBe(1);
+  });
+
+  it("counts unparseable / typeless entries as the user's (never hide a lost message)", () => {
+    expect(countUserQueuedMessages(["not json", "null", JSON.stringify({ content: "x" })])).toBe(3);
+  });
+
+  it("frame.drainedCount reports user messages while pendingCount stays the full queue length", () => {
+    const session = makeSession({ pendingMessages: [poll, typed, poll] });
+    const sel = selectDrainTargets(session, "backend_dead", 1, 0);
+    expect(sel.frame.drainedCount).toBe(1);
+    expect(sel.pendingCount).toBe(3);
+  });
+
+  it("backend_dead follows the browser-close suppression rule", () => {
+    expect(shouldSuppressDrain("backend_dead", 0)).toBe(true);
+    expect(shouldSuppressDrain("backend_dead", 1)).toBe(false);
   });
 });
