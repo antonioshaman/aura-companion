@@ -2405,10 +2405,13 @@ describe("SessionOrchestrator", () => {
 
     it("skips relaunch when session state is 'connected' after grace", async () => {
       // If the session reconnects (state=connected) during grace, skip relaunch.
+      // A reconnected session has its backend adapter attached again; without
+      // one, `connected` is the deaf case below (P4/FIX-RECONNECT-RELAUNCH).
       deps.launcher.getSession
         .mockReturnValueOnce({ archived: false } as any) // check archived
         .mockReturnValueOnce({ state: "connected" } as any); // after grace
       deps.wsBridge.isCliConnected.mockReturnValue(false);
+      vi.mocked(deps.wsBridge.getSession).mockReturnValue({ backendAdapter: {} } as any);
       orchestrator.initialize();
 
       companionBus.emit("session:relaunch-needed", { sessionId: "s1" });
@@ -2416,6 +2419,25 @@ describe("SessionOrchestrator", () => {
       await vi.advanceTimersByTimeAsync(0);
 
       expect(deps.launcher.relaunch).not.toHaveBeenCalled();
+    });
+
+    it("relaunches a 'connected' session whose backend adapter is gone (P4/FIX-RECONNECT-RELAUNCH)", async () => {
+      // Prod 2026-09-29/30: a Codex app-server's WS to the bridge dropped; the
+      // process lived on, the launcher kept `connected`, the adapter was null.
+      // Every returning browser emitted relaunch-needed and nothing happened
+      // until a manual POST /relaunch. The bus path must now relaunch.
+      deps.launcher.getSession
+        .mockReturnValueOnce({ archived: false } as any) // check archived
+        .mockReturnValueOnce({ state: "connected", pid: process.pid } as any); // after grace
+      deps.wsBridge.isCliConnected.mockReturnValue(false);
+      vi.mocked(deps.wsBridge.getSession).mockReturnValue({ backendAdapter: null } as any);
+      orchestrator.initialize();
+
+      companionBus.emit("session:relaunch-needed", { sessionId: "s1" });
+      await vi.advanceTimersByTimeAsync(15_000);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(deps.launcher.relaunch).toHaveBeenCalledWith("s1");
     });
 
     it("skips relaunch when a still-starting session's PID is alive AND its backend adapter is attached", async () => {

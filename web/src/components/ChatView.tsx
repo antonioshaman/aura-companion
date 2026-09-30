@@ -260,7 +260,13 @@ export function ChatView({ sessionId }: { sessionId: string }) {
         </div>
       ) : cliFailure ? (
         <div id={`cli-failed-banner-${sessionId}`} className="shrink-0 border-t border-cc-border bg-cc-card">
-          <CliFailedBanner failure={cliFailure} onStartNewSession={handleCliFailedStartNew} />
+          <CliFailedBanner
+            failure={cliFailure}
+            onStartNewSession={handleCliFailedStartNew}
+            onRelaunch={handleReconnect}
+            relaunching={cliReconnecting}
+            relaunchError={reconnectError}
+          />
         </div>
       ) : topBlocker ? (
         <div className="shrink-0 border-t border-cc-border bg-cc-card">

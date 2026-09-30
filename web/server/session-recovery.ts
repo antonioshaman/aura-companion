@@ -528,7 +528,20 @@ export class SessionRecovery {
     this.relaunchingSet.add(sessionId);
 
     await new Promise((r) => setTimeout(r, RELAUNCH_GRACE_MS));
-    if (this.wsBridge.isCliConnected(sessionId)) { this.relaunchingSet.delete(sessionId); return; }
+    // P4/FIX-RECONNECT-RELAUNCH: every "alive, not relaunching" exit below is
+    // logged (EC-9) — a silent return here is how a deaf observer sat dead for
+    // 12 h while each returning browser logged "requesting relaunch".
+    const skipAlive = (reason: string, extra: Record<string, unknown> = {}) => {
+      log.info("orchestrator", "auto-relaunch skipped: backend considered alive", {
+        event: "session.relaunch.skipped_alive",
+        sessionId,
+        role: info?.sessionGroupRole,
+        reason,
+        ...extra,
+      });
+      this.relaunchingSet.delete(sessionId);
+    };
+    if (this.wsBridge.isCliConnected(sessionId)) { skipAlive("cli_connected"); return; }
     // P4/FIX-AUTOHEAL-1: another path (manual, observer auto-heal, boot
     // watchdog) is relaunching this session or just did — a fresh CLI sits in
     // `starting` with no adapter for up to ~16 s (Codex), which the deaf
@@ -544,9 +557,6 @@ export class SessionRecovery {
       return;
     }
     const freshInfo = this.launcher.getSession(sessionId);
-    if (freshInfo && (freshInfo.state === "connected" || freshInfo.state === "running")) {
-      this.relaunchingSet.delete(sessionId); return;
-    }
     // Only check PID liveness if the session is NOT already "exited".
     // After idle-kill or explicit kill(), the PID field stays set but the
     // process is dead. If the kernel recycles the PID to a different process,
@@ -564,15 +574,25 @@ export class SessionRecovery {
     // adapter still being attached: a live PID with a dead adapter must
     // relaunch (with `--resume`) instead of masquerading as alive.
     const adapterAttached = this.wsBridge.getSession(sessionId)?.backendAdapter != null;
+    // P4/FIX-RECONNECT-RELAUNCH (prod 2026-09-29/30): the same holds for the
+    // launcher's `connected`/`running` state. When a Codex app-server's WS to
+    // the bridge drops, the adapter is nulled but the process lives on and the
+    // launcher still says `connected` — this check used to return here,
+    // silently, on every returning browser. Only an attached adapter makes
+    // that state believable.
+    if (freshInfo && (freshInfo.state === "connected" || freshInfo.state === "running") && adapterAttached) {
+      skipAlive("launcher_state", { state: freshInfo.state });
+      return;
+    }
     if (freshInfo && freshInfo.state !== "exited") {
       if (freshInfo.containerId) {
         const containerState = containerManager.isContainerAlive(freshInfo.containerId);
         if (containerState === "running") {
-          this.relaunchingSet.delete(sessionId);
+          skipAlive("container_running", { adapterAttached });
           return;
         }
       } else if (freshInfo.pid && adapterAttached) {
-        try { process.kill(freshInfo.pid, 0); this.relaunchingSet.delete(sessionId); return; } catch {}
+        try { process.kill(freshInfo.pid, 0); skipAlive("pid_alive"); return; } catch {}
       }
     }
 
@@ -648,7 +668,7 @@ export class SessionRecovery {
         setTimeout(() => this.relaunchingSet.delete(sessionId), RELAUNCH_COOLDOWN_MS);
       }
     } else {
-      this.relaunchingSet.delete(sessionId);
+      skipAlive(freshInfo ? "starting" : "unknown_session");
     }
   }
 

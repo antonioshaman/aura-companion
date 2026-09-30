@@ -26,6 +26,8 @@ const ALL_REASONS: readonly CliFailedReason[] = [
   "container_stopped",
   "binary_missing",
   "browser_closed_no_reconnect",
+  // P4/FIX-RECONNECT-RELAUNCH
+  "backend_dead",
 ];
 
 function failure(overrides: Partial<CliFailure> = {}): CliFailure {
@@ -170,5 +172,61 @@ describe("CliFailedBanner — render + a11y", () => {
     // regression this canary catches.
     expect(body.className).toMatch(/whitespace-pre-wrap/);
     expect(body.className).toMatch(/break-words/);
+  });
+});
+
+describe("CliFailedBanner — Relaunch action (P4/FIX-RECONNECT-RELAUNCH)", () => {
+  // The prod banner offered only "Start a new session" for a session whose
+  // agent had merely dropped its connection; a relaunch was the real fix.
+  it("renders Relaunch as the focused primary action for backend_dead and calls onRelaunch", () => {
+    const onRelaunch = vi.fn();
+    const onStart = vi.fn();
+    render(<CliFailedBanner failure={failure({ reason: "backend_dead", drainedCount: 1 })} onStartNewSession={onStart} onRelaunch={onRelaunch} />);
+    const relaunch = screen.getByTestId("cli-failed-relaunch-action");
+    expect(relaunch).toHaveTextContent("Relaunch agent");
+    expect(relaunch).toHaveFocus();
+    expect(relaunch).toHaveAttribute("data-cli-failed-primary");
+    expect(screen.getByTestId("cli-failed-primary-action")).not.toHaveAttribute("data-cli-failed-primary");
+    fireEvent.click(relaunch);
+    expect(onRelaunch).toHaveBeenCalledTimes(1);
+    expect(onStart).not.toHaveBeenCalled();
+    // The fresh-session fallback stays available.
+    fireEvent.click(screen.getByTestId("cli-failed-primary-action"));
+    expect(onStart).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows progress and blocks double-clicks while relaunching", () => {
+    const onRelaunch = vi.fn();
+    render(<CliFailedBanner failure={failure({ reason: "backend_dead" })} onStartNewSession={() => {}} onRelaunch={onRelaunch} relaunching />);
+    const relaunch = screen.getByTestId("cli-failed-relaunch-action");
+    expect(relaunch).toBeDisabled();
+    expect(relaunch).toHaveAttribute("aria-busy", "true");
+    expect(relaunch).toHaveTextContent("Relaunching…");
+    fireEvent.click(relaunch);
+    expect(onRelaunch).not.toHaveBeenCalled();
+  });
+
+  it("shows the relaunch error", () => {
+    render(<CliFailedBanner failure={failure({ reason: "relaunch_exhausted" })} onStartNewSession={() => {}} onRelaunch={() => {}} relaunchError="Session not found" />);
+    expect(screen.getByTestId("cli-failed-relaunch-error")).toHaveTextContent("Relaunch failed: Session not found");
+  });
+
+  it("offers no Relaunch where it cannot help or without a handler", () => {
+    const { unmount } = render(<CliFailedBanner failure={failure({ reason: "container_missing" })} onStartNewSession={() => {}} onRelaunch={() => {}} />);
+    expect(screen.queryByTestId("cli-failed-relaunch-action")).toBeNull();
+    expect(screen.getByTestId("cli-failed-primary-action")).toHaveFocus();
+    unmount();
+    render(<CliFailedBanner failure={failure({ reason: "backend_dead" })} onStartNewSession={() => {}} />);
+    expect(screen.queryByTestId("cli-failed-relaunch-action")).toBeNull();
+  });
+
+  it("passes axe with the Relaunch action, busy state and error", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container, rerender } = render(
+      <CliFailedBanner failure={failure({ reason: "backend_dead", drainedCount: 2 })} onStartNewSession={() => {}} onRelaunch={() => {}} relaunchError="boom" />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
+    rerender(<CliFailedBanner failure={failure({ reason: "backend_dead", drainedCount: 2 })} onStartNewSession={() => {}} onRelaunch={() => {}} relaunching />);
+    expect(await axe(container)).toHaveNoViolations();
   });
 });

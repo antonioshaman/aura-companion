@@ -3,6 +3,7 @@ import type { CliLauncher, SdkSessionInfo } from "./cli-launcher.js";
 import type { WsBridge } from "./ws-bridge.js";
 import { companionBus } from "./event-bus.js";
 import { IntentionalKills } from "./intentional-kills.js";
+import { log } from "./logger.js";
 import { DEFAULT_LAG_TOLERANCE_MS } from "./silent-stdio-drift-detector.js";
 import {
   DRIFT_DETECTOR_TICK_MS,
@@ -541,5 +542,86 @@ describe("SessionRecovery.relaunchOnce — single-flight (P4/FIX-AUTOHEAL-1)", (
     intentionalKills.add("s1");
     await recovery.relaunchOnce("s1", "manual", {});
     expect(intentionalKills.has("s1")).toBe(true);
+  });
+});
+
+describe("SessionRecovery.handleAutoRelaunch — deaf backend (P4/FIX-RECONNECT-RELAUNCH)", () => {
+  // Prod 2026-09-29 19:03 → 2026-09-30 06:55: a Codex observer's app-server
+  // WS to the bridge dropped. The bridge nulled the adapter and emitted
+  // `session:relaunch-needed`, but the process lived on and the launcher kept
+  // state `connected`, so handleAutoRelaunch returned silently — six returning
+  // browsers logged "requesting relaunch", none relaunched, until a manual
+  // POST /relaunch. These tests pin: launcher `connected` without an attached
+  // adapter relaunches; with an adapter it is still left alone, but loudly.
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    companionBus.clear();
+  });
+
+  it("relaunches a session the launcher calls `connected` whose adapter is gone (live PID)", async () => {
+    // process.pid is alive, so the old PID-liveness shortcut would also have
+    // held it back if it were not gated on the adapter.
+    const sessions = new Map([["obs", info("obs", { state: "connected", pid: process.pid, sessionGroupRole: "observer" })]]);
+    const { recovery, launcher, wsBridge } = makeRecovery(sessions);
+    wsBridge.getSession.mockReturnValue({ backendAdapter: null } as never);
+
+    const p = recovery.handleAutoRelaunch("obs");
+    await vi.advanceTimersByTimeAsync(RELAUNCH_GRACE_MS);
+    await p;
+
+    expect(launcher.relaunch).toHaveBeenCalledWith("obs");
+  });
+
+  it("the same for `running`", async () => {
+    const sessions = new Map([["s1", info("s1", { state: "running", pid: process.pid })]]);
+    const { recovery, launcher, wsBridge } = makeRecovery(sessions);
+    wsBridge.getSession.mockReturnValue({ backendAdapter: null } as never);
+
+    const p = recovery.handleAutoRelaunch("s1");
+    await vi.advanceTimersByTimeAsync(RELAUNCH_GRACE_MS);
+    await p;
+
+    expect(launcher.relaunch).toHaveBeenCalledWith("s1");
+  });
+
+  it("leaves a `connected` session with an attached adapter alone and logs why (EC-9)", async () => {
+    // E.g. Claude over the legacy WS transport mid-reconnect: the adapter
+    // object stays attached; that path is owned by the disconnect debounce.
+    const sessions = new Map([["s1", info("s1", { state: "connected", pid: process.pid, sessionGroupRole: "orchestrator" })]]);
+    const { recovery, launcher, wsBridge } = makeRecovery(sessions);
+    wsBridge.getSession.mockReturnValue({ backendAdapter: {} } as never);
+    const infoSpy = vi.spyOn(log, "info");
+
+    const p = recovery.handleAutoRelaunch("s1");
+    await vi.advanceTimersByTimeAsync(RELAUNCH_GRACE_MS);
+    await p;
+
+    expect(launcher.relaunch).not.toHaveBeenCalled();
+    const skip = infoSpy.mock.calls.find((c) => (c[2] as { event?: string } | undefined)?.event === "session.relaunch.skipped_alive");
+    expect(skip?.[2]).toMatchObject({ sessionId: "s1", role: "orchestrator", reason: "launcher_state", state: "connected" });
+    // relaunchingSet released — the next request is evaluated afresh.
+    wsBridge.getSession.mockReturnValue({ backendAdapter: null } as never);
+    const p2 = recovery.handleAutoRelaunch("s1");
+    await vi.advanceTimersByTimeAsync(RELAUNCH_GRACE_MS);
+    await p2;
+    expect(launcher.relaunch).toHaveBeenCalledTimes(1);
+  });
+
+  it("logs cli_connected when the backend reconnected during the grace", async () => {
+    const sessions = new Map([["s1", info("s1", { state: "connected" })]]);
+    const { recovery, launcher, wsBridge } = makeRecovery(sessions);
+    wsBridge.isCliConnected.mockReturnValue(true);
+    const infoSpy = vi.spyOn(log, "info");
+
+    const p = recovery.handleAutoRelaunch("s1");
+    await vi.advanceTimersByTimeAsync(RELAUNCH_GRACE_MS);
+    await p;
+
+    expect(launcher.relaunch).not.toHaveBeenCalled();
+    expect(infoSpy.mock.calls.some((c) => (c[2] as { reason?: string } | undefined)?.reason === "cli_connected")).toBe(true);
   });
 });

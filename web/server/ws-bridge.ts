@@ -66,6 +66,7 @@ import { log } from "./logger.js";
 import {
   selectDrainTargets,
   shouldSuppressDrain,
+  countUserQueuedMessages,
 } from "./cleanup/drain-selector.js";
 import { recordCleanupEvent } from "./cleanup/cleanup-events.js";
 import type { CliFailedReason } from "./cli-failed-frame.js";
@@ -710,11 +711,15 @@ export class WsBridge {
       return { fired: false, drainedCount: 0 };
     }
     const pendingCount = session.pendingMessages.length;
-    if (shouldSuppressDrain(reason, pendingCount)) {
+    // P4/FIX-RECONNECT-RELAUNCH: suppression counts only what the user sent —
+    // browser status polls (`mcp_get_status`) stay queued for the next backend.
+    const userCount = countUserQueuedMessages(session.pendingMessages);
+    if (shouldSuppressDrain(reason, userCount)) {
       log.info("ws-bridge", "cli_failed drain suppressed (zero queued)", {
         event: "ws_bridge.cli_failed.suppressed",
         sessionId,
         reason,
+        serviceQueued: pendingCount,
       });
       return { fired: false, drainedCount: 0 };
     }
@@ -743,6 +748,7 @@ export class WsBridge {
       sessionId,
       reason,
       drainedCount: pendingCount,
+      userMessages: userCount,
       browserCount: selection.browserIds.length,
       subprocessAlive: selection.frame.subprocessAlive,
     });
@@ -769,7 +775,12 @@ export class WsBridge {
       const session = this.sessions.get(sessionId);
       if (!session) return;
       if (session.browserSockets.size > 0) return;
-      this.dispatchCliFailedDrain(sessionId, "browser_closed_no_reconnect");
+      // P4/FIX-RECONNECT-RELAUNCH: the queue never drained because the backend
+      // is down — say that, not "you closed this tab".
+      this.dispatchCliFailedDrain(
+        sessionId,
+        this.isCliConnected(sessionId) ? "browser_closed_no_reconnect" : "backend_dead",
+      );
     }, WsBridge.BROWSER_DRAIN_GRACE_MS);
     this.browserDrainTimers.set(sessionId, timer);
   }
@@ -1951,7 +1962,7 @@ export class WsBridge {
     // is nothing to drain.
     if (
       session.browserSockets.size === 0 &&
-      session.pendingMessages.length > 0 &&
+      countUserQueuedMessages(session.pendingMessages) > 0 &&
       !this.browserDrainTimers.has(sessionId)
     ) {
       this.startBrowserDrainTimer(sessionId);

@@ -51,12 +51,28 @@ export interface CliFailedBannerProps {
    *  affordance. The parent (ChatView) owns the draft-carryover wiring
    *  via the existing pickup-draft channel. */
   onStartNewSession: () => void;
+  /** P4/FIX-RECONNECT-RELAUNCH: relaunch the agent in place. Rendered as the
+   *  primary action only for reasons whose copy offers it (`backend_dead`,
+   *  `relaunch_exhausted`); a successful relaunch's `session_init` clears
+   *  the failure, which unmounts this banner. */
+  onRelaunch?: () => void;
+  /** A relaunch request is in flight — the button shows progress. */
+  relaunching?: boolean;
+  /** Last relaunch error, shown under the actions. */
+  relaunchError?: string | null;
 }
 
-export function CliFailedBanner({ failure, onStartNewSession }: CliFailedBannerProps) {
+export function CliFailedBanner({
+  failure,
+  onStartNewSession,
+  onRelaunch,
+  relaunching = false,
+  relaunchError = null,
+}: CliFailedBannerProps) {
   const copy = useMemo(() => cliFailedCopy(failure.reason), [failure.reason]);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const sha = failure.lastErrorSha256;
+  const canRelaunch = onRelaunch !== undefined && copy.relaunchAction !== undefined;
 
   // a11y finding #11 — the banner is the terminal surface with a single
   // recovery action, but `role="alert"` only ANNOUNCES; keyboard/SR focus is
@@ -141,22 +157,48 @@ export function CliFailedBanner({ failure, onStartNewSession }: CliFailedBannerP
               </div>
             )}
 
-            {/* Primary action - single button. Friedman P5: every variant
-                resolves to the same affordance ("Start a new session with
-                this draft"). Marked data-cli-failed-primary so ChatView
-                can focus / keyboard-shortcut it later if needed. */}
-            <div className="mt-3">
+            {/* Primary action. Friedman P5: every variant offers the same
+                affordance ("Start a new session with this draft"). Marked
+                data-cli-failed-primary so ChatView can focus /
+                keyboard-shortcut it later if needed. */}
+            {/* When the agent itself failed (backend_dead / relaunch_exhausted)
+                an in-place relaunch is the primary action and the fresh
+                session drops to secondary (P4/FIX-RECONNECT-RELAUNCH). */}
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              {canRelaunch && (
+                <button
+                  ref={primaryRef}
+                  type="button"
+                  data-cli-failed-primary=""
+                  data-testid="cli-failed-relaunch-action"
+                  onClick={onRelaunch}
+                  disabled={relaunching}
+                  aria-busy={relaunching}
+                  className="text-xs font-medium px-3 py-1.5 rounded-md bg-cc-error/15 hover:bg-cc-error/25 text-cc-error transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-default"
+                >
+                  {relaunching ? "Relaunching…" : copy.relaunchAction}
+                </button>
+              )}
               <button
-                ref={primaryRef}
+                ref={canRelaunch ? undefined : primaryRef}
                 type="button"
-                data-cli-failed-primary=""
+                {...(canRelaunch ? {} : { "data-cli-failed-primary": "" })}
                 data-testid="cli-failed-primary-action"
                 onClick={onStartNewSession}
-                className="text-xs font-medium px-3 py-1.5 rounded-md bg-cc-error/15 hover:bg-cc-error/25 text-cc-error transition-colors cursor-pointer"
+                className={
+                  canRelaunch
+                    ? "text-xs font-medium px-3 py-1.5 rounded-md border border-cc-error/25 hover:bg-cc-error/10 text-cc-error transition-colors cursor-pointer"
+                    : "text-xs font-medium px-3 py-1.5 rounded-md bg-cc-error/15 hover:bg-cc-error/25 text-cc-error transition-colors cursor-pointer"
+                }
               >
                 {copy.action}
               </button>
             </div>
+            {canRelaunch && relaunchError && (
+              <p data-testid="cli-failed-relaunch-error" className="mt-2 text-xs text-cc-error break-words">
+                Relaunch failed: {relaunchError}
+              </p>
+            )}
           </div>
         </div>
       </div>

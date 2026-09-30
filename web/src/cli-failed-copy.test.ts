@@ -13,6 +13,8 @@ const ALL_REASONS: readonly CliFailedReason[] = [
   "container_stopped",
   "binary_missing",
   "browser_closed_no_reconnect",
+  // P4/FIX-RECONNECT-RELAUNCH
+  "backend_dead",
 ];
 
 describe("cliFailedCopy", () => {
@@ -100,5 +102,22 @@ describe("cliFailedCopy", () => {
     expect(() =>
       cliFailedCopy("not_a_real_reason" as unknown as CliFailedReason),
     ).toThrow(/unhandled reason/);
+  });
+});
+
+describe("cliFailedCopy — relaunch affordance (P4/FIX-RECONNECT-RELAUNCH)", () => {
+  it("backend_dead names the agent as the cause, never the user's tab", () => {
+    const copy = cliFailedCopy("backend_dead");
+    expect(copy.headline).toMatch(/agent/i);
+    expect(`${copy.headline} ${copy.body}`).not.toMatch(/you closed|this tab/i);
+    expect(copy.body).toMatch(/relaunch/i);
+  });
+
+  it("offers an in-place relaunch only where the agent itself failed", () => {
+    expect(cliFailedCopy("backend_dead").relaunchAction).toBe("Relaunch agent");
+    expect(cliFailedCopy("relaunch_exhausted").relaunchAction).toBe("Relaunch agent");
+    for (const reason of ["container_missing", "container_stopped", "binary_missing", "browser_closed_no_reconnect"] as const) {
+      expect(cliFailedCopy(reason).relaunchAction).toBeUndefined();
+    }
   });
 });
