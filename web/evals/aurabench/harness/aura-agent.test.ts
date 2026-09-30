@@ -165,6 +165,24 @@ describe("AuraSessionTracker", () => {
     expect(t.metrics()).toMatchObject({ turns: 3, tool_calls: 1, cost_usd: 1.5, tokens_out: 14 });
   });
 
+  // DIET-AB: the standing-context metric is the ORCHESTRATOR's first call —
+  // the observer has its own (much smaller) system prompt and must not
+  // overwrite it, even when its first call arrives earlier.
+  it("context_first_call comes from the primary session only", () => {
+    const t = new AuraSessionTracker("p", ["o"], 10);
+    const call = (input: number, read: number) => ({ type: "assistant", message: { content: [], usage: { input_tokens: input, cache_read_input_tokens: read } } });
+    t.promptSent(0);
+    t.onMessage("o", call(1, 4000), 1);
+    t.onMessage("p", call(2, 15000), 2);
+    t.onMessage("p", call(3, 30000), 3);
+    expect(t.metrics().context_first_call).toBe(15002);
+    // No primary call seen → unknown (field absent), never the observer's.
+    const u = new AuraSessionTracker("p", ["o"], 10);
+    u.promptSent(0);
+    u.onMessage("o", call(1, 4000), 1);
+    expect(u.metrics().context_first_call).toBeUndefined();
+  });
+
   // P6/FIX-D2-4 (pilot 1: F/G wrote tokens/cost 0). The bridge synthesises
   // every Codex `result` with placeholder zeros; the real token totals ride on
   // `session_update.codex_token_details` and the cost is unknown.

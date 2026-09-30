@@ -65,6 +65,25 @@ describe("summarizeClaudeStream", () => {
     });
   });
 
+  // DIET-AB metric: the standing context the agent starts with = prompt tokens
+  // of the FIRST model call (input + cache read + cache write). Later calls
+  // grow with the conversation and must not overwrite it.
+  it("context_first_call = prompt tokens of the first assistant call only", () => {
+    const call = (input: number, read?: number, write?: number) => ({
+      type: "assistant",
+      message: { model: "claude-x", content: [], usage: { input_tokens: input, output_tokens: 5, ...(read !== undefined ? { cache_read_input_tokens: read } : {}), ...(write !== undefined ? { cache_creation_input_tokens: write } : {}) } },
+    });
+    expect(summarizeClaudeStream([line(init), line(call(3, 12000, 800)), line(call(4, 20000, 50))].join("\n")).metrics.context_first_call).toBe(12803);
+    // Cache fields absent = unused, not unknown.
+    expect(summarizeClaudeStream(line(call(7))).metrics.context_first_call).toBe(7);
+    // No usage on the first call → keep looking; no usage at all → field absent (unknown).
+    expect(summarizeClaudeStream([line(toolTurn), line(call(2, 1))].join("\n")).metrics.context_first_call).toBe(3);
+    expect(summarizeClaudeStream(line(toolTurn)).metrics.context_first_call).toBeUndefined();
+    // A usage object without input_tokens is unknown (null), never a partial sum.
+    const bad = { type: "assistant", message: { content: [], usage: { cache_read_input_tokens: 9 } } };
+    expect(summarizeClaudeStream([line(bad), line(call(1))].join("\n")).metrics.context_first_call).toBeNull();
+  });
+
   it("adds a new cost segment when the cumulative counter drops (CLI restarted)", () => {
     const s = summarizeClaudeStream([line(result(3, 1)), line(result(0.5, 1))].join("\n"));
     expect(s.metrics.cost_usd).toBeCloseTo(3.5);

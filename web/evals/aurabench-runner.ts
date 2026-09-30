@@ -11,6 +11,7 @@
  *   bun run eval:aurabench bench --bench-root <dir> [--variants A,B,…] [--reps 5]
  *     [--task-ids a,b] [--max-cells N] [--state <STATE.json>] [--timeout-min 60] [--timeout-min-class architecture=120]
  *     [--claude-model claude-opus-5-5] [--codex-model gpt-5.5]
+ *     [--diet-overlay before|after] [--diet-after-ref diet/main]
  *
  * `prs.json` is `gh pr list --state merged --base main --limit 300
  *   --json number,title,body,mergeCommit`. `mine` writes one candidate per
@@ -105,6 +106,7 @@ import {
 } from "./aurabench/harness/codex-home.js";
 import { benchChildEnv, killLiveChildren, niceExec, spawnNice, stopLiveChildren } from "./aurabench/harness/proc.js";
 import { parseClassTimeouts, staleCellRecords, type CellRecord } from "./aurabench/harness/cells.js";
+import { DIET_BEFORE_REF, overlayMismatches, parseDietVersion, type DietOverlaySpec } from "./aurabench/harness/diet-overlay.js";
 import {
   CELL_PATH_CONFOUND,
   checkWorktreeRoot,
@@ -288,6 +290,33 @@ async function bench(argv: string[], repo: string): Promise<number> {
     return 2;
   }
   const stateFile = arg(argv, "state");
+  // DIET-AB: swap the control files for the pre-/post-diet version. Refs are
+  // pinned to full shas at start, so a moving `diet/main` cannot mix versions.
+  const dietVersion = parseDietVersion(arg(argv, "diet-overlay"));
+  if (!dietVersion.ok) {
+    console.error(`[aurabench] ${dietVersion.reason}`);
+    return 2;
+  }
+  let dietOverlay: DietOverlaySpec | null = null;
+  if (dietVersion.version) {
+    const naked = variants.ids.filter((id) => VARIANTS[id].mode === "naked");
+    if (naked.length) {
+      console.error(`[aurabench] --diet-overlay needs Aura variants; naked: ${naked.join(",")}`);
+      return 2;
+    }
+    const pin = (ref: string) => git(repo, ["rev-parse", "--verify", `${ref}^{commit}`]);
+    const after = pin(arg(argv, "diet-after-ref") ?? "diet/main");
+    const before = pin(DIET_BEFORE_REF);
+    if (!after.ok || !before.ok) {
+      console.error(`[aurabench] cannot resolve diet refs (after ok=${after.ok}, before ok=${before.ok})`);
+      return 2;
+    }
+    dietOverlay =
+      dietVersion.version === "before"
+        ? { version: "before", ref: before.out.trim(), learningsRef: after.out.trim() }
+        : { version: "after", ref: after.out.trim() };
+    console.log(`[aurabench] diet overlay: ${JSON.stringify(dietOverlay)}`);
+  }
   // Every variant of a provider runs the SAME pinned model: Companion's own
   // default (claude-sonnet-4-6) differs from the CLI's, and `codex exec
   // --ignore-user-config` drops the user's configured model. gpt-5.4 is no
@@ -319,6 +348,11 @@ async function bench(argv: string[], repo: string): Promise<number> {
   const stale = staleCellRecords(readTextOrNull(resultsFile) ?? "", promptSha);
   if (stale.mismatched.length) {
     console.error(`[aurabench] ${stale.mismatched.length} finished cell(s) ran an older prompt — move them out of ${resultsFile} before rerunning: ${stale.mismatched.map((m) => m.key).join(", ")}`);
+    return 2;
+  }
+  const wrongOverlay = overlayMismatches(readTextOrNull(resultsFile) ?? "", dietOverlay);
+  if (wrongOverlay.length) {
+    console.error(`[aurabench] ${wrongOverlay.length} finished cell(s) in ${resultsFile} ran another diet overlay — one overlay per bench root: ${wrongOverlay.slice(0, 5).join(", ")}`);
     return 2;
   }
   if (stale.unstamped.length) console.log(`[aurabench] WARNING: ${stale.unstamped.length} reused cell(s) carry no prompt sha — reuse unverified`);
@@ -498,6 +532,7 @@ async function bench(argv: string[], repo: string): Promise<number> {
           worktree: newCellWorktree(wtRoot),
           artifactDir,
           confounds: [CELL_PATH_CONFOUND],
+          ...(dietOverlay ? { dietOverlay } : {}),
           exec: niceExec,
           runAgent: variant.mode === "aura" ? runners.aura : cell.variant === "A" ? runners.A : runners.B,
           baseline,

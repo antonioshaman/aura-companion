@@ -28,6 +28,7 @@ import { describe, it, expect } from "vitest";
 import type { AuraBenchTask } from "../task.js";
 import { VARIANTS } from "./variants.js";
 import { emptyMetrics } from "./agent-metrics.js";
+import { DIET_BEFORE_HOOK_CONFOUND, DIET_SOURCE_LATER_CONFOUND } from "./diet-overlay.js";
 import { baselineZones, computeBaseline, parseNumstat, relatedSources, removeCheckout, runCell, vitestFileVerdicts, type AgentRun, type AsyncExec, type CellDeps, type ExecResult } from "./run-cell.js";
 
 const BASE = "b".repeat(40);
@@ -70,6 +71,8 @@ function harness(s: Script) {
     if (cmd === "git" && args[0] === "fetch" && args.includes(BASE)) return res({ code: s.addFails ? 128 : 0, output: "fatal" });
     if (cmd === "git" && args[0] === "rev-parse") return res({ output: "p".repeat(40) + "\n" });
     if (cmd === "git" && args[0] === "diff" && args[1] === "--numstat") return res({ output: s.numstat ?? "" });
+    if (cmd === "git" && args[0] === "ls-tree") return res({ output: "CLAUDE.md\n.agents/knowledge/gotchas.jsonl\n" });
+    if (cmd === "git" && args[0] === "cat-file" && args[1] === "-s") return res({ output: "900\n" });
     if (cmd === "bunx" && args[1] === "run") {
       const out = args.find((a) => a.startsWith("--outputFile="))!.slice(13);
       const pass = s.hiddenPass ?? true;
@@ -151,6 +154,45 @@ describe("runCell", () => {
     await runCell(task, VARIANTS.C, 1, deps);
     expect(idx(calls, "git rm")).toBe(-1);
     expect(idx(calls, "aurabench: scrub")).toBe(-1);
+  });
+
+  // DIET-AB: the overlay swaps control files in the checkout BEFORE install and
+  // the agent, committed so it never counts as the agent's diff; the record
+  // carries the evidence and the overlay confounds. The overlay itself (real
+  // git/tar, leak guard) is covered in diet-overlay.test.ts.
+  it("diet overlay: applied and committed before the agent, recorded with its confounds", async () => {
+    const { deps, calls } = harness({});
+    const out = await runCell(task, VARIANTS.D, 1, { ...deps, dietOverlay: { version: "before", ref: "0".repeat(40), learningsRef: "1".repeat(40) } });
+    if (out.kind !== "record") throw new Error("expected record");
+    const order = ["git archive", "aurabench: diet overlay before", "rev-parse HEAD", "bun install", "AGENT"];
+    const positions = order.map((n) => idx(calls, n));
+    expect(positions.every((p) => p >= 0)).toBe(true);
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+    // Files come out of the MAIN repo (git archive), never fetched into the cell.
+    expect(calls[idx(calls, "git archive")]).toMatch(/^\/repo\$/);
+    expect(out.record.diet_overlay).toMatchObject({ version: "before", ref: "0".repeat(40), claude_md_bytes: 900 });
+    expect(out.record.confounds).toEqual(expect.arrayContaining([DIET_SOURCE_LATER_CONFOUND, DIET_BEFORE_HOOK_CONFOUND]));
+  });
+
+  it("diet overlay: `after` has no hook confound; a naked variant is refused without running the agent", async () => {
+    const a = harness({});
+    const after = await runCell(task, VARIANTS.C, 1, { ...a.deps, dietOverlay: { version: "after", ref: "2".repeat(40) } });
+    if (after.kind !== "record") throw new Error("expected record");
+    expect(after.record.confounds).toContain(DIET_SOURCE_LATER_CONFOUND);
+    expect(after.record.confounds).not.toContain(DIET_BEFORE_HOOK_CONFOUND);
+    const n = harness({});
+    const naked = await runCell(task, VARIANTS.A, 1, { ...n.deps, dietOverlay: { version: "after", ref: "2".repeat(40) } });
+    if (naked.kind !== "record") throw new Error("expected record");
+    expect(naked.record).toMatchObject({ status: "harness_error", error: "diet overlay on a naked variant" });
+    expect(n.agentCalls).toEqual([]);
+  });
+
+  it("no overlay: the record has no diet_overlay field", async () => {
+    const { deps, calls } = harness({});
+    const out = await runCell(task, VARIANTS.C, 1, deps);
+    if (out.kind !== "record") throw new Error("expected record");
+    expect(out.record.diet_overlay).toBeUndefined();
+    expect(idx(calls, "git archive")).toBe(-1);
   });
 
   it("flags a hidden test the agent edited — and still scores the restored original", async () => {

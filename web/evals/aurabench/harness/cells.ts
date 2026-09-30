@@ -13,6 +13,7 @@
  */
 
 import { isAuraBenchClass, type AuraBenchClass } from "../task.js";
+import type { DietOverlayEvidence } from "./diet-overlay.js";
 import type { VariantId } from "./variants.js";
 
 export const CELL_RECORD_VERSION = 1 as const;
@@ -40,6 +41,11 @@ export interface AgentMetrics {
   /** Model(s) the agent reported actually using (init frame / session /
    *  Codex rollout); [] = unknown, never back-filled from the pinned model. */
   models: string[];
+  /** Prompt tokens of the orchestrator's FIRST model call (input + cache read
+   *  + cache write) — the size of the standing context (system prompt,
+   *  CLAUDE.md, skills list, …) before any work. The DIET-AB metric; Claude
+   *  only (Codex reports usage per turn, not per call). Absent/null = unknown. */
+  context_first_call?: number | null;
 }
 
 export interface HiddenTestOutcome {
@@ -92,6 +98,9 @@ export interface CellRecord {
    *  longer matches the corpus measured a different task and must not be
    *  reused (see {@link staleCellRecords}). Absent on pre-D2-full records. */
   prompt_sha256?: string;
+  /** DIET-AB: which control-file version was overlaid on the checkout
+   *  (see `diet-overlay.ts`). Absent = the task's own historical files. */
+  diet_overlay?: DietOverlayEvidence;
   error?: string;
 }
 

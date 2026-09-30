@@ -29,6 +29,7 @@ import { toWebRelative } from "../validate.js";
 import type { AgentMetrics, CellRecord, CellStatus, DiffStats, HiddenTestOutcome, RegressionOutcome } from "./cells.js";
 import { CELL_RECORD_VERSION, cellKey } from "./cells.js";
 import { emptyMetrics, type LimitHit } from "./agent-metrics.js";
+import { applyDietOverlay, DIET_BEFORE_HOOK_CONFOUND, DIET_SOURCE_LATER_CONFOUND, type DietOverlaySpec } from "./diet-overlay.js";
 import { NAKED_SCRUB_PATHS } from "./isolation.js";
 import type { Variant } from "./variants.js";
 
@@ -78,6 +79,9 @@ export interface CellDeps {
   artifactDir: string;
   /** Harness-level confounds recorded on every cell (e.g. unsandboxed paths). */
   confounds?: readonly string[];
+  /** DIET-AB: overlay this control-file version before the agent runs
+   *  (Aura variants only — a naked cell has no control files to swap). */
+  dietOverlay?: DietOverlaySpec;
   exec: AsyncExec;
   runAgent: AgentRunner;
   baseline: (task: AuraBenchTask) => Promise<Baseline>;
@@ -219,6 +223,12 @@ export async function runCell(task: AuraBenchTask, variant: Variant, rep: number
       const ci = await git([...GIT_ID, "commit", "-q", "--no-verify", "--allow-empty", "-m", "aurabench: scrub"], d.worktree);
       if (ci.code !== 0) return finish("harness_error", { error: `scrub commit failed: ${ci.output.slice(-300)}` });
     }
+    if (d.dietOverlay) {
+      if (variant.mode === "naked") return finish("harness_error", { error: "diet overlay on a naked variant" });
+      const o = await applyDietOverlay(d.exec, d.repo, d.worktree, d.artifactDir, d.dietOverlay, GIT_ID);
+      if (!o.ok) return finish("harness_error", { error: o.error });
+      base.diet_overlay = o.evidence;
+    }
     const prepared = (await git(["rev-parse", "HEAD"], d.worktree)).output.trim();
     const inst = await d.exec("bun", ["install", "--frozen-lockfile"], {
       cwd: web,
@@ -236,7 +246,11 @@ export async function runCell(task: AuraBenchTask, variant: Variant, rep: number
     if (agent.kind === "limit") return { kind: "limit", limit: agent.limit };
     base.metrics = agent.metrics;
     base.isolation = { ...agent.isolation, worktree: d.worktree };
-    base.confounds = [...agent.confounds, ...(d.confounds ?? [])];
+    base.confounds = [
+      ...agent.confounds,
+      ...(d.confounds ?? []),
+      ...(d.dietOverlay ? [DIET_SOURCE_LATER_CONFOUND, ...(d.dietOverlay.version === "before" ? [DIET_BEFORE_HOOK_CONFOUND] : [])] : []),
+    ];
 
     // Diff against the prepared commit, new files included.
     await git(["add", "-A", "-N"], d.worktree);

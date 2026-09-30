@@ -67,6 +67,12 @@ export class ClaudeMetricsAccumulator {
     if (typeof message.model === "string" && !this.metrics.models.includes(message.model)) {
       this.metrics.models.push(message.model);
     }
+    if (this.metrics.context_first_call === undefined && isObj(message.usage)) {
+      const u = message.usage;
+      const parts = [num(u.input_tokens), num(u.cache_read_input_tokens), num(u.cache_creation_input_tokens)];
+      // input_tokens is mandatory; the cache fields are absent when unused.
+      this.metrics.context_first_call = parts[0] === null ? null : parts.reduce<number>((a, b) => a + (b ?? 0), 0);
+    }
     const content = message.content;
     if (!Array.isArray(content)) return;
     for (const block of content) if (isObj(block) && block.type === "tool_use") this.metrics.tool_calls++;
