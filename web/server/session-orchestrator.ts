@@ -234,11 +234,13 @@ export class SessionOrchestrator {
    */
   private recovery: SessionRecovery;
   /** Test seam: the relaunch-exhaustion set lives on the recovery controller. */
-  private get relaunchExhaustedNotified(): Set<string> {
+  /** @internal Test seam — reached by session-orchestrator.test.ts; delegates to the extracted module. */
+  get relaunchExhaustedNotified(): Set<string> {
     return this.recovery.relaunchExhaustedNotified;
   }
   /** Test seam: silence strike counts live on the recovery controller. */
-  private get silenceRecurrenceCounts(): Map<string, { count: number; lastSilentModel: string }> {
+  /** @internal Test seam — reached by session-orchestrator.test.ts; delegates to the extracted module. */
+  get silenceRecurrenceCounts(): Map<string, { count: number; lastSilentModel: string }> {
     return this.recovery.silenceRecurrenceCounts;
   }
 
@@ -770,11 +772,13 @@ export class SessionOrchestrator {
     return this.coordinator;
   }
 
-  private getOrCreateCoordinatorSync(): SessionGroupCoordinator {
+  /** @internal Test seam — reached by session-orchestrator.test.ts; delegates to the extracted module. */
+  getOrCreateCoordinatorSync(): SessionGroupCoordinator {
     return this.councilLifecycle.getOrCreateCoordinatorSync();
   }
 
-  private startCouncilWatchers(sessionGroupId: string, workspaceCwd: string): void {
+  /** @internal Test seam — reached by session-orchestrator.test.ts; delegates to the extracted module. */
+  startCouncilWatchers(sessionGroupId: string, workspaceCwd: string): void {
     this.councilLifecycle.startCouncilWatchers(sessionGroupId, workspaceCwd);
   }
 
@@ -815,11 +819,13 @@ export class SessionOrchestrator {
     return this.observerScheduler.scheduleSpawnCheckpointWhenObserverReady(sessionGroupId, observerSessionId, workspaceCwd);
   }
 
-  private scheduleCatchupWakeWhenObserverReady(sessionGroupId: string, payload: CheckpointPayload): Promise<void> {
+  /** @internal Test seam — reached by session-orchestrator.test.ts; delegates to the extracted module. */
+  scheduleCatchupWakeWhenObserverReady(sessionGroupId: string, payload: CheckpointPayload): Promise<void> {
     return this.observerScheduler.scheduleCatchupWakeWhenObserverReady(sessionGroupId, payload);
   }
 
-  private emitSpawnCheckpoint(sessionGroupId: string, workspaceCwd: string): void {
+  /** @internal Test seam — reached by session-orchestrator.test.ts; delegates to the extracted module. */
+  emitSpawnCheckpoint(sessionGroupId: string, workspaceCwd: string): void {
     this.observerScheduler.emitSpawnCheckpoint(sessionGroupId, workspaceCwd);
   }
 
@@ -831,7 +837,8 @@ export class SessionOrchestrator {
     return this.observerScheduler.spawnCheckpointPollsInFlight;
   }
 
-  private tearDownCouncilGroupTracking(sessionGroupId: string): void {
+  /** @internal Test seam — reached by session-orchestrator.test.ts; delegates to the extracted module. */
+  tearDownCouncilGroupTracking(sessionGroupId: string): void {
     this.councilLifecycle.tearDownCouncilGroupTracking(sessionGroupId);
   }
 
@@ -1732,7 +1739,8 @@ export class SessionOrchestrator {
   // ── Private: Session recovery delegates (P4/C1d) ───────────────────────────
 
   /** Delegate kept so the silence-rotation suite reaches the real handler. */
-  private handleBackendSilent(sessionId: string, sinceMs: number, reason: string): Promise<void> {
+  /** @internal Test seam — reached by session-orchestrator.test.ts; delegates to the extracted module. */
+  handleBackendSilent(sessionId: string, sinceMs: number, reason: string): Promise<void> {
     return this.recovery.handleBackendSilent(sessionId, sinceMs, reason);
   }
 
