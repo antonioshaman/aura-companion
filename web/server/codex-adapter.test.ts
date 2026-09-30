@@ -3716,6 +3716,68 @@ describe("CodexAdapter with ICodexTransport", () => {
     expect(mock2.calls[1]?.params?.threadId).toBe("thr_fresh_new");
   });
 
+  // aura-meta-diet FIX-C3-1: the system prompt (observer role prompt, layer
+  // directive) must use the field Codex app-server actually defines —
+  // `developerInstructions` in ThreadStartParams/ThreadResumeParams
+  // (codex-cli 0.142.5 schema). The old `instructions` key was dropped
+  // silently: prod observer rollouts showed no trace of the observer prompt.
+  // It must also ride thread/resume, since a server restart resumes the thread.
+  describe("system prompt delivery (FIX-C3-1)", () => {
+    const PROMPT = "# Aura layer flags\nThe council layer is disabled.";
+
+    it("thread/start sends developerInstructions, never the unknown `instructions` key", async () => {
+      const mock = createMockTransport();
+      new CodexAdapter(mock.transport, "s-start", { model: "gpt-5.5", cwd: "/w", systemPrompt: PROMPT });
+      await new Promise((r) => setTimeout(r, 50));
+      mock.resolveCall(1, { userAgent: "codex" });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(mock.calls[1]?.method).toBe("thread/start");
+      expect(mock.calls[1]?.params?.developerInstructions).toBe(PROMPT);
+      expect(mock.calls[1]?.params).not.toHaveProperty("instructions");
+      // baseInstructions would REPLACE Codex's own system prompt — must stay unset.
+      expect(mock.calls[1]?.params).not.toHaveProperty("baseInstructions");
+    });
+
+    it("thread/resume re-sends developerInstructions", async () => {
+      const mock = createMockTransport();
+      new CodexAdapter(mock.transport, "s-resume", {
+        model: "gpt-5.5", cwd: "/w", threadId: "thr_old", systemPrompt: PROMPT,
+      });
+      await new Promise((r) => setTimeout(r, 50));
+      mock.resolveCall(1, { userAgent: "codex" });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(mock.calls[1]?.method).toBe("thread/resume");
+      expect(mock.calls[1]?.params?.threadId).toBe("thr_old");
+      expect(mock.calls[1]?.params?.developerInstructions).toBe(PROMPT);
+    });
+
+    it("resume→start fallback keeps developerInstructions", async () => {
+      const mock = createMockTransport();
+      new CodexAdapter(mock.transport, "s-fallback", {
+        model: "gpt-5.5", cwd: "/w", threadId: "thr_gone", systemPrompt: PROMPT,
+      });
+      await new Promise((r) => setTimeout(r, 50));
+      mock.resolveCall(1, { userAgent: "codex" });
+      await new Promise((r) => setTimeout(r, 20));
+      mock.rejectCall(2, new Error("no rollout found for thread id thr_gone"));
+      await new Promise((r) => setTimeout(r, 100));
+      expect(mock.calls[2]?.method).toBe("thread/start");
+      expect(mock.calls[2]?.params?.developerInstructions).toBe(PROMPT);
+    });
+
+    it("no system prompt → neither thread call carries an instructions field", async () => {
+      // Prod parity for plain sessions: params byte-identical to before.
+      const mock = createMockTransport();
+      new CodexAdapter(mock.transport, "s-plain", { model: "gpt-5.5", cwd: "/w", threadId: "thr_x" });
+      await new Promise((r) => setTimeout(r, 50));
+      mock.resolveCall(1, { userAgent: "codex" });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(Object.keys(mock.calls[1]?.params ?? {}).sort()).toEqual(
+        ["approvalPolicy", "cwd", "model", "sandbox", "threadId"],
+      );
+    });
+  });
+
   it("propagates thread/start failure even after resume fallback", async () => {
     // If both thread/resume AND the fallback thread/start fail,
     // the init error should still be reported.

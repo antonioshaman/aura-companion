@@ -72,6 +72,7 @@ export function ChatView({ sessionId }: { sessionId: string }) {
   const findings = useStore((s) => (groupId ? s.findings.get(groupId) : undefined));
   const dismissedStopIds = useStore((s) => s.dismissedStopIds);
   const dismissStop = useStore((s) => s.dismissStop);
+  const disputeStop = useStore((s) => s.disputeStop);
   const topBlocker = useMemo(() => {
     if (!findings || findings.length === 0) return null;
     const live = findUnresolvedStops(findings, dismissedStopIds);
@@ -259,7 +260,13 @@ export function ChatView({ sessionId }: { sessionId: string }) {
         </div>
       ) : cliFailure ? (
         <div id={`cli-failed-banner-${sessionId}`} className="shrink-0 border-t border-cc-border bg-cc-card">
-          <CliFailedBanner failure={cliFailure} onStartNewSession={handleCliFailedStartNew} />
+          <CliFailedBanner
+            failure={cliFailure}
+            onStartNewSession={handleCliFailedStartNew}
+            onRelaunch={handleReconnect}
+            relaunching={cliReconnecting}
+            relaunchError={reconnectError}
+          />
         </div>
       ) : topBlocker ? (
         <div className="shrink-0 border-t border-cc-border bg-cc-card">
@@ -267,7 +274,7 @@ export function ChatView({ sessionId }: { sessionId: string }) {
               this slot — a bad finding payload must not blank the whole app
               via the root AppErrorBoundary (RC-1 T13 / RC-5). */}
           <SectionErrorBoundary label="Blocker">
-            <BlockerBanner finding={topBlocker} onDismiss={dismissStop} />
+            <BlockerBanner finding={topBlocker} onDismiss={dismissStop} onDispute={disputeStop} />
           </SectionErrorBoundary>
         </div>
       ) : null}

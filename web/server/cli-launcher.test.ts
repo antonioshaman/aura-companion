@@ -1826,6 +1826,59 @@ describe("codex websocket launcher", () => {
     expect(mockSpawn).toHaveBeenCalledTimes(4);
   });
 
+  // P4/FIX-AUTOHEAL-2 (b): spawnCodexWs awaits its port pick before
+  // Bun.spawn, and nobody awaits spawnCodexWs. A kill/archive/delete landing
+  // in that gap found no process in `processes` to signal, then the spawn went
+  // ahead — a live app-server for a session that should be down (orphan).
+  describe("a Codex WS spawn still picking its port (P4/FIX-AUTOHEAL-2)", () => {
+    function launchPendingCodexWs() {
+      process.env.COMPANION_CODEX_TRANSPORT = "ws";
+      mockResolveBinary.mockReturnValue("/opt/fake/codex");
+      mockSpawn.mockImplementation(() => createPendingCodexWsProxyProc(4100).proc);
+      // launch() runs spawnCodexWs synchronously up to the port-pick await.
+      return launcher.launch({ backendType: "codex", cwd: "/tmp/project", codexSandbox: "workspace-write" });
+    }
+
+    it("kill in the gap cancels the spawn: no process starts and the session is exited", async () => {
+      const info = launchPendingCodexWs();
+      await expect(launcher.kill(info.sessionId)).resolves.toBe(true);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(mockSpawn).not.toHaveBeenCalled();
+      expect(launcher.getSession(info.sessionId)?.state).toBe("exited");
+      // The port was never claimed, so it is free for the next spawn.
+      expect((launcher as any).claimedCodexWsPorts.size).toBe(0);
+    });
+
+    it("archive in the gap cancels the spawn", async () => {
+      const info = launchPendingCodexWs();
+      launcher.setArchived(info.sessionId, true);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(mockSpawn).not.toHaveBeenCalled();
+      expect(launcher.getSession(info.sessionId)?.state).toBe("exited");
+    });
+
+    it("delete in the gap cancels the spawn", async () => {
+      const info = launchPendingCodexWs();
+      launcher.removeSession(info.sessionId);
+      await new Promise((r) => setTimeout(r, 0));
+      expect(mockSpawn).not.toHaveBeenCalled();
+      expect((launcher as any).claimedCodexWsPorts.size).toBe(0);
+    });
+
+    it("a relaunch in the gap supersedes the pending spawn: exactly one app-server + proxy pair starts", async () => {
+      const info = launchPendingCodexWs();
+      const relaunch = launcher.relaunch(info.sessionId);
+      await expect(relaunch).resolves.toEqual({ ok: true });
+      await new Promise((r) => setTimeout(r, 0));
+      // Two Bun.spawn calls = one codex app-server + its ws proxy (the
+      // relaunch's); the superseded launch spawned nothing.
+      expect(mockSpawn).toHaveBeenCalledTimes(2);
+      // The superseded spawn did not flip the relaunch's session to exited.
+      expect(launcher.getSession(info.sessionId)?.state).not.toBe("exited");
+      expect((launcher as any).claimedCodexWsPorts.size).toBe(1);
+    });
+  });
+
   it("relaunch with an unavailable codex model keeps the live session intact", async () => {
     // Council review P1 #2 — the requested model must be validated BEFORE the
     // running Codex process is killed. If resolution fails (model rejected /
@@ -2782,7 +2835,7 @@ describe("isCmdScript platform guard", () => {
   });
 });
 
-// Council Plan PLAN-aura-observer-prompt-bundled-fallback.md Task 9 —
+// Council Plan docs/history/council/handoffs/PLAN-aura-observer-prompt-bundled-fallback.md Task 9 —
 // integration test for `applyCouncilObserverSpawnConfig` through the
 // public `launch()` surface. Exercised on the Claude backend (the
 // codex variant lives in `codex websocket launcher` describe above
@@ -3229,7 +3282,7 @@ describe("EC-19 canaries — buildObserverSpawnOverrides routing + sentinel-path
   // Council Review 2026-05-15-1015 CR-8 (Backend P2): the typed
   // `session:relaunch-failed` channel contract is "relaunch-only" —
   // emit sites are confined to `cli-launcher.ts:relaunch()` and
-  // `session-orchestrator.ts:handleAutoRelaunch()`. Cold-start
+  // `session-recovery.ts:handleAutoRelaunch()`. Cold-start
   // (`cli-launcher.ts:launch()`) surfaces failures as REST 503 via
   // the orchestrator's spawn rollback; emitting from launch() would
   // race a listener that may not yet exist for the group. This canary
@@ -3238,7 +3291,9 @@ describe("EC-19 canaries — buildObserverSpawnOverrides routing + sentinel-path
     const fs = await import("node:fs");
     const path = await import("node:path");
     const serverDir = path.join(__dirname);
-    const allowedFiles = new Set(["cli-launcher.ts", "session-orchestrator.ts"]);
+    // P4/C1d: `handleAutoRelaunch` moved verbatim from session-orchestrator.ts
+    // into session-recovery.ts; the contract (relaunch-only emit sites) is unchanged.
+    const allowedFiles = new Set(["cli-launcher.ts", "session-recovery.ts"]);
     const entries = fs.readdirSync(serverDir, { withFileTypes: true });
     const offending: Array<{ file: string; lineNum: number; line: string }> = [];
     const emitRegex = /companionBus\.emit\(\s*["']session:relaunch-failed["']/;
@@ -3257,7 +3312,7 @@ describe("EC-19 canaries — buildObserverSpawnOverrides routing + sentinel-path
     }
     expect(
       offending,
-      `session:relaunch-failed must only be emitted from cli-launcher.ts:relaunch() or session-orchestrator.ts:handleAutoRelaunch(). Offenders:\n${offending.map((o) => `${o.file}:${o.lineNum} → ${o.line}`).join("\n")}`,
+      `session:relaunch-failed must only be emitted from cli-launcher.ts:relaunch() or session-recovery.ts:handleAutoRelaunch(). Offenders:\n${offending.map((o) => `${o.file}:${o.lineNum} → ${o.line}`).join("\n")}`,
     ).toEqual([]);
   });
 });
@@ -3606,5 +3661,174 @@ describe("resumeTranscriptExists", () => {
   });
   it("returns false when stat throws (missing/unreadable → cannot confirm)", () => {
     expect(resumeTranscriptExists("/x/cli.jsonl", () => { throw new Error("ENOENT"); })).toBe(false);
+  });
+});
+
+// aura-meta-diet P4/C3 — layer flags at spawn. Validates the launcher half of
+// the contract: default flags leave argv byte-identical (prod parity),
+// knowledge/council OFF add Claude permission deny rules + one appended
+// directive, the flags persist on SdkSessionInfo and survive relaunch, and
+// Codex (no per-tool deny flag) receives the directive as thread instructions.
+describe("layer flags at spawn (P4/C3)", () => {
+  const ALL_ON = { knowledge: true, observer: true, council: true, autoProceed: true } as const;
+
+  function argvOf(call: number): string[] {
+    return mockSpawn.mock.calls[call][0] as string[];
+  }
+  function denyRules(argv: string[]): string[] {
+    return argv.flatMap((a, i) => (a === "--disallowedTools" ? [argv[i + 1]] : []));
+  }
+
+  it("default flags produce the same argv as a launch without flags", () => {
+    // Prod parity: a session created through the flag-aware route (which
+    // always passes resolved flags) must spawn exactly like before C3.
+    launcher.launch({ cwd: "/tmp/project", model: "claude-sonnet-4-6" });
+    const baseline = argvOf(0);
+    // Fresh proc: the default mock proc's stdout stream can only be read once.
+    mockSpawn.mockReturnValueOnce(createMockProc(12346));
+    launcher.launch({ cwd: "/tmp/project", model: "claude-sonnet-4-6", layers: ALL_ON });
+    expect(argvOf(1)).toEqual(baseline);
+    expect(baseline).not.toContain("--append-system-prompt");
+  });
+
+  it("knowledge=off denies KB file access + KB skills and appends one directive", () => {
+    const info = launcher.launch({ cwd: "/tmp/project", layers: { ...ALL_ON, knowledge: false } });
+    const argv = argvOf(0);
+    const rules = denyRules(argv);
+    expect(rules).toEqual(expect.arrayContaining([
+      "Read(./.agents/knowledge/**)",
+      "Edit(./.agents/knowledge/**)",
+      "Write(./.agents/knowledge/**)",
+      "Skill(prime)",
+      "Skill(learn)",
+      "Skill(self-reflect)",
+    ]));
+    // council stays on → no council skill denied
+    expect(rules.some((r) => r.startsWith("Skill(council-"))).toBe(false);
+    expect(argv.filter((a) => a === "--append-system-prompt")).toHaveLength(1);
+    expect(argv[argv.indexOf("--append-system-prompt") + 1]).toContain("knowledge layer is disabled");
+    // persisted for relaunch
+    expect(info.layers).toEqual({ ...ALL_ON, knowledge: false });
+  });
+
+  // aura-meta-diet AP-WIRE: the validated auto-proceed opt-in is stored on the
+  // orchestrator-half's info (persisted with the launcher state, so it
+  // survives relaunch/restart) and dropped for every other session — a
+  // non-orchestrator session must never carry an arm-able opt-in.
+  it("stores autoProceedOnIdle only on a council orchestrator-half", () => {
+    const opt = { idleMs: 60_000, maxIterations: 3 };
+    const orch = launcher.launch({
+      cwd: "/tmp/project",
+      sessionGroupId: "grp_0123456789abcdef0123456789abcdef",
+      sessionGroupRole: "orchestrator",
+      autoProceedOnIdle: opt,
+    });
+    expect(orch.autoProceedOnIdle).toEqual(opt);
+    // (An observer-half launch needs real council prompt files; the solo case
+    // below exercises the same `role !== "orchestrator"` branch.)
+    mockSpawn.mockReturnValueOnce(createMockProc(12346));
+    const solo = launcher.launch({ cwd: "/tmp/project", autoProceedOnIdle: opt });
+    expect(solo.autoProceedOnIdle).toBeUndefined();
+  });
+
+  it("council=off denies every council skill", () => {
+    launcher.launch({ cwd: "/tmp/project", layers: { ...ALL_ON, council: false } });
+    const rules = denyRules(argvOf(0));
+    expect(rules).toEqual(expect.arrayContaining([
+      "Skill(council-review)",
+      "Skill(council-review-aura)",
+      "Skill(council-plan-aura)",
+      "Skill(_council-experts)",
+    ]));
+    expect(rules).not.toContain("Skill(prime)");
+  });
+
+  it("observer role keeps its profile and gets the layer directive composed into the single append flag", () => {
+    // Observer overrides REPLACE disallowedTools; layer rules must be added
+    // on top (never dropped), and the prompt must stay one flag (a second
+    // --append-system-prompt would silently last-win on the CLI).
+    launcher.launch({
+      cwd: tempDir,
+      sessionGroupRole: "observer",
+      sessionGroupId: "grp_c3_obs",
+      layers: { ...ALL_ON, knowledge: false },
+    });
+    const argv = argvOf(0);
+    expect(argv.filter((a) => a === "--append-system-prompt")).toHaveLength(1);
+    const body = argv[argv.indexOf("--append-system-prompt") + 1];
+    expect(body).toContain("knowledge layer is disabled");
+    expect(body.length).toBeGreaterThan("# Aura layer flags".length + 200); // observer prompt still there
+    expect(denyRules(argv)).toContain("Skill(prime)");
+  });
+
+  it("relaunch re-applies the persisted deny rules (directive skipped on --resume)", async () => {
+    let resolveFirst: (code: number) => void;
+    const firstProc = {
+      pid: 12345,
+      kill: vi.fn(() => { resolveFirst(0); }),
+      exited: new Promise<number>((r) => { resolveFirst = r; }),
+      stdout: null,
+      stderr: null,
+    };
+    mockSpawn.mockReturnValueOnce(firstProc);
+    launcher.launch({ cwd: "/tmp/project", layers: { ...ALL_ON, knowledge: false } });
+    launcher.setCLISessionId("test-session-id", "cli-resume-id");
+    mockSpawn.mockReturnValueOnce(createMockProc(54321));
+
+    expect(await launcher.relaunch("test-session-id")).toEqual({ ok: true });
+    const argv = argvOf(1);
+    expect(argv).toContain("--resume");
+    expect(denyRules(argv)).toContain("Read(./.agents/knowledge/**)");
+    // CR-3 rule: the prompt is baked at the original spawn; not re-emitted on resume.
+    expect(argv).not.toContain("--append-system-prompt");
+  });
+
+  it("codex: knowledge=off reaches the adapter as thread instructions", async () => {
+    mockSpawn.mockReturnValueOnce(createMockCodexProc());
+    let captured: any;
+    companionBus.on("backend:codex-adapter-created", ({ adapter }) => { captured ??= adapter; });
+    launcher.launch({
+      cwd: "/tmp/project",
+      backendType: "codex",
+      layers: { ...ALL_ON, knowledge: false },
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(captured).toBeDefined();
+    expect(captured.options.systemPrompt).toContain("knowledge layer is disabled");
+  });
+
+  it("codex: default flags leave instructions unset", async () => {
+    mockSpawn.mockReturnValueOnce(createMockCodexProc());
+    let captured: any;
+    companionBus.on("backend:codex-adapter-created", ({ adapter }) => { captured ??= adapter; });
+    launcher.launch({ cwd: "/tmp/project", backendType: "codex", layers: ALL_ON });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(captured.options.systemPrompt).toBeUndefined();
+  });
+
+  it("codex: the directive survives a relaunch that resumes the thread (FIX-C3-1)", async () => {
+    // On stdio every server restart relaunches with the persisted thread id.
+    // The relaunched adapter must still carry the directive AND the thread
+    // id, so CodexAdapter re-sends it as developerInstructions on
+    // thread/resume (adapter half covered in codex-adapter.test.ts).
+    let resolveFirst!: (code: number) => void;
+    mockSpawn.mockReturnValueOnce({
+      ...createMockCodexProc(4001),
+      kill: vi.fn(() => resolveFirst(0)),
+      exited: new Promise<number>((r) => { resolveFirst = r; }),
+    });
+    const adapters: any[] = [];
+    companionBus.on("backend:codex-adapter-created", ({ adapter }) => { adapters.push(adapter); });
+    launcher.launch({ cwd: "/tmp/project", backendType: "codex", layers: { ...ALL_ON, council: false } });
+    await new Promise((r) => setTimeout(r, 0));
+    launcher.setCLISessionId("test-session-id", "thr_persisted");
+    mockSpawn.mockReturnValueOnce(createMockCodexProc(4002));
+
+    expect(await launcher.relaunch("test-session-id")).toEqual({ ok: true });
+    await new Promise((r) => setTimeout(r, 0));
+    const relaunched = adapters[adapters.length - 1];
+    expect(adapters.length).toBeGreaterThanOrEqual(2);
+    expect(relaunched.options.threadId).toBe("thr_persisted");
+    expect(relaunched.options.systemPrompt).toContain("council layer is disabled");
   });
 });

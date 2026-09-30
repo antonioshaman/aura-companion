@@ -65,6 +65,7 @@ import { verifyToken, getToken, regenerateToken, getAllAddresses } from "./auth-
 import QRCode from "qrcode";
 import { VSCODE_EDITOR_CONTAINER_PORT, NOVNC_CONTAINER_PORT } from "./constants.js";
 import { probePairingCapability, type ProbeRunner, type PairingCapability } from "./preflight-probe.js";
+import { applyLayerFlagsToCreateBody, getServerLayerFlags } from "./layer-flags.js";
 
 const ROUTES_DIR = dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = dirname(ROUTES_DIR);
@@ -428,25 +429,30 @@ export function createRoutes(
    */
   function normaliseCreateSessionBody(
     body: Record<string, unknown>,
-  ): { ok: true; body: Record<string, unknown> } | { ok: false; error: string } {
+  ): { ok: true; body: Record<string, unknown> } | { ok: false; error: string; status: 400 | 409 } {
     const rawAuto = (body as { autoProceedOnIdle?: unknown }).autoProceedOnIdle;
     const parsed = parseAutoProceedOnIdleAtBoundary(rawAuto);
     if (parsed.kind === "invalid") {
-      return { ok: false, error: formatAutoProceedConfigError(parsed.error) };
+      return { ok: false, error: formatAutoProceedConfigError(parsed.error), status: 400 };
     }
     // Strip the raw field; replace with parsed value or omit entirely.
     const { autoProceedOnIdle: _stripped, ...rest } = body as Record<string, unknown>;
-    if (parsed.kind === "absent") {
-      return { ok: true, body: rest };
+    const autoBody = parsed.kind === "absent" ? rest : { ...rest, autoProceedOnIdle: parsed.value };
+    // aura-meta-diet C3: resolve layer flags (fail-closed, warn) and apply
+    // the host-side gates (observer → no council pair, autoProceed → strip).
+    const layered = applyLayerFlagsToCreateBody(autoBody, getServerLayerFlags());
+    for (const w of layered.warnings) console.warn(`[layer-flags] ${w}`);
+    if (!layered.ok) {
+      return { ok: false, error: layered.error, status: layered.status };
     }
-    return { ok: true, body: { ...rest, autoProceedOnIdle: parsed.value } };
+    return { ok: true, body: layered.body };
   }
 
   api.post("/sessions/create", async (c) => {
     const rawBody = await c.req.json().catch(() => ({}));
     const norm = normaliseCreateSessionBody(rawBody);
     if (!norm.ok) {
-      return c.json({ error: norm.error }, 400 as any);
+      return c.json({ error: norm.error }, norm.status as any);
     }
     const body = norm.body;
     // Council Mode branch — the browser opts in by setting
@@ -482,7 +488,7 @@ export function createRoutes(
     const rawBody = await c.req.json().catch(() => ({}));
     const norm = normaliseCreateSessionBody(rawBody);
     if (!norm.ok) {
-      return c.json({ error: norm.error }, 400 as any);
+      return c.json({ error: norm.error }, norm.status as any);
     }
     const body = norm.body;
 
@@ -867,9 +873,105 @@ export function createRoutes(
     return c.json(result);
   });
 
+  // ─── Council Mode — dispute an observer STOP (meta-diet B2b) ──────────────
+  //
+  // The browser calls this when a human presses "Dispute" on a STOP (not on a
+  // plain "Dismiss for now"). The server persists the claim per group
+  // (`.council/state/<group>-disputes.json`); a later STOP repeating it on the
+  // same evidence file is marked `disputed` and kept out of the banner. The
+  // browser sends the claim text it was shown: the server has no finding-id
+  // index, and the claim is what the match runs on anyway.
+  api.post("/groups/:groupId/disputes", async (c) => {
+    const groupId = c.req.param("groupId");
+    const body = (await c.req.json().catch(() => null)) as
+      | { claim?: unknown; evidence_path?: unknown; finding_id?: unknown }
+      | null;
+    if (
+      !body ||
+      typeof body.claim !== "string" ||
+      typeof body.evidence_path !== "string" ||
+      (body.finding_id !== undefined && typeof body.finding_id !== "string")
+    ) {
+      return respondError(c, 400, "bad_request", {
+        module: "council.disputes",
+        detail: { reason: "claim and evidence_path (strings) required; finding_id optional string" },
+      });
+    }
+    const result = orchestrator.disputeObserverFinding(groupId, {
+      claim: body.claim,
+      evidencePath: body.evidence_path,
+      ...(typeof body.finding_id === "string" ? { findingId: body.finding_id } : {}),
+    });
+    if (!result.ok) {
+      if (result.reason === "unknown_group") {
+        return respondError(c, 404, "not_found", { module: "council.disputes", detail: { groupId } });
+      }
+      if (result.reason === "invalid_input") {
+        return respondError(c, 400, "bad_request", { module: "council.disputes", detail: { reason: "claim or evidence_path empty or too long" } });
+      }
+      return respondError(c, 500, "internal_error", { module: "council.disputes", detail: { groupId } });
+    }
+    return c.json({ ok: true, added: result.added });
+  });
+
+  // ─── Council Mode — release an observer STOP's auto-proceed hold (FIX-AP-1) ─
+  //
+  // The browser calls this on "Dismiss for now". Auto-proceed holds while the
+  // blocker banner would show a STOP; a dismissal is the human saying "go on".
+  // Not a dispute: the claim is not marked wrong and a re-raise is shown.
+  api.post("/groups/:groupId/stops/resolve", async (c) => {
+    const groupId = c.req.param("groupId");
+    const body = (await c.req.json().catch(() => null)) as { finding_id?: unknown } | null;
+    if (!body || typeof body.finding_id !== "string") {
+      return respondError(c, 400, "bad_request", {
+        module: "council.stops",
+        detail: { reason: "finding_id (string) required" },
+      });
+    }
+    const result = orchestrator.resolveObserverStop(groupId, body.finding_id);
+    if (!result.ok) {
+      if (result.reason === "unknown_group") {
+        return respondError(c, 404, "not_found", { module: "council.stops", detail: { groupId } });
+      }
+      return respondError(c, 400, "bad_request", { module: "council.stops", detail: { reason: "finding_id empty or too long" } });
+    }
+    return c.json(result);
+  });
+
+  // ─── Council Mode — ignore a restore gap (meta-diet P4/FIX-AP-4) ─────────
+  //
+  // A review file the server cannot read or parse keeps the auto-proceed hold
+  // restore incomplete (fail-closed). The ObserverPanel lists it with an
+  // "Ignore this file" action; this persists that decision for the exact
+  // content the human saw (`fingerprint` from the findings bootstrap).
+  api.post("/groups/:groupId/restore-gaps/ignore", async (c) => {
+    const groupId = c.req.param("groupId");
+    const body = (await c.req.json().catch(() => null)) as { file?: unknown; fingerprint?: unknown } | null;
+    if (!body || typeof body.file !== "string" || typeof body.fingerprint !== "string") {
+      return respondError(c, 400, "bad_request", {
+        module: "council.restore-gaps",
+        detail: { reason: "file and fingerprint (strings) required" },
+      });
+    }
+    const result = orchestrator.ignoreAutoProceedRestoreGap(groupId, body.file, body.fingerprint);
+    if (!result.ok) {
+      if (result.reason === "unknown_group") {
+        return respondError(c, 404, "not_found", { module: "council.restore-gaps", detail: { groupId } });
+      }
+      if (result.reason === "invalid_input") {
+        return respondError(c, 400, "bad_request", {
+          module: "council.restore-gaps",
+          detail: { reason: "file is not a review file name or fingerprint is malformed" },
+        });
+      }
+      return respondError(c, 500, "internal_error", { module: "council.restore-gaps", detail: { reason: "not persisted" } });
+    }
+    return c.json(result);
+  });
+
   // ─── Council Mode — REST bootstrap of group records ──────────────────────
   //
-  // Closes `BUG-council-mode-group-rest-bootstrap-gap.md` (PR #68). The
+  // Closes `docs/history/BUG-council-mode-group-rest-bootstrap-gap.md` (PR #68). The
   // browser's `groupBySessionId` map is populated EXCLUSIVELY by the live
   // `group:created` push, so a tab reloading after pair creation lands
   // without the Sidebar ☼/☽ glyph + role suffix and without ObserverPanel

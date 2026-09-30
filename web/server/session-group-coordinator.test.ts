@@ -266,7 +266,7 @@ describe("SessionGroupCoordinator.archiveGroup", () => {
   });
 });
 
-// PLAN-aura-consolidated-refactor.md Task 2 acceptance:
+// docs/history/PLAN-aura-consolidated-refactor.md Task 2 acceptance:
 // `createGroup` now plumbs an opaque `spawnContext` to each spawn callback
 // (replacing the prior `pendingCouncilCall` instance scalar on the
 // orchestrator that two concurrent invocations could race and
@@ -347,7 +347,7 @@ describe("SessionGroupCoordinator.createGroup — concurrent spawnContext isolat
   });
 });
 
-// PLAN-aura-consolidated-refactor.md Task 4 acceptance criterion (v2
+// docs/history/PLAN-aura-consolidated-refactor.md Task 4 acceptance criterion (v2
 // promotion from Risks → Task 4): "every reconcile-driven state mutation
 // function MUST be safe to call twice — `markGroupDegraded(id)` called by
 // both the reconnect-grace expiry path AND the cascading-second-half-death

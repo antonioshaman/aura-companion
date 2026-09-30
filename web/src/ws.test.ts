@@ -12,6 +12,8 @@ import type { ModelOption } from "./utils/backends.js";
 // frame per status makes a dropped mapping branch go red.
 import claudeResultErrorsRaw from "./__fixtures__/model-failover/claude-result-errors.jsonl?raw";
 import codexResultErrorRaw from "./__fixtures__/model-failover/codex-result-error.jsonl?raw";
+// UI-RESUME-NOISE — real `--resume` bookkeeping + api_error result frames.
+import resumeResultsRaw from "./__fixtures__/resume-interrupted/claude-resume-results.jsonl?raw";
 
 // Browser-safe mirror of replay.ts's getExpectedBrowserMessages over a raw
 // recording string: drop the header line, then keep `dir:"out" ch:"browser"`
@@ -25,6 +27,12 @@ function recordedBrowserResultFrames(recording: string): Array<Record<string, un
     .map((e) => JSON.parse(e.raw) as Record<string, unknown>);
 }
 
+// Spy on the completion chime so the resume-noise tests can assert it stays silent.
+const mockPlayNotificationSound = vi.hoisted(() => vi.fn());
+vi.mock("./utils/notification-sound.js", () => ({
+  playNotificationSound: mockPlayNotificationSound,
+}));
+
 // Mock the names utility before any imports
 vi.mock("./utils/names.js", () => ({
   generateUniqueSessionName: vi.fn(() => "Test Session"),
@@ -34,8 +42,10 @@ vi.mock("./utils/names.js", () => ({
 // imports `./api.js` so we mock the api surface here to capture the
 // fetchGroups call without touching the real REST client.
 const mockFetchGroups = vi.hoisted(() => vi.fn().mockResolvedValue({ groups: [] }));
+// FIX-AP-4: the `group_created` handler bootstraps findings (and restore gaps).
+const mockFetchGroupFindings = vi.hoisted(() => vi.fn());
 vi.mock("./api.js", () => ({
-  api: { fetchGroups: mockFetchGroups },
+  api: { fetchGroups: mockFetchGroups, fetchGroupFindings: mockFetchGroupFindings },
 }));
 
 let wsModule: typeof import("./ws.js");
@@ -1118,6 +1128,88 @@ describe("handleMessage: result", () => {
     expect(msgs).toHaveLength(1);
     expect(msgs[0].role).toBe("system");
     expect(msgs[0].content).toBe("Error: Something went wrong, Another error");
+  });
+
+  it("tags a real execution error from a live result as the red error variant", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+
+    fireMessage({
+      type: "result",
+      data: {
+        type: "result",
+        subtype: "error_during_execution",
+        is_error: true,
+        terminal_reason: "aborted_streaming",
+        errors: ["Stream closed unexpectedly"],
+        duration_ms: 100,
+        duration_api_ms: 50,
+        num_turns: 1,
+        total_cost_usd: 0.01,
+        stop_reason: null,
+        usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        uuid: "u2",
+        session_id: "s1",
+      },
+    });
+
+    // Same terminal reason, but a human-readable error → still a real error.
+    const msgs = useStore.getState().messages.get("s1")!;
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0].systemVariant).toBe("error");
+  });
+
+  // UI-RESUME-NOISE live path: the REAL recorded frame arriving right after a
+  // relaunch becomes a muted note and does not fire the "Session completed"
+  // chime/desktop notification — nothing finished, a restart cut it off.
+  it("renders the recorded live --resume frame as a note and keeps notifications silent", () => {
+    const hasFocus = vi.spyOn(document, "hasFocus").mockReturnValue(false);
+    const NotificationMock = vi.fn();
+    Object.assign(NotificationMock, { permission: "granted" });
+    // Swap Notification by hand — vi.unstubAllGlobals() would also drop the
+    // suite's WebSocket stub and break every later test.
+    const g = globalThis as { Notification?: unknown };
+    const originalNotification = g.Notification;
+    g.Notification = NotificationMock;
+    mockPlayNotificationSound.mockClear();
+    try {
+      useStore.setState({ notificationSound: true, notificationDesktop: true });
+      wsModule.connectSession("s1");
+      fireMessage({ type: "session_init", session: makeSession("s1") });
+
+      const [aborted] = recordedBrowserResultFrames(resumeResultsRaw);
+      fireMessage(aborted);
+
+      const msgs = useStore.getState().messages.get("s1")!;
+      expect(msgs).toHaveLength(1);
+      expect(msgs[0].systemVariant).toBe("resume-interrupted");
+      expect(mockPlayNotificationSound).not.toHaveBeenCalled();
+      expect(NotificationMock).not.toHaveBeenCalled();
+
+      // Control: a normal successful result in the same setup DOES chime, so
+      // the silence above is the resume guard, not a broken test harness.
+      fireMessage({
+        type: "result",
+        data: {
+          type: "result",
+          subtype: "success",
+          is_error: false,
+          duration_ms: 1000,
+          duration_api_ms: 800,
+          num_turns: 1,
+          total_cost_usd: 0.05,
+          stop_reason: "end_turn",
+          usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+          uuid: "u3",
+          session_id: "s1",
+        },
+      });
+      expect(mockPlayNotificationSound).toHaveBeenCalledTimes(1);
+      expect(NotificationMock).toHaveBeenCalledTimes(1);
+    } finally {
+      hasFocus.mockRestore();
+      g.Notification = originalNotification;
+    }
   });
 
   // Claude `set_model` is optimistic + unvalidated by the CLI, so an unusable
@@ -2305,6 +2397,46 @@ describe("handleMessage: message_history", () => {
     expect(msgs[0].content).toBe("Error: Timed out");
   });
 
+  // UI-RESUME-NOISE: after a relaunch with --resume the Claude CLI closes the
+  // turn the old process was killed in with an `aborted_streaming` result
+  // (`[ede_diagnostic] …`). Replaying the REAL recorded frame through the
+  // history path must yield a muted "resume-interrupted" note, while a real
+  // execution error in the same history stays a red "error".
+  it("marks the recorded --resume bookkeeping frame as resume-interrupted in history", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+
+    const [aborted] = recordedBrowserResultFrames(resumeResultsRaw);
+    fireMessage({
+      type: "message_history",
+      messages: [
+        aborted,
+        {
+          type: "result",
+          data: {
+            type: "result",
+            subtype: "error_during_execution",
+            is_error: true,
+            errors: ["Timed out"],
+            duration_ms: 100,
+            duration_api_ms: 50,
+            num_turns: 1,
+            total_cost_usd: 0,
+            stop_reason: null,
+            usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+            uuid: "u1",
+            session_id: "s1",
+          },
+        },
+      ],
+    });
+
+    const msgs = useStore.getState().messages.get("s1")!;
+    expect(msgs.map((m) => m.systemVariant)).toEqual(["resume-interrupted", "error"]);
+    // The raw diagnostic is kept as the expandable detail.
+    expect(msgs[0].content).toContain("[ede_diagnostic]");
+  });
+
   it("assigns stable IDs to error results based on history index", () => {
     wsModule.connectSession("s1");
     fireMessage({ type: "session_init", session: makeSession("s1") });
@@ -3096,7 +3228,7 @@ describe("handleMessage: assistant clears only completed tool progress", () => {
 // Post-reconnect group bootstrap refetch (PR #68 friedman fix-pass)
 // ===========================================================================
 //
-// `BUG-council-mode-group-rest-bootstrap-gap.md` left a recovery hole:
+// `docs/history/BUG-council-mode-group-rest-bootstrap-gap.md` left a recovery hole:
 // if the App.tsx mount-effect `fetchGroups` call fails (network blip,
 // server 500), the user has no UI to retry. The friedman P2 fix says:
 // dispatch the same `fetchGroups → hydrateGroups` pipeline on every
@@ -3181,5 +3313,64 @@ describe("post-reconnect group bootstrap refetch", () => {
     // Drain the debounce window (armed at t=2000 for 250ms → fires at t=2250).
     await vi.advanceTimersByTimeAsync(300);
     expect(mockFetchGroups).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ===========================================================================
+// handleMessage: group_convergence (P3/CONV-HONEST)
+// ===========================================================================
+describe("handleMessage: group_convergence", () => {
+  // The server marks a clean review that reviewed nothing as `not-counted`
+  // with a reason; the store keeps that reason on the GroupRecord so the
+  // UI can say "not counted". Any other transition clears it.
+  function seedGroup() {
+    useStore.getState().upsertGroup({
+      sessionGroupId: "grp_ws",
+      primarySessionId: "s1",
+      observerSessionId: "s1_obs",
+      pairing: "claude+codex",
+      status: "active",
+    } as never);
+  }
+
+  it("stores the not-counted reason, then clears it on a counted transition", () => {
+    wsModule.connectSession("s1");
+    seedGroup();
+    fireMessage({
+      type: "group_convergence", sessionGroupId: "grp_ws", transition: "not-counted",
+      cycleNumber: 0, convergenceThreshold: 3, convergenceState: "in-progress",
+      notCountedReason: "no_files_read", timestamp: 1,
+    });
+    expect(useStore.getState().groups.get("grp_ws")?.lastReviewNotCounted).toBe("no_files_read");
+
+    fireMessage({
+      type: "group_convergence", sessionGroupId: "grp_ws", transition: "cycle-progress",
+      cycleNumber: 1, convergenceThreshold: 3, convergenceState: "in-progress", timestamp: 2,
+    });
+    const g = useStore.getState().groups.get("grp_ws");
+    expect(g?.lastReviewNotCounted).toBeUndefined();
+    expect(g?.cycleNumber).toBe(1);
+  });
+});
+
+// ===========================================================================
+// FIX-AP-4 — restore gaps from the findings bootstrap
+// ===========================================================================
+// An incomplete auto-proceed hold restore can happen with NO parseable review
+// (reviewCount 0: the only file is broken). The bootstrap handler used to
+// return early on reviewCount 0; the gaps must reach the store anyway, or the
+// pause stays invisible — exactly the case FIX-AP-4 exists for.
+describe("group_created findings bootstrap → auto-proceed restore gaps", () => {
+  it("stores the gaps even when no review could be counted", async () => {
+    const gap = { gap: "review_unparseable:p-claude-observer.md", reason: "r", file: "p-claude-observer.md", fingerprint: "a".repeat(64) };
+    mockFetchGroupFindings.mockResolvedValue({
+      sessionGroupId: "grp_gap", findings: [], downgrades: [], reviewCount: 0, autoProceedRestoreGaps: [gap],
+    });
+    wsModule.connectSession("s1");
+    fireMessage({ type: "group_created", sessionGroupId: "grp_gap", primarySessionId: "s1", observerSessionId: "s2", pairing: "claude+claude" });
+    await vi.waitFor(() => {
+      expect(useStore.getState().autoProceedRestoreGaps.get("grp_gap")).toEqual([gap]);
+    });
+    expect(mockFetchGroupFindings).toHaveBeenCalledWith("grp_gap");
   });
 });

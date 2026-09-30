@@ -1,0 +1,50 @@
+# AuraBench task mined from PR #114 ("fix(cli-launcher): kill restart-survived CLI process on archive/delete").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: archived-session-cli-survives-restart
+title: "Archiving a session after a server restart actually stops its CLI process"
+start_commit: 1bb028fd9c61b163396333d07f3a57b042bc2741
+prompt: |
+  Under systemd `KillMode=process`, CLI child processes survive a server restart.
+  After such a restart, archiving or deleting one of the restored sessions leaves
+  its CLI process running forever; nothing ever terminates it.
+
+  Required behaviour of `CliLauncher.kill(sessionId)` for a session restored from
+  disk whose CLI process is still alive:
+  - the process receives SIGTERM, and SIGKILL if it has not exited after a grace
+    period;
+  - the session ends up `exited` with its `pid` cleared, and `kill()` returns
+    whether it signalled the process;
+  - for a Claude session whose pid now belongs to some unrelated process (pid
+    reuse), nothing is signalled;
+  - Codex sessions are still terminated (best-effort).
+expected_files:
+  - web/server/cli-launcher.ts
+expected_tests:
+  - web/server/cli-launcher.test.ts
+failure_modes:
+  - "an unrelated process with a reused pid is killed"
+  - "kill() blocks forever waiting on a pid"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 114
+  merge_commit: 60e9125c44ca0506272f92fd81790384f2f2833b
+  class: bugfix
+  hidden_tests:
+    - web/server/cli-launcher.test.ts
+  validation:
+    base: fail
+    merge: pass
+    base_failure: assertion
+    checked_at: "2026-09-28T07:28:18.486Z"

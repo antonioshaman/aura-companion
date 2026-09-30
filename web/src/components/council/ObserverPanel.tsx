@@ -27,13 +27,16 @@ import {
   deriveObserverPanelState,
   findUnresolvedStops,
 } from "../../observer-panel-state.js";
-import type {
-  GroupRecord,
-  ObserverFinding,
-  ObserverPanelState,
+import {
+  CONVERGENCE_DISCLAIMER,
+  convergenceNotCountedInline,
+  type GroupRecord,
+  type ObserverFinding,
+  type ObserverPanelState,
 } from "../../types.js";
 import { FindingsLog, formatRelativeTime } from "./FindingsLog.js";
 import { DegradedBanner } from "./DegradedBanner.js";
+import { AutoProceedRestoreNotice } from "./AutoProceedRestoreNotice.js";
 import { ProviderBadges } from "./ProviderBadges.js";
 
 export interface ObserverPanelProps {
@@ -227,6 +230,7 @@ function StatusPill({ state }: { state: ObserverPanelState }) {
           role="status"
           aria-atomic="true"
           aria-label={accessibleLabel}
+          title={`${state.cycleNumber} of ${state.threshold} reviews in a row without blockers. ${CONVERGENCE_DISCLAIMER}`}
           className="flex items-center gap-2 text-cc-info"
         >
           <span aria-hidden="true">🔄</span>
@@ -238,11 +242,11 @@ function StatusPill({ state }: { state: ObserverPanelState }) {
     }
     case "converged": {
       // Bidirectional pipeline Story 4.1.5: pair has reached threshold.
-      // Emerald-500 token (Tailwind's `emerald-500`) signals "ship-ready".
-      // Click target is the entire pill so an operator can drill into
-      // the final review via the parent ObserverPanel's click handler
-      // (popover wiring deferred — pill itself stays declarative).
-      const accessibleLabel = `Converged — ready to ship after ${state.cycleNumber} clean cycles`;
+      // P3/CONV-HONEST: the copy states what was measured — N observer
+      // reviews in a row without a blocker — and the tooltip says it is NOT
+      // a readiness guarantee. It never says "ready to ship".
+      const summary = `${state.cycleNumber} reviews in a row without blockers`;
+      const accessibleLabel = `${summary}. ${CONVERGENCE_DISCLAIMER}`;
       return (
         <div
           data-testid="status-pill"
@@ -250,11 +254,12 @@ function StatusPill({ state }: { state: ObserverPanelState }) {
           role="status"
           aria-atomic="true"
           aria-label={accessibleLabel}
+          title={accessibleLabel}
           className="flex items-center gap-2 text-emerald-500"
         >
           <span aria-hidden="true">✅</span>
           <span className="text-xs font-medium">
-            Converged — ready to ship
+            {summary}
           </span>
           <span className="text-[10px] font-mono-code text-cc-muted">·</span>
           <span className="text-[10px] font-mono-code text-cc-muted">
@@ -326,6 +331,8 @@ export function ObserverPanel({
   const setOpen = useStore((s) => s.setObserverPanelOpen);
   const dismissStop = useStore((s) => s.dismissStop);
   const dismissFirstRunHint = useStore((s) => s.dismissFirstRunHint);
+  const restoreGaps = useStore((s) => (groupId ? s.autoProceedRestoreGaps.get(groupId) : undefined)) ?? [];
+  const ignoreRestoreGap = useStore((s) => s.ignoreRestoreGap);
 
   const handleExpand = useCallback(() => setOpen(sessionId, true), [sessionId, setOpen]);
   const handleCollapse = useCallback(() => setOpen(sessionId, false), [sessionId, setOpen]);
@@ -412,6 +419,18 @@ export function ObserverPanel({
         )}
       </div>
 
+      {/* P3/CONV-HONEST: the latest review did not count toward the streak. */}
+      {group.lastReviewNotCounted && state.name !== "degraded" && (
+        <div
+          data-testid="convergence-not-counted"
+          data-reason={group.lastReviewNotCounted}
+          className="shrink-0 px-3 py-1.5 border-b border-cc-border text-[11px] text-cc-muted"
+          title={CONVERGENCE_DISCLAIMER}
+        >
+          Last review — {convergenceNotCountedInline(group.lastReviewNotCounted)}
+        </div>
+      )}
+
       {/* Degraded banner — lives in the header, NOT in the composer slot. */}
       {state.name === "degraded" && onRespawnHalf && (
         <DegradedBanner deadRole={state.deadRole} reason={state.reason} onRespawn={handleRespawn} />
@@ -444,6 +463,13 @@ export function ObserverPanel({
           </button>
         </div>
       )}
+
+      {/* FIX-AP-4: auto-proceed paused by an incomplete hold restore — no
+          STOP carries this hold, so the panel says why and offers "ignore". */}
+      <AutoProceedRestoreNotice
+        gaps={restoreGaps}
+        onIgnore={(gap) => ignoreRestoreGap(group.sessionGroupId, gap)}
+      />
 
       {/* First-run microcopy (dismissable, per-user) */}
       {!firstRunDismissed && (

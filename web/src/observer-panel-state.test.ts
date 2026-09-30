@@ -3,6 +3,7 @@ import {
   countUnresolvedStopsAcrossGroups,
   deriveObserverPanelState,
   findUnresolvedStops,
+  orderFindingsForDisplay,
 } from "./observer-panel-state.js";
 import type { GroupRecord, ObserverFinding } from "./types.js";
 
@@ -32,6 +33,33 @@ function finding(overrides: Partial<ObserverFinding> = {}): ObserverFinding {
   };
 }
 
+// ── orderFindingsForDisplay (FINDINGS-DEDUP) ────────────────────────────────
+
+describe("orderFindingsForDisplay", () => {
+  // The FindingsLog order: blockers first (the banner's own predicate, so a
+  // server-held NOTE counts and a disputed STOP does not), then newest first,
+  // ties in input order; a repeated id is kept once (first copy wins).
+  it("orders blockers first, then newest first, ties stable, ids once", () => {
+    const all = [
+      finding({ id: "note-old", receivedAt: 100 }),
+      finding({ id: "held-note", severity: "NOTE", holdsAutoProceed: true, receivedAt: 5 }),
+      finding({ id: "disputed-stop", severity: "STOP", disputed: "same_claim", receivedAt: 900 }),
+      finding({ id: "tie-1", receivedAt: 400 }),
+      finding({ id: "tie-2", receivedAt: 400 }),
+      finding({ id: "note-old", receivedAt: 999, claim: "second copy" }),
+    ];
+    const out = orderFindingsForDisplay(all, new Set());
+    expect(out.map((f) => f.id)).toEqual(["held-note", "disputed-stop", "tie-1", "tie-2", "note-old"]);
+    expect(out.find((f) => f.id === "note-old")!.receivedAt).toBe(100);
+  });
+
+  it("does not mutate the input array", () => {
+    const all = [finding({ id: "a", receivedAt: 1 }), finding({ id: "b", receivedAt: 2 })];
+    orderFindingsForDisplay(all, new Set());
+    expect(all.map((f) => f.id)).toEqual(["a", "b"]);
+  });
+});
+
 // ── findUnresolvedStops ─────────────────────────────────────────────────────
 
 describe("findUnresolvedStops", () => {
@@ -47,6 +75,53 @@ describe("findUnresolvedStops", () => {
     ];
     const out = findUnresolvedStops(all, new Set(["f4"]));
     expect(out.map((f) => f.id)).toEqual(["f1"]);
+  });
+
+  // B2: a weak-evidence STOP (path-only / claim not on cited lines) is not a
+  // blocker — it must not drive the banner, the blocker-found panel state, or
+  // the unread count. The same STOP without the mark still is.
+  it("excludes weak-evidence STOPs", () => {
+    const all = [
+      finding({ id: "weak", severity: "STOP", weakEvidence: "no_cited_lines" }),
+      finding({ id: "strong", severity: "STOP" }),
+    ];
+    expect(findUnresolvedStops(all, new Set()).map((f) => f.id)).toEqual(["strong"]);
+  });
+
+  // B2b: a STOP repeating a claim a human already dismissed in this group
+  // (server-marked `disputed`) is not a blocker either, even with a new id.
+  it("excludes disputed STOPs", () => {
+    const all = [
+      finding({ id: "again", severity: "STOP", disputed: "shared_anchor" }),
+      finding({ id: "same", severity: "STOP", disputed: "same_claim" }),
+      finding({ id: "fresh", severity: "STOP" }),
+    ];
+    expect(findUnresolvedStops(all, new Set()).map((f) => f.id)).toEqual(["fresh"]);
+  });
+
+  // FIX-AP-3: the server flags a finding that holds auto-proceed although its
+  // re-grounded severity / weak evidence would hide it. It is a blocker (banner,
+  // title count, rail) until dismissed — no invisible holds.
+  it("includes a finding holding auto-proceed whatever its severity, until dismissed", () => {
+    const all = [
+      finding({ id: "note", severity: "NOTE", wasDowngraded: true, downgradeReason: "evidence_not_in_modified_set", holdsAutoProceed: true }),
+      finding({ id: "weak", severity: "STOP", weakEvidence: "no_cited_lines", holdsAutoProceed: true }),
+      finding({ id: "plain-note", severity: "NOTE" }),
+    ];
+    expect(findUnresolvedStops(all, new Set()).map((f) => f.id)).toEqual(["note", "weak"]);
+    expect(findUnresolvedStops(all, new Set(["note"])).map((f) => f.id)).toEqual(["weak"]);
+  });
+
+  // BANNER-RESOLVED: a STOP the server reports as dismissed (persisted
+  // "Dismiss for now") is never a blocker, even with an empty local dismissed
+  // set (fresh tab after reload) and even if also flagged as holding.
+  it("excludes server-dismissed STOPs", () => {
+    const all = [
+      finding({ id: "done", severity: "STOP", dismissed: true }),
+      finding({ id: "done-held", severity: "NOTE", holdsAutoProceed: true, dismissed: true }),
+      finding({ id: "open", severity: "STOP" }),
+    ];
+    expect(findUnresolvedStops(all, new Set()).map((f) => f.id)).toEqual(["open"]);
   });
 
   // Beck F4 — empty case (early-return branch).

@@ -2099,7 +2099,11 @@ describe("auraIsActiveSession", () => {
 // ─── Council Mode — per-session badge & unread counter ─────────────────────
 
 describe("Sidebar — Council Mode badges", () => {
-  function seedCouncilSession(sessionId: string, pairing: string, stops: { id: string; wasDowngraded?: boolean }[] = []) {
+  function seedCouncilSession(
+    sessionId: string,
+    pairing: string,
+    stops: { id: string; severity?: string; wasDowngraded?: boolean; weakEvidence?: string; disputed?: string; holdsAutoProceed?: true }[] = [],
+  ) {
     const groupId = `grp_for_${sessionId}`;
     const sdkSession = makeSdkSession(sessionId);
     mockState.sessions = new Map([[sessionId, makeSession(sessionId)]]);
@@ -2110,10 +2114,13 @@ describe("Sidebar — Council Mode badges", () => {
     mockState.groups = new Map([[groupId, { pairing }]]);
     mockState.findings = new Map([[groupId, stops.map((s) => ({
       id: s.id,
-      severity: "STOP",
+      severity: s.severity ?? "STOP",
       claim: "test",
       evidence_path: "src/x.ts",
       wasDowngraded: s.wasDowngraded,
+      weakEvidence: s.weakEvidence,
+      disputed: s.disputed,
+      holdsAutoProceed: s.holdsAutoProceed,
     }))]]);
     mockState.dismissedStopIds = new Set();
   }
@@ -2138,6 +2145,30 @@ describe("Sidebar — Council Mode badges", () => {
     ]);
     render(<Sidebar />);
     expect(screen.queryByTestId("council-unread-count")).toBeNull();
+  });
+
+  // B2/B2b: weak-evidence and disputed STOPs never raise the banner, so the
+  // Sidebar's unread blocker counter must not count them either (it used to
+  // count every non-downgraded STOP).
+  it("counts neither weak-evidence nor disputed STOPs as unread", () => {
+    seedCouncilSession("s_mixed", "claude+codex", [
+      { id: "f1" },
+      { id: "f2", weakEvidence: "no_cited_lines" },
+      { id: "f3", disputed: "shared_anchor" },
+    ]);
+    render(<Sidebar />);
+    expect(screen.getAllByTestId("council-unread-count")[0]).toHaveTextContent("1");
+  });
+
+  // FIX-AP-3: a finding holding auto-proceed is on the banner, so the rail
+  // counts it too, even when it now reads as a downgraded NOTE.
+  it("counts a finding holding auto-proceed as unread", () => {
+    seedCouncilSession("s_held", "claude+codex", [
+      { id: "f1", severity: "NOTE", wasDowngraded: true, holdsAutoProceed: true },
+      { id: "f2", severity: "NOTE", wasDowngraded: true },
+    ]);
+    render(<Sidebar />);
+    expect(screen.getAllByTestId("council-unread-count")[0]).toHaveTextContent("1");
   });
 
   it("does not render any council badge when the session is not in a group", () => {
@@ -2166,6 +2197,7 @@ describe("Sidebar — Council convergence badge", () => {
       convergenceState?: "in-progress" | "converged" | "revoked";
       cycleNumber?: number;
       convergenceThreshold?: number;
+      lastReviewNotCounted?: "no_changed_files" | "no_files_read";
     },
   ) {
     const groupId = `grp_for_${sessionId}`;
@@ -2206,6 +2238,22 @@ describe("Sidebar — Council convergence badge", () => {
     render(<Sidebar />);
     const badge = screen.getAllByTestId("council-convergence-badge")[0];
     expect(badge).toHaveAttribute("data-state", "converged");
+  });
+
+  // P3/CONV-HONEST: an uncounted latest review is threaded from GroupRecord
+  // (lastReviewNotCounted) through councilInfoFor to the row badge.
+  it("threads lastReviewNotCounted to a 'not counted' badge", () => {
+    seedConvergenceSession("s_not_counted", {
+      pairing: "claude+claude",
+      status: "active",
+      convergenceState: "in-progress",
+      cycleNumber: 0,
+      convergenceThreshold: 3,
+      lastReviewNotCounted: "no_files_read",
+    });
+    render(<Sidebar />);
+    const badge = screen.getAllByTestId("council-convergence-badge")[0];
+    expect(badge).toHaveAttribute("data-state", "not-counted");
   });
 
   it("renders the frozen degraded badge when the group status is degraded", () => {

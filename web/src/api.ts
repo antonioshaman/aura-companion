@@ -1,5 +1,5 @@
 import type { SdkSessionInfo, GroupRecord } from "./types.js";
-import type { ContentBlock, BrowserObserverFinding, BrowserObserverDowngrade } from "./types.js";
+import type { ContentBlock, BrowserObserverFinding, BrowserObserverDowngrade, AutoProceedRestoreGap } from "./types.js";
 import { captureEvent, captureException } from "./analytics.js";
 
 const BASE = "/api";
@@ -969,10 +969,30 @@ export const api = {
       reviewCount: number;
       observerProvider?: string;
       observerModel?: string;
+      /** FIX-AP-4: set only when an incomplete restore pauses auto-proceed. */
+      autoProceedRestoreGaps?: AutoProceedRestoreGap[];
     }>(`/groups/${encodeURIComponent(groupId)}/findings`),
 
+  // Council Mode (meta-diet B2b) — persist a human dismissal of an observer
+  // STOP so a re-raised copy of the claim no longer raises the blocker banner.
+  disputeObserverFinding: (groupId: string, finding: { finding_id: string; claim: string; evidence_path: string }) =>
+    post<{ ok: true; added: boolean }>(`/groups/${encodeURIComponent(groupId)}/disputes`, finding),
+
+  // Council Mode (FIX-AP-1) — "Dismiss for now": release the STOP's hold on
+  // auto-proceed. Not a dispute; the claim is not recorded as wrong.
+  resolveObserverStop: (groupId: string, findingId: string) =>
+    post<{ ok: true; released: boolean; persisted: boolean }>(
+      `/groups/${encodeURIComponent(groupId)}/stops/resolve`,
+      { finding_id: findingId },
+    ),
+
+  // Council Mode (FIX-AP-4) — "Ignore this file": a review file that keeps
+  // the auto-proceed hold restore incomplete stops blocking (this content only).
+  ignoreAutoProceedRestoreGap: (groupId: string, gap: { file: string; fingerprint: string }) =>
+    post<{ ok: true; added: boolean }>(`/groups/${encodeURIComponent(groupId)}/restore-gaps/ignore`, gap),
+
   // Council Mode — REST bootstrap of group records on app mount. Closes
-  // `BUG-council-mode-group-rest-bootstrap-gap.md` (PR #68). The browser's
+  // `docs/history/BUG-council-mode-group-rest-bootstrap-gap.md` (PR #68). The browser's
   // `groupBySessionId` map was previously populated EXCLUSIVELY by the
   // live `group:created` push; a tab reloading after pair creation landed
   // without the Sidebar ☼/☽ glyph + role suffix and without ObserverPanel

@@ -11,7 +11,14 @@
  *  - Reasoning visible — evidence path + line range + observer attribution
  *    are spelled out. Not a verdict in isolation.
  *  - Dismissable but not snoozable; dismissed STOPs remain in the
- *    FindingsLog permanently.
+ *    FindingsLog permanently. "Dismiss for now" hides this banner in this
+ *    tab and releases the STOP's hold on auto-proceed (FIX-AP-1); it does
+ *    not mark the claim wrong. "Dispute" is the separate, explicit "this claim is wrong"
+ *    action: it is remembered server-side and keeps a re-raise of the claim
+ *    on the same evidence file out of the banner (FIX-B2b-1).
+ *  - FIX-AP-3: a finding the server flags `holdsAutoProceed` (a raw STOP
+ *    whose verdict was never frozen, now re-checked as NOTE / weak) is shown
+ *    here too, labelled as holding auto-proceed, so no hold is invisible.
  *  - Renders ONLY through JSX text content; never `dangerouslySetInnerHTML`.
  */
 
@@ -22,12 +29,25 @@ export interface BlockerBannerProps {
   finding: ObserverFinding;
   /** Wallclock (ms) used for the relative-time stamp; defaults to Date.now(). */
   nowMs?: number;
-  /** Dismiss this STOP from the banner. Finding remains in FindingsLog. */
+  /** Dismiss this STOP from the banner (this tab only). Finding remains in FindingsLog. */
   onDismiss: (findingId: string) => void;
+  /** Optional: mark the claim wrong so its re-raise on the same file stays out of the banner. */
+  onDispute?: (findingId: string) => void;
   /** Optional callback when user clicks "Open evidence" (route to editor or file panel). */
   onOpenEvidence?: (finding: ObserverFinding) => void;
   /** Optional callback when user marks the STOP addressed (same as dismiss in v1; reserved for future status). */
   onMarkAddressed?: (finding: ObserverFinding) => void;
+}
+
+/** Why a held finding is on the banner although it no longer reads as a STOP. */
+function holdReason(finding: ObserverFinding): string {
+  if (finding.severity === "STOP" && finding.weakEvidence) {
+    return "Re-checked: its evidence is weak now, but the STOP was never confirmed or released.";
+  }
+  if (finding.severity !== "STOP" || finding.wasDowngraded) {
+    return "Re-checked as a note now, but the STOP was never confirmed or released.";
+  }
+  return "The STOP was never confirmed or released.";
 }
 
 function formatEvidenceLine(finding: ObserverFinding): string {
@@ -41,6 +61,7 @@ export function BlockerBanner({
   finding,
   nowMs,
   onDismiss,
+  onDispute,
   onOpenEvidence,
   onMarkAddressed,
 }: BlockerBannerProps) {
@@ -65,7 +86,7 @@ export function BlockerBanner({
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2 mb-1">
               <span className="text-[10px] uppercase tracking-wide font-mono-code text-cc-error font-semibold">
-                Blocker from observer
+                {finding.holdsAutoProceed ? "Holding auto-proceed" : "Blocker from observer"}
               </span>
               <span className="text-[10px] text-cc-muted font-mono-code">
                 · {formatRelativeTime(finding.receivedAt, now)}
@@ -74,6 +95,11 @@ export function BlockerBanner({
             <p className="text-sm text-cc-fg leading-relaxed mb-2 whitespace-pre-wrap break-words">
               {finding.claim}
             </p>
+            {finding.holdsAutoProceed && (
+              <p data-testid="blocker-hold-reason" className="text-xs text-cc-muted mb-2">
+                {holdReason(finding)} Auto-proceed stays paused until you dismiss or dispute it.
+              </p>
+            )}
             <div className="text-xs text-cc-muted font-mono-code mb-2">
               Evidence: <span data-testid="blocker-evidence" className="text-cc-fg">{formatEvidenceLine(finding)}</span>
             </div>
@@ -87,7 +113,9 @@ export function BlockerBanner({
 
             {/* Actions — `data-council-blocker-primary` marks the primary
                 action so the Cmd/Ctrl+Shift+B shortcut can focus it.
-                Stacking: Open evidence > Mark addressed > Dismiss. */}
+                Stacking: Open evidence > Mark addressed > Dispute > Dismiss.
+                Dispute is never the primary: a keyboard shortcut must not
+                silently suppress future blockers. */}
             <div className="mt-3 flex flex-wrap items-center gap-2">
               {onOpenEvidence && (
                 <button
@@ -108,6 +136,21 @@ export function BlockerBanner({
                 >
                   Mark addressed
                 </button>
+              )}
+              {onDispute && (
+                <button
+                  type="button"
+                  onClick={() => onDispute(finding.id)}
+                  aria-describedby={`blocker-dispute-hint-${finding.id}`}
+                  className="text-xs font-medium px-3 py-1.5 rounded-md bg-cc-card hover:bg-cc-hover text-cc-fg border border-cc-border transition-colors cursor-pointer"
+                >
+                  Dispute
+                </button>
+              )}
+              {onDispute && (
+                <span id={`blocker-dispute-hint-${finding.id}`} className="sr-only">
+                  Marks this claim as wrong. The observer repeating it about {finding.evidence_path} will not raise a blocker again.
+                </span>
               )}
               <button
                 type="button"

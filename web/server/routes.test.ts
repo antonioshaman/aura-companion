@@ -1,4 +1,4 @@
-import { vi, describe, it, expect, beforeEach } from "vitest";
+import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 
 // Mock auth-manager so all test requests pass the auth middleware
 vi.mock("./auth-manager.js", () => ({
@@ -295,6 +295,7 @@ import * as modelRegistry from "./model-registry.js";
 import * as linearProjectManager from "./linear-project-manager.js";
 import { resolveApiKey } from "./linear-connections.js";
 import { containerManager } from "./container-manager.js";
+import { _resetServerLayerFlagsForTest } from "./layer-flags.js";
 
 // ─── Mock factories ──────────────────────────────────────────────────────────
 
@@ -655,7 +656,7 @@ describe("POST /api/sessions/create — Council Mode branch", () => {
 
 // ─── Council Mode — group REST bootstrap (PR #68) ─────────────────────────
 //
-// Closes `BUG-council-mode-group-rest-bootstrap-gap.md`. Browser app-mount
+// Closes `docs/history/BUG-council-mode-group-rest-bootstrap-gap.md`. Browser app-mount
 // fetches this endpoint to repopulate `groupBySessionId` so the Sidebar
 // glyph + role suffix renders correctly even when the original
 // `group:created` push was lost across reload.
@@ -717,6 +718,120 @@ describe("GET /api/groups", () => {
     const res = await app.request("/api/groups", { method: "GET" });
     const json = await res.json();
     expect(json.groups).toEqual(wire);
+  });
+});
+
+// B2b (meta-diet): the browser persists a human dismissal of an observer STOP.
+// The route only validates the body shape and maps orchestrator outcomes to
+// HTTP; matching / persistence is covered in observer-disputes.test.ts and the
+// orchestrator's B2b test.
+describe("POST /api/groups/:groupId/disputes", () => {
+  const post = (body: unknown, groupId = "grp_x") =>
+    app.request(`/api/groups/${groupId}/disputes`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    });
+
+  it("forwards claim, evidence_path and finding_id and returns the add outcome", async () => {
+    orchestrator.disputeObserverFinding = vi.fn(() => ({ ok: true, added: true }));
+    const res = await post({ claim: "c", evidence_path: "src/a.ts", finding_id: "fnd_1" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, added: true });
+    expect(orchestrator.disputeObserverFinding).toHaveBeenCalledWith("grp_x", { claim: "c", evidencePath: "src/a.ts", findingId: "fnd_1" });
+  });
+
+  it("rejects a malformed body with 400 without touching the orchestrator", async () => {
+    orchestrator.disputeObserverFinding = vi.fn();
+    expect((await post({ claim: 1, evidence_path: "a" })).status).toBe(400);
+    expect((await post({ claim: "c" })).status).toBe(400);
+    expect((await post({ claim: "c", evidence_path: "a", finding_id: 5 })).status).toBe(400);
+    expect((await post("not json")).status).toBe(400);
+    expect(orchestrator.disputeObserverFinding).not.toHaveBeenCalled();
+  });
+
+  it("maps unknown group to 404, invalid input to 400 and persistence failure to 500", async () => {
+    orchestrator.disputeObserverFinding = vi.fn(() => ({ ok: false, reason: "unknown_group" }));
+    expect((await post({ claim: "c", evidence_path: "a" })).status).toBe(404);
+    orchestrator.disputeObserverFinding = vi.fn(() => ({ ok: false, reason: "invalid_input" }));
+    expect((await post({ claim: "", evidence_path: "a" })).status).toBe(400);
+    orchestrator.disputeObserverFinding = vi.fn(() => ({ ok: false, reason: "persist_failed" }));
+    expect((await post({ claim: "c", evidence_path: "a" })).status).toBe(500);
+  });
+});
+
+// FIX-AP-1: "Dismiss for now" releases a STOP's hold on auto-proceed. The
+// route validates the body and maps controller outcomes to HTTP; the hold
+// semantics are covered in council-auto-proceed-wiring.test.ts.
+describe("POST /api/groups/:groupId/stops/resolve", () => {
+  const post = (body: unknown, groupId = "grp_x") =>
+    app.request(`/api/groups/${groupId}/stops/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    });
+
+  it("forwards the finding id and returns the release outcome", async () => {
+    orchestrator.resolveObserverStop = vi.fn(() => ({ ok: true, released: true, persisted: true }));
+    const res = await post({ finding_id: "fnd_1" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, released: true, persisted: true });
+    expect(orchestrator.resolveObserverStop).toHaveBeenCalledWith("grp_x", "fnd_1");
+  });
+
+  it("rejects a malformed body with 400 without touching the orchestrator", async () => {
+    orchestrator.resolveObserverStop = vi.fn();
+    expect((await post({})).status).toBe(400);
+    expect((await post({ finding_id: 5 })).status).toBe(400);
+    expect((await post("not json")).status).toBe(400);
+    expect(orchestrator.resolveObserverStop).not.toHaveBeenCalled();
+  });
+
+  it("maps unknown group to 404 and invalid input to 400", async () => {
+    orchestrator.resolveObserverStop = vi.fn(() => ({ ok: false, reason: "unknown_group" }));
+    expect((await post({ finding_id: "f" })).status).toBe(404);
+    orchestrator.resolveObserverStop = vi.fn(() => ({ ok: false, reason: "invalid_input" }));
+    expect((await post({ finding_id: "" })).status).toBe(400);
+  });
+});
+
+// FIX-AP-4: "Ignore this file" for a review file that keeps the auto-proceed
+// hold restore incomplete. The route validates the body and maps controller
+// outcomes to HTTP; persistence + re-arm are covered in
+// council-auto-proceed-wiring.test.ts and session-orchestrator.test.ts.
+describe("POST /api/groups/:groupId/restore-gaps/ignore", () => {
+  const post = (body: unknown, groupId = "grp_x") =>
+    app.request(`/api/groups/${groupId}/restore-gaps/ignore`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    });
+  const ok = { file: "p-claude-observer.md", fingerprint: "a".repeat(64) };
+
+  it("forwards file + fingerprint and returns the outcome", async () => {
+    orchestrator.ignoreAutoProceedRestoreGap = vi.fn(() => ({ ok: true, added: true }));
+    const res = await post(ok);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true, added: true });
+    expect(orchestrator.ignoreAutoProceedRestoreGap).toHaveBeenCalledWith("grp_x", ok.file, ok.fingerprint);
+  });
+
+  it("rejects a malformed body with 400 without touching the orchestrator", async () => {
+    orchestrator.ignoreAutoProceedRestoreGap = vi.fn();
+    expect((await post({})).status).toBe(400);
+    expect((await post({ file: "x" })).status).toBe(400);
+    expect((await post({ file: 1, fingerprint: "a" })).status).toBe(400);
+    expect((await post("not json")).status).toBe(400);
+    expect(orchestrator.ignoreAutoProceedRestoreGap).not.toHaveBeenCalled();
+  });
+
+  it("maps unknown group → 404, invalid input → 400, write failure → 500", async () => {
+    orchestrator.ignoreAutoProceedRestoreGap = vi.fn(() => ({ ok: false, reason: "unknown_group" }));
+    expect((await post(ok)).status).toBe(404);
+    orchestrator.ignoreAutoProceedRestoreGap = vi.fn(() => ({ ok: false, reason: "invalid_input" }));
+    expect((await post(ok)).status).toBe(400);
+    orchestrator.ignoreAutoProceedRestoreGap = vi.fn(() => ({ ok: false, reason: "write_failed" }));
+    expect((await post(ok)).status).toBe(500);
   });
 });
 
@@ -5647,5 +5762,99 @@ describe("GET /api/sweep/preview + POST /api/sweep/execute", () => {
     const result = await res.json();
     expect(result).toMatchObject({ requested: 0, swept: 0, skipped: 0 });
     expect(orchestrator.killSession).not.toHaveBeenCalled();
+  });
+});
+
+// aura-meta-diet P4/C3 — layer flags at the create-session boundary. The
+// route must (a) forward resolved per-session flags to the orchestrator,
+// (b) refuse a Council Mode pair when the observer layer is off (409, never
+// a silent solo downgrade), (c) strip autoProceedOnIdle when auto-proceed is
+// off, and (d) honour the COMPANION_LAYER_* server default.
+describe("POST /api/sessions/create — layer flags (P4/C3)", () => {
+  const ALL_ON = { knowledge: true, observer: true, council: true, autoProceed: true };
+  const post = (path: string, body: unknown) =>
+    app.request(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  beforeEach(() => {
+    _resetServerLayerFlagsForTest();
+    orchestrator.createSession.mockResolvedValue({
+      ok: true,
+      session: { sessionId: "s1", state: "starting", cwd: "/test", createdAt: 0 },
+    });
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    _resetServerLayerFlagsForTest();
+  });
+
+  it("forwards resolved per-session flags to the orchestrator", async () => {
+    const res = await post("/api/sessions/create", { cwd: "/test", layers: { knowledge: "off" } });
+    expect(res.status).toBe(200);
+    expect(orchestrator.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ layers: { ...ALL_ON, knowledge: false } }),
+    );
+  });
+
+  it("unknown flag value falls back to the default, warns, and does not fail the request", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const res = await post("/api/sessions/create", { cwd: "/test", layers: { knowledge: "maybe" } });
+    expect(res.status).toBe(200);
+    // All-default → body forwarded without a layers key (prod parity).
+    expect(orchestrator.createSession.mock.calls[0]![0]).not.toHaveProperty("layers");
+    expect(warn.mock.calls.flat().join(" ")).toContain("layers.knowledge");
+    warn.mockRestore();
+  });
+
+  it("observer=off refuses Council Mode with 409 on both create routes", async () => {
+    for (const path of ["/api/sessions/create", "/api/sessions/create-stream"]) {
+      const res = await post(path, {
+        cwd: "/work/repo",
+        councilMode: "council",
+        councilPairing: "claude+claude",
+        layers: { observer: "off" },
+      });
+      expect(res.status).toBe(409);
+      expect((await res.json()).error).toContain("Observer layer is disabled");
+    }
+    expect(orchestrator.createCouncilGroup).not.toHaveBeenCalled();
+    expect(orchestrator.createSession).not.toHaveBeenCalled();
+  });
+
+  it("COMPANION_LAYER_OBSERVER=off (server default) also refuses Council Mode", async () => {
+    vi.stubEnv("COMPANION_LAYER_OBSERVER", "off");
+    const res = await post("/api/sessions/create", {
+      cwd: "/work/repo",
+      councilMode: "council",
+      councilPairing: "claude+claude",
+    });
+    expect(res.status).toBe(409);
+  });
+
+  it("autoProceed=off strips autoProceedOnIdle before the coordinator sees it", async () => {
+    await post("/api/sessions/create", {
+      cwd: "/work/repo",
+      councilMode: "council",
+      councilPairing: "claude+claude",
+      autoProceedOnIdle: { idleMs: 60_000, maxIterations: 3 },
+      layers: { autoProceed: "off" },
+    });
+    const base = orchestrator.createCouncilGroup.mock.calls[0]![0]!.base;
+    expect(base).not.toHaveProperty("autoProceedOnIdle");
+    expect(base.layers).toEqual({ ...ALL_ON, autoProceed: false });
+  });
+
+  it("an invalid autoProceedOnIdle is still a 400 even when the layer is off", async () => {
+    // Validation order: the boundary parse runs first, so a malformed
+    // payload is never masked by the layer strip.
+    const res = await post("/api/sessions/create", {
+      cwd: "/test",
+      autoProceedOnIdle: { idleMs: "soon" },
+      layers: { autoProceed: "off" },
+    });
+    expect(res.status).toBe(400);
   });
 });

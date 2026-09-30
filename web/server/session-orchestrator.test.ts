@@ -347,6 +347,41 @@ describe("SessionOrchestrator", () => {
       expect(replacement.getIterationCount("any-session")).toBe(0);
     });
 
+    // aura-meta-diet P4/C3: the orchestrator wires the auto-proceed layer
+    // gate to the per-session flags persisted on the launcher info; legacy
+    // sessions (no `layers`) follow the COMPANION_LAYER_* server default.
+    it("auto-proceed enactor honours per-session layers, legacy sessions follow the server default", async () => {
+      const { _resetServerLayerFlagsForTest } = await import("./layer-flags.js");
+      const arm = vi.fn();
+      orchestrator.setIdleTimerManager({ arm } as unknown as Parameters<typeof orchestrator.setIdleTimerManager>[0]);
+      deps.launcher.getSession.mockImplementation((sid: string) =>
+        sid === "s-off"
+          ? { sessionId: sid, layers: { knowledge: true, observer: true, council: true, autoProceed: false } }
+          : sid === "s-on"
+            ? { sessionId: sid, layers: { knowledge: true, observer: true, council: true, autoProceed: true } }
+            : { sessionId: sid });
+      const enactor = (orchestrator as unknown as { autoProceed: { enactor: { arm: (s: string, o: object) => void } } })
+        .autoProceed.enactor;
+      const opts = { idleMs: 1_000, maxIterations: 2 };
+
+      try {
+        _resetServerLayerFlagsForTest();
+        vi.stubEnv("COMPANION_LAYER_AUTO_PROCEED", "off");
+        enactor.arm("s-off", opts);
+        enactor.arm("s-legacy", opts);
+        enactor.arm("s-on", opts); // explicit per-session "on" outranks the server "off"
+        expect(arm.mock.calls.map((c) => c[0])).toEqual(["s-on"]);
+
+        _resetServerLayerFlagsForTest();
+        vi.unstubAllEnvs();
+        enactor.arm("s-legacy", opts);
+        expect(arm.mock.calls.map((c) => c[0])).toEqual(["s-on", "s-legacy"]);
+      } finally {
+        vi.unstubAllEnvs();
+        _resetServerLayerFlagsForTest();
+      }
+    });
+
     it("CLI session ID callback delegates to launcher.setCLISessionId", () => {
       orchestrator.initialize();
 
@@ -1392,6 +1427,165 @@ describe("SessionOrchestrator", () => {
     });
   });
 
+  // P4/KILL-INTENTIONAL (ASK #19): a user kill (REST `POST /sessions/:id/kill`,
+  // UI kill button) used to be indistinguishable from a crash — proactive
+  // keepalive relaunched it 3s later and a council half entered the reconnect
+  // ladder. These tests drive the REAL SessionRecovery + coordinator wiring
+  // (only launcher/bridge are mocked) through `initialize()`'s bus listeners.
+  describe("killSession() — user stop is intentional (P4/KILL-INTENTIONAL)", () => {
+    type Internals = {
+      intentionalKills: Set<string>;
+      recovery: { isStoppedByUser: (id: string) => boolean };
+      councilGroupMeta: Map<string, unknown>;
+      getOrCreateCoordinatorSync: () => {
+        registerExternalGroup: (r: unknown) => void;
+        get: (id: string) => { status: string } | undefined;
+        getReconnectContext: (id: string) => unknown;
+      };
+    };
+    const internals = () => orchestrator as unknown as Internals;
+
+    // Registers a live council pair with the real coordinator + meta map, the
+    // same way `reconcileCouncilGroups` does on a server restart.
+    function registerPair(groupId: string, orch: string, obs: string) {
+      internals().councilGroupMeta.set(groupId, {
+        primarySessionId: orch,
+        observerSessionId: obs,
+        pairing: "claude+codex",
+        createdAt: Date.now(),
+        lastCheckpointReceivedAt: null,
+      });
+      const coord = internals().getOrCreateCoordinatorSync();
+      coord.registerExternalGroup({
+        sessionGroupId: groupId,
+        primary: { sessionId: orch, backendType: "claude" },
+        observer: { sessionId: obs, backendType: "codex" },
+        status: "active",
+        createdAt: Date.now(),
+      });
+      return coord;
+    }
+
+    it("single session: kill → exit → no keepalive relaunch, no relaunch on browser return", async () => {
+      vi.useFakeTimers();
+      try {
+        deps.launcher.getSession.mockReturnValue({ archived: false, state: "exited", pid: undefined } as any);
+        orchestrator.initialize();
+
+        const result = await orchestrator.killSession("s1");
+        expect(result.ok).toBe(true);
+        expect(internals().intentionalKills.has("s1")).toBe(true);
+        expect(internals().recovery.isStoppedByUser("s1")).toBe(true);
+
+        // The process exit the kill produces: keepalive must NOT schedule.
+        companionBus.emit("session:exited", { sessionId: "s1", exitCode: 0 });
+        // A returning browser / transport-drop debounce: must NOT relaunch either.
+        companionBus.emit("session:relaunch-needed", { sessionId: "s1" });
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(deps.launcher.relaunch).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("council half: marks BOTH halves before either kill, stops both, group stays active (EC-2)", async () => {
+      deps.launcher.getSession.mockReturnValue({ archived: false, state: "running" } as any);
+      orchestrator.initialize();
+      const coord = registerPair("grp_kill", "sess_orch_k", "sess_obs_k");
+
+      // Snapshot the marks at the moment of the FIRST kill — EC-2 ordering.
+      const marksAtFirstKill: string[][] = [];
+      deps.launcher.kill.mockImplementation(async () => {
+        marksAtFirstKill.push(Array.from(internals().intentionalKills));
+        return true;
+      });
+
+      const result = await orchestrator.killSession("sess_obs_k");
+      expect(result.ok).toBe(true);
+      expect(deps.launcher.kill).toHaveBeenCalledWith("sess_orch_k");
+      expect(deps.launcher.kill).toHaveBeenCalledWith("sess_obs_k");
+      expect(marksAtFirstKill[0]).toEqual(expect.arrayContaining(["sess_orch_k", "sess_obs_k"]));
+
+      // Both exits land: no reconnect ladder, no degrade — the pair is simply stopped.
+      companionBus.emit("session:exited", { sessionId: "sess_orch_k", exitCode: 0 });
+      companionBus.emit("session:exited", { sessionId: "sess_obs_k", exitCode: 0 });
+      expect(coord.get("grp_kill")?.status).toBe("active");
+      expect(coord.getReconnectContext("grp_kill")).toBeFalsy();
+      const degraded = vi
+        .mocked(deps.wsBridge.broadcastToGroup)
+        .mock.calls.find((c: unknown[]) => (c[1] as { type?: string }).type === "group_degraded");
+      expect(degraded).toBeUndefined();
+    });
+
+    it("explicit relaunch clears the marks (pair resumes together); a later crash is auto-relaunched", async () => {
+      vi.useFakeTimers();
+      try {
+        deps.launcher.getSession.mockReturnValue({ archived: false, state: "exited", pid: undefined } as any);
+        orchestrator.initialize();
+        registerPair("grp_resume", "sess_orch_r", "sess_obs_r");
+
+        await orchestrator.killSession("sess_orch_r");
+        const res = await orchestrator.relaunchSession("sess_orch_r");
+        expect(res.ok).toBe(true);
+        for (const id of ["sess_orch_r", "sess_obs_r"]) {
+          expect(internals().intentionalKills.has(id)).toBe(false);
+          expect(internals().recovery.isStoppedByUser(id)).toBe(false);
+        }
+        // The stopped partner comes back through the auto-relaunch path.
+        await vi.advanceTimersByTimeAsync(15_000);
+        expect(deps.launcher.relaunch).toHaveBeenCalledWith("sess_obs_r");
+
+        // A real crash afterwards: keepalive heals it again (mark is gone).
+        deps.launcher.relaunch.mockClear();
+        await vi.advanceTimersByTimeAsync(10_000); // past relaunch cooldowns
+        companionBus.emit("session:exited", { sessionId: "sess_orch_r", exitCode: 1 });
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(deps.launcher.relaunch).toHaveBeenCalledWith("sess_orch_r");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("a browser-typed user message to a stopped session clears the mark and relaunches it", async () => {
+      vi.useFakeTimers();
+      try {
+        let userFrame: ((sid: string) => void) | null = null;
+        (deps.wsBridge as any).onUserFrameObserved = vi.fn((cb: (sid: string) => void) => {
+          userFrame = cb;
+          return () => {};
+        });
+        deps.launcher.getSession.mockReturnValue({ archived: false, state: "exited", pid: undefined } as any);
+        orchestrator.initialize();
+
+        await orchestrator.killSession("s1");
+        expect(userFrame).not.toBeNull();
+        userFrame!("s1");
+        expect(internals().recovery.isStoppedByUser("s1")).toBe(false);
+        expect(internals().intentionalKills.has("s1")).toBe(false);
+        await vi.advanceTimersByTimeAsync(15_000);
+        expect(deps.launcher.relaunch).toHaveBeenCalledWith("s1");
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("unknown session: no marks, ok=false", async () => {
+      deps.launcher.getSession.mockReturnValue(undefined);
+      deps.launcher.kill.mockResolvedValue(false);
+      const result = await orchestrator.killSession("ghost");
+      expect(result.ok).toBe(false);
+      expect(internals().intentionalKills.has("ghost")).toBe(false);
+      expect(internals().recovery.isStoppedByUser("ghost")).toBe(false);
+    });
+
+    it("archive supersedes a user stop so an unarchived session relaunches on browser open", async () => {
+      deps.launcher.getSession.mockReturnValue({ archived: false, state: "exited" } as any);
+      await orchestrator.killSession("s1");
+      await orchestrator.archiveSession("s1");
+      expect(internals().recovery.isStoppedByUser("s1")).toBe(false);
+    });
+  });
+
   // ── Relaunch ──────────────────────────────────────────────────────────────
 
   describe("relaunchSession()", () => {
@@ -2211,10 +2405,13 @@ describe("SessionOrchestrator", () => {
 
     it("skips relaunch when session state is 'connected' after grace", async () => {
       // If the session reconnects (state=connected) during grace, skip relaunch.
+      // A reconnected session has its backend adapter attached again; without
+      // one, `connected` is the deaf case below (P4/FIX-RECONNECT-RELAUNCH).
       deps.launcher.getSession
         .mockReturnValueOnce({ archived: false } as any) // check archived
         .mockReturnValueOnce({ state: "connected" } as any); // after grace
       deps.wsBridge.isCliConnected.mockReturnValue(false);
+      vi.mocked(deps.wsBridge.getSession).mockReturnValue({ backendAdapter: {} } as any);
       orchestrator.initialize();
 
       companionBus.emit("session:relaunch-needed", { sessionId: "s1" });
@@ -2222,6 +2419,25 @@ describe("SessionOrchestrator", () => {
       await vi.advanceTimersByTimeAsync(0);
 
       expect(deps.launcher.relaunch).not.toHaveBeenCalled();
+    });
+
+    it("relaunches a 'connected' session whose backend adapter is gone (P4/FIX-RECONNECT-RELAUNCH)", async () => {
+      // Prod 2026-09-29/30: a Codex app-server's WS to the bridge dropped; the
+      // process lived on, the launcher kept `connected`, the adapter was null.
+      // Every returning browser emitted relaunch-needed and nothing happened
+      // until a manual POST /relaunch. The bus path must now relaunch.
+      deps.launcher.getSession
+        .mockReturnValueOnce({ archived: false } as any) // check archived
+        .mockReturnValueOnce({ state: "connected", pid: process.pid } as any); // after grace
+      deps.wsBridge.isCliConnected.mockReturnValue(false);
+      vi.mocked(deps.wsBridge.getSession).mockReturnValue({ backendAdapter: null } as any);
+      orchestrator.initialize();
+
+      companionBus.emit("session:relaunch-needed", { sessionId: "s1" });
+      await vi.advanceTimersByTimeAsync(15_000);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(deps.launcher.relaunch).toHaveBeenCalledWith("s1");
     });
 
     it("skips relaunch when a still-starting session's PID is alive AND its backend adapter is attached", async () => {
@@ -2661,6 +2877,8 @@ describe("SessionOrchestrator", () => {
         downgrades: [{ id: "f2", reason: "evidence_not_in_modified_set" }],
         observerModel: "gpt-5-codex",
         observerProvider: "codex",
+        artifactsChanged: 2,
+        artifactsRead: 2,
       });
       const calls = vi.mocked(deps.wsBridge.broadcastToGroup).mock.calls;
       const last = calls[calls.length - 1]!;
@@ -2978,6 +3196,687 @@ describe("SessionOrchestrator", () => {
       }
     });
 
+    // B2 (meta-diet) wiring: the orchestrator snapshots a checkpoint's
+    // artifact files on arrival and grounds the answering review against
+    // THOSE lines. Covers the three live outcomes end-to-end through the real
+    // handlers: a STOP citing lines past EOF and a STOP citing lines the
+    // checkpoint did not change are downgraded with their reason; a STOP that
+    // cites no lines stays STOP but carries `weakEvidence` (banner-exempt);
+    // a line-grounded STOP naming a symbol on its changed lines is untouched.
+    it("B2: grounds review STOPs against the checkpoint's line snapshot (out-of-range / unchanged / weak / strong)", () => {
+      const { mkdtempSync, writeFileSync, mkdirSync, rmSync, realpathSync } = require("node:fs") as typeof import("node:fs");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      const workspace = realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-orch-b2-")));
+      try {
+        mkdirSync(pathJoin(workspace, "src"), { recursive: true });
+        const v1 = ["import x from 'x';", "export function keep() {}", "export function alpha() { return 1; }", "// end"];
+        writeFileSync(pathJoin(workspace, "src/a.ts"), v1.join("\n") + "\n");
+        seedGroup("grp_b2", { cwd: workspace, artifactPaths: ["src/a.ts"] });
+        const checkpoint = (handle: unknown) => handle as (g: string, p: Record<string, unknown>) => void;
+        const handleCheckpoint = checkpoint((orchestrator as unknown as { handleCouncilCheckpoint: unknown }).handleCouncilCheckpoint);
+        const base = { schema_version: 1, phase: "council-implement", session_group_id: "grp_b2", emitted_at: "2026-01-01T00:00:00Z", artifact_paths: ["src/a.ts"] };
+        // Checkpoint 1 establishes the baseline snapshot (no prior → changed unknown).
+        handleCheckpoint.call(orchestrator, "grp_b2", { ...base, checkpoint_id: "chk_b2_1", sequence: 1 });
+        // Only line 3 changes before checkpoint 2.
+        const v2 = [...v1];
+        v2[2] = "export function alphaRenamed() { return 2; }";
+        writeFileSync(pathJoin(workspace, "src/a.ts"), v2.join("\n") + "\n");
+        handleCheckpoint.call(orchestrator, "grp_b2", { ...base, checkpoint_id: "chk_b2_2", sequence: 2 });
+        // An edit AFTER the checkpoint must not affect grounding of its review.
+        writeFileSync(pathJoin(workspace, "src/a.ts"), "// rewritten\n");
+
+        const emitted: Array<{ findings: Array<{ severity: string; wasDowngraded?: boolean; downgradeReason?: string; weakEvidence?: string }> }> = [];
+        companionBus.on("group:review", (e: unknown) => { emitted.push(e as (typeof emitted)[number]); });
+        const handleReview = checkpoint((orchestrator as unknown as { handleCouncilReview: unknown }).handleCouncilReview);
+        handleReview.call(orchestrator, "grp_b2", {
+          schema_version: 1,
+          observer_wake_payload_version_echo: 1,
+          checkpoint_id: "chk_b2_2",
+          phase: "council-implement",
+          session_group_id: "grp_b2",
+          reviewed_at: "2026-01-01T00:00:00Z",
+          observer_provider: "codex",
+          observer_model: "gpt-5.5",
+          observer_cli_version: "1.0.0",
+          findings: [
+            { severity: "STOP", claim: "alphaRenamed returns the wrong value", evidence_path: "src/a.ts", evidence_lines: [3, 3] },
+            { severity: "STOP", claim: "alphaRenamed is broken", evidence_path: "src/a.ts", evidence_lines: [40, 41] },
+            { severity: "STOP", claim: "keep is broken", evidence_path: "src/a.ts", evidence_lines: [2, 2] },
+            { severity: "STOP", claim: "the build fails at runtime", evidence_path: "src/a.ts" },
+          ],
+        });
+        expect(emitted).toHaveLength(1);
+        const [strong, outOfRange, unchanged, weak] = emitted[0]!.findings;
+        expect(strong).toMatchObject({ severity: "STOP" });
+        expect(strong!.wasDowngraded).toBeUndefined();
+        expect(strong!.weakEvidence).toBeUndefined();
+        expect(outOfRange).toMatchObject({ severity: "NOTE", wasDowngraded: true, downgradeReason: "evidence_lines_out_of_range" });
+        expect(unchanged).toMatchObject({ severity: "NOTE", wasDowngraded: true, downgradeReason: "evidence_lines_unchanged" });
+        expect(weak).toMatchObject({ severity: "STOP", weakEvidence: "no_cited_lines" });
+        expect(weak!.wasDowngraded).toBeUndefined();
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
+    // B2b (meta-diet): the observer has no channel for "this claim was already
+    // refuted", so it re-raises it (diet-A3-104 repeated the disputed
+    // `bun run --cwd web` claim of diet-A2-103 with new wording and a new
+    // evidence path). A human dismissal is persisted per group; afterwards
+    //   - the REST bootstrap (tab reload) marks the ORIGINAL STOP disputed, so a
+    //     reload no longer resurrects the dismissed banner;
+    //   - a live review repeating the claim (reworded, same quoted command) is
+    //     marked `shared_anchor`, while an unrelated STOP and a NOTE are not;
+    //   - FIX-B2b-1: the same command quoted in a STOP about ANOTHER file is a
+    //     new claim and is not marked (B2b matched on any path);
+    //   - disputing twice is idempotent and an unknown group is refused.
+    // FIX-AP-1 (5): the orchestrator wires the bus into the auto-proceed
+    // controller end-to-end. Real coordinator + controller; only the manager is
+    // a spy. Pins, through the orchestrator's own listeners and public API:
+    //   - the hold is restored from the REST-bootstrap view before arming;
+    //   - orchestrator:turn-done arms an opted-in orchestrator only when clear;
+    //   - a group:review STOP holds, and a later clean review does not release;
+    //   - disputeObserverFinding (B2b) and resolveObserverStop release it.
+    it("FIX-AP-1: bus → controller wiring (restore, STOP hold across a clean review, dispute + dismissal release)", async () => {
+      const { mkdtempSync, rmSync, realpathSync } = require("node:fs") as typeof import("node:fs");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      const workspace = realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-orch-ap-")));
+      const groupId = "grp_0123456789abcdef0123456789abcdef";
+      const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+      const stopFinding = (id: string, path = "src/a.ts") => ({
+        id, severity: "STOP" as const, claim: `\`${id}\` drops the error`, evidence_path: path, evidence_lines: [1, 1] as [number, number],
+      });
+      try {
+        const arm = vi.fn(() => ({ kind: "armed" as const }));
+        const cancel = vi.fn();
+        orchestrator.setIdleTimerManager({
+          arm, cancel,
+          noteUserMessage: () => {}, resetIterationCount: () => {}, getIterationCount: () => 0,
+          clearPendingSyntheticTurn: () => {}, disposeAll: () => {}, isApiLimitReached: () => false,
+        } as any);
+        deps.launcher.getSession.mockImplementation((sid: string) =>
+          sid === "sess_orch"
+            ? ({ sessionId: sid, autoProceedOnIdle: { idleMs: 60_000, maxIterations: 3 } } as any)
+            : undefined,
+        );
+        seedGroup(groupId, { cwd: workspace });
+        const internals = orchestrator as unknown as {
+          councilGroupBySessionId: Map<string, string>;
+          councilLifecycle: { getGroupStopHoldView: (g: string) => unknown };
+          getOrCreateCoordinatorSync: () => { registerExternalGroup: (r: unknown) => void };
+        };
+        internals.councilGroupBySessionId.set("sess_orch", groupId);
+        internals.councilGroupBySessionId.set("sess_obs", groupId);
+        internals.getOrCreateCoordinatorSync().registerExternalGroup({
+          sessionGroupId: groupId,
+          primary: { sessionId: "sess_orch", backendType: "claude" },
+          observer: { sessionId: "sess_obs", backendType: "codex" },
+          status: "active",
+          createdAt: 1,
+        });
+        // "Restart": a STOP from before is still in the reviews on disk.
+        // FIX-AP-2: the restore reads the hold view (frozen verdicts), not the
+        // re-grounded REST bootstrap; the real path is pinned in its own test.
+        const bootstrap = vi.spyOn(internals.councilLifecycle, "getGroupStopHoldView")
+          .mockReturnValue({ findings: [stopFinding("old")], unfrozenRawStopIds: [], gaps: [] });
+        orchestrator.initialize();
+
+        const turnDone = () => companionBus.emit("orchestrator:turn-done", { sessionId: "sess_orch", blockedByStop: false });
+        const review = (findings: unknown[]) => companionBus.emit("group:review", {
+          sessionGroupId: groupId, checkpointId: "chk", phase: "council-implement", findings: findings as any,
+          downgrades: [], observerModel: "m", observerProvider: "codex", artifactsChanged: 1, artifactsRead: 1,
+        });
+
+        turnDone();
+        await flush();
+        expect(bootstrap).toHaveBeenCalledWith(groupId);
+        expect(arm).not.toHaveBeenCalled(); // restored STOP holds
+
+        review([stopFinding("new", "src/b.ts")]);
+        expect(cancel).toHaveBeenCalledWith("sess_orch");
+        review([{ ...stopFinding("clean"), severity: "NOTE" }]);
+        turnDone();
+        expect(arm).not.toHaveBeenCalled(); // a clean review does not release
+
+        expect(orchestrator.disputeObserverFinding(groupId, { claim: "`old` drops the error", evidencePath: "src/a.ts", findingId: "old" }))
+          .toEqual({ ok: true, added: true });
+        expect(arm).not.toHaveBeenCalled(); // "new" still open
+        expect(orchestrator.resolveObserverStop(groupId, "new")).toEqual({ ok: true, released: true, persisted: true });
+        expect(arm).toHaveBeenCalledWith("sess_orch", { idleMs: 60_000, maxIterations: 3 });
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
+    // FIX-AP-2 (re-review of PR #245, STOP). After a restart the hold used to
+    // be rebuilt from the REST bootstrap, which RE-grounds every old review
+    // against the LATEST checkpoint: a STOP from checkpoint A whose file is not
+    // in checkpoint B became NOTE, the hold dropped and auto-proceed fired.
+    // This drives the real path end to end — no stubbed loader:
+    //   handleCouncilReview (A, grounded STOP) → verdicts frozen on disk →
+    //   checkpoint B no longer touches the file and its lines shift →
+    //   initialize() + turn-done → restore via getGroupStopHoldView.
+    it("FIX-AP-2: a STOP from checkpoint A still holds after a restart when B no longer touches its file", async () => {
+      const { mkdtempSync, writeFileSync, mkdirSync, rmSync, realpathSync, existsSync, renameSync } = require("node:fs") as typeof import("node:fs");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      const workspace = realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-orch-ap2-")));
+      const groupId = "grp_0123456789abcdef0123456789abcdef";
+      const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+      const review = {
+        schema_version: 1,
+        observer_wake_payload_version_echo: 1,
+        checkpoint_id: "chk_a",
+        phase: "council-implement",
+        session_group_id: groupId,
+        reviewed_at: "2026-01-01T00:00:00Z",
+        observer_provider: "codex",
+        observer_model: "gpt-5.5",
+        observer_cli_version: "1.0.0",
+        findings: [{ severity: "STOP", claim: "`alpha` swallows the error", evidence_path: "src/a.ts", evidence_lines: [1, 1] }],
+      };
+      try {
+        mkdirSync(pathJoin(workspace, "src"), { recursive: true });
+        writeFileSync(pathJoin(workspace, "src/a.ts"), "export function alpha() { try { run(); } catch {} }\n");
+        writeFileSync(pathJoin(workspace, "src/b.ts"), "export const beta = 2;\n");
+        mkdirSync(pathJoin(workspace, ".council", "reviews"), { recursive: true });
+        writeFileSync(pathJoin(workspace, ".council", "reviews", `council-implement-codex-observer.md`), JSON.stringify(review));
+        // Checkpoint A changed src/a.ts: the live review grounds a real STOP.
+        seedGroup(groupId, { cwd: workspace, artifactPaths: ["src/a.ts"] });
+        const emitted: Array<{ findings: Array<{ id: string; severity: string; weakEvidence?: string; wasDowngraded?: boolean }> }> = [];
+        companionBus.on("group:review", (e: unknown) => { emitted.push(e as (typeof emitted)[number]); });
+        (orchestrator as unknown as { handleCouncilReview: (g: string, p: Record<string, unknown>) => void })
+          .handleCouncilReview.call(orchestrator, groupId, review);
+        const live = emitted[0]!.findings[0]!;
+        expect(live).toMatchObject({ severity: "STOP" });
+        expect(live.weakEvidence).toBeUndefined();
+        expect(live.wasDowngraded).toBeFalsy();
+        expect(existsSync(pathJoin(workspace, ".council", "state", `${groupId}-review-verdicts.json`))).toBe(true);
+
+        // Checkpoint B: only src/b.ts changed, and a.ts's lines moved down.
+        seedGroup(groupId, { cwd: workspace, artifactPaths: ["src/b.ts"] });
+        writeFileSync(pathJoin(workspace, "src/a.ts"), "// header\n// header\nexport function alpha() { try { run(); } catch {} }\n");
+
+        // Precondition — without the frozen verdict the re-grounded view is no
+        // longer a blocking STOP (this is what released the hold before).
+        const verdictsFile = pathJoin(workspace, ".council", "state", `${groupId}-review-verdicts.json`);
+        renameSync(verdictsFile, `${verdictsFile}.off`);
+        const regrounded = await orchestrator.getGroupReviewsForBootstrap(groupId);
+        const r0 = regrounded!.findings[0]!;
+        expect(r0.id).toBe(live.id);
+        expect(r0.severity === "STOP" && !r0.weakEvidence).toBe(false);
+        renameSync(`${verdictsFile}.off`, verdictsFile);
+
+        // The banner bootstrap now shows the verdict reached at review time.
+        const frozenView = await orchestrator.getGroupReviewsForBootstrap(groupId);
+        expect(frozenView!.findings[0]).toMatchObject({ id: live.id, severity: "STOP" });
+        expect(frozenView!.findings[0]!.weakEvidence).toBeUndefined();
+        expect(frozenView!.downgrades).toEqual([]);
+
+        // "Restart": opted-in orchestrator goes idle; the hold is restored.
+        const arm = vi.fn(() => ({ kind: "armed" as const }));
+        orchestrator.setIdleTimerManager({
+          arm, cancel: vi.fn(),
+          noteUserMessage: () => {}, resetIterationCount: () => {}, getIterationCount: () => 0,
+          clearPendingSyntheticTurn: () => {}, disposeAll: () => {}, isApiLimitReached: () => false,
+        } as any);
+        deps.launcher.getSession.mockImplementation((sid: string) =>
+          sid === "sess_orch"
+            ? ({ sessionId: sid, autoProceedOnIdle: { idleMs: 60_000, maxIterations: 3 } } as any)
+            : undefined,
+        );
+        const internals = orchestrator as unknown as {
+          councilGroupBySessionId: Map<string, string>;
+          getOrCreateCoordinatorSync: () => { registerExternalGroup: (r: unknown) => void };
+          autoProceed: { getUnresolvedStopIds: (g: string) => string[] };
+        };
+        internals.councilGroupBySessionId.set("sess_orch", groupId);
+        internals.councilGroupBySessionId.set("sess_obs", groupId);
+        internals.getOrCreateCoordinatorSync().registerExternalGroup({
+          sessionGroupId: groupId,
+          primary: { sessionId: "sess_orch", backendType: "claude" },
+          observer: { sessionId: "sess_obs", backendType: "codex" },
+          status: "active",
+          createdAt: 1,
+        });
+        orchestrator.initialize();
+        companionBus.emit("orchestrator:turn-done", { sessionId: "sess_orch", blockedByStop: false });
+        await flush();
+        companionBus.emit("orchestrator:turn-done", { sessionId: "sess_orch", blockedByStop: false });
+        expect(arm).not.toHaveBeenCalled();
+        expect(internals.autoProceed.getUnresolvedStopIds(groupId)).toEqual([live.id]);
+
+        // The human can still release it: the banner shows it, dismissal works.
+        expect(orchestrator.resolveObserverStop(groupId, live.id)).toEqual({ ok: true, released: true, persisted: true });
+        expect(arm).toHaveBeenCalledWith("sess_orch", { idleMs: 60_000, maxIterations: 3 });
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
+    // FIX-AP-3 (third review of PR #247, WARN confirmed by a probe test). Two
+    // pairs sharing one workspace share `.council/reviews/`. The live path
+    // rejects a foreign group's review, but the bootstrap / hold restore read
+    // every file in the directory — so after a restart ANOTHER pair's raw STOP
+    // held this pair's auto-proceed. And a raw STOP of our own pair whose
+    // verdict was never frozen held while the banner showed it as NOTE (no
+    // Dismiss button): an invisible hold, releasable only through REST.
+    // Real path end to end (no stubbed loader): reviews on disk → initialize()
+    // + turn-done restore → REST bootstrap → dismissal.
+    it("FIX-AP-3: a foreign pair's review never holds, and an unfrozen held STOP is flagged visible in the bootstrap", async () => {
+      const { mkdtempSync, writeFileSync, mkdirSync, rmSync, realpathSync } = require("node:fs") as typeof import("node:fs");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      const workspace = realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-orch-ap3-")));
+      const groupId = "grp_0123456789abcdef0123456789abcdef";
+      const foreignGroupId = "grp_fedcba9876543210fedcba9876543210";
+      const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+      const reviewFor = (gid: string, checkpointId: string, claim: string, path: string) => ({
+        schema_version: 1,
+        observer_wake_payload_version_echo: 1,
+        checkpoint_id: checkpointId,
+        phase: "council-implement",
+        session_group_id: gid,
+        reviewed_at: "2026-01-01T00:00:00Z",
+        observer_provider: "codex",
+        observer_model: "gpt-5.5",
+        observer_cli_version: "1.0.0",
+        findings: [{ severity: "STOP", claim, evidence_path: path, evidence_lines: [1, 1] }],
+      });
+      try {
+        mkdirSync(pathJoin(workspace, "src"), { recursive: true });
+        writeFileSync(pathJoin(workspace, "src/a.ts"), "export function alpha() { try { run(); } catch {} }\n");
+        writeFileSync(pathJoin(workspace, "src/b.ts"), "export function beta() { try { go(); } catch {} }\n");
+        const reviewsDir = pathJoin(workspace, ".council", "reviews");
+        mkdirSync(reviewsDir, { recursive: true });
+        // Ours: a raw STOP with NO frozen verdict (review predates the verdicts
+        // file); the latest checkpoint no longer touches src/a.ts, so the
+        // re-grounded view downgrades it to NOTE.
+        writeFileSync(pathJoin(reviewsDir, "council-implement-codex-observer.md"),
+          JSON.stringify(reviewFor(groupId, "chk_ours", "`alpha` swallows the error", "src/a.ts")));
+        // The other pair's: a STOP on a file OUR checkpoint did change.
+        writeFileSync(pathJoin(reviewsDir, "council-implement-claude-observer.md"),
+          JSON.stringify({ ...reviewFor(foreignGroupId, "chk_theirs", "`beta` swallows the error", "src/b.ts"), observer_provider: "claude" }));
+        seedGroup(groupId, { cwd: workspace, artifactPaths: ["src/b.ts"] });
+
+        // A pair that never opted in holds nothing, so nothing is flagged.
+        deps.launcher.getSession.mockImplementation(() => undefined);
+        const optedOut = await orchestrator.getGroupReviewsForBootstrap(groupId);
+        expect(optedOut!.findings).toHaveLength(1);
+        expect(optedOut!.findings[0]!.holdsAutoProceed).toBeUndefined();
+
+        const arm = vi.fn(() => ({ kind: "armed" as const }));
+        orchestrator.setIdleTimerManager({
+          arm, cancel: vi.fn(),
+          noteUserMessage: () => {}, resetIterationCount: () => {}, getIterationCount: () => 0,
+          clearPendingSyntheticTurn: () => {}, disposeAll: () => {}, isApiLimitReached: () => false,
+        } as any);
+        deps.launcher.getSession.mockImplementation((sid: string) =>
+          sid === "sess_orch"
+            ? ({ sessionId: sid, autoProceedOnIdle: { idleMs: 60_000, maxIterations: 3 } } as any)
+            : undefined,
+        );
+        const internals = orchestrator as unknown as {
+          councilGroupBySessionId: Map<string, string>;
+          getOrCreateCoordinatorSync: () => { registerExternalGroup: (r: unknown) => void };
+          autoProceed: { getUnresolvedStopIds: (g: string) => string[] };
+        };
+        internals.councilGroupBySessionId.set("sess_orch", groupId);
+        internals.councilGroupBySessionId.set("sess_obs", groupId);
+        internals.getOrCreateCoordinatorSync().registerExternalGroup({
+          sessionGroupId: groupId,
+          primary: { sessionId: "sess_orch", backendType: "claude" },
+          observer: { sessionId: "sess_obs", backendType: "codex" },
+          status: "active",
+          createdAt: 1,
+        });
+
+        // The bootstrap sees only our review, and flags our held STOP: its
+        // re-grounded severity is NOTE, yet it holds auto-proceed.
+        const view = await orchestrator.getGroupReviewsForBootstrap(groupId);
+        expect(view!.reviewCount).toBe(1);
+        expect(view!.findings).toHaveLength(1);
+        const ours = view!.findings[0]!;
+        expect(ours.evidence_path).toBe("src/a.ts");
+        expect(ours.severity).toBe("NOTE");
+        expect(ours.holdsAutoProceed).toBe(true);
+
+        // "Restart": the restored hold is exactly the finding the bootstrap
+        // shows as holding — never the foreign pair's STOP.
+        orchestrator.initialize();
+        companionBus.emit("orchestrator:turn-done", { sessionId: "sess_orch", blockedByStop: false });
+        await flush();
+        companionBus.emit("orchestrator:turn-done", { sessionId: "sess_orch", blockedByStop: false });
+        expect(internals.autoProceed.getUnresolvedStopIds(groupId)).toEqual([ours.id]);
+        expect(arm).not.toHaveBeenCalled();
+
+        // The visible Dismiss releases it; the flag is gone after a reload.
+        expect(orchestrator.resolveObserverStop(groupId, ours.id)).toEqual({ ok: true, released: true, persisted: true });
+        expect(arm).toHaveBeenCalledWith("sess_orch", { idleMs: 60_000, maxIterations: 3 });
+        const after = await orchestrator.getGroupReviewsForBootstrap(groupId);
+        expect(after!.findings[0]!.holdsAutoProceed).toBeUndefined();
+
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
+    // FINDINGS-DEDUP (human report 2026-09-28, confirmed on a real bootstrap
+    // response of 84 findings / 79 unique ids): the bootstrap listed review
+    // files in readdir order, so the panel mixed 115-day-old findings between
+    // fresh STOPs, and two review files for the same checkpoint (a re-wake)
+    // emitted the same deterministic id twice — duplicate React keys, which
+    // React renders as multiplied rows. Now: files oldest first by mtime
+    // (name breaks ties), one entry per id with the newest file's copy, and
+    // the result is identical on every call (reload / reconnect).
+    it("FINDINGS-DEDUP: the bootstrap is chronological by review mtime and emits each finding id once", async () => {
+      const { mkdtempSync, writeFileSync, mkdirSync, rmSync, realpathSync, utimesSync } = require("node:fs") as typeof import("node:fs");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      const workspace = realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-orch-dedup-")));
+      const groupId = "grp_0123456789abcdef0123456789abcdef";
+      const review = (checkpointId: string, claims: string[]) => JSON.stringify({
+        schema_version: 1,
+        observer_wake_payload_version_echo: 1,
+        checkpoint_id: checkpointId,
+        phase: "council-review",
+        session_group_id: groupId,
+        reviewed_at: "2026-01-01T00:00:00Z",
+        observer_provider: "codex",
+        observer_model: "gpt-5.5",
+        observer_cli_version: "1.0.0",
+        findings: claims.map((claim) => ({ severity: "NOTE", claim, evidence_path: "docs/review.md" })),
+      });
+      try {
+        const reviewsDir = pathJoin(workspace, ".council", "reviews");
+        mkdirSync(reviewsDir, { recursive: true });
+        // Names sort opposite to mtimes, so a name-ordered or readdir-ordered
+        // bootstrap cannot pass by accident.
+        const oldest = pathJoin(reviewsDir, "z-phase-codex-observer.md");
+        const rewake = pathJoin(reviewsDir, "m-phase-codex-observer.md");
+        const newest = pathJoin(reviewsDir, "a-phase-codex-observer.md");
+        writeFileSync(oldest, review("chk_old", ["table does not sum", "clause contradicts"]));
+        // Re-wake of the same checkpoint: same claims at the same indices → same ids.
+        writeFileSync(rewake, review("chk_old", ["table does not sum", "clause contradicts"]));
+        writeFileSync(newest, review("chk_new", ["fresh finding"]));
+        utimesSync(oldest, new Date(1_000_000_000), new Date(1_000_000_000));
+        utimesSync(rewake, new Date(2_000_000_000), new Date(2_000_000_000));
+        utimesSync(newest, new Date(3_000_000_000), new Date(3_000_000_000));
+        seedGroup(groupId, { cwd: workspace, artifactPaths: ["docs/review.md"] });
+        deps.launcher.getSession.mockImplementation(() => undefined);
+
+        const view = await orchestrator.getGroupReviewsForBootstrap(groupId);
+        expect(view!.reviewCount).toBe(3);
+        // One entry per id — the re-wake did not add copies.
+        const ids = view!.findings.map((f) => f.id);
+        expect(new Set(ids).size).toBe(ids.length);
+        expect(view!.findings.map((f) => f.claim)).toEqual(["table does not sum", "clause contradicts", "fresh finding"]);
+        // The surviving copy of a duplicated id is the newer file's.
+        expect(view!.findings.map((f) => f.reviewedAt)).toEqual([2_000_000_000, 2_000_000_000, 3_000_000_000]);
+
+        // Reload / reconnect: byte-identical bootstrap.
+        const again = await orchestrator.getGroupReviewsForBootstrap(groupId);
+        expect(again!.findings).toEqual(view!.findings);
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
+    // FIX-AP-4 (fourth review of PR #249, WARN). A review file the restore
+    // cannot parse — e.g. a LEGACY review written before `session_group_id`
+    // existed — kept the hold restore incomplete forever, with nothing in the
+    // UI (no finding to Dismiss). Now: (1) the REST bootstrap reports the gap
+    // with a reason and a content fingerprint, only for a pair whose hold it
+    // actually is (opted in); (2) a broken review that names ANOTHER pair's
+    // group is that pair's business and is skipped (documented foreign rule);
+    // (3) "ignore this file" persists for that exact content, the waiting idle
+    // edge arms without another turn, and a rewritten-but-still-broken file
+    // blocks again (the human never saw it). Real path, no stubbed loader.
+    it("FIX-AP-4: an unparseable review is shown as a restore gap, a foreign one is skipped, and ignoring the file re-arms", async () => {
+      const { mkdtempSync, writeFileSync, mkdirSync, rmSync, realpathSync } = require("node:fs") as typeof import("node:fs");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      const { createHash } = require("node:crypto") as typeof import("node:crypto");
+      const workspace = realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-orch-ap4-")));
+      const groupId = "grp_0123456789abcdef0123456789abcdef";
+      const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+      const legacyFile = "council-implement-claude-observer.md";
+      // Legacy: an otherwise plausible review with no `session_group_id`.
+      const legacy = JSON.stringify({ schema_version: 1, checkpoint_id: "chk_old", phase: "council-implement", findings: [] });
+      try {
+        const reviewsDir = pathJoin(workspace, ".council", "reviews");
+        mkdirSync(reviewsDir, { recursive: true });
+        writeFileSync(pathJoin(reviewsDir, legacyFile), legacy);
+        // Foreign and broken (missing required fields): not a gap for us.
+        writeFileSync(pathJoin(reviewsDir, "council-implement-codex-observer.md"),
+          JSON.stringify({ session_group_id: "grp_fedcba9876543210fedcba9876543210", findings: "oops" }));
+        seedGroup(groupId, { cwd: workspace, artifactPaths: [] });
+
+        // Not opted in: the gap holds nothing, so nothing is reported.
+        deps.launcher.getSession.mockImplementation(() => undefined);
+        const optedOut = await orchestrator.getGroupReviewsForBootstrap(groupId);
+        expect(optedOut!.autoProceedRestoreGaps).toBeUndefined();
+
+        const arm = vi.fn(() => ({ kind: "armed" as const }));
+        orchestrator.setIdleTimerManager({
+          arm, cancel: vi.fn(),
+          noteUserMessage: () => {}, resetIterationCount: () => {}, getIterationCount: () => 0,
+          clearPendingSyntheticTurn: () => {}, disposeAll: () => {}, isApiLimitReached: () => false,
+        } as any);
+        deps.launcher.getSession.mockImplementation((sid: string) =>
+          sid === "sess_orch"
+            ? ({ sessionId: sid, autoProceedOnIdle: { idleMs: 60_000, maxIterations: 3 } } as any)
+            : undefined,
+        );
+        const internals = orchestrator as unknown as {
+          councilGroupBySessionId: Map<string, string>;
+          getOrCreateCoordinatorSync: () => { registerExternalGroup: (r: unknown) => void };
+        };
+        internals.councilGroupBySessionId.set("sess_orch", groupId);
+        internals.councilGroupBySessionId.set("sess_obs", groupId);
+        internals.getOrCreateCoordinatorSync().registerExternalGroup({
+          sessionGroupId: groupId,
+          primary: { sessionId: "sess_orch", backendType: "claude" },
+          observer: { sessionId: "sess_obs", backendType: "codex" },
+          status: "active",
+          createdAt: 1,
+        });
+
+        // Opted in: exactly the legacy file is reported, with its fingerprint.
+        const view = await orchestrator.getGroupReviewsForBootstrap(groupId);
+        expect(view!.reviewCount).toBe(0);
+        const fp = createHash("sha256").update(legacy).digest("hex");
+        expect(view!.autoProceedRestoreGaps).toEqual([{
+          gap: `review_unparseable:${legacyFile}`,
+          reason: expect.stringContaining("legacy"),
+          file: legacyFile,
+          fingerprint: fp,
+        }]);
+
+        // "Restart": the gap holds (fail-closed) …
+        orchestrator.initialize();
+        companionBus.emit("orchestrator:turn-done", { sessionId: "sess_orch", blockedByStop: false });
+        await flush();
+        expect(arm).not.toHaveBeenCalled();
+
+        // … until the human ignores that file; the waiting edge then arms.
+        expect(orchestrator.ignoreAutoProceedRestoreGap(groupId, legacyFile, fp)).toEqual({ ok: true, added: true });
+        await flush();
+        expect(arm).toHaveBeenCalledWith("sess_orch", { idleMs: 60_000, maxIterations: 3 });
+        expect((await orchestrator.getGroupReviewsForBootstrap(groupId))!.autoProceedRestoreGaps).toBeUndefined();
+
+        // New broken content under the same name blocks again.
+        writeFileSync(pathJoin(reviewsDir, legacyFile), legacy + " ");
+        const rewritten = await orchestrator.getGroupReviewsForBootstrap(groupId);
+        expect(rewritten!.autoProceedRestoreGaps).toHaveLength(1);
+        expect(rewritten!.autoProceedRestoreGaps![0]!.fingerprint).not.toBe(fp);
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
+    // BANNER-RESOLVED (human decision on ASK #14): "Dismiss for now" writes
+    // `<group>-resolved-stops.json`, but the browser's dismissal lived only in
+    // tab memory — after a reload the banner raised the same STOP again while
+    // auto-proceed no longer held on it. The REST bootstrap must carry the
+    // server's resolution so the browser can keep the STOP off the banner.
+    // Real path: review file on disk → resolveObserverStop → bootstrap.
+    // Edge cases: a pair that never opted in to auto-proceed still gets the
+    // flag (dismissal is a UI fact, not an auto-proceed one); an undismissed
+    // STOP in the same review stays unflagged; the flag survives a new
+    // orchestrator instance reading the same workspace (the "restart").
+    it("BANNER-RESOLVED: the bootstrap flags a STOP a human dismissed, and only that one", async () => {
+      const { mkdtempSync, writeFileSync, mkdirSync, rmSync, realpathSync } = require("node:fs") as typeof import("node:fs");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      const workspace = realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-orch-banner-resolved-")));
+      const groupId = "grp_00112233445566778899aabbccddeeff";
+      try {
+        mkdirSync(pathJoin(workspace, "src"), { recursive: true });
+        writeFileSync(pathJoin(workspace, "src/a.ts"), "export function alpha() { try { run(); } catch {} }\nexport function gamma() { try { go(); } catch {} }\n");
+        const reviewsDir = pathJoin(workspace, ".council", "reviews");
+        mkdirSync(reviewsDir, { recursive: true });
+        writeFileSync(pathJoin(reviewsDir, "council-implement-claude-observer.md"), JSON.stringify({
+          schema_version: 1,
+          observer_wake_payload_version_echo: 1,
+          checkpoint_id: "chk_banner",
+          phase: "council-implement",
+          session_group_id: groupId,
+          reviewed_at: "2026-01-01T00:00:00Z",
+          observer_provider: "claude",
+          observer_model: "claude-opus",
+          observer_cli_version: "1.0.0",
+          findings: [
+            { severity: "STOP", claim: "`alpha` swallows the error", evidence_path: "src/a.ts", evidence_lines: [1, 1] },
+            { severity: "STOP", claim: "`gamma` swallows the error", evidence_path: "src/a.ts", evidence_lines: [2, 2] },
+          ],
+        }));
+        seedGroup(groupId, { cwd: workspace, artifactPaths: ["src/a.ts"] });
+        // Not opted in to auto-proceed: the dismissal must still be reflected.
+        deps.launcher.getSession.mockImplementation(() => undefined);
+
+        const before = await orchestrator.getGroupReviewsForBootstrap(groupId);
+        expect(before!.findings).toHaveLength(2);
+        expect(before!.findings.every((f) => f.severity === "STOP" && f.dismissed === undefined)).toBe(true);
+
+        const [alpha, gamma] = before!.findings;
+        const res = orchestrator.resolveObserverStop(groupId, alpha!.id);
+        expect(res).toMatchObject({ ok: true, persisted: true });
+
+        const after = await orchestrator.getGroupReviewsForBootstrap(groupId);
+        const byId = new Map(after!.findings.map((f) => [f.id, f]));
+        expect(byId.get(alpha!.id)!.dismissed).toBe(true);
+        // A resolved STOP holds nothing, so it is never flagged as holding.
+        expect(byId.get(alpha!.id)!.holdsAutoProceed).toBeUndefined();
+        expect(byId.get(gamma!.id)!.dismissed).toBeUndefined();
+
+        // "Restart": a fresh orchestrator on the same workspace reads the
+        // persisted resolution, not in-memory state.
+        const fresh = new SessionOrchestrator(deps);
+        const freshInternals = fresh as unknown as {
+          councilWatchers: Map<string, unknown>;
+          councilGroupMeta: Map<string, unknown>;
+        };
+        const oldInternals = orchestrator as unknown as typeof freshInternals;
+        freshInternals.councilWatchers.set(groupId, oldInternals.councilWatchers.get(groupId));
+        freshInternals.councilGroupMeta.set(groupId, oldInternals.councilGroupMeta.get(groupId));
+        const reloaded = await fresh.getGroupReviewsForBootstrap(groupId);
+        expect(reloaded!.findings.find((f) => f.id === alpha!.id)!.dismissed).toBe(true);
+        expect(reloaded!.findings.find((f) => f.id === gamma!.id)!.dismissed).toBeUndefined();
+        fresh.shutdown();
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
+    it("B2b: a dismissed STOP is persisted and marks re-raised copies as disputed (live + bootstrap)", async () => {
+      const { mkdtempSync, writeFileSync, mkdirSync, rmSync, realpathSync, existsSync } = require("node:fs") as typeof import("node:fs");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      const workspace = realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-orch-b2b-")));
+      // resolveCouncilStatePath only accepts real group ids (grp_ + 32 hex).
+      const groupId = "grp_0123456789abcdef0123456789abcdef";
+      const originalClaim = "`bun run --cwd web kb:record` fails: bun ignores --cwd after run";
+      try {
+        mkdirSync(pathJoin(workspace, "src"), { recursive: true });
+        writeFileSync(pathJoin(workspace, "src/a.ts"), "export function alpha() { return 1; }\n");
+        writeFileSync(pathJoin(workspace, "src/b.ts"), "export function beta() { return 2; }\n");
+        mkdirSync(pathJoin(workspace, ".council", "reviews"), { recursive: true });
+        writeFileSync(
+          pathJoin(workspace, ".council", "reviews", `council-plan-${groupId}-codex-observer.md`),
+          JSON.stringify({
+            schema_version: 1,
+            observer_wake_payload_version_echo: 1,
+            checkpoint_id: "chk_a",
+            phase: "council-plan",
+            session_group_id: groupId,
+            reviewed_at: "2026-01-01T00:00:00Z",
+            observer_provider: "codex",
+            observer_model: "gpt-5.5",
+            observer_cli_version: "1.0.0",
+            findings: [{ severity: "STOP", claim: originalClaim, evidence_path: "src/a.ts" }],
+          }),
+        );
+        seedGroup(groupId, { cwd: workspace, artifactPaths: ["src/a.ts", "src/b.ts"] });
+
+        const before = await orchestrator.getGroupReviewsForBootstrap(groupId);
+        expect(before!.findings).toHaveLength(1);
+        const original = before!.findings[0]!;
+        expect(original).toMatchObject({ severity: "STOP", claim: originalClaim });
+        expect(original.disputed).toBeUndefined();
+
+        expect(orchestrator.disputeObserverFinding(groupId, { claim: originalClaim, evidencePath: "src/a.ts", findingId: original.id }))
+          .toEqual({ ok: true, added: true });
+        // Idempotent: a second dismissal (another tab) adds nothing.
+        expect(orchestrator.disputeObserverFinding(groupId, { claim: originalClaim, evidencePath: "src/a.ts", findingId: original.id }))
+          .toEqual({ ok: true, added: false });
+        expect(existsSync(pathJoin(workspace, ".council", "state", `${groupId}-disputes.json`))).toBe(true);
+        expect(orchestrator.disputeObserverFinding("grp_ffffffffffffffffffffffffffffffff", { claim: "x", evidencePath: "src/a.ts" }))
+          .toEqual({ ok: false, reason: "unknown_group" });
+
+        // Reload: the same finding id comes back, now marked disputed.
+        const after = await orchestrator.getGroupReviewsForBootstrap(groupId);
+        expect(after!.findings[0]).toMatchObject({ id: original.id, severity: "STOP", disputed: "same_claim" });
+
+        const emitted: Array<{ findings: Array<{ severity: string; claim: string; disputed?: string; wasDowngraded?: boolean }> }> = [];
+        companionBus.on("group:review", (e: unknown) => { emitted.push(e as (typeof emitted)[number]); });
+        const handleReview = (orchestrator as unknown as {
+          handleCouncilReview: (g: string, p: Record<string, unknown>) => void;
+        }).handleCouncilReview;
+        handleReview.call(orchestrator, groupId, {
+          schema_version: 1,
+          observer_wake_payload_version_echo: 1,
+          checkpoint_id: "chk_a",
+          phase: "council-plan",
+          session_group_id: groupId,
+          reviewed_at: "2026-01-01T00:00:00Z",
+          observer_provider: "codex",
+          observer_model: "gpt-5.5",
+          observer_cli_version: "1.0.0",
+          findings: [
+            { severity: "STOP", claim: "The mandatory `bun run --cwd web kb:record` step will fail for every /prime", evidence_path: "src/a.ts" },
+            { severity: "STOP", claim: "alpha returns the wrong value", evidence_path: "src/a.ts" },
+            { severity: "NOTE", claim: originalClaim, evidence_path: "src/a.ts" },
+            { severity: "STOP", claim: originalClaim, evidence_path: "src/b.ts" },
+          ],
+        });
+        expect(emitted).toHaveLength(1);
+        const [repeat, unrelated, note, otherFile] = emitted[0]!.findings;
+        // A live STOP (not grounding-downgraded) that is simply not disputed.
+        expect(otherFile).toMatchObject({ severity: "STOP", claim: originalClaim, evidence_path: "src/b.ts" });
+        expect(otherFile!.wasDowngraded).toBeFalsy();
+        expect(otherFile!.disputed).toBeUndefined();
+        expect(repeat).toMatchObject({ severity: "STOP", disputed: "shared_anchor" });
+        expect(unrelated!.disputed).toBeUndefined();
+        // Only live STOPs are marked — a NOTE never raises the banner anyway.
+        expect(note!.disputed).toBeUndefined();
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
     // got-051 (prod 2026-09-08). Several council pairs can share one
     // workspace, and every pair's review watcher then watches the SAME
     // `.council/reviews/` directory — so one observer's review file is
@@ -3278,8 +4177,8 @@ describe("SessionOrchestrator", () => {
       companionBus.on("group:review", (e: unknown) => { reviews.push(e); });
       const metricSpy = vi.spyOn(metricsCollector, "recordError");
       try {
-        (orchestrator as unknown as { handleReviewDeadlineExpired: (g: string, c: string) => void })
-          .handleReviewDeadlineExpired("grp_dl_mine", "chk_dl");
+        (orchestrator as unknown as { checkpointPipeline: { handleReviewDeadlineExpired: (g: string, c: string) => void } })
+          .checkpointPipeline.handleReviewDeadlineExpired("grp_dl_mine", "chk_dl");
         // (a) degrades, with the foreign-review reason, not the generic silence one
         expect(degraded).toHaveLength(1);
         expect(degraded[0]!.reason).toBe("foreign_group_review");
@@ -3303,8 +4202,8 @@ describe("SessionOrchestrator", () => {
       companionBus.on("group:degraded", (e: unknown) => { degraded.push(e); });
       companionBus.on("group:review", (e: unknown) => { reviews.push(e); });
       try {
-        (orchestrator as unknown as { handleReviewDeadlineExpired: (g: string, c: string) => void })
-          .handleReviewDeadlineExpired("grp_dl_own", "chk_dl");
+        (orchestrator as unknown as { checkpointPipeline: { handleReviewDeadlineExpired: (g: string, c: string) => void } })
+          .checkpointPipeline.handleReviewDeadlineExpired("grp_dl_own", "chk_dl");
         expect(reviews).toHaveLength(1); // recovered_by_deadline_rescan
         expect(degraded).toHaveLength(0);
       } finally {
@@ -3348,7 +4247,12 @@ describe("SessionOrchestrator", () => {
       // Stub a minimal coordinator with an active group record so Gate 1
       // doesn't short-circuit on absent-coordinator.
       ws.coordinator = {
-        get: vi.fn(() => ({ sessionGroupId: groupId, status: "active" })),
+        get: vi.fn(() => ({
+          sessionGroupId: groupId,
+          status: "active",
+          primary: { sessionId: opts.primary ?? "sess_orch" },
+          observer: { sessionId: opts.observer ?? "sess_obs" },
+        })),
       };
       return cwd;
     }
@@ -3643,6 +4547,112 @@ describe("SessionOrchestrator", () => {
       }
     });
 
+    // ── P3/B1: host-built reviews from the observer's reply ────────────────
+    //
+    // The observer's final message is a bare findings array; on turn end the
+    // orchestrator finalizes the capture armed at dispatch. These pin the
+    // orchestrator-side wiring: file written under the canonical name, one bad
+    // answer does not degrade the group, a streak of bad answers (or silence)
+    // still does through the existing wake_produced_no_review channel.
+    function observerReply(groupId: string, observer: string, text: string) {
+      const ws = orchestrator as unknown as {
+        observerReplyCapture: { onAssistant: (s: string, m: unknown) => void };
+        finalizeObserverReply: (g: string, s: string) => void;
+      };
+      ws.observerReplyCapture.onAssistant(observer, { type: "assistant", message: { model: "claude-opus-4-8", content: [{ type: "text", text }] } });
+      ws.finalizeObserverReply.call(orchestrator, groupId, observer);
+    }
+
+    it("B1: a findings-array reply is written as the canonical review file with host fields", async () => {
+      const { parseObserverReviewPayload } = await import("./council-types.js");
+      const { cwd } = seedActiveGroupWithApplyEvent("grp_b1_ok", { observer: "sess_obs_b1" });
+      vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "sent" });
+      callDispatch("grp_b1_ok", validPayload("grp_b1_ok", { checkpointId: "chk_b1_ok" }));
+      observerReply("grp_b1_ok", "sess_obs_b1", JSON.stringify([
+        { severity: "WARN", claim: "missing test for retry", evidence_path: "src/a.ts", confidence: "medium" },
+      ]));
+      const raw = require("node:fs").readFileSync(require("node:path").join(cwd, ".council", "reviews", "council-plan-grp_b1_ok-claude-observer.md"), "utf-8");
+      const review = parseObserverReviewPayload(raw);
+      expect(review).toMatchObject({
+        checkpoint_id: "chk_b1_ok",
+        phase: "council-plan",
+        session_group_id: "grp_b1_ok",
+        observer_provider: "claude",
+        observer_model: "claude-opus-4-8",
+        findings: [{ severity: "WARN", claim: "missing test for retry", evidence_path: "src/a.ts", confidence: "medium" }],
+      });
+    });
+
+    it("B1: the deadline rescan recovers a host-written review, so no degrade fires", async () => {
+      // The review watcher is not running in this harness; the EC-8 rescan at
+      // the deadline is the path that must find the host's file on disk.
+      const { OBSERVER_WAKE_TIMEOUT_MS } = await import("./council-types.js");
+      vi.useFakeTimers();
+      try {
+        const { ws } = seedActiveGroupWithApplyEvent("grp_b1_rescan", { observer: "sess_obs_b1r" });
+        vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "sent" });
+        callDispatch("grp_b1_rescan", validPayload("grp_b1_rescan", { checkpointId: "chk_b1_rescan" }));
+        observerReply("grp_b1_rescan", "sess_obs_b1r", "[]");
+        vi.advanceTimersByTime(OBSERVER_WAKE_TIMEOUT_MS + 1);
+        expect(ws.coordinator.applyEvent).not.toHaveBeenCalledWith("grp_b1_rescan", expect.objectContaining({ type: "half_died" }));
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("B1: one invalid reply writes no review and does NOT degrade the group", async () => {
+      const { OBSERVER_WAKE_TIMEOUT_MS } = await import("./council-types.js");
+      vi.useFakeTimers();
+      try {
+        const { cwd, ws } = seedActiveGroupWithApplyEvent("grp_b1_bad", { observer: "sess_obs_bad" });
+        vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "sent" });
+        callDispatch("grp_b1_bad", validPayload("grp_b1_bad", { checkpointId: "chk_b1_bad" }));
+        observerReply("grp_b1_bad", "sess_obs_bad", "Looks good, no issues.");
+        expect(require("node:fs").existsSync(require("node:path").join(cwd, ".council", "reviews"))).toBe(false);
+        const entry = (orchestrator as unknown as {
+          councilWatchers: Map<string, { pendingReviewDeadline: unknown }>;
+        }).councilWatchers.get("grp_b1_bad");
+        expect(entry?.pendingReviewDeadline).toBeNull();
+        vi.advanceTimersByTime(OBSERVER_WAKE_TIMEOUT_MS + 1);
+        expect(ws.coordinator.applyEvent).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("B1: after OBSERVER_REPLY_REJECTIONS_BEFORE_DEGRADE bad replies in a row the watchdog degrades as before", async () => {
+      const { OBSERVER_WAKE_TIMEOUT_MS } = await import("./council-types.js");
+      const { OBSERVER_REPLY_REJECTIONS_BEFORE_DEGRADE } = await import("./session-orchestrator.js");
+      vi.useFakeTimers();
+      try {
+        const { ws } = seedActiveGroupWithApplyEvent("grp_b1_streak", { observer: "sess_obs_streak" });
+        vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "sent" });
+        for (let i = 1; i <= OBSERVER_REPLY_REJECTIONS_BEFORE_DEGRADE; i++) {
+          callDispatch("grp_b1_streak", validPayload("grp_b1_streak", { checkpointId: `chk_streak_${i}`, sequence: i }));
+          observerReply("grp_b1_streak", "sess_obs_streak", "{\"status\":\"approved\"}");
+        }
+        vi.advanceTimersByTime(OBSERVER_WAKE_TIMEOUT_MS + 1);
+        expect(ws.coordinator.applyEvent).toHaveBeenCalledWith("grp_b1_streak", { type: "half_died", role: "observer", reason: "wake_produced_no_review" });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("B1: an empty reply (silence after the last tool call) keeps the watchdog armed", async () => {
+      const { OBSERVER_WAKE_TIMEOUT_MS } = await import("./council-types.js");
+      vi.useFakeTimers();
+      try {
+        const { ws } = seedActiveGroupWithApplyEvent("grp_b1_empty", { observer: "sess_obs_empty" });
+        vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "sent" });
+        callDispatch("grp_b1_empty", validPayload("grp_b1_empty", { checkpointId: "chk_b1_empty" }));
+        observerReply("grp_b1_empty", "sess_obs_empty", "   ");
+        vi.advanceTimersByTime(OBSERVER_WAKE_TIMEOUT_MS + 1);
+        expect(ws.coordinator.applyEvent).toHaveBeenCalledWith("grp_b1_empty", { type: "half_died", role: "observer", reason: "wake_produced_no_review" });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("re-arms the watchdog for the newest dispatched checkpoint (single-slot supersede)", () => {
       const ws = orchestrator as unknown as {
         councilWatchers: Map<string, { pendingReviewDeadline: { checkpointId: string } | null }>;
@@ -3785,7 +4795,19 @@ describe("SessionOrchestrator", () => {
     // pin the fix: after OBSERVER_CATCHUP_TIMEOUT_ESCALATION_THRESHOLD (3)
     // consecutive timeouts for the SAME checkpoint the group is degraded via
     // the single degrade authority; a successful wake resets the strike count.
+    //
+    // P4/OBS-AUTOHEAL: a timed-out poll now first tries to relaunch the
+    // observer. The strike/threshold path below still applies whenever the
+    // heal budget is spent (hourly cap → `rate_limited`), so these tests pin
+    // it with the auto-heal reporting `rate_limited`. The heal path itself is
+    // pinned in "observer auto-heal (P4/OBS-AUTOHEAL)" below.
     describe("scheduleCatchupWakeWhenObserverReady escalation (P1-1)", () => {
+      beforeEach(() => {
+        vi.spyOn((orchestrator as any).observerAutoheal, "heal").mockResolvedValue({
+          kind: "skipped",
+          reason: "rate_limited",
+        });
+      });
       function callCatchup(groupId: string, payload: any): Promise<void> {
         return (orchestrator as unknown as {
           scheduleCatchupWakeWhenObserverReady: (g: string, p: any) => Promise<void>;
@@ -3862,6 +4884,204 @@ describe("SessionOrchestrator", () => {
           }
           expect(ws.coordinator.applyEvent).not.toHaveBeenCalled();
           readySpy.mockRestore();
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+    });
+
+    // ── P4/OBS-AUTOHEAL: bounded observer-only relaunch ─────────────────
+    //
+    // Incident 2026-09-28 (twice): an idle Codex observer lost its backend
+    // adapter; the failsafe polled, timed out and degraded the pair ("Observer
+    // offline · wake failed"). Only a manual POST /sessions/<observer>/relaunch
+    // cured it. These tests drive the REAL coordinator and the live wake path
+    // (dispatchObserverWake → adapter_missing → catch-up poll → auto-heal)
+    // for both pairings — the heal is provider-agnostic, so claude+claude
+    // must behave exactly like claude+codex.
+    describe.each([
+      { pairing: "claude+codex", observerBackend: "codex" },
+      { pairing: "claude+claude", observerBackend: "claude" },
+    ])("observer auto-heal (P4/OBS-AUTOHEAL) — $pairing", ({ pairing, observerBackend }) => {
+      const ORCH = "sess_orch_heal";
+      const OBS = "sess_obs_heal";
+
+      function registerHealPair(groupId: string) {
+        const internals = orchestrator as unknown as {
+          councilGroupMeta: Map<string, unknown>;
+          councilWatchers: Map<string, unknown>;
+          getOrCreateCoordinatorSync: () => {
+            registerExternalGroup: (r: unknown) => void;
+            get: (id: string) => { status: string } | undefined;
+          };
+        };
+        const cwd = require("node:fs").realpathSync(
+          require("node:fs").mkdtempSync(require("node:path").join(require("node:os").tmpdir(), "council-heal-")),
+        );
+        internals.councilWatchers.set(groupId, {
+          cwd,
+          abort: new AbortController(),
+          lastCheckpoint: null,
+          previousCheckpoint: null,
+          pendingCheckpoint: null,
+          supersededCheckpointIds: [],
+          pendingReviewDeadline: null,
+        });
+        internals.councilGroupMeta.set(groupId, {
+          primarySessionId: ORCH,
+          observerSessionId: OBS,
+          pairing,
+          createdAt: Date.now(),
+          lastCheckpointReceivedAt: null,
+        });
+        const coord = internals.getOrCreateCoordinatorSync();
+        coord.registerExternalGroup({
+          sessionGroupId: groupId,
+          primary: { sessionId: ORCH, backendType: "claude" },
+          observer: { sessionId: OBS, backendType: observerBackend },
+          status: "active",
+          createdAt: Date.now(),
+        });
+        return coord;
+      }
+
+      it("adapter_missing → relaunches ONLY the observer → wake delivered → group stays active", async () => {
+        vi.useFakeTimers();
+        try {
+          deps.launcher.getSession.mockReturnValue({ archived: false, state: "running" } as any);
+          orchestrator.initialize();
+          const coord = registerHealPair("grp_heal_ok");
+          // Adapter gone until the observer is relaunched; attached right after.
+          let adapterAttached = false;
+          vi.spyOn(orchestrator as any, "observerReadyForWake").mockImplementation(() => adapterAttached);
+          deps.launcher.relaunch.mockImplementation(async () => {
+            adapterAttached = true;
+            return { ok: true };
+          });
+          vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockImplementation(() =>
+            adapterAttached ? { kind: "sent" } : { kind: "adapter_missing" },
+          );
+
+          const first = callDispatch("grp_heal_ok", validPayload("grp_heal_ok", { checkpointId: "chk_heal" }));
+          expect(first).toEqual({ kind: "skipped", reason: "adapter_missing" });
+
+          // 30s readiness poll times out → auto-heal relaunches → adapter attaches.
+          await vi.advanceTimersByTimeAsync(31_000);
+
+          expect(deps.launcher.relaunch).toHaveBeenCalledTimes(1);
+          expect(deps.launcher.relaunch).toHaveBeenCalledWith(OBS, {});
+          expect(deps.launcher.relaunch).not.toHaveBeenCalledWith(ORCH, expect.anything());
+          // The missed wake was re-sent and accepted after the heal.
+          const results = vi.mocked(deps.wsBridge.sendObserverWakeFrame).mock.results.map((r: { value: unknown }) => r.value);
+          expect(results.at(-1)).toEqual({ kind: "sent" });
+          expect(coord.get("grp_heal_ok")?.status).toBe("active");
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      // P4/FIX-AUTOHEAL-1 items 1 + 4: the heal relaunch goes through the
+      // single-flight gate and, unlike a manual relaunch, does not reset the
+      // auto-relaunch crash budget. P4/FIX-AUTOHEAL-2 (a): a manual relaunch
+      // clicked meanwhile no longer JOINS the heal (it may carry new
+      // credentials the heal's spawn never saw) — it waits for the heal to
+      // finish and then spawns its own CLI. Never two spawns at once, so
+      // still no two `--resume`s racing on one cliSessionId.
+      it("heal relaunch: a concurrent manual relaunch waits for it and then runs its own, and the crash budget is not reset", async () => {
+        vi.useFakeTimers();
+        try {
+          deps.launcher.getSession.mockReturnValue({ archived: false, state: "running" } as any);
+          orchestrator.initialize();
+          registerHealPair("grp_heal_sf");
+          let adapterAttached = false;
+          vi.spyOn(orchestrator as any, "observerReadyForWake").mockImplementation(() => adapterAttached);
+          let finishRelaunch!: (r: { ok: boolean }) => void;
+          deps.launcher.relaunch.mockImplementation(
+            () => new Promise((resolve) => { finishRelaunch = resolve; }),
+          );
+          vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockImplementation(() =>
+            adapterAttached ? { kind: "sent" } : { kind: "adapter_missing" },
+          );
+          const recovery = (orchestrator as any).recovery;
+          const clearBudget = vi.spyOn(recovery, "clearAutoRelaunchCount");
+
+          callDispatch("grp_heal_sf", validPayload("grp_heal_sf", { checkpointId: "chk_sf" }));
+          await vi.advanceTimersByTimeAsync(31_000);
+          expect(deps.launcher.relaunch).toHaveBeenCalledTimes(1);
+          // Auto-heal did not wipe the crash-loop budget.
+          expect(clearBudget).not.toHaveBeenCalled();
+
+          // The user clicks relaunch while the heal's spawn is still running.
+          const manual = orchestrator.relaunchSession(OBS);
+          await vi.advanceTimersByTimeAsync(0);
+          // Not overlapping the heal's spawn.
+          expect(deps.launcher.relaunch).toHaveBeenCalledTimes(1);
+          adapterAttached = true;
+          finishRelaunch({ ok: true });
+          await vi.advanceTimersByTimeAsync(0);
+          // The heal finished → the manual relaunch spawns on its own.
+          expect(deps.launcher.relaunch).toHaveBeenCalledTimes(2);
+          finishRelaunch({ ok: true });
+          await expect(manual).resolves.toEqual({ ok: true });
+          await vi.advanceTimersByTimeAsync(1_000);
+          expect(deps.launcher.relaunch).toHaveBeenCalledTimes(2);
+          // The manual path still resets the budget (explicit user action).
+          expect(clearBudget).toHaveBeenCalledWith(OBS);
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it("heal budget exhausted → the group degrades (not before)", async () => {
+        vi.useFakeTimers();
+        try {
+          deps.launcher.getSession.mockReturnValue({ archived: false, state: "running" } as any);
+          orchestrator.initialize();
+          const coord = registerHealPair("grp_heal_ex");
+          // Relaunch "succeeds" but the adapter never attaches.
+          vi.spyOn(orchestrator as any, "observerReadyForWake").mockReturnValue(false);
+          deps.launcher.relaunch.mockResolvedValue({ ok: true });
+          vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "adapter_missing" });
+
+          callDispatch("grp_heal_ex", validPayload("grp_heal_ex", { checkpointId: "chk_ex" }));
+          // Poll timeout + first relaunch's 60s ready window: still healing, still active.
+          await vi.advanceTimersByTimeAsync(31_000 + 30_000);
+          expect(deps.launcher.relaunch).toHaveBeenCalledTimes(1);
+          expect(coord.get("grp_heal_ex")?.status).toBe("active");
+
+          // Second attempt (after backoff) also never attaches → degraded.
+          await vi.advanceTimersByTimeAsync(5 * 60_000);
+          expect(deps.launcher.relaunch).toHaveBeenCalledTimes(2);
+          expect(deps.launcher.relaunch.mock.calls.every((c: unknown[]) => c[0] === OBS)).toBe(true);
+          expect(coord.get("grp_heal_ex")?.status).toBe("degraded");
+        } finally {
+          vi.useRealTimers();
+        }
+      });
+
+      it("observer stopped by the user → no heal, no degrade (EC-2, P4/KILL-INTENTIONAL)", async () => {
+        vi.useFakeTimers();
+        try {
+          deps.launcher.getSession.mockReturnValue({ archived: false, state: "exited", pid: undefined } as any);
+          orchestrator.initialize();
+          const coord = registerHealPair("grp_heal_kill");
+          vi.spyOn(orchestrator as any, "observerReadyForWake").mockReturnValue(false);
+          vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "adapter_missing" });
+
+          await orchestrator.killSession(OBS);
+          deps.launcher.relaunch.mockClear();
+
+          // A checkpoint from before the stop hits the dead observer.
+          callDispatch("grp_heal_kill", validPayload("grp_heal_kill", { checkpointId: "chk_kill" }));
+          // And the catch-up poll is forced directly, as a restart scan would.
+          void (orchestrator as any).observerScheduler.scheduleCatchupWakeWhenObserverReady(
+            "grp_heal_kill",
+            validPayload("grp_heal_kill", { checkpointId: "chk_kill_2" }),
+          );
+          await vi.advanceTimersByTimeAsync(10 * 60_000);
+
+          expect(deps.launcher.relaunch).not.toHaveBeenCalled();
+          expect(coord.get("grp_heal_kill")?.status).toBe("active");
         } finally {
           vi.useRealTimers();
         }
@@ -4499,6 +5719,33 @@ describe("SessionOrchestrator", () => {
       }
     });
 
+    // FIX-B1-1: a throw while turning the observer's reply into a review
+    // (e.g. an unforeseen naming error) must not skip the drain — otherwise
+    // the queued checkpoint is never dispatched and the pair degrades later.
+    it("observer:turn-done still drains when reply finalize throws (FIX-B1-1)", () => {
+      orchestrator.initialize();
+      const { workspace, ws } = setupGroup("grp_lt3");
+      try {
+        ws.councilWatchers.get("grp_lt3")!.pendingCheckpoint = {
+          schema_version: 1, checkpoint_id: "chk_queued", phase: "p", sequence: 1,
+          session_group_id: "grp_lt3", emitted_at: "2026-01-01T00:00:00Z", artifact_paths: [],
+        };
+        vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReset();
+        vi.mocked(deps.wsBridge.sendObserverWakeFrame).mockReturnValue({ kind: "sent" });
+        (orchestrator as any).coordinator = {
+          get: vi.fn(() => ({ sessionGroupId: "grp_lt3", status: "active" })),
+        };
+        vi.spyOn((orchestrator as any).checkpointPipeline, "finalizeObserverReply").mockImplementation(() => {
+          throw new RangeError("boom");
+        });
+        companionBus.emit("observer:turn-done", { sessionId: "obs_id" });
+        expect(ws.councilWatchers.get("grp_lt3")?.pendingCheckpoint).toBeNull();
+        expect(deps.wsBridge.sendObserverWakeFrame).toHaveBeenCalled();
+      } finally {
+        fs.rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
     it("observer:turn-done from non-observer sessionId is ignored (Backend #21 guard)", () => {
       orchestrator.initialize();
       const { workspace, ws } = setupGroup("grp_lt2");
@@ -4634,8 +5881,9 @@ describe("SessionOrchestrator", () => {
       const fs = await import("node:fs");
       const path = await import("node:path");
       const url = await import("node:url");
+      // P4/C1e: the watcher lifecycle moved to council-lifecycle.ts verbatim.
       const src = fs.readFileSync(
-        path.join(path.dirname(url.fileURLToPath(import.meta.url)), "session-orchestrator.ts"),
+        path.join(path.dirname(url.fileURLToPath(import.meta.url)), "council-lifecycle.ts"),
         "utf-8",
       );
       // The re-arm closure must dispatch the watcher-rearm trigger.
@@ -4871,7 +6119,7 @@ describe("SessionOrchestrator", () => {
     // `reconnect_ok` resolves it back to `active`. Watcher attach is best-
     // effort (mkdirSync of a missing cwd fails silently); the Task 6
     // contract is the coordinator state machine, not the filesystem watcher.
-    // PLAN-aura-consolidated-refactor.md Task 3 (FINAL-REVIEW 2026-05-12-2211
+    // docs/history/PLAN-aura-consolidated-refactor.md Task 3 (FINAL-REVIEW 2026-05-12-2211
     // P1 #1): partial-pair restart now lands directly in `degraded` rather
     // than arming a useless reconnect grace window. The `__missing_*`
     // placeholder sessionId cannot bind to any real handshake by

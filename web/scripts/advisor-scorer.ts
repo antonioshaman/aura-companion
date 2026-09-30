@@ -63,7 +63,7 @@ function intersectSorted(a: string[], b: Set<string>): string[] {
  * not free text, so scoring stays deterministic.
  */
 export function scoreAdvisors(
-  fingerprint: Fingerprint,
+  fingerprint: Pick<Fingerprint, "signals">,
   featureDomains: string[],
   profiles: AdvisorProfile[],
 ): RankedCandidate[] {
@@ -126,7 +126,7 @@ export function dedupRedundant(ranked: RankedCandidate[]): RankedCandidate[] {
  */
 export function applyGuardrails(
   ranked: RankedCandidate[],
-  min: number = MIN_SEATS,
+  _min: number = MIN_SEATS,
   max: number = MAX_SEATS,
 ): RankedCandidate[] {
   if (ranked.length <= max) return ranked.slice();

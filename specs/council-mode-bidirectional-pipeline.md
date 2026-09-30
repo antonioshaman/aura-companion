@@ -1,12 +1,14 @@
 # Spec: Council Mode bidirectional pipeline — Orchestrator ↔ Observer cycle
 
+> **Amended 2026-09-28 (aura-meta-diet A1):** `/self-improvement` was removed from the canonical orchestrator sequence — `/learn` is the single learning-capture path. The sequence is now 8 steps.
+
 **Date:** 2026-05-15
 **Status:** Draft
 **Depends on:** `specs/council-experts-catalog-v2-expansion.md` (catalog v2 with 16 creator-named IDs + chair-side stack-detection + panel selection)
 
 ## Vision
 
-Today's Aura Council Mode pair (Orchestrator + Observer sessions) is **one-directional**: Observer wakes on filesystem checkpoint, writes a review file, server fans findings back to Orchestrator's UI. Failure modes the operator already saw: (1) Observer falls asleep silently when the filesystem watcher drops events; (2) Orchestrator advances without knowing Observer is dead; (3) cross-half memory drift (Orchestrator runs `/learn`, Observer's review is based on stale memory); (4) no convergence signal — operator must manually check CI gates to know "we're done". v2 makes Council Mode a **bidirectional, self-driving development pipeline**: Orchestrator follows the canonical 9-step sequence (`/prime → /spec-writer → /council-plan → /council-implement → /council-review → /test-architect → /self-improvement → /learn → /self-reflect`); Observer reviews task N's commit IN PARALLEL with Orchestrator's task N+1 plan; both halves can wake each other, exchange messages visibly to the operator, and converge after 2-3 cycles + green CI. "Why now": β consolidated the catalog (44/44 byte-identical, −29% LOC); v2-catalog completes the catalog story. The pipeline is the next bottleneck — operators must currently choreograph the slash commands manually and watch CI by hand.
+Today's Aura Council Mode pair (Orchestrator + Observer sessions) is **one-directional**: Observer wakes on filesystem checkpoint, writes a review file, server fans findings back to Orchestrator's UI. Failure modes the operator already saw: (1) Observer falls asleep silently when the filesystem watcher drops events; (2) Orchestrator advances without knowing Observer is dead; (3) cross-half memory drift (Orchestrator runs `/learn`, Observer's review is based on stale memory); (4) no convergence signal — operator must manually check CI gates to know "we're done". v2 makes Council Mode a **bidirectional, self-driving development pipeline**: Orchestrator follows the canonical 8-step sequence (`/prime → /spec-writer → /council-plan → /council-implement → /council-review → /test-architect → /learn → /self-reflect`); Observer reviews task N's commit IN PARALLEL with Orchestrator's task N+1 plan; both halves can wake each other, exchange messages visibly to the operator, and converge after 2-3 cycles + green CI. "Why now": β consolidated the catalog (44/44 byte-identical, −29% LOC); v2-catalog completes the catalog story. The pipeline is the next bottleneck — operators must currently choreograph the slash commands manually and watch CI by hand.
 
 ## Problem Statement
 
@@ -28,7 +30,7 @@ Operators report three symptoms today: (1) **silent Observer drop-off** — conn
 
 ### In scope (v1)
 
-- **Canonical 9-step Orchestrator sequence** — `/prime → /spec-writer → /council-plan → /council-implement → /council-review → /test-architect (anytime) → /self-improvement → /learn → /self-reflect` announced at session start.
+- **Canonical 8-step Orchestrator sequence** — `/prime → /spec-writer → /council-plan → /council-implement → /council-review → /test-architect (anytime) → /learn → /self-reflect` announced at session start.
 - **Parallel Observer review cycle** — Observer reviews task N's commit while Orchestrator advances to task N+1.
 - **Cross-half wake + heartbeat** — either half can revive the other when sleep/degradation is detected. See "Cross-half sync architecture options" section — implementer picks the hybrid.
 - **Convergence detection** — 2-3 consecutive cycles with 0 P1 findings + green CI → pair emits `converged` checkpoint + banner.
@@ -105,12 +107,12 @@ Implementer can drop Option E entirely if it adds noise. Options C + B are the c
 
 ### Canonical sequence
 
-#### Story 1.1: Orchestrator announces the 9-step sequence at session start
+#### Story 1.1: Orchestrator announces the 8-step sequence at session start
 
-**When** a fresh Council Mode pair activates, **I want** the Orchestrator's first message to announce the planned sequence `/prime → /spec-writer → /council-plan → /council-implement → /council-review → /test-architect (anytime) → /self-improvement → /learn → /self-reflect`, **so I can** start the session knowing the framing and exit-points.
+**When** a fresh Council Mode pair activates, **I want** the Orchestrator's first message to announce the planned sequence `/prime → /spec-writer → /council-plan → /council-implement → /council-review → /test-architect (anytime) → /learn → /self-reflect`, **so I can** start the session knowing the framing and exit-points.
 
 **Acceptance Criteria:**
-- Given a fresh Council Mode pair, when the Orchestrator first activates, then its first message names the 9 sequence steps in order with brief intent.
+- Given a fresh Council Mode pair, when the Orchestrator first activates, then its first message names the 8 sequence steps in order with brief intent.
 - Given the Orchestrator is at step N, when it advances, then a checkpoint `<workspace>/.council/checkpoints/step-<N>-<phase>.json` records the step + produced artifact path.
 - Given an unexpected skill is invoked out of sequence (e.g. `/council-implement` before `/council-plan`), when the Orchestrator detects, then a structured WARN names the missing prerequisite step (forensic; does NOT block).
 - Given the session wraps, when `/self-reflect` runs, then it summarises which sequence steps ran vs skipped.
@@ -231,7 +233,7 @@ The two specs land their atomic-promotion commits in the same PR so v1 → v2 cu
 - Adding any non-filesystem channel beyond Options B + C (e.g., MCP, vector memory backplane, custom transport).
 - Removing the filesystem checkpoint surface (would break β audit trail).
 - Changing the convergence threshold (default 3 cycles + 0 P1; raising/lowering changes user trust).
-- Extending the canonical sequence beyond 9 steps.
+- Extending the canonical sequence beyond 8 steps.
 
 ### 🚫 Never
 

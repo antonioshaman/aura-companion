@@ -47,6 +47,8 @@ import {
   hydrateObserverFinding,
 } from "./council-slice.js";
 import type { BrowserObserverFinding, GroupRecord } from "../types.js";
+import { api } from "../api.js";
+import { countUnresolvedStopsAcrossGroups } from "../observer-panel-state.js";
 
 beforeEach(() => {
   useStore.getState().reset();
@@ -127,6 +129,18 @@ describe("hydrateObserverFinding", () => {
     });
   });
 
+  // FIX-AP-3: the server's hold flag survives hydration (the banner reads it).
+  it("carries holdsAutoProceed from the wire", () => {
+    const out = hydrateObserverFinding(wireFinding({ severity: "NOTE", holdsAutoProceed: true }), {
+      receivedAt: 1_000,
+      checkpointId: "chk",
+      phase: "p",
+      observerModel: "m",
+      observerProvider: "claude",
+    });
+    expect(out.holdsAutoProceed).toBe(true);
+  });
+
   // Optional wire fields drop out when absent — no `undefined` litter on the
   // hydrated record.
   it("omits optional wire fields when absent on input", () => {
@@ -185,6 +199,23 @@ describe("hydrateObserverFinding", () => {
     });
     expect(out.wasDowngraded).toBe(true);
     expect(out.downgradeReason).toBe("evidence_missing_on_disk");
+  });
+
+  // B2: the weak-evidence mark survives hydration (it gates the banner).
+  it("preserves the weak-evidence mark and a B2 downgrade reason", () => {
+    const ctx = { receivedAt: 1_000, checkpointId: "chk", phase: "p", observerModel: "m", observerProvider: "codex" };
+    expect(hydrateObserverFinding(wireFinding({ weakEvidence: "no_cited_lines" }), ctx).weakEvidence).toBe("no_cited_lines");
+    expect(
+      hydrateObserverFinding(wireFinding({ wasDowngraded: true, downgradeReason: "evidence_lines_unchanged" }), ctx).downgradeReason,
+    ).toBe("evidence_lines_unchanged");
+    expect(hydrateObserverFinding(wireFinding(), ctx)).not.toHaveProperty("weakEvidence");
+  });
+
+  // B2b: the server's "disputed earlier" mark survives hydration (it gates the banner).
+  it("preserves the disputed mark", () => {
+    const ctx = { receivedAt: 1_000, checkpointId: "chk", phase: "p", observerModel: "m", observerProvider: "codex" };
+    expect(hydrateObserverFinding(wireFinding({ disputed: "shared_anchor" }), ctx).disputed).toBe("shared_anchor");
+    expect(hydrateObserverFinding(wireFinding(), ctx)).not.toHaveProperty("disputed");
   });
 });
 
@@ -531,6 +562,30 @@ describe("appendObserverReview", () => {
     expect(useStore.getState().findings.get("grp_abc")).toHaveLength(1);
   });
 
+  // FINDINGS-DEDUP: a real bootstrap (before the server fix) carried the same
+  // id twice in ONE batch — two review files for one re-woken checkpoint. The
+  // cross-batch dedup above never saw it, so both copies reached the
+  // FindingsLog as duplicate React keys. Repeated bootstraps (every reconnect)
+  // must not grow the list either.
+  it("keeps one copy of an id repeated inside one batch, and repeated bootstraps add nothing", () => {
+    useStore.getState().upsertGroup(group());
+    const bootstrap = {
+      sessionGroupId: "grp_abc",
+      checkpointId: "",
+      phase: "",
+      findings: [wireFinding({ id: "f1" }), wireFinding({ id: "f2" }), wireFinding({ id: "f1" })],
+      downgrades: [],
+      observerModel: "",
+      observerProvider: "",
+      timestamp: 1_000,
+    };
+    useStore.getState().appendObserverReview(bootstrap);
+    expect(useStore.getState().findings.get("grp_abc")!.map((f) => f.id)).toEqual(["f1", "f2"]);
+    useStore.getState().appendObserverReview(bootstrap);
+    useStore.getState().appendObserverReview(bootstrap);
+    expect(useStore.getState().findings.get("grp_abc")!.map((f) => f.id)).toEqual(["f1", "f2"]);
+  });
+
   it("is a no-op for an unknown group id", () => {
     useStore.getState().appendObserverReview({
       sessionGroupId: "grp_missing",
@@ -716,7 +771,77 @@ describe("observer panel preferences", () => {
   });
 });
 
+// ── BANNER-RESOLVED: server-side dismissals survive a reload ────────────────
+
+describe("appendObserverReview — server-dismissed STOPs (BANNER-RESOLVED)", () => {
+  // Human decision on ASK #14: after "Dismiss for now" the server stops
+  // holding auto-proceed, but the browser's dismissal lived only in tab
+  // memory, so a reload raised the banner again. The REST bootstrap now
+  // flags such findings `dismissed`; the slice must fold them into the
+  // dismissed set (the one source the banner, the title count and the
+  // Sidebar unread count read) without re-sending a resolution.
+  const bootstrap = (findings: BrowserObserverFinding[]) =>
+    useStore.getState().appendObserverReview({
+      sessionGroupId: "grp_abc",
+      checkpointId: "rest-bootstrap",
+      phase: "rest-bootstrap",
+      findings,
+      downgrades: [],
+      observerModel: "m",
+      observerProvider: "claude",
+      timestamp: 1_000,
+    });
+
+  it("folds server-dismissed STOPs into the dismissed set and keeps them in the log", () => {
+    const resolve = vi.spyOn(api, "resolveObserverStop").mockResolvedValue({ ok: true, released: true, persisted: true });
+    try {
+      useStore.getState().upsertGroup(group());
+      bootstrap([
+        wireFinding({ id: "done", severity: "STOP", dismissed: true }),
+        wireFinding({ id: "open", severity: "STOP" }),
+      ]);
+      const s = useStore.getState();
+      expect(s.dismissedStopIds.has("done")).toBe(true);
+      expect(s.dismissedStopIds.has("open")).toBe(false);
+      // Still in the findings log, carrying the flag for the "dismissed" chip.
+      expect(s.findings.get("grp_abc")!.map((f) => [f.id, f.dismissed])).toEqual([["done", true], ["open", undefined]]);
+      // The only unresolved STOP is the undismissed one — banner/title/rail agree.
+      expect(countUnresolvedStopsAcrossGroups(s.findings, s.dismissedStopIds)).toBe(1);
+      // Nothing is sent back: the resolution already lives on the server.
+      expect(resolve).not.toHaveBeenCalled();
+    } finally {
+      resolve.mockRestore();
+    }
+  });
+
+  // Edge: the STOP arrived live first (no flag), then a reconnect bootstrap
+  // reports it dismissed (another tab dismissed it). The existing row is kept
+  // (dedup by id) but the id still joins the dismissed set.
+  it("dismisses a live-arrived STOP when a later bootstrap reports it dismissed", () => {
+    useStore.getState().upsertGroup(group());
+    bootstrap([wireFinding({ id: "f1", severity: "STOP" })]);
+    expect(useStore.getState().dismissedStopIds.has("f1")).toBe(false);
+    bootstrap([wireFinding({ id: "f1", severity: "STOP", dismissed: true })]);
+    const s = useStore.getState();
+    expect(s.findings.get("grp_abc")).toHaveLength(1);
+    expect(s.dismissedStopIds.has("f1")).toBe(true);
+  });
+
+  // Without a server resolution nothing changes: the banner still shows it.
+  it("leaves the dismissed set untouched when no finding is flagged", () => {
+    useStore.getState().upsertGroup(group());
+    const before = useStore.getState().dismissedStopIds;
+    bootstrap([wireFinding({ id: "f1", severity: "STOP" })]);
+    expect(useStore.getState().dismissedStopIds).toBe(before);
+  });
+});
+
 // ── dismissStop ─────────────────────────────────────────────────────────────
+
+const cleanupsResolve: Array<() => void> = [];
+afterEach(() => {
+  while (cleanupsResolve.length) cleanupsResolve.pop()!();
+});
 
 describe("dismissStop", () => {
   it("adds finding ids to the dismissed set", () => {
@@ -731,6 +856,115 @@ describe("dismissStop", () => {
     const before = useStore.getState().dismissedStopIds;
     useStore.getState().dismissStop("f1");
     expect(useStore.getState().dismissedStopIds).toBe(before);
+  });
+
+  // FIX-B2b-1: "Dismiss for now" is local and temporary. It must NOT create a
+  // server-side dispute (B2b did, so any dismissal permanently silenced every
+  // later STOP quoting the same command). Since FIX-AP-1 it does tell the
+  // server to release the auto-proceed hold — see the block below.
+  it("does not create a server-side dispute", () => {
+    const spy = vi.spyOn(api, "disputeObserverFinding").mockResolvedValue({ ok: true, added: true });
+    const resolve = vi.spyOn(api, "resolveObserverStop").mockResolvedValue({ ok: true, released: true, persisted: true });
+    cleanupsResolve.push(() => resolve.mockRestore());
+    try {
+      useStore.getState().upsertGroup(group());
+      appendStop();
+      useStore.getState().dismissStop("f1");
+      expect(useStore.getState().dismissedStopIds.has("f1")).toBe(true);
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe("dismissStop → auto-proceed hold release (FIX-AP-1)", () => {
+  // The server holds auto-proceed while the banner would show a STOP, so a
+  // dismissal must reach it — as a resolution, never as a dispute. A failed
+  // request keeps the local dismissal (the banner stays hidden).
+  it("sends a resolve (not a dispute) once, for the finding's group", async () => {
+    const resolve = vi.spyOn(api, "resolveObserverStop").mockRejectedValue(new Error("offline"));
+    const dispute = vi.spyOn(api, "disputeObserverFinding").mockResolvedValue({ ok: true, added: true });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      useStore.getState().upsertGroup(group());
+      appendStop();
+      useStore.getState().dismissStop("f1");
+      useStore.getState().dismissStop("f1");
+      expect(resolve).toHaveBeenCalledTimes(1);
+      expect(resolve).toHaveBeenCalledWith("grp_abc", "f1");
+      expect(dispute).not.toHaveBeenCalled();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(warn).toHaveBeenCalled();
+      expect(useStore.getState().dismissedStopIds.has("f1")).toBe(true);
+      // An id with no known finding stays local-only.
+      useStore.getState().dismissStop("unknown");
+      expect(resolve).toHaveBeenCalledTimes(1);
+    } finally {
+      resolve.mockRestore();
+      dispute.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  // A dispute releases the hold server-side by itself; no extra resolve call.
+  it("disputeStop does not also send a resolve", () => {
+    const resolve = vi.spyOn(api, "resolveObserverStop").mockResolvedValue({ ok: true, released: true, persisted: true });
+    const dispute = vi.spyOn(api, "disputeObserverFinding").mockResolvedValue({ ok: true, added: true });
+    try {
+      useStore.getState().upsertGroup(group());
+      appendStop();
+      useStore.getState().disputeStop("f1");
+      expect(dispute).toHaveBeenCalledTimes(1);
+      expect(resolve).not.toHaveBeenCalled();
+    } finally {
+      resolve.mockRestore();
+      dispute.mockRestore();
+    }
+  });
+});
+
+function appendStop(): void {
+  useStore.getState().appendObserverReview({
+    sessionGroupId: "grp_abc",
+    checkpointId: "chk_1",
+    phase: "council-plan",
+    findings: [wireFinding({ id: "f1", claim: "`bun run --cwd web kb:record` fails", evidence_path: "a.diff" })],
+    downgrades: [],
+    observerModel: "gpt-5.5",
+    observerProvider: "codex",
+    timestamp: 1_500,
+  });
+}
+
+describe("disputeStop", () => {
+  // B2b: an explicit dispute hides the banner locally AND is sent to the
+  // server (once, with the claim + path the human saw) so it survives a
+  // reload and suppresses re-raised copies on the same file. A failed request
+  // must not undo the local dismissal.
+  it("persists the dispute server-side, once, keeping the local dismissal on failure", async () => {
+    const spy = vi.spyOn(api, "disputeObserverFinding").mockRejectedValue(new Error("offline"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      useStore.getState().upsertGroup(group());
+      appendStop();
+      useStore.getState().disputeStop("f1");
+      useStore.getState().disputeStop("f1");
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(spy).toHaveBeenCalledWith("grp_abc", { finding_id: "f1", claim: "`bun run --cwd web kb:record` fails", evidence_path: "a.diff" });
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(warn).toHaveBeenCalled();
+      expect(useStore.getState().dismissedStopIds.has("f1")).toBe(true);
+      // An id the store has no finding for (e.g. already pruned) stays local-only.
+      useStore.getState().disputeStop("unknown");
+      expect(spy).toHaveBeenCalledTimes(1);
+      expect(useStore.getState().dismissedStopIds.has("unknown")).toBe(true);
+    } finally {
+      spy.mockRestore();
+      warn.mockRestore();
+    }
   });
 });
 
@@ -762,5 +996,71 @@ describe("cross-slice cleanup", () => {
       const entries = JSON.parse(raw) as Array<[string, boolean]>;
       expect(entries.find(([k]) => k === "sess_orch")).toBeUndefined();
     }
+  });
+});
+
+// ── auto-proceed restore gaps (FIX-AP-4) ────────────────────────────────────
+
+describe("autoProceedRestoreGaps (FIX-AP-4)", () => {
+  // An incomplete hold restore pauses auto-proceed with no STOP to show. The
+  // slice keeps the bootstrap's gap list per group; "Ignore this file" drops
+  // the gap optimistically and restores it if the server did not record the
+  // decision (a gap the server still counts still pauses auto-proceed).
+  const fileGap = {
+    gap: "review_unparseable:p-claude-observer.md",
+    reason: "review file is not a valid review for this pair (unparseable or legacy format)",
+    file: "p-claude-observer.md",
+    fingerprint: "a".repeat(64),
+  };
+  const verdictsGap = { gap: "verdicts_invalid-json", reason: "the review verdicts file is not valid JSON" };
+
+  it("stores a non-empty list and clears the entry on an empty one", () => {
+    useStore.getState().setAutoProceedRestoreGaps("grp_abc", [fileGap]);
+    expect(useStore.getState().autoProceedRestoreGaps.get("grp_abc")).toEqual([fileGap]);
+    useStore.getState().setAutoProceedRestoreGaps("grp_abc", []);
+    expect(useStore.getState().autoProceedRestoreGaps.has("grp_abc")).toBe(false);
+  });
+
+  it("ignoreRestoreGap sends file + fingerprint and drops only that gap", async () => {
+    const ignore = vi.spyOn(api, "ignoreAutoProceedRestoreGap").mockResolvedValue({ ok: true, added: true });
+    try {
+      useStore.getState().upsertGroup(group());
+      useStore.getState().setAutoProceedRestoreGaps("grp_abc", [fileGap, verdictsGap]);
+      useStore.getState().ignoreRestoreGap("grp_abc", fileGap);
+      expect(ignore).toHaveBeenCalledWith("grp_abc", { file: fileGap.file, fingerprint: fileGap.fingerprint });
+      expect(useStore.getState().autoProceedRestoreGaps.get("grp_abc")).toEqual([verdictsGap]);
+      await Promise.resolve();
+      expect(useStore.getState().autoProceedRestoreGaps.get("grp_abc")).toEqual([verdictsGap]);
+      // A non-ignorable gap sends nothing.
+      useStore.getState().ignoreRestoreGap("grp_abc", verdictsGap);
+      expect(ignore).toHaveBeenCalledTimes(1);
+    } finally {
+      ignore.mockRestore();
+    }
+  });
+
+  it("puts the gap back when the server did not record the ignore", async () => {
+    const ignore = vi.spyOn(api, "ignoreAutoProceedRestoreGap").mockRejectedValue(new Error("500"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      useStore.getState().upsertGroup(group());
+      useStore.getState().setAutoProceedRestoreGaps("grp_abc", [fileGap]);
+      useStore.getState().ignoreRestoreGap("grp_abc", fileGap);
+      expect(useStore.getState().autoProceedRestoreGaps.has("grp_abc")).toBe(false);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(useStore.getState().autoProceedRestoreGaps.get("grp_abc")).toEqual([fileGap]);
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      ignore.mockRestore();
+      warn.mockRestore();
+    }
+  });
+
+  it("removeGroup drops the group's gaps", () => {
+    useStore.getState().upsertGroup(group());
+    useStore.getState().setAutoProceedRestoreGaps("grp_abc", [fileGap]);
+    useStore.getState().removeGroup("grp_abc");
+    expect(useStore.getState().autoProceedRestoreGaps.has("grp_abc")).toBe(false);
   });
 });

@@ -1,0 +1,55 @@
+# AuraBench task mined from PR #52 ("feat(council): auto-proceed Task 11.1+11.2 — outbound FIFO queue + asymmetric overflow").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: claude-adapter-outbound-queue-overflow
+title: "The Claude adapter's outbound queue is bounded and never silently drops a user message"
+start_commit: 5cd1278d960bce368984064b06ee28db01b3cc81
+prompt: |
+  Add `ClaudeAdapter.enqueueOutboundFrame(kind, payload)` (kind `"user"` or
+  `"synthetic"`, returns `{ ok: true }` or `{ ok: false, error }`) — the send
+  path that server-generated synthetic frames and user messages will share. It
+  is a bounded FIFO:
+
+  - enqueueing never sends synchronously: frames are sent after the call
+    returns, strictly in admission order, even under
+    concurrent producers; the queue holds at most 16 entries;
+  - a `synthetic` frame arriving at saturation is refused with
+    `{ ok: false, error: "queue-full" }`;
+  - a `user` frame arriving at saturation evicts the OLDEST queued synthetic
+    frame (which is then never sent) and is admitted;
+  - a `user` frame at saturation with no synthetic to evict is refused with
+    `{ ok: false, error: "queue-full-no-evictable" }` so the caller can tell the
+    user — user messages must never be dropped silently;
+  - expose `getOutboundQueueDepth()` and an awaitable
+    `drainOutboundQueueForTest()` that resolves once everything queued so far has
+    been sent.
+expected_files:
+  - web/server/claude-adapter.ts
+expected_tests:
+  - web/server/claude-adapter.test.ts
+failure_modes:
+  - "a user frame is dropped without an error"
+  - "frames are sent out of order"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 52
+  merge_commit: de2ac985b2bf366b3294e2f7730b0bf73a9ba1c8
+  class: feature
+  hidden_tests:
+    - web/server/claude-adapter.test.ts
+  validation:
+    base: fail
+    merge: pass
+    base_failure: assertion
+    checked_at: "2026-09-28T07:19:19.934Z"

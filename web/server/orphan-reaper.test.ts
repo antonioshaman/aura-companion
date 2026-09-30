@@ -30,6 +30,7 @@ import {
   classifyArgv,
   splitCmdline,
   parsePpidFromStat,
+  resolveOrphanReaperGate,
   type OrphanReaperDeps,
   type ReaperKnownSession,
 } from "./orphan-reaper.js";
@@ -684,5 +685,30 @@ describe("reapOrphans — non-ESRCH kill failure not counted as reaped (NOTE fix
     const sum = await reapOrphans(deps);
     expect(sum.reaped).toBe(1); // already-gone == effective reap
     expect(sum.killFailed).toBe(0);
+  });
+});
+
+// aura-meta-diet P6/D2: the AuraBench bench instance shares the host and user
+// with prod, and the reaper scans all of /proc — so a second instance must be
+// able to boot with the reaper off. The gate is fail-closed: only an explicit
+// off-value disables it; typos keep prod behaviour (on) and warn.
+describe("resolveOrphanReaperGate — COMPANION_ORPHAN_REAPER boot gate", () => {
+  it("defaults to enabled when the variable is absent or empty (prod behaviour)", () => {
+    expect(resolveOrphanReaperGate(undefined)).toEqual({ enabled: true });
+    expect(resolveOrphanReaperGate("")).toEqual({ enabled: true });
+    expect(resolveOrphanReaperGate("  ")).toEqual({ enabled: true });
+  });
+
+  it("accepts the closed on/off set case-insensitively", () => {
+    for (const v of ["on", "1", "true", "ON", " True "]) expect(resolveOrphanReaperGate(v)).toEqual({ enabled: true });
+    for (const v of ["off", "0", "false", "OFF", " False "]) expect(resolveOrphanReaperGate(v)).toEqual({ enabled: false });
+  });
+
+  it("fails closed to enabled with a warning on an unknown value", () => {
+    // A typo like "of" must never silently disable the reaper in prod.
+    const r = resolveOrphanReaperGate("of");
+    expect(r.enabled).toBe(true);
+    expect(r.warning).toContain("COMPANION_ORPHAN_REAPER");
+    expect(r.warning).toContain('"of"');
   });
 });

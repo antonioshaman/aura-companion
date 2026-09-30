@@ -1,0 +1,57 @@
+# AuraBench task mined from PR #85 ("feat(council): auto-emit spawn-ack checkpoint at pair creation").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: council-observer-idle-until-first-checkpoint
+title: "A new Council observer comes online immediately instead of idling until the first checkpoint"
+start_commit: 34129558f50549cfde4491a1f5cd42ecb293212e
+prompt: |
+  A freshly spawned Council observer sits at the initialize handshake with no
+  CLI session id until it receives its first user message (the Claude CLI does
+  not emit `system:init` before that). Until the orchestrator happens to write a
+  checkpoint, the observer panel shows "never checkpointed" and nothing proves
+  the pair works.
+
+  Make pair creation emit a spawn checkpoint automatically, using two new
+  (private is fine) session-orchestrator methods:
+  - `emitSpawnCheckpoint(sessionGroupId, cwd)` writes a valid checkpoint to
+    `.council/checkpoints/spawn.json` with `phase: "spawn"`, `sequence: 0`,
+    `checkpoint_id: "spawn-<sessionGroupId>"`, empty `artifact_paths`, the
+    current schema version and an ISO `emitted_at`, written synchronously; a write failure is logged,
+    never thrown;
+  - `scheduleSpawnCheckpointWhenObserverReady(sessionGroupId, observerSessionId,
+    cwd)` returns a promise that resolves once the spawn checkpoint has been
+    written. The checkpoint must not be written while the observer's bridge
+    session has no backend adapter attached; it is written soon after one is
+    attached. If the observer never becomes ready, it eventually gives up.
+  The observer must then be woken for this checkpoint like for any other.
+expected_files:
+  - web/server/observer-prompt-bundled.ts
+  - web/server/session-orchestrator.ts
+expected_tests:
+  - web/server/session-orchestrator.test.ts
+failure_modes:
+  - "the checkpoint is written before the observer can receive the wake"
+  - "an unbounded poll keeps running after the group is gone"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 85
+  merge_commit: 221d30b805c88dbd9b6e2608f31d1c30720ec53e
+  class: feature
+  hidden_tests:
+    - web/server/session-orchestrator.test.ts
+  validation:
+    base: fail
+    merge: pass
+    base_failure: assertion
+    checked_at: "2026-09-28T07:23:03.814Z"

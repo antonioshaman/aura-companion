@@ -46,13 +46,20 @@
     "build-observer-prompt-bundle": "bun scripts/build-observer-prompt-bundle.ts",
     "build-council-skill-fixture": "bun scripts/build-council-skill-fixture.ts",
     "guardrail:ci": "bun scripts/guardrail.ts --ci",
+    "council:dispatch-report": "bun scripts/dispatch-policy.ts report",
     "eval:replay": "bun evals/replay-runner.ts",
     "eval:findings": "bun evals/findings-runner.ts",
     "eval:scorecard": "bun evals/scorecard-runner.ts",
     "eval:label-sheet": "bun evals/label-sheet-runner.ts",
     "eval:label-ingest": "bun evals/label-ingest-runner.ts",
+    "eval:label-export": "bun evals/label-export-runner.ts",
     "eval:compare": "bun evals/compare-runner.ts",
-    "eval:redteam": "bun evals/redteam-runner.ts"
+    "eval:redteam": "bun evals/redteam-runner.ts",
+    "eval:aurabench": "bun evals/aurabench-runner.ts",
+    "eval:council-panel": "bun evals/council-panel-runner.ts",
+    "kb:health": "bun scripts/kb-health.ts report",
+    "kb:record": "bun scripts/kb-health.ts record",
+    "kb:prune": "bun scripts/kb-health.ts prune"
   },
   "dependencies": {
     "@codemirror/lang-cpp": "^6.0.3",

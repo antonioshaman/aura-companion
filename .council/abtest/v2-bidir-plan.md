@@ -1,8 +1,10 @@
 # Council Plan (Aura): Council Mode bidirectional pipeline — Orchestrator ↔ Observer cycle
 
+> **Amended 2026-09-28 (aura-meta-diet A1):** `/self-improvement` was removed from the canonical orchestrator sequence — `/learn` is the single learning-capture path. The sequence is now 8 steps.
+
 **Scope:** Land the structural keystones for the bidirectional pipeline spec (canonical sequence visibility + inline peer-message channel + convergence-cycle detection with sidebar badge). Defer Phase 3 (REST `:3457`), Phase 4 (memory propagation), and Phase 6 (atomic promotion) — each is a session-sized chunk; this plan covers Phases 1 + 2 + 5 only.
 
-**Context:** Council Mode pair coordination today flows one-way (orchestrator emits checkpoint → watcher → observer review). The spec adds: (1) operator-visible peer messages crossing back from observer into orchestrator's chat thread; (2) a clean-cycle counter that converts repeated zero-STOP reviews into a `converged` signal; (3) a canonical 9-step sequence constant the orchestrator can announce. The existing `injectUserMessage(origin?: "server:cron"|"server:agent"|"server:rest")` already threads EC-16 — extending its discriminator with `council:peer` is the cheapest seam that preserves the convention. Convergence is a derived property of the `group:review` event stream, owned by the coordinator beside the existing reconnect/degrade state machine.
+**Context:** Council Mode pair coordination today flows one-way (orchestrator emits checkpoint → watcher → observer review). The spec adds: (1) operator-visible peer messages crossing back from observer into orchestrator's chat thread; (2) a clean-cycle counter that converts repeated zero-STOP reviews into a `converged` signal; (3) a canonical 8-step sequence constant the orchestrator can announce. The existing `injectUserMessage(origin?: "server:cron"|"server:agent"|"server:rest")` already threads EC-16 — extending its discriminator with `council:peer` is the cheapest seam that preserves the convention. Convergence is a derived property of the `group:review` event stream, owned by the coordinator beside the existing reconnect/degrade state machine.
 
 **Boundaries:**
 - ✅ In scope: `council:peer` origin + EC-16 skip; peer-formatter with 1KB cap; convergence-cycle tracker with revoke-on-P1; `convergence-trial` / `converged` checkpoint phases; `cycleNumber` + `convergenceState` fields on GroupRecord; convergence badges in ObserverPanel StatusPill; CANONICAL_SEQUENCE constant module.
@@ -48,7 +50,7 @@ Co-locate `formatPeerMessage(sourceRole, severity, body, reviewPath)` and `PEER_
 | **Ref** | `references/quality-persistence.md` → Principle 1 |
 | **Depends on** | — |
 
-The 9-step sequence (`/prime → /spec-writer → /council-plan → /council-implement → /council-review → /test-architect → /self-improvement → /learn → /self-reflect`) becomes a frozen exported array in a new `web/server/canonical-sequence.ts` module — pure data, no I/O. The orchestrator-system-prompt loader (deferred to a follow-up) and any UI start-banner consume the same constant. Test asserts `deepEqual` against the spec list (not substring) to defend Story 1.1 AC without the substring-pass failure mode (`feedback_i18n_test_assert_key_not_substring`).
+The 8-step sequence (`/prime → /spec-writer → /council-plan → /council-implement → /council-review → /test-architect → /learn → /self-reflect`) becomes a frozen exported array in a new `web/server/canonical-sequence.ts` module — pure data, no I/O. The orchestrator-system-prompt loader (deferred to a follow-up) and any UI start-banner consume the same constant. Test asserts `deepEqual` against the spec list (not substring) to defend Story 1.1 AC without the substring-pass failure mode (`feedback_i18n_test_assert_key_not_substring`).
 
 ### 4. Server-side convergence tracker (clean-cycle counter + revoke)
 

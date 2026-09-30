@@ -288,7 +288,9 @@ describe("ObserverPanel — state pills (5 explicit states)", () => {
     expect(await axe(container)).toHaveNoViolations();
   });
 
-  it("renders converged pill with ✅ ready-to-ship copy + emerald token", async () => {
+  // P3/CONV-HONEST: the converged pill states what was measured (N reviews in
+  // a row without blockers) and disclaims readiness; "ready to ship" is gone.
+  it("renders converged pill with honest streak copy, disclaimer + emerald token", async () => {
     seedGroup();
     act(() => {
       useStore.getState().applyConvergence({
@@ -302,12 +304,96 @@ describe("ObserverPanel — state pills (5 explicit states)", () => {
     const pill = screen.getByTestId("status-pill");
     expect(pill).toHaveAttribute("data-state", "converged");
     expect(pill).toHaveAttribute("role", "status");
-    expect(pill).toHaveAttribute("aria-label", "Converged — ready to ship after 3 clean cycles");
-    expect(pill).toHaveTextContent(/Converged — ready to ship/);
-    // Emerald token signals "ship-ready" per Story 4.1.5
+    expect(pill).toHaveTextContent("3 reviews in a row without blockers");
+    expect(pill.getAttribute("aria-label")).toMatch(/^3 reviews in a row without blockers\. Not a readiness guarantee/);
+    // The tooltip carries the same disclaimer for sighted mouse users.
+    expect(pill.getAttribute("title")).toContain("Not a readiness guarantee");
+    expect(pill.textContent).not.toMatch(/ready to ship/i);
+    expect(pill.getAttribute("aria-label")).not.toMatch(/ready to ship/i);
+    // Emerald token signals "streak reached" per Story 4.1.5
     expect(pill.className).toContain("text-emerald-500");
     const { axe } = await import("vitest-axe");
     expect(await axe(container)).toHaveNoViolations();
+  });
+
+  // P3/CONV-HONEST: a review that read nothing is visibly "not counted".
+  it("shows a 'not counted: no files read' note when the latest review was not counted", async () => {
+    seedGroup();
+    act(() => {
+      useStore.getState().applyConvergence({
+        sessionGroupId: GROUP.sessionGroupId,
+        cycleNumber: 1,
+        convergenceThreshold: 3,
+        convergenceState: "in-progress",
+        notCountedReason: "no_files_read",
+      });
+    });
+    const { container } = render(<ObserverPanel sessionId={SESSION} />);
+    const note = screen.getByTestId("convergence-not-counted");
+    expect(note).toHaveAttribute("data-reason", "no_files_read");
+    expect(note).toHaveTextContent("Last review — not counted: no files read");
+    // The streak itself is unchanged by an uncounted review.
+    expect(screen.getByTestId("status-pill")).toHaveTextContent(/Cycle 1\/3/);
+    const { axe } = await import("vitest-axe");
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("shows 'no changed files' for an uncounted spawn/empty checkpoint review", () => {
+    seedGroup();
+    act(() => {
+      useStore.getState().applyConvergence({
+        sessionGroupId: GROUP.sessionGroupId,
+        cycleNumber: 0,
+        convergenceThreshold: 3,
+        convergenceState: "in-progress",
+        notCountedReason: "no_changed_files",
+      });
+    });
+    render(<ObserverPanel sessionId={SESSION} />);
+    expect(screen.getByTestId("convergence-not-counted")).toHaveTextContent("not counted: no changed files");
+  });
+
+  // P3/CONV-DOWNGRADE: a review whose STOP grounding downgraded is shown as
+  // not counted, and the streak it did not reset is still displayed.
+  it("shows 'not counted: downgraded STOP' and keeps the streak", async () => {
+    seedGroup();
+    act(() => {
+      useStore.getState().applyConvergence({
+        sessionGroupId: GROUP.sessionGroupId,
+        cycleNumber: 2,
+        convergenceThreshold: 3,
+        convergenceState: "in-progress",
+        notCountedReason: "downgraded_stop",
+      });
+    });
+    const { container } = render(<ObserverPanel sessionId={SESSION} />);
+    const note = screen.getByTestId("convergence-not-counted");
+    expect(note).toHaveAttribute("data-reason", "downgraded_stop");
+    expect(note).toHaveTextContent("Last review — not counted: downgraded STOP");
+    expect(screen.getByTestId("status-pill")).toHaveTextContent(/Cycle 2\/3/);
+    const { axe } = await import("vitest-axe");
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("a counted review clears the 'not counted' note", () => {
+    seedGroup();
+    act(() => {
+      useStore.getState().applyConvergence({
+        sessionGroupId: GROUP.sessionGroupId,
+        cycleNumber: 0,
+        convergenceThreshold: 3,
+        convergenceState: "in-progress",
+        notCountedReason: "no_files_read",
+      });
+      useStore.getState().applyConvergence({
+        sessionGroupId: GROUP.sessionGroupId,
+        cycleNumber: 1,
+        convergenceThreshold: 3,
+        convergenceState: "in-progress",
+      });
+    });
+    render(<ObserverPanel sessionId={SESSION} />);
+    expect(screen.queryByTestId("convergence-not-counted")).toBeNull();
   });
 
   it("degraded short-circuits over converged (Story 4.1.5 freeze precedence in UI)", () => {
@@ -594,5 +680,44 @@ describe("ObserverPanel — accessibility", () => {
     const { container } = render(<ObserverPanel sessionId={SESSION} />);
     const results = await axe(container);
     expect(results).toHaveNoViolations();
+  });
+});
+
+// FIX-AP-4: an incomplete STOP-hold restore pauses auto-proceed with no
+// finding to show. The panel must surface the store's gap list (filled by the
+// findings bootstrap) and route "Ignore this file" to the slice action for
+// THIS group; with no gaps nothing extra renders.
+describe("ObserverPanel — auto-proceed restore gaps (FIX-AP-4)", () => {
+  const gap = {
+    gap: "review_unparseable:phase-3-claude-observer.md",
+    reason: "review file is not a valid review for this pair (unparseable or legacy format)",
+    file: "phase-3-claude-observer.md",
+    fingerprint: "0".repeat(64),
+  };
+
+  it("shows no notice without gaps", () => {
+    seedGroup();
+    render(<ObserverPanel sessionId={SESSION} />);
+    expect(screen.queryByTestId("auto-proceed-restore-notice")).toBeNull();
+  });
+
+  it("shows the notice, ignores a file for this group, and passes axe accessibility scan", async () => {
+    seedGroup();
+    const ignore = vi.fn();
+    const original = useStore.getState().ignoreRestoreGap;
+    act(() => {
+      useStore.getState().setAutoProceedRestoreGaps(GROUP.sessionGroupId, [gap]);
+      useStore.setState({ ignoreRestoreGap: ignore });
+    });
+    try {
+      const { container } = render(<ObserverPanel sessionId={SESSION} />);
+      expect(screen.getByText("Auto-proceed paused: restore incomplete")).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: /Ignore phase-3-claude-observer\.md/ }));
+      expect(ignore).toHaveBeenCalledWith(GROUP.sessionGroupId, gap);
+      const { axe } = await import("vitest-axe");
+      expect(await axe(container)).toHaveNoViolations();
+    } finally {
+      useStore.setState({ ignoreRestoreGap: original });
+    }
   });
 });

@@ -1,10 +1,13 @@
 /**
- * Canonical Orchestrator skill sequence — the 9 steps the orchestrator
+ * Canonical Orchestrator skill sequence — the 8 steps the orchestrator
  * half of a Council Mode pair runs through, in order.
  *
  * Story 1.1 (council-mode-bidirectional-pipeline): "Given a fresh Council
  * Mode pair, when the Orchestrator first activates, then its first
- * message names the 9 sequence steps in order with brief intent."
+ * message names the 8 sequence steps in order with brief intent."
+ *
+ * aura-meta-diet A1 removed the second, competing learning skill (its own
+ * `.learnings/` store); `/learn` is the single learning-capture path.
  *
  * This is a frozen exported array — single source of truth for any
  * downstream consumer (orchestrator-system-prompt loader [deferred],
@@ -30,9 +33,8 @@ export const CANONICAL_ORCHESTRATOR_SEQUENCE: readonly OrchestratorSequenceStep[
   { index: 4, slug: "/council-implement", intent: "Execute the plan task by task, verifying after each." },
   { index: 5, slug: "/council-review", intent: "Rigorous code review producing prioritised findings." },
   { index: 6, slug: "/test-architect", intent: "Map testable surfaces; audit + specify tests (anytime)." },
-  { index: 7, slug: "/self-improvement", intent: "Capture learnings, errors, corrections." },
-  { index: 8, slug: "/learn", intent: "Quick-capture a learning mid-session without breaking flow." },
-  { index: 9, slug: "/self-reflect", intent: "End-of-session reflection; consolidate + prune knowledge." },
+  { index: 7, slug: "/learn", intent: "Quick-capture a learning mid-session without breaking flow." },
+  { index: 8, slug: "/self-reflect", intent: "End-of-session reflection; consolidate + prune knowledge." },
 ]);
 
 /** Number of canonical steps — for length assertions in tests. */

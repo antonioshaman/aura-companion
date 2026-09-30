@@ -1,0 +1,53 @@
+# AuraBench task mined from PR #53 ("fix(council): emit half_respawned for post-grace pair recovery").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: council-degraded-pair-never-recovers
+title: "A Council pair that degraded after the reconnect grace window recovers when its half comes back"
+start_commit: 904affdc4c2d45398e299fd602eb6d2976d2e08e
+prompt: |
+  In Council Mode, when one half of a pair (orchestrator or observer) drops and
+  does not come back within the reconnect grace window, the group moves to
+  `degraded`. If that half's CLI later reconnects (its CLI session id arrives
+  again), the pair stays `degraded` forever: chat keeps working, but every
+  checkpoint is refused for observer wake with `reason=group_not_active`, so the
+  observer never reviews anything again until a server restart.
+
+  Required behaviour: a late reconnect of either half of a `degraded` pair brings
+  the group back to `active` (browsers are told the group reconnected, and
+  checkpoints wake the observer again). The recovery is logged as a structured
+  entry `{ event: "group.half_respawned", role, attempts: 1, … }` with the role of
+  the half that came back. A reconnect for a session that is not part of a
+  degraded group must not change anything.
+expected_files:
+  - web/server/group-state-machine.ts
+  - web/server/session-orchestrator.ts
+expected_tests:
+  - web/server/group-state-machine.test.ts
+  - web/server/session-orchestrator.test.ts
+failure_modes:
+  - "the recovery event is only emitted in tests (no production emit site)"
+  - "an unrelated session's reconnect flips some group to active"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 53
+  merge_commit: 2c9cb937f711261f848da75e50c048e74ec186f8
+  class: bugfix
+  hidden_tests:
+    - web/server/group-state-machine.test.ts
+    - web/server/session-orchestrator.test.ts
+  validation:
+    base: fail
+    merge: pass
+    base_failure: assertion
+    checked_at: "2026-09-28T07:19:24.123Z"

@@ -1,14 +1,17 @@
 import type { StateCreator } from "zustand";
 import type { AppState } from "./index.js";
 import type {
+  AutoProceedRestoreGap,
   BrowserObserverDowngrade,
   BrowserObserverFinding,
+  ConvergenceNotCountedReason,
   GroupRecord,
   ObserverFinding,
   SessionGroupStatus,
   SessionRole,
 } from "../types.js";
 import { clearAnnouncerScope } from "../components/council/FindingsLog.js";
+import { api } from "../api.js";
 
 // ── Persistence keys & bounds ───────────────────────────────────────────────
 
@@ -128,6 +131,10 @@ export function hydrateObserverFinding(
     phase: context.phase,
     ...(wire.wasDowngraded === true ? { wasDowngraded: true } : {}),
     ...(wire.downgradeReason !== undefined ? { downgradeReason: wire.downgradeReason } : {}),
+    ...(wire.weakEvidence !== undefined ? { weakEvidence: wire.weakEvidence } : {}),
+    ...(wire.disputed !== undefined ? { disputed: wire.disputed } : {}),
+    ...(wire.holdsAutoProceed === true ? { holdsAutoProceed: true as const } : {}),
+    ...(wire.dismissed === true ? { dismissed: true as const } : {}),
     observerModel: context.observerModel,
     observerProvider: context.observerProvider,
   };
@@ -159,6 +166,12 @@ export interface CouncilSlice {
   firstRunHintDismissed: boolean;
   /** STOP finding ids the user has dismissed from the blocker banner. Per-process; not persisted. */
   dismissedStopIds: Set<string>;
+  /**
+   * FIX-AP-4 — per group: why auto-proceed is paused after a server restart
+   * (the STOP hold restore is incomplete). Filled by the findings bootstrap;
+   * absent → nothing paused (or the pair never opted in).
+   */
+  autoProceedRestoreGaps: Map<string, AutoProceedRestoreGap[]>;
 
   // Actions — group lifecycle
   upsertGroup: (group: GroupRecord) => void;
@@ -213,6 +226,8 @@ export interface CouncilSlice {
     cycleNumber: number;
     convergenceThreshold: number;
     convergenceState: "in-progress" | "converged" | "revoked";
+    /** P3/CONV-HONEST: present iff the latest review was not counted. */
+    notCountedReason?: ConvergenceNotCountedReason;
   }) => void;
 
   // Actions — panel state
@@ -220,14 +235,48 @@ export interface CouncilSlice {
   toggleObserverPanel: (sessionId: string) => void;
   setObserverPanelWidth: (sessionId: string, widthPx: number) => void;
   dismissFirstRunHint: () => void;
+  /**
+   * Hide a STOP from the banner in this tab. Not a dispute: nothing marks the
+   * claim wrong. The server is told only so the STOP stops holding
+   * auto-proceed (FIX-AP-1: the hold lives exactly as long as the banner).
+   */
   dismissStop: (findingId: string) => void;
+  /**
+   * The human says the STOP's claim is wrong: dismiss it locally and persist a
+   * group dispute server-side, so a re-raise of the claim on the same evidence
+   * file stays out of the banner (FIX-B2b-1: split from `dismissStop`).
+   */
+  disputeStop: (findingId: string) => void;
+  /** FIX-AP-4: replace a group's restore gaps with the bootstrap's list. */
+  setAutoProceedRestoreGaps: (sessionGroupId: string, gaps: AutoProceedRestoreGap[]) => void;
+  /**
+   * FIX-AP-4 — "Ignore this file": the server stops counting this exact
+   * review file content as a restore gap. Optimistic; restored on failure,
+   * because a gap the server still counts still pauses auto-proceed.
+   */
+  ignoreRestoreGap: (sessionGroupId: string, gap: AutoProceedRestoreGap) => void;
   // Council slice cross-slice cleanup is canonically performed inline
   // inside `sessions-slice.removeSession` (single write path; React
   // council review #12 — eliminating the parallel `cleanupCouncilForSession`
   // export the prior commit shipped unused).
 }
 
-export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = (set) => ({
+function hideStopLocally(set: (fn: (s: AppState) => Partial<AppState>) => void, findingId: string): void {
+  set((s) => {
+    const dismissedStopIds = new Set(s.dismissedStopIds);
+    dismissedStopIds.add(findingId);
+    return { dismissedStopIds };
+  });
+}
+
+function findGroupOfFinding(findings: ReadonlyMap<string, ObserverFinding[]>, findingId: string): string | undefined {
+  for (const [groupId, list] of findings) {
+    if (list.some((f) => f.id === findingId)) return groupId;
+  }
+  return undefined;
+}
+
+export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = (set, get) => ({
   groups: new Map(),
   groupBySessionId: new Map(),
   findings: new Map(),
@@ -236,6 +285,7 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
   observerPanelWidth: getInitialPanelWidth(),
   firstRunHintDismissed: getInitialFirstRunDismissed(),
   dismissedStopIds: new Set(),
+  autoProceedRestoreGaps: new Map(),
 
   upsertGroup: (group) =>
     set((s) => {
@@ -303,7 +353,9 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
       // exited-then-recreated group doesn't inherit stale "already
       // announced" ids.
       clearAnnouncerScope(sessionGroupId);
-      return { groups, groupBySessionId, findings, groundingDowngrades };
+      const autoProceedRestoreGaps = new Map(s.autoProceedRestoreGaps);
+      autoProceedRestoreGaps.delete(sessionGroupId);
+      return { groups, groupBySessionId, findings, groundingDowngrades, autoProceedRestoreGaps };
     }),
 
   setGroupStatus: (sessionGroupId, status, opts) =>
@@ -366,6 +418,7 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
       // indices in the `prior` array.
       const priorIdxById = new Map<string, number>(prior.map((f, i) => [f.id, i]));
       const newOnes: ObserverFinding[] = [];
+      const newIdsInBatch = new Set<string>();
       // Track whether an attribution upgrade occurred so we can decide
       // whether to write a fresh array reference (React #24 optimization).
       let upgraded = false;
@@ -374,7 +427,11 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
       for (const wire of wireFindings) {
         const existingIdx = priorIdxById.get(wire.id);
         if (existingIdx === undefined) {
-          // Genuinely new finding — append as before.
+          // FINDINGS-DEDUP: an id repeated INSIDE one batch (an older server
+          // emitted a re-woken checkpoint's findings twice) is kept once; a
+          // second copy would be a duplicate React key in the FindingsLog.
+          if (newIdsInBatch.has(wire.id)) continue;
+          newIdsInBatch.add(wire.id);
           newOnes.push(hydrateObserverFinding(wire, ctx));
           continue;
         }
@@ -413,19 +470,33 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
       const seenDowngradeIds = new Set(priorDowngrades.map((d) => d.id));
       const newDowngrades = downgrades.filter((d) => !seenDowngradeIds.has(d.id));
       groundingDowngrades.set(sessionGroupId, [...priorDowngrades, ...newDowngrades]);
+      // BANNER-RESOLVED: a STOP the server reports as already dismissed joins
+      // the local dismissed set, so the banner, the title count and the
+      // Sidebar unread count agree — including for a copy that arrived live
+      // (without the flag) before this bootstrap. No request is sent: the
+      // resolution is already on the server.
+      const serverDismissed = wireFindings.filter((w) => w.dismissed === true && !s.dismissedStopIds.has(w.id));
+      if (serverDismissed.length > 0) {
+        const dismissedStopIds = new Set(s.dismissedStopIds);
+        for (const w of serverDismissed) dismissedStopIds.add(w.id);
+        return { groups, findings, groundingDowngrades, dismissedStopIds };
+      }
       return { groups, findings, groundingDowngrades };
     }),
 
-  applyConvergence: ({ sessionGroupId, cycleNumber, convergenceThreshold, convergenceState }) =>
+  applyConvergence: ({ sessionGroupId, cycleNumber, convergenceThreshold, convergenceState, notCountedReason }) =>
     set((s) => {
       const existing = s.groups.get(sessionGroupId);
       if (!existing) return {};
       const groups = new Map(s.groups);
+      const { lastReviewNotCounted: _prev, ...rest } = existing;
+      void _prev;
       groups.set(sessionGroupId, {
-        ...existing,
+        ...rest,
         cycleNumber,
         convergenceThreshold,
         convergenceState,
+        ...(notCountedReason ? { lastReviewNotCounted: notCountedReason } : {}),
       });
       return { groups };
     }),
@@ -466,11 +537,54 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
       return { firstRunHintDismissed: true };
     }),
 
-  dismissStop: (findingId) =>
+  dismissStop: (findingId) => {
+    if (get().dismissedStopIds.has(findingId)) return;
+    hideStopLocally(set, findingId);
+    // FIX-AP-1: release the STOP's auto-proceed hold. Best effort: the banner
+    // is already hidden; a failed request only keeps auto-proceed held.
+    const groupId = findGroupOfFinding(get().findings, findingId);
+    if (groupId === undefined) return;
+    api.resolveObserverStop(groupId, findingId).catch((err: unknown) => {
+      console.warn("[council] STOP dismissal not sent", err);
+    });
+  },
+
+  setAutoProceedRestoreGaps: (sessionGroupId, gaps) =>
     set((s) => {
-      if (s.dismissedStopIds.has(findingId)) return {};
-      const dismissedStopIds = new Set(s.dismissedStopIds);
-      dismissedStopIds.add(findingId);
-      return { dismissedStopIds };
+      const autoProceedRestoreGaps = new Map(s.autoProceedRestoreGaps);
+      if (gaps.length > 0) autoProceedRestoreGaps.set(sessionGroupId, gaps);
+      else autoProceedRestoreGaps.delete(sessionGroupId);
+      return { autoProceedRestoreGaps };
     }),
+
+  ignoreRestoreGap: (sessionGroupId, gap) => {
+    const { file, fingerprint } = gap;
+    if (!file || !fingerprint) return; // not ignorable
+    const without = (list: AutoProceedRestoreGap[] | undefined) => (list ?? []).filter((g) => g.gap !== gap.gap);
+    get().setAutoProceedRestoreGaps(sessionGroupId, without(get().autoProceedRestoreGaps.get(sessionGroupId)));
+    api.ignoreAutoProceedRestoreGap(sessionGroupId, { file, fingerprint }).catch((err: unknown) => {
+      console.warn("[council] restore gap ignore not recorded", err);
+      if (!get().groups.has(sessionGroupId)) return;
+      get().setAutoProceedRestoreGaps(sessionGroupId, [...without(get().autoProceedRestoreGaps.get(sessionGroupId)), gap]);
+    });
+  },
+
+  disputeStop: (findingId) => {
+    if (get().dismissedStopIds.has(findingId)) return;
+    // A dispute releases the auto-proceed hold server-side by itself.
+    hideStopLocally(set, findingId);
+    // B2b: tell the server, so the dispute survives a reload and a re-raised
+    // copy of the claim on the same file stays out of the banner. Best effort:
+    // the local dismissal above already hid this banner.
+    for (const [groupId, list] of get().findings) {
+      const f = list.find((x) => x.id === findingId);
+      if (!f) continue;
+      api
+        .disputeObserverFinding(groupId, { finding_id: f.id, claim: f.claim, evidence_path: f.evidence_path })
+        .catch((err: unknown) => {
+          console.warn("[council] dispute not recorded", err);
+        });
+      return;
+    }
+  },
 });

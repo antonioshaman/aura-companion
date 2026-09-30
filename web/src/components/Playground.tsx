@@ -28,6 +28,7 @@ import { AiValidationToggle } from "./AiValidationToggle.js";
 import { ModelFallbackBanner } from "./ModelFallbackBanner.js";
 import { UpdateAvailableBanner } from "./UpdateAvailableBanner.js";
 import {
+  AutoProceedRestoreNotice,
   BlockerBanner,
   CouncilToggle,
   DegradedBanner,
@@ -36,7 +37,7 @@ import {
   ProviderBadges,
   type CouncilPairing,
 } from "./council/index.js";
-import type { GroupRecord, ObserverFinding } from "../types.js";
+import type { ConvergenceNotCountedReason, GroupRecord, ObserverFinding } from "../types.js";
 import { ToolExecutionBar } from "./ToolExecutionBar.js";
 import { ToolTurnSummary } from "./ToolTurnSummary.js";
 import type { ToolActivityEntry } from "../store/tasks-slice.js";
@@ -409,6 +410,24 @@ const MSG_SYSTEM: ChatMessage = {
   role: "system",
   content: "Context compacted successfully",
   timestamp: Date.now() - 30000,
+};
+
+// Result frame with a real execution error (red)
+const MSG_SYSTEM_ERROR: ChatMessage = {
+  id: "msg-6-error",
+  role: "system",
+  content: "Error: Tool execution failed: permission denied",
+  timestamp: Date.now() - 29000,
+  systemVariant: "error",
+};
+
+// Result frame --resume emits for a turn a restart cut off (muted, collapsed)
+const MSG_SYSTEM_RESUME_INTERRUPTED: ChatMessage = {
+  id: "msg-6-resume",
+  role: "system",
+  content: "Error: [ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null",
+  timestamp: Date.now() - 28000,
+  systemVariant: "resume-interrupted",
 };
 
 // Tool result with error
@@ -1120,6 +1139,12 @@ export function Playground() {
             </Card>
             <Card label="System message">
               <MessageBubble message={MSG_SYSTEM} />
+            </Card>
+            <Card label="System message (execution error)">
+              <MessageBubble message={MSG_SYSTEM_ERROR} />
+            </Card>
+            <Card label="System message (previous turn interrupted by restart)">
+              <MessageBubble message={MSG_SYSTEM_RESUME_INTERRUPTED} />
             </Card>
           </div>
         </Section>
@@ -3112,9 +3137,15 @@ function CouncilModeSection() {
         { id: "fnd_warn", severity: "WARN", claim: "Extracted helper has no negative-path test.", evidence_path: "web/server/group-state-machine.ts", evidence_lines: [54, 80] },
         { id: "fnd_note", severity: "NOTE", claim: "Consider renaming BackendProvider once a third backend lands.", evidence_path: "web/server/backend-provider.ts" },
         { id: "fnd_downgraded", severity: "STOP", claim: "Suspicious cast in unrelated file (downgraded by grounding).", evidence_path: "src/unrelated.ts", wasDowngraded: true, downgradeReason: "evidence_not_in_modified_set" },
+        { id: "fnd_downgraded_lines", severity: "STOP", claim: "Off-by-one in retry loop (cited lines untouched this phase).", evidence_path: "web/server/session-orchestrator.ts", evidence_lines: [12, 14], wasDowngraded: true, downgradeReason: "evidence_lines_unchanged" },
+        { id: "fnd_weak", severity: "STOP", claim: "`bun run --cwd web kb:record` fails at runtime (no cited lines — kept off the banner).", evidence_path: ".council/review/A2.diff", weakEvidence: "no_cited_lines" },
+        { id: "fnd_disputed", severity: "STOP", claim: "The mandatory `bun run --cwd web kb:record` step will fail (repeats a dismissed claim — kept off the banner).", evidence_path: ".council/review/A3.diff", evidence_lines: [106, 106], disputed: "shared_anchor" },
         { id: "fnd_info", severity: "INFO", claim: "Spec coverage matches phase A boundaries.", evidence_path: "specs/council-mode-paired-sessions.md" },
       ],
-      downgrades: [{ id: "fnd_downgraded", reason: "evidence_not_in_modified_set" }],
+      downgrades: [
+        { id: "fnd_downgraded", reason: "evidence_not_in_modified_set" },
+        { id: "fnd_downgraded_lines", reason: "evidence_lines_unchanged" },
+      ],
       observerModel: "gpt-5-codex",
       observerProvider: "codex",
       timestamp: Date.now() - 60_000,
@@ -3180,8 +3211,25 @@ function CouncilModeSection() {
             finding={liveBlockerFinding}
             nowMs={Date.now()}
             onDismiss={() => { /* noop in playground */ }}
+            onDispute={() => { /* noop in playground */ }}
             onOpenEvidence={() => { /* noop */ }}
             onMarkAddressed={() => { /* noop */ }}
+          />
+        </Card>
+
+        <Card label="BlockerBanner — holding auto-proceed (unfrozen STOP re-checked as NOTE, FIX-AP-3)">
+          <BlockerBanner
+            finding={{
+              ...liveBlockerFinding,
+              id: "fnd_held",
+              severity: "NOTE",
+              wasDowngraded: true,
+              downgradeReason: "evidence_not_in_modified_set",
+              holdsAutoProceed: true,
+            }}
+            nowMs={Date.now()}
+            onDismiss={() => { /* noop in playground */ }}
+            onDispute={() => { /* noop in playground */ }}
           />
         </Card>
 
@@ -3193,6 +3241,23 @@ function CouncilModeSection() {
         </Card>
         <Card label="DegradedBanner — controlled respawning state">
           <DegradedBanner deadRole="observer" onRespawn={() => {}} isRespawning={true} />
+        </Card>
+
+        {/* FIX-AP-4 — auto-proceed paused by an incomplete STOP-hold restore:
+            an ignorable legacy review file + a non-ignorable verdicts gap. */}
+        <Card label="AutoProceedRestoreNotice — restore incomplete (ignorable file + verdicts gap)">
+          <AutoProceedRestoreNotice
+            gaps={[
+              {
+                gap: "review_unparseable:phase-3-claude-observer.md",
+                reason: "review file is not a valid review for this pair (unparseable or legacy format)",
+                file: "phase-3-claude-observer.md",
+                fingerprint: "0".repeat(64),
+              },
+              { gap: "verdicts_invalid-json", reason: "the review verdicts file is not valid JSON" },
+            ]}
+            onIgnore={() => { /* noop in playground */ }}
+          />
         </Card>
 
         {/* PLAN-aura-model-registry Task 8 — model fallback notice. Warning
@@ -3213,9 +3278,11 @@ function CouncilModeSection() {
           <UpdateAvailableBanner onUpdate={() => {}} onDismiss={() => {}} />
         </Card>
 
-        {/* PLAN T12 (Phase G) - per-variant CliFailedBanner mocks. Five
+        {/* PLAN T12 (Phase G) - per-variant CliFailedBanner mocks. The
             cards mirror the closed CliFailedReason union; each carries
-            human-readable copy + drainedCount + (when present) SHA. */}
+            human-readable copy + drainedCount + (when present) SHA.
+            relaunch_exhausted / backend_dead also get the in-place
+            Relaunch action (P4/FIX-RECONNECT-RELAUNCH). */}
         <Card label="CliFailedBanner — relaunch_exhausted (retry budget spent)">
           <CliFailedBanner
             failure={{
@@ -3226,6 +3293,7 @@ function CouncilModeSection() {
               lastErrorSha256: "d4f5e8a912c0f1234567890abcdef1234567890abcdef1234567890abcdef1234",
             }}
             onStartNewSession={() => { /* noop */ }}
+            onRelaunch={() => { /* noop */ }}
           />
         </Card>
         <Card label="CliFailedBanner — container_missing (Docker container deleted)">
@@ -3252,21 +3320,64 @@ function CouncilModeSection() {
             onStartNewSession={() => { /* noop */ }}
           />
         </Card>
+        <Card label="CliFailedBanner — backend_dead (agent down past grace, Relaunch primary)">
+          <CliFailedBanner
+            failure={{ reason: "backend_dead", drainedCount: 1, subprocessAlive: false, firedAt: Date.now() - 60_000 }}
+            onStartNewSession={() => { /* noop */ }}
+            onRelaunch={() => { /* noop */ }}
+          />
+        </Card>
+        <Card label="CliFailedBanner — backend_dead (relaunch in flight)">
+          <CliFailedBanner
+            failure={{ reason: "backend_dead", drainedCount: 1, subprocessAlive: false, firedAt: Date.now() - 60_000 }}
+            onStartNewSession={() => { /* noop */ }}
+            onRelaunch={() => { /* noop */ }}
+            relaunching
+          />
+        </Card>
+        <Card label="CliFailedBanner — backend_dead (relaunch failed)">
+          <CliFailedBanner
+            failure={{ reason: "backend_dead", drainedCount: 2, subprocessAlive: false, firedAt: Date.now() - 60_000 }}
+            onStartNewSession={() => { /* noop */ }}
+            onRelaunch={() => { /* noop */ }}
+            relaunchError="Session not found"
+          />
+        </Card>
 
         <Card label="FindingsLog — empty state">
           <FindingsLog findings={[]} />
         </Card>
-        <Card label="FindingsLog — full mix (STOP / WARN / NOTE / INFO / downgraded)">
+        <Card label="FindingsLog — full mix (STOP / WARN / NOTE / INFO / downgraded / weak evidence / dismissed)">
           <FindingsLog
-            // Append-ordered (index 0 = oldest), matching the council slice's
-            // push-onto-end convention; FindingsLog renders newest-first, so
-            // "e" (10s ago) surfaces at the top of the rail.
+            // FINDINGS-DEDUP: unresolved blockers first ("a" and the held
+            // "i"), then everything else newest first by receivedAt.
             findings={[
               mockFinding({ id: "a", severity: "STOP", claim: "Race condition in session-orchestrator.ts", receivedAt: Date.now() - 240_000 }),
               mockFinding({ id: "b", severity: "WARN", claim: "Helper has no negative-path test", receivedAt: Date.now() - 180_000 }),
               mockFinding({ id: "c", severity: "NOTE", claim: "Consider renaming BackendProvider", receivedAt: Date.now() - 120_000 }),
               mockFinding({ id: "d", severity: "STOP", claim: "Suspicious cast — downgraded by grounding", receivedAt: Date.now() - 60_000, wasDowngraded: true, downgradeReason: "evidence_not_in_modified_set" }),
               mockFinding({ id: "e", severity: "INFO", claim: "Spec coverage matches phase A boundaries", receivedAt: Date.now() - 10_000 }),
+              mockFinding({ id: "f", severity: "STOP", claim: "Cited lines untouched this phase — downgraded", receivedAt: Date.now() - 8_000, wasDowngraded: true, downgradeReason: "evidence_lines_unchanged" }),
+              mockFinding({ id: "g", severity: "STOP", claim: "Command fails at runtime — weak evidence, no banner", receivedAt: Date.now() - 5_000, weakEvidence: "no_cited_lines" }),
+              mockFinding({ id: "h", severity: "STOP", claim: "Same command fails again — disputed earlier, no banner", receivedAt: Date.now() - 3_000, disputed: "shared_anchor" }),
+              mockFinding({ id: "i", severity: "NOTE", claim: "Unfrozen STOP re-checked as NOTE — still holds auto-proceed", receivedAt: Date.now() - 1_000, wasDowngraded: true, downgradeReason: "evidence_not_in_modified_set", holdsAutoProceed: true }),
+              mockFinding({ id: "j", severity: "STOP", claim: "STOP dismissed before a reload — kept in the log, no banner", receivedAt: Date.now() - 500, dismissed: true }),
+            ]}
+            onDismissStop={() => {}}
+            nowMs={Date.now()}
+          />
+        </Card>
+        <Card label="FindingsLog — old backlog after a reload (sorted, fresh STOPs on top, a repeated id shown once)">
+          <FindingsLog
+            // Arrival order mimics the pre-fix readdir-ordered bootstrap:
+            // 18d, 1m STOP, 103d, 39m STOP, 1d, and "old-18d" twice.
+            findings={[
+              mockFinding({ id: "old-18d", severity: "NOTE", claim: "The 'Findings Breakdown by Expert' table does not sum to its TOTAL row", receivedAt: Date.now() - 18 * 86_400_000 }),
+              mockFinding({ id: "stop-1m", severity: "STOP", claim: "Fresh STOP — surfaces on top", receivedAt: Date.now() - 60_000 }),
+              mockFinding({ id: "old-103d", severity: "WARN", claim: "A 103-day-old review", receivedAt: Date.now() - 103 * 86_400_000 }),
+              mockFinding({ id: "stop-39m", severity: "STOP", claim: "Second unresolved STOP", receivedAt: Date.now() - 39 * 60_000 }),
+              mockFinding({ id: "note-1d", severity: "NOTE", claim: "Yesterday's note", receivedAt: Date.now() - 86_400_000 }),
+              mockFinding({ id: "old-18d", severity: "NOTE", claim: "The 'Findings Breakdown by Expert' table does not sum to its TOTAL row", receivedAt: Date.now() - 18 * 86_400_000 }),
             ]}
             onDismissStop={() => {}}
             nowMs={Date.now()}
@@ -3289,9 +3400,19 @@ function CouncilModeSection() {
             <CouncilCycleProgressPanelDemo />
           </div>
         </Card>
-        <Card label="ObserverPanel — converged ✅ (bidir Story 4.1.5)">
+        <Card label="ObserverPanel — streak reached ✅ N reviews without blockers (CONV-HONEST)">
           <div className="h-[460px] bg-cc-bg rounded-md overflow-hidden">
             <CouncilConvergedPanelDemo />
+          </div>
+        </Card>
+        <Card label="ObserverPanel — latest review not counted: no files read (CONV-HONEST)">
+          <div className="h-[460px] bg-cc-bg rounded-md overflow-hidden">
+            <CouncilNotCountedPanelDemo reason="no_files_read" />
+          </div>
+        </Card>
+        <Card label="ObserverPanel — latest review not counted: downgraded STOP (CONV-DOWNGRADE)">
+          <div className="h-[460px] bg-cc-bg rounded-md overflow-hidden">
+            <CouncilNotCountedPanelDemo reason="downgraded_stop" />
           </div>
         </Card>
         {/* Worst-case header stack in a SHORT column — layout-stability spec rec 3.
@@ -3368,6 +3489,38 @@ function CouncilConvergedPanelDemo() {
   }, [upsertGroup, applyConvergence, removeGroup]);
 
   return <ObserverPanel sessionId={COUNCIL_CONVERGED_SESSION} onRespawnHalf={async () => {}} />;
+}
+
+// P3/CONV-HONEST: a STOP-free review in which the observer read none of the
+// checkpoint's changed files does not advance the streak; the panel says so.
+// P3/CONV-DOWNGRADE: same for a review whose STOP grounding downgraded to NOTE
+// (not counted, but the streak is not reset either).
+function CouncilNotCountedPanelDemo({ reason }: { reason: ConvergenceNotCountedReason }) {
+  const upsertGroup = useStore((s) => s.upsertGroup);
+  const applyConvergence = useStore((s) => s.applyConvergence);
+  const removeGroup = useStore((s) => s.removeGroup);
+  const session = `playground-council-not-counted-${reason}-orch`;
+  const group = `playground-council-not-counted-${reason}-grp`;
+
+  useEffect(() => {
+    upsertGroup({
+      sessionGroupId: group,
+      primarySessionId: session,
+      observerSessionId: `playground-council-not-counted-${reason}-obs`,
+      status: "active",
+      pairing: "claude+codex",
+    });
+    applyConvergence({
+      sessionGroupId: group,
+      cycleNumber: 1,
+      convergenceThreshold: 3,
+      convergenceState: "in-progress",
+      notCountedReason: reason,
+    });
+    return () => removeGroup(group);
+  }, [upsertGroup, applyConvergence, removeGroup, group, session, reason]);
+
+  return <ObserverPanel sessionId={session} onRespawnHalf={async () => {}} />;
 }
 
 const COUNCIL_DEGRADED_DEMO_SESSION = "playground-council-degraded-orch";
@@ -3760,8 +3913,9 @@ function PlaygroundSessionItems() {
         </div>
       </Card>
 
-      {/* Converged — ✅ green badge; pair is ready to ship. */}
-      <Card label="Council pair — converged (✅ ready to ship)">
+      {/* Streak reached — ✅ green badge. P3/CONV-HONEST: "N× no blockers",
+          tooltip disclaims readiness; never "ready to ship". */}
+      <Card label="Council pair — streak reached (✅ 3× no blockers)">
         <div className="bg-cc-sidebar rounded-lg p-1">
           <SessionItem
             session={mockSession({
@@ -3776,6 +3930,48 @@ function PlaygroundSessionItems() {
             councilPairing="claude+codex"
             councilRole="orchestrator"
             councilConvergence={{ state: "converged", cycleNumber: 3, threshold: 3, degraded: false }}
+            {...noopSessionItemProps}
+          />
+        </div>
+      </Card>
+
+      {/* P3/CONV-HONEST: latest review read nothing → muted "not counted". */}
+      <Card label="Council pair — latest review not counted (no files read)">
+        <div className="bg-cc-sidebar rounded-lg p-1">
+          <SessionItem
+            session={mockSession({
+              isConnected: true,
+              status: "idle",
+              backendType: "claude",
+            })}
+            isActive={false}
+            sessionName="Observer reviewed the spawn checkpoint only"
+            permCount={0}
+            isRecentlyRenamed={false}
+            councilPairing="claude+claude"
+            councilRole="orchestrator"
+            councilConvergence={{ state: "in-progress", cycleNumber: 0, threshold: 3, degraded: false, notCounted: "no_files_read" }}
+            {...noopSessionItemProps}
+          />
+        </div>
+      </Card>
+
+      {/* P3/CONV-DOWNGRADE: latest review carried a grounding-downgraded STOP → "not counted", streak kept. */}
+      <Card label="Council pair — latest review not counted (downgraded STOP), streak kept">
+        <div className="bg-cc-sidebar rounded-lg p-1">
+          <SessionItem
+            session={mockSession({
+              isConnected: true,
+              status: "idle",
+              backendType: "claude",
+            })}
+            isActive={false}
+            sessionName="Observer STOP downgraded by grounding"
+            permCount={0}
+            isRecentlyRenamed={false}
+            councilPairing="claude+claude"
+            councilRole="orchestrator"
+            councilConvergence={{ state: "in-progress", cycleNumber: 2, threshold: 3, degraded: false, notCounted: "downgraded_stop" }}
             {...noopSessionItemProps}
           />
         </div>

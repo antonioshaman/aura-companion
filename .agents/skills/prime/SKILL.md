@@ -75,9 +75,17 @@ Output a compact brief:
 - If nothing matches, say so and suggest running `/self-reflect` after this session
 - Never load ALL entries — that defeats the purpose
 
-### 5. Bump Usage Counters
+### 5. Record Usage (mandatory)
 
-For each entry actually surfaced in the brief, increment its `usageCount` by 1 and set `updatedAt` to now. This is a relevance signal `/evolve` uses later — entries that get surfaced often but never re-confirmed (low `helpfulCount`) may be too generic; entries with high `outdatedReports` relative to `helpfulCount` are pruning candidates.
+After presenting the brief, persist which entries were surfaced — one call per `/prime` run, even when nothing matched (it still counts as a session for idle tracking):
+
+```bash
+bun run --cwd web kb:record -- <id> <id> ...   # ids shown in the brief; no ids if none
+```
+
+This appends one line (`{session, at, ids}`) to `.agents/knowledge/usage.log` — a gitignored, append-only telemetry log. The `*.jsonl` stores are content-only and are **not** touched, so `/prime` never dirties the checkout, and concurrent `/prime` runs in the same repo cannot lose each other's records. Do not edit `usageCount` in the stores and do not bump `updatedAt` (that is the content timestamp). Entries not surfaced for 20 consecutive sessions become candidates for `bun run --cwd web kb:prune` (moved to `.agents/knowledge/archive/`, never deleted). `bun run --cwd web kb:health` shows the lifecycle report.
+
+Only read the top-level `*.jsonl` stores — `archive/` holds retired entries.
 
 ## Auto-Prime
 

@@ -68,7 +68,7 @@ jobs:
         working-directory: web
         run: bun install --frozen-lockfile
 
-      # Council Plan PLAN-aura-observer-prompt-bundled-fallback.md P1 #1:
+      # Council Plan docs/history/council/handoffs/PLAN-aura-observer-prompt-bundled-fallback.md P1 #1:
       # regenerate the bundled observer-prompt and fail if it drifts from
       # `web/server/observer-prompt-bundled.ts`. Catches edits to the
       # canonical `.council/prompts/observer-system.md` that didn't re-run

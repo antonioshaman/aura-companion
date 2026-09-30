@@ -54,6 +54,11 @@ import {
   resolveCompanionCodexSessionHome,
 } from "./codex-home.js";
 import { reconcileProviderAuthForRelaunch } from "./provider-auth-env.js";
+import {
+  buildLayerSpawnConfig,
+  composeSystemPrompt,
+  type LayerFlags,
+} from "./layer-flags.js";
 
 /**
  * Control-channel transport for Claude sessions.
@@ -262,6 +267,12 @@ export interface SdkSessionInfo {
   agentName?: string;
   /** Sandbox profile slug used for this session */
   sandboxSlug?: string;
+  /** aura-meta-diet C3 — non-default layer flags (absent = all layers on).
+   *  Persisted so a relaunch re-applies the same restrictions. */
+  layers?: LayerFlags;
+  /** aura-meta-diet AP-WIRE — validated auto-proceed opt-in; set only on a
+   *  council orchestrator-half. Persisted so the opt-in survives restarts. */
+  autoProceedOnIdle?: { idleMs: number; maxIterations: number };
 
   // Codex WebSocket transport fields
   /** Port used for Codex WebSocket transport (host mode). */
@@ -293,7 +304,7 @@ export interface SdkSessionInfo {
    * - `"workspace"` — loaded from `<cwd>/.council/prompts/observer-system.md`
    * - `"bundled"` — workspace file absent (ENOENT); fell back to the
    *    bundled artifact shipped with aura-companion
-   * (Council Plan PLAN-aura-observer-prompt-bundled-fallback.md Task 4)
+   * (Council Plan docs/history/council/handoffs/PLAN-aura-observer-prompt-bundled-fallback.md Task 4)
    *
    * Consumers (recorder attribution, EC-9 invocation log, UI provenance
    * display, replay determinism) MUST distinguish on THIS field rather
@@ -371,6 +382,15 @@ export interface LaunchOptions {
    *  launcher disables the recorder for this sessionId before the
    *  adapter wires its first `record()` call. */
   record?: boolean;
+  /** aura-meta-diet C3 — resolved layer flags. Absent or all-default →
+   *  spawn argv unchanged. See `layer-flags.ts`. */
+  layers?: LayerFlags;
+  /** AP-WIRE — auto-proceed opt-in; stored only when `sessionGroupRole` is
+   *  `orchestrator` (the manager's gate refuses any other half anyway). */
+  autoProceedOnIdle?: { idleMs: number; maxIterations: number };
+  /** Internal: layer directive composed by `applyLayerSpawnOverrides`;
+   *  appended to Claude's system prompt / Codex `developerInstructions`. */
+  layerSystemPrompt?: string;
 }
 
 /**
@@ -382,6 +402,14 @@ export class CliLauncher {
   private processes = new Map<string, Subprocess>();
   /** Sidecar Node proxy processes used by Codex WebSocket transport. */
   private codexWsProxies = new Map<string, Subprocess>();
+  /**
+   * P4/FIX-AUTOHEAL-2: Codex WS spawns still awaiting their port pick. The
+   * processes are not in `processes` yet, so a `kill`/relaunch/delete landing
+   * in that gap had nothing to signal and the spawn then went ahead — a live
+   * app-server for an archived, deleted or stopped session. Those paths set
+   * `cancelled`; the spawn re-checks it before `Bun.spawn`.
+   */
+  private pendingCodexWsSpawns = new Map<string, { cancelled: boolean }>();
   /** Host-mode Codex WS listen ports currently reserved by active sessions. */
   private claimedCodexWsPorts = new Set<number>();
   /** Account- or runtime-rejected Codex models, remembered per session to avoid retry loops. */
@@ -711,6 +739,15 @@ export class CliLauncher {
     this.claimedCodexWsPorts.add(port);
   }
 
+  /** P4/FIX-AUTOHEAL-2: returns true when a pending Codex WS spawn was cancelled. */
+  private cancelPendingCodexWsSpawn(sessionId: string): boolean {
+    const pending = this.pendingCodexWsSpawns.get(sessionId);
+    if (!pending) return false;
+    pending.cancelled = true;
+    this.pendingCodexWsSpawns.delete(sessionId);
+    return true;
+  }
+
   private releaseCodexWsPort(info: SdkSessionInfo | undefined): void {
     if (!info || info.containerId) return;
     if (typeof info.codexWsPort !== "number") return;
@@ -1032,10 +1069,23 @@ export class CliLauncher {
     // Council Mode observer spawn config (council review #1 P1#1) is
     // applied uniformly across both backends and reused on relaunch so
     // the council context isn't lost on every non-initial spawn (#4).
-    const effectiveOptions = this.buildObserverSpawnOverrides(sessionId, info, {
-      ...options,
-      model: launchModel,
-    });
+    // Stored whenever the caller resolved flags (routes always do), so the
+    // per-session choice survives relaunch and outranks a later env change.
+    if (options.layers) {
+      info.layers = options.layers;
+    }
+    if (options.autoProceedOnIdle && options.sessionGroupRole === "orchestrator") {
+      info.autoProceedOnIdle = {
+        idleMs: options.autoProceedOnIdle.idleMs,
+        maxIterations: options.autoProceedOnIdle.maxIterations,
+      };
+    }
+    const effectiveOptions = this.applyLayerSpawnOverrides(
+      this.buildObserverSpawnOverrides(sessionId, info, {
+        ...options,
+        model: launchModel,
+      }),
+    );
 
     this.sessions.set(sessionId, info);
     if (effectiveOptions.env) {
@@ -1152,6 +1202,23 @@ export class CliLauncher {
         `observer spawn config load failed for session ${sessionId}: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+  }
+
+  /**
+   * aura-meta-diet C3: fold the layer flags into the spawn options — extra
+   * `--disallowedTools` rules (Claude) and the layer directive. Runs AFTER
+   * {@link buildObserverSpawnOverrides}, which replaces `disallowedTools`
+   * wholesale for the observer profile; the layer rules are added on top,
+   * never widening. Default flags → options returned unchanged.
+   */
+  private applyLayerSpawnOverrides(options: LaunchOptions): LaunchOptions {
+    const layer = buildLayerSpawnConfig(options.layers);
+    if (layer.disallowedTools.length === 0 && !layer.systemPrompt) return options;
+    return {
+      ...options,
+      disallowedTools: [...(options.disallowedTools ?? []), ...layer.disallowedTools],
+      layerSystemPrompt: layer.systemPrompt,
+    };
   }
 
   /**
@@ -1347,6 +1414,7 @@ export class CliLauncher {
         env: runtimeEnv,
         sessionGroupId: info.sessionGroupId,
         sessionGroupRole: info.sessionGroupRole,
+        layers: info.layers,
       }
       : {
         model: info.model,
@@ -1359,6 +1427,7 @@ export class CliLauncher {
         env: runtimeEnv,
         sessionGroupId: info.sessionGroupId,
         sessionGroupRole: info.sessionGroupRole,
+        layers: info.layers,
       };
     // Council Review 2026-05-15-0820 P2 #7: detect drift in observer
     // prompt provenance across the relaunch boundary. Snapshot captured
@@ -1367,7 +1436,9 @@ export class CliLauncher {
     // gated below (CR-3).
     let effectiveRelaunchOptions: LaunchOptions;
     try {
-      effectiveRelaunchOptions = this.buildObserverSpawnOverrides(sessionId, info, baseRelaunchOptions);
+      effectiveRelaunchOptions = this.applyLayerSpawnOverrides(
+        this.buildObserverSpawnOverrides(sessionId, info, baseRelaunchOptions),
+      );
     } catch (err) {
       info.exitCode = 1;
       // Council Review 2026-05-15-0820 P2 #8 (D4): emit `session:relaunch-failed`
@@ -1556,12 +1627,21 @@ export class CliLauncher {
     // about provenance ("source transitioned" when the model still sees
     // the old prompt). Only the fresh-fallback path (uptime<5000ms
     // cleared cliSessionId → no resume) actually re-applies the prompt.
-    if (
-      options.systemPrompt &&
-      options.sessionGroupRole === "observer" &&
-      !options.resumeSessionId
-    ) {
-      args.push("--append-system-prompt", options.systemPrompt);
+    //
+    // aura-meta-diet C3: the layer-flag directive rides the same flag (one
+    // `--append-system-prompt` — a second occurrence would override the
+    // first) and obeys the same skip-on-resume rule. FIX-C3-1 verified the
+    // skip is safe (Claude Code 2.1.283): the CLI writes a `prompt_snapshot`
+    // attachment into the transcript and a flag-less `--resume` still answers
+    // from the original appended prompt. `--disallowedTools` is re-emitted
+    // below on every spawn. Codex re-sends it on thread/resume instead
+    // (`CodexAdapter.threadInstructionParams`).
+    const appendedSystemPrompt = composeSystemPrompt(
+      options.sessionGroupRole === "observer" ? options.systemPrompt : undefined,
+      options.layerSystemPrompt,
+    );
+    if (appendedSystemPrompt && !options.resumeSessionId) {
+      args.push("--append-system-prompt", appendedSystemPrompt);
     }
     if (options.disallowedTools && options.disallowedTools.length > 0) {
       for (const tool of options.disallowedTools) {
@@ -2043,22 +2123,50 @@ export class CliLauncher {
       }
       proxyConnectPort = mappedPort;
     } else {
+      const pending = { cancelled: false };
+      // A previous spawn of this session still picking its port is superseded.
+      this.cancelPendingCodexWsSpawn(sessionId);
+      this.pendingCodexWsSpawns.set(sessionId, pending);
       try {
         proxyConnectPort = await findFreePort(
           4500,
           4600,
           (port) => this.claimedCodexWsPorts.has(port),
         );
-        this.claimCodexWsPort(proxyConnectPort);
-        // Set immediately after claiming so any downstream failure can release it.
-        info.codexWsPort = proxyConnectPort;
       } catch (err) {
         console.error(`[cli-launcher] Failed to find free port for Codex WS: ${err}`);
         info.state = "exited";
         info.exitCode = 1;
         this.persistState();
         return;
+      } finally {
+        if (this.pendingCodexWsSpawns.get(sessionId) === pending) this.pendingCodexWsSpawns.delete(sessionId);
       }
+      // P4/FIX-AUTOHEAL-2: killed, superseded, archived or deleted while the
+      // port was being picked — spawning now would leave an orphan no one
+      // tracks. Everything below up to the process registration is sync.
+      const deleted = this.sessions.get(sessionId) !== info;
+      if (pending.cancelled || deleted || info.archived) {
+        log.warn("cli-launcher", "Codex WS spawn cancelled before the process started", {
+          event: "codex.spawn_cancelled",
+          sessionId,
+          sessionGroupId: info.sessionGroupId,
+          role: info.sessionGroupRole,
+          reason: pending.cancelled ? "cancelled" : deleted ? "deleted" : "archived",
+        });
+        // The port was never claimed. A superseding relaunch owns `info` now
+        // (its own spawn pending or running) — leave its state alone.
+        if (!deleted && !this.pendingCodexWsSpawns.has(sessionId) && !this.processes.has(sessionId)) {
+          info.state = "exited";
+          info.exitCode = -1;
+          info.pid = undefined;
+          this.persistState();
+        }
+        return;
+      }
+      this.claimCodexWsPort(proxyConnectPort);
+      // Set immediately after claiming so any downstream failure can release it.
+      info.codexWsPort = proxyConnectPort;
       codexListenPort = proxyConnectPort;
     }
 
@@ -2195,7 +2303,7 @@ export class CliLauncher {
       threadId: info.cliSessionId,
       sandbox: options.codexSandbox,
       recorder: this.recorder ?? undefined,
-      systemPrompt: options.systemPrompt,
+      systemPrompt: composeSystemPrompt(options.systemPrompt, options.layerSystemPrompt),
       killProcess: async () => {
         try {
           proxyProc.kill("SIGTERM");
@@ -2450,7 +2558,7 @@ export class CliLauncher {
       threadId: info.cliSessionId,
       sandbox: options.codexSandbox,
       recorder: this.recorder ?? undefined,
-      systemPrompt: options.systemPrompt,
+      systemPrompt: composeSystemPrompt(options.systemPrompt, options.layerSystemPrompt),
     });
 
     // Handle init errors — mark session as exited so UI shows failure.
@@ -2607,6 +2715,7 @@ export class CliLauncher {
    * Kill a session's CLI process.
    */
   async kill(sessionId: string): Promise<boolean> {
+    const cancelledSpawn = this.cancelPendingCodexWsSpawn(sessionId);
     const proxy = this.codexWsProxies.get(sessionId);
     if (proxy) {
       try { proxy.kill("SIGTERM"); } catch {}
@@ -2639,7 +2748,7 @@ export class CliLauncher {
         this.persistState();
         return true;
       }
-      return !!proxy;
+      return !!proxy || cancelledSpawn;
     }
 
     proc.kill("SIGTERM");
@@ -2755,6 +2864,7 @@ export class CliLauncher {
    * Remove a session from the internal map (after kill or cleanup).
    */
   removeSession(sessionId: string) {
+    this.cancelPendingCodexWsSpawn(sessionId);
     this.releaseCodexWsPort(this.sessions.get(sessionId));
     this.sessions.delete(sessionId);
     this.processes.delete(sessionId);

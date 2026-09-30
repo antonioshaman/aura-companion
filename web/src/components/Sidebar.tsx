@@ -8,6 +8,7 @@ import { ProjectGroup } from "./ProjectGroup.js";
 import { GlobalUsageBadge } from "./GlobalUsageBadge.js";
 import { TelemetryNudge } from "./TelemetryNudge.js";
 import { SessionItem, type CouncilConvergenceInfo } from "./SessionItem.js";
+import { isUnresolvedStop } from "../observer-panel-state.js";
 import { groupSessionsByProject, type SessionItem as SessionItemType } from "../utils/project-grouping.js";
 
 interface NavItem {
@@ -726,10 +727,9 @@ export function Sidebar() {
     const groupFindings = findings.get(groupId) ?? [];
     let unread = 0;
     for (const f of groupFindings) {
-      if (f.severity !== "STOP") continue;
-      if (f.wasDowngraded === true) continue;
-      if (dismissedStopIds.has(f.id)) continue;
-      unread++;
+      // Same predicate as the banner: weak (B2) and disputed (B2b) STOPs never
+      // count; a finding holding auto-proceed (FIX-AP-3) always does.
+      if (isUnresolvedStop(f, dismissedStopIds)) unread++;
     }
     // Council Review 2026-05-15 Item 17 — derive role from GroupRecord
     // membership rather than plumbing a new field through SessionItem's
@@ -755,6 +755,7 @@ export function Sidebar() {
             cycleNumber: group.cycleNumber,
             threshold: group.convergenceThreshold,
             degraded,
+            ...(group.lastReviewNotCounted ? { notCounted: group.lastReviewNotCounted } : {}),
           }
         : undefined;
     return { pairing: group.pairing, unreadStops: unread, role, convergence };

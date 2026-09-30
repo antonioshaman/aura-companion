@@ -59,6 +59,14 @@ export interface ChatMessage {
    * on a synthesised partial frame after a CLI disconnect.
    */
   streamStatus?: "complete" | "interrupted" | "errored";
+  /**
+   * Rendering hint for system messages built from an errored result frame.
+   * "error" — a real execution error (red). "resume-interrupted" — the
+   * bookkeeping frame `--resume` emits for a turn a restart cut off; shown as
+   * a muted, collapsed note with `content` as the expandable diagnostic
+   * (see `utils/resume-interrupted.ts`). Absent → the plain muted divider.
+   */
+  systemVariant?: "error" | "resume-interrupted";
 }
 
 export interface TaskItem {
@@ -174,7 +182,35 @@ export interface GroupRecord {
   cycleNumber?: number;
   convergenceThreshold?: number;
   convergenceState?: "in-progress" | "converged" | "revoked";
+  /**
+   * P3/CONV-HONEST: set when the LATEST review was not counted toward
+   * convergence (the checkpoint had no changed files, or the host saw the
+   * observer read none of them, or a STOP in it was downgraded by grounding —
+   * CONV-DOWNGRADE). Cleared by the next counted review.
+   */
+  lastReviewNotCounted?: ConvergenceNotCountedReason;
 }
+
+/** P3/CONV-HONEST: why a STOP-free review did not advance the counter. */
+export type ConvergenceNotCountedReason = "no_changed_files" | "no_files_read" | "downgraded_stop";
+
+/** User-facing copy for {@link ConvergenceNotCountedReason}. */
+export const CONVERGENCE_NOT_COUNTED_COPY: Record<ConvergenceNotCountedReason, string> = {
+  no_changed_files: "Not counted: no changed files",
+  no_files_read: "Not counted: no files read",
+  downgraded_stop: "Not counted: downgraded STOP",
+};
+
+/** Inline form of {@link CONVERGENCE_NOT_COUNTED_COPY} ("…: downgraded STOP"
+ *  keeps the acronym; only the leading capital is dropped). */
+export function convergenceNotCountedInline(reason: ConvergenceNotCountedReason): string {
+  const copy = CONVERGENCE_NOT_COUNTED_COPY[reason];
+  return copy.charAt(0).toLowerCase() + copy.slice(1);
+}
+
+/** P3/CONV-HONEST: the counter is a streak, never a readiness verdict. */
+export const CONVERGENCE_DISCLAIMER =
+  "Not a readiness guarantee — only reviews in which the observer read changed files are counted.";
 
 /**
  * Browser-side finding record. Adds `receivedAt`, `checkpointId`, `phase`
@@ -201,9 +237,47 @@ export interface ObserverFinding {
    *  `wake_version_mismatch` (Task 10) is a global downgrade applied to
    *  every finding when the observer's echo of the wake-payload version
    *  disagrees with what the server dispatched. */
-  downgradeReason?: "evidence_not_in_modified_set" | "evidence_missing_on_disk" | "wake_version_mismatch";
+  downgradeReason?:
+    | "evidence_not_in_modified_set"
+    | "evidence_missing_on_disk"
+    | "evidence_lines_out_of_range"
+    | "evidence_lines_unchanged"
+    | "wake_version_mismatch";
+  /** B2: a STOP the server kept but could not tie to its cited lines. Stays a
+   *  STOP in the findings log; never raises the blocker banner or the unread
+   *  blocker count. */
+  weakEvidence?: "no_cited_lines" | "claim_symbols_not_on_cited_lines" | "cited_lines_unreadable";
+  /** B2b: a STOP repeating a claim a human already dismissed in this group
+   *  (server match: identical claim, or the same quoted command/code span).
+   *  Stays a STOP in the findings log; never raises the blocker banner. */
+  disputed?: "same_claim" | "shared_anchor";
+  /** FIX-AP-3: this finding holds the pair's auto-proceed (a STOP whose
+   *  grounding verdict was never frozen) even though its current severity or
+   *  weak evidence would keep it off the banner. Shown as a blocker anyway so
+   *  no hold is invisible; Dismiss / Dispute release it. */
+  holdsAutoProceed?: true;
+  /** BANNER-RESOLVED: the server says a human already released this STOP with
+   *  "Dismiss for now" (persisted resolution). Never a blocker; the findings
+   *  log marks it "dismissed". */
+  dismissed?: true;
   observerModel: string;
   observerProvider: string;
+}
+
+/**
+ * FIX-AP-4 — why a pair's auto-proceed stays paused after a server restart:
+ * the server could not fully restore its STOP hold from `.council/reviews/`.
+ * Wire shape of `autoProceedRestoreGaps` in `GET /api/groups/:id/findings`.
+ */
+export interface AutoProceedRestoreGap {
+  /** Raw gap code, as in the server log `auto-proceed.hold-restore-incomplete`. */
+  gap: string;
+  /** Human-readable reason. */
+  reason: string;
+  /** Review file name (review-file gaps only). */
+  file?: string;
+  /** Present iff the gap can be ignored; sent back with "Ignore this file". */
+  fingerprint?: string;
 }
 
 export type ObserverPanelStateName =
@@ -248,8 +322,9 @@ export type ObserverPanelState =
    */
   | { name: "cycle-progress"; cycleNumber: number; threshold: number }
   /**
-   * Bidirectional pipeline Story 4.1 — pair has converged. Pill renders
-   * `✅ Converged — ready to ship` (emerald-500 token). Slots BELOW
+   * Bidirectional pipeline Story 4.1 — pair reached the threshold. Pill
+   * renders `✅ N reviews in a row without blockers` (emerald-500 token) —
+   * P3/CONV-HONEST: a streak, NOT "ready to ship". Slots BELOW
    * `degraded` so a half going dead immediately re-asserts the warning.
    */
   | { name: "converged"; cycleNumber: number; threshold: number }

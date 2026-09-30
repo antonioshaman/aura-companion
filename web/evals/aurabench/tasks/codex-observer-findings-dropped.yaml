@@ -1,0 +1,56 @@
+# AuraBench task mined from PR #122 ("fix(council): normalize codex finding shape so non-empty reviews parse").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: codex-observer-findings-dropped
+title: "Codex observer reviews with findings are no longer dropped"
+start_commit: 82d855a051dbae7395a98d30c681d1597242e6ac
+prompt: |
+  In a claude+codex Council pair, empty Codex observer reviews (spawn acks) parse
+  fine, but any review that actually contains findings is dropped by the review
+  watcher with `frame_dropped field=findings.severity`, so the user never sees a
+  Codex observer finding. Codex writes findings in its own native shape:
+  `{ severity: "critical"|"high"|"medium"|"low", file, line, title, detail }`.
+
+  Such reviews must be accepted and delivered with their findings intact:
+  - severities map critical→STOP, high→WARN, medium→NOTE, low→INFO; the canonical
+    tiers (STOP/WARN/NOTE/INFO) pass through; anything unrecognised becomes NOTE
+    instead of dropping the review;
+  - the finding keeps its location (a single `line` becomes the range
+    `[line, line]`) and its text (title and detail);
+  - a finding that already carries canonical-schema fields keeps them — they win
+    over anything derived from the native fields.
+
+  Contract pinned by the tests: the canonical review schema does not change —
+  `parseObserverReviewPayload` still rejects a payload in Codex's native shape;
+  the conversion belongs to the Codex review normalization step
+  (`normalizeCodexObserverReviewRaw`), whose output must then parse.
+expected_files:
+  - web/server/council-types.ts
+expected_tests:
+  - web/server/council-types.test.ts
+failure_modes:
+  - "Claude observer reviews are altered by the normalization"
+  - "grounding/validation is weakened so malformed reviews pass"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 122
+  merge_commit: 9b98563ea566ba122820c3678ff2813393e6ae15
+  class: bugfix
+  hidden_tests:
+    - web/server/council-types.test.ts
+  validation:
+    base: fail
+    merge: pass
+    base_failure: assertion
+    checked_at: "2026-09-28T07:31:22.215Z"

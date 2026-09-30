@@ -1,0 +1,1460 @@
+{
+  "_doc": "B4 (aura-meta-diet) historical Council review dispatch dataset. One row per archived review under docs/history/council/review-output/<id>/ that dispatched experts (2026-05-12-2211 dispatched none and is excluded). panel = expert output files actually written (historical seat names); panelCatalogIds = the same seats mapped to today's catalog ids (backend-ts|realtime->dahl, persistence|subprocess->ritchie, react-ui->abramov, a11y->watson, deploy->hashimoto). finalFindings = one entry per FINAL-REVIEW.md finding with a \"| **Council** | A \u00d7 B \u00d7 Carmack\" attribution row: its P1/P2/P3 section and the credited seats mapped to catalog ids (null when the FINAL is absent or carries no attribution rows). changedDomains = closed-vocab domains the reviewed change touched, annotated by the B4 executor from the context brief (judgement, not measured). diffLines null = the source did not state a line total. The council-stats run-stats dataset held only 1 smoke record at B4 time, so this archive is the only real dispatch history.",
+  "fingerprintSignals": [
+    "browser-spa",
+    "docker",
+    "drizzle",
+    "github-actions",
+    "hono",
+    "javascript",
+    "json-rpc",
+    "ndjson",
+    "react",
+    "stdio-subprocess",
+    "typescript",
+    "websocket"
+  ],
+  "reviews": [
+    {
+      "reviewId": "2026-05-11-1953",
+      "diffFiles": 24,
+      "diffLines": null,
+      "sizeSource": "context-brief: 22 TS files (11 src + 11 test) + PLAN + spec; line total not stated",
+      "panel": [
+        "backend-ts",
+        "beck",
+        "fowler",
+        "hunt",
+        "persistence",
+        "realtime",
+        "subprocess",
+        "willison"
+      ],
+      "panelCatalogIds": [
+        "beck",
+        "dahl",
+        "fowler",
+        "hunt",
+        "ritchie",
+        "willison"
+      ],
+      "changedDomains": [
+        "backend-architecture",
+        "filesystem-persistence",
+        "llm-pipeline",
+        "process-lifecycle",
+        "protocol-correctness",
+        "security",
+        "test-quality"
+      ],
+      "finalFindings": [
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "ritchie"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "ritchie"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "ritchie"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "ritchie"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "dahl"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "dahl"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "willison"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "hunt"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "hunt"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "dahl"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "dahl"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "ritchie"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "dahl"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "fowler"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "dahl"
+          ]
+        }
+      ]
+    },
+    {
+      "reviewId": "2026-05-11-1957",
+      "diffFiles": 24,
+      "diffLines": null,
+      "sizeSource": "same scope as 2026-05-11-1953 (Phase A-C re-review); line total not stated",
+      "panel": [
+        "backend-ts",
+        "beck",
+        "fowler",
+        "hunt",
+        "persistence",
+        "realtime",
+        "subprocess",
+        "willison"
+      ],
+      "panelCatalogIds": [
+        "beck",
+        "dahl",
+        "fowler",
+        "hunt",
+        "ritchie",
+        "willison"
+      ],
+      "changedDomains": [
+        "backend-architecture",
+        "filesystem-persistence",
+        "llm-pipeline",
+        "process-lifecycle",
+        "protocol-correctness",
+        "security",
+        "test-quality"
+      ],
+      "finalFindings": null
+    },
+    {
+      "reviewId": "2026-05-11-2251",
+      "diffFiles": 33,
+      "diffLines": null,
+      "sizeSource": "context-brief: 33 distinct repo paths cited (lower bound); line total not stated",
+      "panel": [
+        "a11y",
+        "backend-ts",
+        "beck",
+        "fowler",
+        "friedman",
+        "hunt",
+        "persistence",
+        "react-ui",
+        "realtime",
+        "saarinen",
+        "subprocess",
+        "willison"
+      ],
+      "panelCatalogIds": [
+        "abramov",
+        "beck",
+        "dahl",
+        "fowler",
+        "friedman",
+        "hunt",
+        "ritchie",
+        "saarinen",
+        "watson",
+        "willison"
+      ],
+      "changedDomains": [
+        "accessibility",
+        "backend-architecture",
+        "filesystem-persistence",
+        "frontend-architecture",
+        "llm-pipeline",
+        "process-lifecycle",
+        "protocol-correctness",
+        "security",
+        "test-quality",
+        "ui-visual-quality",
+        "ux-flow"
+      ],
+      "finalFindings": [
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "hunt"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "willison"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "dahl"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "ritchie"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "ritchie"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "dahl",
+            "willison"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "dahl"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "dahl"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "beck"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "watson"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "friedman"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "abramov"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "dahl"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "saarinen"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "fowler"
+          ]
+        }
+      ]
+    },
+    {
+      "reviewId": "2026-05-13-0100",
+      "diffFiles": 24,
+      "diffLines": null,
+      "sizeSource": "context-brief: \"new path through 24 files\"; line total not stated",
+      "panel": [
+        "a11y",
+        "backend-ts",
+        "beck",
+        "fowler",
+        "friedman",
+        "hunt",
+        "persistence",
+        "react-ui",
+        "realtime",
+        "subprocess",
+        "willison"
+      ],
+      "panelCatalogIds": [
+        "abramov",
+        "beck",
+        "dahl",
+        "fowler",
+        "friedman",
+        "hunt",
+        "ritchie",
+        "watson",
+        "willison"
+      ],
+      "changedDomains": [
+        "accessibility",
+        "backend-architecture",
+        "filesystem-persistence",
+        "frontend-architecture",
+        "llm-pipeline",
+        "process-lifecycle",
+        "protocol-correctness",
+        "realtime-streaming",
+        "security",
+        "test-quality",
+        "ux-flow"
+      ],
+      "finalFindings": [
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "hunt"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "ritchie"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "ritchie"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "abramov"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "friedman"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "ritchie"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "beck",
+            "dahl",
+            "willison"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "dahl"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "dahl"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "watson"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "willison"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "ritchie",
+            "willison"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "beck"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "ritchie"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "ritchie"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "ritchie"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "dahl"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "friedman"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "friedman"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "watson"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "dahl"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "hunt"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "dahl"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "abramov"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "fowler"
+          ]
+        }
+      ]
+    },
+    {
+      "reviewId": "2026-05-13-0150",
+      "diffFiles": 37,
+      "diffLines": 5287,
+      "sizeSource": "git 1fa3aa1 (PR #8 squash incl. fix-pass), code files only (.council/ + root process docs excluded)",
+      "panel": [
+        "a11y",
+        "backend-ts",
+        "beck",
+        "fowler",
+        "friedman",
+        "hunt",
+        "persistence",
+        "react-ui",
+        "realtime",
+        "subprocess",
+        "willison"
+      ],
+      "panelCatalogIds": [
+        "abramov",
+        "beck",
+        "dahl",
+        "fowler",
+        "friedman",
+        "hunt",
+        "ritchie",
+        "watson",
+        "willison"
+      ],
+      "changedDomains": [
+        "accessibility",
+        "backend-architecture",
+        "filesystem-persistence",
+        "frontend-architecture",
+        "llm-pipeline",
+        "process-lifecycle",
+        "protocol-correctness",
+        "realtime-streaming",
+        "security",
+        "test-quality",
+        "ux-flow"
+      ],
+      "finalFindings": [
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "willison"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "beck"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "beck"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "dahl"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "ritchie"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "fowler"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "ritchie"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "watson"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "friedman"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "friedman"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "dahl",
+            "hunt"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "hunt"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "beck",
+            "dahl"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "watson"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "abramov",
+            "fowler"
+          ]
+        }
+      ]
+    },
+    {
+      "reviewId": "2026-05-15-0336",
+      "diffFiles": 7,
+      "diffLines": 855,
+      "sizeSource": "git 3dee080 (PR #54), matches context-brief \"+843/-12\"",
+      "panel": [
+        "backend-ts",
+        "beck",
+        "fowler",
+        "hunt",
+        "realtime",
+        "subprocess",
+        "willison"
+      ],
+      "panelCatalogIds": [
+        "beck",
+        "dahl",
+        "fowler",
+        "hunt",
+        "ritchie",
+        "willison"
+      ],
+      "changedDomains": [
+        "backend-architecture",
+        "llm-pipeline",
+        "process-lifecycle",
+        "protocol-correctness",
+        "security",
+        "test-quality"
+      ],
+      "finalFindings": [
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "hunt",
+            "ritchie",
+            "willison"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "dahl"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "ritchie"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "dahl"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "ritchie"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "beck",
+            "willison"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "beck"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "beck",
+            "fowler"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "dahl",
+            "fowler"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "hunt",
+            "willison"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "hunt"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "dahl"
+          ]
+        }
+      ]
+    },
+    {
+      "reviewId": "2026-05-15-beta-catalog",
+      "diffFiles": 143,
+      "diffLines": 3177,
+      "sizeSource": "context-brief: skills-repo commit, 143 files / 3177 lines",
+      "panel": [
+        "beck",
+        "fowler",
+        "hunt"
+      ],
+      "panelCatalogIds": [
+        "beck",
+        "fowler",
+        "hunt"
+      ],
+      "changedDomains": [
+        "llm-pipeline",
+        "refactoring",
+        "security",
+        "test-quality"
+      ],
+      "finalFindings": null
+    },
+    {
+      "reviewId": "2026-05-17-1055",
+      "diffFiles": 6,
+      "diffLines": 1171,
+      "sizeSource": "git 385f8dd (3 TS files, 979 lines) + skills-repo a593c16 (3 SKILL.md, 192 lines) per context-brief",
+      "panel": [
+        "beck",
+        "fowler",
+        "friedman",
+        "hunt",
+        "ritchie"
+      ],
+      "panelCatalogIds": [
+        "beck",
+        "fowler",
+        "friedman",
+        "hunt",
+        "ritchie"
+      ],
+      "changedDomains": [
+        "filesystem-persistence",
+        "refactoring",
+        "security",
+        "test-quality",
+        "ux-flow"
+      ],
+      "finalFindings": null
+    },
+    {
+      "reviewId": "2026-05-17-2031",
+      "diffFiles": 9,
+      "diffLines": 297,
+      "sizeSource": "git 158b630 (A/B v1 docs implementation; reviewed commit 50a9018 not on main)",
+      "panel": [
+        "a11y",
+        "deploy",
+        "fowler",
+        "friedman",
+        "hunt",
+        "react-ui",
+        "saarinen",
+        "willison"
+      ],
+      "panelCatalogIds": [
+        "abramov",
+        "fowler",
+        "friedman",
+        "hashimoto",
+        "hunt",
+        "saarinen",
+        "watson",
+        "willison"
+      ],
+      "changedDomains": [
+        "accessibility",
+        "devops-deploy",
+        "frontend-architecture",
+        "security",
+        "ui-visual-quality",
+        "ux-flow"
+      ],
+      "finalFindings": [
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "willison"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "hunt"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "hunt"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "hunt"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "hashimoto"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "watson"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "fowler"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "fowler"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "saarinen"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "friedman"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "willison"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "watson"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "hunt"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "fowler"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "willison"
+          ]
+        }
+      ]
+    },
+    {
+      "reviewId": "2026-05-18-1121",
+      "diffFiles": 20,
+      "diffLines": 1177,
+      "sizeSource": "context-brief: \"20 files, +1156 -21\"",
+      "panel": [
+        "a11y",
+        "beck",
+        "dahl",
+        "fowler",
+        "friedman",
+        "hunt",
+        "react-ui",
+        "ritchie",
+        "saarinen",
+        "willison"
+      ],
+      "panelCatalogIds": [
+        "abramov",
+        "beck",
+        "dahl",
+        "fowler",
+        "friedman",
+        "hunt",
+        "ritchie",
+        "saarinen",
+        "watson",
+        "willison"
+      ],
+      "changedDomains": [
+        "accessibility",
+        "backend-architecture",
+        "filesystem-persistence",
+        "frontend-architecture",
+        "protocol-correctness",
+        "security",
+        "test-quality",
+        "ui-visual-quality",
+        "ux-flow"
+      ],
+      "finalFindings": [
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "dahl"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "beck"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "watson"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "fowler"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "friedman"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "hunt"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "willison"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "saarinen"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "saarinen"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "watson"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "hunt",
+            "ritchie",
+            "willison"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "fowler"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "beck"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "abramov"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "fowler"
+          ]
+        }
+      ]
+    },
+    {
+      "reviewId": "2026-06-01-2026",
+      "diffFiles": 4,
+      "diffLines": 552,
+      "sizeSource": "git 99336b5",
+      "panel": [
+        "beck",
+        "fowler",
+        "hunt",
+        "persistence"
+      ],
+      "panelCatalogIds": [
+        "beck",
+        "fowler",
+        "hunt",
+        "ritchie"
+      ],
+      "changedDomains": [
+        "filesystem-persistence",
+        "refactoring",
+        "security",
+        "test-quality"
+      ],
+      "finalFindings": [
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "hunt"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "ritchie"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "fowler"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "fowler"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "beck"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "beck"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "ritchie"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "beck"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "fowler"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "hunt"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "ritchie"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "hunt"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "beck"
+          ]
+        }
+      ]
+    },
+    {
+      "reviewId": "2026-06-04-0823",
+      "diffFiles": 21,
+      "diffLines": 4621,
+      "sizeSource": "git 8314318 (PR #91 squash), code files only",
+      "panel": [
+        "a11y",
+        "backend-ts",
+        "beck",
+        "fowler",
+        "friedman",
+        "hunt",
+        "persistence",
+        "react-ui",
+        "realtime",
+        "saarinen",
+        "subprocess",
+        "willison"
+      ],
+      "panelCatalogIds": [
+        "abramov",
+        "beck",
+        "dahl",
+        "fowler",
+        "friedman",
+        "hunt",
+        "ritchie",
+        "saarinen",
+        "watson",
+        "willison"
+      ],
+      "changedDomains": [
+        "accessibility",
+        "backend-architecture",
+        "filesystem-persistence",
+        "frontend-architecture",
+        "protocol-correctness",
+        "security",
+        "test-quality",
+        "ui-visual-quality",
+        "ux-flow"
+      ],
+      "finalFindings": [
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "friedman"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "watson"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "watson"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "beck"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "beck"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "beck"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "abramov"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "hunt",
+            "ritchie"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "abramov",
+            "dahl"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "ritchie"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "dahl"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "friedman"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "abramov"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "beck"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "dahl",
+            "ritchie"
+          ]
+        }
+      ]
+    },
+    {
+      "reviewId": "2026-06-04-1826",
+      "diffFiles": 31,
+      "diffLines": 3818,
+      "sizeSource": "context-brief: burndown commit \"~3818 LOC across 31 files\"",
+      "panel": [
+        "a11y",
+        "backend-ts",
+        "beck",
+        "fowler",
+        "friedman",
+        "hunt",
+        "persistence",
+        "react-ui",
+        "realtime",
+        "saarinen",
+        "willison"
+      ],
+      "panelCatalogIds": [
+        "abramov",
+        "beck",
+        "dahl",
+        "fowler",
+        "friedman",
+        "hunt",
+        "ritchie",
+        "saarinen",
+        "watson",
+        "willison"
+      ],
+      "changedDomains": [
+        "accessibility",
+        "backend-architecture",
+        "filesystem-persistence",
+        "frontend-architecture",
+        "protocol-correctness",
+        "security",
+        "test-quality",
+        "ui-visual-quality",
+        "ux-flow"
+      ],
+      "finalFindings": [
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "beck",
+            "watson"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "dahl"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "beck",
+            "watson"
+          ]
+        },
+        {
+          "priority": "P1",
+          "creditedSeats": [
+            "beck",
+            "dahl"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "watson"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "dahl",
+            "fowler"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "ritchie"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "friedman",
+            "saarinen"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "friedman"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "beck",
+            "dahl"
+          ]
+        },
+        {
+          "priority": "P2",
+          "creditedSeats": [
+            "saarinen"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "dahl",
+            "hunt",
+            "ritchie"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "friedman",
+            "watson"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "watson"
+          ]
+        },
+        {
+          "priority": "P3",
+          "creditedSeats": [
+            "watson"
+          ]
+        }
+      ]
+    }
+  ]
+}

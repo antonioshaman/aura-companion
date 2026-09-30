@@ -6,7 +6,13 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { renderLabelSheet, headlineOf, type LabelSheetItem } from "./label-sheet.js";
+import {
+  renderCodeClaimQueue,
+  renderDecisionSheet,
+  renderLabelSheet,
+  headlineOf,
+  type LabelSheetItem,
+} from "./label-sheet.js";
 
 function item(over: Partial<LabelSheetItem>): LabelSheetItem {
   return {
@@ -73,5 +79,61 @@ describe("renderLabelSheet", () => {
       item({ severity: "WARN", index: 3 }),
     ]);
     expect(md).toContain("STOP=1 WARN=2");
+  });
+});
+
+/**
+ * P3/FIX-B3-1: the human only gets decisions, framed "now → A / B → what is
+ * right"; code claims go to the orchestrator with the code at the checkpoint
+ * AND now, so a claim can be checked against what the observer actually read.
+ */
+describe("triaged sheets", () => {
+  it("frames a decision as now / option A / option B with an A/B/SKIP call", () => {
+    const md = renderDecisionSheet([
+      item({
+        claim: "The bot stores the author's tg-id. It should store only the text.",
+        triage: { kind: "decision", reason: "privacy / data policy" },
+      }),
+    ]);
+    expect(md).toContain("- **Сейчас так:** The bot stores the author's tg-id.");
+    expect(md).toContain("- **Вариант А:** Оставить как есть");
+    expect(md).toContain("- **Вариант Б:** Изменить, как советует observer: It should store only the text.");
+    expect(md).toContain("**Что верно:**  `[ ] A`  ·  `[ ] B`  ·  `[ ] SKIP`");
+    expect(md).toContain("Почему к вам: privacy / data policy");
+    // No code block and no TRUE/FALSE call for a decision.
+    expect(md).not.toContain("**Your call:**");
+    expect(md).not.toContain("```");
+  });
+
+  it("shows a code claim with the checkpoint-time code and the current code", () => {
+    const md = renderCodeClaimQueue([
+      item({
+        triage: { kind: "code-claim", reason: "r" },
+        snippet: "▶    2  const v = 1;",
+        snippet_note: "as of commit abc12345",
+        current_snippet: "▶    2  const v = 2;",
+        current_note: "from the current file",
+      }),
+    ]);
+    expect(md).toContain("**Code at the checkpoint** (as of commit abc12345):\n\n```\n▶    2  const v = 1;\n```");
+    expect(md).toContain("**Code now** (from the current file):\n\n```\n▶    2  const v = 2;\n```");
+    expect(md).toContain("**Your call:**");
+    expect(md).toContain("--labeler orchestrator-");
+  });
+
+  it("says why a side is missing instead of printing an empty block", () => {
+    const md = renderCodeClaimQueue([
+      item({ triage: { kind: "code-claim", reason: "r" }, snippet: null, snippet_note: "uncommitted at review time", current_snippet: null, current_note: "deleted" }),
+    ]);
+    expect(md).toContain("**Code at the checkpoint** (uncommitted at review time):");
+    expect(md).toContain("**Code now** (deleted):");
+    expect(md).not.toContain("```");
+  });
+
+  it("uses a longer fence when the code itself contains backticks", () => {
+    const md = renderCodeClaimQueue([
+      item({ triage: { kind: "code-claim", reason: "r" }, snippet: "    1  const s = ```x```;", current_snippet: null }),
+    ]);
+    expect(md).toContain("````\n    1  const s = ```x```;\n````");
   });
 });

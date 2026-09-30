@@ -15,7 +15,7 @@ Analyze and evolve the knowledge base and project configuration. This is the met
 
 ### 1. Audit Knowledge Base Health
 
-Read all `.agents/knowledge/*.jsonl` files and compute:
+Start from the mechanical report — `bun run --cwd web kb:health` (total, used≥1, helpful≥1, promoted, stale, never-surfaced, idle, confidence; non-zero exit on corrupt lines). Then read all `.agents/knowledge/*.jsonl` files and add:
 
 - **Total entries** per category
 - **Confidence distribution** (how many high/medium/low)
@@ -27,12 +27,12 @@ Read all `.agents/knowledge/*.jsonl` files and compute:
 When a pattern appears 3+ times across sessions or has high confidence with broad impact:
 
 1. Extract the core rule
-2. Add it to the appropriate section in `CLAUDE.md`
+2. Add it where it belongs: `CLAUDE.md` only if it is load-bearing for **every** session and the file stays within its 15 360-byte budget (guarded by `web/server/claude-md-budget.test.ts`); otherwise the matching on-demand doc under `docs/architecture/` or `docs/conventions/` (already linked from `CLAUDE.md`)
 3. Mark the KB entry as `promoted: true` (keep for history, but no longer surfaced by `/prime`)
 
 **Example promotion:**
 - KB entry: "Always test WebSocket changes against both NDJSON and JSON-RPC backends"
-- → Becomes a bullet point in CLAUDE.md's Architecture section
+- → Becomes a bullet point in `docs/architecture/overview.md` (area-specific, so not in the `CLAUDE.md` core)
 
 ### 3. Prune Stale Entries (mode: prune)
 
@@ -42,10 +42,12 @@ An entry is stale when:
 - Its recommendation contradicts a newer entry
 - It has `confidence: low` and is older than 14 days without re-confirmation
 - `outdatedReports >= helpfulCount` and `outdatedReports >= 2` (the field-driven signal — at least two flags and no fresh confirmations to balance them)
-- `usageCount >= 10` and `helpfulCount == 0` (surfaced often but never re-confirmed → too generic to be useful)
+- usage `>= 10` (store `usageCount` + `usage.log` surfacings, as computed by `kb:health`) and `helpfulCount == 0` (surfaced often but never re-confirmed → too generic to be useful)
+
+- Not surfaced by `/prime` for 20 consecutive sessions — `bun run --cwd web kb:prune --dry-run` lists them, `kb:prune` archives them
 
 **Actions:**
-- Remove clearly stale entries
+- Archive clearly stale entries: move the row to `.agents/knowledge/archive/<store>.jsonl` with `archivedAt` + `archiveReason` (never delete)
 - Downgrade confidence on questionable entries
 - Flag uncertain entries for human review
 

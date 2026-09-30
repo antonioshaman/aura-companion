@@ -4,8 +4,25 @@ import remarkGfm from "remark-gfm";
 import type { ChatMessage, ContentBlock } from "../types.js";
 import { ToolBlock, getToolIcon, getToolLabel, getPreview, ToolIcon } from "./ToolBlock.js";
 import { AssistantAvatar } from "./chat/AssistantAvatar.js";
+import { RESUME_INTERRUPTED_LABEL } from "../utils/resume-interrupted.js";
 
 export function MessageBubble({ message }: { message: ChatMessage }) {
+  if (message.role === "system" && message.systemVariant === "resume-interrupted") {
+    return <ResumeInterruptedNote diagnostic={message.content} />;
+  }
+
+  if (message.role === "system" && message.systemVariant === "error") {
+    return (
+      <div className="flex items-center gap-3 py-1 min-w-0">
+        <div className="shrink-0 flex-1 h-px bg-cc-error/30" />
+        <span className="text-[11px] text-cc-error font-mono-code px-1 min-w-0 break-words text-center">
+          {message.content}
+        </span>
+        <div className="shrink-0 flex-1 h-px bg-cc-error/30" />
+      </div>
+    );
+  }
+
   if (message.role === "system") {
     return (
       <div className="flex items-center gap-3 py-1 min-w-0">
@@ -132,6 +149,29 @@ const PROVIDER_AUTH_PHRASES = [
 
 const AUTH_ERROR_TYPE_RE =
   /(authentication|unauthorized|permission|invalid[_-]?(?:x[_-]?)?api[_-]?key|oauth)/i;
+
+/**
+ * Muted, collapsed note for the result frame Claude's `--resume` emits to close
+ * a turn a restart cut off (`utils/resume-interrupted.ts`). Not an error of the
+ * current work, so it reads like the other system dividers; the raw diagnostic
+ * stays one click away for debugging.
+ */
+function ResumeInterruptedNote({ diagnostic }: { diagnostic: string }) {
+  return (
+    <details className="group py-1 min-w-0" data-testid="resume-interrupted-note">
+      <summary className="flex items-center gap-3 cursor-pointer list-none [&::-webkit-details-marker]:hidden min-w-0">
+        <span className="shrink-0 flex-1 h-px bg-cc-border" aria-hidden="true" />
+        <span className="text-[11px] text-cc-muted italic font-mono-code px-1 min-w-0 break-words text-center">
+          {RESUME_INTERRUPTED_LABEL}
+          <span className="not-italic ml-1 group-open:hidden" aria-hidden="true">▸</span>
+          <span className="not-italic ml-1 hidden group-open:inline" aria-hidden="true">▾</span>
+        </span>
+        <span className="shrink-0 flex-1 h-px bg-cc-border" aria-hidden="true" />
+      </summary>
+      <p className="mt-1 text-[11px] text-cc-muted font-mono-code text-center break-words">{diagnostic}</p>
+    </details>
+  );
+}
 
 /** Best-effort extraction of an embedded JSON object (handles a "API Error: 401
  *  {…}" prefix and a trailing-garbage suffix). Two bounded parse attempts, no

@@ -17,7 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isEvalSidecarEnabled, maybeEmitEvalSidecar } from "./eval-sidecar.js";
 import { COUNCIL_SCHEMA_VERSION, type ObserverReviewPayload } from "./council-types.js";
-import type { GroundingResult } from "./observer-grounding.js";
+import { validateObserverFindings, type GroundingResult } from "./observer-grounding.js";
 import { parseSidecarArtifact } from "../evals/schema/parse-artifact.js";
 import { rerunGrounding } from "../evals/scorers/grounding-rerun.js";
 
@@ -86,7 +86,7 @@ describe("maybeEmitEvalSidecar", () => {
       sessionGroupId: "grp_abc",
       payload: review(),
       manifest: { delta: [], carried: [], dropped: [] },
-      grounding: { findings: [], downgrades: [] },
+      grounding: { findings: [], downgrades: [], weakEvidence: [] },
       observerPromptSha256: "f".repeat(64),
     });
     expect(() => readFileSync(sidecarPath("council-plan-0-deadbeef"))).toThrow();
@@ -112,6 +112,7 @@ describe("maybeEmitEvalSidecar", () => {
       downgrades: [
         { index: 1, original: payload.findings[1]!, reason: "evidence_missing_on_disk" },
       ],
+      weakEvidence: [],
     };
 
     maybeEmitEvalSidecar({
@@ -143,7 +144,7 @@ describe("maybeEmitEvalSidecar", () => {
       sessionGroupId: "grp_abc",
       payload: review(),
       manifest: { delta: ["z.ts", "a.ts", "m.ts"], carried: ["c.ts", "b.ts"], dropped: [] },
-      grounding: { findings: [], downgrades: [] },
+      grounding: { findings: [], downgrades: [], weakEvidence: [] },
       observerPromptSha256: "f".repeat(64),
     });
     const parsed = parseSidecarArtifact(
@@ -162,7 +163,7 @@ describe("maybeEmitEvalSidecar", () => {
       sessionGroupId: "grp_abc",
       payload: review({ checkpoint_id: "../../etc/evil" }),
       manifest: { delta: [], carried: [], dropped: [] },
-      grounding: { findings: [], downgrades: [] },
+      grounding: { findings: [], downgrades: [], weakEvidence: [] },
       observerPromptSha256: "f".repeat(64),
     });
     // No file under the eval dir, and nothing escaped the workspace.
@@ -184,6 +185,7 @@ describe("maybeEmitEvalSidecar", () => {
       downgrades: [
         { index: 1, original: payload.findings[1]!, reason: "evidence_not_in_modified_set" },
       ],
+      weakEvidence: [],
     };
     maybeEmitEvalSidecar({
       workspaceRoot: workspace,
@@ -202,5 +204,53 @@ describe("maybeEmitEvalSidecar", () => {
     const rerun = rerunGrounding(parsed.value);
     expect(rerun.deterministic).toBe(true);
     expect(rerun.diffs).toEqual([]);
+  });
+
+  // B2: when the gate consulted line facts, the sidecar freezes exactly what
+  // the line checks read (line count, changed ranges, cited line text — not
+  // the whole file) and the hermetic rerun reproduces the live result:
+  // same line downgrades, same weak-evidence marks.
+  it("freezes cited line facts so the rerun reproduces line downgrades and weak evidence", () => {
+    process.env[ENV_KEY] = "1";
+    const lines = ["alpha()", "beta()", "gamma()"];
+    const lineFacts = (p: string) =>
+      p === "src/a.ts"
+        ? { lineCount: lines.length, lineText: (n: number) => lines[n - 1], changedRanges: [[2, 3]] as [number, number][] }
+        : null;
+    const payload = review({
+      findings: [
+        { severity: "STOP", claim: "beta() is broken", evidence_path: "src/a.ts", evidence_lines: [2, 2] },
+        { severity: "STOP", claim: "alpha() is broken", evidence_path: "src/a.ts", evidence_lines: [1, 1] },
+        { severity: "STOP", claim: "whatever", evidence_path: "src/a.ts", evidence_lines: [9, 9] },
+        { severity: "STOP", claim: "unrelated words", evidence_path: "src/a.ts", evidence_lines: [3, 3] },
+      ],
+    });
+    const modified = new Set(["src/a.ts"]);
+    const grounding = validateObserverFindings(payload, {
+      workspaceRoot: "/ws",
+      modifiedFiles: modified,
+      existsRelative: () => true,
+      lineFacts,
+    });
+    mkdirSync(join(workspace, "src"), { recursive: true });
+    writeFileSync(join(workspace, "src", "a.ts"), lines.join("\n"));
+    maybeEmitEvalSidecar({
+      workspaceRoot: workspace,
+      sessionGroupId: "grp_abc",
+      payload,
+      manifest: { delta: ["src/a.ts"], carried: [], dropped: [] },
+      grounding,
+      observerPromptSha256: "f".repeat(64),
+      lineFacts,
+    });
+    const parsed = parseSidecarArtifact(readFileSync(sidecarPath(payload.checkpoint_id), "utf8"));
+    if (!parsed.ok) throw new Error(parsed.reason);
+    expect(parsed.value.grounding_inputs.line_facts_by_path).toEqual({
+      "src/a.ts": { line_count: 3, changed_ranges: [[2, 3]], cited_lines: { "1": "alpha()", "2": "beta()", "3": "gamma()" } },
+    });
+    const rerun = rerunGrounding(parsed.value);
+    expect(rerun.deterministic).toBe(true);
+    expect(rerun.recomputed.map((d) => d.reason)).toEqual(["evidence_lines_unchanged", "evidence_lines_out_of_range"]);
+    expect(rerun.weak_evidence).toEqual([{ index: 3, reason: "claim_symbols_not_on_cited_lines" }]);
   });
 });

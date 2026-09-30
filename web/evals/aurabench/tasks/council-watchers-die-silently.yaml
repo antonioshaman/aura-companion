@@ -1,0 +1,66 @@
+# AuraBench task mined from PR #157 ("fix(council): re-arm dead fs.watch watchers + implement EC-13 failsafe tick").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: council-watchers-die-silently
+title: "Council filesystem watchers recover from errors and missed checkpoints are caught by a periodic failsafe"
+start_commit: b385a7c62b27a36170f676f8ef8ece3bc4c9cded
+prompt: |
+  Council Mode's only live IPC is `fs.watch` on `.council/checkpoints/` and
+  `.council/reviews/`. If a watcher errors once mid-uptime it is logged as a
+  warning and stays dead until the server restarts: no checkpoint → wake, no
+  review fan-out. Separately, the documented EC-13 failsafe (a recurring tick
+  that rescans checkpoints for missed wakes) was never implemented.
+
+  1. Add `web/server/resilient-watch.ts` exporting
+     `runResilientWatch({ kind, signal, start, logContext?, onDeath?, sleep? })`:
+     it keeps calling `start()` until `signal` is aborted. Each unexpected end —
+     `start` throwing (`deathKind: "threw"`) or resolving while not aborted
+     (`deathKind: "ended"`) — logs one `log.error` with message
+     "council watcher died — re-arming" and data
+     `{ event: "council.watcher.died", kind, deathKind, error?, ...logContext }`,
+     calls `onDeath({ kind: deathKind, … })` (a throwing hook is logged as
+     "council watcher onDeath hook threw" and swallowed), waits via the
+     injectable `sleep(ms, signal)` and re-arms. Nothing runs if already
+     aborted. Also export `abortableSleep(ms, signal)`, which resolves early on
+     abort. The orchestrator's council watchers must survive such deaths, and a
+     checkpoint written while a watcher was down must still wake the observer.
+  2. On orchestrator init, also start a recurring failsafe tick
+     (default every 5 minutes, overridable via env within sane bounds) that
+     wakes the observer for any unprocessed checkpoint. Contract pinned by the
+     tests: each tick calls `scanForMissedObserverWakes("failsafe")`; the
+     init-time call of that method stays argument-less. Keep the interval handle in a private `observerFailsafeTimer`
+     (`null` when not armed), arm it via an idempotent `startObserverFailsafe()`,
+     and clear it (back to `null`) in `shutdown()`.
+expected_files:
+  - web/server/resilient-watch.ts
+  - web/server/session-orchestrator.ts
+expected_tests:
+  - web/server/resilient-watch.test.ts
+  - web/server/session-orchestrator.test.ts
+failure_modes:
+  - "re-arm loops hot without backoff"
+  - "the failsafe interval leaks after shutdown"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 157
+  merge_commit: f0c4fd7868bf1f4610800b3b680e9f3d439da433
+  class: architecture
+  hidden_tests:
+    - web/server/resilient-watch.test.ts
+    - web/server/session-orchestrator.test.ts
+  validation:
+    base: fail
+    merge: pass
+    base_failure: missing-interface
+    checked_at: "2026-09-28T07:36:41.957Z"

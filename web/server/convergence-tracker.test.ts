@@ -25,6 +25,7 @@ import {
   initialConvergenceState,
   nextStateAfterReview,
   reviewHasStop,
+  reviewNotCountedReason,
 } from "./convergence-tracker.js";
 import { companionBus } from "./event-bus.js";
 import type { BrowserObserverFinding } from "./session-types.js";
@@ -168,6 +169,8 @@ describe("ConvergenceTracker — live bus wiring", () => {
         downgrades: [],
         observerModel: "test",
         observerProvider: "claude",
+        artifactsChanged: 1,
+        artifactsRead: 1,
       });
     }
 
@@ -199,6 +202,8 @@ describe("ConvergenceTracker — live bus wiring", () => {
         downgrades: [],
         observerModel: "test",
         observerProvider: "claude",
+        artifactsChanged: 1,
+        artifactsRead: 1,
       });
     }
 
@@ -211,6 +216,8 @@ describe("ConvergenceTracker — live bus wiring", () => {
       downgrades: [],
       observerModel: "test",
       observerProvider: "claude",
+      artifactsChanged: 1,
+      artifactsRead: 1,
     });
 
     // 5th review clean — counter must be back at 1, NOT 4
@@ -222,6 +229,8 @@ describe("ConvergenceTracker — live bus wiring", () => {
       downgrades: [],
       observerModel: "test",
       observerProvider: "claude",
+      artifactsChanged: 1,
+      artifactsRead: 1,
     });
 
     expect(seen.map((s) => s.transition)).toEqual([
@@ -257,6 +266,8 @@ describe("ConvergenceTracker — live bus wiring", () => {
         downgrades: [],
         observerModel: "test",
         observerProvider: "claude",
+        artifactsChanged: 1,
+        artifactsRead: 1,
       });
     }
     expect(seen.map((s) => s.cycleNumber)).toEqual([1, 2]);
@@ -271,6 +282,8 @@ describe("ConvergenceTracker — live bus wiring", () => {
       downgrades: [],
       observerModel: "test",
       observerProvider: "claude",
+      artifactsChanged: 1,
+      artifactsRead: 1,
     });
     expect(seen).toHaveLength(2);  // no new emit
 
@@ -284,6 +297,8 @@ describe("ConvergenceTracker — live bus wiring", () => {
       downgrades: [],
       observerModel: "test",
       observerProvider: "claude",
+      artifactsChanged: 1,
+      artifactsRead: 1,
     });
     expect(seen[2]).toEqual({ transition: "converged", cycleNumber: 3 });
 
@@ -302,6 +317,8 @@ describe("ConvergenceTracker — live bus wiring", () => {
       downgrades: [],
       observerModel: "test",
       observerProvider: "claude",
+      artifactsChanged: 1,
+      artifactsRead: 1,
     });
     expect(tracker.getState("grp-D")?.cleanCycleCount).toBe(1);
 
@@ -339,6 +356,8 @@ describe("ConvergenceTracker — live bus wiring", () => {
         downgrades: [],
         observerModel: "test",
         observerProvider: "claude",
+        artifactsChanged: 1,
+        artifactsRead: 1,
       });
     }
 
@@ -368,6 +387,8 @@ describe("ConvergenceTracker — live bus wiring", () => {
         downgrades: [],
         observerModel: "test",
         observerProvider: "claude",
+        artifactsChanged: 1,
+        artifactsRead: 1,
       });
     }
 
@@ -397,6 +418,8 @@ describe("ConvergenceTracker — live bus wiring", () => {
         downgrades: [],
         observerModel: "test",
         observerProvider: provider,
+        artifactsChanged: 1,
+        artifactsRead: 1,
       });
     }
 
@@ -421,6 +444,8 @@ describe("ConvergenceTracker — live bus wiring", () => {
         downgrades: [],
         observerModel: "test",
         observerProvider: "claude",
+        artifactsChanged: 1,
+        artifactsRead: 1,
       });
 
     emitCp0();
@@ -455,6 +480,8 @@ describe("ConvergenceTracker — live bus wiring", () => {
         downgrades: [],
         observerModel: "test",
         observerProvider: "claude",
+        artifactsChanged: 1,
+        artifactsRead: 1,
       });
 
     emitCp(); // frozen → no-op, must NOT consume the slot
@@ -474,6 +501,218 @@ describe("ConvergenceTracker — live bus wiring", () => {
     tracker.detach();
     tracker.detach();  // no-op
     expect(() => tracker.attach()).not.toThrow();
+    tracker.detach();
+  });
+});
+
+// P3/CONV-HONEST (human decision 2026-09-28): three "clean" reviews of a
+// spawn checkpoint / of reviews where the observer opened nothing flipped a
+// pair to "ready to ship". Only reviews in which the HOST saw the observer
+// read ≥1 changed file of the checkpoint may advance the counter. Threshold
+// and its 2–5 range are unchanged.
+describe("reviewNotCountedReason (CONV-HONEST)", () => {
+  it("empty/spawn checkpoint → no_changed_files (even if something was 'read')", () => {
+    expect(reviewNotCountedReason(0, 0)).toBe("no_changed_files");
+    expect(reviewNotCountedReason(0, 3)).toBe("no_changed_files");
+  });
+  it("changed files but none read → no_files_read", () => {
+    expect(reviewNotCountedReason(4, 0)).toBe("no_files_read");
+  });
+  it("≥1 changed file read → countable", () => {
+    expect(reviewNotCountedReason(4, 1)).toBeNull();
+  });
+  // P3/CONV-DOWNGRADE (ASK #13, option 2): a STOP that grounding downgraded
+  // to NOTE means the observer DID raise a blocker that could not be
+  // confirmed — the review is not a clean cycle. Plain NOTE/WARN stay clean.
+  it("read review carrying a downgraded STOP → downgraded_stop", () => {
+    expect(reviewNotCountedReason(4, 1, [downgradedStop()])).toBe("downgraded_stop");
+  });
+  it("read review with only genuine NOTE/WARN findings → countable", () => {
+    expect(reviewNotCountedReason(4, 1, [...findings("NOTE"), ...findings("WARN")])).toBeNull();
+  });
+  it("reviews that read nothing keep their more fundamental reason", () => {
+    expect(reviewNotCountedReason(0, 0, [downgradedStop()])).toBe("no_changed_files");
+    expect(reviewNotCountedReason(2, 0, [downgradedStop()])).toBe("no_files_read");
+  });
+});
+
+/** A STOP after grounding downgraded it — the shape council-checkpoint-pipeline emits. */
+function downgradedStop(): BrowserObserverFinding {
+  return {
+    id: "fnd_downgraded",
+    severity: "NOTE",
+    claim: "command X fails at runtime",
+    evidence_path: "web/server/x.ts",
+    wasDowngraded: true,
+    downgradeReason: "evidence_lines_unchanged",
+  };
+}
+
+describe("ConvergenceTracker — reviews that reviewed nothing (CONV-HONEST)", () => {
+  beforeEach(() => {
+    companionBus.clear();
+  });
+
+  type Seen = { transition: string; cycleNumber: number; state: string; reason?: string };
+  function record(): Seen[] {
+    const seen: Seen[] = [];
+    companionBus.on("group:convergence", (p) => {
+      seen.push({
+        transition: p.transition,
+        cycleNumber: p.cycleNumber,
+        state: p.convergenceState,
+        ...(p.notCountedReason ? { reason: p.notCountedReason } : {}),
+      });
+    });
+    return seen;
+  }
+  function review(
+    group: string,
+    checkpointId: string,
+    artifactsChanged: number,
+    artifactsRead: number,
+    findingList: BrowserObserverFinding[] = [],
+  ) {
+    companionBus.emit("group:review", {
+      sessionGroupId: group,
+      checkpointId,
+      phase: "council-implement",
+      findings: findingList,
+      downgrades: [],
+      observerModel: "test",
+      observerProvider: "claude",
+      artifactsChanged,
+      artifactsRead,
+    });
+  }
+
+  it("three clean reviews that read nothing never converge", () => {
+    const seen = record();
+    const tracker = new ConvergenceTracker({ isFrozen: () => false });
+    tracker.attach();
+
+    review("grp-empty", "cp-spawn", 0, 0); // spawn checkpoint
+    review("grp-empty", "cp-1", 3, 0);     // observer opened no changed file
+    review("grp-empty", "cp-2", 2, 0);
+
+    expect(seen).toEqual([
+      { transition: "not-counted", cycleNumber: 0, state: "in-progress", reason: "no_changed_files" },
+      { transition: "not-counted", cycleNumber: 0, state: "in-progress", reason: "no_files_read" },
+      { transition: "not-counted", cycleNumber: 0, state: "in-progress", reason: "no_files_read" },
+    ]);
+    expect(tracker.getState("grp-empty")?.convergenceState).toBe("in-progress");
+    tracker.detach();
+  });
+
+  it("an uncounted review neither advances nor resets the counter", () => {
+    const seen = record();
+    const tracker = new ConvergenceTracker({ isFrozen: () => false });
+    tracker.attach();
+
+    review("grp-mix", "cp-1", 1, 1);
+    review("grp-mix", "cp-2", 1, 0); // not counted
+    review("grp-mix", "cp-3", 2, 1);
+
+    expect(seen.map((s) => [s.transition, s.cycleNumber])).toEqual([
+      ["cycle-progress", 1],
+      ["not-counted", 1],
+      ["cycle-progress", 2],
+    ]);
+    tracker.detach();
+  });
+
+  it("after convergence an uncounted review keeps the converged state (reported, not flipped)", () => {
+    const seen = record();
+    const tracker = new ConvergenceTracker({ isFrozen: () => false });
+    tracker.attach();
+    for (let i = 0; i < 3; i++) review("grp-conv", `cp-${i}`, 1, 1);
+    review("grp-conv", "cp-3", 1, 0);
+    expect(seen.at(-1)).toEqual({ transition: "not-counted", cycleNumber: 3, state: "converged", reason: "no_files_read" });
+    tracker.detach();
+  });
+
+  it("a STOP still resets even when the observer read nothing (blockers are never ignored)", () => {
+    const seen = record();
+    const tracker = new ConvergenceTracker({ isFrozen: () => false });
+    tracker.attach();
+    review("grp-stop", "cp-1", 1, 1);
+    review("grp-stop", "cp-2", 1, 0, findings("STOP"));
+    expect(seen.map((s) => [s.transition, s.cycleNumber])).toEqual([
+      ["cycle-progress", 1],
+      ["cycle-progress", 0],
+    ]);
+    tracker.detach();
+  });
+
+  it("an uncounted review does not consume the dedup slot — a later real review of it counts once", () => {
+    const seen = record();
+    const tracker = new ConvergenceTracker({ isFrozen: () => false });
+    tracker.attach();
+    review("grp-retry", "cp-1", 2, 0); // not counted
+    review("grp-retry", "cp-1", 2, 2); // same checkpoint, now actually read
+    review("grp-retry", "cp-1", 2, 2); // replay — dropped (got-045)
+    expect(seen.map((s) => [s.transition, s.cycleNumber])).toEqual([
+      ["not-counted", 0],
+      ["cycle-progress", 1],
+    ]);
+    tracker.detach();
+  });
+
+  it("frozen (degraded) groups emit nothing, not even not-counted", () => {
+    const seen = record();
+    const tracker = new ConvergenceTracker({ isFrozen: () => true });
+    tracker.attach();
+    review("grp-frozen", "cp-1", 0, 0);
+    expect(seen).toEqual([]);
+    tracker.detach();
+  });
+
+  // P3/CONV-DOWNGRADE (ASK #13, option 2): a downgraded STOP neither advances
+  // the streak (it is not a clean cycle) nor resets it (grounding could not
+  // confirm the blocker). A genuine STOP still resets.
+  it("a review with a downgraded STOP is not counted and does not reset the counter", () => {
+    const seen = record();
+    const tracker = new ConvergenceTracker({ isFrozen: () => false });
+    tracker.attach();
+    review("grp-dg", "cp-1", 1, 1);
+    review("grp-dg", "cp-2", 1, 1);
+    review("grp-dg", "cp-3", 1, 1, [downgradedStop()]); // would have converged if counted
+    expect(seen).toEqual([
+      { transition: "cycle-progress", cycleNumber: 1, state: "in-progress" },
+      { transition: "cycle-progress", cycleNumber: 2, state: "in-progress" },
+      { transition: "not-counted", cycleNumber: 2, state: "in-progress", reason: "downgraded_stop" },
+    ]);
+    expect(tracker.getState("grp-dg")?.cleanCycleCount).toBe(2);
+    tracker.detach();
+  });
+
+  it("after a downgraded-STOP review the next clean review continues the streak", () => {
+    const seen = record();
+    const tracker = new ConvergenceTracker({ isFrozen: () => false });
+    tracker.attach();
+    review("grp-dg2", "cp-1", 1, 1);
+    review("grp-dg2", "cp-2", 1, 1, [downgradedStop()]);
+    review("grp-dg2", "cp-3", 1, 1);
+    review("grp-dg2", "cp-4", 1, 1);
+    expect(seen.map((s) => [s.transition, s.cycleNumber])).toEqual([
+      ["cycle-progress", 1],
+      ["not-counted", 1],
+      ["cycle-progress", 2],
+      ["converged", 3],
+    ]);
+    tracker.detach();
+  });
+
+  it("a genuine STOP next to a downgraded one still resets", () => {
+    const seen = record();
+    const tracker = new ConvergenceTracker({ isFrozen: () => false });
+    tracker.attach();
+    review("grp-dg3", "cp-1", 1, 1);
+    review("grp-dg3", "cp-2", 1, 1, [downgradedStop(), ...findings("STOP")]);
+    expect(seen.map((s) => [s.transition, s.cycleNumber])).toEqual([
+      ["cycle-progress", 1],
+      ["cycle-progress", 0],
+    ]);
     tracker.detach();
   });
 });

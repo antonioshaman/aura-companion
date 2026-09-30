@@ -35,7 +35,11 @@ function tier(over: Partial<SerialTier>): SerialTier {
 function summary(grounded: SerialTier): PrecisionSummary {
   return {
     raw: tier({}),
+    // B2 tiers: compare reads only `grounded`; mirror it so the fixture is a
+    // complete summary without implying a before/after difference.
+    grounded_path_only: grounded,
     grounded,
+    banner: grounded,
     delta: {
       downgraded: 0,
       downgraded_false_positive: 0,

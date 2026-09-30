@@ -358,7 +358,9 @@ export class LinearAgentBridge {
     this.setupRelay(linearSessionId, companionSessionId, agentId);
 
     // Inject user message into the running Companion session
-    this.wsBridge.injectUserMessage(companionSessionId, message);
+    // FIX-AP-2: relayed by the server, not typed in a Companion tab — it must
+    // not reset the auto-proceed iteration cap or advance the user turn-token.
+    this.wsBridge.injectUserMessage(companionSessionId, message, "server:agent");
   }
 
   /** Set up bidirectional relay between a Companion session and a Linear agent session. */

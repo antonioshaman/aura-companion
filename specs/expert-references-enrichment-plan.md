@@ -156,7 +156,7 @@ Then all v1 file digests are unchanged
 
 ### Story 3: Phase 3α closes with HANDOFF capturing 14 commit SHAs
 
-**When** the 14th commit lands and validator PASSes, **I want to** write `HANDOFF-phase-3-α-CLOSURE.md` per EC-32, **so I can** hand off to Phase 3β/γ planning with attributed commit list and closure state.
+**When** the 14th commit lands and validator PASSes, **I want to** write `docs/history/HANDOFF-phase-3-α-CLOSURE.md` per EC-32, **so I can** hand off to Phase 3β/γ planning with attributed commit list and closure state.
 
 **Acceptance criteria:**
 
@@ -202,7 +202,7 @@ Then this is flagged as out-of-scope drift; raise to user before HANDOFF commit
 - Zero validator FAIL across 14 briefs (serial pipeline)
 - `_phase2-coverage-tokens.yml` grows by ~70-140 tokens (~5-10 per expert)
 - `_ref-mirrors.lock` grows by 11 new canonical entries (with mirror sets); 3 existing entries get sha256 bumps
-- Skills-repo HEAD sha advances 14 times; aura-companion `HANDOFF-phase-3-α-CLOSURE.md` committed
+- Skills-repo HEAD sha advances 14 times; aura-companion `docs/history/HANDOFF-phase-3-α-CLOSURE.md` committed
 - EC-30 token-budget probe at /council-plan-aura-v2 stage: if ≤100k per phase, run 3α single phase; if exceeds, split 3α₁ (3 append) + 3α₂ (11 seed) with intermediate HANDOFF per EC-32
 
 ## Section D reconciliation

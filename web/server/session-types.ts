@@ -146,6 +146,13 @@ export interface CLIResultMessage {
   api_error_status?: number;
   result?: string;
   errors?: string[];
+  /**
+   * Why the CLI ended the turn (Claude Code >= 2.1). Observed values include
+   * `api_error`, `blocking_limit`, and `aborted_streaming` — the last one is
+   * what `--resume` emits to close a turn the previous process was killed in
+   * (see `src/utils/resume-interrupted.ts`). Absent on Codex results.
+   */
+  terminal_reason?: string;
   duration_ms: number;
   duration_api_ms: number;
   num_turns: number;
@@ -560,6 +567,10 @@ export type BrowserIncomingMessageBase =
      *   - `cycle-progress`  counter changed (may be increment or reset)
      *   - `converged`       threshold reached; UI flips ☼ row to ✅ badge
      *   - `revoked`         STOP arrived post-convergence; back to in-progress
+     *   - `not-counted`     P3/CONV-HONEST: a clean review that reviewed
+     *                       nothing (no changed files / no host-observed
+     *                       reads) or carried a grounding-downgraded STOP
+     *                       (CONV-DOWNGRADE); counter unchanged, `notCountedReason` set
      *
      * `cycleNumber` / `convergenceThreshold` / `convergenceState` carry
      * the full server-side state so the frontend can render without
@@ -567,10 +578,11 @@ export type BrowserIncomingMessageBase =
      */
     type: "group_convergence";
     sessionGroupId: string;
-    transition: "cycle-progress" | "converged" | "revoked";
+    transition: "cycle-progress" | "converged" | "revoked" | "not-counted";
     cycleNumber: number;
     convergenceThreshold: number;
     convergenceState: "in-progress" | "converged" | "revoked";
+    notCountedReason?: "no_changed_files" | "no_files_read" | "downgraded_stop";
     /** Wallclock (ms) the server processed the transition. */
     timestamp: number;
   };
@@ -591,7 +603,36 @@ export interface BrowserObserverFinding {
   /** True when grounding validation downgraded this from STOP → NOTE. */
   wasDowngraded?: boolean;
   /** Why grounding downgraded this finding. Set iff wasDowngraded. */
-  downgradeReason?: "evidence_not_in_modified_set" | "evidence_missing_on_disk" | "wake_version_mismatch";
+  downgradeReason?: BrowserObserverDowngradeReason;
+  /**
+   * B2 (meta-diet): set on a STOP that survived every grounding downgrade but
+   * is only weakly grounded (no cited lines / claim names nothing on them /
+   * lines unreadable). Severity stays STOP; the browser keeps it out of the
+   * blocker banner and shows it in the findings log with a chip.
+   */
+  weakEvidence?: BrowserObserverWeakEvidenceReason;
+  /**
+   * B2b (meta-diet): set on a live STOP whose claim matches one a human already
+   * dismissed in this group (see `observer-disputes.ts`). Severity stays STOP;
+   * the browser keeps it out of the blocker banner and marks it in the log.
+   */
+  disputed?: BrowserObserverDisputeMatch;
+  /**
+   * FIX-AP-3 (meta-diet): set (REST bootstrap only) on a finding that holds the
+   * group's auto-proceed although the banner predicate alone would hide it —
+   * a raw STOP whose grounding verdict was never frozen and that re-grounding
+   * now shows as NOTE / weak. The browser shows it as a blocker so no hold is
+   * invisible; "Dismiss for now" / "Dispute" release it.
+   */
+  holdsAutoProceed?: true;
+  /**
+   * BANNER-RESOLVED (meta-diet): set (REST bootstrap only) on a finding a
+   * human released with "Dismiss for now" (`<group>-resolved-stops.json`).
+   * The browser keeps it out of the blocker banner, the title count and the
+   * Sidebar unread count, and marks it "dismissed" in the findings log.
+   * Never set together with `holdsAutoProceed`.
+   */
+  dismissed?: true;
   /**
    * Real event time (ms epoch), server-stamped from the review FILE's mtime.
    * Stamped on BOTH paths: REST bootstrap (`getGroupReviewsForBootstrap`) and
@@ -608,8 +649,23 @@ export interface BrowserObserverFinding {
 export interface BrowserObserverDowngrade {
   /** Finding id (correlates with `findings[].id` when downgraded entry kept in stream). */
   id: string;
-  reason: "evidence_not_in_modified_set" | "evidence_missing_on_disk" | "wake_version_mismatch";
+  reason: BrowserObserverDowngradeReason;
 }
+
+export type BrowserObserverDowngradeReason =
+  | "evidence_not_in_modified_set"
+  | "evidence_missing_on_disk"
+  | "evidence_lines_out_of_range"
+  | "evidence_lines_unchanged"
+  | "wake_version_mismatch";
+
+/** How a re-raised STOP matched an earlier dispute (`observer-disputes.ts`). */
+export type BrowserObserverDisputeMatch = "same_claim" | "shared_anchor";
+
+export type BrowserObserverWeakEvidenceReason =
+  | "no_cited_lines"
+  | "claim_symbols_not_on_cited_lines"
+  | "cited_lines_unreadable";
 
 /**
  * Council Mode group — browser wire shape. The subset of the coordinator's

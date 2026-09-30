@@ -97,7 +97,6 @@ Based on John Carmack's engineering philosophy. A council of domain experts revi
 | `/council-implement` | Execute council plans task-by-task with per-task expert guidance |
 | `/spec-writer` | Generate structured specs with Job Stories + Gherkin acceptance criteria |
 | `/test-architect` | Audit test quality, detect AI shortcut patterns, specify tests before implementation |
-| `/self-improvement` | Continuous learning: log errors, corrections, and feature requests |
 
 **Council experts include:** Troy Hunt (security), Martin Fowler (refactoring), Kent Beck (testing), Brandur Leach (databases), Simon Willison (LLM pipelines), Karri Saarinen (UI), Vitaly Friedman (UX), plus stack-specific Backend, Realtime, Subprocess, a11y, and Deploy experts.
 

@@ -23,6 +23,9 @@ describe("buildCliFailedFrame — shape", () => {
     ["container_stopped" as const, false],
     ["binary_missing" as const, false],
     ["browser_closed_no_reconnect" as const, true],
+    // P4/FIX-RECONNECT-RELAUNCH: the backend was down at drain time —
+    // unusable even if a deaf process still exists.
+    ["backend_dead" as const, false],
   ])("%s -> subprocessAlive=%s", (reason, alive) => {
     const frame = buildCliFailedFrame(reason, "sess_1", {
       seq: 42,

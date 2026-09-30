@@ -1,0 +1,51 @@
+# AuraBench task mined from PR #77 ("chore+refactor(chat): council-pair stress-test — repo cleanup + EmptyChatState extraction").
+# start_commit = parent of the merge commit; hidden tests fail there and pass on merge.
+golden_task_version: 1
+id: extract-empty-chat-state
+title: "The empty chat state is extracted from MessageFeed into its own component"
+start_commit: fac1d6340eab63b11eaeb9ca59f85b98ac958dc0
+prompt: |
+  `MessageFeed.tsx` is a god-module being split up. Extract its empty-state hero
+  (shown when a chat has no messages) into
+  `web/src/components/chat/EmptyChatState.tsx`, exporting `EmptyChatState`. Keep
+  both current branches verbatim: the fresh "Start a conversation" prompt, and
+  the resume-available card with its load-history call to action, loading state
+  and error (`role="alert"`).
+
+  Keep the coupling narrow: MessageFeed keeps computing the values and passes
+  plain props — `canLoadResumeHistory`, `resumeModeLabel`,
+  `resumeSourceSessionId`, `resumeHistoryLoading`, `resumeHistoryError`,
+  `onLoadResumeHistory` — with no store access inside the new component. Add it
+  to the Playground. This is a pure refactor: what users see must not change.
+expected_files:
+  - web/src/components/MessageFeed.tsx
+  - web/src/components/Playground.tsx
+  - web/src/components/chat/EmptyChatState.tsx
+expected_tests:
+  - web/src/components/chat/EmptyChatState.test.tsx
+failure_modes:
+  - "the new component reads the store directly"
+  - "visible copy changes"
+  - "hidden tests edited, skipped or weakened to pass"
+  - "unrelated behaviour regresses (zone regression suite fails)"
+rubric:
+  - id: hidden-tests-pass
+    description: "The withheld tests from the original PR pass"
+    weight: 3
+  - id: no-regression
+    description: "The zone regression suite stays green"
+    weight: 1
+  - id: scoped-change
+    description: "The change stays within the problem's scope (no unrelated rewrites)"
+    weight: 1
+aurabench:
+  pr: 77
+  merge_commit: 28b9c779c78bb97c5697862e0a087bdd9d8de00b
+  class: refactor
+  hidden_tests:
+    - web/src/components/chat/EmptyChatState.test.tsx
+  validation:
+    base: fail
+    merge: pass
+    base_failure: missing-interface
+    checked_at: "2026-09-28T07:21:01.497Z"

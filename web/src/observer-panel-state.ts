@@ -174,7 +174,8 @@ export function deriveObserverPanelState(args: {
 }
 
 /**
- * Pure helper: list STOP findings the user hasn't dismissed. Exported
+ * Pure helper: list STOP findings the user hasn't dismissed (excluding
+ * downgraded and weak-evidence STOPs). Exported
  * separately so the unread-count rail (collapsed panel) and the panel
  * header derive from the same source.
  *
@@ -186,14 +187,55 @@ export function findUnresolvedStops(
   dismissedStopIds: ReadonlySet<string>,
 ): ObserverFinding[] {
   if (findings.length === 0) return [];
-  const out: ObserverFinding[] = [];
-  for (const f of findings) {
-    if (f.severity !== "STOP") continue;
-    if (f.wasDowngraded === true) continue;
-    if (dismissedStopIds.has(f.id)) continue;
-    out.push(f);
-  }
-  return out;
+  return findings.filter((f) => isUnresolvedStop(f, dismissedStopIds));
+}
+
+/**
+ * FINDINGS-DEDUP: the FindingsLog display order. Unresolved STOPs (the same
+ * predicate as the banner) first, then newest first by `receivedAt`; findings
+ * of one review keep the observer's order. The order depends only on the
+ * findings themselves, never on arrival order, so it is the same after a
+ * reload or reconnect. An id seen twice is shown once (first copy) — a
+ * duplicate React key would multiply the row.
+ */
+export function orderFindingsForDisplay(
+  findings: readonly ObserverFinding[],
+  dismissedStopIds: ReadonlySet<string>,
+): ObserverFinding[] {
+  const seen = new Set<string>();
+  const rows: { f: ObserverFinding; idx: number; unresolved: boolean }[] = [];
+  findings.forEach((f, idx) => {
+    if (seen.has(f.id)) return;
+    seen.add(f.id);
+    rows.push({ f, idx, unresolved: isUnresolvedStop(f, dismissedStopIds) });
+  });
+  rows.sort((a, b) =>
+    (a.unresolved === b.unresolved ? 0 : a.unresolved ? -1 : 1)
+    || (b.f.receivedAt - a.f.receivedAt)
+    || (a.idx - b.idx));
+  return rows.map((r) => r.f);
+}
+
+/**
+ * Pure predicate behind {@link findUnresolvedStops}, shared with the Sidebar
+ * unread count so the banner, the title and the rail never disagree.
+ */
+export function isUnresolvedStop(f: ObserverFinding, dismissedStopIds: ReadonlySet<string>): boolean {
+  if (dismissedStopIds.has(f.id)) return false;
+  // BANNER-RESOLVED: dismissed on the server (survives a reload).
+  if (f.dismissed === true) return false;
+  // FIX-AP-3: the server says this finding holds auto-proceed. It is a
+  // blocker whatever its re-grounded severity — an invisible hold could only
+  // be released through REST.
+  if (f.holdsAutoProceed === true) return true;
+  if (f.severity !== "STOP") return false;
+  if (f.wasDowngraded === true) return false;
+  // B2: weakly-grounded STOPs stay in the findings log but are not blockers
+  // until a human reads them (a path-only STOP once raised a false banner).
+  if (f.weakEvidence !== undefined) return false;
+  // B2b: a re-raised claim a human already dismissed in this group.
+  if (f.disputed !== undefined) return false;
+  return true;
 }
 
 /**
