@@ -207,6 +207,9 @@ export class AuraSessionTracker {
       put("cost_usd", m.cost_usd);
     }
     for (const f of unknown) out[f] = null;
+    // Standing context of the orchestrator only — the observer has its own prompt.
+    const first = this.sessions.get(this.primaryId)!.acc.metrics.context_first_call;
+    if (first !== undefined) out.context_first_call = first;
     return out;
   }
 }
