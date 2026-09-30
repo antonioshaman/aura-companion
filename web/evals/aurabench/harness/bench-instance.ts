@@ -17,9 +17,13 @@
  *    smoke instance mints its own instance id and heartbeats into the public
  *    install/online counter (it did in pilot 1). Forced, not inherited.
  *
- * The bench HOME gets `.claude/.credentials.json` + a dereferenced copy of
- * `.claude/skills` (the council skills are user-level) — NOT `settings.json`
- * (its hooks write into the real `~/.claude`). `.codex` is the bench's OWN
+ * The bench HOME gets a dereferenced copy of `.claude/skills` (the council
+ * skills are user-level) — NOT `settings.json` (its hooks write into the real
+ * `~/.claude`) and NOT `.credentials.json` (P6/FIX-D2-CLAUDE-AUTH: a Claude
+ * CLI of the bench refreshed that copy and spent prod's single-use refresh
+ * token; a copy left by an older run is moved to quarantine). Claude sessions
+ * authenticate with the bare prod access token, set per cell through the
+ * instance's `claudeCodeOAuthToken` setting (see `claude-auth.ts`). `.codex` is the bench's OWN
  * directory holding only an `auth.json` symlink to the real one — the server
  * seeds per-session Codex homes from `~/.codex`, so this is what F/G sessions
  * see: no config, memories, skills or AGENTS.md, same as naked B. (Pilot 1
@@ -46,6 +50,7 @@ import {
 import { join } from "node:path";
 import { benchChildEnv } from "./proc.js";
 import { CODEX_AUTH_FILE } from "./codex-home.js";
+import { quarantineClaudeCredentialCopies } from "./claude-auth.js";
 
 export const BENCH_PORT = 3499;
 export const PROD_PORT = 3456;
@@ -57,6 +62,8 @@ export interface BenchInstancePaths {
   recordings: string;
   councilStats: string;
   log: string;
+  /** Where credentials copies found under the bench root are moved. */
+  claudeQuarantine: string;
 }
 
 export function benchInstancePaths(benchRoot: string): BenchInstancePaths {
@@ -67,6 +74,7 @@ export function benchInstancePaths(benchRoot: string): BenchInstancePaths {
     recordings: join(benchRoot, "recordings"),
     councilStats: join(benchRoot, "council-stats"),
     log: join(benchRoot, "instance.log"),
+    claudeQuarantine: join(benchRoot, "claude-auth", "quarantine"),
   };
 }
 
@@ -162,13 +170,13 @@ export function prepareBenchHome(
   paths: BenchInstancePaths,
   realHome: string,
   port: number = BENCH_PORT,
-): { skillUrlRewrites: ReturnType<typeof rewriteSkillProdUrls>; staleSessionsRetired: number } {
+): { skillUrlRewrites: ReturnType<typeof rewriteSkillProdUrls>; staleSessionsRetired: number; claudeCredentialsQuarantined: string[] } {
   for (const d of [paths.home, paths.tmp, paths.recordings, paths.councilStats]) mkdirSync(d, { recursive: true });
   const staleSessionsRetired = retireStaleSessions(paths);
   const claude = join(paths.home, ".claude");
   mkdirSync(claude, { recursive: true, mode: 0o700 });
-  // Refreshed on every start: prod keeps rotating the real credentials.
-  cpSync(join(realHome, ".claude", ".credentials.json"), join(claude, ".credentials.json"));
+  // Never a copy of the real credentials (P6/FIX-D2-CLAUDE-AUTH); an old one goes to quarantine.
+  const claudeCredentialsQuarantined = quarantineClaudeCredentialCopies([claude], paths.claudeQuarantine, { maxDepth: 1 });
   const skills = join(realHome, ".claude", "skills");
   if (existsSync(skills)) {
     rmSync(join(claude, "skills"), { recursive: true, force: true });
@@ -176,7 +184,7 @@ export function prepareBenchHome(
   }
   const skillUrlRewrites = rewriteSkillProdUrls(join(claude, "skills"), port);
   prepareBenchCodexHome(join(paths.home, ".codex"), join(realHome, ".codex"));
-  return { skillUrlRewrites, staleSessionsRetired };
+  return { skillUrlRewrites, staleSessionsRetired, claudeCredentialsQuarantined };
 }
 
 /** The bench HOME's `.codex`: a real directory with only an `auth.json`
@@ -207,7 +215,7 @@ export async function startBenchInstance(opts: {
 }): Promise<RunningInstance> {
   const port = opts.port ?? BENCH_PORT;
   const paths = benchInstancePaths(opts.benchRoot);
-  const { skillUrlRewrites, staleSessionsRetired } = prepareBenchHome(paths, opts.realHome, port);
+  const { skillUrlRewrites, staleSessionsRetired, claudeCredentialsQuarantined } = prepareBenchHome(paths, opts.realHome, port);
   if (skillUrlRewrites.remaining > 0) throw new Error(`bench skills still reference the prod API after rewrite (${skillUrlRewrites.remaining})`);
   const env = benchInstanceEnv(process.env, paths, port);
   const baseUrl = `http://127.0.0.1:${port}`;
@@ -241,6 +249,8 @@ export async function startBenchInstance(opts: {
       orphan_reaper: "off",
       telemetry: "off",
       codex_home: "bench-owned ~/.codex (auth.json symlink only)",
+      claude_auth: "no .credentials.json; access token only, via the claudeCodeOAuthToken setting",
+      claude_credentials_quarantined: claudeCredentialsQuarantined.length,
       prod_port: PROD_PORT,
       skill_prod_url_rewrites: skillUrlRewrites,
       stale_sessions_retired: staleSessionsRetired,

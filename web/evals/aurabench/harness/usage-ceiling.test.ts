@@ -69,7 +69,12 @@ describe("evaluateUsageGate", () => {
 
   it("fails closed on a missing or invalid weekly window", () => {
     // The server's error shape: every window null (credentials/upstream failure).
-    expect(evaluateUsageGate({ five_hour: null, seven_day: null, extra_usage: null }, C).ok).toBe(false);
+    // Still a hold — and since P6/FIX-D2-CLAUDE-AUTH a FATAL one (prod OAuth dead).
+    expect(evaluateUsageGate({ five_hour: null, seven_day: null, extra_usage: null }, C)).toMatchObject({ ok: false, fatal: true });
+    // A missing weekly window next to a live 5-hour one is a plain hold, not fatal.
+    const partial = evaluateUsageGate({ five_hour: { utilization: 5 }, seven_day: null }, C);
+    expect(partial.ok).toBe(false);
+    if (!partial.ok) expect(partial.fatal).toBeUndefined();
     expect(evaluateUsageGate({ seven_day: { utilization: "37" } }, C).ok).toBe(false);
     expect(evaluateUsageGate({ seven_day: { utilization: null } }, C).ok).toBe(false);
     expect(evaluateUsageGate(null, C).ok).toBe(false);
@@ -215,6 +220,40 @@ describe("runAblation with the usage gate", () => {
     expect(line).toContain("seven_day 80%");
     expect(line).toContain("five_hour 12%");
     expect(line).toContain("resets_at 2026-09-30T12:00:00Z");
+  });
+
+  // P6/FIX-D2-CLAUDE-AUTH: on 2026-09-30 prod's Claude OAuth was dead and the
+  // gate held silently for 3 h. A fatal answer is re-confirmed, then the run STOPS.
+  const dead: UsageGate = { ok: false, fatal: true, reason: "prod Claude OAuth looks dead", sevenDay: null, fiveHour: null, resetsAt: null };
+
+  it("stops the run on a confirmed fatal gate instead of holding", async () => {
+    const { d, events, logs } = setup([dead, dead, dead]);
+    const s = await runAblation(d);
+    expect(events).toEqual(["gate hold", "sleep 60000", "gate hold", "sleep 60000", "gate hold"]);
+    expect(s.stoppedOnAuth).toBe("prod Claude OAuth looks dead");
+    expect(s.recorded).toBe(0);
+    expect(s.usageHolds).toBe(0);
+    expect(logs.some((l) => l.includes("STOP: prod Claude OAuth looks dead"))).toBe(true);
+  });
+
+  it("a fatal blip that recovers within the confirmations does not stop the run", async () => {
+    const { d, events } = setup([dead, dead]);
+    const s = await runAblation(d);
+    expect(s.stoppedOnAuth).toBeNull();
+    expect(events.slice(0, 6)).toEqual(["gate hold", "sleep 60000", "gate hold", "sleep 60000", "gate open", "run t1|A|1"]);
+    expect(s.recorded).toBe(2);
+  });
+
+  it("passes the planned cell to the gate (its timeout decides the token check)", async () => {
+    const { d } = setup([]);
+    const seen: string[] = [];
+    const inner = d.usageGate!;
+    d.usageGate = async (c) => {
+      seen.push(c.key);
+      return inner(c);
+    };
+    await runAblation(d);
+    expect(seen).toEqual(["t1|A|1", "t1|C|1"]);
   });
 
   it("re-checks the gate before retrying a limit-interrupted cell", async () => {

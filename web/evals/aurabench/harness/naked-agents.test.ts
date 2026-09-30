@@ -3,8 +3,11 @@
  * scripted fake — no real `claude`/`codex` is started.
  *
  * Validates:
- *   - A runs with a FRESH per-cell CLAUDE_CONFIG_DIR (credentials copied from
- *     the real ~/.claude, nothing else) and the isolating flags
+ *   - A runs with a FRESH, EMPTY per-cell CLAUDE_CONFIG_DIR — no credentials
+ *     copy (P6/FIX-D2-CLAUDE-AUTH: a copied refresh token logged prod out) —
+ *     authenticated by the bare access token in CLAUDE_CODE_OAUTH_TOKEN, and
+ *     a credentials file found in the config dir afterwards is a violation;
+ *     the isolating flags
  *     (`--strict-mcp-config`, `--include-hook-events`, no session persistence);
  *     the init-frame isolation verdict lands in the result;
  *   - B runs `codex exec --json --ignore-user-config` (NOT `--ephemeral`:
@@ -39,7 +42,7 @@ const cleanInit = { type: "system", subtype: "init", model: "m", skills: ["simpl
 
 function deps(result: Partial<SpawnResult>, extra: Partial<NakedDeps> = {}) {
   const spawned: { cmd: string; args: string[]; o: SpawnOptions }[] = [];
-  const prepared: [string, string][] = [];
+  const prepared: string[] = [];
   const d: NakedDeps = {
     spawn: async (cmd, args, o) => {
       spawned.push({ cmd, args, o });
@@ -49,7 +52,9 @@ function deps(result: Partial<SpawnResult>, extra: Partial<NakedDeps> = {}) {
     realClaudeDir: "/home/u/.claude",
     realCodexDir: "/home/u/.codex",
     userSkillNames: () => ["council-review-aura"],
-    prepareClaudeConfig: (dir, from) => prepared.push([dir, from]),
+    prepareClaudeConfig: (dir) => prepared.push(dir),
+    claudeAccessToken: () => "at-live",
+    credentialCopies: () => [],
     present: () => false,
     now: () => 0,
     // Codex-home fs work is proven against real files in codex-home.test.ts;
@@ -63,17 +68,33 @@ function deps(result: Partial<SpawnResult>, extra: Partial<NakedDeps> = {}) {
 }
 
 describe("naked Claude (A)", () => {
-  it("uses a fresh per-cell config dir with only the credentials and isolating flags", async () => {
+  it("uses a fresh empty per-cell config dir, the access token env and isolating flags", async () => {
     const stdout = [line(cleanInit), line({ type: "result", subtype: "success", is_error: false, num_turns: 2, total_cost_usd: 0.5, usage: {} })].join("\n");
     const { d, spawned, prepared } = deps({ stdout });
     const r = await nakedClaudeRunner(d)(ctx("A"));
-    expect(prepared).toEqual([["/cells/t1/A-1/claude-config", "/home/u/.claude/.credentials.json"]]);
+    expect(prepared).toEqual(["/cells/t1/A-1/claude-config"]);
+    // Only an access token reaches the CLI — nothing it could refresh prod's login with.
+    expect(spawned[0]!.o.env?.CLAUDE_CODE_OAUTH_TOKEN).toBe("at-live");
     expect(spawned[0]!.cmd).toBe("claude");
     expect(spawned[0]!.o.env?.CLAUDE_CONFIG_DIR).toBe("/cells/t1/A-1/claude-config");
     expect(spawned[0]!.o.cwd).toBe("/wt/cell");
     expect(spawned[0]!.args).toEqual(claudeNakedArgs("do the thing"));
     for (const f of ["--strict-mcp-config", "--include-hook-events", "--no-session-persistence"]) expect(spawned[0]!.args).toContain(f);
-    expect(r).toMatchObject({ kind: "done", status: "completed", isolation: { isolated: true } });
+    expect(r).toMatchObject({ kind: "done", status: "completed", isolation: { isolated: true, credential_copies: [] } });
+  });
+
+  it("flags a credentials file that appears in the cell config dir", async () => {
+    const stdout = [line(cleanInit), line({ type: "result", subtype: "success", is_error: false })].join("\n");
+    const r = await nakedClaudeRunner(deps({ stdout }, { credentialCopies: (dirs) => dirs.map((d) => `${d}/.credentials.json`) }).d)(ctx("A"));
+    if (r.kind !== "done") throw new Error("expected done");
+    expect(r.isolation.isolated).toBe(false);
+    expect(r.isolation.violations).toEqual(["Claude credentials file in the cell config: /cells/t1/A-1/claude-config/.credentials.json"]);
+  });
+
+  it("does not start the agent without a prod access token", async () => {
+    const { d, spawned } = deps({}, { claudeAccessToken: () => { throw new Error("no prod Claude access token"); } });
+    await expect(nakedClaudeRunner(d)(ctx("A"))).rejects.toThrow("no prod Claude access token");
+    expect(spawned).toHaveLength(0);
   });
 
   it("records an isolation violation instead of hiding it", async () => {

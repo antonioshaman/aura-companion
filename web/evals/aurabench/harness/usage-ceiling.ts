@@ -18,6 +18,12 @@
  * A malformed `five_hour` object is a hold. Invalid env values fall back to
  * the default (never "no ceiling").
  *
+ * P6/FIX-D2-CLAUDE-AUTH: the all-null body (`five_hour`, `seven_day` both
+ * null) is the server's shape when prod's Claude OAuth cannot be read or
+ * refreshed. On 2026-09-30 that meant prod was logged out, and the gate held
+ * silently for 3 h. It is now `fatal`: the driver re-confirms it and then
+ * STOPS the run for a human instead of waiting.
+ *
  * Pure except `fetchUsageGate` (injected fetch). Firewall-clean.
  */
 
@@ -33,7 +39,7 @@ export interface UsageCeilings {
 
 export type UsageGate =
   | { ok: true; sevenDay: number; fiveHour: number | null }
-  | { ok: false; reason: string; sevenDay: number | null; fiveHour: number | null; resetsAt: string | null };
+  | { ok: false; reason: string; sevenDay: number | null; fiveHour: number | null; resetsAt: string | null; fatal?: boolean };
 
 type Obj = Record<string, unknown>;
 const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
@@ -66,6 +72,9 @@ function readWindow(v: unknown): Window | null | undefined {
 /** Decides whether a cell may start, from a parsed `/api/usage-limits` body. */
 export function evaluateUsageGate(body: unknown, c: UsageCeilings): UsageGate {
   if (!isObj(body)) return { ok: false, reason: "invalid response", sevenDay: null, fiveHour: null, resetsAt: null };
+  if (body.seven_day == null && body.five_hour == null) {
+    return { ok: false, fatal: true, reason: "prod Claude OAuth looks dead: usage-limits returned no windows", sevenDay: null, fiveHour: null, resetsAt: null };
+  }
   const week = readWindow(body.seven_day);
   const five = readWindow(body.five_hour);
   const fiveHour = five ? five.utilization : null;
