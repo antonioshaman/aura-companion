@@ -8,8 +8,10 @@
  *     per-layer table in D3 measures one change at a time);
  *   - naked variants carry no layers, Codex variants never get the observer
  *     (Council Mode rejects a Codex primary);
- *   - Council pairs (D, E) carry the observer-loop directive flag; only E
+ *   - Council pairs (D, E, H) carry the observer-loop directive flag; only E
  *     requests auto-proceed (FIX-D2-2);
+ *   - BENCH-H: H is D with a Codex observer — same layers, loop and no
+ *     auto-proceed — so the D ↔ H comparison isolates the observer provider;
  *   - `--variants` parsing rejects unknown ids instead of dropping them;
  *   - the cell plan is repetition-major and keys are unique;
  *   - resume: `completedCellKeys` reads keys back, ignores torn lines and
@@ -23,11 +25,23 @@ import { CELL_RECORD_VERSION, cellKey, completedCellKeys, parseClassTimeouts, pl
 const onLayers = (v: AuraVariant) => Object.entries(v.layers).filter(([, s]) => s === "on").map(([k]) => k).sort();
 
 describe("VARIANTS", () => {
-  it("defines exactly A–G, A/B naked, C–G through Companion", () => {
+  it("defines exactly A–H, A/B naked, C–H through Companion", () => {
     expect(Object.keys(VARIANTS).sort()).toEqual([...VARIANT_IDS]);
     expect(VARIANTS.A).toMatchObject({ mode: "naked", provider: "claude" });
     expect(VARIANTS.B).toMatchObject({ mode: "naked", provider: "codex" });
-    for (const id of ["C", "D", "E", "F", "G"] as const) expect(VARIANTS[id].mode).toBe("aura");
+    for (const id of ["C", "D", "E", "F", "G", "H"] as const) expect(VARIANTS[id].mode).toBe("aura");
+  });
+
+  it("H = D with a Codex observer: only the pairing differs (BENCH-H, the prod pair)", () => {
+    const d = VARIANTS.D as AuraVariant;
+    const h = VARIANTS.H as AuraVariant;
+    expect(h.councilPairing).toBe("claude+codex");
+    // Everything but id/label/pairing is identical to D, so a D↔H gap can
+    // only come from the observer's provider (no skills, no auto-proceed).
+    const strip = ({ id: _i, label: _l, councilPairing: _c, ...rest }: AuraVariant) => rest;
+    expect(strip(h)).toEqual(strip(d));
+    expect(h.autoProceedOnIdle).toBeUndefined();
+    expect(h.layers.council).toBe("off");
   });
 
   it("the Claude ladder A→C→D→E adds layers monotonically, one group per step", () => {
@@ -87,9 +101,10 @@ describe("parseVariantList", () => {
     expect(parseVariantList(" a, C ,a")).toEqual({ ok: true, ids: ["A", "C"] });
   });
   it("rejects unknown ids instead of skipping them", () => {
-    const r = parseVariantList("A,H");
+    // H is a real variant since BENCH-H; Z is not.
+    const r = parseVariantList("A,Z");
     expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.reason).toContain("H");
+    if (!r.ok) expect(r.reason).toContain("Z");
   });
 });
 

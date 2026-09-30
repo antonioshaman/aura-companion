@@ -27,6 +27,14 @@
  *     pair's `.council/` traces become `isolation.layer_evidence`, scoped to
  *     the pair's group, so "D/E measured the observer / auto-proceed" is
  *     proven per cell, not assumed.
+ *   - BENCH-H (claude+codex): the create body carries BOTH binaries (the
+ *     Codex observer spawns from the same body); the halves the server
+ *     actually spawned (backend + resolved model) land in
+ *     `isolation.council_halves`, and a wrong backend or a Codex observer
+ *     off the Codex pin becomes a confound (council create forwards one
+ *     model to both halves); `layer_evidence.review_providers` names the
+ *     provider that wrote each review, so "a Codex observer reviewed" is
+ *     proven per cell.
  */
 
 import { describe, it, expect } from "vitest";
@@ -38,6 +46,8 @@ import { VARIANTS, type AuraVariant } from "./variants.js";
 import { AuraSessionTracker } from "./aura-session-tracker.js";
 import {
   auraRunner,
+  councilHalvesConfounds,
+  councilHalvesFromCreate,
   createBody,
   observerLoopDirective,
   quietWindowMs,
@@ -70,6 +80,14 @@ describe("createBody / sessionIdsFromCreate / quietWindowMs", () => {
     expect("codexBinary" in createBody(VARIANTS.E as AuraVariant, "/wt", undefined, bins)).toBe(false);
     expect(createBody(VARIANTS.F as AuraVariant, "/wt", undefined, bins)).toMatchObject({ codexBinary: bins.codex });
   });
+  it("claude+codex pair (H) passes both binaries — the Codex observer spawns from the same body", () => {
+    const bins = { claude: "/u/.local/bin/claude", codex: "/u/.bun/bin/codex" };
+    const b = createBody(VARIANTS.H as AuraVariant, "/wt", "claude-opus-5-5", bins);
+    expect(b).toMatchObject({ backend: "claude", councilMode: "council", councilPairing: "claude+codex", claudeBinary: bins.claude, codexBinary: bins.codex });
+    // Same layers as D, and no auto-proceed (D ↔ H differs by the observer only).
+    expect(b.layers).toEqual((VARIANTS.D as AuraVariant).layers);
+    expect("autoProceedOnIdle" in b).toBe(false);
+  });
   it("Codex variant uses the codex backend", () => {
     expect(createBody(VARIANTS.F as AuraVariant, "/wt").backend).toBe("codex");
   });
@@ -83,6 +101,39 @@ describe("createBody / sessionIdsFromCreate / quietWindowMs", () => {
       others: ["o"],
       groupId: "grp_1",
     });
+  });
+  it("council halves: parsed from the create response; null for a solo create", () => {
+    expect(
+      councilHalvesFromCreate({
+        primary: { sessionId: "p", backendType: "claude", model: "claude-opus-5-5" },
+        observer: { sessionId: "o", backendType: "codex", model: "gpt-5.5" },
+      }),
+    ).toEqual({ primary: { backend: "claude", model: "claude-opus-5-5" }, observer: { backend: "codex", model: "gpt-5.5" } });
+    expect(councilHalvesFromCreate({ primary: { sessionId: "p" }, observer: { sessionId: "o" } })).toEqual({
+      primary: { backend: null, model: null },
+      observer: { backend: null, model: null },
+    });
+    expect(councilHalvesFromCreate({ sessionId: "s" })).toBeNull();
+  });
+  it("council halves confounds: wrong backend and a Codex observer off the Codex pin are flagged", () => {
+    const H = VARIANTS.H as AuraVariant;
+    const models = { claude: "claude-opus-5-5", codex: "gpt-5.5" };
+    const ok = { primary: { backend: "claude", model: "claude-opus-5-5" }, observer: { backend: "codex", model: "gpt-5.5" } };
+    expect(councilHalvesConfounds(H, ok, models)).toEqual([]);
+    // The server picked another launchable Codex model for the Claude pin.
+    expect(councilHalvesConfounds(H, { ...ok, observer: { backend: "codex", model: "gpt-5.3-codex" } }, models)).toEqual([
+      "codex observer ran model gpt-5.3-codex, not the pinned gpt-5.5 (council create forwards one model to both halves)",
+    ]);
+    // A Claude observer under H's name would measure D: flagged, not hidden.
+    expect(councilHalvesConfounds(H, { ...ok, observer: { backend: "claude", model: "claude-opus-5-5" } }, models).join("\n")).toMatch(
+      /observer ran backend claude, not codex/,
+    );
+    expect(councilHalvesConfounds(H, null, models)).toEqual(["council create response carried no primary/observer session info"]);
+    // D's observer shares the orchestrator's provider → its model is the pin by construction.
+    const D = VARIANTS.D as AuraVariant;
+    expect(councilHalvesConfounds(D, { primary: ok.primary, observer: { backend: "claude", model: "claude-opus-5-5" } }, models)).toEqual([]);
+    // Solo variants have no halves to check.
+    expect(councilHalvesConfounds(VARIANTS.C as AuraVariant, null, models)).toEqual([]);
   });
   it("quiet window grows for council and auto-proceed", () => {
     expect(quietWindowMs(VARIANTS.C as AuraVariant)).toBe(60_000);
@@ -203,7 +254,15 @@ describe("AuraSessionTracker", () => {
 });
 
 /** Fake Companion: records REST calls; sockets deliver scripted messages when prompted. */
-function fakeCompanion(opts: { council?: boolean; noGroup?: boolean; survivors?: string[]; onPrompt?: (emit: (id: string, m: unknown) => void) => void; connectAfter?: number }) {
+function fakeCompanion(opts: {
+  council?: boolean;
+  noGroup?: boolean;
+  /** Observer half as the server reports it (default: a Claude observer). */
+  observer?: { backendType: string; model: string };
+  survivors?: string[];
+  onPrompt?: (emit: (id: string, m: unknown) => void) => void;
+  connectAfter?: number;
+}) {
   const calls: string[] = [];
   const sent: { id: string; data: unknown }[] = [];
   const handlers = new Map<string, (d: string) => void>();
@@ -215,7 +274,10 @@ function fakeCompanion(opts: { council?: boolean; noGroup?: boolean; survivors?:
     http: async (method, path, body) => {
       calls.push(`${method} ${path}${body ? ` ${JSON.stringify(body)}` : ""}`);
       if (path === "/api/sessions/create") {
-        const pair = { primary: { sessionId: "p" }, observer: { sessionId: "o" } };
+        const pair = {
+          primary: { sessionId: "p", backendType: "claude", model: "claude-opus-5-5" },
+          observer: { sessionId: "o", ...(opts.observer ?? { backendType: "claude", model: "claude-opus-5-5" }) },
+        };
         return {
           status: 200,
           json: opts.council ? (opts.noGroup ? pair : { sessionGroupId: "grp_abc", ...pair }) : { sessionId: "p" },
@@ -253,7 +315,7 @@ function fakeCompanion(opts: { council?: boolean; noGroup?: boolean; survivors?:
   return { d, calls, sent, emit };
 }
 
-const ctx = (variant: "C" | "D" | "E", timeoutMs = 3_600_000, worktree = "/wt/cell") => ({
+const ctx = (variant: "C" | "D" | "E" | "H", timeoutMs = 3_600_000, worktree = "/wt/cell") => ({
   task: { id: "t", prompt: "fix it" } as AuraBenchTask,
   variant: VARIANTS[variant],
   worktree,
@@ -399,6 +461,42 @@ describe("observer loop (FIX-D2-2)", () => {
   });
 });
 
+describe("auraRunner — H (claude+codex)", () => {
+  it("records the spawned halves and which provider reviewed; an off-pin Codex model is a confound", async () => {
+    const wt = mkdtempSync(join(tmpdir(), "aurabench-h-"));
+    const f = fakeCompanion({
+      council: true,
+      observer: { backendType: "codex", model: "gpt-5.3-codex" },
+      onPrompt: (emit) => {
+        mkdirSync(join(wt, ".council", "checkpoints"), { recursive: true });
+        mkdirSync(join(wt, ".council", "reviews"), { recursive: true });
+        writeFileSync(join(wt, ".council", "checkpoints", "bench-implement.grp_abc.json"), JSON.stringify({ phase: "bench-implement", sequence: 1 }));
+        writeFileSync(join(wt, ".council", "reviews", "bench-implement-grp_abc-codex-observer.md"), "[]");
+        emit("p", result());
+      },
+    });
+    f.d.models = { claude: "claude-opus-5-5", codex: "gpt-5.5" };
+    const r = await auraRunner(f.d)(ctx("H", 3_600_000, wt));
+    expect(r).toMatchObject({ kind: "done", status: "completed" });
+    expect(f.calls.find((c) => c.startsWith("POST /api/sessions/create"))).toContain('"councilPairing":"claude+codex"');
+    if (r.kind !== "done") return;
+    expect(r.isolation.council).toBe("claude+codex");
+    expect(r.isolation.council_halves).toEqual({
+      primary: { backend: "claude", model: "claude-opus-5-5" },
+      observer: { backend: "codex", model: "gpt-5.3-codex" },
+    });
+    expect(r.isolation.layer_evidence).toMatchObject({ observer_loop_ran: true, review_providers: ["codex"] });
+    expect(r.confounds.join("\n")).toMatch(/codex observer ran model gpt-5\.3-codex, not the pinned gpt-5\.5/);
+  });
+
+  it("a D cell with a Claude observer on the pin adds no halves confound", async () => {
+    const f = fakeCompanion({ council: true, onPrompt: (emit) => emit("p", result()) });
+    f.d.models = { claude: "claude-opus-5-5", codex: "gpt-5.5" };
+    const r = await auraRunner(f.d)(ctx("D"));
+    expect(r.kind === "done" && r.confounds.some((c) => /ran (backend|model)|session info/.test(c))).toBe(false);
+  });
+});
+
 describe("readLayerEvidence", () => {
   const setup = () => {
     const wt = mkdtempSync(join(tmpdir(), "aurabench-ev-"));
@@ -412,7 +510,7 @@ describe("readLayerEvidence", () => {
   };
 
   it("missing .council → empty evidence, no throw", () => {
-    expect(readLayerEvidence("/nonexistent/wt", "grp_x")).toEqual({ checkpoints: [], reviews: 0, observer_loop_ran: false, auto_proceed_fires: null });
+    expect(readLayerEvidence("/nonexistent/wt", "grp_x")).toEqual({ checkpoints: [], reviews: 0, review_providers: [], observer_loop_ran: false, auto_proceed_fires: null });
   });
 
   it("only the spawn checkpoint + its review → the loop did NOT run (pilot-1 shape of D)", () => {
@@ -444,6 +542,17 @@ describe("readLayerEvidence", () => {
     put("checkpoints/bench-implement.grp_other.json", JSON.stringify({ phase: "bench-implement", sequence: 1 }), 2000);
     put("reviews/bench-implement-grp_other-claude-observer.md", "[]", 2100);
     put("state/grp_other-auto-proceed-trace.json", JSON.stringify({ iterationCount: 3 }));
-    expect(readLayerEvidence(wt, "grp_a")).toEqual({ checkpoints: [], reviews: 0, observer_loop_ran: false, auto_proceed_fires: null });
+    expect(readLayerEvidence(wt, "grp_a")).toEqual({ checkpoints: [], reviews: 0, review_providers: [], observer_loop_ran: false, auto_proceed_fires: null });
+  });
+
+  it("review_providers lists who wrote the pair's reviews, from the pinned file name", () => {
+    const { wt, put } = setup();
+    put("reviews/spawn-grp_a-codex-observer.md", "[]", 1000);
+    put("reviews/bench-implement-grp_a-codex-observer.md", "[]", 2100);
+    put("reviews/bench-implement-grp_a-claude-observer.md", "[]", 2100);
+    // Another pair's review and an off-shape name never count.
+    put("reviews/bench-implement-grp_b-claude-observer.md", "[]", 2100);
+    put("reviews/notes-grp_a.txt", "x", 2100);
+    expect(readLayerEvidence(wt, "grp_a").review_providers).toEqual(["claude", "codex"]);
   });
 });

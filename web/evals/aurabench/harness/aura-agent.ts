@@ -1,5 +1,5 @@
 /**
- * Aura variant runner (C–G, P6/D2): drives a session on the ISOLATED bench
+ * Aura variant runner (C–H, P6/D2): drives a session on the ISOLATED bench
  * Companion instance (see `bench-instance.ts`, port 3499 — never prod :3456)
  * through its public REST + browser-WS API, exactly like the UI would:
  *
@@ -72,12 +72,14 @@ export function createBody(
   model?: string,
   binaries: { claude?: string; codex?: string } = {},
 ): Obj {
+  // A `claude+codex` pair spawns a Codex observer from the same body, so it
+  // needs the Codex binary too; otherwise only the provider's own matters.
+  const needs = (p: "claude" | "codex") => v.provider === p || v.councilPairing?.split("+").includes(p) === true;
   const body: Obj = {
     cwd,
     ...(model ? { model } : {}),
-    // Council pairs are claude+claude, so only the provider's own binary matters.
-    ...(binaries.claude && v.provider === "claude" ? { claudeBinary: binaries.claude } : {}),
-    ...(binaries.codex && v.provider === "codex" ? { codexBinary: binaries.codex } : {}),
+    ...(binaries.claude && needs("claude") ? { claudeBinary: binaries.claude } : {}),
+    ...(binaries.codex && needs("codex") ? { codexBinary: binaries.codex } : {}),
     backend: v.provider,
     permissionMode: "bypassPermissions",
     layers: v.layers,
@@ -101,6 +103,49 @@ export function sessionIdsFromCreate(json: unknown): { primary: string; others: 
     return typeof json.sessionGroupId === "string" ? { primary: p, others: [o], groupId: json.sessionGroupId } : { primary: p, others: [o] };
   }
   return typeof json.sessionId === "string" ? { primary: json.sessionId, others: [] } : null;
+}
+
+export interface CouncilHalf {
+  backend: string | null;
+  model: string | null;
+}
+
+/**
+ * What the server actually spawned for each half of a Council pair (null for
+ * a solo create). Council create forwards ONE `model` to both halves, so a
+ * Codex observer gets the closest launchable Codex model to the Claude pin —
+ * the cell records which one instead of assuming the Codex pin.
+ */
+export function councilHalvesFromCreate(json: unknown): { primary: CouncilHalf; observer: CouncilHalf } | null {
+  if (!isObj(json) || !isObj(json.primary) || !isObj(json.observer)) return null;
+  const half = (h: Obj): CouncilHalf => ({
+    backend: typeof h.backendType === "string" ? h.backendType : null,
+    model: typeof h.model === "string" ? h.model : null,
+  });
+  return { primary: half(json.primary), observer: half(json.observer) };
+}
+
+/**
+ * Confounds for a pair whose halves differ from what the variant asked for:
+ * a wrong observer backend (the cell would measure another pair under this
+ * name) or a Codex observer off the Codex pin (see {@link councilHalvesFromCreate}).
+ */
+export function councilHalvesConfounds(
+  v: AuraVariant,
+  halves: { primary: CouncilHalf; observer: CouncilHalf } | null,
+  models: { claude?: string; codex?: string } = {},
+): string[] {
+  if (!v.councilPairing) return [];
+  if (!halves) return ["council create response carried no primary/observer session info"];
+  const [wantPrimary, wantObserver] = v.councilPairing.split("+") as ["claude" | "codex", "claude" | "codex"];
+  const out: string[] = [];
+  if (halves.primary.backend !== wantPrimary) out.push(`council primary ran backend ${String(halves.primary.backend)}, not ${wantPrimary}`);
+  if (halves.observer.backend !== wantObserver) out.push(`council observer ran backend ${String(halves.observer.backend)}, not ${wantObserver}`);
+  const pin = models[wantObserver];
+  if (wantObserver !== v.provider && pin && halves.observer.model !== pin) {
+    out.push(`${wantObserver} observer ran model ${String(halves.observer.model)}, not the pinned ${pin} (council create forwards one model to both halves)`);
+  }
+  return out;
 }
 
 /** Phase name the directive's checkpoints use (distinct from the skills'). */
@@ -130,6 +175,9 @@ export interface LayerEvidence {
   checkpoints: { file: string; phase: string | null; sequence: number | null }[];
   /** Observer review files of the pair. */
   reviews: number;
+  /** Distinct providers in the pair's review file names, sorted — proof of
+   *  WHICH provider reviewed (H must show `codex`). */
+  review_providers: string[];
   /** A directive/skill checkpoint (not the spawn one) exists AND a review of
    *  the pair was written at or after it. */
   observer_loop_ran: boolean;
@@ -177,12 +225,21 @@ export function readLayerEvidence(worktree: string, groupId: string): LayerEvide
       return { file, phase, sequence: typeof j?.sequence === "number" ? j.sequence : null };
     });
   const reviewFiles = list("reviews");
+  // The writer (`buildObserverReviewFilename`, server/review-watcher.ts)
+  // pins `<phase>-<group>-<provider>-observer.md`; only the provider suffix
+  // is read here (the harness never imports server/).
+  const reviewProviders = new Set<string>();
+  for (const f of reviewFiles) {
+    const m = /-(claude|codex)-observer\.md$/.exec(f);
+    if (m) reviewProviders.add(m[1]!);
+  }
   const reviewedAfter = reviewFiles.some((f) => mtime(join(dir, "reviews", f)) >= workCheckpointAt);
   const traceFile = list("state").find((f) => f.endsWith("-auto-proceed-trace.json"));
   const trace = traceFile ? readJson(join(dir, "state", traceFile)) : null;
   return {
     checkpoints,
     reviews: reviewFiles.length,
+    review_providers: [...reviewProviders].sort(),
     observer_loop_ran: workCheckpointAt !== Infinity && reviewedAfter,
     auto_proceed_fires: typeof trace?.iterationCount === "number" ? trace.iterationCount : null,
   };
@@ -228,6 +285,11 @@ export function auraRunner(d: AuraDeps): AgentRunner {
         confounds,
         error: "council create response carried no sessionGroupId",
       };
+    }
+    if (v.councilPairing) {
+      const halves = councilHalvesFromCreate(created.json);
+      isolation.council_halves = halves;
+      confounds.push(...councilHalvesConfounds(v, halves, d.models));
     }
     const groupId = ids.groupId;
     const prompt =

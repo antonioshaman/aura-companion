@@ -12,6 +12,9 @@
  *                         the server since AP-WIRE)
  *   F  Codex+Aura       — Companion Codex session, KB on
  *   G  Codex+Council    — F + `/council-*` skills (see note below)
+ *   H  Claude+Codex Observer — D with a Codex observer (`claude+codex`, the
+ *                         prod pair): same layers and observer loop as D, so
+ *                         D ↔ H differs by the observer's provider only
  *
  * Layer ladder for the report: A → C → D → E (each adds exactly one layer
  * group on top of the previous one).
@@ -35,7 +38,7 @@
  * Firewall-clean: pure data. Never `server/`.
  */
 
-export const VARIANT_IDS = ["A", "B", "C", "D", "E", "F", "G"] as const;
+export const VARIANT_IDS = ["A", "B", "C", "D", "E", "F", "G", "H"] as const;
 export type VariantId = (typeof VARIANT_IDS)[number];
 
 export type Provider = "claude" | "codex";
@@ -61,8 +64,8 @@ export interface AuraVariant {
   provider: Provider;
   mode: "aura";
   layers: VariantLayers;
-  /** Council Mode pair; absent = solo session. */
-  councilPairing?: "claude+claude";
+  /** Council Mode pair (the orchestrator is always Claude); absent = solo session. */
+  councilPairing?: "claude+claude" | "claude+codex";
   /** Append the checkpoint → review directive to the prompt (Council pairs). */
   observerLoop?: true;
   /** Sent as `autoProceedOnIdle` when the autoProceed layer is on. */
@@ -108,6 +111,15 @@ export const VARIANTS: Readonly<Record<VariantId, Variant>> = Object.freeze({
     provider: "codex",
     mode: "aura",
     layers: layers({ knowledge: true, council: true }),
+  },
+  H: {
+    id: "H",
+    label: "Claude+Codex Observer",
+    provider: "claude",
+    mode: "aura",
+    layers: layers({ knowledge: true, observer: true }),
+    councilPairing: "claude+codex",
+    observerLoop: true,
   },
 });
 
