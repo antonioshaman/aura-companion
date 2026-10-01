@@ -13,7 +13,7 @@ import { Hono } from "hono";
 import { serveStatic } from "hono/bun";
 import { cacheControlMiddleware } from "./cache-headers.js";
 import { createRoutes } from "./routes.js";
-import { CliLauncher } from "./cli-launcher.js";
+import { CliLauncher, claudeTransportMode } from "./cli-launcher.js";
 import { WsBridge } from "./ws-bridge.js";
 import { SessionStore, migrateLegacyTmpdirSessions } from "./session-store.js";
 import { WorktreeTracker } from "./worktree-tracker.js";
@@ -35,7 +35,7 @@ import { writeAutoProceedTrace, appendAfkSummary } from "./auto-proceed-state.js
 import { log as appLog } from "./logger.js";
 import { migrateCronJobsToAgents } from "./agent-cron-migrator.js";
 import { migrateLinearCredentialsToAgents } from "./linear-credential-migration.js";
-import { authenticateManagedWebSocket } from "./ws-auth.js";
+import { authenticateManagedWebSocket, checkCliSocketUpgrade } from "./ws-auth.js";
 import { LinearAgentBridge } from "./linear-agent-bridge.js";
 import { NoVncProxy } from "./novnc-proxy.js";
 import { apiCors, isOriginAllowed } from "./middleware/origin-allowlist.js";
@@ -449,6 +449,14 @@ const server = Bun.serve<SocketData>({
     // ── CLI WebSocket — Claude Code CLI connects here via --sdk-url ────
     const cliMatch = url.pathname.match(/^\/ws\/cli\/([a-f0-9-]+)$/);
     if (cliMatch) {
+      const cliGate = checkCliSocketUpgrade({
+        address: server.requestIP(req)?.address,
+        headers: req.headers,
+        transportMode: claudeTransportMode(),
+      });
+      if (!cliGate.ok) {
+        return new Response(cliGate.body, { status: cliGate.status });
+      }
       const sessionId = cliMatch[1];
       const upgraded = server.upgrade(req, {
         data: { kind: "cli" as const, sessionId },

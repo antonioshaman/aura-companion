@@ -67,7 +67,7 @@ import {
  * `--sdk-url ws://localhost`. Set `COMPANION_CLAUDE_TRANSPORT=ws` only with a
  * CLI pinned below that version.
  */
-function claudeTransportMode(): "stdio" | "ws" {
+export function claudeTransportMode(): "stdio" | "ws" {
   return (process.env.COMPANION_CLAUDE_TRANSPORT || "stdio").toLowerCase() === "ws" ? "ws" : "stdio";
 }
 
