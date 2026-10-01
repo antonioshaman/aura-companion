@@ -1,13 +1,9 @@
-import {
-  mkdirSync,
-  readFileSync,
-  writeFileSync,
-  existsSync,
-} from "node:fs";
-import { join, dirname } from "node:path";
+import { readFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { getSettings } from "./settings-manager.js";
+import { tightenFileMode, writeAtomicJson } from "./atomic-write.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -44,6 +40,7 @@ function ensureLoaded(): void {
   if (loaded) return;
   try {
     if (existsSync(filePath)) {
+      tightenFileMode(filePath);
       const raw = JSON.parse(readFileSync(filePath, "utf-8"));
       if (Array.isArray(raw)) {
         connections = raw.filter(
@@ -66,9 +63,10 @@ function ensureLoaded(): void {
   migrateFromSettings();
 }
 
+// Secrets live in this file (Linear API keys) — write them 0o600 via the atomic helper
+// (a rename also re-tightens a file that predates this, unlike writeFileSync's mode).
 function persist(): void {
-  mkdirSync(dirname(filePath), { recursive: true });
-  writeFileSync(filePath, JSON.stringify(connections, null, 2), "utf-8");
+  writeAtomicJson(filePath, connections, { maxBytes: Number.POSITIVE_INFINITY, space: 2 });
 }
 
 // ─── Migration ───────────────────────────────────────────────────────────────

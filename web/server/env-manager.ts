@@ -7,7 +7,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { COMPANION_HOME } from "./paths.js";
-import { writeAtomicJson } from "./atomic-write.js";
+import { tightenFileMode, writeAtomicJson } from "./atomic-write.js";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -72,6 +72,7 @@ export function listEnvs(): CompanionEnv[] {
     const envs: CompanionEnv[] = [];
     for (const file of files) {
       try {
+        tightenFileMode(join(ENVS_DIR, file));
         const raw = readFileSync(join(ENVS_DIR, file), "utf-8");
         envs.push(JSON.parse(raw));
       } catch {
@@ -88,6 +89,7 @@ export function listEnvs(): CompanionEnv[] {
 export function getEnv(slug: string): CompanionEnv | null {
   ensureDir();
   try {
+    tightenFileMode(filePath(slug));
     const raw = readFileSync(filePath(slug), "utf-8");
     return JSON.parse(raw) as CompanionEnv;
   } catch {

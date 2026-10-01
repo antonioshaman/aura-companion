@@ -1,10 +1,12 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { readFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
 import { homedir } from "node:os";
 import { networkInterfaces } from "node:os";
+import { tightenFileMode, writeAtomicJson } from "./atomic-write.js";
 
-const AUTH_FILE = join(homedir(), ".companion", "auth.json");
+const DEFAULT_AUTH_FILE = join(homedir(), ".companion", "auth.json");
+let authFile = DEFAULT_AUTH_FILE;
 const TOKEN_BYTES = 32; // 64 hex characters
 
 interface AuthData {
@@ -33,8 +35,9 @@ export function getToken(): string {
 
   // Try reading from file
   try {
-    if (existsSync(AUTH_FILE)) {
-      const raw = readFileSync(AUTH_FILE, "utf-8");
+    if (existsSync(authFile)) {
+      tightenFileMode(authFile);
+      const raw = readFileSync(authFile, "utf-8");
       const data = JSON.parse(raw) as Partial<AuthData>;
       if (typeof data.token === "string" && data.token.length >= 32) {
         cachedToken = data.token;
@@ -49,8 +52,8 @@ export function getToken(): string {
   const token = randomBytes(TOKEN_BYTES).toString("hex");
   const data: AuthData = { token, createdAt: Date.now() };
   try {
-    mkdirSync(dirname(AUTH_FILE), { recursive: true });
-    writeFileSync(AUTH_FILE, JSON.stringify(data, null, 2), { mode: 0o600 });
+    // Atomic tmp(0o600)+rename: also re-tightens a pre-existing wider file.
+    writeAtomicJson(authFile, data, { maxBytes: Number.POSITIVE_INFINITY, space: 2 });
   } catch (err) {
     console.error("[auth] Failed to persist auth token:", err);
   }
@@ -66,7 +69,7 @@ export function getToken(): string {
 export function describeTokenSource(): string {
   const envToken = process.env.COMPANION_AUTH_TOKEN;
   if (envToken && envToken.trim()) return "COMPANION_AUTH_TOKEN env var";
-  return AUTH_FILE;
+  return authFile;
 }
 
 /**
@@ -166,8 +169,8 @@ export function regenerateToken(): string {
   const token = randomBytes(TOKEN_BYTES).toString("hex");
   const data: AuthData = { token, createdAt: Date.now() };
   try {
-    mkdirSync(dirname(AUTH_FILE), { recursive: true });
-    writeFileSync(AUTH_FILE, JSON.stringify(data, null, 2), { mode: 0o600 });
+    // Atomic tmp(0o600)+rename: also re-tightens a pre-existing wider file.
+    writeAtomicJson(authFile, data, { maxBytes: Number.POSITIVE_INFINITY, space: 2 });
   } catch (err) {
     console.error("[auth] Failed to persist regenerated token:", err);
   }
@@ -176,6 +179,7 @@ export function regenerateToken(): string {
 }
 
 /** Reset cached state — for testing only */
-export function _resetForTest(): void {
+export function _resetForTest(customAuthFile?: string): void {
   cachedToken = null;
+  authFile = customAuthFile ?? DEFAULT_AUTH_FILE;
 }

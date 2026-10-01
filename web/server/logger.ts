@@ -53,15 +53,35 @@ const SECRET_PATTERNS: ReadonlyArray<[RegExp, string]> = [
   [/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, `$1${REDACTED}`],
   // Anthropic / OpenAI style keys, incl. Claude OAuth sk-ant-oat01-… / sk-ant-ort01-….
   [/\bsk-[A-Za-z0-9_-]{16,}/g, REDACTED],
-  // 64-hex tokens (the Companion auth token is randomBytes(32).toString("hex")).
-  [/\b[0-9a-fA-F]{64}\b/g, REDACTED],
 ];
+
+// 64-hex values: the Companion auth token is randomBytes(32).toString("hex"),
+// but so is every diagnostic sha256 (wakeBodySha256, observerPromptSha256,
+// argvSha256). A 64-hex value is masked only in a secret context, see maskHex64.
+const HEX64 = /\b[0-9a-fA-F]{64}\b/g;
+// Key directly assigned to the value: `name=`, `name: `, `"name":"`, `\"name\":\"`.
+const ASSIGNED_KEY = /([A-Za-z_][\w-]*)\\?"?\s*[:=]\s*\\?"?$/;
+const SECRET_WORD = /token|secret|passw(?:or)?d|api[_-]?key|authorization|bearer|credential/i;
+const HASH_KEY = /(?:sha\d*|hash|digest|checksum|id)$/i;
+const HEX64_LOOKBEHIND = 32;
+
+function maskHex64(line: string): string {
+  return line.replace(HEX64, (hex, offset: number) => {
+    const before = line.slice(Math.max(0, offset - HEX64_LOOKBEHIND), offset);
+    const key = ASSIGNED_KEY.exec(before)?.[1];
+    // A named field decides by its own name: `wakeBodySha256=` / `tokenHash=`
+    // keep the value, `authToken=` / `"secret":` mask it.
+    if (key) return !HASH_KEY.test(key) && SECRET_WORD.test(key) ? REDACTED : hex;
+    // Prose such as "token is <hex>": mask when a secret word is nearby.
+    return SECRET_WORD.test(before) ? REDACTED : hex;
+  });
+}
 
 /** Replace secret-looking substrings in a log line with `[REDACTED]`. */
 export function maskSecrets(line: string): string {
   let out = line;
   for (const [re, replacement] of SECRET_PATTERNS) out = out.replace(re, replacement);
-  return out;
+  return maskHex64(out);
 }
 
 function formatEntry(level: LogLevel, module: string, msg: string, data?: Record<string, unknown>): string {
