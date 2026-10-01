@@ -43,13 +43,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AuraBenchTask } from "../task.js";
 import { VARIANTS, type AuraVariant } from "./variants.js";
-import { AuraSessionTracker } from "./aura-session-tracker.js";
+import { AuraSessionTracker, observerDead } from "./aura-session-tracker.js";
 import {
   auraRunner,
   councilHalvesConfounds,
   councilHalvesFromCreate,
   createBody,
   observerLoopDirective,
+  observerPin,
   quietWindowMs,
   readLayerEvidence,
   sessionIdsFromCreate,
@@ -88,6 +89,23 @@ describe("createBody / sessionIdsFromCreate / quietWindowMs", () => {
     expect(b.layers).toEqual((VARIANTS.D as AuraVariant).layers);
     expect("autoProceedOnIdle" in b).toBe(false);
   });
+  // FIX-H-MODEL: the Codex half of H must get the Codex pin as
+  // `observerModel` — DIET-AB's H cells sent only the Claude `model`, which
+  // reached the Codex observer and 400'd on every turn. D's Claude observer
+  // runs the primary's model, so it gets no separate pin.
+  it("H pins its Codex observer via observerModel; D/C/F carry none", () => {
+    const models = { claude: "claude-opus-5-5", codex: "gpt-5.5" };
+    const H = VARIANTS.H as AuraVariant;
+    expect(observerPin(H, models)).toBe("gpt-5.5");
+    expect(createBody(H, "/wt", models.claude, {}, observerPin(H, models))).toMatchObject({ model: "claude-opus-5-5", observerModel: "gpt-5.5" });
+    for (const id of ["C", "D", "E", "F"] as const) {
+      const v = VARIANTS[id] as AuraVariant;
+      expect(observerPin(v, models)).toBeUndefined();
+      expect("observerModel" in createBody(v, "/wt", models[v.provider], {}, observerPin(v, models))).toBe(false);
+    }
+    // No Codex pin configured → nothing sent (server falls back to its launcher default).
+    expect(observerPin(H, { claude: "claude-opus-5-5" })).toBeUndefined();
+  });
   it("Codex variant uses the codex backend", () => {
     expect(createBody(VARIANTS.F as AuraVariant, "/wt").backend).toBe("codex");
   });
@@ -120,9 +138,9 @@ describe("createBody / sessionIdsFromCreate / quietWindowMs", () => {
     const models = { claude: "claude-opus-5-5", codex: "gpt-5.5" };
     const ok = { primary: { backend: "claude", model: "claude-opus-5-5" }, observer: { backend: "codex", model: "gpt-5.5" } };
     expect(councilHalvesConfounds(H, ok, models)).toEqual([]);
-    // The server picked another launchable Codex model for the Claude pin.
+    // The server spawned the Codex observer on another model than the pin (e.g. the pin is not launchable for the account).
     expect(councilHalvesConfounds(H, { ...ok, observer: { backend: "codex", model: "gpt-5.3-codex" } }, models)).toEqual([
-      "codex observer ran model gpt-5.3-codex, not the pinned gpt-5.5 (council create forwards one model to both halves)",
+      "codex observer ran model gpt-5.3-codex, not the pinned gpt-5.5",
     ]);
     // A Claude observer under H's name would measure D: flagged, not hidden.
     expect(councilHalvesConfounds(H, { ...ok, observer: { backend: "claude", model: "claude-opus-5-5" } }, models).join("\n")).toMatch(
@@ -512,6 +530,94 @@ describe("auraRunner — H (claude+codex)", () => {
     f.d.models = { claude: "claude-opus-5-5", codex: "gpt-5.5" };
     const r = await auraRunner(f.d)(ctx("D"));
     expect(r.kind === "done" && r.confounds.some((c) => /ran (backend|model)|session info/.test(c))).toBe(false);
+  });
+});
+
+// FIX-H-MODEL — the observer-health gate. Frames are the real shapes from a
+// DIET-AB H recording (bench/diet-ab/after/recordings/452c38d3…_codex_*.jsonl,
+// browser channel, payload trimmed): the Codex observer's spawn-ack turn fails
+// BEFORE the task prompt, a later wake fails again, then the server declares
+// the observer dead.
+const CODEX_400 = '{"type":"error","status":400,"error":{"type":"invalid_request_error","message":"The \'claude-opus-5-5\' model is not supported when using Codex with a ChatGPT account."}}';
+const observerErrorResult = { type: "result", data: { type: "result", subtype: "error_during_execution", is_error: true, result: CODEX_400, num_turns: 1, total_cost_usd: 0, stop_reason: "failed" } };
+
+describe("observer health (FIX-H-MODEL)", () => {
+  it("the DIET-AB H shape (pre-prompt error turn, error frame, group_degraded) is observer_dead", () => {
+    const t = new AuraSessionTracker("p", ["o"], 10);
+    t.onMessage("o", observerErrorResult, 1); // spawn-ack turn, before the prompt — must still count
+    t.promptSent(2);
+    t.onMessage("o", { type: "error", message: `${CODEX_400} (other)` }, 3);
+    t.onMessage("o", observerErrorResult, 4);
+    t.onMessage("o", { type: "group_degraded", sessionGroupId: "grp_abc", deadRole: "observer", reason: "wake_produced_no_review" }, 5);
+    t.onMessage("p", result(), 6);
+    const h = t.observerHealth();
+    expect(h).toEqual({ ok_results: 0, error_results: 2, last_error: CODEX_400, degraded: "wake_produced_no_review" });
+    expect(observerDead(h)).toMatch(/^observer_dead: no successful observer turn \(2 error results\) — .*not supported when using Codex/);
+  });
+
+  it("one successful observer turn keeps the cell valid, even next to errors / a degraded wake", () => {
+    expect(observerDead({ ok_results: 1, error_results: 3, last_error: "x", degraded: "wake_produced_no_review" })).toBeNull();
+  });
+
+  it("an observer that was never woken (no results, no failure signal) is not dead — that is agent behaviour", () => {
+    const t = new AuraSessionTracker("p", ["o"], 10);
+    t.promptSent(0);
+    t.onMessage("p", result(), 1);
+    expect(observerDead(t.observerHealth())).toBeNull();
+  });
+
+  it("a degraded observer with no results at all is dead; the primary's own errors never count", () => {
+    expect(observerDead({ ok_results: 0, error_results: 0, last_error: null, degraded: "relaunch_exhausted" })).toBe(
+      "observer_dead: no successful observer turn (0 error results) — group_degraded: relaunch_exhausted",
+    );
+    const t = new AuraSessionTracker("p", ["o"], 10);
+    t.promptSent(0);
+    t.onMessage("p", result({ is_error: true, result: "boom" }), 1);
+    expect(t.observerHealth()).toMatchObject({ ok_results: 0, error_results: 0 });
+  });
+});
+
+describe("auraRunner — dead observer voids the Council cell (FIX-H-MODEL)", () => {
+  it("H whose Codex observer only failed → harness_error observer_dead, health recorded, observerModel sent", async () => {
+    const f = fakeCompanion({
+      council: true,
+      observer: { backendType: "codex", model: "gpt-5.5" },
+      onPrompt: (emit) => {
+        emit("o", observerErrorResult);
+        emit("p", result());
+      },
+    });
+    f.d.models = { claude: "claude-opus-5-5", codex: "gpt-5.5" };
+    const r = await auraRunner(f.d)(ctx("H"));
+    expect(f.calls.find((c) => c.startsWith("POST /api/sessions/create"))).toContain('"observerModel":"gpt-5.5"');
+    expect(r).toMatchObject({ kind: "done", status: "harness_error" });
+    if (r.kind !== "done") return;
+    expect(r.error).toMatch(/^observer_dead: /);
+    expect(r.isolation.observer_health).toMatchObject({ ok_results: 0, error_results: 1 });
+    // Teardown still ran for both halves.
+    expect(f.calls.some((c) => c.includes("/api/sessions/o"))).toBe(true);
+  });
+
+  it("H whose observer completed a turn stays completed", async () => {
+    const f = fakeCompanion({
+      council: true,
+      observer: { backendType: "codex", model: "gpt-5.5" },
+      onPrompt: (emit) => {
+        emit("o", result());
+        emit("p", result());
+      },
+    });
+    f.d.models = { claude: "claude-opus-5-5", codex: "gpt-5.5" };
+    const r = await auraRunner(f.d)(ctx("H"));
+    expect(r).toMatchObject({ kind: "done", status: "completed" });
+    expect(r.kind === "done" && r.isolation.observer_health).toMatchObject({ ok_results: 1, error_results: 0 });
+  });
+
+  it("a solo cell never gets an observer verdict", async () => {
+    const f = fakeCompanion({ onPrompt: (emit) => emit("p", result()) });
+    const r = await auraRunner(f.d)(ctx("C"));
+    expect(r).toMatchObject({ kind: "done", status: "completed" });
+    expect(r.kind === "done" && "observer_health" in r.isolation).toBe(false);
   });
 });
 

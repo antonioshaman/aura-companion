@@ -64,6 +64,31 @@ describe("SessionGroupCoordinator.createGroup", () => {
     expect(spawn.calls[1]?.backendType).toBe("codex");
   });
 
+  // P6/FIX-H-MODEL: a model slug belongs to one provider. Forwarding the
+  // Claude pin to the Codex observer made Codex 400 on its first turn
+  // ("model is not supported when using Codex") — the observer never
+  // reviewed. The primary's model may only carry over to a same-backend
+  // observer; a cross-backend observer gets `observerModel` or nothing.
+  it("does not forward the primary's model to a cross-backend observer", async () => {
+    await coord.createGroup({ cwd: "/work/repo", primary: "claude", observer: "codex", model: "claude-opus-5-5" });
+    expect(spawn.calls[0]?.model).toBe("claude-opus-5-5");
+    expect(spawn.calls[1]?.model).toBeUndefined();
+  });
+
+  it("pins the observer to observerModel when given (cross- and same-backend)", async () => {
+    await coord.createGroup({ cwd: "/w", primary: "claude", observer: "codex", model: "claude-opus-5-5", observerModel: "gpt-5.5" });
+    expect(spawn.calls[0]?.model).toBe("claude-opus-5-5");
+    expect(spawn.calls[1]?.model).toBe("gpt-5.5");
+    await coord.createGroup({ cwd: "/w", primary: "claude", observer: "claude", model: "claude-opus-5-5", observerModel: "claude-sonnet-4-6" });
+    expect(spawn.calls[3]?.model).toBe("claude-sonnet-4-6");
+  });
+
+  // Same-backend pair keeps today's behaviour: both halves on one model.
+  it("forwards the primary's model to a same-backend observer", async () => {
+    await coord.createGroup({ cwd: "/work/repo", primary: "claude", observer: "claude", model: "claude-opus-5-5" });
+    expect(spawn.calls.map((c) => c.model)).toEqual(["claude-opus-5-5", "claude-opus-5-5"]);
+  });
+
   it("rejects unsupported pairings without spawning", async () => {
     await expect(
       coord.createGroup({ cwd: "/work/repo", primary: "codex", observer: "codex" }),

@@ -633,6 +633,43 @@ describe("POST /api/sessions/create — Council Mode branch", () => {
     expect(orchestrator.createCouncilGroup).not.toHaveBeenCalled();
   });
 
+  // P6/FIX-H-MODEL: `observerModel` pins the observer half (the Codex side
+  // of claude+codex can't run the Claude `model`). It travels as a top-level
+  // request field — never inside `base`, which createSession spreads into
+  // BOTH halves.
+  it("forwards observerModel top-level (not in base) to the coordinator", async () => {
+    const res = await app.request("/api/sessions/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        cwd: "/work/repo",
+        model: "claude-opus-5-5",
+        observerModel: "gpt-5.5",
+        councilMode: "council",
+        councilPairing: "claude+codex",
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(orchestrator.createCouncilGroup).toHaveBeenCalledWith({
+      pairing: "claude+codex",
+      base: { cwd: "/work/repo", model: "claude-opus-5-5" },
+      observerModel: "gpt-5.5",
+    });
+  });
+
+  // A malformed pin is a 400, not a silent drop: dropping it would spawn the
+  // observer on a different model than the caller asked for.
+  it.each([[""], ["   "], [42], [{ slug: "gpt-5.5" }]])("rejects observerModel=%j with 400", async (observerModel) => {
+    const res = await app.request("/api/sessions/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: "/work/repo", observerModel, councilMode: "council", councilPairing: "claude+codex" }),
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toMatch(/Invalid observerModel/);
+    expect(orchestrator.createCouncilGroup).not.toHaveBeenCalled();
+  });
+
   it("propagates coordinator failure error+status to the client", async () => {
     orchestrator.createCouncilGroup.mockResolvedValueOnce({
       ok: false,
@@ -4485,6 +4522,31 @@ describe("POST /api/sessions/create-stream — Council Mode branch (Beck council
       pairing: "claude+codex",
       base: { cwd: "/work/repo", model: "claude-sonnet-4-6" },
     }));
+  });
+
+  // P6/FIX-H-MODEL — the SSE branch strips and forwards observerModel the
+  // same way as the plain create route.
+  it("forwards observerModel top-level and rejects a malformed one", async () => {
+    const ok = await app.request("/api/sessions/create-stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: "/work/repo", model: "claude-opus-5-5", observerModel: "gpt-5.5", councilMode: "council", councilPairing: "claude+codex" }),
+    });
+    await parseSSE(ok);
+    expect(orchestrator.createCouncilGroup).toHaveBeenCalledWith({
+      pairing: "claude+codex",
+      base: { cwd: "/work/repo", model: "claude-opus-5-5" },
+      observerModel: "gpt-5.5",
+    });
+    orchestrator.createCouncilGroup.mockClear();
+    const bad = await app.request("/api/sessions/create-stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: "/work/repo", observerModel: 7, councilMode: "council", councilPairing: "claude+codex" }),
+    });
+    const events = await parseSSE(bad);
+    expect(JSON.parse(events.find((e) => e.event === "error")!.data).error).toMatch(/Invalid observerModel/);
+    expect(orchestrator.createCouncilGroup).not.toHaveBeenCalled();
   });
 
   it("emits error event for an invalid pairing BEFORE any progress event fires", async () => {

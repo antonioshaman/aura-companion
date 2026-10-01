@@ -916,7 +916,10 @@ export class CouncilLifecycle {
           ...ctx.baseBody,
           backend: opts.backendType,
           cwd: opts.cwd,
-          model: opts.model ?? ctx.baseBody.model,
+          // No fallback to the base model: the coordinator already resolved
+          // it per half, and `undefined` here is deliberate for a
+          // cross-backend observer (`observerSpawnModel`, FIX-H-MODEL).
+          model: opts.model,
           permissionMode: opts.permissionMode ?? ctx.baseBody.permissionMode,
           sessionGroupId: opts.sessionGroupId,
           sessionGroupRole: opts.sessionGroupRole,
@@ -1166,6 +1169,7 @@ export class CouncilLifecycle {
         primary: parsed.primary,
         observer: parsed.observer,
         model: req.base.model,
+        ...(req.observerModel ? { observerModel: req.observerModel } : {}),
         permissionMode: req.base.permissionMode,
         spawnContext,
       });
