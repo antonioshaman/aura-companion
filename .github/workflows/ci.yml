@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+# Least privilege: these jobs only read the repo (P7/CI-HARDEN).
+permissions:
+  contents: read
+
 jobs:
   quality:
     runs-on: ubuntu-latest
@@ -36,6 +40,15 @@ jobs:
       # calls, no network, no secrets. A scorer change that drifts from the
       # baseline (or a stale baseline) fails here rather than shipping.
       # Regenerate intentionally with `bun run eval:replay --ci --update-baseline`.
+      # Dependency advisories (P7/CI-HARDEN). Non-blocking for now: the tree
+      # carries known advisories in transitive dev/build deps, so this step
+      # surfaces them as a warning without failing the job. Drop
+      # `continue-on-error` once the high/critical backlog is cleared.
+      - name: Dependency audit (non-blocking)
+        working-directory: web
+        continue-on-error: true
+        run: bun audit --audit-level=high
+
       - name: Eval replay L1 gate (no regression vs baseline)
         working-directory: web
         run: bun run eval:replay --ci
