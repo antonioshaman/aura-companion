@@ -22,7 +22,8 @@
  *
  * `.learnings/` was untracked in prod before the diet; A1 archived that exact
  * copy to `docs/history/learnings/` on `diet/main`, so the `before` overlay
- * takes it from the `after` ref and renames it back.
+ * takes it from the `after` ref and renames it back (subtree archive +
+ * `--prefix`, so extraction needs no GNU-only tar flag).
  *
  * Not reproduced (recorded as a confound on every `before` cell): the
  * user-level `UserPromptSubmit` self-improvement reminder hook, which lives in
@@ -105,14 +106,16 @@ export async function applyDietOverlay(
     const r = await run("git", ["ls-tree", "-r", "--name-only", ref, "--", ...paths], repo);
     return r.code !== 0 ? r : r.output.split("\n").filter(Boolean);
   };
-  // Unpack `files` of `ref` into the checkout; `transform` renames on the way.
-  const unpack = async (ref: string, files: string[], tarName: string, transform?: string): Promise<ExecResult> => {
-    if (!files.length) return { code: 0, output: "", timedOut: false };
+  // Unpack `archiveArgs` (a `git archive` tail) into the checkout. Renaming is
+  // git's job (`<ref>:<subdir>` + `--prefix`): tar gets only POSIX `-xf -C`,
+  // since GNU `--transform` does not exist in BSD tar (macOS CI).
+  const unpack = async (archiveArgs: string[], tarName: string): Promise<ExecResult> => {
     const tar = `${scratch}/${tarName}`;
-    const ar = await run("git", ["archive", "--format=tar", `--output=${tar}`, ref, "--", ...files], repo);
+    const ar = await run("git", ["archive", "--format=tar", `--output=${tar}`, ...archiveArgs], repo);
     if (ar.code !== 0) return ar;
-    return run("tar", ["-xf", tar, "-C", worktree, ...(transform ? [`--transform=${transform}`] : [])], repo);
+    return run("tar", ["-xf", tar, "-C", worktree], repo);
   };
+  const skip = async (): Promise<ExecResult> => ({ code: 0, output: "", timedOut: false });
 
   const main = await listed(spec.ref, DIET_OVERLAY_PATHS.filter((p) => !(spec.version === "before" && p === ".learnings")));
   if (!Array.isArray(main)) return { ok: false, error: `diet overlay ls-tree ${spec.ref} failed: ${main.output.slice(-300)}` };
@@ -130,8 +133,12 @@ export async function applyDietOverlay(
     () => run("git", ["rm", "-r", "-q", "--ignore-unmatch", "--", ...DIET_OVERLAY_PATHS], worktree),
     // Untracked leftovers of an owned path (none in a fresh checkout) go too.
     () => run("rm", ["-rf", "--", ...DIET_OVERLAY_PATHS.map((p) => `${worktree}/${p}`)], worktree),
-    () => unpack(spec.ref, main, "diet-overlay.tar"),
-    () => unpack(spec.learningsRef ?? spec.ref, learnings, "diet-learnings.tar", `s,^${LEARNINGS_ARCHIVE}/,.learnings/,`),
+    () => (main.length ? unpack([spec.ref, "--", ...main], "diet-overlay.tar") : skip()),
+    // Subtree archive: `docs/history/learnings/X` lands as `.learnings/X`.
+    () =>
+      learnings.length
+        ? unpack(["--prefix=.learnings/", `${spec.learningsRef}:${LEARNINGS_ARCHIVE}`], "diet-learnings.tar")
+        : skip(),
     // Whole tree: a fresh checkout has no other change, and a pathspec for an
     // owned path absent from both sides would make `git add` fail.
     () => run("git", ["add", "-A", "--", "."], worktree),
