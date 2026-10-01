@@ -39,6 +39,31 @@ interface LogEntry {
 
 const STRUCTURED = process.env.COMPANION_LOG_FORMAT === "json";
 
+// ─── Secret masking ─────────────────────────────────────────────────────────
+// Applied to every formatted line before it reaches stdout (journald) or the
+// log file, so a caller that drops an API key, auth token or OAuth credential
+// into `msg` or `data` does not persist it. Order matters: the key=value rule
+// runs first so the whole value is replaced, not just an inner match.
+const REDACTED = "[REDACTED]";
+const SECRET_PATTERNS: ReadonlyArray<[RegExp, string]> = [
+  // OAuth fields in JSON / query / key=value form, incl. escaped JSON:
+  //   "access_token":"…", refresh_token=…, accessToken=…, \"refreshToken\":\"…\"
+  [/((?:access|refresh)[_-]?token\\?"?\s*[:=]\s*\\?"?)[^"'\s&,}\\]+/gi, `$1${REDACTED}`],
+  // Authorization header values.
+  [/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, `$1${REDACTED}`],
+  // Anthropic / OpenAI style keys, incl. Claude OAuth sk-ant-oat01-… / sk-ant-ort01-….
+  [/\bsk-[A-Za-z0-9_-]{16,}/g, REDACTED],
+  // 64-hex tokens (the Companion auth token is randomBytes(32).toString("hex")).
+  [/\b[0-9a-fA-F]{64}\b/g, REDACTED],
+];
+
+/** Replace secret-looking substrings in a log line with `[REDACTED]`. */
+export function maskSecrets(line: string): string {
+  let out = line;
+  for (const [re, replacement] of SECRET_PATTERNS) out = out.replace(re, replacement);
+  return out;
+}
+
 function formatEntry(level: LogLevel, module: string, msg: string, data?: Record<string, unknown>): string {
   if (STRUCTURED) {
     const entry: LogEntry = {
@@ -48,7 +73,7 @@ function formatEntry(level: LogLevel, module: string, msg: string, data?: Record
       module,
       msg,
     };
-    return JSON.stringify(entry);
+    return maskSecrets(JSON.stringify(entry));
   }
 
   // Human-readable format (default): [module] msg key=value key=value
@@ -59,7 +84,7 @@ function formatEntry(level: LogLevel, module: string, msg: string, data?: Record
       .join(" ");
     if (pairs) line += ` | ${pairs}`;
   }
-  return line;
+  return maskSecrets(line);
 }
 
 // ─── Log File Writer ────────────────────────────────────────────────────────

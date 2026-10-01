@@ -108,6 +108,105 @@ describe("logger", () => {
       expect(parsed.ts).not.toBe("tampered");
       spy.mockRestore();
     });
+
+    it("masks secrets in data while keeping the line valid JSON", () => {
+      // The replacement must not break JSON quoting, otherwise structured log
+      // consumers (jq, journald JSON parsing) would lose the whole line.
+      const spy = vi.spyOn(console, "log").mockImplementation(() => {});
+      try {
+        log.info("oauth", "refreshed", {
+          access_token: "lin_oauth_abcdef123456",
+          refreshToken: "rt-0123456789",
+          authorization: "Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig",
+        });
+        const output = spy.mock.calls[0][0] as string;
+        const parsed = JSON.parse(output);
+        expect(parsed.access_token).toBe("[REDACTED]");
+        expect(parsed.refreshToken).toBe("[REDACTED]");
+        expect(parsed.authorization).toBe("Bearer [REDACTED]");
+        expect(output).not.toContain("lin_oauth_abcdef123456");
+        expect(output).not.toContain("eyJhbGciOiJIUzI1NiJ9");
+      } finally {
+        // Restore even on failure so a red run does not cascade into later tests.
+        spy.mockRestore();
+      }
+    });
+  });
+});
+
+// Secret masking is applied to every formatted line (stdout and log file).
+// Source: external tech audit, LOG-MASK — tokens must not reach journald or
+// ~/.companion/logs even if a caller passes them in msg/data by mistake.
+describe("maskSecrets", () => {
+  let maskSecrets: typeof import("./logger.js").maskSecrets;
+  const AUTH_TOKEN = "a".repeat(32) + "0123456789abcdef0123456789abcdef"; // 64 hex
+
+  beforeEach(async () => {
+    vi.resetModules();
+    maskSecrets = (await import("./logger.js")).maskSecrets;
+  });
+
+  it("redacts Anthropic/OpenAI keys and Claude OAuth tokens (sk-…)", () => {
+    const line = "key=sk-ant-api03-AbCdEf0123456789_xyz oat=sk-ant-oat01-ZZZZZZZZZZZZZZZZZZ proj sk-proj-1234567890abcdefXYZ";
+    const out = maskSecrets(line);
+    expect(out).not.toMatch(/sk-[A-Za-z0-9]/);
+    expect(out.match(/\[REDACTED\]/g)).toHaveLength(3);
+  });
+
+  it("redacts Bearer header values but keeps the scheme for diagnostics", () => {
+    expect(maskSecrets("Authorization: Bearer abc.DEF-123_xyz=")).toBe("Authorization: Bearer [REDACTED]");
+    expect(maskSecrets("authorization: bearer tok123")).toBe("authorization: bearer [REDACTED]");
+  });
+
+  it("redacts 64-hex tokens (Companion auth token shape) but not 40-hex git SHAs", () => {
+    expect(maskSecrets(`token ${AUTH_TOKEN} used`)).toBe("token [REDACTED] used");
+    // Commit SHAs are 40 hex and appear legitimately in logs — keep them.
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+    expect(maskSecrets(`commit ${sha}`)).toBe(`commit ${sha}`);
+  });
+
+  it("redacts OAuth access/refresh token fields in JSON, query and key=value form", () => {
+    expect(maskSecrets('{"access_token":"gho_secret1","refresh_token":"r1"}')).toBe(
+      '{"access_token":"[REDACTED]","refresh_token":"[REDACTED]"}',
+    );
+    expect(maskSecrets("cb?code=x&access_token=abc123&state=s")).toBe("cb?code=x&access_token=[REDACTED]&state=s");
+    expect(maskSecrets("accessToken=xyz refresh-token: qqq")).toBe("accessToken=[REDACTED] refresh-token: [REDACTED]");
+    // Escaped JSON (a JSON string serialised inside another JSON value).
+    expect(maskSecrets('{"body":"{\\"refreshToken\\":\\"rt-9\\"}"}')).toBe(
+      '{"body":"{\\"refreshToken\\":\\"[REDACTED]\\"}"}',
+    );
+  });
+
+  it("leaves ordinary log lines untouched", () => {
+    // Prose mentioning tokens without a value must not be rewritten.
+    const line = "[ws-bridge] access token expired, refreshing | sessionId=abc-123 browsers=3";
+    expect(maskSecrets(line)).toBe(line);
+  });
+
+  it("masks lines written by log.* to stdout and to the log file", async () => {
+    // End-to-end: the masking sits in formatEntry, so both sinks get the
+    // already-masked line. Mutation check: removing maskSecrets from
+    // formatEntry turns this test red.
+    const { mkdtempSync, readFileSync, rmSync } = await import("node:fs");
+    const dir = mkdtempSync(join(tmpdir(), "logger-mask-"));
+    delete process.env.COMPANION_LOG_FORMAT;
+    const mod = await import("./logger.js");
+    const writer = mod.initLogFile({ logsDir: dir });
+    expect(writer).not.toBeNull();
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      mod.log.warn("auth", `token is ${AUTH_TOKEN}`, { apiKey: "sk-ant-api03-SECRETSECRETSECRET" });
+      const out = spy.mock.calls[0][0] as string;
+      expect(out).toBe("[auth] token is [REDACTED] | apiKey=[REDACTED]");
+      const fileContent = readFileSync(writer!.filePath, "utf-8");
+      expect(fileContent).toContain("[auth] token is [REDACTED] | apiKey=[REDACTED]");
+      expect(fileContent).not.toContain(AUTH_TOKEN);
+      expect(fileContent).not.toContain("SECRETSECRET");
+    } finally {
+      spy.mockRestore();
+      mod.closeLogFile();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
