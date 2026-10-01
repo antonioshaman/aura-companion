@@ -48,7 +48,7 @@ import { reapStrandedTerminals } from "./terminal-orphan-reaper.js";
 import { imagePullManager } from "./image-pull-manager.js";
 import { restoreIfNeeded as restoreTailscaleFunnel, cleanup as cleanupTailscaleFunnel } from "./tailscale-manager.js";
 import { isRunningAsService } from "./service.js";
-import { getToken, verifyToken } from "./auth-manager.js";
+import { getToken, verifyToken, isDirectLocalRequest } from "./auth-manager.js";
 import { getCookie } from "hono/cookie";
 import type { SocketData } from "./ws-bridge.js";
 import type { ServerWebSocket } from "bun";
@@ -412,8 +412,7 @@ app.get("/manifest.json", (c) => {
     // Localhost bypass — always embed the token for same-machine installs
     const bunServer = c.env as { requestIP?: (req: Request) => { address: string } | null };
     const ip = bunServer?.requestIP?.(c.req.raw);
-    const addr = ip?.address ?? "";
-    if (addr === "127.0.0.1" || addr === "::1" || addr === "::ffff:127.0.0.1") {
+    if (isDirectLocalRequest(ip?.address, c.req.raw.headers)) {
       manifest.start_url = `/?token=${getToken()}`;
     }
   }
@@ -461,8 +460,7 @@ const server = Bun.serve<SocketData>({
 
     // Helper: check if request is from localhost (same machine)
     const reqIp = server.requestIP(req);
-    const reqAddr = reqIp?.address ?? "";
-    const isLocalhost = reqAddr === "127.0.0.1" || reqAddr === "::1" || reqAddr === "::ffff:127.0.0.1";
+    const isLocalhost = isDirectLocalRequest(reqIp?.address, req.headers);
 
     // Task 15a: shared Origin allowlist check applied to every
     // browser-facing WS upgrade. WebSocket bypasses same-origin policy

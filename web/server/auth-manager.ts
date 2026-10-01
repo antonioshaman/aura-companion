@@ -70,6 +70,26 @@ export function verifyToken(candidate: string | null | undefined): boolean {
   return timingSafeEqual(candidateBuf, expectedBuf);
 }
 
+const LOOPBACK_ADDRESSES = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
+const PROXY_HEADERS = ["x-forwarded-for", "forwarded", "x-real-ip"];
+
+/**
+ * True only for a request made directly on this machine: loopback TCP source
+ * AND no reverse-proxy markers. A local proxy (Tailscale Funnel/Serve, nginx)
+ * also connects from 127.0.0.1 but relays a remote client, so any forwarding
+ * or Tailscale-* header disqualifies the request from the localhost bypass.
+ */
+export function isDirectLocalRequest(address: string | null | undefined, headers: Headers): boolean {
+  if (!address || !LOOPBACK_ADDRESSES.has(address)) return false;
+  for (const name of PROXY_HEADERS) {
+    if (headers.has(name)) return false;
+  }
+  for (const [name] of headers) {
+    if (name.toLowerCase().startsWith("tailscale-")) return false;
+  }
+  return true;
+}
+
 /**
  * Get the primary LAN IP address for QR code URL generation.
  * Falls back to "localhost" if no LAN IP is found.

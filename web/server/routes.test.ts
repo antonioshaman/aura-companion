@@ -1,7 +1,10 @@
 import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 
 // Mock auth-manager so all test requests pass the auth middleware
-vi.mock("./auth-manager.js", () => ({
+vi.mock("./auth-manager.js", async (importOriginal) => ({
+  // Real loopback/proxy-header predicate so the localhost-bypass tests
+  // exercise the production logic, not a stub.
+  isDirectLocalRequest: (await importOriginal<typeof import("./auth-manager.js")>()).isDirectLocalRequest,
   verifyToken: vi.fn(() => true),
   getToken: vi.fn(() => "test-token-for-routes"),
   getLanAddress: vi.fn(() => "192.168.1.100"),
@@ -4600,6 +4603,49 @@ describe("POST /api/sessions/create-stream — Council Mode branch (Beck council
 // ---------------------------------------------------------------------------
 // Auth endpoints
 // ---------------------------------------------------------------------------
+
+// SEC-S1: a local reverse proxy (Tailscale Funnel/Serve, nginx) connects
+// from 127.0.0.1 but relays a remote client. The localhost bypass and
+// /auth/auto token hand-out must only apply to a direct local request.
+describe("localhost bypass ignores proxied requests (SEC-S1)", () => {
+  // Hono passes the third app.request() arg as c.env — emulate Bun's
+  // server.requestIP() reporting a loopback TCP source address.
+  const loopbackEnv = { requestIP: () => ({ address: "127.0.0.1" }) };
+
+  it("GET /auth/auto returns the token to a clean loopback request", async () => {
+    const res = await app.request("/api/auth/auto", {}, loopbackEnv);
+    expect(await res.json()).toEqual({ ok: true, token: "test-token-for-routes" });
+  });
+
+  it("GET /auth/auto refuses loopback + X-Forwarded-For", async () => {
+    const res = await app.request("/api/auth/auto", { headers: { "X-Forwarded-For": "203.0.113.7" } }, loopbackEnv);
+    expect(await res.json()).toEqual({ ok: false });
+  });
+
+  it("GET /auth/auto refuses loopback + Tailscale-User-Login", async () => {
+    const res = await app.request("/api/auth/auto", { headers: { "Tailscale-User-Login": "x@example.com" } }, loopbackEnv);
+    expect(await res.json()).toEqual({ ok: false });
+  });
+
+  it("auth middleware: proxied loopback without token -> 401, clean loopback -> passes", async () => {
+    const { verifyToken } = await import("./auth-manager.js");
+    // No valid token anywhere: only the localhost bypass could let it through.
+    (verifyToken as ReturnType<typeof vi.fn>).mockReturnValue(false);
+    try {
+      const proxied = await app.request("/api/sessions", { headers: { "X-Forwarded-For": "203.0.113.7" } }, loopbackEnv);
+      expect(proxied.status).toBe(401);
+      const tailscale = await app.request("/api/sessions", { headers: { "Tailscale-User-Login": "x@example.com" } }, loopbackEnv);
+      expect(tailscale.status).toBe(401);
+      const forwarded = await app.request("/api/sessions", { headers: { Forwarded: "for=203.0.113.7" } }, loopbackEnv);
+      expect(forwarded.status).toBe(401);
+      // Local automation (curl localhost:3456/api/... from the box) keeps working.
+      const direct = await app.request("/api/sessions", {}, loopbackEnv);
+      expect(direct.status).toBe(200);
+    } finally {
+      (verifyToken as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    }
+  });
+});
 
 describe("POST /api/auth/verify", () => {
   it("returns ok:true for valid token", async () => {
