@@ -59,6 +59,17 @@ export function getToken(): string {
 }
 
 /**
+ * Log-safe description of where the active token lives — the env var name or
+ * the auth.json path, never the token itself (startup logs end up in
+ * journald / CI output, which must not hold a credential).
+ */
+export function describeTokenSource(): string {
+  const envToken = process.env.COMPANION_AUTH_TOKEN;
+  if (envToken && envToken.trim()) return "COMPANION_AUTH_TOKEN env var";
+  return AUTH_FILE;
+}
+
+/**
  * Verify a candidate token using constant-time comparison.
  */
 export function verifyToken(candidate: string | null | undefined): boolean {

@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, writeFileSync, existsSync, rmSync, readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 
 // Use a temp directory so tests don't touch the real ~/.companion/auth.json
@@ -72,6 +73,44 @@ describe("auth-manager", () => {
     authManager._resetForTest();
     expect(authManager.verifyToken("env-token-abc")).toBe(true);
     expect(authManager.verifyToken("wrong")).toBe(false);
+  });
+
+  // SEC-S6: the startup banner used to print the raw token, which then lived
+  // in journald / CI logs. describeTokenSource() is the log-safe replacement:
+  // it names where the token comes from and must never contain the token.
+  it("describeTokenSource names the env var, never the env token value", () => {
+    process.env.COMPANION_AUTH_TOKEN = "env-secret-token-xyz";
+    authManager._resetForTest();
+    const desc = authManager.describeTokenSource();
+    expect(desc).toBe("COMPANION_AUTH_TOKEN env var");
+    expect(desc).not.toContain("env-secret-token-xyz");
+  });
+
+  it("describeTokenSource returns the auth.json path, never the file token", () => {
+    // Without the env var the token is persisted in ~/.companion/auth.json;
+    // the description is that path, and the 64-hex token is not in it.
+    const token = authManager.getToken();
+    const desc = authManager.describeTokenSource();
+    expect(desc).toMatch(/[\\/]\.companion[\\/]auth\.json$/);
+    expect(desc).not.toContain(token);
+  });
+
+  it("describeTokenSource treats a whitespace-only env var as unset (same rule as getToken)", () => {
+    process.env.COMPANION_AUTH_TOKEN = "   ";
+    expect(authManager.describeTokenSource()).toMatch(/auth\.json$/);
+  });
+
+  it("server startup banner logs the token source, not the token (source canary)", () => {
+    // index.ts runs Bun.serve at import time, so it is checked at source level:
+    // no console.* line may interpolate getToken()/authToken, and the banner
+    // must go through describeTokenSource().
+    const here = dirname(fileURLToPath(import.meta.url));
+    const src = readFileSync(join(here, "index.ts"), "utf8");
+    const logLines = src.split("\n").filter((l) => /console\.(log|info|warn|error)\(/.test(l));
+    for (const line of logLines) {
+      expect(line).not.toMatch(/getToken\(\)|\bauthToken\b/);
+    }
+    expect(src).toMatch(/console\.log\(`\s*Auth token: \$\{describeTokenSource\(\)\}`\)/);
   });
 
   it("getLanAddress returns a string", () => {
