@@ -1,8 +1,17 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { chmodSync, mkdirSync, writeFileSync, existsSync, rmSync, readFileSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
+import type { NetworkInterfaceInfo } from "node:os";
+
+// networkInterfaces is wrapped so the address tests can feed fixed
+// interfaces; every other test gets the real implementation.
+const osMock = vi.hoisted(() => ({ networkInterfaces: null as null | (() => NodeJS.Dict<NetworkInterfaceInfo[]>) }));
+vi.mock("node:os", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:os")>();
+  return { ...actual, networkInterfaces: () => (osMock.networkInterfaces ?? actual.networkInterfaces)() };
+});
 
 // Use a temp directory so tests don't touch the real ~/.companion/auth.json
 const TEST_DIR = join(tmpdir(), `companion-auth-test-${Date.now()}`);
@@ -182,6 +191,61 @@ describe("auth-manager", () => {
       authManager._resetForTest(TEST_AUTH_FILE);
       authManager.getToken();
       expect(statSync(TEST_AUTH_FILE).mode & 0o777).toBe(0o600);
+    });
+  });
+
+  // Token persistence must not take the server down: a failed write is
+  // logged and the in-memory token is still served for this process.
+  describe("persist failure", () => {
+    it("getToken and regenerateToken still return a token when auth.json cannot be written", () => {
+      // A regular file where the parent directory should be → mkdir fails.
+      const blocker = join(TEST_DIR, "not-a-dir");
+      writeFileSync(blocker, "x");
+      authManager._resetForTest(join(blocker, "auth.json"));
+      const err = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        expect(authManager.getToken()).toMatch(/^[a-f0-9]{64}$/);
+        expect(authManager.regenerateToken()).toMatch(/^[a-f0-9]{64}$/);
+        expect(err).toHaveBeenCalledTimes(2);
+      } finally {
+        err.mockRestore();
+      }
+    });
+  });
+
+  // QR/login addresses: LAN = first external IPv4, Tailscale = 100.64.0.0/10.
+  describe("getAllAddresses / getLanAddress", () => {
+    const v4 = (address: string, internal = false) =>
+      ({ address, family: "IPv4", internal, netmask: "255.255.255.0", mac: "00:00:00:00:00:00", cidr: null }) as NetworkInterfaceInfo;
+
+    afterEach(() => {
+      osMock.networkInterfaces = null;
+    });
+
+    it("lists localhost, the first LAN IPv4 and the Tailscale CGNAT IPv4", () => {
+      osMock.networkInterfaces = () => ({
+        lo: [v4("127.0.0.1", true)],
+        eth0: [{ ...v4("fe80::1"), family: "IPv6" } as NetworkInterfaceInfo, v4("192.168.1.10"), v4("192.168.1.11")],
+        tailscale0: [v4("100.101.5.6")],
+        none: undefined,
+      });
+      expect(authManager.getAllAddresses()).toEqual([
+        { label: "Localhost", ip: "localhost" },
+        { label: "LAN", ip: "192.168.1.10" },
+        { label: "Tailscale", ip: "100.101.5.6" },
+      ]);
+      expect(authManager.getLanAddress()).toBe("192.168.1.10");
+    });
+
+    it("treats 100.x outside 100.64.0.0/10 as LAN, and falls back to localhost with no external IPv4", () => {
+      osMock.networkInterfaces = () => ({ eth0: [v4("100.20.0.1")] });
+      expect(authManager.getAllAddresses()).toEqual([
+        { label: "Localhost", ip: "localhost" },
+        { label: "LAN", ip: "100.20.0.1" },
+      ]);
+      osMock.networkInterfaces = () => ({ lo: [v4("127.0.0.1", true)] });
+      expect(authManager.getAllAddresses()).toEqual([{ label: "Localhost", ip: "localhost" }]);
+      expect(authManager.getLanAddress()).toBe("localhost");
     });
   });
 });
