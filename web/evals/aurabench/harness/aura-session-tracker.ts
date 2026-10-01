@@ -25,6 +25,13 @@
  * or a limit-shaped `error` message → the cell is not a result, the runner
  * retries it later.
  *
+ * Observer health (P6/FIX-H-MODEL): every non-primary session's `result`s
+ * are counted ok / error, and a `group_degraded` with `deadRole: "observer"`
+ * is kept — from the first frame, prompt or not, because the observer's
+ * spawn-ack turn runs before the task prompt. A Council cell whose observer
+ * never finished a turn successfully measured no observer at all (DIET-AB:
+ * 20/20 H cells, Codex 400 on the Claude model) — see {@link observerDead}.
+ *
  * Pure (clock passed in). Firewall-clean.
  */
 
@@ -53,6 +60,31 @@ interface SessionState {
   codexCurrent: CodexTokens | null;
 }
 
+/** What the observer half(s) of a Council cell did, for `isolation`. */
+export interface ObserverHealth {
+  /** Successful (`is_error` not true) results over every non-primary session. */
+  ok_results: number;
+  error_results: number;
+  /** Text of the last error result / `error` frame of a non-primary session. */
+  last_error: string | null;
+  /** `reason` of a `group_degraded` frame that named the observer dead. */
+  degraded: string | null;
+}
+
+/**
+ * Why a Council cell did not measure its observer, or null if it did (or
+ * cannot be told). Dead = not one successful observer turn AND a positive
+ * failure signal (an error result or the server declaring the observer
+ * dead). An observer that was simply never woken (no checkpoint) has neither
+ * and stays valid — that is the agent's behaviour, not the harness's fault.
+ */
+export function observerDead(h: ObserverHealth): string | null {
+  if (h.ok_results > 0) return null;
+  if (h.error_results === 0 && h.degraded === null) return null;
+  const why = h.last_error ?? `group_degraded: ${h.degraded}`;
+  return `observer_dead: no successful observer turn (${h.error_results} error results) — ${why}`.slice(0, 500);
+}
+
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
 
 export class AuraSessionTracker {
@@ -62,6 +94,7 @@ export class AuraSessionTracker {
   private primaryResults = 0;
   private lastPrimaryError: string | null = null;
   limit: LimitHit | null = null;
+  private readonly obs: ObserverHealth = { ok_results: 0, error_results: 0, last_error: null, degraded: null };
 
   constructor(
     private readonly primaryId: string,
@@ -114,6 +147,7 @@ export class AuraSessionTracker {
     const type = msg.type;
     if (typeof type !== "string") return;
     if (type === "session_init" || type === "session_update") this.onSessionState(s, msg.session);
+    this.onObserverHealth(sessionId, type, msg);
     if (this.promptSentAt === null) return;
     if (ACTIVITY.has(type)) this.lastActivity = now;
     if (type === "assistant") {
@@ -149,6 +183,30 @@ export class AuraSessionTracker {
     } else if (type === "cli_disconnected" && sessionId === this.primaryId) {
       s.running = false;
     }
+  }
+
+  private onObserverHealth(sessionId: string, type: string, msg: Obj): void {
+    if (type === "group_degraded" && msg.deadRole === "observer") {
+      this.obs.degraded = typeof msg.reason === "string" ? msg.reason : "unknown";
+      return;
+    }
+    if (sessionId === this.primaryId) return;
+    if (type === "result") {
+      const data = isObj(msg.data) ? msg.data : {};
+      if (data.is_error === true) {
+        this.obs.error_results++;
+        this.obs.last_error = (typeof data.result === "string" && data.result) || String(data.subtype ?? "error");
+      } else {
+        this.obs.ok_results++;
+      }
+    } else if (type === "error" && typeof msg.message === "string") {
+      this.obs.last_error = msg.message;
+    }
+  }
+
+  /** Snapshot of the non-primary sessions' turn outcomes. */
+  observerHealth(): ObserverHealth {
+    return { ...this.obs };
   }
 
   isDone(now: number): boolean {

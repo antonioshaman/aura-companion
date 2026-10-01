@@ -153,8 +153,13 @@ export interface RelaunchSessionRequest {
  *  selection is treated as untrusted input. */
 export interface CreateCouncilGroupRequest {
   pairing: "claude+claude" | "claude+codex";
-  /** Shared base request — model/cwd/env/sandbox/etc. apply to BOTH halves. */
+  /** Shared base request — cwd/env/sandbox/etc. apply to BOTH halves;
+   *  `model` is the primary's and carries over only to a same-backend
+   *  observer (see `observerSpawnModel`). */
   base: Omit<CreateSessionRequest, "backend" | "sessionGroupId" | "sessionGroupRole">;
+  /** Explicit observer model — needed to pin a cross-backend observer
+   *  (e.g. the Codex half of `claude+codex`); absent → its launcher default. */
+  observerModel?: string;
 }
 
 export type CreateCouncilGroupResult =

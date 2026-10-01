@@ -25,7 +25,9 @@ export type CellStatus =
   | "timeout"
   /** Agent process / session failed (crash, spawn error, error result). */
   | "agent_error"
-  /** The harness itself failed before the agent could run (worktree, install). */
+  /** The harness itself failed before the agent could run (worktree, install),
+   *  or the cell ran without measuring its variant (a Council observer that
+   *  never completed a turn — `error` starts with `observer_dead:`). */
   | "harness_error";
 
 export interface AgentMetrics {

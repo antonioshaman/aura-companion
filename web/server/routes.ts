@@ -448,6 +448,17 @@ export function createRoutes(
     return { ok: true, body: layered.body };
   }
 
+  /**
+   * Council create's optional `observerModel` (P6/FIX-H-MODEL): a non-empty
+   * string pins the observer half; absent → none. Anything else is a 400 —
+   * a silently dropped pin would spawn the observer on another model.
+   */
+  function parseObserverModel(raw: unknown): { ok: true; value?: string } | { ok: false; error: string } {
+    if (raw === undefined || raw === null) return { ok: true };
+    if (typeof raw === "string" && raw.trim().length > 0) return { ok: true, value: raw.trim() };
+    return { ok: false, error: `Invalid observerModel: ${JSON.stringify(raw)}` };
+  }
+
   api.post("/sessions/create", async (c) => {
     const rawBody = await c.req.json().catch(() => ({}));
     const norm = normaliseCreateSessionBody(rawBody);
@@ -464,8 +475,16 @@ export function createRoutes(
       if (pairing !== "claude+claude" && pairing !== "claude+codex") {
         return c.json({ error: `Invalid pairing: ${String(body.councilPairing)}` }, 400 as any);
       }
-      const { councilMode: _cm, councilPairing: _cp, ...rest } = body;
-      const result = await orchestrator.createCouncilGroup({ pairing, base: rest });
+      const { councilMode: _cm, councilPairing: _cp, observerModel: rawObserverModel, ...rest } = body;
+      const observerModel = parseObserverModel(rawObserverModel);
+      if (!observerModel.ok) {
+        return c.json({ error: observerModel.error }, 400 as any);
+      }
+      const result = await orchestrator.createCouncilGroup({
+        pairing,
+        base: rest,
+        ...(observerModel.value ? { observerModel: observerModel.value } : {}),
+      });
       if (!result.ok) {
         return c.json({ error: result.error }, result.status as any);
       }
@@ -510,8 +529,17 @@ export function createRoutes(
           event: "progress",
           data: JSON.stringify({ step: "launching_cli", label: "Spawning Council pair…", status: "in_progress" }),
         });
-        const { councilMode: _cm, councilPairing: _cp, ...rest } = body;
-        const result = await orchestrator.createCouncilGroup({ pairing, base: rest });
+        const { councilMode: _cm, councilPairing: _cp, observerModel: rawObserverModel, ...rest } = body;
+        const observerModel = parseObserverModel(rawObserverModel);
+        if (!observerModel.ok) {
+          await stream.writeSSE({ event: "error", data: JSON.stringify({ error: observerModel.error }) });
+          return;
+        }
+        const result = await orchestrator.createCouncilGroup({
+          pairing,
+          base: rest,
+          ...(observerModel.value ? { observerModel: observerModel.value } : {}),
+        });
         if (!result.ok) {
           await stream.writeSSE({
             event: "error",
