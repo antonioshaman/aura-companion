@@ -24,7 +24,7 @@ import { log } from "./logger.js";
 export function writeAtomicJson(
   target: string,
   payload: unknown,
-  opts?: { maxBytes?: number },
+  opts?: { maxBytes?: number; space?: number },
 ): void {
   // Default cap is the council-artifact limit. Callers persisting
   // unbounded state (session JSON carries full message history) pass
@@ -70,7 +70,9 @@ export function writeAtomicJson(
     });
   }
 
-  const json = JSON.stringify(payload);
+  // `space` keeps hand-editable stores (settings.json, env profiles)
+  // pretty-printed as they were under the old writeFileSync path.
+  const json = JSON.stringify(payload, null, opts?.space);
   // Byte-count via Buffer — JS string `.length` is UTF-16 code units and
   // undercounts multibyte content by up to 3×. Hunt #6.
   const byteLen = Buffer.byteLength(json, "utf8");
