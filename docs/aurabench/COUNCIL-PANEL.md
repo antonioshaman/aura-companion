@@ -94,7 +94,10 @@ follows the D2 harness rules. One run = case × panel × rep:
    known defects. Smoke on this clone for pr91: 2 commits in the checkout, no
    `2026-06-04-1826` object, the fix tree of #92 absent; the reviewed diff went
    from 37 files to 23 (the 14 dropped are review artefacts). The prompt
-   names the sealed base.
+   names the sealed base. Repo-shipped skills (`.agents/skills`,
+   `.claude/skills`) are scrubbed too: the CLI loads them from the checkout,
+   and the repo's `harden` shares its name with a real user skill, so the first
+   live run was `invalid_isolation`. No case diff touches these directories.
 2. `bun install --frozen-lockfile` in `web/` (best effort; a failure is a
    confound, since reviewers may want to run tests).
 3. **Skill copy in a per-run HOME.** `council-review-aura` and
@@ -142,6 +145,12 @@ cd web && env $(env | grep -oE '^AURA_[A-Z_]+' | sed 's/^/-u /') NODE_OPTIONS=--
 
 Start with `--max-runs 1` and check the first record: `status`, the init-frame
 skills, and `dispatch.seated`.
+
+Smoke (2026-10-01, after the skill scrub): `pr54|FULL|1` → `completed`, valid,
+isolated (init skills: `council-review-aura` plus CLI built-ins only, builtin
+plugins, no MCP, 0 hook events), 11/11 seats dispatched, 11/11 expert files,
+recall 5/7, 549 s. The aborted pre-fix record is kept in
+`bench/council-panel/invalid-smoke-20261001/`, outside the results file.
 
 ## Scoring
 
