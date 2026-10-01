@@ -1,11 +1,10 @@
 import {
-  mkdirSync,
   readFileSync,
-  writeFileSync,
   existsSync,
 } from "node:fs";
-import { join, dirname } from "node:path";
+import { join } from "node:path";
 import { COMPANION_HOME } from "./paths.js";
+import { writeAtomicJson } from "./atomic-write.js";
 
 export const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6";
 
@@ -126,9 +125,10 @@ function ensureLoaded(): void {
   loaded = true;
 }
 
+// Secrets live in this file (API keys / OAuth tokens) — write them 0o600 via the atomic helper
+// (a rename also re-tightens a file that predates this, unlike writeFileSync's mode).
 function persist(): void {
-  mkdirSync(dirname(filePath), { recursive: true });
-  writeFileSync(filePath, JSON.stringify(settings, null, 2), "utf-8");
+  writeAtomicJson(filePath, settings, { maxBytes: Number.POSITIVE_INFINITY, space: 2 });
 }
 
 export function getSettings(): CompanionSettings {

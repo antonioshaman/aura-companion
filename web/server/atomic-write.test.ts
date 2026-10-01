@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { writeAtomicJson } from "./atomic-write.js";
@@ -62,5 +62,38 @@ describe("writeAtomicJson", () => {
     writeAtomicJson(target, { v: 1 });
     writeAtomicJson(target, { v: 2 });
     expect(JSON.parse(readFileSync(target, "utf-8"))).toEqual({ v: 2 });
+  });
+});
+
+// P7/SEC-S7: the helper is now the write path for secret stores
+// (settings.json, env profiles, agent configs, Linear OAuth connections).
+describe("writeAtomicJson file mode and formatting", () => {
+  // The tmp file is opened 0o600 and renamed over the target, so the result
+  // is owner-only regardless of the process umask.
+  it("writes the target with mode 0o600", () => {
+    const target = join(dir, "secret.json");
+    writeAtomicJson(target, { token: "x" });
+    expect(statSync(target).mode & 0o777).toBe(0o600);
+  });
+
+  // writeFileSync's `mode` only applies on create; the rename replaces the
+  // inode, so a world-readable file written by an older version is tightened.
+  it("tightens a pre-existing 0o644 target to 0o600 on overwrite", () => {
+    const target = join(dir, "legacy.json");
+    writeFileSync(target, "{}", { mode: 0o644 });
+    chmodSync(target, 0o644);
+    writeAtomicJson(target, { v: 1 });
+    expect(statSync(target).mode & 0o777).toBe(0o600);
+  });
+
+  // `space` keeps hand-editable stores pretty-printed (same bytes as the
+  // old JSON.stringify(x, null, 2) writers); omitted → compact as before.
+  it("pretty-prints only when `space` is given", () => {
+    const pretty = join(dir, "pretty.json");
+    const compact = join(dir, "compact.json");
+    writeAtomicJson(pretty, { a: 1 }, { space: 2 });
+    writeAtomicJson(compact, { a: 1 });
+    expect(readFileSync(pretty, "utf-8")).toBe(JSON.stringify({ a: 1 }, null, 2));
+    expect(readFileSync(compact, "utf-8")).toBe('{"a":1}');
   });
 });

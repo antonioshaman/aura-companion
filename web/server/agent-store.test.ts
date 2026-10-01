@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -586,3 +586,19 @@ describe("edge cases", () => {
   });
 });
 
+// P7/SEC-S7: agent configs carry trigger credentials (webhook secrets,
+// Linear tokens) — files must be 0o600 on create and on update.
+describe("agent file permissions", () => {
+  it("creates the agent file with mode 0o600", () => {
+    const agent = agentStore.createAgent(makeAgentInput());
+    expect(statSync(join(agentsDir(), `${agent.id}.json`)).mode & 0o777).toBe(0o600);
+  });
+
+  it("tightens a pre-existing 0o644 agent file on update", () => {
+    const agent = agentStore.createAgent(makeAgentInput());
+    const file = join(agentsDir(), `${agent.id}.json`);
+    chmodSync(file, 0o644);
+    agentStore.updateAgent(agent.id, { prompt: "new prompt" });
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+  });
+});

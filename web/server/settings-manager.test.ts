@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, rmSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -274,5 +274,24 @@ describe("settings-manager", () => {
     updateSettings({ publicUrl: "https://example.com" });
     const updated = updateSettings({ anthropicModel: "claude-haiku-3" });
     expect(updated.publicUrl).toBe("https://example.com");
+  });
+});
+
+// P7/SEC-S7: settings.json holds API keys and OAuth tokens — it must be
+// owner-only (0o600), including a file created world-readable by an older build.
+describe("settings-manager file permissions", () => {
+  it("persists settings.json with mode 0o600", () => {
+    updateSettings({ anthropicApiKey: "sk-ant-key" });
+    expect(statSync(settingsPath).mode & 0o777).toBe(0o600);
+  });
+
+  it("tightens a pre-existing 0o644 settings.json on the next write", () => {
+    writeFileSync(settingsPath, JSON.stringify({ anthropicApiKey: "old" }), { mode: 0o644 });
+    chmodSync(settingsPath, 0o644);
+    _resetForTest(settingsPath);
+    updateSettings({ anthropicApiKey: "new" });
+    expect(statSync(settingsPath).mode & 0o777).toBe(0o600);
+    // Still pretty-printed, so hand edits stay practical.
+    expect(readFileSync(settingsPath, "utf-8")).toContain('\n  "anthropicApiKey": "new"');
   });
 });
