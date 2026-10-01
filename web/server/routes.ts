@@ -61,7 +61,7 @@ import { getAnthropicModels, type BackendModelInfo } from "./anthropic-models-ca
 import { lookupModel } from "./model-registry.js";
 import { discoverClaudeSessions } from "./claude-session-discovery.js";
 import { getClaudeSessionHistoryPage } from "./claude-session-history.js";
-import { verifyToken, getToken, regenerateToken, getAllAddresses } from "./auth-manager.js";
+import { verifyToken, getToken, regenerateToken, getAllAddresses, isDirectLocalRequest } from "./auth-manager.js";
 import QRCode from "qrcode";
 import { VSCODE_EDITOR_CONTAINER_PORT, NOVNC_CONTAINER_PORT } from "./constants.js";
 import { probePairingCapability, type ProbeRunner, type PairingCapability } from "./preflight-probe.js";
@@ -343,13 +343,13 @@ export function createRoutes(
   // auto-authenticate without a token. This makes first-launch seamless.
 
   // Check if the request comes from localhost (same machine as the server).
-  // Uses Bun's requestIP which returns the actual TCP source address.
+  // Uses Bun's requestIP which returns the actual TCP source address; a local
+  // reverse proxy (forwarding / Tailscale-* headers) never counts as localhost.
   // Returns false in test environments where c.env is not a Bun server.
   function isLocalhostRequest(c: { env: unknown; req: { raw: Request } }): boolean {
     const bunServer = c.env as { requestIP?: (req: Request) => { address: string } | null };
     const ip = bunServer?.requestIP?.(c.req.raw);
-    const addr = ip?.address ?? "";
-    return addr === "127.0.0.1" || addr === "::1" || addr === "::ffff:127.0.0.1";
+    return isDirectLocalRequest(ip?.address, c.req.raw.headers);
   }
 
   api.get("/auth/auto", (c) => {
