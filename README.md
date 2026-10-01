@@ -40,13 +40,7 @@ Open http://localhost:5174.
 
 **Requirements:** [Bun](https://bun.sh/) ≥ 1.0, Claude Code CLI or Codex CLI.
 
-```bash
-# Or install the published package globally
-bun install -g aura-companion
-
-# Or run without installing
-bunx aura-companion
-```
+Install from a git checkout as shown above. The `aura-companion` package on npm is an old release, so don't install it with `bun install -g` or `bunx`.
 
 ## Self-Learning
 
