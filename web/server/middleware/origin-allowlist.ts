@@ -21,6 +21,9 @@
  * `localhost: true` when the request IP is loopback.
  */
 
+import type { MiddlewareHandler } from "hono";
+import { cors } from "hono/cors";
+
 const DEV_FRONTEND_ORIGINS: ReadonlySet<string> = new Set([
   "http://localhost:5174",
   "http://127.0.0.1:5174",
@@ -90,4 +93,21 @@ export function isOriginAllowed(opts: OriginCheckOptions): boolean {
   if (envAllowed.has(origin)) return true;
 
   return false;
+}
+
+/**
+ * CORS for `/api/*` (external audit S2). The browser UI is same-origin
+ * (prod serves it from the API host; dev goes through the Vite proxy),
+ * so no origin needs CORS by default. The old bare `cors()` answered
+ * `Access-Control-Allow-Origin: *` to every page on the web. Now only
+ * origins listed in `COMPANION_ALLOWED_ORIGIN` get the header; every
+ * other origin gets none and the browser blocks the cross-origin read.
+ */
+export function apiCors(allowedOriginsOverride?: ReadonlySet<string>): MiddlewareHandler {
+  return cors({
+    origin: (origin) => {
+      const allowed = allowedOriginsOverride ?? parseAllowedOriginsEnv();
+      return allowed.has(origin) ? origin : null;
+    },
+  });
 }

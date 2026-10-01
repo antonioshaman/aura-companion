@@ -10,7 +10,6 @@ import { dirname, resolve } from "node:path";
 import { realpathSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { Hono } from "hono";
-import { cors } from "hono/cors";
 import { serveStatic } from "hono/bun";
 import { cacheControlMiddleware } from "./cache-headers.js";
 import { createRoutes } from "./routes.js";
@@ -39,7 +38,7 @@ import { migrateLinearCredentialsToAgents } from "./linear-credential-migration.
 import { authenticateManagedWebSocket } from "./ws-auth.js";
 import { LinearAgentBridge } from "./linear-agent-bridge.js";
 import { NoVncProxy } from "./novnc-proxy.js";
-import { isOriginAllowed } from "./middleware/origin-allowlist.js";
+import { apiCors, isOriginAllowed } from "./middleware/origin-allowlist.js";
 import { securityHeaders } from "./middleware/security-headers.js";
 
 import { CleanupScheduler } from "./cleanup/cleanup-scheduler.js";
@@ -381,7 +380,7 @@ if (managedAuthEnabled) {
 // response — including HTML, JSON, and 404s — carries the headers.
 app.use("/*", securityHeaders());
 
-app.use("/api/*", cors());
+app.use("/api/*", apiCors());
 app.route("/api", createRoutes(orchestrator, launcher, wsBridge, terminalManager, prPoller, recorder, cronScheduler, agentExecutor, linearAgentBridge, port));
 
 // Dynamic manifest — embeds auth token in start_url so PWA auto-authenticates
