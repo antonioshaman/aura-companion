@@ -40,7 +40,7 @@ import { LinearAgentBridge } from "./linear-agent-bridge.js";
 import { NoVncProxy } from "./novnc-proxy.js";
 import { apiCors, isOriginAllowed } from "./middleware/origin-allowlist.js";
 import { securityHeaders } from "./middleware/security-headers.js";
-import { MAX_REQUEST_BODY_BYTES, requestBodyLimit } from "./middleware/body-limit.js";
+import { MAX_REQUEST_BODY_BYTES, originalRequest, requestBodyLimit } from "./middleware/body-limit.js";
 
 import { CleanupScheduler } from "./cleanup/cleanup-scheduler.js";
 import { reapOrphans, resolveOrphanReaperGate } from "./orphan-reaper.js";
@@ -414,7 +414,7 @@ app.get("/manifest.json", (c) => {
   } else {
     // Localhost bypass — always embed the token for same-machine installs
     const bunServer = c.env as { requestIP?: (req: Request) => { address: string } | null };
-    const ip = bunServer?.requestIP?.(c.req.raw);
+    const ip = bunServer?.requestIP?.(originalRequest(c.req.raw));
     if (isDirectLocalRequest(ip?.address, c.req.raw.headers)) {
       manifest.start_url = `/?token=${getToken()}`;
     }

@@ -62,6 +62,7 @@ import { lookupModel } from "./model-registry.js";
 import { discoverClaudeSessions } from "./claude-session-discovery.js";
 import { getClaudeSessionHistoryPage } from "./claude-session-history.js";
 import { verifyToken, getToken, regenerateToken, getAllAddresses, isDirectLocalRequest } from "./auth-manager.js";
+import { originalRequest } from "./middleware/body-limit.js";
 import QRCode from "qrcode";
 import { VSCODE_EDITOR_CONTAINER_PORT, NOVNC_CONTAINER_PORT } from "./constants.js";
 import { probePairingCapability, type ProbeRunner, type PairingCapability } from "./preflight-probe.js";
@@ -348,7 +349,7 @@ export function createRoutes(
   // Returns false in test environments where c.env is not a Bun server.
   function isLocalhostRequest(c: { env: unknown; req: { raw: Request } }): boolean {
     const bunServer = c.env as { requestIP?: (req: Request) => { address: string } | null };
-    const ip = bunServer?.requestIP?.(c.req.raw);
+    const ip = bunServer?.requestIP?.(originalRequest(c.req.raw));
     return isDirectLocalRequest(ip?.address, c.req.raw.headers);
   }
 
