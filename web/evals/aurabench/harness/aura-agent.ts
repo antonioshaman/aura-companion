@@ -309,7 +309,8 @@ export function auraRunner(d: AuraDeps): AgentRunner {
         ? ctx.task.prompt + observerLoopDirective({ baseUrl: d.baseUrl, orchestratorId: ids.primary, groupId })
         : ctx.task.prompt;
     const all = [ids.primary, ...ids.others];
-    const tracker = new AuraSessionTracker(ids.primary, ids.others, quietWindowMs(v), v.provider);
+    const observerBackend = v.councilPairing ? (v.councilPairing.split("+")[1] as "claude" | "codex") : v.provider;
+    const tracker = new AuraSessionTracker(ids.primary, ids.others, quietWindowMs(v), v.provider, observerBackend);
     const sockets = new Map<string, BenchSocket>();
     const wsBase = d.baseUrl.replace(/^http/, "ws");
     try {
@@ -369,6 +370,8 @@ export function auraRunner(d: AuraDeps): AgentRunner {
           const health = tracker.observerHealth();
           isolation.observer_health = health;
           const dead = observerDead(health);
+          // A dead observer that died on its quota is a pause, not a result.
+          if (dead && tracker.observerLimit) return { kind: "limit", limit: tracker.observerLimit };
           if (dead) return { kind: "done", status: "harness_error", metrics: tracker.metrics(), isolation, confounds, error: dead };
         }
         return { kind: "done", status, metrics: tracker.metrics(), isolation, confounds, ...(error ? { error } : {}) };
@@ -376,6 +379,12 @@ export function auraRunner(d: AuraDeps): AgentRunner {
       const deadline = started + ctx.timeoutMs;
       for (;;) {
         if (tracker.limit) return { kind: "limit", limit: tracker.limit };
+        // P6/FIX-CODEX-QUOTA: the observer ran out of quota — the cell can no
+        // longer measure its variant; stop now instead of spending the
+        // orchestrator's quota on a cell that would be voided.
+        if (v.councilPairing && tracker.observerLimit && tracker.observerHealth().ok_results === 0) {
+          return { kind: "limit", limit: tracker.observerLimit };
+        }
         if (tracker.isDone(now())) break;
         if (now() > deadline) return finish("timeout");
         await sleep(pollMs);
