@@ -161,7 +161,7 @@ vi.mock("./settings-manager.js", () => ({
 // ─── Imports (after mocks) ───────────────────────────────────────────────────
 
 import { SessionStore } from "./session-store.js";
-import { CliLauncher, shouldClearResumeAfterExit, resumeFailureThresholdFor, resumeTranscriptExists } from "./cli-launcher.js";
+import { CliLauncher, claudeTransportMode, shouldClearResumeAfterExit, resumeFailureThresholdFor, resumeTranscriptExists } from "./cli-launcher.js";
 import type { SdkSessionInfo } from "./cli-launcher.js";
 import { readLaunchableCodexModels } from "./codex-models.js";
 import { companionBus } from "./event-bus.js";
@@ -3830,5 +3830,29 @@ describe("layer flags at spawn (P4/C3)", () => {
     expect(adapters.length).toBeGreaterThanOrEqual(2);
     expect(relaunched.options.threadId).toBe("thr_persisted");
     expect(relaunched.options.systemPrompt).toContain("council layer is disabled");
+  });
+});
+
+// SEC-S3: index.ts closes the token-less `/ws/cli/:id` endpoint whenever this
+// returns "stdio", so the default must stay stdio and only an explicit
+// (case-insensitive) "ws" may reopen it — anything else fails closed.
+describe("claudeTransportMode", () => {
+  afterEach(() => { delete process.env.COMPANION_CLAUDE_TRANSPORT; });
+
+  it("defaults to stdio when unset", () => {
+    delete process.env.COMPANION_CLAUDE_TRANSPORT;
+    expect(claudeTransportMode()).toBe("stdio");
+  });
+
+  it("returns ws only for an explicit ws value", () => {
+    process.env.COMPANION_CLAUDE_TRANSPORT = "WS";
+    expect(claudeTransportMode()).toBe("ws");
+  });
+
+  it("falls back to stdio for unrecognised values", () => {
+    for (const v of ["websocket", "1", "true", " ws"]) {
+      process.env.COMPANION_CLAUDE_TRANSPORT = v;
+      expect(claudeTransportMode()).toBe("stdio");
+    }
   });
 });
