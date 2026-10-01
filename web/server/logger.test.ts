@@ -165,6 +165,31 @@ describe("maskSecrets", () => {
     expect(maskSecrets(`commit ${sha}`)).toBe(`commit ${sha}`);
   });
 
+  it("redacts 64-hex values only in a secret context, keeping diagnostic sha256 fields", () => {
+    // FIX-P7-REVIEW (1): the blanket 64-hex rule ate wakeBodySha256
+    // (council-checkpoint-pipeline), observerPromptSha256 (cli-launcher) and
+    // argvSha256 (orphan-reaper) — all sha256 hex, all needed for forensics.
+    const digest = "f".repeat(32) + "0123456789abcdef0123456789abcdef";
+    for (const line of [
+      `[orphan-reaper] adopt | argvSha256=${digest} pid=42`,
+      `{"event":"wake","wakeBodySha256":"${digest}","sessionId":"s1"}`,
+      `{"msg":"spawn","observerPromptSha256":"${digest}"}`,
+      `tokenHash=${digest}`,
+      `checkpoint ${digest} written`,
+    ]) {
+      expect(maskSecrets(line)).toBe(line);
+    }
+    // Secret contexts: key names and nearby prose.
+    expect(maskSecrets(`authToken=${AUTH_TOKEN}`)).toBe("authToken=[REDACTED]");
+    expect(maskSecrets(`{"secret":"${AUTH_TOKEN}"}`)).toBe('{"secret":"[REDACTED]"}');
+    expect(maskSecrets(`{\\"apiKey\\":\\"${AUTH_TOKEN}\\"}`)).toBe('{\\"apiKey\\":\\"[REDACTED]\\"}');
+    expect(maskSecrets(`login url /?token=${AUTH_TOKEN}`)).toBe("login url /?token=[REDACTED]");
+    expect(maskSecrets(`authorization: ${AUTH_TOKEN}`)).toBe("authorization: [REDACTED]");
+    expect(maskSecrets(`password ${AUTH_TOKEN}`)).toBe("password [REDACTED]");
+    // Both on one line: the token goes, the digest stays.
+    expect(maskSecrets(`token=${AUTH_TOKEN} argvSha256=${digest}`)).toBe(`token=[REDACTED] argvSha256=${digest}`);
+  });
+
   it("redacts OAuth access/refresh token fields in JSON, query and key=value form", () => {
     expect(maskSecrets('{"access_token":"gho_secret1","refresh_token":"r1"}')).toBe(
       '{"access_token":"[REDACTED]","refresh_token":"[REDACTED]"}',

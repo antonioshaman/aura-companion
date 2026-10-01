@@ -7,7 +7,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { COMPANION_HOME } from "./paths.js";
-import { writeAtomicJson } from "./atomic-write.js";
+import { tightenFileMode, writeAtomicJson } from "./atomic-write.js";
 import { randomBytes } from "node:crypto";
 import type { AgentConfig, AgentConfigCreateInput } from "./agent-types.js";
 
@@ -66,6 +66,7 @@ export function listAgents(): AgentConfig[] {
     const agents: AgentConfig[] = [];
     for (const file of files) {
       try {
+        tightenFileMode(join(AGENTS_DIR, file));
         const raw = readFileSync(join(AGENTS_DIR, file), "utf-8");
         agents.push(stripLegacyChatTrigger(JSON.parse(raw)));
       } catch {
@@ -82,6 +83,7 @@ export function listAgents(): AgentConfig[] {
 export function getAgent(id: string): AgentConfig | null {
   ensureDir();
   try {
+    tightenFileMode(filePath(id));
     const raw = readFileSync(filePath(id), "utf-8");
     return stripLegacyChatTrigger(JSON.parse(raw) as AgentConfig);
   } catch {

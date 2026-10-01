@@ -1,7 +1,9 @@
 import {
+  chmodSync,
   mkdtempSync,
   rmSync,
   readFileSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -73,6 +75,23 @@ afterEach(() => {
 });
 
 describe("linear-connections", () => {
+  // ─── File mode (FIX-P7-REVIEW S7 tail) ───────────────────────────────
+  // The store holds Linear API keys. persist() used a plain writeFileSync
+  // with no mode, so the file landed at 0o644 under a default umask.
+
+  it("persists the store with mode 0o600", () => {
+    createConnection({ name: "Work", apiKey: "lin_api_work123" });
+    expect(statSync(join(tempDir, "linear-connections.json")).mode & 0o777).toBe(0o600);
+  });
+
+  it("re-tightens a pre-existing 0o644 store on load, before any write", () => {
+    const path = join(tempDir, "linear-connections.json");
+    writeFileSync(path, "[]");
+    chmodSync(path, 0o644);
+    listConnections();
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+  });
+
   // ─── CRUD ────────────────────────────────────────────────────────────
 
   it("listConnections returns empty array when no connections exist", () => {

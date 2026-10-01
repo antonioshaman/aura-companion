@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { writeAtomicJson } from "./atomic-write.js";
+import { tightenFileMode, writeAtomicJson } from "./atomic-write.js";
 import { COUNCIL_ARTIFACT_MAX_BYTES } from "./council-types.js";
 
 let dir: string;
@@ -95,5 +95,30 @@ describe("writeAtomicJson file mode and formatting", () => {
     writeAtomicJson(compact, { a: 1 });
     expect(readFileSync(pretty, "utf-8")).toBe(JSON.stringify({ a: 1 }, null, 2));
     expect(readFileSync(compact, "utf-8")).toBe('{"a":1}');
+  });
+});
+
+// FIX-P7-REVIEW (3): a secret store that is only ever read (auth.json) never
+// goes through the atomic rename, so the loaders re-tighten it on read.
+describe("tightenFileMode", () => {
+  it("chmods a group/world-readable file to 0o600", () => {
+    const target = join(dir, "auth.json");
+    writeFileSync(target, "{}");
+    chmodSync(target, 0o644);
+    tightenFileMode(target);
+    expect(statSync(target).mode & 0o777).toBe(0o600);
+  });
+
+  it("leaves an owner-only file's mode as is", () => {
+    // 0o400 has no group/other bits — must not be widened to 0o600.
+    const target = join(dir, "ro.json");
+    writeFileSync(target, "{}");
+    chmodSync(target, 0o400);
+    tightenFileMode(target);
+    expect(statSync(target).mode & 0o777).toBe(0o400);
+  });
+
+  it("is a no-op for a missing file", () => {
+    expect(() => tightenFileMode(join(dir, "missing.json"))).not.toThrow();
   });
 });
