@@ -40,6 +40,7 @@ import { LinearAgentBridge } from "./linear-agent-bridge.js";
 import { NoVncProxy } from "./novnc-proxy.js";
 import { apiCors, isOriginAllowed } from "./middleware/origin-allowlist.js";
 import { securityHeaders } from "./middleware/security-headers.js";
+import { MAX_REQUEST_BODY_BYTES, requestBodyLimit } from "./middleware/body-limit.js";
 
 import { CleanupScheduler } from "./cleanup/cleanup-scheduler.js";
 import { reapOrphans, resolveOrphanReaperGate } from "./orphan-reaper.js";
@@ -380,6 +381,9 @@ if (managedAuthEnabled) {
 // response — including HTML, JSON, and 404s — carries the headers.
 app.use("/*", securityHeaders());
 
+// S9: cap request bodies (chunked ones too — see middleware/body-limit.ts).
+app.use("/*", requestBodyLimit());
+
 app.use("/api/*", apiCors());
 app.route("/api", createRoutes(orchestrator, launcher, wsBridge, terminalManager, prPoller, recorder, cronScheduler, agentExecutor, linearAgentBridge, port));
 
@@ -432,6 +436,7 @@ const server = Bun.serve<SocketData>({
   hostname: host,
   port,
   idleTimeout: 0, // Disable top-level idle timeout — it kills idle browser WebSockets (code 1006)
+  maxRequestBodySize: MAX_REQUEST_BODY_BYTES, // S9: 413 on an oversized Content-Length
   async fetch(req, server) {
     // Guard against malformed request-lines from port scanners / malformed
     // proxies. `new URL(req.url)` throws `TypeError [ERR_INVALID_URL]` on
