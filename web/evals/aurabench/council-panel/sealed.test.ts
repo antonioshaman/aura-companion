@@ -11,6 +11,8 @@
  *     archived review (`.council/review-output`, `docs/history`, …) on disk
  *     or anywhere in the object store — the head of #91 really carries the
  *     review that defines its known defects;
+ *   - no repo-shipped skills (`.agents/skills`, `.claude/skills`) on disk —
+ *     the CLI would load them and a name clash with a user skill voids the run;
  *   - scrub counts per tree are reported as evidence;
  *   - an unresolvable revision fails cleanly (no partial success).
  */
@@ -63,8 +65,14 @@ describe("sealedPanelCheckout", () => {
     expect(objects).not.toContain("old handoff");
     expect(git(dir, "status", "--porcelain")).toBe("");
 
-    // Evidence: base had 2 scrubbable files, head 3.
-    expect(r.checkout.scrubbed).toEqual({ base: 2, head: 3 });
+    // Repo-shipped skills are gone too: the CLI would load them from the
+    // checkout, and `harden` collides with a real user skill name, which made
+    // the first live run invalid_isolation (2026-10-01 smoke).
+    expect(existsSync(join(dir, ".agents/skills"))).toBe(false);
+    expect(existsSync(join(dir, ".claude/skills"))).toBe(false);
+
+    // Evidence: base had 4 scrubbable entries (review, handoff, skill file, skill symlink), head 5.
+    expect(r.checkout.scrubbed).toEqual({ base: 4, head: 5 });
     expect(readFileSync(join(dir, "CLAUDE.md"), "utf8")).toBe("rules\n");
     expect(existsSync(join(scratch, "panel-head.tar"))).toBe(false);
   });

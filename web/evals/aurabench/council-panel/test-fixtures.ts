@@ -34,6 +34,10 @@ export function makeCaseRepo(root: string): { repo: string; base: string; head: 
   put(".council/prompts/observer-system.md", "runtime prompt\n");
   put(".council/review-output/2026-01-01-0000/FINAL-REVIEW.md", "old review\n");
   put("docs/history/HANDOFF.md", "old handoff\n");
+  // Repo-shipped skill, named like a real user skill, plus the .claude/skills symlink to it.
+  put(".agents/skills/harden/SKILL.md", "---\nname: harden\n---\n");
+  mkdirSync(join(repo, ".claude/skills"), { recursive: true });
+  symlinkSync("../../.agents/skills/harden", join(repo, ".claude/skills/harden"));
   symlinkSync("CLAUDE.md", join(repo, "AGENTS.md"));
   put("CLAUDE.md", "rules\n");
   git(repo, "add", "-A");
