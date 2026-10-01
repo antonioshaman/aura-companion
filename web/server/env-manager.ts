@@ -2,12 +2,12 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
-  writeFileSync,
   unlinkSync,
   existsSync,
 } from "node:fs";
 import { join } from "node:path";
 import { COMPANION_HOME } from "./paths.js";
+import { writeAtomicJson } from "./atomic-write.js";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -29,6 +29,12 @@ export interface EnvUpdateFields {
 // ─── Paths ──────────────────────────────────────────────────────────────────
 
 const ENVS_DIR = join(COMPANION_HOME, "envs");
+
+// Secrets live in env profiles (variables) — write them 0o600 via the atomic helper
+// (a rename also re-tightens a file that predates this, unlike writeFileSync's mode).
+function writeEnvFile(path: string, env: CompanionEnv): void {
+  writeAtomicJson(path, env, { maxBytes: Number.POSITIVE_INFINITY, space: 2 });
+}
 
 function ensureDir(): void {
   mkdirSync(ENVS_DIR, { recursive: true });
@@ -111,7 +117,7 @@ export function createEnv(
     updatedAt: now,
   };
 
-  writeFileSync(filePath(slug), JSON.stringify(env, null, 2), "utf-8");
+  writeEnvFile(filePath(slug), env);
   return env;
 }
 
@@ -145,7 +151,7 @@ export function updateEnv(
     try { unlinkSync(filePath(slug)); } catch { /* ok */ }
   }
 
-  writeFileSync(filePath(newSlug), JSON.stringify(env, null, 2), "utf-8");
+  writeEnvFile(filePath(newSlug), env);
   return env;
 }
 

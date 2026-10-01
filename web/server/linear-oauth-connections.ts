@@ -1,12 +1,11 @@
 import {
-  mkdirSync,
   readFileSync,
-  writeFileSync,
   existsSync,
 } from "node:fs";
-import { join, dirname } from "node:path";
+import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { COMPANION_HOME } from "./paths.js";
+import { writeAtomicJson } from "./atomic-write.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -182,9 +181,10 @@ export function migrateFromAgents(deps?: MigrationDeps): void {
   }
 }
 
+// Secrets live in this file (OAuth client secrets and tokens) — write them 0o600 via the atomic helper
+// (a rename also re-tightens a file that predates this, unlike writeFileSync's mode).
 function persist(): void {
-  mkdirSync(dirname(filePath), { recursive: true });
-  writeFileSync(filePath, JSON.stringify(connections, null, 2), "utf-8");
+  writeAtomicJson(filePath, connections, { maxBytes: Number.POSITIVE_INFINITY, space: 2 });
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────
