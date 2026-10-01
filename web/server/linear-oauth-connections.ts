@@ -5,7 +5,7 @@ import {
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { COMPANION_HOME } from "./paths.js";
-import { writeAtomicJson } from "./atomic-write.js";
+import { tightenFileMode, writeAtomicJson } from "./atomic-write.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -49,6 +49,7 @@ function ensureLoaded(): void {
   if (loaded) return;
   try {
     if (existsSync(filePath)) {
+      tightenFileMode(filePath);
       const raw = JSON.parse(readFileSync(filePath, "utf-8"));
       if (Array.isArray(raw)) {
         connections = raw.filter(

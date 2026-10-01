@@ -1,4 +1,4 @@
-import { chmodSync, closeSync, constants as fsConstants, fsyncSync, mkdirSync, openSync, renameSync, unlinkSync, writeSync } from "node:fs";
+import { chmodSync, closeSync, constants as fsConstants, fsyncSync, mkdirSync, openSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { COUNCIL_ARTIFACT_MAX_BYTES } from "./council-types.js";
@@ -130,5 +130,21 @@ export function writeAtomicJson(
         /* ignore */
       }
     }
+  }
+}
+
+/**
+ * Re-tighten a secret store that already exists on disk to 0o600.
+ * `writeFileSync(..., { mode })` applies the mode only when it creates the
+ * file, and a store that is read but never rewritten (auth.json) would keep
+ * whatever mode it was born with. Call on load. Best-effort: a missing file
+ * or a chmod we are not allowed to do never breaks the read.
+ */
+export function tightenFileMode(path: string): void {
+  try {
+    if ((statSync(path).mode & 0o077) === 0) return;
+    chmodSync(path, 0o600);
+  } catch {
+    /* missing file / not owner — the read path decides what to do */
   }
 }

@@ -4,7 +4,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { COMPANION_HOME } from "./paths.js";
-import { writeAtomicJson } from "./atomic-write.js";
+import { tightenFileMode, writeAtomicJson } from "./atomic-write.js";
 
 export const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6";
 
@@ -116,6 +116,7 @@ function ensureLoaded(): void {
   if (loaded) return;
   try {
     if (existsSync(filePath)) {
+      tightenFileMode(filePath);
       const raw = readFileSync(filePath, "utf-8");
       settings = normalize(JSON.parse(raw) as Partial<CompanionSettings>);
     }
