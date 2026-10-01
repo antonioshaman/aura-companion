@@ -2,12 +2,12 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
-  writeFileSync,
   unlinkSync,
   existsSync,
 } from "node:fs";
 import { join } from "node:path";
 import { COMPANION_HOME } from "./paths.js";
+import { writeAtomicJson } from "./atomic-write.js";
 import { randomBytes } from "node:crypto";
 import type { AgentConfig, AgentConfigCreateInput } from "./agent-types.js";
 
@@ -17,6 +17,12 @@ const AGENTS_DIR = join(COMPANION_HOME, "agents");
 
 function ensureDir(): void {
   mkdirSync(AGENTS_DIR, { recursive: true });
+}
+
+// Secrets live in agent configs (trigger credentials, webhook secrets) — write them 0o600 via the atomic helper
+// (a rename also re-tightens a file that predates this, unlike writeFileSync's mode).
+function writeAgentFile(path: string, agent: AgentConfig): void {
+  writeAtomicJson(path, agent, { maxBytes: Number.POSITIVE_INFINITY, space: 2 });
 }
 
 function filePath(id: string): string {
@@ -115,7 +121,7 @@ export function createAgent(data: AgentConfigCreateInput): AgentConfig {
     totalRuns: 0,
     consecutiveFailures: 0,
   };
-  writeFileSync(filePath(id), JSON.stringify(agent, null, 2), "utf-8");
+  writeAgentFile(filePath(id), agent);
   return agent;
 }
 
@@ -155,7 +161,7 @@ export function updateAgent(
     }
   }
 
-  writeFileSync(filePath(newId), JSON.stringify(agent, null, 2), "utf-8");
+  writeAgentFile(filePath(newId), agent);
   return agent;
 }
 

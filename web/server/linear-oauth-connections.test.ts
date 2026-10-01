@@ -13,7 +13,7 @@
  * - Invalid/corrupt JSON file handling
  */
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
-import { mkdirSync, rmSync, existsSync, writeFileSync, readFileSync } from "node:fs";
+import { chmodSync, mkdirSync, rmSync, existsSync, statSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -361,5 +361,29 @@ describe("linear-oauth-connections", () => {
     const emptyFile = join(TEST_DIR, "empty.json");
     _resetForTest(emptyFile);
     expect(listOAuthConnections()).toHaveLength(0);
+  });
+});
+
+// P7/SEC-S7: the connections file stores OAuth client secrets and access/
+// refresh tokens — it must be owner-only, including an older 0o644 file.
+describe("linear-oauth-connections file permissions", () => {
+  const input = {
+    name: "Workspace",
+    oauthClientId: "cid",
+    oauthClientSecret: "csecret",
+    webhookSecret: "whsec",
+  };
+
+  it("persists the connections file with mode 0o600", () => {
+    createOAuthConnection(input);
+    expect(statSync(TEST_FILE).mode & 0o777).toBe(0o600);
+  });
+
+  it("tightens a pre-existing 0o644 connections file on the next write", () => {
+    writeFileSync(TEST_FILE, "[]", { mode: 0o644 });
+    chmodSync(TEST_FILE, 0o644);
+    _resetForTest(TEST_FILE);
+    createOAuthConnection(input);
+    expect(statSync(TEST_FILE).mode & 0o777).toBe(0o600);
   });
 });
