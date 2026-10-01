@@ -546,6 +546,47 @@ describe("CronManager — create flow", () => {
     expect(args.prompt).toBe("Send the weekly digest");
     expect(args.backendType).toBe("claude");
     expect(args.recurring).toBe(true);
+    // SEC-S5: without touching the autonomy checkbox the job is created in
+    // the safe "default" mode, never bypassPermissions.
+    expect(args.permissionMode).toBe("default");
+  });
+
+  it("renders the full-autonomy checkbox unchecked by default with a safe-mode hint", async () => {
+    // SEC-S5: bypassPermissions must be an explicit choice, so the form opens
+    // with the checkbox off and explains that tool use needs approval.
+    render(<CronManager embedded={true} />);
+    await waitFor(() =>
+      expect(screen.getByText(/No scheduled tasks yet/)).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /New Task/ }));
+    const checkbox = screen.getByRole("checkbox", { name: /Full autonomy/ });
+    expect(checkbox).not.toBeChecked();
+    expect(checkbox).toHaveAccessibleDescription(/asks for your approval/);
+  });
+
+  it("sends bypassPermissions only after the user ticks the full-autonomy checkbox", async () => {
+    // SEC-S5: ticking the checkbox opts in (with a warning hint); the value
+    // reaches api.createCronJob unchanged.
+    render(<CronManager embedded={true} />);
+    await waitFor(() =>
+      expect(screen.getByText(/No scheduled tasks yet/)).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /New Task/ }));
+    fireEvent.change(screen.getByPlaceholderText(/Task name/i), {
+      target: { value: "Autonomous" },
+    });
+    fireEvent.change(screen.getByPlaceholderText(/Prompt for the session/i), {
+      target: { value: "Fix failing tests" },
+    });
+    const checkbox = screen.getByRole("checkbox", { name: /Full autonomy/ });
+    fireEvent.click(checkbox);
+    expect(checkbox).toBeChecked();
+    expect(checkbox).toHaveAccessibleDescription(/without asking/);
+    fireEvent.click(screen.getByRole("button", { name: /^Create$/ }));
+    await waitFor(() => {
+      expect(mockApi.createCronJob).toHaveBeenCalledTimes(1);
+    });
+    expect(mockApi.createCronJob.mock.calls[0]![0]!.permissionMode).toBe("bypassPermissions");
   });
 });
 
@@ -643,6 +684,25 @@ describe("CronManager — edit flow", () => {
         expect(nameInputs.length).toBeGreaterThan(0);
       });
     }
+  });
+
+  it("edit form reflects the job's bypass mode and saving after unticking sends default", async () => {
+    // SEC-S5: an existing bypass job shows the checkbox ticked; turning it
+    // off and saving downgrades the job to the safe "default" mode.
+    mockApi.listCronJobs.mockResolvedValue([sampleJob({ id: "edit-target" })]);
+    render(<CronManager embedded={true} />);
+    await waitFor(() =>
+      expect(screen.getByText("Daily reminder")).toBeInTheDocument(),
+    );
+    fireEvent.click(screen.getAllByRole("button", { name: /Edit/i })[0]!);
+    const checkbox = await screen.findByRole("checkbox", { name: /Full autonomy/ });
+    expect(checkbox).toBeChecked();
+    fireEvent.click(checkbox);
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/ }));
+    await waitFor(() => {
+      expect(mockApi.updateCronJob).toHaveBeenCalledTimes(1);
+    });
+    expect(mockApi.updateCronJob.mock.calls[0]![1]!.permissionMode).toBe("default");
   });
 });
 
