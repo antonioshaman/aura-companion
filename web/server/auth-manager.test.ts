@@ -80,4 +80,32 @@ describe("auth-manager", () => {
     expect(typeof addr).toBe("string");
     expect(addr.length).toBeGreaterThan(0);
   });
+
+  // SEC-S1: the localhost bypass must not trust a local reverse proxy that
+  // relays remote clients from 127.0.0.1 (Tailscale Funnel exploit path).
+  describe("isDirectLocalRequest", () => {
+    it("accepts every loopback form with no proxy headers", () => {
+      for (const addr of ["127.0.0.1", "::1", "::ffff:127.0.0.1"]) {
+        expect(authManager.isDirectLocalRequest(addr, new Headers())).toBe(true);
+      }
+    });
+
+    it("rejects non-loopback and missing addresses", () => {
+      expect(authManager.isDirectLocalRequest("192.168.1.5", new Headers())).toBe(false);
+      expect(authManager.isDirectLocalRequest("", new Headers())).toBe(false);
+      expect(authManager.isDirectLocalRequest(undefined, new Headers())).toBe(false);
+    });
+
+    it("rejects loopback carrying any forwarding header (case-insensitive)", () => {
+      for (const h of ["X-Forwarded-For", "Forwarded", "X-Real-IP", "x-forwarded-for"]) {
+        expect(authManager.isDirectLocalRequest("127.0.0.1", new Headers({ [h]: "203.0.113.7" }))).toBe(false);
+      }
+    });
+
+    it("rejects loopback carrying any Tailscale-* header", () => {
+      for (const h of ["Tailscale-User-Login", "Tailscale-User-Name", "Tailscale-Funnel-Request"]) {
+        expect(authManager.isDirectLocalRequest("::1", new Headers({ [h]: "?1" }))).toBe(false);
+      }
+    });
+  });
 });
