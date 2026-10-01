@@ -47,7 +47,7 @@ import { reapStrandedTerminals } from "./terminal-orphan-reaper.js";
 import { imagePullManager } from "./image-pull-manager.js";
 import { restoreIfNeeded as restoreTailscaleFunnel, cleanup as cleanupTailscaleFunnel } from "./tailscale-manager.js";
 import { isRunningAsService } from "./service.js";
-import { getToken, verifyToken, isDirectLocalRequest } from "./auth-manager.js";
+import { getToken, verifyToken, isDirectLocalRequest, describeTokenSource } from "./auth-manager.js";
 import { getCookie } from "hono/cookie";
 import type { SocketData } from "./ws-bridge.js";
 import type { ServerWebSocket } from "bun";
@@ -622,13 +622,12 @@ const server = Bun.serve<SocketData>({
   },
 });
 
-const authToken = getToken();
+// Resolve (and persist on first run) the token, but never print it: show
+// where it lives instead (`bun run generate-token` prints it on demand).
+getToken();
 console.log(`Server running on http://${host}:${server.port}`);
 console.log();
-console.log(`  Auth token: ${authToken}`);
-if (process.env.COMPANION_AUTH_TOKEN) {
-  console.log("  (using COMPANION_AUTH_TOKEN env var)");
-}
+console.log(`  Auth token: ${describeTokenSource()}`);
 console.log();
 console.log(`  CLI WebSocket:     ws://localhost:${server.port}/ws/cli/:sessionId`);
 console.log(`  Browser WebSocket: ws://localhost:${server.port}/ws/browser/:sessionId`);
