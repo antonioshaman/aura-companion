@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { isOriginAllowed } from "./origin-allowlist.js";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { Hono } from "hono";
+import { apiCors, isOriginAllowed } from "./origin-allowlist.js";
 
 describe("isOriginAllowed", () => {
   // ── Rule 1: localhost without Origin header (CLI/curl/test) ─────────────
@@ -95,5 +99,84 @@ describe("isOriginAllowed", () => {
     } finally {
       if (prev !== undefined) process.env.COMPANION_ALLOWED_ORIGIN = prev;
     }
+  });
+});
+
+// External audit S2: `/api/*` used a bare `cors()`, which answers
+// `Access-Control-Allow-Origin: *` to any page on the web. apiCors() must
+// only ever echo an origin from COMPANION_ALLOWED_ORIGIN and never `*`.
+describe("apiCors", () => {
+  const ALLOWED = new Set(["https://box.tail1234.ts.net"]);
+
+  function makeApp(allowed?: ReadonlySet<string>) {
+    const app = new Hono();
+    app.use("/api/*", apiCors(allowed));
+    app.get("/api/ping", (c) => c.json({ ok: true }));
+    return app;
+  }
+
+  it("sends no Access-Control-Allow-Origin to an unlisted origin", async () => {
+    const res = await makeApp(ALLOWED).request("/api/ping", {
+      headers: { Origin: "https://evil.example" },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBeNull();
+  });
+
+  it("never answers with a wildcard, even with an empty allowlist", async () => {
+    // Default deployment: env unset -> nothing is cross-origin readable.
+    const res = await makeApp(new Set()).request("/api/ping", {
+      headers: { Origin: "http://localhost:5174" },
+    });
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBeNull();
+  });
+
+  it("echoes an origin listed in the allowlist", async () => {
+    const res = await makeApp(ALLOWED).request("/api/ping", {
+      headers: { Origin: "https://box.tail1234.ts.net" },
+    });
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("https://box.tail1234.ts.net");
+  });
+
+  it("does not grant a preflight to an unlisted origin", async () => {
+    const res = await makeApp(ALLOWED).request("/api/ping", {
+      method: "OPTIONS",
+      headers: {
+        Origin: "https://evil.example",
+        "Access-Control-Request-Method": "POST",
+      },
+    });
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBeNull();
+  });
+
+  it("requests without an Origin header (local curl/CLI) still succeed", async () => {
+    // Same-host automation sends no Origin; CORS must not get in its way.
+    const res = await makeApp(ALLOWED).request("/api/ping");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ ok: true });
+  });
+
+  it("reads COMPANION_ALLOWED_ORIGIN when no override is given", async () => {
+    const prev = process.env.COMPANION_ALLOWED_ORIGIN;
+    process.env.COMPANION_ALLOWED_ORIGIN = "https://a.example, https://b.example";
+    try {
+      const app = makeApp();
+      const ok = await app.request("/api/ping", { headers: { Origin: "https://b.example" } });
+      expect(ok.headers.get("Access-Control-Allow-Origin")).toBe("https://b.example");
+      const no = await app.request("/api/ping", { headers: { Origin: "https://c.example" } });
+      expect(no.headers.get("Access-Control-Allow-Origin")).toBeNull();
+    } finally {
+      if (prev === undefined) delete process.env.COMPANION_ALLOWED_ORIGIN;
+      else process.env.COMPANION_ALLOWED_ORIGIN = prev;
+    }
+  });
+
+  it("index.ts mounts apiCors on /api and no bare cors()", () => {
+    // index.ts is a bootstrap module (not unit-testable), so canary the
+    // wiring at the source level: a regression back to `cors()` reopens S2.
+    const here = dirname(fileURLToPath(import.meta.url));
+    const indexSrc = readFileSync(join(here, "..", "index.ts"), "utf8");
+    expect(indexSrc).toMatch(/app\.use\("\/api\/\*",\s*apiCors\(\)\)/);
+    expect(indexSrc).not.toMatch(/\bcors\(\s*\)/);
   });
 });
