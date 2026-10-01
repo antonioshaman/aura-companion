@@ -140,7 +140,7 @@ export function nakedClaudeRunner(d: NakedDeps): AgentRunner {
     if (r.timedOut) return { kind: "done", status: "timeout", metrics: s.metrics, isolation, confounds: [] };
     if (s.finishedOk && r.code === 0) return { kind: "done", status: "completed", metrics: s.metrics, isolation, confounds: [] };
     const limit = detectLimit(`${s.resultText}\n${tail(r.stderr)}`, (d.now ?? Date.now)(), s.limitResult);
-    if (limit) return { kind: "limit", limit };
+    if (limit) return { kind: "limit", limit: { ...limit, provider: "claude" } };
     return {
       kind: "done",
       status: "agent_error",
@@ -208,7 +208,7 @@ export function nakedCodexRunner(d: NakedDeps): AgentRunner {
     if (r.timedOut) return { kind: "done", status: "timeout", metrics: s.metrics, isolation, confounds };
     if (s.finishedOk && r.code === 0) return { kind: "done", status: "completed", metrics: s.metrics, isolation, confounds };
     const limit = detectLimit(`${s.errorText}\n${tail(r.stderr)}`, (d.now ?? Date.now)());
-    if (limit) return { kind: "limit", limit };
+    if (limit) return { kind: "limit", limit: { ...limit, provider: "codex" } };
     return {
       kind: "done",
       status: "agent_error",

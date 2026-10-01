@@ -32,6 +32,12 @@
  * never finished a turn successfully measured no observer at all (DIET-AB:
  * 20/20 H cells, Codex 400 on the Claude model) — see {@link observerDead}.
  *
+ * Observer limit (P6/FIX-CODEX-QUOTA): an observer error result / `error`
+ * frame whose text is a usage limit sets {@link observerLimit} (tagged with
+ * that session's backend). BENCH-H burned 5 cells as `observer_dead` on the
+ * Codex "You've hit your usage limit … try again at Oct 4th, 2026 11:56 PM";
+ * that is a quota pause, not a result.
+ *
  * Pure (clock passed in). Firewall-clean.
  */
 
@@ -94,6 +100,8 @@ export class AuraSessionTracker {
   private primaryResults = 0;
   private lastPrimaryError: string | null = null;
   limit: LimitHit | null = null;
+  /** First usage limit an observer (non-primary) session ended a turn on. */
+  observerLimit: LimitHit | null = null;
   private readonly obs: ObserverHealth = { ok_results: 0, error_results: 0, last_error: null, degraded: null };
 
   constructor(
@@ -101,12 +109,15 @@ export class AuraSessionTracker {
     otherIds: readonly string[],
     private readonly quietMs: number,
     defaultBackend: Backend = "claude",
+    /** Backend of the non-primary sessions until a frame says otherwise (a
+     *  Council observer: the pairing's second half). Default: `defaultBackend`. */
+    otherBackend: Backend = defaultBackend,
   ) {
     for (const id of [primaryId, ...otherIds]) {
       this.sessions.set(id, {
         running: false,
         acc: new ClaudeMetricsAccumulator(),
-        backend: defaultBackend,
+        backend: id === primaryId ? defaultBackend : otherBackend,
         codexDone: null,
         codexCurrent: null,
       });
@@ -147,7 +158,7 @@ export class AuraSessionTracker {
     const type = msg.type;
     if (typeof type !== "string") return;
     if (type === "session_init" || type === "session_update") this.onSessionState(s, msg.session);
-    this.onObserverHealth(sessionId, type, msg);
+    this.onObserverHealth(sessionId, s.backend, type, msg, now);
     if (this.promptSentAt === null) return;
     if (ACTIVITY.has(type)) this.lastActivity = now;
     if (type === "assistant") {
@@ -171,7 +182,7 @@ export class AuraSessionTracker {
         if (data.is_error === true) {
           this.lastPrimaryError = text || errs || String(data.subtype ?? "error");
           const hit = detectLimit(`${text}\n${errs}`, now, isLimitResult(data));
-          if (hit) this.limit = hit;
+          if (hit) this.limit = { ...hit, provider: s.backend };
         } else {
           this.lastPrimaryError = null;
           this.limit = null;
@@ -179,28 +190,37 @@ export class AuraSessionTracker {
       }
     } else if (type === "error" && typeof msg.message === "string") {
       const hit = detectLimit(msg.message, now);
-      if (hit && sessionId === this.primaryId) this.limit = hit;
+      if (hit && sessionId === this.primaryId) this.limit = { ...hit, provider: s.backend };
     } else if (type === "cli_disconnected" && sessionId === this.primaryId) {
       s.running = false;
     }
   }
 
-  private onObserverHealth(sessionId: string, type: string, msg: Obj): void {
+  private onObserverHealth(sessionId: string, backend: Backend, type: string, msg: Obj, now: number): void {
     if (type === "group_degraded" && msg.deadRole === "observer") {
       this.obs.degraded = typeof msg.reason === "string" ? msg.reason : "unknown";
       return;
     }
     if (sessionId === this.primaryId) return;
+    let errorText: string | null = null;
+    let structural = false;
     if (type === "result") {
       const data = isObj(msg.data) ? msg.data : {};
       if (data.is_error === true) {
         this.obs.error_results++;
         this.obs.last_error = (typeof data.result === "string" && data.result) || String(data.subtype ?? "error");
+        errorText = this.obs.last_error;
+        structural = isLimitResult(data);
       } else {
         this.obs.ok_results++;
       }
     } else if (type === "error" && typeof msg.message === "string") {
       this.obs.last_error = msg.message;
+      errorText = msg.message;
+    }
+    if (errorText !== null && !this.observerLimit) {
+      const hit = detectLimit(errorText, now, structural);
+      if (hit) this.observerLimit = { ...hit, provider: backend };
     }
   }
 

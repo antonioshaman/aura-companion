@@ -598,6 +598,27 @@ describe("auraRunner — dead observer voids the Council cell (FIX-H-MODEL)", ()
     expect(f.calls.some((c) => c.includes("/api/sessions/o"))).toBe(true);
   });
 
+  // P6/FIX-CODEX-QUOTA: BENCH-H burned 5 cells as observer_dead on the Codex
+  // weekly refusal. An observer that died on its QUOTA is a pause (the runner
+  // retries the cell after the reset), never a recorded harness_error.
+  it("H whose Codex observer hit its usage limit → codex limit, not observer_dead", async () => {
+    const refusal =
+      "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Oct 4th, 2026 11:56 PM.";
+    const f = fakeCompanion({
+      council: true,
+      observer: { backendType: "codex", model: "gpt-5.5" },
+      onPrompt: (emit) => {
+        emit("o", { type: "result", data: { subtype: "error_during_execution", is_error: true, result: refusal } });
+        emit("p", result());
+      },
+    });
+    f.d.models = { claude: "claude-opus-5-5", codex: "gpt-5.5" };
+    const r = await auraRunner(f.d)(ctx("H"));
+    expect(r).toMatchObject({ kind: "limit", limit: { provider: "codex", resetAt: Date.UTC(2026, 9, 4, 23, 56) } });
+    // Teardown still ran for both halves.
+    expect(f.calls.some((c) => c.includes("/api/sessions/o"))).toBe(true);
+  });
+
   it("H whose observer completed a turn stays completed", async () => {
     const f = fakeCompanion({
       council: true,

@@ -49,6 +49,10 @@
  * prod `GET /api/usage-limits` (read-only) and holds while the Claude
  * subscription is at/over `AURABENCH_WEEKLY_CEILING` (default 75%) weekly or
  * `AURABENCH_FIVE_HOUR_CEILING` (default 90%) 5-hourly; fail-closed.
+ * Codex cells (B/F/G/H) additionally obey a rolling-24 h start budget
+ * (`AURABENCH_CODEX_DAILY_CELLS`, default 12; ledger `AURABENCH_CODEX_LEDGER`,
+ * default `<bench-root>/codex-starts.log` — point every runner at one file),
+ * and a Codex usage limit pauses only the Codex cells — see `codex-quota.ts`.
  *
  * Child processes run under `nice -n 10` with every `AURA_*` variable unset and
  * a bounded Node heap; before each candidate it waits while MemAvailable is
@@ -89,6 +93,7 @@ import { checkMergeStability, readStabilityVerdicts, stabilityKey } from "./aura
 import { loadAuraBenchTasks } from "./aurabench/loader.js";
 import type { AuraBenchTask } from "./aurabench/task.js";
 import { runAblation } from "./aurabench/harness/driver.js";
+import { codexDailyCellsFromEnv, parseCodexLedger, variantUsesCodex } from "./aurabench/harness/codex-quota.js";
 import { fetchUsageGate, usageCeilingsFromEnv } from "./aurabench/harness/usage-ceiling.js";
 import { claudeTokenGate, quarantineClaudeCredentialCopies, readClaudeAccessToken } from "./aurabench/harness/claude-auth.js";
 import { runCell, computeBaseline, type AgentRunner, type Baseline } from "./aurabench/harness/run-cell.js";
@@ -513,6 +518,9 @@ async function bench(argv: string[], repo: string): Promise<number> {
 
   const ceilings = usageCeilingsFromEnv(process.env);
   console.log(`[aurabench] usage ceilings: seven_day < ${ceilings.weekly}%, five_hour < ${ceilings.fiveHour}%`);
+  const codexDailyCells = codexDailyCellsFromEnv(process.env);
+  const codexLedger = resolve(process.env.AURABENCH_CODEX_LEDGER?.trim() || join(benchRoot, "codex-starts.log"));
+  console.log(`[aurabench] Codex budget: ${codexDailyCells} cell starts / 24 h (ledger ${codexLedger})`);
   try {
     const summary = await runAblation({
       taskIds: selected.map((t) => t.id),
@@ -542,6 +550,15 @@ async function bench(argv: string[], repo: string): Promise<number> {
         });
       },
       memAvailableKb,
+      codex: {
+        isCodexCell: (cell) => variantUsesCodex(cell.variant),
+        dailyCells: codexDailyCells,
+        starts: () => parseCodexLedger(readTextOrNull(codexLedger) ?? ""),
+        noteStart: (at) => {
+          mkdirSync(dirname(codexLedger), { recursive: true });
+          appendFileSync(codexLedger, `${at}\n`);
+        },
+      },
       usageGate: async (cell) => {
         const g = await fetchUsageGate(fetch, ceilings);
         if (!g.ok || cell.variant === "B") return g;
@@ -562,7 +579,7 @@ async function bench(argv: string[], repo: string): Promise<number> {
       if (stateFile) appendAuthStopAsk(join(dirname(resolve(stateFile)), "ASK-FIRST.md"), summary.stoppedOnAuth);
       return 4;
     }
-    return summary.stoppedOnLimit ? 3 : 0;
+    return summary.stoppedOnLimit || summary.stoppedOnCodex ? 3 : 0;
   } finally {
     // Best effort: the bench HOME keeps no access token after the run.
     if (instance) await http((instance as RunningInstance).baseUrl, "PUT", "/api/settings", { claudeCodeOAuthToken: "" }).catch(() => undefined);
