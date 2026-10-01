@@ -50,6 +50,36 @@ export async function downscaleImageIfNeeded(file: File): Promise<File> {
   }
 }
 
+// The browser-reported `File.type` is derived from the file extension / OS
+// clipboard metadata, NOT the actual bytes. Screenshots saved as `.png` but
+// encoded as JPEG (common from messengers) arrive labelled `image/png`, and
+// the Anthropic API rejects the whole request with a 400 when the declared
+// media type disagrees with the real bytes. Sniff the magic number so the
+// label always matches the payload.
+export function sniffImageMediaType(base64: string): string | null {
+  let bytes: Uint8Array;
+  try {
+    const binary = atob(base64.slice(0, 24));
+    bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
+  } catch {
+    return null;
+  }
+  if (bytes.length < 4) return null;
+
+  if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
+  if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47)
+    return "image/png";
+  if (bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38)
+    return "image/gif";
+  if (
+    bytes.length >= 12 &&
+    bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46 &&
+    bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50
+  )
+    return "image/webp";
+  return null;
+}
+
 export async function readFileAsBase64(file: File): Promise<{ base64: string; mediaType: string }> {
   const processed = await downscaleImageIfNeeded(file);
   return new Promise((resolve, reject) => {
@@ -57,7 +87,8 @@ export async function readFileAsBase64(file: File): Promise<{ base64: string; me
     reader.onload = () => {
       const dataUrl = reader.result as string;
       const base64 = dataUrl.split(",")[1];
-      resolve({ base64, mediaType: processed.type });
+      const sniffed = processed.type.startsWith("image/") ? sniffImageMediaType(base64) : null;
+      resolve({ base64, mediaType: sniffed ?? processed.type });
     };
     reader.onerror = reject;
     reader.readAsDataURL(processed);

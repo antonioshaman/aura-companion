@@ -1,8 +1,49 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { downscaleImageIfNeeded, readFileAsBase64 } from "./image.js";
+import { downscaleImageIfNeeded, readFileAsBase64, sniffImageMediaType } from "./image.js";
+
+const toBase64 = (bytes: number[]) =>
+  btoa(String.fromCharCode(...bytes));
+
+describe("sniffImageMediaType", () => {
+  it("detects JPEG from the FF D8 FF magic number", () => {
+    expect(sniffImageMediaType(toBase64([0xff, 0xd8, 0xff, 0xe0, 0, 0]))).toBe("image/jpeg");
+  });
+
+  it("detects PNG from the 89 50 4E 47 magic number", () => {
+    expect(sniffImageMediaType(toBase64([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]))).toBe("image/png");
+  });
+
+  it("detects GIF and WEBP", () => {
+    expect(sniffImageMediaType(toBase64([0x47, 0x49, 0x46, 0x38, 0x39, 0x61]))).toBe("image/gif");
+    expect(
+      sniffImageMediaType(
+        toBase64([0x52, 0x49, 0x46, 0x46, 0, 0, 0, 0, 0x57, 0x45, 0x42, 0x50]),
+      ),
+    ).toBe("image/webp");
+  });
+
+  it("returns null for unrecognised or too-short input", () => {
+    expect(sniffImageMediaType(toBase64([0x00, 0x01, 0x02, 0x03]))).toBeNull();
+    expect(sniffImageMediaType(toBase64([0xff]))).toBeNull();
+    expect(sniffImageMediaType("not-valid-base64-@@@")).toBeNull();
+  });
+});
 
 describe("readFileAsBase64", () => {
+  it("corrects a mislabelled .png that is actually JPEG bytes", async () => {
+    // The bug source: a screenshot saved as .png but encoded as JPEG. The
+    // browser reports image/png from the extension; the bytes say JPEG. We
+    // must emit image/jpeg so the Anthropic API doesn't 400 the request.
+    const jpegBytes = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10]);
+    const file = new File([jpegBytes], "screenshot.png", { type: "image/png" });
+
+    const result = await readFileAsBase64(file);
+
+    expect(result.mediaType).toBe("image/jpeg");
+  });
+
+
   it("reads a text file and returns base64 + mediaType", async () => {
     // Create a Blob-backed File with known content
     const content = "hello world";
