@@ -4,6 +4,10 @@ on:
   pull_request:
     branches: [main]
 
+# Least privilege: these jobs only read the repo (P7/CI-HARDEN).
+permissions:
+  contents: read
+
 jobs:
   coverage:
     runs-on: ubuntu-latest
@@ -22,7 +26,7 @@ jobs:
 
       - name: Run web tests with coverage
         working-directory: web
-        run: bun run test -- --coverage || true
+        run: bun run test -- --coverage
 
       - name: Install platform dependencies
         working-directory: platform
@@ -30,7 +34,7 @@ jobs:
 
       - name: Run platform tests with coverage
         working-directory: platform
-        run: bun run test -- --coverage || true
+        run: bun run test -- --coverage
 
       - name: Enforce 80% coverage on new / changed files
         run: |

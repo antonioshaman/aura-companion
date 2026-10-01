@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
 
+# Least privilege: these jobs only read the repo (P7/CI-HARDEN).
+permissions:
+  contents: read
+
 jobs:
   a11y:
     runs-on: ubuntu-latest
