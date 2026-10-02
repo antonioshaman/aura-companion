@@ -1,3 +1,4 @@
+import { trackSync } from "./event-loop-lag-monitor.js";
 import { mkdirSync, readdirSync, readFileSync, unlinkSync, existsSync, copyFileSync, statSync, renameSync, fsyncSync, openSync, closeSync, realpathSync } from "node:fs";
 import { join, sep } from "node:path";
 import { tmpdir, homedir } from "node:os";
@@ -268,7 +269,9 @@ export class SessionStore {
       // session this write meant to preserve. Uncapped (Infinity) because
       // session JSON carries full message history and a size cap would
       // newly throw + drop the write — a regression over writeFileSync.
-      writeAtomicJson(this.filePath(session.id), stamped, { maxBytes: Number.POSITIVE_INFINITY });
+      trackSync("session-store.save", () =>
+        writeAtomicJson(this.filePath(session.id), stamped, { maxBytes: Number.POSITIVE_INFINITY }),
+      );
     } catch (err) {
       console.error(`[session-store] Failed to save session ${session.id}:`, err);
     }

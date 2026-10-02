@@ -673,6 +673,7 @@ isReady = true;
 
 // ── Runtime diagnostics ──────────────────────────────────────────────────────
 import { log } from "./logger.js";
+import { installEventLoopLagMonitor, formatTopOperations, trackSync } from "./event-loop-lag-monitor.js";
 import { metricsCollector } from "./metrics-collector.js";
 // AURA-LOCAL: cleanup-subsystem diagnostic surfaces. PLAN T6 (Phase C).
 import { loadCleanupConfig } from "./cleanup/cleanup-config.js";
@@ -915,7 +916,7 @@ let lastMemoryPressureWarnAt: number | null = null;
 // pending tick never keeps the process alive on exit, and wrap the body in
 // try/catch so a single snapshot/probe throw cannot kill the only diagnostic
 // timer for the rest of the process lifetime.
-const diagnosticsTimer = setInterval(() => {
+const diagnosticsTimer = setInterval(() => trackSync("diagnostics.tick", () => {
   try {
   const snap = metricsCollector.getSnapshot(wsBridge);
   const mem = snap.gauges.memory;
@@ -1007,8 +1008,30 @@ const diagnosticsTimer = setInterval(() => {
       error: err instanceof Error ? err.message : String(err),
     });
   }
-}, DIAGNOSTICS_INTERVAL_MS);
+}), DIAGNOSTICS_INTERVAL_MS);
 diagnosticsTimer.unref();
+
+// AURA-LOCAL (P7/SERVER-STDOUT-STALL): event-loop lag detector. A blocked
+// loop starves every CLI stdout pump at once, which is one candidate cause of
+// the cross-session stdout stalls the drift detector sees. The WARN names the
+// slowest `trackSync`-wrapped operations since the previous tick; time not
+// covered by them is reported as `untrackedMs`.
+const eventLoopLagMonitor = installEventLoopLagMonitor({
+  onLag: (report) => {
+    const mem = process.memoryUsage();
+    const topMs = report.topOperations[0]?.durationMs ?? 0;
+    log.warn("diagnostics", "event loop lag", {
+      event: "server.event_loop_lag",
+      lagMs: Math.round(report.lagMs),
+      intervalMs: report.intervalMs,
+      topOperations: formatTopOperations(report.topOperations),
+      operationCount: report.operationCount,
+      untrackedMs: Math.max(0, Math.round(report.lagMs - topMs)),
+      rss: `${(mem.rss / 1024 / 1024).toFixed(1)}MB`,
+      heapUsed: `${(mem.heapUsed / 1024 / 1024).toFixed(1)}MB`,
+    });
+  },
+});
 
 // ── Graceful shutdown — Council teardown + persist container state ───────────
 //
@@ -1032,6 +1055,7 @@ async function gracefulShutdown() {
   // callback cannot race the teardown below (it reads wsBridge state that
   // shutdown is actively dismantling).
   clearInterval(diagnosticsTimer);
+  eventLoopLagMonitor.stop();
   try {
     const coordinator = orchestrator.getCouncilCoordinator();
     if (coordinator) {

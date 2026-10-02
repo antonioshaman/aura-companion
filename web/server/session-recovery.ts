@@ -1,3 +1,4 @@
+import { trackSync } from "./event-loop-lag-monitor.js";
 import type { CliLauncher } from "./cli-launcher.js";
 import type { WsBridge } from "./ws-bridge.js";
 import { ClaudeAdapter } from "./claude-adapter.js";
@@ -14,6 +15,7 @@ import {
 import { nextCompactionMilestone } from "./context-size-suggester.js";
 import { homedir } from "node:os";
 import { statSync } from "node:fs";
+import { summarizeWaitChannels } from "./process-wait-channels.js";
 import type { IntentionalKills } from "./intentional-kills.js";
 
 /**
@@ -399,7 +401,7 @@ export class SessionRecovery {
     if (this.driftDetectorTimer) return;
     const timer = setInterval(() => {
       try {
-        this.driftDetectorTick();
+        trackSync("drift-detector.tick", () => this.driftDetectorTick());
       } catch (err) {
         log.warn("session-orchestrator", "silent-stdio drift detector tick failed", {
           event: "silent_stdio_drift.tick_failed",
@@ -518,6 +520,10 @@ export class SessionRecovery {
           mtimeDeltaMs: verdict.mtimeDeltaMs,
           undeliveredAssistantRecords: verdict.undeliveredAssistantRecords,
           reason: verdict.reason,
+          // P7/SERVER-STDOUT-STALL: which side stopped? A CLI thread in
+          // `pipe_write` means bun stopped draining stdout; none means the
+          // CLI itself stopped writing. Read before the kill below.
+          cliWaitChannels: info.pid ? summarizeWaitChannels(info.pid) : null,
         },
       );
       this.wsBridge.broadcastToSession(info.sessionId, {
