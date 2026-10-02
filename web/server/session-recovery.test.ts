@@ -4,7 +4,11 @@ import type { WsBridge } from "./ws-bridge.js";
 import { companionBus } from "./event-bus.js";
 import { IntentionalKills } from "./intentional-kills.js";
 import { log } from "./logger.js";
-import { DEFAULT_LAG_TOLERANCE_MS } from "./silent-stdio-drift-detector.js";
+import { DEFAULT_LAG_TOLERANCE_MS, resolveJsonlPath } from "./silent-stdio-drift-detector.js";
+import { ClaudeAdapter } from "./claude-adapter.js";
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import {
   DRIFT_DETECTOR_TICK_MS,
   KEEPALIVE_BASE_DELAY_MS,
@@ -623,5 +627,76 @@ describe("SessionRecovery.handleAutoRelaunch — deaf backend (P4/FIX-RECONNECT-
 
     expect(launcher.relaunch).not.toHaveBeenCalled();
     expect(infoSpy.mock.calls.some((c) => (c[2] as { reason?: string } | undefined)?.reason === "cli_connected")).toBe(true);
+  });
+});
+
+// P7/FIX-DRIFT-FALSE-KILLS: the tick wires the undelivered-output evidence
+// into the kill decision. A real jsonl under a temp HOME, a ClaudeAdapter
+// whose last-frame clock is pinned, fake timers for `now`.
+describe("SessionRecovery.driftDetectorTick — undelivered-output gate (P7/FIX-DRIFT-FALSE-KILLS)", () => {
+  const NOW = Date.parse("2026-10-01T13:10:52.000Z");
+  let home: string;
+  let prevHome: string | undefined;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    prevHome = process.env.HOME;
+    home = mkdtempSync(join(tmpdir(), "drift-tick-"));
+    process.env.HOME = home;
+  });
+  afterEach(() => {
+    process.env.HOME = prevHome;
+    rmSync(home, { recursive: true, force: true });
+    vi.useRealTimers();
+    companionBus.clear();
+  });
+
+  function setup(records: Array<{ type: string; atMs: number }>, bunLastFrameMs: number) {
+    const sessions = new Map([["s1", info("s1", { state: "running", cwd: "/root/proj", cliSessionId: "cli-1" })]]);
+    const ctx = makeRecovery(sessions);
+    const adapter = Object.create(ClaudeAdapter.prototype) as ClaudeAdapter;
+    adapter.getLastCliFrameReceivedMs = () => bunLastFrameMs;
+    ctx.wsBridge.getSession.mockReturnValue({ backendAdapter: adapter } as never);
+    const path = resolveJsonlPath(join(home, ".claude"), "/root/proj", "cli-1")!;
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, records.map((r) => JSON.stringify({ type: r.type, timestamp: new Date(r.atMs).toISOString() })).join("\n") + "\n");
+    const mtime = Math.max(...records.map((r) => r.atMs)) / 1000;
+    utimesSync(path, mtime, mtime);
+    return ctx;
+  }
+
+  it("idle session that just got a prompt: no kill, one suppressed log per stall", () => {
+    // Prod shape (2026-10-01T13:10:52): last frame 421 s ago, prompt queued 3 s ago.
+    const { recovery, launcher } = setup(
+      [
+        { type: "queue-operation", atMs: NOW - 3_000 },
+        { type: "user", atMs: NOW - 3_000 },
+      ],
+      NOW - 424_000,
+    );
+    const info_ = vi.spyOn(log, "info");
+    recovery.driftDetectorTick();
+    recovery.driftDetectorTick();
+    expect(launcher.kill).not.toHaveBeenCalled();
+    const suppressed = info_.mock.calls.filter((c) => (c[2] as { event?: string })?.event === "silent_stdio_drift.suppressed");
+    expect(suppressed).toHaveLength(1);
+    expect(suppressed[0][2]).toMatchObject({ sessionId: "s1", reason: "no_undelivered_output" });
+  });
+
+  it("model output stuck in the jsonl past the min age: kills for relaunch", () => {
+    const { recovery, launcher } = setup(
+      [
+        { type: "user", atMs: NOW - 100_000 },
+        { type: "assistant", atMs: NOW - 60_000 },
+        { type: "user", atMs: NOW - 2_000 },
+      ],
+      NOW - 110_000,
+    );
+    const warn = vi.spyOn(log, "warn");
+    recovery.driftDetectorTick();
+    expect(launcher.kill).toHaveBeenCalledWith("s1");
+    const detected = warn.mock.calls.find((c) => (c[2] as { event?: string })?.event === "silent_stdio_drift.detected");
+    expect(detected?.[2]).toMatchObject({ sessionId: "s1", undeliveredAssistantRecords: 1 });
   });
 });
