@@ -1,5 +1,45 @@
 # Changelog
 
+## [2.0.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.17.0...aura-companion-v2.0.0) (2026-10-02)
+
+
+### Features
+
+* aura meta-diet — one learning system, lean context, observer reliability, AuraBench harness ([#278](https://github.com/antonioshaman/aura-companion/issues/278)) ([0869448](https://github.com/antonioshaman/aura-companion/commit/0869448c3fb2619362a03199530597e8037e6014))
+* **council:** data-derived tier policy + review-depth thresholds (PRO economy Story 3) ([#208](https://github.com/antonioshaman/aura-companion/issues/208)) ([118a847](https://github.com/antonioshaman/aura-companion/commit/118a847150183fcbf80eb7aa5f40a9bea1d8aa3b))
+* **council:** fail-closed per-seat model tier decision (PRO economy Story 2) ([#207](https://github.com/antonioshaman/aura-companion/issues/207)) ([b36f1f7](https://github.com/antonioshaman/aura-companion/commit/b36f1f732ee31b18c43861366037835d9299dd82))
+* **council:** persistent run-stats store + complexity signal (PRO economy Story 1) ([#206](https://github.com/antonioshaman/aura-companion/issues/206)) ([f34865e](https://github.com/antonioshaman/aura-companion/commit/f34865e587838e89a8ba0b018d03ae9c23d92304))
+* **council:** persistent skip-if-unchanged result cache (PRO economy spec Story 2) ([#210](https://github.com/antonioshaman/aura-companion/issues/210)) ([422b0ce](https://github.com/antonioshaman/aura-companion/commit/422b0ce94a913c5d71750d58ab68fc837137953c))
+* **council:** quality-floor guardrail + CI fixture gate (PRO economy Story 4) ([#209](https://github.com/antonioshaman/aura-companion/issues/209)) ([4df1e6c](https://github.com/antonioshaman/aura-companion/commit/4df1e6c8cf78a9e9946f829ee06c29834d1e806c))
+* **council:** universal adaptive advisor selection, retire 2-stack router (RC-2) ([#202](https://github.com/antonioshaman/aura-companion/issues/202)) ([77657b4](https://github.com/antonioshaman/aura-companion/commit/77657b4f7410309c9b0266303176d8e15cc78982))
+* **council:** workspace-agnostic HTTP routes for run-stats + result-cache ([#211](https://github.com/antonioshaman/aura-companion/issues/211)) ([74a539d](https://github.com/antonioshaman/aura-companion/commit/74a539d5626281a2ce19f1685f1ecd4235495998))
+* **landing:** add search and social preview meta tags (P7/LANDING-META) ([#311](https://github.com/antonioshaman/aura-companion/issues/311)) ([2f2c6a3](https://github.com/antonioshaman/aura-companion/commit/2f2c6a36c589c02dca38a530d7e13485f7930d17))
+
+
+### Bug Fixes
+
+* **aurabench:** extract the diet overlay with portable tar flags (P6/FIX-MAC-TAR) ([#280](https://github.com/antonioshaman/aura-companion/issues/280)) ([#308](https://github.com/antonioshaman/aura-companion/issues/308)) ([ff54fe3](https://github.com/antonioshaman/aura-companion/commit/ff54fe3a751229c8893fa39d878c9287009aa042))
+* **council:** gate emit-closure/back-compat in CI + re-hydrate ObserverPanel on focus (observer follow-ups) ([#203](https://github.com/antonioshaman/aura-companion/issues/203)) ([8e3c206](https://github.com/antonioshaman/aura-companion/commit/8e3c2068d685a0391ac2c558b51f1414499360ae))
+* **security:** cap request bodies at 64 MiB, chunked included (P7/SEC-S9) ([#294](https://github.com/antonioshaman/aura-companion/issues/294)) ([8ee66b3](https://github.com/antonioshaman/aura-companion/commit/8ee66b3bc5979c076eae83ee38212751a3332ed1))
+* **security:** cron jobs default to the safe permission mode (P7/SEC-S5-CRON-DEFAULT) ([#307](https://github.com/antonioshaman/aura-companion/issues/307)) ([955e958](https://github.com/antonioshaman/aura-companion/commit/955e9584ec103b1a016b4a6ab87bc8abe39c40a1))
+* **security:** gate /ws/cli upgrade to direct loopback on the ws transport (P7/SEC-S3) ([#290](https://github.com/antonioshaman/aura-companion/issues/290)) ([1240f24](https://github.com/antonioshaman/aura-companion/commit/1240f24db7e1032c6c31c73593d5b8a34e250a14))
+* **security:** keep sha256 diagnostics in logs, IP for chunked bodies, 0o600 on existing secret files (P7/FIX-P7-REVIEW) ([#305](https://github.com/antonioshaman/aura-companion/issues/305)) ([293ef29](https://github.com/antonioshaman/aura-companion/commit/293ef2907689af240d397584dba71389eb6c5b05))
+* **security:** localhost bypass ignores reverse-proxied requests (P7/SEC-S1) ([#286](https://github.com/antonioshaman/aura-companion/issues/286)) ([22723b2](https://github.com/antonioshaman/aura-companion/commit/22723b2fd3bbc5025a62fe3960cceae51aa54123))
+* **security:** mask secrets in server log lines (P7/LOG-MASK) ([#298](https://github.com/antonioshaman/aura-companion/issues/298)) ([8672620](https://github.com/antonioshaman/aura-companion/commit/8672620e9162f4a70837faef0c42fa501f17fedb))
+* **security:** restrict /api CORS to COMPANION_ALLOWED_ORIGIN (P7/SEC-S2) ([#288](https://github.com/antonioshaman/aura-companion/issues/288)) ([e1bb242](https://github.com/antonioshaman/aura-companion/commit/e1bb242fdaf36ef82e3041a6bf729a798cc1c296))
+* **security:** stop printing the auth token in the startup log (P7/SEC-S6) ([#292](https://github.com/antonioshaman/aura-companion/issues/292)) ([b9d73c6](https://github.com/antonioshaman/aura-companion/commit/b9d73c69ac96d5237f52934035b6d03b1d58731e))
+* **security:** write secret stores with mode 0o600 (P7/SEC-S7) ([#296](https://github.com/antonioshaman/aura-companion/issues/296)) ([05e67ad](https://github.com/antonioshaman/aura-companion/commit/05e67ad7bf92b3323ae49c4671151166485c5c06))
+* **server:** drift detector uses adapter's last-frame-received ts, not transcript mtime ([#201](https://github.com/antonioshaman/aura-companion/issues/201)) ([4f47e7a](https://github.com/antonioshaman/aura-companion/commit/4f47e7aa738e35d500ed38e159b4307d09e951e0))
+* **server:** give --resume spawns a longer init-frame canary deadline ([#197](https://github.com/antonioshaman/aura-companion/issues/197)) ([c572e28](https://github.com/antonioshaman/aura-companion/commit/c572e28f34c44be9dcb7a5e064bc599a66ce2eb0))
+* **server:** kickoff via user-frame + interrupt to force CLI system.init emit ([#200](https://github.com/antonioshaman/aura-companion/issues/200)) ([7b7192a](https://github.com/antonioshaman/aura-companion/commit/7b7192a090080462bc9d634e0cafefb449fa2f3f))
+* **server:** resolveJsonlPath must mirror CLI's `_`→`-` slug conversion, not only `/`→`-` ([#204](https://github.com/antonioshaman/aura-companion/issues/204)) ([902965c](https://github.com/antonioshaman/aura-companion/commit/902965c37510deb2d0d2033c2b6d983a3b777929))
+* **ui:** derive Claude context meter from per-turn occupancy so it drops after /compact ([#196](https://github.com/antonioshaman/aura-companion/issues/196)) ([cbd9b60](https://github.com/antonioshaman/aura-companion/commit/cbd9b60d9aae42cedbe47d28eccdb58151085437))
+
+
+### Miscellaneous Chores
+
+* release 2.0.0 ([#313](https://github.com/antonioshaman/aura-companion/issues/313)) ([a83ebd3](https://github.com/antonioshaman/aura-companion/commit/a83ebd3ace651757921dae6869a866d7afed6ec9))
+
 ## [1.17.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.16.0...aura-companion-v1.17.0) (2026-09-12)
 
 
