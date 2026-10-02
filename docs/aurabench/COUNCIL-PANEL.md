@@ -1,11 +1,11 @@
-# COUNCIL-PANEL-BENCH — which council panel buys the most P1 recall per dollar (harness ready; results pending)
+# COUNCIL-PANEL-BENCH — which council panel buys the most P1 recall per dollar
 
 B4 measured the economy dispatch policy only by replaying archived reviews
 (median seats 8 → 4, but 27/49 P1s lost under the assumption that experts are
 independent). The human's decision of 2026-09-29 asks for a live measurement:
 6 historical PRs with known defects × 3 panels = 18 runs of
-`/council-review-aura`. This file describes the offline half (cases, panels,
-scoring) and the live runner. The results section comes after the live runs.
+`/council-review-aura`. This file describes the cases, panels, scoring and the live runner, and
+reports the results of the 18 live runs (2026-10-01/02).
 
 ## Cases
 
@@ -176,4 +176,74 @@ scores 0 on pr54.
 
 ## Results
 
-Pending: the 18 live runs (under the USAGE-CEILING gate, after D2-full stage 1).
+18/18 runs `completed`, all valid. Each forced roster was dispatched exactly
+(2–11 seats), every expert file is present, and every run is isolated (init frame:
+`council-review-aura` plus CLI built-ins, no MCP, no hooks). No confounds were
+recorded. Chair `claude-opus-5-5`, Claude Code 2.1.283, 1 rep per case × panel.
+Data: `docs/aurabench/data/council-panel/runs.jsonl` (one line per run, no
+paths or tokens) and `judge.json` (the verdict per known defect × panel, with the
+finding number and a note).
+
+### Judge pass
+
+The keyword scorer is only the candidate step, and here it overstated recall
+badly: 15 / 16 / 14 of 18 (FULL / ECONOMY / MINIMAL), against 10 / 10 / 12
+after the judge. Most false candidates share a file and a generic keyword
+(`synthetic`, `probe`, `mtime`) with a known defect but describe a different
+problem. For pr120, every candidate was a file+line overlap only. The judge also
+caught two matches the scorer missed: the `server:auto-proceed` recorder origin
+in pr54 FULL #4 and MINIMAL #5. Rule: a finding counts only if it names the
+same root cause as the known defect, at any priority. The judge is the
+executor (an LLM). The supervisor's manual pass is still open.
+
+### Totals (6 cases, 18 known P1 defects)
+
+| Panel | Seats / run | Recall (judged) | 95% CI | Rated P1 | Unmatched P1 | Cost | $ / found defect | Wall |
+|---|---|---|---|---|---|---|---|---|
+| FULL | 11 | 10/18 (56%) | 33–92% | 4 | 17 | $47.88 | $4.79 | 53.6 min |
+| ECONOMY | 3–4 | 10/18 (56%) | 33–92% | 4 | 15 | $19.48 | $1.95 | 37.0 min |
+| MINIMAL | 2 | 12/18 (67%) | 38–92% | 3 | 10 | $14.18 | $1.18 | 36.9 min |
+
+The CIs are a bootstrap over cases (10 000 resamples, seed 42). Paired recall
+difference vs FULL: ECONOMY −11…+17 p.p., MINIMAL 0…+22 p.p. Defects found per
+dollar: FULL 0.21 (0.10–0.31), ECONOMY 0.51 (0.27–0.76), MINIMAL 0.85
+(0.35–1.42). Together the three panels find 13/18. Five defects were found by no panel:
+pr54 `synthetic-inflight-torn-read` and `archive-clear-after-await`, pr91
+`coalesced-signal-dead` (MINIMAL saw the unthreaded signal but called it
+correct) and `footnote-listbox-test-vacuous`, and pr120 `codex-findings-not-normalized`.
+
+### Per case
+
+| Case | Known | FULL found / P1 / $ | ECONOMY found / P1 / $ | MINIMAL found / P1 / $ |
+|---|---|---|---|---|
+| pr54 | 7 | 3 / 2 / 8.68 | 2 / 2 / 3.93 | 5 / 1 / 2.38 |
+| pr91 | 4 | 1 / 0 / 10.44 | 2 / 0 / 4.33 | 1 / 0 / 3.10 |
+| pr172-173 | 3 | 3 / 1 / 8.68 | 3 / 1 / 2.97 | 3 / 1 / 2.61 |
+| pr120 | 1 | 0 / 0 / 7.00 | 0 / 0 / 3.08 | 0 / 0 / 2.10 |
+| pr122 | 1 | 1 / 0 / 5.64 | 1 / 1 / 2.71 | 1 / 0 / 1.74 |
+| pr189 | 2 | 2 / 1 / 7.44 | 2 / 0 / 2.46 | 2 / 1 / 2.25 |
+
+"Unmatched P1" counts P1 findings that match no known defect. These are
+false-P1 **candidates**. Several look like real bugs that no later PR fixed: on
+pr189 all three panels rated "a missing session file counts as infinite drift,
+so every session is killed" as P1. The supervisor has to check them before they
+can be called false positives.
+
+### Conclusions
+
+- **Eleven seats do not buy recall.** On these 6 cases FULL found no known
+  defect that a smaller panel missed. It cost 2.5× ECONOMY and 3.4× MINIMAL.
+- **Recall seems to depend more on the Chair than on the seat count.** MINIMAL (dahl + hunt)
+  found the most, and the Chair's own verification shows in every review.
+  The recall differences between panels sit inside the CIs: 6 cases × 1 rep cannot
+  separate them. What the data does support is the cost gap, which is large
+  and holds on every case.
+- **The weak spot is severity calibration, not detection.** In each panel only 3–4 of the
+  10–12 found defects were rated P1. A panel that "finds" a P1 only as a P3
+  note (pr54 MINIMAL #11, pr122 MINIMAL #4) would not have blocked the merge.
+- **Recommendation:** ECONOMY loses no measurable recall here and cuts cost by
+  about 60%; MINIMAL cuts about 70%. Whether to switch the live skills to the economy
+  policy is the human's decision (ASK-FIRST); the B4 patch for
+  `~/.claude/skills/council-*` still applies. Before relying on MINIMAL, rerun
+  with ≥3 reps: with 1 rep per cell, a panel effect cannot be told apart from
+  run-to-run variance.
