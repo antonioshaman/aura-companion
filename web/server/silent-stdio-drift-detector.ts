@@ -31,7 +31,7 @@
  */
 
 import type { PathLike } from "node:fs";
-import { statSync } from "node:fs";
+import { closeSync, openSync, readSync, statSync } from "node:fs";
 
 /** Per-session state maintained across ticks. */
 export interface DriftDetectorSessionState {
@@ -78,6 +78,21 @@ export interface DriftVerdict {
   readonly bunLastFrameMs: number;
   /** jsonl mtime in ms (0 if missing). */
   readonly jsonlMtimeMs: number;
+  /**
+   * `assistant` records in the jsonl newer than `bunLastFrameMs` and at
+   * least {@link UNDELIVERED_OUTPUT_MIN_AGE_MS} old — model output the CLI
+   * produced that never reached bun. `null` when the evidence check did not
+   * run (no `undeliveredOutput` dep, or lag under tolerance).
+   */
+  readonly undeliveredAssistantRecords: number | null;
+  /**
+   * Set when the lag crossed the tolerance but the kill was withheld:
+   * `no_undelivered_output` = the jsonl grew (queued prompt, attachment,
+   * pr-link…) but holds no model output bun missed, so there is no evidence
+   * the stdout channel is dead — typically an idle session that just got
+   * input, whose last frame is the previous turn's result.
+   */
+  readonly suppressedReason: "no_undelivered_output" | null;
   /** Human-readable reason if `drifted=true`. */
   readonly reason: string | null;
 }
@@ -104,6 +119,66 @@ export interface DriftDetectorDeps {
    * jsonl is legitimate history, not a bug.
    */
   readonly jsonlIdleThresholdMs?: number;
+  /**
+   * Evidence check run once the lag crosses the tolerance: returns how many
+   * `assistant` records in the jsonl have `sinceMs < timestamp <= untilMs`.
+   * When given, drift requires at least one.
+   */
+  readonly undeliveredOutput?: (jsonlPath: string, sinceMs: number, untilMs: number) => number;
+}
+
+/**
+ * Minimum age of an undelivered `assistant` record before it counts as
+ * evidence. A healthy CLI writes the record and emits the frame at the same
+ * moment; the age keeps a tick that lands between the two from killing.
+ */
+export const UNDELIVERED_OUTPUT_MIN_AGE_MS = 10_000;
+
+/**
+ * Count `assistant` records with `sinceMs < timestamp <= untilMs` in a chunk
+ * of Claude CLI jsonl. Lines that do not parse (the chunk may start
+ * mid-record) are skipped.
+ */
+export function countAssistantRecordsBetween(jsonlChunk: string, sinceMs: number, untilMs: number): number {
+  let count = 0;
+  for (const line of jsonlChunk.split("\n")) {
+    if (!line.includes('"assistant"')) continue;
+    let rec: { type?: unknown; timestamp?: unknown };
+    try {
+      rec = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (rec.type !== "assistant" || typeof rec.timestamp !== "string") continue;
+    const t = Date.parse(rec.timestamp);
+    if (Number.isFinite(t) && t > sinceMs && t <= untilMs) count++;
+  }
+  return count;
+}
+
+/** Tail window read by {@link countUndeliveredAssistantRecords}. */
+export const UNDELIVERED_OUTPUT_TAIL_BYTES = 1024 * 1024;
+
+/**
+ * Default evidence check: reads the last {@link UNDELIVERED_OUTPUT_TAIL_BYTES}
+ * of the jsonl and counts `assistant` records in `(sinceMs, untilMs]`.
+ * Runs only when the lag already crossed the tolerance, so the read is rare.
+ * Returns 0 on any read error (no evidence → no kill).
+ */
+export function countUndeliveredAssistantRecords(jsonlPath: string, sinceMs: number, untilMs: number): number {
+  let fd: number | null = null;
+  try {
+    fd = openSync(jsonlPath, "r");
+    const size = statSync(jsonlPath).size;
+    const len = Math.min(size, UNDELIVERED_OUTPUT_TAIL_BYTES);
+    const buf = Buffer.alloc(len);
+    readSync(fd, buf, 0, len, size - len);
+    return countAssistantRecordsBetween(buf.toString("utf-8"), sinceMs, untilMs);
+  } catch {
+    return 0;
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
 }
 
 /** Default lag tolerance — 90s (see rationale on the field). */
@@ -136,9 +211,12 @@ function defaultStatFile(p: PathLike): { mtimeMs: number } | null {
  *      yet received its first CLI frame is booting, not drifting.
  *   3. jsonl's mtime is more than `lagToleranceMs` newer than
  *      `bunLastFrameMs`.
+ *   4. with `deps.undeliveredOutput`: the jsonl holds at least one
+ *      `assistant` record newer than `bunLastFrameMs` and at least
+ *      {@link UNDELIVERED_OUTPUT_MIN_AGE_MS} old.
  *
- * The third condition is the tell: CLI is writing new records to its
- * own jsonl, bun has NOT received a frame in a while. That is the
+ * Conditions 3+4 are the tell: CLI is writing model output to its own
+ * jsonl, bun has NOT received a frame in a while. That is the
  * two-writer-path divergence pattern, in the act.
  *
  * `bunLastFrameMs` replaced the previous transcript-file-mtime signal
@@ -168,6 +246,8 @@ export function checkDrift(
       mtimeDeltaMs: 0,
       bunLastFrameMs: state.bunLastFrameMs,
       jsonlMtimeMs: 0,
+      undeliveredAssistantRecords: null,
+      suppressedReason: null,
       reason: null,
     };
   }
@@ -183,6 +263,8 @@ export function checkDrift(
       mtimeDeltaMs: 0,
       bunLastFrameMs: state.bunLastFrameMs,
       jsonlMtimeMs,
+      undeliveredAssistantRecords: null,
+      suppressedReason: null,
       reason: null,
     };
   }
@@ -200,6 +282,8 @@ export function checkDrift(
       mtimeDeltaMs,
       bunLastFrameMs: state.bunLastFrameMs,
       jsonlMtimeMs,
+      undeliveredAssistantRecords: null,
+      suppressedReason: null,
       reason: null,
     };
   }
@@ -214,30 +298,61 @@ export function checkDrift(
       mtimeDeltaMs,
       bunLastFrameMs: state.bunLastFrameMs,
       jsonlMtimeMs,
+      undeliveredAssistantRecords: null,
+      suppressedReason: null,
       reason: null,
     };
   }
 
   // Condition 3: jsonl mtime is more than lag-tolerance newer than
-  // bun's last-received-frame timestamp. That's the divergence signature.
-  if (mtimeDeltaMs > lagTolerance) {
+  // bun's last-received-frame timestamp.
+  if (mtimeDeltaMs <= lagTolerance) {
     return {
       sessionId: state.sessionId,
-      drifted: true,
+      drifted: false,
       mtimeDeltaMs,
       bunLastFrameMs: state.bunLastFrameMs,
       jsonlMtimeMs,
-      reason: `jsonl mtime ${Math.round(mtimeDeltaMs / 1000)}s newer than bun's last frame (age ${Math.round(jsonlAgeMs / 1000)}s) while jsonl actively writing`,
+      undeliveredAssistantRecords: null,
+      suppressedReason: null,
+      reason: null,
+    };
+  }
+
+  // Condition 4 (only with an `undeliveredOutput` dep): the jsonl must hold
+  // model output bun never received. Condition 3 alone fires on any idle
+  // session the moment it gets input: bun's last frame is the previous
+  // turn's result (minutes or hours old) and the CLI writes the queued
+  // prompt to jsonl within ms. P7/FIX-DRIFT-FALSE-KILLS (prod 2026-09-28 →
+  // 10-02): 17/69 kills were that shape, 2–14 s into a fresh turn with no
+  // model output yet; the other 52 had `assistant` records bun never got.
+  const undelivered = deps.undeliveredOutput
+    ? deps.undeliveredOutput(state.jsonlPath, state.bunLastFrameMs, now - UNDELIVERED_OUTPUT_MIN_AGE_MS)
+    : null;
+  if (undelivered === 0) {
+    return {
+      sessionId: state.sessionId,
+      drifted: false,
+      mtimeDeltaMs,
+      bunLastFrameMs: state.bunLastFrameMs,
+      jsonlMtimeMs,
+      undeliveredAssistantRecords: 0,
+      suppressedReason: "no_undelivered_output",
+      reason: null,
     };
   }
 
   return {
     sessionId: state.sessionId,
-    drifted: false,
+    drifted: true,
     mtimeDeltaMs,
     bunLastFrameMs: state.bunLastFrameMs,
     jsonlMtimeMs,
-    reason: null,
+    undeliveredAssistantRecords: undelivered,
+    suppressedReason: null,
+    reason:
+      `jsonl mtime ${Math.round(mtimeDeltaMs / 1000)}s newer than bun's last frame (age ${Math.round(jsonlAgeMs / 1000)}s) while jsonl actively writing` +
+      (undelivered === null ? "" : `; ${undelivered} undelivered assistant record(s)`),
   };
 }
 
