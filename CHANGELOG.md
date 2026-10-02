@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.0.1](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.0.0...aura-companion-v2.0.1) (2026-10-02)
+
+
+### Bug Fixes
+
+* **session:** drift detector kills only on undelivered model output (P7/FIX-DRIFT-FALSE-KILLS) ([#317](https://github.com/antonioshaman/aura-companion/issues/317)) ([cf2ce66](https://github.com/antonioshaman/aura-companion/commit/cf2ce66f95d13e448434b51ffeb059e84d9aae2a))
+
 ## [2.0.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v1.17.0...aura-companion-v2.0.0) (2026-10-02)
 
 
