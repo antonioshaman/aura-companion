@@ -6,7 +6,11 @@ import { companionBus } from "./event-bus.js";
 import { metricsCollector } from "./metrics-collector.js";
 import { log } from "./logger.js";
 import { nextModelInChain, computeSilenceRotation } from "./model-fallback-chain.js";
-import { checkDrift, resolveJsonlPath } from "./silent-stdio-drift-detector.js";
+import {
+  checkDrift,
+  countUndeliveredAssistantRecords,
+  resolveJsonlPath,
+} from "./silent-stdio-drift-detector.js";
 import { nextCompactionMilestone } from "./context-size-suggester.js";
 import { homedir } from "node:os";
 import { statSync } from "node:fs";
@@ -168,6 +172,13 @@ export class SessionRecovery {
    * for the 2026-09-11 failure pattern.
    */
   private driftPrevSnapshot = new Map<string, { jsonlMtimeMs: number; bunLastFrameMs: number }>();
+
+  /**
+   * `bunLastFrameMs` of the stall whose suppressed kill was already logged,
+   * per session — one `silent_stdio_drift.suppressed` line per stall, not
+   * one every tick.
+   */
+  private readonly driftSuppressedLogged = new Map<string, number>();
 
   /**
    * Per-session highest compaction-advisory milestone we've already
@@ -414,7 +425,10 @@ export class SessionRecovery {
    */
   driftDetectorTick(): void {
     const claudeHome = `${homedir()}/.claude`;
-    for (const info of this.launcher.listSessions()) {
+    const sessions = this.launcher.listSessions();
+    const listed = new Set(sessions.map((s) => s.sessionId));
+    for (const id of this.driftSuppressedLogged.keys()) if (!listed.has(id)) this.driftSuppressedLogged.delete(id);
+    for (const info of sessions) {
       if (info.archived) continue;
       if (info.backendType === "codex") continue;
       if (info.state !== "connected" && info.state !== "running") continue;
@@ -437,7 +451,7 @@ export class SessionRecovery {
           bunLastFrameMs,
           jsonlPath,
         },
-        {},
+        { undeliveredOutput: countUndeliveredAssistantRecords },
       );
       // Cache last snapshot for future delta-over-time detection.
       this.driftPrevSnapshot.set(info.sessionId, {
@@ -477,6 +491,18 @@ export class SessionRecovery {
         // or permission changed) — skip silently. Next tick retries.
       }
 
+      if (verdict.suppressedReason) {
+        if (this.driftSuppressedLogged.get(info.sessionId) !== bunLastFrameMs) {
+          this.driftSuppressedLogged.set(info.sessionId, bunLastFrameMs);
+          log.info("session-orchestrator", "silent-stdio drift kill suppressed — no undelivered model output", {
+            event: "silent_stdio_drift.suppressed",
+            sessionId: info.sessionId,
+            reason: verdict.suppressedReason,
+            mtimeDeltaMs: verdict.mtimeDeltaMs,
+          });
+        }
+        continue;
+      }
       if (!verdict.drifted) continue;
 
       // Belt-and-braces guards mirroring `handleBackendSilent`:
@@ -490,6 +516,7 @@ export class SessionRecovery {
           event: "silent_stdio_drift.detected",
           sessionId: info.sessionId,
           mtimeDeltaMs: verdict.mtimeDeltaMs,
+          undeliveredAssistantRecords: verdict.undeliveredAssistantRecords,
           reason: verdict.reason,
         },
       );

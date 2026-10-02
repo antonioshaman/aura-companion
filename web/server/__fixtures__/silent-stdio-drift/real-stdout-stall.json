@@ -1,0 +1,220 @@
+{
+ "note": "REAL stall: user message at +20 s, then the CLI wrote thinking/text/tool_use/tool_result for 72 s while zero CLI frames reached bun (protocol recording: no inbound cli frame between bunLastFrameMs and the kill; the relaunched process re-did the turn).",
+ "source": "prod journal 2026-09-30T08:09:00 silent_stdio_drift.detected (mtimeDeltaMs=91430); CLI jsonl records reduced to type/timestamp/content-block types",
+ "bunLastFrameMs": 1790755647570,
+ "originalKillAtMs": 1790755740000,
+ "jsonl": [
+  {
+   "type": "queue-operation",
+   "timestamp": "2026-09-30T08:07:47.820Z",
+   "operation": "enqueue"
+  },
+  {
+   "type": "queue-operation",
+   "timestamp": "2026-09-30T08:07:47.821Z",
+   "operation": "dequeue"
+  },
+  {
+   "type": "user",
+   "timestamp": "2026-09-30T08:07:47.853Z",
+   "message": {
+    "role": "user",
+    "content": "[redacted]"
+   }
+  },
+  {
+   "type": "attachment",
+   "timestamp": "2026-09-30T08:07:47.852Z",
+   "attachment": {
+    "type": "total_tokens_reminder"
+   }
+  },
+  {
+   "type": "assistant",
+   "timestamp": "2026-09-30T08:08:03.151Z",
+   "message": {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "thinking"
+     }
+    ]
+   }
+  },
+  {
+   "type": "assistant",
+   "timestamp": "2026-09-30T08:08:03.748Z",
+   "message": {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "text"
+     }
+    ]
+   }
+  },
+  {
+   "type": "assistant",
+   "timestamp": "2026-09-30T08:08:13.660Z",
+   "message": {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "tool_use"
+     }
+    ]
+   }
+  },
+  {
+   "type": "pr-link",
+   "timestamp": "2026-09-30T08:08:13.808Z"
+  },
+  {
+   "type": "user",
+   "timestamp": "2026-09-30T08:08:15.585Z",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "type": "tool_result"
+     }
+    ]
+   }
+  },
+  {
+   "type": "attachment",
+   "timestamp": "2026-09-30T08:08:15.584Z",
+   "attachment": {
+    "type": "hook_success"
+   }
+  },
+  {
+   "type": "attachment",
+   "timestamp": "2026-09-30T08:08:15.601Z",
+   "attachment": {
+    "type": "total_tokens_reminder"
+   }
+  },
+  {
+   "type": "assistant",
+   "timestamp": "2026-09-30T08:08:18.412Z",
+   "message": {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "thinking"
+     }
+    ]
+   }
+  },
+  {
+   "type": "assistant",
+   "timestamp": "2026-09-30T08:08:19.038Z",
+   "message": {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "tool_use"
+     }
+    ]
+   }
+  },
+  {
+   "type": "user",
+   "timestamp": "2026-09-30T08:08:20.706Z",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "type": "tool_result"
+     }
+    ]
+   }
+  },
+  {
+   "type": "attachment",
+   "timestamp": "2026-09-30T08:08:20.722Z",
+   "attachment": {
+    "type": "total_tokens_reminder"
+   }
+  },
+  {
+   "type": "assistant",
+   "timestamp": "2026-09-30T08:08:24.343Z",
+   "message": {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "thinking"
+     }
+    ]
+   }
+  },
+  {
+   "type": "assistant",
+   "timestamp": "2026-09-30T08:08:30.995Z",
+   "message": {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "tool_use"
+     }
+    ]
+   }
+  },
+  {
+   "type": "pr-link",
+   "timestamp": "2026-09-30T08:08:34.996Z"
+  },
+  {
+   "type": "user",
+   "timestamp": "2026-09-30T08:08:35.039Z",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "type": "tool_result"
+     }
+    ]
+   }
+  },
+  {
+   "type": "attachment",
+   "timestamp": "2026-09-30T08:08:35.051Z",
+   "attachment": {
+    "type": "total_tokens_reminder"
+   }
+  },
+  {
+   "type": "assistant",
+   "timestamp": "2026-09-30T08:08:37.652Z",
+   "message": {
+    "role": "assistant",
+    "content": [
+     {
+      "type": "tool_use"
+     }
+    ]
+   }
+  },
+  {
+   "type": "user",
+   "timestamp": "2026-09-30T08:08:58.822Z",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "type": "tool_result"
+     }
+    ]
+   }
+  },
+  {
+   "type": "attachment",
+   "timestamp": "2026-09-30T08:08:58.831Z",
+   "attachment": {
+    "type": "total_tokens_reminder"
+   }
+  }
+ ]
+}
