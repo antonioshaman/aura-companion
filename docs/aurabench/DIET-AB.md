@@ -187,3 +187,27 @@ property, not a diet effect.
   20 p.p., but p = 0.5. Recommendation: rerun D on the two flipped tasks ×
   3 reps on both sides before D3 quotes a quality number (cheap: 12 cells).
 - **H:** no data (see above).
+
+## D rerun (human decision 2026-10-01, ASK #27)
+
+Before D3 quotes a quality number, D is rerun on the two tasks that flipped
+(`archived-sessions-hold-memory`, `claude-adapter-outbound-queue-overflow`)
+× 3 reps × {before, after} = 12 cells, Claude only (D is claude+claude).
+
+- Fresh bench roots `bench/diet-ab-rerun/{before,after}`: the 1-rep cells
+  above stay untouched and are not reused, so every side has 3 new reps.
+- `after` is pinned to the same `727cd5d6fcc69c4dd232b1b7bc9ef76e0adf70b2`
+  as the first run, so the two runs compare the same post-diet files.
+- Both ceilings 75%, `--state` omitted (D2-full counters stay as they are).
+
+```bash
+cd web && IDS=archived-sessions-hold-memory,claude-adapter-outbound-queue-overflow \
+&& for v in before after; do \
+  env $(env | grep -oE '^AURA_[A-Z_]+' | sed 's/^/-u /') AURABENCH_FIVE_HOUR_CEILING=75 AURABENCH_WEEKLY_CEILING=75 NODE_OPTIONS=--max-old-space-size=2560 \
+  bun run eval:aurabench bench --bench-root /home/auracomp/aura-diet/bench/diet-ab-rerun/$v \
+  --diet-overlay $v --diet-after-ref 727cd5d6fcc69c4dd232b1b7bc9ef76e0adf70b2 --variants D --reps 3 --task-ids $IDS \
+  --timeout-min 60 --timeout-min-class architecture=120 --wt-root /home/auracomp/aura-diet/wt-cells || exit $?; done
+```
+
+Results (success per rep, cost, verdict: regression or noise) are added here
+when the 12 cells are in.
