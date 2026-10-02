@@ -21,6 +21,7 @@ import { CodexAdapter } from "./codex-adapter.js";
 import type { ClaudeAdapter } from "./claude-adapter.js";
 import type { CliTransport } from "./cli-transport.js";
 import { StdioCliTransport, pumpStdoutLines } from "./cli-transport.js";
+import { trackSync } from "./event-loop-lag-monitor.js";
 import { resolveBinary, getEnrichedPath } from "./path-resolver.js";
 import { resolveObserverPromptForSpawn } from "./observer-prompt-spawn.js";
 import { assertExhaustiveObserverPromptSource } from "./observer-prompt.js";
@@ -1911,6 +1912,7 @@ export class CliLauncher {
     const stdout = proc.stdout;
     if (stdout && typeof stdout !== "number") {
       let sawFirstFrame = false;
+      const stdoutLabel = `cli.stdout:${sessionId.slice(0, 8)}`;
       void pumpStdoutLines(
         stdout,
         (chunk) => {
@@ -1923,7 +1925,7 @@ export class CliLauncher {
             this.markConnected(sessionId);
           }
           try {
-            adapter.handleRawMessage(chunk);
+            trackSync(stdoutLabel, () => adapter.handleRawMessage(chunk));
           } catch (err) {
             console.error(`[cli-launcher] Session ${sessionId}: handleRawMessage threw:`, err);
           }

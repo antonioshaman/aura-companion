@@ -17,7 +17,7 @@ A kill is **real** when the jsonl holds an `assistant` record newer than bun's l
 
 The "long tool call" hypothesis is not supported by the data: no kill happened while a tool was running and the jsonl only grew by non-output records.
 
-23 of the 52 real stalls landed within 180 s of a real stall in another session (e.g. 4 sessions at 2026-09-29 19:00–19:02, 3 at 2026-09-30 06:22–06:23). That points to a server-side cause (bun's read side, or box-wide pressure) rather than one CLI's emitter. This is not fixed here; it is listed as an open question.
+23 of the 52 real stalls landed within 180 s of a real stall in another session (e.g. 4 sessions at 2026-09-29 19:00–19:02, 3 at 2026-09-30 06:22–06:23). That points to a server-side cause (bun's read side, or box-wide pressure) rather than one CLI's emitter. This is not fixed here; it is listed as an open question. Follow-up: [server-stdout-stall-2026-10.md](server-stdout-stall-2026-10.md) (bun was not blocked; instrumentation added).
 
 ## Fix
 

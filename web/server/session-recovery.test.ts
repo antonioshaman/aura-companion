@@ -652,8 +652,8 @@ describe("SessionRecovery.driftDetectorTick — undelivered-output gate (P7/FIX-
     companionBus.clear();
   });
 
-  function setup(records: Array<{ type: string; atMs: number }>, bunLastFrameMs: number) {
-    const sessions = new Map([["s1", info("s1", { state: "running", cwd: "/root/proj", cliSessionId: "cli-1" })]]);
+  function setup(records: Array<{ type: string; atMs: number }>, bunLastFrameMs: number, pid?: number) {
+    const sessions = new Map([["s1", info("s1", { state: "running", cwd: "/root/proj", cliSessionId: "cli-1", pid })]]);
     const ctx = makeRecovery(sessions);
     const adapter = Object.create(ClaudeAdapter.prototype) as ClaudeAdapter;
     adapter.getLastCliFrameReceivedMs = () => bunLastFrameMs;
@@ -698,5 +698,31 @@ describe("SessionRecovery.driftDetectorTick — undelivered-output gate (P7/FIX-
     expect(launcher.kill).toHaveBeenCalledWith("s1");
     const detected = warn.mock.calls.find((c) => (c[2] as { event?: string })?.event === "silent_stdio_drift.detected");
     expect(detected?.[2]).toMatchObject({ sessionId: "s1", undeliveredAssistantRecords: 1 });
+    // No pid known → no wait-channel probe, field present and null.
+    expect((detected?.[2] as { cliWaitChannels?: unknown }).cliWaitChannels).toBeNull();
   });
+
+  it.skipIf(process.platform !== "linux")(
+    "detected log carries the CLI's kernel wait channels (P7/SERVER-STDOUT-STALL)",
+    () => {
+      // The field tells the next investigation which side stopped: a CLI
+      // thread parked in `pipe_write` = bun stopped draining stdout. Our own
+      // pid stands in for the CLI so the real /proc path is exercised.
+      const { recovery } = setup(
+        [
+          { type: "user", atMs: NOW - 100_000 },
+          { type: "assistant", atMs: NOW - 60_000 },
+          { type: "user", atMs: NOW - 2_000 }, // jsonl still being written
+        ],
+        NOW - 110_000,
+        process.pid,
+      );
+      // The spy may carry calls from the previous test's tick; start clean.
+      const warn = vi.spyOn(log, "warn");
+      warn.mockClear();
+      recovery.driftDetectorTick();
+      const detected = warn.mock.calls.find((c) => (c[2] as { event?: string })?.event === "silent_stdio_drift.detected");
+      expect((detected?.[2] as { cliWaitChannels?: unknown }).cliWaitChannels).toMatch(/^[\w.]+×\d+(, [\w.]+×\d+)*$/);
+    },
+  );
 });
