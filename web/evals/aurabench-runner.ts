@@ -12,6 +12,12 @@
  *     [--task-ids a,b] [--max-cells N] [--state <STATE.json>] [--timeout-min 60] [--timeout-min-class architecture=120]
  *     [--claude-model claude-opus-5-5] [--codex-model gpt-5.5]
  *     [--diet-overlay before|after] [--diet-after-ref diet/main]
+ *   bun run eval:aurabench report --cells <cells.jsonl>[,<more.jsonl>] [--iters 10000] [--exclude-tasks a,b]
+ *
+ * `report` prints the D3 tables (success / Aura Lift / cost with bootstrap
+ * 95% CIs, per class, the A→C→D→E ladder) for `docs/aurabench/REPORT.md` —
+ * see `aurabench/report.ts`. Several cell files are concatenated;
+ * `--exclude-tasks` drops tasks (a sensitivity table without artefact tasks).
  *
  * `prs.json` is `gh pr list --state merged --base main --limit 300
  *   --json number,title,body,mergeCommit`. `mine` writes one candidate per
@@ -93,6 +99,7 @@ import { checkMergeStability, readStabilityVerdicts, stabilityKey } from "./aura
 import { loadAuraBenchTasks } from "./aurabench/loader.js";
 import type { AuraBenchTask } from "./aurabench/task.js";
 import { runAblation } from "./aurabench/harness/driver.js";
+import { loadReportCells, renderReportTables } from "./aurabench/report.js";
 import { codexDailyCellsFromEnv, parseCodexLedger, variantUsesCodex } from "./aurabench/harness/codex-quota.js";
 import { fetchUsageGate, usageCeilingsFromEnv } from "./aurabench/harness/usage-ceiling.js";
 import { claudeTokenGate, quarantineClaudeCredentialCopies, readClaudeAccessToken } from "./aurabench/harness/claude-auth.js";
@@ -833,7 +840,26 @@ async function main(argv: string[]): Promise<number> {
   if (sub === "judge") return judge(argv, repo);
   if (sub === "spec-check") return specCheck(argv, repo);
   if (sub === "bench") return bench(argv, repo);
-  console.error("usage: aurabench-runner.ts <mine|validate|leak|stability|judge|spec-check|bench> …");
+  if (sub === "report") {
+    const files = arg(argv, "cells");
+    if (!files) {
+      console.error("usage: report --cells <cells.jsonl>[,<more.jsonl>] [--iters 10000] [--exclude-tasks a,b]");
+      return 2;
+    }
+    const jsonl = files
+      .split(",")
+      .map((f) => readFileSync(resolve(f), "utf8"))
+      .join("\n");
+    const dropTasks = new Set((arg(argv, "exclude-tasks") ?? "").split(",").filter(Boolean));
+    const loaded = loadReportCells(jsonl);
+    const cells = loaded.cells.filter((c) => !dropTasks.has(c.task_id));
+    const excluded = loaded.excluded;
+    console.log(`<!-- ${cells.length} cells, ${excluded.length} excluded, tasks dropped: ${[...dropTasks].join(",") || "none"} -->`);
+    for (const e of excluded) console.log(`<!-- excluded ${e.key}: ${e.reason} -->`);
+    console.log(renderReportTables(cells, Number(arg(argv, "iters") ?? 10_000)));
+    return 0;
+  }
+  console.error("usage: aurabench-runner.ts <mine|validate|leak|stability|judge|spec-check|bench|report> …");
   return 2;
 }
 
