@@ -1,0 +1,33 @@
+{
+ "note": "FALSE kill: session idle 7 min, user message queued 3 s before the kill tick; no model output yet. Old detector: lag 421 s > 90 s -> SIGTERM.",
+ "source": "prod journal 2026-10-01T13:10:52 silent_stdio_drift.detected (mtimeDeltaMs=420678); CLI jsonl records reduced to type/timestamp/content-block types",
+ "bunLastFrameMs": 1790859827322,
+ "originalKillAtMs": 1790860252000,
+ "jsonl": [
+  {
+   "type": "queue-operation",
+   "timestamp": "2026-10-01T13:10:48.873Z",
+   "operation": "enqueue"
+  },
+  {
+   "type": "queue-operation",
+   "timestamp": "2026-10-01T13:10:48.874Z",
+   "operation": "dequeue"
+  },
+  {
+   "type": "user",
+   "timestamp": "2026-10-01T13:10:48.903Z",
+   "message": {
+    "role": "user",
+    "content": "[redacted]"
+   }
+  },
+  {
+   "type": "attachment",
+   "timestamp": "2026-10-01T13:10:48.902Z",
+   "attachment": {
+    "type": "total_tokens_reminder"
+   }
+  }
+ ]
+}

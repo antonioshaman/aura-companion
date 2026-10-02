@@ -1,9 +1,16 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   checkDrift,
+  countAssistantRecordsBetween,
+  countUndeliveredAssistantRecords,
   resolveJsonlPath,
   DEFAULT_LAG_TOLERANCE_MS,
   DEFAULT_JSONL_IDLE_THRESHOLD_MS,
+  UNDELIVERED_OUTPUT_MIN_AGE_MS,
+  UNDELIVERED_OUTPUT_TAIL_BYTES,
   type DriftDetectorSessionState,
 } from "./silent-stdio-drift-detector.js";
 
@@ -212,5 +219,169 @@ describe("resolveJsonlPath", () => {
       "cli-x",
     );
     expect(p).toBe("/home/a/.claude/projects/-root-my-project-sub-folder-deep-nested/cli-x.jsonl");
+  });
+});
+
+// P7/FIX-DRIFT-FALSE-KILLS: the lag check alone killed idle sessions the
+// moment they got input (bun's last frame = previous turn's result, minutes
+// or hours old; the CLI writes the queued prompt to jsonl within ms). The
+// kill now also needs evidence: an `assistant` record in the jsonl, newer
+// than bun's last frame and >= UNDELIVERED_OUTPUT_MIN_AGE_MS old.
+describe("countAssistantRecordsBetween", () => {
+  const T0 = Date.parse("2026-10-01T00:00:00.000Z");
+  const rec = (type: string, atMs: number) => JSON.stringify({ type, timestamp: new Date(atMs).toISOString() });
+
+  it("counts only assistant records inside (since, until]", () => {
+    // since is exclusive (a record at bun's last frame was delivered),
+    // until is inclusive; other record types never count.
+    const chunk = [
+      rec("assistant", T0), // == since → excluded
+      rec("assistant", T0 + 1_000),
+      rec("user", T0 + 2_000),
+      rec("queue-operation", T0 + 2_500),
+      rec("assistant", T0 + 5_000), // == until → included
+      rec("assistant", T0 + 5_001), // too young → excluded
+    ].join("\n");
+    expect(countAssistantRecordsBetween(chunk, T0, T0 + 5_000)).toBe(2);
+  });
+
+  it("skips a truncated first line and unparseable lines (tail reads start mid-record)", () => {
+    const chunk = ['istant","timestamp":"2026-10-01T00:00:09.000Z"}', "{not json", rec("assistant", T0 + 9_000)].join("\n");
+    expect(countAssistantRecordsBetween(chunk, T0, T0 + 10_000)).toBe(1);
+  });
+
+  it("ignores records without a string timestamp and text that merely mentions assistant", () => {
+    const chunk = [
+      JSON.stringify({ type: "assistant" }),
+      JSON.stringify({ type: "user", note: "the assistant said", timestamp: new Date(T0 + 1_000).toISOString() }),
+    ].join("\n");
+    expect(countAssistantRecordsBetween(chunk, T0 - 1, T0 + 10_000)).toBe(0);
+  });
+});
+
+describe("countUndeliveredAssistantRecords (reads the jsonl tail)", () => {
+  let dir: string | null = null;
+  afterEach(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    dir = null;
+  });
+
+  it("finds an assistant record at the end of a jsonl larger than the tail window", () => {
+    // Prod jsonls reach tens of MB; only the last UNDELIVERED_OUTPUT_TAIL_BYTES
+    // are read. Old assistant records beyond the window must not matter, the
+    // fresh one at the end must be found.
+    dir = mkdtempSync(join(tmpdir(), "drift-tail-"));
+    const p = join(dir, "cli.jsonl");
+    const T0 = Date.parse("2026-10-01T00:00:00.000Z");
+    const filler = JSON.stringify({ type: "attachment", pad: "x".repeat(1000) });
+    const lines = [JSON.stringify({ type: "assistant", timestamp: new Date(T0 + 1_000).toISOString() })];
+    for (let i = 0; i < Math.ceil(UNDELIVERED_OUTPUT_TAIL_BYTES / filler.length) + 10; i++) lines.push(filler);
+    lines.push(JSON.stringify({ type: "assistant", timestamp: new Date(T0 + 2_000).toISOString() }));
+    writeFileSync(p, lines.join("\n") + "\n");
+    expect(countUndeliveredAssistantRecords(p, T0, T0 + 60_000)).toBe(1);
+  });
+
+  it("returns 0 for a missing file (no evidence → no kill)", () => {
+    expect(countUndeliveredAssistantRecords("/nonexistent/drift/cli.jsonl", 0, Date.now())).toBe(0);
+  });
+});
+
+describe("checkDrift — undelivered-output evidence gate", () => {
+  const NOW = 1_800_000_000_000;
+  const base: DriftDetectorSessionState = { sessionId: "s", bunLastFrameMs: NOW - 400_000, jsonlPath: "/tmp/cli.jsonl" };
+  const stat = (p: unknown) => (String(p) === "/tmp/cli.jsonl" ? { mtimeMs: NOW - 3_000 } : null);
+
+  it("withholds the kill when the jsonl holds no undelivered model output", () => {
+    // Idle 400 s, prompt queued 3 s ago: lag 397 s > 90 s, but nothing the
+    // model produced is missing on bun's side.
+    const v = checkDrift(base, { now: () => NOW, statFile: stat, undeliveredOutput: () => 0 });
+    expect(v.drifted).toBe(false);
+    expect(v.suppressedReason).toBe("no_undelivered_output");
+    expect(v.undeliveredAssistantRecords).toBe(0);
+    expect(v.mtimeDeltaMs).toBe(397_000);
+  });
+
+  it("kills when model output sat undelivered, and asks for records at least the min age old", () => {
+    const calls: Array<[string, number, number]> = [];
+    const v = checkDrift(base, {
+      now: () => NOW,
+      statFile: stat,
+      undeliveredOutput: (p, since, until) => {
+        calls.push([p, since, until]);
+        return 3;
+      },
+    });
+    expect(v.drifted).toBe(true);
+    expect(v.suppressedReason).toBeNull();
+    expect(v.undeliveredAssistantRecords).toBe(3);
+    expect(v.reason).toMatch(/3 undelivered assistant record/);
+    expect(calls).toEqual([["/tmp/cli.jsonl", NOW - 400_000, NOW - UNDELIVERED_OUTPUT_MIN_AGE_MS]]);
+  });
+
+  it("does not read the jsonl at all while the lag is under tolerance", () => {
+    // The tail read is the expensive part; it must only run on suspicion.
+    let reads = 0;
+    const v = checkDrift(
+      { ...base, bunLastFrameMs: NOW - 10_000 },
+      { now: () => NOW, statFile: stat, undeliveredOutput: () => ++reads },
+    );
+    expect(v.drifted).toBe(false);
+    expect(v.undeliveredAssistantRecords).toBeNull();
+    expect(reads).toBe(0);
+  });
+});
+
+// EC-6 replay: real prod kills (journal `silent_stdio_drift.detected`) with
+// the CLI's own jsonl around them, reduced to record type/timestamp (see
+// __fixtures__/silent-stdio-drift/README.md). Each case replays the tick that
+// killed in prod: the old check must still fire (proves the fixture
+// reproduces the kill); the gated check must keep the real stall and drop the
+// false ones.
+describe("checkDrift — replay of prod drift kills", () => {
+  interface Fixture {
+    bunLastFrameMs: number;
+    originalKillAtMs: number;
+    jsonl: Array<{ type: string; timestamp: string }>;
+  }
+  const load = (name: string): Fixture =>
+    JSON.parse(readFileSync(join(__dirname, "__fixtures__", "silent-stdio-drift", `${name}.json`), "utf-8"));
+
+  function replayAtKillTick(fx: Fixture, gated: boolean) {
+    const now = fx.originalKillAtMs;
+    const visible = fx.jsonl.filter((r) => Date.parse(r.timestamp) <= now);
+    const chunk = visible.map((r) => JSON.stringify(r)).join("\n");
+    const mtime = Math.max(...visible.map((r) => Date.parse(r.timestamp)));
+    return checkDrift(
+      { sessionId: "replay", bunLastFrameMs: fx.bunLastFrameMs, jsonlPath: "/replay/cli.jsonl" },
+      {
+        now: () => now,
+        statFile: () => ({ mtimeMs: mtime }),
+        undeliveredOutput: gated ? (_p, since, until) => countAssistantRecordsBetween(chunk, since, until) : undefined,
+      },
+    );
+  }
+
+  it.each([
+    // Session idle 7 min; user message queued 3 s before the kill tick.
+    ["false-kill-input-after-idle"],
+    // Session idle 85 min; CLI-internal scheduled prompt queued 4 s before the kill tick.
+    ["false-kill-scheduled-wake"],
+  ])("%s: prod killed a turn seconds old; the gated check withholds", (name) => {
+    const fx = load(name);
+    expect(replayAtKillTick(fx, false).drifted).toBe(true);
+    const v = replayAtKillTick(fx, true);
+    expect(v.drifted).toBe(false);
+    expect(v.suppressedReason).toBe("no_undelivered_output");
+  });
+
+  it("real-stdout-stall: the CLI wrote 72 s of model output bun never got; the gated check still kills", () => {
+    // Protocol recording for this kill: no inbound CLI frame between
+    // bunLastFrameMs and the kill, while the jsonl gained thinking, text,
+    // tool_use and tool_result records — a genuinely dead stdout channel.
+    const fx = load("real-stdout-stall");
+    expect(replayAtKillTick(fx, false).drifted).toBe(true);
+    const v = replayAtKillTick(fx, true);
+    expect(v.drifted).toBe(true);
+    expect(v.undeliveredAssistantRecords).toBeGreaterThan(0);
   });
 });
