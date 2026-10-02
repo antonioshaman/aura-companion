@@ -1,0 +1,168 @@
+/**
+ * Tests for the D3 report engine (P6/D3). They pin the rules the REPORT.md
+ * numbers depend on: which cells count, how unknown cost is treated, how the
+ * Aura Lift is paired against the naked baseline of the SAME provider, that
+ * the bootstrap is reproducible, and that E's wall clock is shown with the
+ * auto-proceed idle waits subtracted.
+ */
+
+import { describe, it, expect } from "vitest";
+import type { CellRecord } from "./harness/cells.js";
+import type { VariantId } from "./harness/variants.js";
+import {
+  autoProceedWaitMs,
+  baselineOf,
+  bootstrapMeanCi,
+  classTable,
+  layerLadder,
+  loadReportCells,
+  renderReportTables,
+  variantRows,
+} from "./report.js";
+
+function cell(task: string, variant: VariantId, success: boolean, extra: Partial<CellRecord> = {}): CellRecord {
+  return {
+    v: 1,
+    key: `${task}|${variant}|${extra.rep ?? 1}`,
+    task_id: task,
+    task_class: "bugfix",
+    variant,
+    rep: 1,
+    status: "completed",
+    success,
+    hidden: null,
+    regressions: null,
+    diff: null,
+    metrics: {
+      turns: 1,
+      tool_calls: 1,
+      tokens_in: 1,
+      tokens_out: 100,
+      tokens_cache_read: 0,
+      tokens_cache_write: 0,
+      cost_usd: variant === "B" || variant === "F" ? null : 1,
+      models: [],
+    },
+    wall_clock_ms: 600_000,
+    started_at: "",
+    finished_at: "",
+    isolation: { violations: [] },
+    confounds: [],
+    ...extra,
+  };
+}
+
+const jsonl = (cs: CellRecord[]) => cs.map((c) => JSON.stringify(c)).join("\n") + "\n";
+
+describe("loadReportCells", () => {
+  it("keeps the last record per key and drops cells that did not measure the variant", () => {
+    // A re-run of t1|A replaces the earlier failure; harness_error and an
+    // isolation violation are excluded with a reason, never counted as failures.
+    const { cells, excluded } = loadReportCells(
+      jsonl([
+        cell("t1", "A", false),
+        cell("t1", "A", true),
+        cell("t2", "H", false, { status: "harness_error", error: "observer_dead: quota" }),
+        cell("t3", "C", true, { isolation: { violations: ["~/.claude/skills"] } }),
+        cell("t4", "C", false, { status: "timeout" }),
+      ]),
+    );
+    expect(cells.map((c) => `${c.key}:${c.success}`)).toEqual(["t1|A|1:true", "t4|C|1:false"]);
+    expect(excluded).toEqual([
+      { key: "t2|H|1", reason: "harness_error: observer_dead: quota" },
+      { key: "t3|C|1", reason: "isolation violations: 1" },
+    ]);
+  });
+});
+
+describe("bootstrapMeanCi", () => {
+  it("is reproducible for a seed and brackets the point estimate", () => {
+    const xs = [1, 0, 1, 1, 0, 1, 1, 1];
+    const a = bootstrapMeanCi(xs, 2000, 9)!;
+    expect(bootstrapMeanCi(xs, 2000, 9)).toEqual(a);
+    expect(a.point).toBe(0.75);
+    expect(a.lo).toBeLessThanOrEqual(a.point);
+    expect(a.hi).toBeGreaterThanOrEqual(a.point);
+  });
+
+  it("degenerates to a point for a constant sample and to null for none", () => {
+    expect(bootstrapMeanCi([1, 1, 1], 500)).toEqual({ point: 1, lo: 1, hi: 1 });
+    expect(bootstrapMeanCi([], 500)).toBeNull();
+  });
+});
+
+describe("variantRows", () => {
+  it("measures the lift against the naked baseline of the same provider, paired on shared tasks", () => {
+    // C (Claude) is compared with A, F (Codex) with B. Task t3 has C but no A,
+    // so it does not enter C's paired lift.
+    expect(baselineOf("C")).toBe("A");
+    expect(baselineOf("H")).toBe("A");
+    expect(baselineOf("F")).toBe("B");
+    expect(baselineOf("A")).toBeNull();
+    const rows = variantRows(
+      [
+        cell("t1", "A", true),
+        cell("t2", "A", false),
+        cell("t1", "C", true),
+        cell("t2", "C", true),
+        cell("t3", "C", false),
+        cell("t1", "B", false),
+        cell("t1", "F", true),
+      ],
+      500,
+    );
+    const c = rows.find((r) => r.variant === "C")!;
+    expect(c.lift).toMatchObject({ baseline: "A", pairedTasks: 2, point: 0.5 });
+    expect(rows.find((r) => r.variant === "F")!.lift).toMatchObject({ baseline: "B", pairedTasks: 1, point: 1 });
+    expect(rows.find((r) => r.variant === "A")!.lift).toBeNull();
+  });
+
+  it("keeps Codex cost unknown instead of averaging it as zero", () => {
+    // B never reports cost: mean, CI and $/success must all be unknown.
+    const b = variantRows([cell("t1", "B", true), cell("t2", "B", true)], 200)[0]!;
+    expect(b).toMatchObject({ costMean: null, costCi: null, costUnknown: 2, costPerSuccess: null });
+    // A known zero-success variant has no $/success either.
+    const a = variantRows([cell("t1", "A", false)], 200)[0]!;
+    expect(a.costPerSuccess).toBeNull();
+    expect(a.costMean).toBe(1);
+  });
+});
+
+describe("classTable", () => {
+  it("counts successes and cells per class and variant", () => {
+    const t = classTable([cell("t1", "A", true), cell("t2", "A", false, { task_class: "ui" }), cell("t1", "C", true)]);
+    expect([...t.keys()]).toEqual(["bugfix", "ui"]);
+    expect(t.get("bugfix")!.get("A")).toEqual({ s: 1, n: 1 });
+    expect(t.get("ui")!.get("A")).toEqual({ s: 0, n: 1 });
+  });
+});
+
+describe("layer ladder", () => {
+  it("uses only tasks with every rung and subtracts auto-proceed waits from E's wall clock", () => {
+    // t2 lacks E, so the ladder is computed on t1 alone. E's cell fired
+    // auto-proceed 3× at 120 s idle → 6 min of its 16 min are waiting.
+    const e = cell("t1", "E", true, { wall_clock_ms: 16 * 60_000, isolation: { violations: [], layer_evidence: { auto_proceed_fires: 3 } } });
+    expect(autoProceedWaitMs(e)).toBe(360_000);
+    // Only E has the auto-proceed layer; the same evidence on D subtracts nothing.
+    expect(autoProceedWaitMs({ ...e, variant: "D" })).toBe(0);
+    const { tasks, rows } = layerLadder(
+      [cell("t1", "A", false), cell("t1", "C", true), cell("t1", "D", true), e, cell("t2", "A", true), cell("t2", "C", true)],
+      300,
+    );
+    expect(tasks).toEqual(["t1"]);
+    expect(rows.map((r) => r.variant)).toEqual(["A", "C", "D", "E"]);
+    expect(rows[1]!.deltaSuccess!.point).toBe(1);
+    expect(rows[0]!.deltaSuccess).toBeNull();
+    expect(rows[3]).toMatchObject({ wallMinMean: 16, wallMinNetMean: 10 });
+  });
+});
+
+describe("renderReportTables", () => {
+  it("renders all three tables and marks Codex cost unknown", () => {
+    const md = renderReportTables([cell("t1", "A", true), cell("t1", "B", true), cell("t1", "C", true)], 200);
+    expect(md).toContain("### R1.");
+    expect(md).toContain("### R2.");
+    expect(md).toContain("### R3.");
+    expect(md).toMatch(/\| B \| naked Codex \| 1 \| 1 \| 1\/1 \(100%\) .*\| unknown \|/);
+  });
+});
