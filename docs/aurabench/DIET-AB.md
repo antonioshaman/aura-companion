@@ -209,5 +209,52 @@ cd web && IDS=archived-sessions-hold-memory,claude-adapter-outbound-queue-overfl
   --timeout-min 60 --timeout-min-class architecture=120 --wt-root /home/auracomp/aura-diet/wt-cells || exit $?; done
 ```
 
-Results (success per rep, cost, verdict: regression or noise) are added here
-when the 12 cells are in.
+### D rerun results (run finished 2026-10-02)
+
+12/12 cells recorded, every one `completed`, 0 isolation violations, 0
+regressions in the zone suites. `before` ran 05:45–09:50 UTC, `after`
+11:03–12:08 UTC (a prod bugfix paused the bench in between). Per-cell data:
+[`data/diet-ab-rerun-cells.csv`](data/diet-ab-rerun-cells.csv) (no paths, no
+secrets).
+
+| Task | before (rep 1/2/3) | after (rep 1/2/3) |
+|---|---|---|
+| `archived-sessions-hold-memory` | ✓ ✗ ✗ (1/3) | ✗ ✗ ✓ (1/3) |
+| `claude-adapter-outbound-queue-overflow` | ✓ ✓ ✓ (3/3) | ✓ ✓ ✓ (3/3) |
+| **D, both tasks** | **4/6** | **4/6** |
+
+All 4 failures (2 per side) are the same single test, 392/393:
+`SessionOrchestrator unarchiveSession() unsets archived flag on launcher and
+store` throws `this.wsBridge.restoreArchivedSessionMemory is not a function`.
+The agent adds a re-hydrate method on `wsBridge`; the hidden test's mock of
+`wsBridge` only has the reference implementation's methods. This is the same
+shape mismatch as the first run's `after` flip, and it hits `before` exactly
+as often, so it is a task property, not a diet effect. The first run's
+`claude-adapter-outbound-queue-overflow` `after` failure (102/106, JSON-encoded
+queue frames) did not reproduce in 3 reps.
+
+| Metric (sum of 6 cells) | before | after | Δ |
+|---|---|---|---|
+| standing context, first call (mean tokens) | 34 382 | 24 861 | −9 521 (−27.7%) |
+| cost, $ | 11.84 | 9.62 | −18.8% |
+| prompt tokens (in + cache) | 11.36 M | 9.89 M | −12.9% |
+| turns / tool calls | 205 / 187 | 219 / 203 | +6.8% / +8.6% |
+| wall clock, min | 64.4 | 64.8 | +0.6% |
+
+Mean cost Δ per task (bootstrap over reps within each task, 20 000 resamples):
+−$0.37 per cell, 95% CI [−0.65, −0.07]. Turns, tool calls and wall clock did
+not move beyond rep-to-rep spread (turns range 24–49 on `after`, 26–47 on
+`before`).
+
+Pooled with the first run's single D rep (4 reps per side):
+`archived-sessions-hold-memory` 2/4 vs 1/4,
+`claude-adapter-outbound-queue-overflow` 4/4 vs 3/4, total 6/8 vs 4/8
+(Fisher exact two-sided p ≈ 0.61). The whole gap is the first run's 1-rep
+cells; the 3-rep rerun is tied.
+
+**Verdict: noise, not a regression.** On the two tasks that flipped, D after
+the diet solves as often as before (4/6 = 4/6), the recurring failure is the
+same mock-shape mismatch on both sides, and cost is lower (CI excludes zero).
+A3-recheck's "> 5 p.p. regression" blocker is not triggered by this data:
+the rerun shows 0 p.p. D3 may quote D quality from the 3-rep rerun, with the
+caveat that 2 tasks × 3 reps cannot rule out a small effect.
