@@ -54,7 +54,8 @@
  * into `STATE.bench.cells_done/cells_total`. Before every cell `bench` asks the
  * prod `GET /api/usage-limits` (read-only) and holds while the Claude
  * subscription is at/over `AURABENCH_WEEKLY_CEILING` (default 75%) weekly or
- * `AURABENCH_FIVE_HOUR_CEILING` (default 90%) 5-hourly; fail-closed.
+ * `AURABENCH_FIVE_HOUR_CEILING` (default 90%) 5-hourly; fail-closed. Codex-only
+ * cells (B/F/G) skip that Claude gate — see `variantUsesClaude`.
  * Codex cells (B/F/G/H) additionally obey a rolling-24 h start budget
  * (`AURABENCH_CODEX_DAILY_CELLS`, default 12; ledger `AURABENCH_CODEX_LEDGER`,
  * default `<bench-root>/codex-starts.log` — point every runner at one file),
@@ -104,7 +105,7 @@ import { codexDailyCellsFromEnv, parseCodexLedger, variantUsesCodex } from "./au
 import { fetchUsageGate, usageCeilingsFromEnv } from "./aurabench/harness/usage-ceiling.js";
 import { claudeTokenGate, quarantineClaudeCredentialCopies, readClaudeAccessToken } from "./aurabench/harness/claude-auth.js";
 import { runCell, computeBaseline, type AgentRunner, type Baseline } from "./aurabench/harness/run-cell.js";
-import { VARIANTS, parseVariantList } from "./aurabench/harness/variants.js";
+import { VARIANTS, parseVariantList, variantUsesClaude } from "./aurabench/harness/variants.js";
 import { nakedClaudeRunner, nakedCodexRunner, type NakedDeps } from "./aurabench/harness/naked-agents.js";
 import { auraRunner, type BenchSocket } from "./aurabench/harness/aura-agent.js";
 import { benchInstancePaths, startBenchInstance, type RunningInstance } from "./aurabench/harness/bench-instance.js";
@@ -566,9 +567,10 @@ async function bench(argv: string[], repo: string): Promise<number> {
           appendFileSync(codexLedger, `${at}\n`);
         },
       },
+      isClaudeCell: (cell) => variantUsesClaude(cell.variant),
       usageGate: async (cell) => {
         const g = await fetchUsageGate(fetch, ceilings);
-        if (!g.ok || cell.variant === "B") return g;
+        if (!g.ok || !variantUsesClaude(cell.variant)) return g;
         // Every Claude-driven cell must finish on the access token it starts with.
         const task = byId.get(cell.taskId)!;
         const needMs = (classTimeouts.minutes[task.aurabench.class] ?? timeoutMs / 60_000) * 60_000;
