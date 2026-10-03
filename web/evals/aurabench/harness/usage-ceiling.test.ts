@@ -270,4 +270,25 @@ describe("runAblation with the usage gate", () => {
     await runAblation(d);
     expect(events.slice(0, 5)).toEqual(["gate open", "run t1|A|1", "sleep 1200000", "gate open", "run t1|A|1"]);
   });
+
+  // P6/CODEX-ONLY-GATE (2026-10-03): Claude weekly at 83% held the B/F cells of
+  // D2-full stage 1 too, although they never touch Claude. Non-Claude cells
+  // skip the gate; a missing predicate keeps every cell gated (fail-closed).
+  it("does not ask the gate for cells isClaudeCell rejects", async () => {
+    const { d, events } = setup([hold, hold]);
+    d.isClaudeCell = (c) => c.variant !== "A";
+    const s = await runAblation(d);
+    expect(events).toEqual([
+      "run t1|A|1",
+      "record t1|A|1",
+      "gate hold",
+      `sleep ${USAGE_HOLD_POLL_MS}`,
+      "gate hold",
+      `sleep ${USAGE_HOLD_POLL_MS}`,
+      "gate open",
+      "run t1|C|1",
+      "record t1|C|1",
+    ]);
+    expect(s.usageHolds).toBe(2);
+  });
 });

@@ -5,7 +5,8 @@
  *
  *  - before each cell, holds while the subscription usage gate is closed
  *    (weekly / 5-hour ceiling, fail-closed — see `usage-ceiling.ts`),
- *    rechecking every 15 min, then waits while MemAvailable < 1.5 GB;
+ *    rechecking every 15 min, then waits while MemAvailable < 1.5 GB; cells
+ *    that do not use Claude (`isClaudeCell` false) skip that gate;
  *  - a FATAL gate (prod's Claude OAuth dead, P6/FIX-D2-CLAUDE-AUTH) is
  *    re-confirmed a few times a minute apart and then STOPS the run
  *    (`stoppedOnAuth`) — never a silent multi-hour hold;
@@ -43,6 +44,12 @@ export interface DriverDeps {
   memAvailableKb: () => number;
   /** Subscription usage + auth gate, asked before every cell start (retries included). */
   usageGate?: (cell: PlannedCell) => Promise<UsageGate>;
+  /**
+   * Cells that spend the Claude subscription; only these ask `usageGate`.
+   * Absent = every cell is gated (fail-closed). A Codex-only cell (B, F, G)
+   * must not wait on the Claude weekly ceiling (P6/CODEX-ONLY-GATE).
+   */
+  isClaudeCell?: (cell: PlannedCell) => boolean;
   /** Consecutive fatal gate answers before the run stops (default 3). */
   fatalConfirmations?: number;
   /** Pause between fatal re-checks (default 60 s). */
@@ -156,7 +163,7 @@ export async function runAblation(d: DriverDeps): Promise<DriverSummary> {
       continue;
     }
     for (;;) {
-      if (d.usageGate) {
+      if (d.usageGate && (d.isClaudeCell?.(cell) ?? true)) {
         let fatalSeen = 0;
         for (let g = await d.usageGate(cell); !g.ok; g = await d.usageGate(cell)) {
           if (g.fatal) {
