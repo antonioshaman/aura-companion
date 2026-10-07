@@ -128,6 +128,25 @@ describe("runAblation", () => {
     expect(sleeps).toEqual([30_000, 30_000]);
   });
 
+  // P6/DISK-GATE: on 2026-10-06 bench codex-homes filled `/` (shared with
+  // prod) and cells died with ENOSPC. The driver must hold BEFORE starting a
+  // cell while free disk < 5 GB, re-checking every 5 min, and start the cell
+  // once space is back — never run it on a nearly full disk.
+  it("waits for free disk before a cell", async () => {
+    const disk = [1024, 4 * 1024 * 1024, 6 * 1024 * 1024];
+    const { d, sleeps, appended } = driver({}, { diskAvailableKb: () => disk.shift() ?? 6 * 1024 * 1024, maxCells: 1 });
+    await runAblation(d);
+    expect(sleeps).toEqual([5 * 60_000, 5 * 60_000]);
+    expect(appended).toEqual(["t1|A|1"]);
+  });
+
+  // Boundary: exactly 5 GB free is enough — the gate is strictly "< 5 GB".
+  it("does not wait at exactly the disk threshold", async () => {
+    const { d, sleeps } = driver({}, { diskAvailableKb: () => 5 * 1024 * 1024, maxCells: 1 });
+    await runAblation(d);
+    expect(sleeps).toEqual([]);
+  });
+
   it("maxCells bounds the number of newly recorded cells", async () => {
     const { d, appended } = driver({}, { maxCells: 2 });
     await runAblation(d);
