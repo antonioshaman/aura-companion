@@ -813,6 +813,11 @@ export class WsBridge {
     }));
   }
 
+  /** Return the number of pending (queued) user messages for a session. */
+  getSessionPendingMessageCount(sessionId: string): number {
+    return this.sessions.get(sessionId)?.pendingMessages.length ?? 0;
+  }
+
   /**
    * Total number of browser WebSockets connected across all sessions right now.
    * Used by the presence-ping loop to decide whether a human currently has the
@@ -1132,6 +1137,9 @@ export class WsBridge {
         this.refreshGitInfo(session, { broadcastUpdate: true, notifyPoller: true });
         this.appendHistory(session, msg);
         session.stateMachine.transition("ready", "turn_completed");
+        if (session.pendingMessages.length > 0 && adapter.isConnected()) {
+          this.flushQueuedBrowserMessages(session, adapter, "turn_completed_flush");
+        }
         this.persistSession(session);
         companionBus.emit("message:result", { sessionId: session.id, message: msg });
 
