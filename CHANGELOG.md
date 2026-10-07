@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.1.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.0.1...aura-companion-v2.1.0) (2026-10-07)
+
+
+### Features
+
+* **diagnostics:** event-loop lag detector and CLI wait channels for stdout stalls ([#322](https://github.com/antonioshaman/aura-companion/issues/322)) ([7cd16c8](https://github.com/antonioshaman/aura-companion/commit/7cd16c8a07cfc1459a71c4b936264d1d9c3a715b))
+
+
+### Bug Fixes
+
+* drain pendingMessages on turn_completed; override drift suppression when user messages pending ([#327](https://github.com/antonioshaman/aura-companion/issues/327)) ([97f6a32](https://github.com/antonioshaman/aura-companion/commit/97f6a323b361e9576929b4516915bee884277a7d))
+
 ## [2.0.1](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.0.0...aura-companion-v2.0.1) (2026-10-02)
 
 
