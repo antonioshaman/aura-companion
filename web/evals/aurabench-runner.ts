@@ -127,7 +127,7 @@ import {
   sweepStaleCellWorktrees,
   withCleanClaudeProject,
 } from "./aurabench/harness/cell-paths.js";
-import { readdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { readdirSync, renameSync, rmSync, statSync, statfsSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 
 const MIN_AVAILABLE_KB = 1.5 * 1024 * 1024;
@@ -558,6 +558,10 @@ async function bench(argv: string[], repo: string): Promise<number> {
         });
       },
       memAvailableKb,
+      diskAvailableKb: () => {
+        const s = statfsSync(benchRoot);
+        return (s.bavail * s.bsize) / 1024;
+      },
       codex: {
         isCodexCell: (cell) => variantUsesCodex(cell.variant),
         dailyCells: codexDailyCells,

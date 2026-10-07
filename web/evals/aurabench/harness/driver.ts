@@ -5,8 +5,10 @@
  *
  *  - before each cell, holds while the subscription usage gate is closed
  *    (weekly / 5-hour ceiling, fail-closed — see `usage-ceiling.ts`),
- *    rechecking every 15 min, then waits while MemAvailable < 1.5 GB; cells
- *    that do not use Claude (`isClaudeCell` false) skip that gate;
+ *    rechecking every 15 min, then waits while MemAvailable < 1.5 GB and
+ *    while free disk < 5 GB (P6/DISK-GATE: bench codex-homes filled `/`,
+ *    shared with prod, on 2026-10-06); cells that do not use Claude
+ *    (`isClaudeCell` false) skip the usage gate;
  *  - a FATAL gate (prod's Claude OAuth dead, P6/FIX-D2-CLAUDE-AUTH) is
  *    re-confirmed a few times a minute apart and then STOPS the run
  *    (`stoppedOnAuth`) — never a silent multi-hour hold;
@@ -42,6 +44,8 @@ export interface DriverDeps {
   appendResult: (rec: CellRecord) => void;
   runCell: (cell: PlannedCell) => Promise<CellOutcome>;
   memAvailableKb: () => number;
+  /** Free KB on the bench filesystem; absent = no disk gate. */
+  diskAvailableKb?: () => number;
   /** Subscription usage + auth gate, asked before every cell start (retries included). */
   usageGate?: (cell: PlannedCell) => Promise<UsageGate>;
   /**
@@ -81,6 +85,9 @@ export const CODEX_MAX_HOLD_MS = 6 * 3_600_000;
 export const CODEX_UNKNOWN_RESET_MS = 20 * 60_000;
 
 export const MIN_AVAILABLE_KB = 1.5 * 1024 * 1024;
+/** Free disk below which no cell starts — the bench shares `/` with prod. */
+export const MIN_DISK_AVAILABLE_KB = 5 * 1024 * 1024;
+export const DISK_WAIT_MS = 5 * 60_000;
 
 export interface DriverSummary {
   total: number;
@@ -185,6 +192,10 @@ export async function runAblation(d: DriverDeps): Promise<DriverSummary> {
       while (d.memAvailableKb() < MIN_AVAILABLE_KB) {
         d.log("[aurabench] MemAvailable < 1.5 GB — waiting 30s");
         await d.sleep(30_000);
+      }
+      while (d.diskAvailableKb && d.diskAvailableKb() < MIN_DISK_AVAILABLE_KB) {
+        d.log("[aurabench] free disk < 5 GB — waiting 5 min");
+        await d.sleep(DISK_WAIT_MS);
       }
       const started = d.now();
       if (isCodex) codex!.noteStart(started);
