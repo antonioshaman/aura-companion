@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.1](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.1.0...aura-companion-v2.1.1) (2026-10-08)
+
+
+### Bug Fixes
+
+* **council:** host adopts group-less observer review files and stamps the model ([#331](https://github.com/antonioshaman/aura-companion/issues/331)) ([0a30349](https://github.com/antonioshaman/aura-companion/commit/0a30349c990107343b0d127c1374172ce95e166d))
+
 ## [2.1.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.0.1...aura-companion-v2.1.0) (2026-10-07)
 
 
