@@ -236,10 +236,21 @@ export function readLayerEvidence(worktree: string, groupId: string): LayerEvide
       if (phase !== null && phase !== "spawn") workCheckpointAt = Math.min(workCheckpointAt, mtime(p));
       return { file, phase, sequence: typeof j?.sequence === "number" ? j.sequence : null };
     });
-  const reviewFiles = list("reviews");
   // The writer (`buildObserverReviewFilename`, server/review-watcher.ts)
   // pins `<phase>-<group>-<provider>-observer.md`; only the provider suffix
-  // is read here (the harness never imports server/).
+  // is read here (the harness never imports server/). An observer that
+  // writes its own file (the host then stands down) may drop the group:
+  // `bench-implement-codex-observer.md` (BENCH-H, 4/16 cells). A cell
+  // worktree hosts exactly one pair, so a group-less observer review is
+  // this pair's; another pair's file always carries its own `grp_`.
+  let reviewFiles: string[];
+  try {
+    reviewFiles = readdirSync(join(dir, "reviews")).filter(
+      (f) => f.includes(groupId) || (!f.includes("grp_") && /-(claude|codex)-observer\.md$/.test(f)),
+    );
+  } catch {
+    reviewFiles = [];
+  }
   const reviewProviders = new Set<string>();
   for (const f of reviewFiles) {
     const m = /-(claude|codex)-observer\.md$/.exec(f);
