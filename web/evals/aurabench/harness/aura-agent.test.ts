@@ -700,4 +700,27 @@ describe("readLayerEvidence", () => {
     put("reviews/notes-grp_a.txt", "x", 2100);
     expect(readLayerEvidence(wt, "grp_a").review_providers).toEqual(["claude", "codex"]);
   });
+
+  it("an observer-written review without the group in its name still counts (BENCH-H Codex shape)", () => {
+    // BENCH-H: the Codex observer wrote `.council/reviews/<phase>-codex-observer.md`
+    // itself (host stood down), so 4/16 cells recorded reviews=0 although the
+    // instance log shows both checkpoints reviewed. One pair per cell worktree,
+    // so a group-less observer file belongs to that pair.
+    const { wt, put } = setup();
+    put("checkpoints/spawn.grp_a.json", JSON.stringify({ phase: "spawn", sequence: 0 }), 1000);
+    put("checkpoints/bench-implement.grp_a.json", JSON.stringify({ phase: "bench-implement", sequence: 1 }), 2000);
+    put("reviews/spawn-codex-observer.md", "[]", 1001);
+    put("reviews/bench-implement-codex-observer.md", "[]", 2100);
+    // Group-less but not an observer review → still ignored.
+    put("reviews/notes.md", "x", 2100);
+    expect(readLayerEvidence(wt, "grp_a")).toMatchObject({ reviews: 2, review_providers: ["codex"], observer_loop_ran: true });
+  });
+
+  it("a group-less observer review does not leak into another pair's evidence when the file names a different group", () => {
+    // Only group-less names are attributed to the asking pair; a file that
+    // names grp_b stays grp_b's.
+    const { wt, put } = setup();
+    put("reviews/bench-implement-grp_b-codex-observer.md", "[]", 2100);
+    expect(readLayerEvidence(wt, "grp_a").reviews).toBe(0);
+  });
 });
