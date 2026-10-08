@@ -8,12 +8,13 @@ import {
   OBSERVER_WAKE_PAYLOAD_VERSION,
   OBSERVER_WAKE_TIMEOUT_MS,
   normalizeCodexObserverReviewRaw,
+  isBoundedToken,
   normalizeObserverFindingShapeRaw,
 } from "./council-types.js";
 import { companionBus } from "./event-bus.js";
 import { metricsCollector } from "./metrics-collector.js";
 import { log } from "./logger.js";
-import { findReviewForCheckpointSync } from "./review-watcher.js";
+import { findOwnReviewForCheckpointSync, findReviewForCheckpointSync } from "./review-watcher.js";
 import { validateObserverFindings } from "./observer-grounding.js";
 import { applyDisputes, readDisputes } from "./observer-disputes.js";
 import type { CheckpointLineSnapshots } from "./observer-line-snapshots.js";
@@ -755,6 +756,31 @@ export class CouncilCheckpointPipeline {
           file: outcome.file,
         });
         return;
+      case "adopted":
+        // BENCH-H: the observer wrote a GROUP-LESS review file. The host
+        // re-emitted it under this group's canonical name and moved the
+        // ambiguous original aside, so no neighbour pair can consume it.
+        log.warn("session-orchestrator", "observer wrote a group-less review file — host adopted it", {
+          event: "council.observer_reply.groupless_review_adopted",
+          ...base,
+          file: outcome.file,
+          sourceFile: outcome.sourceFile,
+          ...(outcome.asideFile ? { asideFile: outcome.asideFile } : {}),
+          ...(outcome.asideError ? { asideError: outcome.asideError } : {}),
+          findingCount: outcome.findingCount,
+          observerModel: outcome.hostModel,
+        });
+        metricsCollector.recordError("council.observer_reply.groupless_review_adopted");
+        if (outcome.reportedModel !== outcome.hostModel) {
+          log.warn("session-orchestrator", "observer self-reported model differs from host fact — host wins", {
+            event: "council.review.observer_model_mismatch",
+            ...base,
+            source: "groupless_file",
+            reportedModel: outcome.reportedModel,
+            hostModel: outcome.hostModel,
+          });
+        }
+        return;
       case "filename_failed":
         log.error("session-orchestrator", "host review filename could not be built", {
           event: "council.observer_reply.filename_failed",
@@ -859,11 +885,15 @@ export class CouncilCheckpointPipeline {
       // review landed on disk 3.5 min before this deadline fired, the watcher
       // logged neither success nor drop, and 7 findings including 2 grounded
       // STOPs were lost. Look at the disk before declaring absence.
-      const recovered = findReviewForCheckpointSync({
-        directory: join(entry.cwd, ".council", "reviews"),
-        checkpointId,
-        normalizeRaw: (raw, provider) => this.normalizeObserverReviewRaw(sessionGroupId, raw, provider),
-      });
+      // Own review first (group-scoped name preferred): a neighbour pair's
+      // same-checkpoint file listed earlier by readdir must not mask ours.
+      // Only when we own nothing is a foreign match reported as such.
+      const reviewsDir = join(entry.cwd, ".council", "reviews");
+      const normalizeRaw = (raw: string, provider: "claude" | "codex") =>
+        this.normalizeObserverReviewRaw(sessionGroupId, raw, provider);
+      const recovered =
+        findOwnReviewForCheckpointSync({ directory: reviewsDir, checkpointId, sessionGroupId, normalizeRaw }) ??
+        findReviewForCheckpointSync({ directory: reviewsDir, checkpointId, normalizeRaw });
       // got-051: the rescan matches on `checkpointId` alone, and a phase name
       // like `council-review` is NOT group-scoped — in a workspace shared by
       // several pairs the directory can hold a same-named review belonging to
@@ -981,6 +1011,30 @@ export class CouncilCheckpointPipeline {
     });
   }
 
+  /**
+   * Replace the review's self-reported `observer_model` with the model the
+   * observer session's own assistant frames carried (host fact), logging a
+   * structured mismatch event when they differ. Host-written reviews already
+   * carry that value, so this only ever rewrites observer-written files.
+   */
+  private stampHostObserverModel(sessionGroupId: string, payload: ObserverReviewPayload): ObserverReviewPayload {
+    const observerSessionId = this.deps.groupMeta.get(sessionGroupId)?.observerSessionId;
+    if (!observerSessionId) return payload;
+    const hostModel = this.deps.replyCapture.observedModel(observerSessionId);
+    if (!hostModel || !isBoundedToken(hostModel, 128) || hostModel === payload.observer_model) return payload;
+    log.warn("session-orchestrator", "observer self-reported model differs from host fact — host wins", {
+      event: "council.review.observer_model_mismatch",
+      sessionGroupId,
+      sessionId: observerSessionId,
+      role: "observer",
+      checkpointId: payload.checkpoint_id,
+      source: "observer_file",
+      reportedModel: payload.observer_model,
+      hostModel,
+    });
+    return { ...payload, observer_model: hostModel };
+  }
+
   handleCouncilReview(sessionGroupId: string, payload: ObserverReviewPayload, reviewedAt?: number): void {
     // Backend P1-3 (council review #L): wrap the whole handler body in a
     // try/catch so a transient throw in the grounding pipeline doesn't
@@ -1014,6 +1068,13 @@ export class CouncilCheckpointPipeline {
         });
         return;
       }
+
+      // BENCH-H: `observer_model` is an audit fact, so the host's value wins
+      // over the observer's self-report (Codex observers wrote `gpt-5` /
+      // `gpt-5-codex` while the session ran `gpt-5.5`). The host fact is the
+      // model the observer session's OWN frames carried; with none observed
+      // (e.g. review recovered after a restart) the file's value stands.
+      payload = this.stampHostObserverModel(sessionGroupId, payload);
 
       // Council Review 2026-06-13 (P1 #1): a review arrived — disarm the
       // wake→review watchdog if it was tracking this checkpoint. A review

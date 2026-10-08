@@ -8,6 +8,9 @@ import {
   OBSERVER_REVIEW_FILE_PATTERN,
   buildObserverReviewFilename,
   findReviewForCheckpointSync,
+  findOwnReviewForCheckpointSync,
+  isGroupScopedReviewFilename,
+  adoptedReviewAsideName,
 } from "./review-watcher.js";
 import { writeAtomicJson } from "./atomic-write.js";
 import { COUNCIL_SCHEMA_VERSION, type ObserverReviewPayload } from "./council-types.js";
@@ -499,5 +502,69 @@ describe("findReviewForCheckpointSync", () => {
     });
     expect(providers).toEqual(["codex"]);
     expect(found?.payload.checkpoint_id).toBe("chk-hit");
+  });
+});
+
+// BENCH-H: group scoping of review files in a workspace shared by pairs.
+describe("group-scoped review files (BENCH-H)", () => {
+  const A = "grp_aaaa";
+  const B = "grp_bbbb";
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), "rev-scope-")); });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  // The predicate accepts only `<phase>-<group>-<provider>-observer.md` for
+  // the given group; a group-less name or a neighbour's name is not ours.
+  it("isGroupScopedReviewFilename distinguishes own, foreign and group-less names", () => {
+    expect(isGroupScopedReviewFilename(buildObserverReviewFilename("spawn", "codex", A), A)).toBe(true);
+    expect(isGroupScopedReviewFilename(buildObserverReviewFilename("spawn", "claude", A), A)).toBe(true);
+    expect(isGroupScopedReviewFilename(buildObserverReviewFilename("spawn", "codex", B), A)).toBe(false);
+    expect(isGroupScopedReviewFilename("spawn-codex-observer.md", A)).toBe(false);
+    // The aside name an adopted group-less file is moved to matches no reader.
+    const aside = adoptedReviewAsideName("spawn-codex-observer.md", A, 1);
+    expect(OBSERVER_REVIEW_FILE_PATTERN.test(aside)).toBe(false);
+    expect(aside.endsWith(".md")).toBe(false);
+  });
+
+  // A watcher bound to group A reads only A's group-scoped file: a group-less
+  // file (ambiguous) and B's file are skipped — even though the group-less
+  // payload claims group A — and none of them is reported as a drop.
+  it("a group-bound watcher consumes only its own group-scoped file", async () => {
+    const controller = new AbortController();
+    const seen: string[] = [];
+    const onDropped = vi.fn();
+    const watching = watchReviews({
+      directory: dir,
+      signal: controller.signal,
+      sessionGroupId: A,
+      onDropped,
+      onReview: (p) => { seen.push(`${p.session_group_id}:${p.checkpoint_id}`); },
+    });
+    writeAtomicJson(join(dir, "spawn-codex-observer.md"), validReview({ session_group_id: A, checkpoint_id: "chk-groupless" }));
+    writeAtomicJson(join(dir, buildObserverReviewFilename("spawn", "codex", B)), validReview({ session_group_id: B, checkpoint_id: "chk-b" }));
+    writeAtomicJson(join(dir, buildObserverReviewFilename("spawn", "codex", A)), validReview({ session_group_id: A, checkpoint_id: "chk-a" }));
+    await new Promise((r) => setTimeout(r, 500));
+    controller.abort();
+    await watching;
+    expect(seen).toEqual([`${A}:chk-a`]);
+    expect(onDropped).not.toHaveBeenCalled();
+  });
+
+  // The own-review finder returns only a review naming the group, prefers
+  // the group-scoped file over a group-less copy, and never returns a
+  // neighbour's same-checkpoint file (which the first-match helper would).
+  it("findOwnReviewForCheckpointSync is ownership-checked and prefers the group-scoped name", () => {
+    writeFileSync(join(dir, "aaa-codex-observer.md"), JSON.stringify(validReview({ session_group_id: B, checkpoint_id: "chk" })));
+    expect(findReviewForCheckpointSync({ directory: dir, checkpointId: "chk" })?.payload.session_group_id).toBe(B);
+    expect(findOwnReviewForCheckpointSync({ directory: dir, checkpointId: "chk", sessionGroupId: A })).toBeNull();
+
+    writeFileSync(join(dir, "spawn-codex-observer.md"), JSON.stringify(validReview({ session_group_id: A, checkpoint_id: "chk" })));
+    expect(findOwnReviewForCheckpointSync({ directory: dir, checkpointId: "chk", sessionGroupId: A }))
+      .toMatchObject({ file: "spawn-codex-observer.md", groupScoped: false });
+
+    const own = buildObserverReviewFilename("spawn", "codex", A);
+    writeFileSync(join(dir, own), JSON.stringify(validReview({ session_group_id: A, checkpoint_id: "chk" })));
+    expect(findOwnReviewForCheckpointSync({ directory: dir, checkpointId: "chk", sessionGroupId: A }))
+      .toMatchObject({ file: own, groupScoped: true });
   });
 });
