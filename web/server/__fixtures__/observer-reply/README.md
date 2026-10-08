@@ -18,3 +18,13 @@ cut, so the frame SHAPES are captured and only the final text is substituted.
 The codex recorded `Edit` carries no file content; its finding is reconstructed
 from the labelled corpus (`diet-A2-103`, a known false-positive STOP — the text
 does not need to be true, only realistic).
+
+## Group-less review files (AuraBench BENCH-H)
+
+| File | Source | Content |
+|---|---|---|
+| `codex-groupless-review-schema.md` | `/root/om_event_bot/.council/reviews/spawn-codex-observer.md`, 2026-09-30 | verbatim: codex observer wrote a full-schema review under the GROUP-LESS name, self-reporting `observer_model: "gpt-5-codex"` |
+| `codex-groupless-review-native.md` | `/root/aura-companion/.council/reviews/spawn-codex-observer.md`, 2026-09-08 | verbatim: codex-native shape (no `schema_version` / model / `reviewed_at`) under the group-less name |
+
+Both name `spawn-codex-observer.md` with no `grp_…` segment, the shape seen in
+4/16 bench pairs. Used by `observer-reply.test.ts` to pin host adoption.

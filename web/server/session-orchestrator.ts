@@ -32,7 +32,9 @@ import { SessionRecovery } from "./session-recovery.js";
 import { IntentionalKills } from "./intentional-kills.js";
 import type { CheckpointPayload, ObserverReviewPayload } from "./council-types.js";
 import { writeAtomicJson } from "./atomic-write.js";
-import { findReviewForCheckpointSync } from "./review-watcher.js";
+import { renameSync } from "node:fs";
+import { join } from "node:path";
+import { findOwnReviewForCheckpointSync } from "./review-watcher.js";
 import { CheckpointLineSnapshots } from "./observer-line-snapshots.js";
 import { ObserverReplyCapture } from "./observer-reply.js";
 import { ObserverReadLedger } from "./observer-read-ledger.js";
@@ -287,14 +289,14 @@ export class SessionOrchestrator {
   private observerReplyCapture = new ObserverReplyCapture({
     now: () => new Date(),
     writeReview: (path, payload) => writeAtomicJson(path, payload),
-    findExistingReview: (directory, checkpointId, sessionGroupId) => {
-      const found = findReviewForCheckpointSync({
+    findExistingReview: (directory, checkpointId, sessionGroupId) =>
+      findOwnReviewForCheckpointSync({
         directory,
         checkpointId,
+        sessionGroupId,
         normalizeRaw: (raw, provider) => this.normalizeObserverReviewRaw(sessionGroupId, raw, provider),
-      });
-      return found && found.payload.session_group_id === sessionGroupId ? found.file : null;
-    },
+      }),
+    moveAside: (directory, file, asideName) => renameSync(join(directory, file), join(directory, asideName)),
     resolveCliVersion: (sessionId) => this.wsBridge.getSession(sessionId)?.state.claude_code_version || undefined,
   });
   /** P3/CONV-HONEST: host-observed observer reads per dispatched wake. */

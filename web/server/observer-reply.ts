@@ -28,6 +28,17 @@
  * processes the observer-written file exactly as before. A full legacy
  * envelope pasted into chat is also accepted — only its `findings` are used.
  *
+ * Group-less observer files (AuraBench BENCH-H): Codex observers sometimes
+ * write `<phase>-codex-observer.md` WITHOUT the group segment. Several pairs
+ * can share one `.council/`, so that name is ambiguous — two observers
+ * overwrite each other and nothing on disk says whose review it is. The
+ * per-group review watcher therefore ignores group-less names, and
+ * `finalize` ADOPTS such a file when it answers the checkpoint this observer
+ * was woken for AND names this group: the host re-emits its findings under
+ * the canonical group-scoped name with a host-stamped envelope (model from
+ * the observer's own frames, not the LLM's self-report) and moves the
+ * group-less file aside to a name no reader matches.
+ *
  * Provider-agnostic by construction: both the Claude and the Codex bridges
  * emit the same `message:assistant` shape (content blocks + `message.model`)
  * and both adapters emit `observer:turn-done` at turn end.
@@ -42,7 +53,7 @@ import {
   normalizeObserverFindingShapeRaw,
   parseObserverReviewPayload,
 } from "./council-types.js";
-import { buildObserverReviewFilename } from "./review-watcher.js";
+import { adoptedReviewAsideName, buildObserverReviewFilename } from "./review-watcher.js";
 
 /** Why a reply produced no review. `empty_reply` = the observer said nothing
  *  after its last tool call (or never answered); the rest = it answered, but
@@ -248,6 +259,21 @@ export type ObserverReplyOutcome =
   | { kind: "written"; expectation: ObserverReplyExpectation; file: string; findingCount: number }
   | { kind: "skipped_existing"; expectation: ObserverReplyExpectation; file: string }
   | {
+      kind: "adopted";
+      expectation: ObserverReplyExpectation;
+      /** Canonical group-scoped file the host wrote. */
+      file: string;
+      /** Group-less file the observer wrote. */
+      sourceFile: string;
+      /** Where the group-less file was moved; absent if the move failed. */
+      asideFile?: string;
+      asideError?: string;
+      findingCount: number;
+      /** Model the observer claimed in its own file vs the host fact stamped. */
+      reportedModel: string;
+      hostModel: string;
+    }
+  | {
       kind: "rejected";
       expectation: ObserverReplyExpectation;
       reason: ObserverReplyRejectReason;
@@ -263,9 +289,17 @@ export interface ObserverReplyCaptureDeps {
   now(): Date;
   /** Atomic write of the validated payload (production: `writeAtomicJson`). */
   writeReview(path: string, payload: ObserverReviewPayload): void;
-  /** Review file already on disk for this group's checkpoint, if any
-   *  (production: `findReviewForCheckpointSync` + group ownership check). */
-  findExistingReview(reviewsDir: string, checkpointId: string, sessionGroupId: string): string | null;
+  /** Review already on disk for this group's checkpoint, if any — owned by
+   *  the group (payload `session_group_id`), group-scoped name preferred
+   *  (production: `findOwnReviewForCheckpointSync`). */
+  findExistingReview(
+    reviewsDir: string,
+    checkpointId: string,
+    sessionGroupId: string,
+  ): { file: string; payload: ObserverReviewPayload; groupScoped: boolean } | null;
+  /** Move an adopted group-less file to `asideName` in the same directory
+   *  (production: `renameSync`). */
+  moveAside(reviewsDir: string, file: string, asideName: string): void;
   /** CLI version reported by the session's init handshake, if known. */
   resolveCliVersion(sessionId: string): string | undefined;
 }
@@ -298,6 +332,10 @@ function assistantParts(message: unknown): { blocks: ContentBlock[]; model: stri
 export class ObserverReplyCapture {
   private readonly slots = new Map<string, CaptureSlot>();
   private readonly consecutiveRejections = new Map<string, number>();
+  /** Last model id seen on an observer's own assistant frames (host fact);
+   *  outlives the per-wake slot so a review landing after `finalize` can
+   *  still be stamped with it. Cleared by {@link forget}. */
+  private readonly observedModels = new Map<string, string>();
 
   constructor(private readonly deps: ObserverReplyCaptureDeps) {}
 
@@ -311,7 +349,10 @@ export class ObserverReplyCapture {
     if (!slot) return;
     const parts = assistantParts(message);
     if (!parts) return;
-    if (parts.model) slot.model = parts.model;
+    if (parts.model) {
+      slot.model = parts.model;
+      this.observedModels.set(sessionId, parts.model);
+    }
     for (const b of parts.blocks) {
       if (b.type === "tool_use" || b.type === "tool_result") {
         slot.tail = [];
@@ -324,6 +365,12 @@ export class ObserverReplyCapture {
   forget(sessionId: string): void {
     this.slots.delete(sessionId);
     this.consecutiveRejections.delete(sessionId);
+    this.observedModels.delete(sessionId);
+  }
+
+  /** Model id the observer session's own frames carried most recently, if any. */
+  observedModel(sessionId: string): string | undefined {
+    return this.observedModels.get(sessionId);
   }
 
   /** Turn ended: turn the captured reply into a review (or a reasoned rejection). */
@@ -336,9 +383,16 @@ export class ObserverReplyCapture {
 
     // Transition: a pre-B1 observer wrote the file itself during the turn.
     const existing = this.deps.findExistingReview(reviewsDir, expectation.checkpointId, expectation.sessionGroupId);
-    if (existing) {
+    if (existing?.groupScoped) {
+      // Canonical, group-scoped name: unambiguous; the watcher consumes it.
       this.consecutiveRejections.delete(sessionId);
-      return { kind: "skipped_existing", expectation, file: existing };
+      return { kind: "skipped_existing", expectation, file: existing.file };
+    }
+    if (existing) {
+      const adopted = this.adopt(sessionId, slot, existing.file, existing.payload, reviewsDir);
+      if (adopted) return adopted;
+      // Unreachable in practice (the file's findings already parsed); fall
+      // through to the reply so the observer's answer is not lost.
     }
 
     const extracted = extractObserverFindings(slot.tail.join("\n"));
@@ -371,6 +425,65 @@ export class ObserverReplyCapture {
     }
     this.consecutiveRejections.delete(sessionId);
     return { kind: "written", expectation, file, findingCount: built.payload.findings.length };
+  }
+
+  /**
+   * Re-emit an observer-written GROUP-LESS review under the canonical
+   * group-scoped name with a host-stamped envelope, then move the group-less
+   * file aside so no pair (this one or a neighbour sharing the directory)
+   * reads it again. Only reached for a file whose payload answers THIS
+   * checkpoint and names THIS group (the dep enforces ownership), so a
+   * neighbour's review is never adopted. `null` = findings failed host
+   * validation; the caller falls back to the chat reply.
+   */
+  private adopt(
+    sessionId: string,
+    slot: CaptureSlot,
+    sourceFile: string,
+    source: ObserverReviewPayload,
+    reviewsDir: string,
+  ): ObserverReplyOutcome | null {
+    const { expectation } = slot;
+    const built = buildHostObserverReview(source.findings, {
+      sessionGroupId: expectation.sessionGroupId,
+      checkpointId: expectation.checkpointId,
+      phase: expectation.phase,
+      provider: expectation.provider,
+      model: slot.model ?? expectation.fallbackModel,
+      cliVersion: this.deps.resolveCliVersion(sessionId),
+      reviewedAt: this.deps.now(),
+    });
+    if (!built.ok) return null;
+    let file: string;
+    try {
+      file = buildObserverReviewFilename(expectation.phase, expectation.provider, expectation.sessionGroupId);
+    } catch (err) {
+      return { kind: "filename_failed", expectation, error: err instanceof Error ? err.message : String(err) };
+    }
+    try {
+      this.deps.writeReview(join(reviewsDir, file), built.payload);
+    } catch (err) {
+      // The group-less file stays where it is; no watcher consumes it, and the
+      // wake watchdog's own-review rescan still finds it at the deadline.
+      return { kind: "write_failed", expectation, file, error: err instanceof Error ? err.message : String(err) };
+    }
+    this.consecutiveRejections.delete(sessionId);
+    const asideName = adoptedReviewAsideName(sourceFile, expectation.sessionGroupId, this.deps.now().getTime());
+    const base = {
+      kind: "adopted" as const,
+      expectation,
+      file,
+      sourceFile,
+      findingCount: built.payload.findings.length,
+      reportedModel: source.observer_model,
+      hostModel: built.payload.observer_model,
+    };
+    try {
+      this.deps.moveAside(reviewsDir, sourceFile, asideName);
+    } catch (err) {
+      return { ...base, asideError: err instanceof Error ? err.message : String(err) };
+    }
+    return { ...base, asideFile: asideName };
   }
 
   private reject(
