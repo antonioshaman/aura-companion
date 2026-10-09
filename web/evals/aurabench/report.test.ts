@@ -16,6 +16,7 @@ import {
   classTable,
   layerLadder,
   loadReportCells,
+  renderPerTaskTable,
   renderReportTables,
   variantRows,
 } from "./report.js";
@@ -75,6 +76,17 @@ describe("loadReportCells", () => {
   });
 });
 
+describe("loadReportCells with non-cell lines", () => {
+  it("excludes records without a key instead of counting them as a phantom cell", () => {
+    // Set-aside files wrap the cell as {moved_at, reason, cell}; concatenated
+    // by mistake they must not become an "undefined" cell in the tables.
+    const wrapped = JSON.stringify({ moved_at: "x", reason: "observer_dead", cell: cell("t1", "H", true) });
+    const { cells, excluded } = loadReportCells(`${wrapped}\n${jsonl([cell("t1", "H", true)])}`);
+    expect(cells).toHaveLength(1);
+    expect(excluded).toEqual([{ key: "(no key)", reason: "1 line(s) are not cell records" }]);
+  });
+});
+
 describe("bootstrapMeanCi", () => {
   it("is reproducible for a seed and brackets the point estimate", () => {
     const xs = [1, 0, 1, 1, 0, 1, 1, 1];
@@ -128,6 +140,49 @@ describe("variantRows", () => {
   });
 });
 
+describe("variantRows with unequal reps", () => {
+  it("weights every task once in the task-weighted success and reports the rep range", () => {
+    // Stage 2 tops up only the hard tasks: t1 fails 3 reps, t2..t4 pass 1 rep.
+    // Per cell that is 3/6 = 50%; per task it is (0 + 1 + 1 + 1) / 4 = 75%.
+    const rows = variantRows(
+      [
+        cell("t1", "A", false),
+        cell("t1", "A", false, { key: "t1|A|2", rep: 2 }),
+        cell("t1", "A", false, { key: "t1|A|3", rep: 3 }),
+        cell("t2", "A", true),
+        cell("t3", "A", true),
+        cell("t4", "A", true),
+      ],
+      500,
+    );
+    const a = rows[0]!;
+    expect(a.success!.point).toBe(0.5);
+    expect(a.taskSuccess!.point).toBe(0.75);
+    expect(a).toMatchObject({ repsMin: 1, repsMax: 3, tasks: 4, cells: 6 });
+    // Bootstrap over 4 tasks: the CI brackets the point and stays in [0, 1].
+    expect(a.taskSuccess!.lo).toBeLessThanOrEqual(0.75);
+    expect(a.taskSuccess!.hi).toBeGreaterThanOrEqual(0.75);
+  });
+});
+
+describe("renderPerTaskTable", () => {
+  it("shows ✓ / ✗N for one rep, successes/reps for several, · when not run", () => {
+    // ✗N carries the number of red hidden tests; ✗0 is a zone regression only.
+    const failed = (n: number) => ({ passed: false, tests_passed: 1, tests_failed: n, tampered: [] });
+    const md = renderPerTaskTable([
+      cell("t1", "A", true),
+      cell("t1", "C", false, { hidden: failed(2) }),
+      cell("t2", "A", false, { hidden: failed(0) }),
+      cell("t2", "C", true),
+      cell("t2", "C", false, { key: "t2|C|2", rep: 2, hidden: failed(1) }),
+    ]);
+    expect(md).toContain("| Task | Class | A | C |");
+    expect(md).toContain("| `t1` | bugfix | ✓ | ✗2 |");
+    expect(md).toContain("| `t2` | bugfix | ✗0 | 1/2 |");
+    expect(renderPerTaskTable([cell("t1", "A", true), cell("t2", "C", true)])).toContain("| `t1` | bugfix | ✓ | · |");
+  });
+});
+
 describe("classTable", () => {
   it("counts successes and cells per class and variant", () => {
     const t = classTable([cell("t1", "A", true), cell("t2", "A", false, { task_class: "ui" }), cell("t1", "C", true)]);
@@ -163,6 +218,7 @@ describe("renderReportTables", () => {
     expect(md).toContain("### R1.");
     expect(md).toContain("### R2.");
     expect(md).toContain("### R3.");
+    expect(md).toContain("### R4. Per task");
     expect(md).toMatch(/\| B \| naked Codex \| 1 \| 1 \| 1\/1 \(100%\) .*\| unknown \|/);
   });
 });

@@ -27,13 +27,20 @@ export interface LoadedCells {
 
 export function loadReportCells(jsonl: string): LoadedCells {
   const last = new Map<string, CellRecord>();
+  let notCells = 0;
   for (const line of jsonl.split("\n")) {
     if (!line.trim()) continue;
     const rec = JSON.parse(line) as CellRecord;
+    // Not a cell (e.g. a `{moved_at, reason, cell}` wrapper from a set-aside file).
+    if (typeof rec.key !== "string" || typeof rec.variant !== "string") {
+      notCells++;
+      continue;
+    }
     last.set(rec.key, rec);
   }
   const cells: CellRecord[] = [];
   const excluded: LoadedCells["excluded"] = [];
+  if (notCells > 0) excluded.push({ key: "(no key)", reason: `${notCells} line(s) are not cell records` });
   for (const rec of last.values()) {
     const violations = (rec.isolation as { violations?: unknown[] } | undefined)?.violations;
     if (rec.status === "harness_error") excluded.push({ key: rec.key, reason: `harness_error: ${rec.error ?? "?"}` });
@@ -98,6 +105,13 @@ function taskRates(cells: readonly CellRecord[], v: VariantId): Map<string, numb
   return new Map([...acc].map(([t, a]) => [t, a.s / a.n]));
 }
 
+/** Cells per task (= reps that produced a valid record). */
+function taskReps(cells: readonly CellRecord[]): Map<string, number> {
+  const m = new Map<string, number>();
+  for (const c of cells) m.set(c.task_id, (m.get(c.task_id) ?? 0) + 1);
+  return m;
+}
+
 export interface VariantRow {
   variant: VariantId;
   label: string;
@@ -105,6 +119,15 @@ export interface VariantRow {
   tasks: number;
   successes: number;
   success: Ci | null;
+  /** Fewest / most reps any task got in this variant (stage 2 tops up only diverging tasks). */
+  repsMin: number;
+  repsMax: number;
+  /**
+   * Mean of per-task success rates, bootstrap over tasks. With unequal reps
+   * the per-cell share over-weights the tasks that got more reps; this one
+   * weights every task once.
+   */
+  taskSuccess: Ci | null;
   /** Paired (same tasks) success difference vs {@link baselineOf}; bootstrap over tasks. */
   lift: (Ci & { baseline: VariantId; pairedTasks: number }) | null;
   costMean: number | null;
@@ -124,6 +147,7 @@ export function variantRows(cells: readonly CellRecord[], iters = 10_000): Varia
     const successes = mine.filter((c) => c.success).length;
     const cost = knownStats(mine.map((c) => c.metrics.cost_usd));
     const knownCosts = mine.map((c) => c.metrics.cost_usd).filter((x): x is number => typeof x === "number");
+    const reps = [...taskReps(mine).values()];
     const base = baselineOf(v);
     let lift: VariantRow["lift"] = null;
     if (base) {
@@ -144,6 +168,9 @@ export function variantRows(cells: readonly CellRecord[], iters = 10_000): Varia
         iters,
         3,
       ),
+      repsMin: Math.min(...reps),
+      repsMax: Math.max(...reps),
+      taskSuccess: bootstrapMeanCi([...taskRates(cells, v).values()], iters, 9),
       lift,
       costMean: cost.mean,
       costCi: knownCosts.length === mine.length ? bootstrapMeanCi(knownCosts, iters, 5) : null,
@@ -247,13 +274,15 @@ export function renderReportTables(cells: readonly CellRecord[], iters = 10_000)
   const out: string[] = [];
   out.push("### R1. Success, Aura Lift, cost by variant", "");
   out.push(
-    "| Variant | Label | Cells | Tasks | Success | 95% CI | Lift vs naked (pp) | Lift 95% CI | Paired tasks | Mean cost | Cost 95% CI | $ / success | Mean wall (min) |",
+    "| Variant | Label | Cells | Tasks | Success | 95% CI | Reps / task | Task-weighted success (95% CI over tasks) | Lift vs naked (pp) | Lift 95% CI | Paired tasks | Mean cost | Cost 95% CI | $ / success | Mean wall (min) |",
   );
-  out.push("|---|---|---:|---:|---:|---|---:|---|---:|---:|---|---:|---:|");
+  out.push("|---|---|---:|---:|---:|---|---:|---|---:|---|---:|---:|---|---:|---:|");
   for (const r of variantRows(cells, iters)) {
     const s = r.success!;
     out.push(
       `| ${r.variant} | ${r.label} | ${r.cells} | ${r.tasks} | ${r.successes}/${r.cells} (${pct(s.point)}) | ${pct(s.lo)}–${pct(s.hi)} | ` +
+        `${r.repsMin === r.repsMax ? r.repsMin : `${r.repsMin}–${r.repsMax}`} | ` +
+        `${pct(r.taskSuccess!.point)} (${pct(r.taskSuccess!.lo)}–${pct(r.taskSuccess!.hi)}) | ` +
         (r.lift ? `${pp(r.lift.point)} vs ${r.lift.baseline} | ${pp(r.lift.lo)}…${pp(r.lift.hi)} | ${r.lift.pairedTasks}` : "— | — | —") +
         ` | ${r.costUnknown === r.cells ? "unknown" : usd(r.costMean)} | ${r.costCi ? `${usd(r.costCi.lo)}–${usd(r.costCi.hi)}` : "—"} | ${usd(r.costPerSuccess)} | ${num(r.wallMinMean)} |`,
     );
@@ -283,6 +312,34 @@ export function renderReportTables(cells: readonly CellRecord[], iters = 10_000)
         (r.deltaCost ? `${sUsd(r.deltaCost.point)} (${sUsd(r.deltaCost.lo)}…${sUsd(r.deltaCost.hi)})` : "—") +
         ` | ${num(r.wallMinMean)} | ${num(r.wallMinNetMean)} |`,
     );
+  }
+  out.push("");
+  out.push(renderPerTaskTable(cells));
+  return out.join("\n");
+}
+
+/**
+ * R4: one row per task. A single-rep cell shows ✓, or ✗N with N hidden
+ * tests red (✗0 = hidden green, zone regression); several reps show
+ * successes/reps; `·` = not run.
+ */
+export function renderPerTaskTable(cells: readonly CellRecord[]): string {
+  const present = VARIANT_IDS.filter((v) => cells.some((c) => c.variant === v));
+  const byTask = new Map<string, { cls: string; cells: CellRecord[] }>();
+  for (const c of cells) {
+    const t = byTask.get(c.task_id) ?? { cls: c.task_class, cells: [] };
+    t.cells.push(c);
+    byTask.set(c.task_id, t);
+  }
+  const out = ["### R4. Per task", "", `| Task | Class | ${present.join(" | ")} |`, `|---|---|${present.map(() => "---").join("|")}|`];
+  for (const [task, { cls, cells: mine }] of [...byTask].sort(([a], [b]) => a.localeCompare(b))) {
+    const mark = (v: VariantId) => {
+      const vs = mine.filter((c) => c.variant === v);
+      if (vs.length === 0) return "·";
+      if (vs.length > 1) return `${vs.filter((c) => c.success).length}/${vs.length}`;
+      return vs[0]!.success ? "✓" : `✗${vs[0]!.hidden?.tests_failed ?? 0}`;
+    };
+    out.push(`| \`${task}\` | ${cls} | ${present.map(mark).join(" | ")} |`);
   }
   out.push("");
   return out.join("\n");

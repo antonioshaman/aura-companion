@@ -13,11 +13,14 @@
  *     [--claude-model claude-opus-5-5] [--codex-model gpt-5.5]
  *     [--diet-overlay before|after] [--diet-after-ref diet/main]
  *   bun run eval:aurabench report --cells <cells.jsonl>[,<more.jsonl>] [--iters 10000] [--exclude-tasks a,b]
+ *   bun run eval:aurabench export-cells --in <cells.jsonl> --out <published.jsonl> [--variants A,B,…]
  *
  * `report` prints the D3 tables (success / Aura Lift / cost with bootstrap
  * 95% CIs, per class, the A→C→D→E ladder) for `docs/aurabench/REPORT.md` —
  * see `aurabench/report.ts`. Several cell files are concatenated;
  * `--exclude-tasks` drops tasks (a sensitivity table without artefact tasks).
+ * `export-cells` writes the sanitized copy committed to `docs/aurabench/data/`
+ * (`aurabench/publish.ts`: no absolute paths, no credentials).
  *
  * `prs.json` is `gh pr list --state merged --base main --limit 300
  *   --json number,title,body,mergeCommit`. `mine` writes one candidate per
@@ -101,6 +104,7 @@ import { loadAuraBenchTasks } from "./aurabench/loader.js";
 import type { AuraBenchTask } from "./aurabench/task.js";
 import { runAblation } from "./aurabench/harness/driver.js";
 import { loadReportCells, renderReportTables } from "./aurabench/report.js";
+import { publishCellsJsonl } from "./aurabench/publish.js";
 import { codexDailyCellsFromEnv, parseCodexLedger, variantUsesCodex } from "./aurabench/harness/codex-quota.js";
 import { fetchUsageGate, usageCeilingsFromEnv } from "./aurabench/harness/usage-ceiling.js";
 import { claudeTokenGate, quarantineClaudeCredentialCopies, readClaudeAccessToken } from "./aurabench/harness/claude-auth.js";
@@ -865,7 +869,21 @@ async function main(argv: string[]): Promise<number> {
     console.log(renderReportTables(cells, Number(arg(argv, "iters") ?? 10_000)));
     return 0;
   }
-  console.error("usage: aurabench-runner.ts <mine|validate|leak|stability|judge|spec-check|bench|report> …");
+  if (sub === "export-cells") {
+    // Sanitized copy of bench cells for docs/aurabench/data (see aurabench/publish.ts).
+    const input = arg(argv, "in");
+    const out = arg(argv, "out");
+    if (!input || !out) {
+      console.error("usage: export-cells --in <cells.jsonl> --out <published.jsonl> [--variants A,B,…]");
+      return 2;
+    }
+    const only = new Set((arg(argv, "variants") ?? "").split(",").filter(Boolean));
+    const text = publishCellsJsonl(readFileSync(resolve(input), "utf8"), (r) => only.size === 0 || only.has(String(r.variant)));
+    writeFileSync(resolve(out), text);
+    console.log(`[aurabench] export-cells: ${text.split("\n").filter(Boolean).length} cells → ${out}`);
+    return 0;
+  }
+  console.error("usage: aurabench-runner.ts <mine|validate|leak|stability|judge|spec-check|bench|report|export-cells> …");
   return 2;
 }
 
