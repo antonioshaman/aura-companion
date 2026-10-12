@@ -26,6 +26,10 @@ jobs:
         working-directory: web
         run: bun install --frozen-lockfile
 
+      # Guards hook pack (packs/guards): pure-stdlib Python, no install step.
+      - name: Guards hook pack tests
+        run: python3 -m unittest discover -s packs/guards/tests
+
       - name: Dead code guard (unused locals/params)
         working-directory: web
         run: bun run deadcode:check
