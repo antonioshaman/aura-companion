@@ -1,0 +1,5 @@
+#!/bin/sh
+# git pre-commit hook: check what this commit adds. Install:
+#   ln -s /path/to/packs/checks/hooks/pre-commit .git/hooks/pre-commit
+# Set AURA_CHECK to the launcher path if aura-check is not on PATH.
+exec "${AURA_CHECK:-aura-check}" --changed
