@@ -1,0 +1,10 @@
+#!/bin/sh
+# aura-check launcher: runs the stdlib-only Python package next to this script.
+# Symlink-safe: resolves the real location before computing the package path.
+SELF="$0"
+while [ -L "$SELF" ]; do
+  LINK=$(readlink "$SELF")
+  case "$LINK" in /*) SELF="$LINK" ;; *) SELF="$(dirname "$SELF")/$LINK" ;; esac
+done
+HERE=$(cd "$(dirname "$SELF")/.." && pwd)
+PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" exec python3 -m aura_check "$@"
