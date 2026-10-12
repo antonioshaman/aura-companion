@@ -12,6 +12,15 @@
  *     [--task-ids a,b] [--max-cells N] [--state <STATE.json>] [--timeout-min 60] [--timeout-min-class architecture=120]
  *     [--claude-model claude-opus-5-5] [--codex-model gpt-5.5]
  *     [--diet-overlay before|after] [--diet-after-ref diet/main]
+ *   bun run eval:aurabench report --cells <cells.jsonl>[,<more.jsonl>] [--iters 10000] [--exclude-tasks a,b]
+ *   bun run eval:aurabench export-cells --in <cells.jsonl> --out <published.jsonl> [--variants A,B,…]
+ *
+ * `report` prints the D3 tables (success / Aura Lift / cost with bootstrap
+ * 95% CIs, per class, the A→C→D→E ladder) for `docs/aurabench/REPORT.md` —
+ * see `aurabench/report.ts`. Several cell files are concatenated;
+ * `--exclude-tasks` drops tasks (a sensitivity table without artefact tasks).
+ * `export-cells` writes the sanitized copy committed to `docs/aurabench/data/`
+ * (`aurabench/publish.ts`: no absolute paths, no credentials).
  *
  * `prs.json` is `gh pr list --state merged --base main --limit 300
  *   --json number,title,body,mergeCommit`. `mine` writes one candidate per
@@ -48,7 +57,12 @@
  * into `STATE.bench.cells_done/cells_total`. Before every cell `bench` asks the
  * prod `GET /api/usage-limits` (read-only) and holds while the Claude
  * subscription is at/over `AURABENCH_WEEKLY_CEILING` (default 75%) weekly or
- * `AURABENCH_FIVE_HOUR_CEILING` (default 90%) 5-hourly; fail-closed.
+ * `AURABENCH_FIVE_HOUR_CEILING` (default 90%) 5-hourly; fail-closed. Codex-only
+ * cells (B/F/G) skip that Claude gate — see `variantUsesClaude`.
+ * Codex cells (B/F/G/H) additionally obey a rolling-24 h start budget
+ * (`AURABENCH_CODEX_DAILY_CELLS`, default 12; ledger `AURABENCH_CODEX_LEDGER`,
+ * default `<bench-root>/codex-starts.log` — point every runner at one file),
+ * and a Codex usage limit pauses only the Codex cells — see `codex-quota.ts`.
  *
  * Child processes run under `nice -n 10` with every `AURA_*` variable unset and
  * a bounded Node heap; before each candidate it waits while MemAvailable is
@@ -89,10 +103,13 @@ import { checkMergeStability, readStabilityVerdicts, stabilityKey } from "./aura
 import { loadAuraBenchTasks } from "./aurabench/loader.js";
 import type { AuraBenchTask } from "./aurabench/task.js";
 import { runAblation } from "./aurabench/harness/driver.js";
+import { loadReportCells, renderReportTables } from "./aurabench/report.js";
+import { publishCellsJsonl } from "./aurabench/publish.js";
+import { codexDailyCellsFromEnv, parseCodexLedger, variantUsesCodex } from "./aurabench/harness/codex-quota.js";
 import { fetchUsageGate, usageCeilingsFromEnv } from "./aurabench/harness/usage-ceiling.js";
 import { claudeTokenGate, quarantineClaudeCredentialCopies, readClaudeAccessToken } from "./aurabench/harness/claude-auth.js";
 import { runCell, computeBaseline, type AgentRunner, type Baseline } from "./aurabench/harness/run-cell.js";
-import { VARIANTS, parseVariantList } from "./aurabench/harness/variants.js";
+import { VARIANTS, parseVariantList, variantUsesClaude } from "./aurabench/harness/variants.js";
 import { nakedClaudeRunner, nakedCodexRunner, type NakedDeps } from "./aurabench/harness/naked-agents.js";
 import { auraRunner, type BenchSocket } from "./aurabench/harness/aura-agent.js";
 import { benchInstancePaths, startBenchInstance, type RunningInstance } from "./aurabench/harness/bench-instance.js";
@@ -114,7 +131,7 @@ import {
   sweepStaleCellWorktrees,
   withCleanClaudeProject,
 } from "./aurabench/harness/cell-paths.js";
-import { readdirSync, renameSync, rmSync, statSync } from "node:fs";
+import { readdirSync, renameSync, rmSync, statSync, statfsSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 
 const MIN_AVAILABLE_KB = 1.5 * 1024 * 1024;
@@ -513,6 +530,9 @@ async function bench(argv: string[], repo: string): Promise<number> {
 
   const ceilings = usageCeilingsFromEnv(process.env);
   console.log(`[aurabench] usage ceilings: seven_day < ${ceilings.weekly}%, five_hour < ${ceilings.fiveHour}%`);
+  const codexDailyCells = codexDailyCellsFromEnv(process.env);
+  const codexLedger = resolve(process.env.AURABENCH_CODEX_LEDGER?.trim() || join(benchRoot, "codex-starts.log"));
+  console.log(`[aurabench] Codex budget: ${codexDailyCells} cell starts / 24 h (ledger ${codexLedger})`);
   try {
     const summary = await runAblation({
       taskIds: selected.map((t) => t.id),
@@ -542,9 +562,23 @@ async function bench(argv: string[], repo: string): Promise<number> {
         });
       },
       memAvailableKb,
+      diskAvailableKb: () => {
+        const s = statfsSync(benchRoot);
+        return (s.bavail * s.bsize) / 1024;
+      },
+      codex: {
+        isCodexCell: (cell) => variantUsesCodex(cell.variant),
+        dailyCells: codexDailyCells,
+        starts: () => parseCodexLedger(readTextOrNull(codexLedger) ?? ""),
+        noteStart: (at) => {
+          mkdirSync(dirname(codexLedger), { recursive: true });
+          appendFileSync(codexLedger, `${at}\n`);
+        },
+      },
+      isClaudeCell: (cell) => variantUsesClaude(cell.variant),
       usageGate: async (cell) => {
         const g = await fetchUsageGate(fetch, ceilings);
-        if (!g.ok || cell.variant === "B") return g;
+        if (!g.ok || !variantUsesClaude(cell.variant)) return g;
         // Every Claude-driven cell must finish on the access token it starts with.
         const task = byId.get(cell.taskId)!;
         const needMs = (classTimeouts.minutes[task.aurabench.class] ?? timeoutMs / 60_000) * 60_000;
@@ -562,7 +596,7 @@ async function bench(argv: string[], repo: string): Promise<number> {
       if (stateFile) appendAuthStopAsk(join(dirname(resolve(stateFile)), "ASK-FIRST.md"), summary.stoppedOnAuth);
       return 4;
     }
-    return summary.stoppedOnLimit ? 3 : 0;
+    return summary.stoppedOnLimit || summary.stoppedOnCodex ? 3 : 0;
   } finally {
     // Best effort: the bench HOME keeps no access token after the run.
     if (instance) await http((instance as RunningInstance).baseUrl, "PUT", "/api/settings", { claudeCodeOAuthToken: "" }).catch(() => undefined);
@@ -816,7 +850,40 @@ async function main(argv: string[]): Promise<number> {
   if (sub === "judge") return judge(argv, repo);
   if (sub === "spec-check") return specCheck(argv, repo);
   if (sub === "bench") return bench(argv, repo);
-  console.error("usage: aurabench-runner.ts <mine|validate|leak|stability|judge|spec-check|bench> …");
+  if (sub === "report") {
+    const files = arg(argv, "cells");
+    if (!files) {
+      console.error("usage: report --cells <cells.jsonl>[,<more.jsonl>] [--iters 10000] [--exclude-tasks a,b]");
+      return 2;
+    }
+    const jsonl = files
+      .split(",")
+      .map((f) => readFileSync(resolve(f), "utf8"))
+      .join("\n");
+    const dropTasks = new Set((arg(argv, "exclude-tasks") ?? "").split(",").filter(Boolean));
+    const loaded = loadReportCells(jsonl);
+    const cells = loaded.cells.filter((c) => !dropTasks.has(c.task_id));
+    const excluded = loaded.excluded;
+    console.log(`<!-- ${cells.length} cells, ${excluded.length} excluded, tasks dropped: ${[...dropTasks].join(",") || "none"} -->`);
+    for (const e of excluded) console.log(`<!-- excluded ${e.key}: ${e.reason} -->`);
+    console.log(renderReportTables(cells, Number(arg(argv, "iters") ?? 10_000)));
+    return 0;
+  }
+  if (sub === "export-cells") {
+    // Sanitized copy of bench cells for docs/aurabench/data (see aurabench/publish.ts).
+    const input = arg(argv, "in");
+    const out = arg(argv, "out");
+    if (!input || !out) {
+      console.error("usage: export-cells --in <cells.jsonl> --out <published.jsonl> [--variants A,B,…]");
+      return 2;
+    }
+    const only = new Set((arg(argv, "variants") ?? "").split(",").filter(Boolean));
+    const text = publishCellsJsonl(readFileSync(resolve(input), "utf8"), (r) => only.size === 0 || only.has(String(r.variant)));
+    writeFileSync(resolve(out), text);
+    console.log(`[aurabench] export-cells: ${text.split("\n").filter(Boolean).length} cells → ${out}`);
+    return 0;
+  }
+  console.error("usage: aurabench-runner.ts <mine|validate|leak|stability|judge|spec-check|bench|report|export-cells> …");
   return 2;
 }
 

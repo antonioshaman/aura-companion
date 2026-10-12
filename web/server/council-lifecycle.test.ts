@@ -178,6 +178,37 @@ describe("CouncilLifecycle (P4/C1e DI seam)", () => {
     expect(bodies[0]!.autoProceedOnIdle).toEqual(autoProceedOnIdle);
   });
 
+  // P6/FIX-H-MODEL end to end through the real coordinator: the Claude
+  // `base.model` must reach only the Claude orchestrator; the Codex observer
+  // gets the explicit `observerModel` (or no model at all — the spawn
+  // callback used to fall back to `base.model`, re-introducing the bug the
+  // coordinator had already avoided).
+  it("createCouncilGroup keeps the Claude model off a Codex observer and pins observerModel", async () => {
+    const ctx = makeLifecycle();
+    const cwd = tmpWorkspace();
+    const pinned = await ctx.lifecycle.createCouncilGroup({
+      pairing: "claude+codex",
+      base: { cwd, model: "claude-opus-5-5" },
+      observerModel: "gpt-5.5",
+    });
+    expect(pinned.ok).toBe(true);
+    if (!pinned.ok) return;
+    const bodies = () => ctx.deps.createSession.mock.calls.map((c) => c[0] as { backend?: string; model?: string });
+    expect(bodies().map((b) => [b.backend, b.model])).toEqual([
+      ["claude", "claude-opus-5-5"],
+      ["codex", "gpt-5.5"],
+    ]);
+    expect(ctx.deps.groupMeta.get(pinned.sessionGroupId)?.observerModel).toBe("gpt-5.5");
+
+    ctx.deps.createSession.mockClear();
+    const unpinned = await ctx.lifecycle.createCouncilGroup({ pairing: "claude+codex", base: { cwd, model: "claude-opus-5-5" } });
+    expect(unpinned.ok).toBe(true);
+    expect(bodies().map((b) => [b.backend, b.model])).toEqual([
+      ["claude", "claude-opus-5-5"],
+      ["codex", undefined],
+    ]);
+  });
+
   it("createCouncilGroup spawns both halves via the injected createSession and registers the pair in the injected maps", async () => {
     const ctx = makeLifecycle();
     const cwd = tmpWorkspace();

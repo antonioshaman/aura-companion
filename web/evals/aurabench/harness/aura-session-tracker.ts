@@ -25,6 +25,19 @@
  * or a limit-shaped `error` message → the cell is not a result, the runner
  * retries it later.
  *
+ * Observer health (P6/FIX-H-MODEL): every non-primary session's `result`s
+ * are counted ok / error, and a `group_degraded` with `deadRole: "observer"`
+ * is kept — from the first frame, prompt or not, because the observer's
+ * spawn-ack turn runs before the task prompt. A Council cell whose observer
+ * never finished a turn successfully measured no observer at all (DIET-AB:
+ * 20/20 H cells, Codex 400 on the Claude model) — see {@link observerDead}.
+ *
+ * Observer limit (P6/FIX-CODEX-QUOTA): an observer error result / `error`
+ * frame whose text is a usage limit sets {@link observerLimit} (tagged with
+ * that session's backend). BENCH-H burned 5 cells as `observer_dead` on the
+ * Codex "You've hit your usage limit … try again at Oct 4th, 2026 11:56 PM";
+ * that is a quota pause, not a result.
+ *
  * Pure (clock passed in). Firewall-clean.
  */
 
@@ -53,6 +66,31 @@ interface SessionState {
   codexCurrent: CodexTokens | null;
 }
 
+/** What the observer half(s) of a Council cell did, for `isolation`. */
+export interface ObserverHealth {
+  /** Successful (`is_error` not true) results over every non-primary session. */
+  ok_results: number;
+  error_results: number;
+  /** Text of the last error result / `error` frame of a non-primary session. */
+  last_error: string | null;
+  /** `reason` of a `group_degraded` frame that named the observer dead. */
+  degraded: string | null;
+}
+
+/**
+ * Why a Council cell did not measure its observer, or null if it did (or
+ * cannot be told). Dead = not one successful observer turn AND a positive
+ * failure signal (an error result or the server declaring the observer
+ * dead). An observer that was simply never woken (no checkpoint) has neither
+ * and stays valid — that is the agent's behaviour, not the harness's fault.
+ */
+export function observerDead(h: ObserverHealth): string | null {
+  if (h.ok_results > 0) return null;
+  if (h.error_results === 0 && h.degraded === null) return null;
+  const why = h.last_error ?? `group_degraded: ${h.degraded}`;
+  return `observer_dead: no successful observer turn (${h.error_results} error results) — ${why}`.slice(0, 500);
+}
+
 const num = (v: unknown): number | null => (typeof v === "number" && Number.isFinite(v) ? v : null);
 
 export class AuraSessionTracker {
@@ -62,18 +100,24 @@ export class AuraSessionTracker {
   private primaryResults = 0;
   private lastPrimaryError: string | null = null;
   limit: LimitHit | null = null;
+  /** First usage limit an observer (non-primary) session ended a turn on. */
+  observerLimit: LimitHit | null = null;
+  private readonly obs: ObserverHealth = { ok_results: 0, error_results: 0, last_error: null, degraded: null };
 
   constructor(
     private readonly primaryId: string,
     otherIds: readonly string[],
     private readonly quietMs: number,
     defaultBackend: Backend = "claude",
+    /** Backend of the non-primary sessions until a frame says otherwise (a
+     *  Council observer: the pairing's second half). Default: `defaultBackend`. */
+    otherBackend: Backend = defaultBackend,
   ) {
     for (const id of [primaryId, ...otherIds]) {
       this.sessions.set(id, {
         running: false,
         acc: new ClaudeMetricsAccumulator(),
-        backend: defaultBackend,
+        backend: id === primaryId ? defaultBackend : otherBackend,
         codexDone: null,
         codexCurrent: null,
       });
@@ -114,6 +158,7 @@ export class AuraSessionTracker {
     const type = msg.type;
     if (typeof type !== "string") return;
     if (type === "session_init" || type === "session_update") this.onSessionState(s, msg.session);
+    this.onObserverHealth(sessionId, s.backend, type, msg, now);
     if (this.promptSentAt === null) return;
     if (ACTIVITY.has(type)) this.lastActivity = now;
     if (type === "assistant") {
@@ -137,7 +182,7 @@ export class AuraSessionTracker {
         if (data.is_error === true) {
           this.lastPrimaryError = text || errs || String(data.subtype ?? "error");
           const hit = detectLimit(`${text}\n${errs}`, now, isLimitResult(data));
-          if (hit) this.limit = hit;
+          if (hit) this.limit = { ...hit, provider: s.backend };
         } else {
           this.lastPrimaryError = null;
           this.limit = null;
@@ -145,10 +190,43 @@ export class AuraSessionTracker {
       }
     } else if (type === "error" && typeof msg.message === "string") {
       const hit = detectLimit(msg.message, now);
-      if (hit && sessionId === this.primaryId) this.limit = hit;
+      if (hit && sessionId === this.primaryId) this.limit = { ...hit, provider: s.backend };
     } else if (type === "cli_disconnected" && sessionId === this.primaryId) {
       s.running = false;
     }
+  }
+
+  private onObserverHealth(sessionId: string, backend: Backend, type: string, msg: Obj, now: number): void {
+    if (type === "group_degraded" && msg.deadRole === "observer") {
+      this.obs.degraded = typeof msg.reason === "string" ? msg.reason : "unknown";
+      return;
+    }
+    if (sessionId === this.primaryId) return;
+    let errorText: string | null = null;
+    let structural = false;
+    if (type === "result") {
+      const data = isObj(msg.data) ? msg.data : {};
+      if (data.is_error === true) {
+        this.obs.error_results++;
+        this.obs.last_error = (typeof data.result === "string" && data.result) || String(data.subtype ?? "error");
+        errorText = this.obs.last_error;
+        structural = isLimitResult(data);
+      } else {
+        this.obs.ok_results++;
+      }
+    } else if (type === "error" && typeof msg.message === "string") {
+      this.obs.last_error = msg.message;
+      errorText = msg.message;
+    }
+    if (errorText !== null && !this.observerLimit) {
+      const hit = detectLimit(errorText, now, structural);
+      if (hit) this.observerLimit = { ...hit, provider: backend };
+    }
+  }
+
+  /** Snapshot of the non-primary sessions' turn outcomes. */
+  observerHealth(): ObserverHealth {
+    return { ...this.obs };
   }
 
   isDone(now: number): boolean {

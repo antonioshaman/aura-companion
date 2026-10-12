@@ -200,7 +200,7 @@ describe("runPanelRun", () => {
     expect(rec.score!.recall).toEqual({ found: 1, total: 1 });
     expect(rec.score!.recallAsP1).toEqual({ found: 1, total: 1 });
     expect(rec.metrics).toMatchObject({ cost_usd: 2.5, turns: 9 });
-    expect(rec.sealed).toMatchObject({ base: fx.base, head: fx.head, scrubbed: { base: 2, head: 3 } });
+    expect(rec.sealed).toMatchObject({ base: fx.base, head: fx.head, scrubbed: { base: 4, head: 5 } });
 
     // The checkout never outlives the run.
     expect(existsSync(d.checkout)).toBe(false);

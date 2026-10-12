@@ -58,7 +58,9 @@ export interface AgentContext {
 export type AgentRun =
   | {
       kind: "done";
-      status: Extract<CellStatus, "completed" | "timeout" | "agent_error">;
+      /** `harness_error` from an agent = the cell ran but did not measure
+       *  its variant (a dead Council observer — FIX-H-MODEL). */
+      status: Extract<CellStatus, "completed" | "timeout" | "agent_error" | "harness_error">;
       metrics: AgentMetrics;
       isolation: Record<string, unknown>;
       confounds: string[];

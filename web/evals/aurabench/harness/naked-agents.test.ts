@@ -214,6 +214,19 @@ describe("naked Codex (B)", () => {
     expect(await nakedCodexRunner(deps({ stdout, code: 1 }).d)(ctx("B"))).toMatchObject({ kind: "limit", limit: { resetAt: 3 * 3_600_000 } });
   });
 
+  // P6/FIX-CODEX-QUOTA: the real ChatGPT-plan refusal (BENCH-H, 2026-10-01).
+  // The limit is tagged provider "codex" so the driver pauses only the Codex
+  // cells, and the absolute "try again at" date becomes the reset time.
+  it("the real Codex weekly refusal → codex limit with the absolute reset", async () => {
+    const msg =
+      "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Oct 4th, 2026 11:56 PM.";
+    const stdout = line({ type: "turn.failed", error: { message: msg } });
+    expect(await nakedCodexRunner(deps({ stdout, code: 1 }).d)(ctx("B"))).toMatchObject({
+      kind: "limit",
+      limit: { provider: "codex", resetAt: Date.UTC(2026, 9, 4, 23, 56) },
+    });
+  });
+
   // P6/FIX-D2-4: `codex exec --json` never names the model; it is read from
   // the rollout the run left in the CELL's CODEX_HOME.
   it("records the model the rollout says ran, not the pinned one", async () => {

@@ -19,7 +19,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { VARIANTS, VARIANT_IDS, parseVariantList, type AuraVariant } from "./variants.js";
+import { VARIANTS, VARIANT_IDS, parseVariantList, variantUsesClaude, type AuraVariant } from "./variants.js";
 import { CELL_RECORD_VERSION, cellKey, completedCellKeys, parseClassTimeouts, planCells, staleCellRecords } from "./cells.js";
 
 const onLayers = (v: AuraVariant) => Object.entries(v.layers).filter(([, s]) => s === "on").map(([k]) => k).sort();
@@ -90,6 +90,16 @@ describe("VARIANTS", () => {
     // G differs from F by the council-skills layer only.
     expect(onLayers(VARIANTS.F as AuraVariant)).toEqual(["knowledge"]);
     expect(onLayers(VARIANTS.G as AuraVariant)).toEqual(["council", "knowledge"]);
+  });
+});
+
+// P6/CODEX-ONLY-GATE: the runner asks the Claude usage ceiling only for cells
+// that spend the Claude subscription. H counts (Claude orchestrator); B, F, G
+// are Codex-only and must keep running while Claude's weekly window is spent.
+describe("variantUsesClaude", () => {
+  it("is true exactly for Claude-provider variants and Council pairs", () => {
+    const claude = VARIANT_IDS.filter((id) => variantUsesClaude(id));
+    expect(claude).toEqual(["A", "C", "D", "E", "H"]);
   });
 });
 

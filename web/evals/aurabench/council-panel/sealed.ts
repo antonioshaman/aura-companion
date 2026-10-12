@@ -10,7 +10,11 @@
  *    #91 carries `.council/review-output/2026-06-04-1826/`, the very review
  *    that defines #91's known defects. The paths are removed from BOTH trees
  *    before committing, so they are neither on disk nor in `git show`, and the
- *    reviewed diff loses only review artefacts, never code.
+ *    reviewed diff loses only review artefacts, never code;
+ *  - no repo-shipped skills (`.agents/skills`, `.claude/skills`): the CLI loads
+ *    them from the checkout, and several share a name with a real user skill
+ *    (`harden`), so the isolation check cannot tell them apart and the run is
+ *    `invalid_isolation`. No case diff touches them, so the diff is unchanged.
  *
  * Result: a two-commit repo `base' → head'` (head' checked out). The prompt
  * names `base'` (the only base the checkout knows); the evidence keeps the
@@ -31,6 +35,9 @@ export const PANEL_SCRUB_PATHS = [
   ".council/reviews",
   ".council/abtest",
   "docs/history",
+  // Repo-shipped skills — the copied council skills in the run home are the only skills a run may see.
+  ".agents/skills",
+  ".claude/skills",
 ] as const;
 
 export interface SealedPanelCheckout {

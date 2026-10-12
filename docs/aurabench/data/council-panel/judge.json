@@ -1,0 +1,46 @@
+{
+  "v": 1,
+  "judge": "LLM judge (executor, claude-opus-5-5), 2026-10-02; strict: a finding counts only if it names the same root cause as the known defect. Supervisor manual pass pending (ASK-FIRST).",
+  "verdicts": {
+    "pr54-auto-proceed-wireup": {
+      "denylist-fails-open": {"FULL": null, "ECONOMY": null, "MINIMAL": {"finding": 11, "priority": "P3"},
+        "note": "FULL #1/ECONOMY #1 are about bypass mode skipping the gate, not the null probe. MINIMAL #11: 'Probe absence is fail-open'."},
+      "synthetic-send-toctou": {"FULL": null, "ECONOMY": null, "MINIMAL": {"finding": 8, "priority": "P2"},
+        "note": "FULL #3 is missing bridge bookkeeping, not the missing busy gate. MINIMAL #8: no busy check, check and send not atomic."},
+      "synthetic-inflight-torn-read": {"FULL": null, "ECONOMY": null, "MINIMAL": null},
+      "wake-outcome-nonexhaustive": {"FULL": {"finding": 13, "priority": "P3"}, "ECONOMY": null, "MINIMAL": {"finding": 13, "priority": "P3"},
+        "note": "ECONOMY #4 only says the index.ts mapper is untested."},
+      "archive-clear-after-await": {"FULL": null, "ECONOMY": null, "MINIMAL": null,
+        "note": "MINIMAL #15 calls the post-archive clear redundant, the opposite of the race."},
+      "recorder-origin-untested": {"FULL": {"finding": 4, "priority": "P1"}, "ECONOMY": {"finding": 3, "priority": "P1"}, "MINIMAL": {"finding": 5, "priority": "P1"},
+        "note": "All three name the server:auto-proceed recorder origin as untested; the keyword scorer missed FULL and MINIMAL."},
+      "orchestrator-wiring-untested": {"FULL": {"finding": 5, "priority": "P1"}, "ECONOMY": {"finding": 4, "priority": "P1"}, "MINIMAL": {"finding": 14, "priority": "P3"}}
+    },
+    "pr91-dynamic-models": {
+      "raf-autofocus-test-vacuous": {"FULL": null, "ECONOMY": {"finding": 12, "priority": "P2"}, "MINIMAL": null,
+        "note": "ECONOMY #12: focus-on-open never asserted, the test focuses the listbox manually."},
+      "coalesced-signal-dead": {"FULL": null, "ECONOMY": null, "MINIMAL": null,
+        "note": "MINIMAL #14 notices the route does not pass the signal but calls that correct (partial, not counted)."},
+      "footnote-listbox-test-vacuous": {"FULL": null, "ECONOMY": null, "MINIMAL": null},
+      "reject-after-success-test-vacuous": {"FULL": {"finding": 11, "priority": "P2"}, "ECONOMY": {"finding": 6, "priority": "P2"}, "MINIMAL": {"finding": 5, "priority": "P2"},
+        "note": "All three: the two catch arms set the same object, the race guard is not implemented."}
+    },
+    "pr172-173-codex-init": {
+      "checkpoint-review-names-not-group-scoped": {"FULL": {"finding": 10, "priority": "P2"}, "ECONOMY": {"finding": 5, "priority": "P2"}, "MINIMAL": {"finding": 6, "priority": "P2"}},
+      "spawn-checkpoint-rearm-manual-only": {"FULL": {"finding": 1, "priority": "P1"}, "ECONOMY": {"finding": 1, "priority": "P1"}, "MINIMAL": {"finding": 1, "priority": "P1"}},
+      "deadline-rescan-ownership-untested": {"FULL": {"finding": 11, "priority": "P2"}, "ECONOMY": {"finding": 6, "priority": "P2"}, "MINIMAL": {"finding": 3, "priority": "P2"}}
+    },
+    "pr120-codex-review-normalize": {
+      "codex-findings-not-normalized": {"FULL": null, "ECONOMY": null, "MINIMAL": null,
+        "note": "Every scorer match was file+line only. Closest: ECONOMY #4 (native status/summary pass through), not the findings shape."}
+    },
+    "pr122-codex-finding-shape": {
+      "line-zero-drops-review": {"FULL": {"finding": 2, "priority": "P2"}, "ECONOMY": {"finding": 3, "priority": "P1"}, "MINIMAL": {"finding": 4, "priority": "P3"}}
+    },
+    "pr189-silent-stdio-drift": {
+      "transcript-mtime-signal-polluted": {"FULL": {"finding": 2, "priority": "P1"}, "ECONOMY": {"finding": 6, "priority": "P2"}, "MINIMAL": {"finding": 2, "priority": "P1"},
+        "note": "All three say the persistence mtime is the wrong liveness signal and propose the actual fix (last inbound frame time). FULL names unrelated writers; MINIMAL and FULL lead with the false-kill direction, not the blind-detector direction."},
+      "jsonl-slug-ignores-underscore": {"FULL": {"finding": 6, "priority": "P2"}, "ECONOMY": {"finding": 9, "priority": "P2"}, "MINIMAL": {"finding": 5, "priority": "P2"}}
+    }
+  }
+}

@@ -1,0 +1,13 @@
+version,task_id,task_class,variant,rep,status,success,hidden_passed,hidden_failed,regressed,context_first_call,tokens_in,tokens_cache_read,tokens_cache_write,tokens_out,cost_usd,turns,tool_calls,wall_clock_min,files_touched,loc_added,loc_removed,overlay_ref,claude_md_bytes,observer_prompt_bytes,isolation_violations,invalid_reason
+before,archived-sessions-hold-memory,bugfix,D,1,completed,True,393,0,,34384,84,2454400,101512,24817,2.1099,47,44,17.88,12,298,3,74a539d,33262,13865,0,
+before,archived-sessions-hold-memory,bugfix,D,2,completed,False,392,1,,34383,64,1757129,94149,25165,1.8366,34,31,12.39,13,298,2,74a539d,33262,13865,0,
+before,archived-sessions-hold-memory,bugfix,D,3,completed,False,392,1,,34385,76,2110640,101771,27023,2.0048,43,40,10.12,12,325,1,74a539d,33262,13865,0,
+before,claude-adapter-outbound-queue-overflow,feature,D,1,completed,True,106,0,,34382,48,1295307,123897,19156,1.8628,26,23,8.08,6,313,0,74a539d,33262,13865,0,
+before,claude-adapter-outbound-queue-overflow,feature,D,2,completed,True,106,0,,34385,46,1349954,119563,17605,1.8899,27,24,6.74,6,290,0,74a539d,33262,13865,0,
+before,claude-adapter-outbound-queue-overflow,feature,D,3,completed,True,106,0,,34373,54,1714897,135496,23887,2.1324,28,25,9.2,6,386,0,74a539d,33262,13865,0,
+after,archived-sessions-hold-memory,bugfix,D,1,completed,False,392,1,,24871,72,1538184,83920,21838,1.6213,40,37,12.05,11,278,0,727cd5d,9263,4262,0,
+after,archived-sessions-hold-memory,bugfix,D,2,completed,False,392,1,,24873,92,2483918,106304,35253,2.1753,49,46,12.06,13,515,7,727cd5d,9263,4262,0,
+after,archived-sessions-hold-memory,bugfix,D,3,completed,True,393,0,,24879,52,1256390,59352,18167,1.0896,26,25,15.97,9,335,1,727cd5d,9263,4262,0,
+after,claude-adapter-outbound-queue-overflow,feature,D,1,completed,True,106,0,,24854,42,872336,89723,15646,1.328,24,21,7.17,6,309,0,727cd5d,9263,4262,0,
+after,claude-adapter-outbound-queue-overflow,feature,D,2,completed,True,106,0,,24852,86,2011617,92409,28592,1.8365,48,45,8.9,6,387,5,727cd5d,9263,4262,0,
+after,claude-adapter-outbound-queue-overflow,feature,D,3,completed,True,106,0,,24838,54,1199637,99912,20500,1.572,32,29,8.67,6,328,0,727cd5d,9263,4262,0,

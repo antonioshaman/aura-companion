@@ -127,6 +127,16 @@ export function isVariantId(v: unknown): v is VariantId {
   return typeof v === "string" && (VARIANT_IDS as readonly string[]).includes(v);
 }
 
+/**
+ * Does a cell of this variant spend the Claude subscription? Claude-provider
+ * variants do (H too: its orchestrator is Claude); B, F and G run on Codex
+ * only — G has no Council pair (see the G caveat above).
+ */
+export function variantUsesClaude(id: VariantId): boolean {
+  const v = VARIANTS[id];
+  return v.provider === "claude" || (v.mode === "aura" && v.councilPairing !== undefined);
+}
+
 /** Parse a `--variants A,C,E` list; unknown ids are an error (never skipped silently). */
 export function parseVariantList(raw: string | undefined): { ok: true; ids: VariantId[] } | { ok: false; reason: string } {
   if (!raw) return { ok: true, ids: [...VARIANT_IDS] };

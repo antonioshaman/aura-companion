@@ -199,6 +199,9 @@ export interface LimitHit {
   /** Epoch ms when the limit resets, if the message carried one. */
   resetAt: number | null;
   message: string;
+  /** Whose quota ran out, when the producer knows (P6/FIX-CODEX-QUOTA): a
+   *  Codex hit pauses only the Codex cells, the rest of the plan continues. */
+  provider?: "claude" | "codex";
 }
 
 /** Structured limit evidence from a Claude `result` frame: the CLI marks a
@@ -249,6 +252,40 @@ export function parseResetsAt(text: string, now: number): number | null {
 }
 
 /**
+ * Codex (ChatGPT plan) form, P6/FIX-CODEX-QUOTA: "You've hit your usage limit.
+ * … or try again at Oct 4th, 2026 11:56 PM." → that instant. The year is
+ * optional (assumed the next such date). Like {@link parseResetsAt}, no zone
+ * is read as UTC (the box's zone); a trailing zone other than UTC/GMT → null.
+ */
+export function parseTryAgainAt(text: string, now: number): number | null {
+  const m =
+    /try again at\s+([a-z]{3})[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(?:(\d{4}),?\s+)?(?:at\s+)?(\d{1,2}):(\d{2})\s*(am|pm)?/i.exec(
+      text,
+    );
+  if (!m) return null;
+  // Zone: an upper-case abbreviation right after the time (case-sensitive, so
+  // a following word like "and" is not read as one).
+  const zone = /^\s*\(?(Etc\/UTC|[A-Z]{2,5})\b/.exec(text.slice(m.index + m[0].length))?.[1]?.toUpperCase();
+  if (zone && zone !== "UTC" && zone !== "GMT" && zone !== "ETC/UTC") return null;
+  const month = MONTHS.indexOf(m[1]!.toLowerCase());
+  if (month < 0) return null;
+  let hour = Number(m[4]);
+  const minute = Number(m[5]);
+  const ampm = m[6]?.toLowerCase();
+  if (ampm) {
+    if (hour < 1 || hour > 12) return null;
+    hour = (hour % 12) + (ampm === "pm" ? 12 : 0);
+  } else if (hour > 23) return null;
+  if (minute > 59) return null;
+  const day = Number(m[2]);
+  if (m[3]) return Date.UTC(Number(m[3]), month, day, hour, minute);
+  const year = new Date(now).getUTCFullYear();
+  let at = Date.UTC(year, month, day, hour, minute);
+  if (at <= now - 24 * 3_600_000) at = Date.UTC(year + 1, month, day, hour, minute);
+  return at;
+}
+
+/**
  * Detect a usage/rate limit in an agent's terminal message (Claude result
  * text, Codex error text, stderr). Only a limit that ENDED the run matters —
  * callers pass the final error/result text, not the whole transcript (an
@@ -262,7 +299,7 @@ export function detectLimit(text: string, now: number, structural = false): Limi
   // Claude legacy form: "Claude AI usage limit reached|1759000000".
   const epoch = /\|(\d{10})\b/.exec(text);
   if (epoch) return { resetAt: Number(epoch[1]) * 1000, message };
-  const resets = parseResetsAt(text, now);
+  const resets = parseResetsAt(text, now) ?? parseTryAgainAt(text, now);
   if (resets !== null) return { resetAt: resets, message };
   // "try again in 37 minutes" / "in 2 hours".
   const rel = /in (\d+)\s*(second|minute|min|hour|hr)s?\b/i.exec(text);

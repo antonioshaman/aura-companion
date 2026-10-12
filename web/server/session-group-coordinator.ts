@@ -20,6 +20,20 @@ import { log } from "./logger.js";
  * matches {@link GROUP_ID_PATTERN} from group-authorization.ts; both
  * sides use the same constant to avoid drift (Fowler F2).
  */
+/**
+ * Model for the observer half. A model slug belongs to ONE provider: a
+ * `claude+codex` pair that forwarded the Claude pin to the Codex observer
+ * spawned a Codex CLI that 400s on its first turn ("model is not supported
+ * when using Codex") — the observer is dead from the start (P6/FIX-H-MODEL).
+ * So the primary's model carries over only to a same-backend observer; a
+ * cross-backend observer gets the explicit `observerModel` or none (its
+ * launcher then picks a launchable default).
+ */
+export function observerSpawnModel(req: Pick<CreateGroupRequest, "primary" | "observer" | "model" | "observerModel">): string | undefined {
+  if (req.observerModel) return req.observerModel;
+  return req.observer === req.primary ? req.model : undefined;
+}
+
 function generateGroupId(): string {
   return `grp_${randomBytes(16).toString("hex")}`;
 }
@@ -31,8 +45,11 @@ export interface CreateGroupRequest {
   primary: BackendType;
   /** The observer backend. */
   observer: BackendType;
-  /** Optional — forwarded to the underlying session spawner. */
+  /** Optional — the primary's model; also the observer's when both halves
+   *  share a backend (see {@link observerSpawnModel}). */
   model?: string;
+  /** Optional — explicit observer model. Wins over {@link model}. */
+  observerModel?: string;
   /** Optional — forwarded to the underlying session spawner. */
   permissionMode?: string;
   /**
@@ -225,7 +242,7 @@ export class SessionGroupCoordinator {
       const observerSpawn = await this.deps.spawn({
         cwd: req.cwd,
         backendType: req.observer,
-        model: req.model,
+        model: observerSpawnModel(req),
         permissionMode: req.permissionMode,
         sessionGroupId,
         sessionGroupRole: "observer",

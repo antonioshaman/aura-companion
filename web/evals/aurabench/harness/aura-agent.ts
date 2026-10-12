@@ -26,7 +26,7 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentContext, AgentRun, AgentRunner } from "./run-cell.js";
-import { AuraSessionTracker } from "./aura-session-tracker.js";
+import { AuraSessionTracker, observerDead } from "./aura-session-tracker.js";
 import type { AuraVariant } from "./variants.js";
 
 export interface BenchSocket {
@@ -66,11 +66,24 @@ export function quietWindowMs(v: AuraVariant): number {
   return v.councilPairing ? 180_000 : 60_000;
 }
 
+/**
+ * The pin for a cross-provider observer (H: the Codex half of claude+codex),
+ * sent as council create's `observerModel`. Without it the server gave the
+ * Codex observer no model it could run (DIET-AB: the Claude pin → HTTP 400,
+ * P6/FIX-H-MODEL). A same-provider observer runs the primary's `model`.
+ */
+export function observerPin(v: AuraVariant, models: { claude?: string; codex?: string } = {}): string | undefined {
+  if (!v.councilPairing) return undefined;
+  const observer = v.councilPairing.split("+")[1] as "claude" | "codex";
+  return observer === v.provider ? undefined : models[observer];
+}
+
 export function createBody(
   v: AuraVariant,
   cwd: string,
   model?: string,
   binaries: { claude?: string; codex?: string } = {},
+  observerModel?: string,
 ): Obj {
   // A `claude+codex` pair spawns a Codex observer from the same body, so it
   // needs the Codex binary too; otherwise only the provider's own matters.
@@ -87,6 +100,7 @@ export function createBody(
   if (v.councilPairing) {
     body.councilMode = "council";
     body.councilPairing = v.councilPairing;
+    if (observerModel) body.observerModel = observerModel;
   }
   if (v.autoProceedOnIdle && v.layers.autoProceed === "on") body.autoProceedOnIdle = v.autoProceedOnIdle;
   return body;
@@ -112,9 +126,7 @@ export interface CouncilHalf {
 
 /**
  * What the server actually spawned for each half of a Council pair (null for
- * a solo create). Council create forwards ONE `model` to both halves, so a
- * Codex observer gets the closest launchable Codex model to the Claude pin —
- * the cell records which one instead of assuming the Codex pin.
+ * a solo create). The cell records it instead of assuming the pins took.
  */
 export function councilHalvesFromCreate(json: unknown): { primary: CouncilHalf; observer: CouncilHalf } | null {
   if (!isObj(json) || !isObj(json.primary) || !isObj(json.observer)) return null;
@@ -143,7 +155,7 @@ export function councilHalvesConfounds(
   if (halves.observer.backend !== wantObserver) out.push(`council observer ran backend ${String(halves.observer.backend)}, not ${wantObserver}`);
   const pin = models[wantObserver];
   if (wantObserver !== v.provider && pin && halves.observer.model !== pin) {
-    out.push(`${wantObserver} observer ran model ${String(halves.observer.model)}, not the pinned ${pin} (council create forwards one model to both halves)`);
+    out.push(`${wantObserver} observer ran model ${String(halves.observer.model)}, not the pinned ${pin}`);
   }
   return out;
 }
@@ -224,10 +236,21 @@ export function readLayerEvidence(worktree: string, groupId: string): LayerEvide
       if (phase !== null && phase !== "spawn") workCheckpointAt = Math.min(workCheckpointAt, mtime(p));
       return { file, phase, sequence: typeof j?.sequence === "number" ? j.sequence : null };
     });
-  const reviewFiles = list("reviews");
   // The writer (`buildObserverReviewFilename`, server/review-watcher.ts)
   // pins `<phase>-<group>-<provider>-observer.md`; only the provider suffix
-  // is read here (the harness never imports server/).
+  // is read here (the harness never imports server/). An observer that
+  // writes its own file (the host then stands down) may drop the group:
+  // `bench-implement-codex-observer.md` (BENCH-H, 4/16 cells). A cell
+  // worktree hosts exactly one pair, so a group-less observer review is
+  // this pair's; another pair's file always carries its own `grp_`.
+  let reviewFiles: string[];
+  try {
+    reviewFiles = readdirSync(join(dir, "reviews")).filter(
+      (f) => f.includes(groupId) || (!f.includes("grp_") && /-(claude|codex)-observer\.md$/.test(f)),
+    );
+  } catch {
+    reviewFiles = [];
+  }
   const reviewProviders = new Set<string>();
   for (const f of reviewFiles) {
     const m = /-(claude|codex)-observer\.md$/.exec(f);
@@ -261,7 +284,7 @@ export function auraRunner(d: AuraDeps): AgentRunner {
     if (v.autoProceedOnIdle && v.layers.autoProceed === "on") {
       confounds.push("an unresolved observer STOP holds auto-proceed until a human releases it; the bench never releases");
     }
-    const created = await d.http("POST", "/api/sessions/create", createBody(v, ctx.worktree, d.models?.[v.provider], d.binaries));
+    const created = await d.http("POST", "/api/sessions/create", createBody(v, ctx.worktree, d.models?.[v.provider], d.binaries, observerPin(v, d.models)));
     const ids = created.status === 200 ? sessionIdsFromCreate(created.json) : null;
     if (!ids) {
       return {
@@ -297,7 +320,8 @@ export function auraRunner(d: AuraDeps): AgentRunner {
         ? ctx.task.prompt + observerLoopDirective({ baseUrl: d.baseUrl, orchestratorId: ids.primary, groupId })
         : ctx.task.prompt;
     const all = [ids.primary, ...ids.others];
-    const tracker = new AuraSessionTracker(ids.primary, ids.others, quietWindowMs(v), v.provider);
+    const observerBackend = v.councilPairing ? (v.councilPairing.split("+")[1] as "claude" | "codex") : v.provider;
+    const tracker = new AuraSessionTracker(ids.primary, ids.others, quietWindowMs(v), v.provider, observerBackend);
     const sockets = new Map<string, BenchSocket>();
     const wsBase = d.baseUrl.replace(/^http/, "ws");
     try {
@@ -348,25 +372,36 @@ export function auraRunner(d: AuraDeps): AgentRunner {
       sockets.get(ids.primary)!.send(
         JSON.stringify({ type: "user_message", content: prompt, client_msg_id: `aurabench-${started}` }),
       );
-      // Snapshot the evidence into `isolation` whenever the cell ends below.
-      const withEvidence = () => {
+      // Every end of a prompted cell: snapshot the evidence into `isolation`,
+      // and void a Council cell whose observer never ran a turn — it measured
+      // C under D/H's name (FIX-H-MODEL), whatever the primary did.
+      const finish = (status: "completed" | "timeout" | "agent_error", error?: string): AgentRun => {
         if (groupId) isolation.layer_evidence = readLayerEvidence(ctx.worktree, groupId);
+        if (v.councilPairing) {
+          const health = tracker.observerHealth();
+          isolation.observer_health = health;
+          const dead = observerDead(health);
+          // A dead observer that died on its quota is a pause, not a result.
+          if (dead && tracker.observerLimit) return { kind: "limit", limit: tracker.observerLimit };
+          if (dead) return { kind: "done", status: "harness_error", metrics: tracker.metrics(), isolation, confounds, error: dead };
+        }
+        return { kind: "done", status, metrics: tracker.metrics(), isolation, confounds, ...(error ? { error } : {}) };
       };
       const deadline = started + ctx.timeoutMs;
       for (;;) {
         if (tracker.limit) return { kind: "limit", limit: tracker.limit };
-        if (tracker.isDone(now())) break;
-        if (now() > deadline) {
-          withEvidence();
-          return { kind: "done", status: "timeout", metrics: tracker.metrics(), isolation, confounds };
+        // P6/FIX-CODEX-QUOTA: the observer ran out of quota — the cell can no
+        // longer measure its variant; stop now instead of spending the
+        // orchestrator's quota on a cell that would be voided.
+        if (v.councilPairing && tracker.observerLimit && tracker.observerHealth().ok_results === 0) {
+          return { kind: "limit", limit: tracker.observerLimit };
         }
+        if (tracker.isDone(now())) break;
+        if (now() > deadline) return finish("timeout");
         await sleep(pollMs);
       }
-      withEvidence();
       const err = tracker.primaryError;
-      return err
-        ? { kind: "done", status: "agent_error", metrics: tracker.metrics(), isolation, confounds, error: err.slice(0, 500) }
-        : { kind: "done", status: "completed", metrics: tracker.metrics(), isolation, confounds };
+      return err ? finish("agent_error", err.slice(0, 500)) : finish("completed");
     } finally {
       for (const s of sockets.values()) s.close();
       isolation.teardown = await teardownSessions(d, all);
