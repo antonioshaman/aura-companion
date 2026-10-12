@@ -240,4 +240,22 @@ describe("WorktreeTracker", () => {
       expect(tracker.isWorktreeInUse("/worktrees/feat", "s1")).toBe(true);
     });
   });
+
+  // Archive of a dirty isolated worktree keeps the mapping and flags it
+  // `retained` so the sidebar can keep showing it; the flag must persist.
+  describe("updateMapping", () => {
+    it("merges fields into an existing mapping and persists them", () => {
+      const tracker = new WorktreeTracker();
+      tracker.addMapping(makeMapping({ sessionId: "s1", worktreePath: "/worktrees/feat" }));
+      tracker.updateMapping("s1", { retained: "dirty" });
+      expect(tracker.getBySession("s1")).toMatchObject({ worktreePath: "/worktrees/feat", retained: "dirty" });
+      expect(new WorktreeTracker().getBySession("s1")).toMatchObject({ retained: "dirty" });
+    });
+
+    it("is a no-op for unknown sessions", () => {
+      const tracker = new WorktreeTracker();
+      tracker.updateMapping("nope", { retained: "dirty" });
+      expect(tracker.getBySession("nope")).toBeNull();
+    });
+  });
 });

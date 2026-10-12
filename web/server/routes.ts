@@ -1,4 +1,6 @@
 import { Hono } from "hono";
+import { parseIsolationMode } from "./worktree-isolation.js";
+import type { WorktreeMapping } from "./worktree-tracker.js";
 import type { Context } from "hono";
 import { getCookie, setCookie } from "hono/cookie";
 import { streamSSE } from "hono/streaming";
@@ -269,6 +271,18 @@ function enrichModelsWithRegistry(
   });
 }
 
+/** Public shape of a session's worktree (see worktree-tracker.ts). */
+function toSessionWorktree(m: WorktreeMapping | null) {
+  if (!m) return undefined;
+  return {
+    path: m.worktreePath,
+    branch: m.actualBranch || m.branch,
+    repoRoot: m.repoRoot,
+    isolated: m.isolated === true,
+    ...(m.retained ? { retained: m.retained } : {}),
+  };
+}
+
 export function createRoutes(
   orchestrator: SessionOrchestrator,
   launcher: CliLauncher,
@@ -446,7 +460,19 @@ export function createRoutes(
     if (!layered.ok) {
       return { ok: false, error: layered.error, status: layered.status };
     }
-    return { ok: true, body: layered.body };
+    // Worktree isolation: public create routes default to `auto` — a new
+    // session gets its own git worktree when another live session already
+    // uses the same tree. The UI sends `shared` to opt out.
+    const isolation = parseIsolationMode((layered.body as { isolation?: unknown }).isolation);
+    if (!isolation.ok) {
+      return { ok: false, error: isolation.error, status: 400 };
+    }
+    // Council pairs share one workspace by design — isolation does not apply.
+    if ((layered.body as { councilMode?: unknown }).councilMode === "council") {
+      const { isolation: _iso, ...councilBody } = layered.body as Record<string, unknown>;
+      return { ok: true, body: councilBody };
+    }
+    return { ok: true, body: { ...layered.body, isolation: isolation.value ?? "auto" } };
   }
 
   /**
@@ -1050,9 +1076,18 @@ export function createRoutes(
         gitBehind: bridge?.git_behind || 0,
         totalLinesAdded: bridge?.total_lines_added || 0,
         totalLinesRemoved: bridge?.total_lines_removed || 0,
+        worktree: toSessionWorktree(orchestrator.getSessionWorktree?.(s.sessionId) ?? null),
       };
     });
     return c.json(enriched);
+  });
+
+  // Preview for the New Session form: would `isolation: "auto"` create a
+  // dedicated worktree for this cwd (another live session in the same tree)?
+  api.get("/sessions/isolation-preview", (c) => {
+    const cwd = c.req.query("cwd");
+    if (!cwd) return c.json({ error: "cwd required" }, 400);
+    return c.json(orchestrator.previewIsolation(cwd));
   });
 
   api.get("/sessions/:id", (c) => {

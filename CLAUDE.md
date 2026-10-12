@@ -62,6 +62,7 @@ Read the matching doc before changing that area:
 - [docs/architecture/council-mode.md](docs/architecture/council-mode.md) — `.council/` filesystem protocol, server + browser pipelines, reconnect grace.
 - [docs/architecture/production-deployment.md](docs/architecture/production-deployment.md) — systemd `KillMode=process`, `COMPANION_ALLOWED_ORIGIN`, the `browsers=0` diagnostic.
 - [docs/architecture/layer-flags.md](docs/architecture/layer-flags.md) — `COMPANION_LAYER_*` / per-session `layers` switches for knowledge, observer, council, auto-proceed (fail-closed, default = prod).
+- [docs/architecture/worktree-isolation.md](docs/architecture/worktree-isolation.md) — `isolation` auto/isolate/shared: dedicated git worktree when another live session uses the same tree; never deletes dirty worktrees.
 
 ### Council Mode convention floor (do not re-flag in council reviews)
 

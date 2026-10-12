@@ -29,6 +29,7 @@ const { mockApi, createSessionStreamMock, mockStoreState, mockStoreGetState } = 
     listPrompts: vi.fn(),
     listLinearConnections: vi.fn(),
     listSandboxes: vi.fn(),
+    getIsolationPreview: vi.fn(),
   },
   createSessionStreamMock: vi.fn(),
   mockStoreState: {
@@ -176,6 +177,63 @@ describe("HomePage", () => {
     mockApi.listSandboxes.mockResolvedValue([]);
     mockApi.getImageStatus.mockResolvedValue({ status: "idle" });
     mockApi.pullImage.mockResolvedValue({ ok: true });
+    // Default: nobody else works in /repo → no isolation choice shown.
+    mockApi.getIsolationPreview.mockResolvedValue({
+      isGitRepo: true, repoRoot: "/repo", liveSessions: [], recommended: "shared",
+      worktreesBaseDir: "/home/ubuntu/.companion/worktrees", warnings: [], repoServiceUnits: [],
+    });
+  });
+
+  // ── Worktree isolation (another live session already uses this tree) ──
+  describe("worktree isolation choice", () => {
+    const busyPreview = {
+      isGitRepo: true, repoRoot: "/repo",
+      liveSessions: [{ sessionId: "other-1", name: "Deploy fix", backendType: "codex" }],
+      recommended: "isolate", worktreesBaseDir: "/home/ubuntu/.companion/worktrees",
+      warnings: [], repoServiceUnits: [],
+    };
+
+    async function sendPrompt() {
+      createSessionStreamMock.mockResolvedValue({ sessionId: "new-session", state: "starting", cwd: "/repo" });
+      const textarea = screen.getByPlaceholderText("Fix a bug, build a feature, refactor code...");
+      fireEvent.change(textarea, { target: { value: "Build a feature" } });
+      fireEvent.keyDown(textarea, { key: "Enter", shiftKey: false });
+      await waitFor(() => expect(createSessionStreamMock).toHaveBeenCalled());
+    }
+
+    it("lone session in the repo: no choice shown, server default (auto) sent", async () => {
+      render(<HomePage />);
+      await waitFor(() => expect(mockApi.getIsolationPreview).toHaveBeenCalledWith("/repo"));
+      expect(screen.queryByTestId("worktree-isolation-choice")).not.toBeInTheDocument();
+      await sendPrompt();
+      expect(createSessionStreamMock).toHaveBeenCalledWith(
+        expect.objectContaining({ isolation: "auto" }),
+        expect.any(Function),
+      );
+    });
+
+    it("live sibling: isolated worktree is the default and sends auto", async () => {
+      mockApi.getIsolationPreview.mockResolvedValue(busyPreview);
+      render(<HomePage />);
+      const isolated = await screen.findByRole("radio", { name: /isolated worktree/i });
+      expect(isolated).toBeChecked();
+      await sendPrompt();
+      expect(createSessionStreamMock).toHaveBeenCalledWith(
+        expect.objectContaining({ isolation: "auto" }),
+        expect.any(Function),
+      );
+    });
+
+    it("opting out ('work in the same tree') sends isolation=shared", async () => {
+      mockApi.getIsolationPreview.mockResolvedValue(busyPreview);
+      render(<HomePage />);
+      fireEvent.click(await screen.findByRole("radio", { name: /work in the same tree/i }));
+      await sendPrompt();
+      expect(createSessionStreamMock).toHaveBeenCalledWith(
+        expect.objectContaining({ isolation: "shared" }),
+        expect.any(Function),
+      );
+    });
   });
 
   it("auto-sets branch from selected mapped Linear issue", async () => {

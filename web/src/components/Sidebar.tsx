@@ -664,6 +664,7 @@ export function Sidebar() {
       cronJobName: bridgeState?.cronJobName || sdkInfo?.cronJobName,
       agentId: bridgeState?.agentId || sdkInfo?.agentId,
       agentName: bridgeState?.agentName || sdkInfo?.agentName,
+      worktree: sdkInfo?.worktree,
     };
   }).sort((a, b) => b.createdAt - a.createdAt);
 

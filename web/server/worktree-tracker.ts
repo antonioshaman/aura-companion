@@ -17,6 +17,18 @@ export interface WorktreeMapping {
   actualBranch?: string;
   worktreePath: string;
   createdAt: number;
+  /**
+   * True when Aura created this worktree automatically to isolate the
+   * session from another live session in the same tree (see
+   * worktree-isolation.ts). Isolated worktrees are never force-removed.
+   */
+  isolated?: boolean;
+  /** Commit the isolated branch was cut from (decides if the branch is safe to delete). */
+  baseCommit?: string;
+  /** Set when archive/delete kept the worktree (e.g. uncommitted changes). */
+  retained?: "dirty" | "error";
+  /** Session branch kept after cleanup because it carries commits. */
+  branchKept?: string;
 }
 
 // ─── Paths ──────────────────────────────────────────────────────────────────
@@ -53,6 +65,14 @@ export class WorktreeTracker {
     // Remove any existing mapping for this session
     this.mappings = this.mappings.filter((m) => m.sessionId !== mapping.sessionId);
     this.mappings.push(mapping);
+    this.save();
+  }
+
+  /** Merge fields into an existing mapping (no-op when absent). */
+  updateMapping(sessionId: string, patch: Partial<Omit<WorktreeMapping, "sessionId">>): void {
+    const m = this.mappings.find((x) => x.sessionId === sessionId);
+    if (!m) return;
+    Object.assign(m, patch);
     this.save();
   }
 

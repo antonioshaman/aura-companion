@@ -143,6 +143,59 @@ describe("SessionItem", () => {
     expect(screen.getByTitle("Scheduled")).toBeInTheDocument();
   });
 
+  // --- Worktree chip (worktree isolation) ---
+
+  it("shows a worktree chip with path + branch when the session runs in a worktree", () => {
+    // The chip is how the user sees WHERE an isolated session works.
+    render(
+      <SessionItem
+        {...buildProps({
+          session: makeSession({
+            worktree: { path: "/wt/repo/s1", branch: "aura/s1", repoRoot: "/repo", isolated: true },
+          }),
+        })}
+      />,
+    );
+    const chip = screen.getByTestId("session-worktree-chip");
+    expect(chip).toHaveTextContent("wt");
+    expect(chip).toHaveAccessibleName("Isolated worktree: /wt/repo/s1 · branch aura/s1");
+  });
+
+  it("marks a worktree kept after archive because of uncommitted changes", () => {
+    // Cleanup never deletes a dirty worktree; the row must say it was kept.
+    render(
+      <SessionItem
+        {...buildProps({
+          session: makeSession({
+            worktree: { path: "/wt/x", branch: "aura/x", repoRoot: "/repo", isolated: true, retained: "dirty" },
+          }),
+        })}
+      />,
+    );
+    const chip = screen.getByTestId("session-worktree-chip");
+    expect(chip).toHaveTextContent("wt kept");
+    expect(chip.getAttribute("title")).toContain("kept: has uncommitted changes");
+  });
+
+  it("renders no worktree chip for sessions in place", () => {
+    render(<SessionItem {...buildProps()} />);
+    expect(screen.queryByTestId("session-worktree-chip")).not.toBeInTheDocument();
+  });
+
+  it("passes axe accessibility checks with the worktree chip", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(
+      <SessionItem
+        {...buildProps({
+          session: makeSession({
+            worktree: { path: "/wt/repo/s1", branch: "aura/s1", repoRoot: "/repo", isolated: true },
+          }),
+        })}
+      />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
   // --- Active state styling ---
 
   it("applies active background class when isActive is true", () => {

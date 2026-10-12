@@ -364,4 +364,16 @@ export interface SdkSessionInfo {
   agentName?: string;
   /** Sandbox profile slug used for this session */
   sandboxSlug?: string;
+  /** Git worktree the session runs in (set when Aura created/tracks one). */
+  worktree?: SessionWorktreeInfo;
+}
+
+export interface SessionWorktreeInfo {
+  path: string;
+  branch: string;
+  repoRoot: string;
+  /** Created automatically to isolate from another live session in the same tree. */
+  isolated: boolean;
+  /** Kept after archive because it has uncommitted changes (`dirty`) or removal failed. */
+  retained?: "dirty" | "error";
 }

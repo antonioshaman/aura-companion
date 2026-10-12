@@ -221,6 +221,8 @@ export interface CreateSessionOpts {
   branch?: string;
   createBranch?: boolean;
   useWorktree?: boolean;
+  /** Worktree isolation: `auto` (server default) isolates only when another live session uses the tree. */
+  isolation?: "auto" | "isolate" | "shared";
   backend?: "claude" | "codex";
   sandboxEnabled?: boolean;
   sandboxSlug?: string;
@@ -337,6 +339,16 @@ export interface GitBranchInfo {
   worktreePath: string | null;
   ahead: number;
   behind: number;
+}
+
+export interface IsolationPreview {
+  isGitRepo: boolean;
+  repoRoot: string | null;
+  liveSessions: Array<{ sessionId: string; name?: string; backendType?: string }>;
+  recommended: "isolate" | "shared";
+  worktreesBaseDir: string;
+  warnings: string[];
+  repoServiceUnits: string[];
 }
 
 export interface GitWorktreeInfo {
@@ -1236,6 +1248,10 @@ export const api = {
       git_ahead: number;
       git_behind: number;
     }>("/git/pull", { cwd }),
+
+  // Worktree isolation preview for the New Session form
+  getIsolationPreview: (cwd: string) =>
+    get<IsolationPreview>(`/sessions/isolation-preview?cwd=${encodeURIComponent(cwd)}`),
 
   // Git worktrees
   listWorktrees: (repoRoot: string) =>

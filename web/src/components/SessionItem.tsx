@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef, type RefObject } from "react";
+import type { SessionWorktreeInfo } from "../types.js";
 import type { SessionItem as SessionItemType } from "../utils/project-grouping.js";
 import { ProviderBadges, pairHalvesAfterBackendCollapse, providerChipClass } from "./council/index.js";
 import { cliFailedCopy } from "../cli-failed-copy.js";
@@ -440,6 +441,9 @@ export function SessionItem({
                     <img src="/logo-docker.svg" alt="Docker logo" className="w-3 h-3" />
                   </span>
                 )}
+                {s.worktree && (
+                  <WorktreeChip worktree={s.worktree} />
+                )}
                 {s.cronJobId && (
                   <span className="flex items-center px-1 py-0.5 rounded bg-cc-primary/10" title="Scheduled">
                     <svg viewBox="0 0 16 16" fill="currentColor" className="w-2.5 h-2.5 text-cc-primary">
@@ -612,5 +616,36 @@ export function SessionItem({
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * Worktree chip: the session runs in its own git worktree. Hover shows the
+ * path + branch. `kept` (amber) = archived but the worktree was retained
+ * because it still has uncommitted changes — nothing was deleted.
+ */
+function WorktreeChip({ worktree }: { worktree: SessionWorktreeInfo }) {
+  const kept = worktree.retained !== undefined;
+  const label = [
+    `${worktree.isolated ? "Isolated worktree" : "Worktree"}: ${worktree.path}`,
+    `branch ${worktree.branch}`,
+    kept
+      ? worktree.retained === "dirty"
+        ? "kept: has uncommitted changes"
+        : "kept: removal failed"
+      : null,
+  ].filter(Boolean).join(" · ");
+  return (
+    <span
+      data-testid="session-worktree-chip"
+      role="img"
+      aria-label={label}
+      title={label}
+      className={`font-mono-code uppercase tracking-wide leading-none text-[10px] px-1.5 py-0.5 rounded-md ${
+        kept ? "bg-amber-500/15 text-amber-500" : "bg-emerald-500/10 text-emerald-500"
+      }`}
+    >
+      {kept ? "wt kept" : "wt"}
+    </span>
   );
 }
