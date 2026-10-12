@@ -190,6 +190,17 @@ describe("maskSecrets", () => {
     expect(maskSecrets(`token=${AUTH_TOKEN} argvSha256=${digest}`)).toBe(`token=[REDACTED] argvSha256=${digest}`);
   });
 
+  it("applies the shared recorder policy (npm_, gnk-, Telegram, KEY=value) to log lines", () => {
+    // SYNTHETIC values with the real token shapes — never real secrets.
+    const body = "aB3dE5gH7jK9mN1pQ".repeat(3);
+    expect(maskSecrets(`publish npm_${body.slice(0, 36)}`)).toBe("publish npm_[REDACTED]");
+    expect(maskSecrets(`gonka gnk-${body.slice(0, 40)}`)).toBe("gonka gnk-[REDACTED]");
+    expect(maskSecrets(`bot 123456789:AA${body.slice(0, 33)}`)).toBe("bot 123456789:[REDACTED]");
+    expect(maskSecrets(`OPENROUTER_API_KEY=${body.slice(0, 32)}`)).toBe("OPENROUTER_API_KEY=[REDACTED]");
+    // Code that merely names a token is untouched.
+    expect(maskSecrets("token = settings.bot_token")).toBe("token = settings.bot_token");
+  });
+
   it("redacts OAuth access/refresh token fields in JSON, query and key=value form", () => {
     expect(maskSecrets('{"access_token":"gho_secret1","refresh_token":"r1"}')).toBe(
       '{"access_token":"[REDACTED]","refresh_token":"[REDACTED]"}',
