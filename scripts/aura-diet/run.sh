@@ -87,8 +87,13 @@ while :; do
   runner=$(python3 - "$STATE" <<'PY'
 import json,sys
 s=json.load(open(sys.argv[1])); b=s.get("bench",{})
-st=s["phases"]["P6"]["steps"].get("D2-full",{}).get("status")
-if st=="in_progress" and b.get("runner_cmd") and b.get("cells_done",0)<b.get("cells_total",1):
+steps=s["phases"]["P6"]["steps"]
+# Generic long run: any P6 step named in bench.active_step, in_progress, with
+# bench.active_runner_cmd and not yet marked complete (bench.active_done).
+act=b.get("active_step")
+if act and steps.get(act,{}).get("status")=="in_progress" and b.get("active_runner_cmd") and not b.get("active_done"):
+    print(b["active_runner_cmd"])
+elif steps.get("D2-full",{}).get("status")=="in_progress" and b.get("runner_cmd") and b.get("cells_done",0)<b.get("cells_total",1):
     print(b["runner_cmd"])
 PY
 )

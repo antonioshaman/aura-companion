@@ -17,12 +17,12 @@
  *    `__fixtures__/observer-reply/`, provenance in its README).
  */
 
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { writeAtomicJson } from "./atomic-write.js";
-import { parseObserverReviewPayload } from "./council-types.js";
+import { type ObserverReviewPayload, normalizeCodexObserverReviewRaw, parseObserverReviewPayload } from "./council-types.js";
 import {
   ObserverReplyCapture,
   type ObserverReplyCaptureDeps,
@@ -30,7 +30,7 @@ import {
   buildHostObserverReview,
   extractObserverFindings,
 } from "./observer-reply.js";
-import { findReviewForCheckpointSync } from "./review-watcher.js";
+import { findOwnReviewForCheckpointSync, findReviewForCheckpointSync, watchReviews } from "./review-watcher.js";
 
 const STOP = { severity: "STOP", claim: "x is null on the retry path", evidence_path: "src/a.ts", evidence_lines: [3, 9], confidence: "high" };
 
@@ -197,10 +197,9 @@ describe("ObserverReplyCapture", () => {
     deps = {
       now: () => new Date("2026-09-28T05:00:00Z"),
       writeReview: (path, payload) => writeAtomicJson(path, payload),
-      findExistingReview: (directory, checkpointId, groupId) => {
-        const f = findReviewForCheckpointSync({ directory, checkpointId });
-        return f && f.payload.session_group_id === groupId ? f.file : null;
-      },
+      findExistingReview: (directory, checkpointId, sessionGroupId) =>
+        findOwnReviewForCheckpointSync({ directory, checkpointId, sessionGroupId }),
+      moveAside: (directory, file, asideName) => renameSync(join(directory, file), join(directory, asideName)),
       resolveCliVersion: () => "2.1.283",
     };
     capture = new ObserverReplyCapture(deps);
@@ -358,5 +357,225 @@ describe("ObserverReplyCapture", () => {
     const out = replay(fixture, provider);
     expect(out).toMatchObject({ kind: "rejected" });
     expect(() => readdirSync(join(cwd, ".council", "reviews"))).toThrow();
+  });
+});
+
+// ── BENCH-H: group-less observer review files in a shared workspace ────────
+//
+// AuraBench BENCH-H (PR #330) found Codex observers writing their review as
+// `.council/reviews/spawn-codex-observer.md` — no `grp_…` segment — and
+// self-reporting `observer_model: "gpt-5-codex"` while the session ran
+// `gpt-5.5`. Several pairs can share one `.council/` (prod checkout), so that
+// name is ambiguous: two observers overwrite it and before this fix each
+// pair's watcher consumed whatever was there, trusting the payload's own
+// group claim and model. These tests replay the REAL group-less files
+// captured on this box (fixtures README) and the REAL codex legacy turn
+// frames (model `gpt-5.5`), with two groups sharing one directory and the
+// real per-group watchers running.
+describe("group-less observer review files (BENCH-H)", () => {
+  const FIXTURES = join(__dirname, "__fixtures__", "observer-reply");
+  // Group id baked into the captured schema-shaped fixture.
+  const GROUP_A = "grp_cf817d385e821de93883337e81800ce7";
+  const GROUP_B = "grp_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  const SPAWN_A = `spawn-${GROUP_A}`;
+  const SPAWN_B = `spawn-${GROUP_B}`;
+  const GROUPLESS = "spawn-codex-observer.md";
+  let cwd: string;
+  let reviewsDir: string;
+  let capture: ObserverReplyCapture;
+
+  // Production-equivalent deps: the codex normalizer the orchestrator wires
+  // into `findExistingReview`, the real ownership-checked finder, a real
+  // rename for the move-aside.
+  const normalizeRaw = (raw: string, provider: "claude" | "codex") =>
+    provider === "codex"
+      ? normalizeCodexObserverReviewRaw(raw, { observerModel: "gpt-5.5", observerCliVersion: "unknown" })
+      : raw;
+
+  beforeEach(() => {
+    cwd = mkdtempSync(join(tmpdir(), "obs-groupless-"));
+    reviewsDir = join(cwd, ".council", "reviews");
+    mkdirSync(reviewsDir, { recursive: true });
+    capture = new ObserverReplyCapture({
+      now: () => new Date("2026-10-08T12:00:00Z"),
+      writeReview: (path, payload) => writeAtomicJson(path, payload),
+      findExistingReview: (directory, checkpointId, sessionGroupId) =>
+        findOwnReviewForCheckpointSync({ directory, checkpointId, sessionGroupId, normalizeRaw }),
+      moveAside: (directory, file, asideName) => renameSync(join(directory, file), join(directory, asideName)),
+      resolveCliVersion: () => "0.130.0",
+    });
+  });
+  afterEach(() => rmSync(cwd, { recursive: true, force: true }));
+
+  const codexExpectation = (sessionGroupId: string, checkpointId: string): ObserverReplyExpectation => ({
+    sessionGroupId,
+    checkpointId,
+    phase: "spawn",
+    provider: "codex",
+    cwd,
+    fallbackModel: "gpt-5.5",
+  });
+
+  /** Replay the captured codex legacy turn (frames carry model `gpt-5.5`,
+   *  final text is prose — the observer "wrote the file itself"). */
+  function replayLegacyCodexTurn(sessionId: string) {
+    const lines = readFileSync(join(FIXTURES, "codex-legacy-turn.jsonl"), "utf-8").split("\n").filter(Boolean);
+    for (const l of lines) {
+      const f = JSON.parse(l);
+      if (f.type === "assistant") capture.onAssistant(sessionId, f);
+    }
+  }
+
+  /** The captured group-less file, re-addressed to `groupId`. */
+  function grouplessFixture(name: string, groupId: string): string {
+    return readFileSync(join(FIXTURES, name), "utf-8").replaceAll(/grp_[0-9a-f]{32}/g, groupId);
+  }
+
+  /** Two real per-group watchers on the ONE shared reviews directory. */
+  function startWatchers() {
+    const controller = new AbortController();
+    const seen: Record<string, ObserverReviewPayload[]> = { [GROUP_A]: [], [GROUP_B]: [] };
+    const done = Promise.all(
+      [GROUP_A, GROUP_B].map((g) =>
+        watchReviews({
+          directory: reviewsDir,
+          signal: controller.signal,
+          sessionGroupId: g,
+          normalizeRaw,
+          onReview: (p) => { seen[g]!.push(p); },
+        }),
+      ),
+    );
+    return { seen, stop: async () => { controller.abort(); await done; } };
+  }
+  const settle = () => new Promise((r) => setTimeout(r, 500));
+
+  // Core replay: observer A writes the group-less file; neither watcher may
+  // consume it. At turn end the host adopts it for A: canonical group-scoped
+  // file with the host model, group-less original moved aside. Only A's
+  // watcher sees the review; B sees nothing.
+  it("adopts A's group-less file for A only, host-stamps the model, and hides the original from B", async () => {
+    const w = startWatchers();
+    capture.expect("obs_a", codexExpectation(GROUP_A, SPAWN_A));
+    replayLegacyCodexTurn("obs_a");
+    writeFileSync(join(reviewsDir, GROUPLESS), grouplessFixture("codex-groupless-review-schema.md", GROUP_A));
+    await settle();
+    // Group-less name: ambiguous → no pair's watcher consumes it.
+    expect(w.seen[GROUP_A]).toHaveLength(0);
+    expect(w.seen[GROUP_B]).toHaveLength(0);
+
+    const out = capture.finalize("obs_a");
+    expect(out).toMatchObject({
+      kind: "adopted",
+      file: `spawn-${GROUP_A}-codex-observer.md`,
+      sourceFile: GROUPLESS,
+      findingCount: 0,
+      reportedModel: "gpt-5-codex", // the LLM's self-report…
+      hostModel: "gpt-5.5", //         …loses to the frames' model
+    });
+    await settle();
+    await w.stop();
+
+    expect(w.seen[GROUP_A]).toHaveLength(1);
+    expect(w.seen[GROUP_A]![0]).toMatchObject({
+      session_group_id: GROUP_A,
+      checkpoint_id: SPAWN_A,
+      observer_model: "gpt-5.5",
+      observer_cli_version: "0.130.0",
+      reviewed_at: "2026-10-08T12:00:00.000Z",
+    });
+    expect(w.seen[GROUP_B]).toHaveLength(0);
+    // The group-less original is gone from every reader's view: B's finder
+    // and the any-group rescan only see A's canonical file.
+    const files = readdirSync(reviewsDir);
+    expect(files).not.toContain(GROUPLESS);
+    expect(files.filter((f) => f.startsWith(`${GROUPLESS}.adopted-${GROUP_A}-`))).toHaveLength(1);
+    expect(findOwnReviewForCheckpointSync({ directory: reviewsDir, checkpointId: SPAWN_A, sessionGroupId: GROUP_B })).toBeNull();
+    expect(findReviewForCheckpointSync({ directory: reviewsDir, checkpointId: SPAWN_A })?.file).toBe(`spawn-${GROUP_A}-codex-observer.md`);
+  });
+
+  // Both pairs' codex observers write the SAME group-less name in turn. Each
+  // host adopts only the file that names its own group, so each group ends
+  // with exactly its own review — never the neighbour's.
+  it("two pairs writing the same group-less name each get only their own review", async () => {
+    const w = startWatchers();
+    capture.expect("obs_a", codexExpectation(GROUP_A, SPAWN_A));
+    replayLegacyCodexTurn("obs_a");
+    writeFileSync(join(reviewsDir, GROUPLESS), grouplessFixture("codex-groupless-review-schema.md", GROUP_A));
+    expect(capture.finalize("obs_a")).toMatchObject({ kind: "adopted" });
+
+    capture.expect("obs_b", codexExpectation(GROUP_B, SPAWN_B));
+    replayLegacyCodexTurn("obs_b");
+    // Codex-native shape (no schema_version/model) — the other captured form.
+    writeFileSync(join(reviewsDir, GROUPLESS), grouplessFixture("codex-groupless-review-native.md", GROUP_B));
+    expect(capture.finalize("obs_b")).toMatchObject({ kind: "adopted", file: `spawn-${GROUP_B}-codex-observer.md` });
+    await settle();
+    await w.stop();
+
+    expect(w.seen[GROUP_A]!.map((p) => [p.session_group_id, p.checkpoint_id])).toEqual([[GROUP_A, SPAWN_A]]);
+    expect(w.seen[GROUP_B]!.map((p) => [p.session_group_id, p.checkpoint_id])).toEqual([[GROUP_B, SPAWN_B]]);
+    expect(w.seen[GROUP_B]![0]!.observer_model).toBe("gpt-5.5");
+    expect(readdirSync(reviewsDir)).not.toContain(GROUPLESS);
+  });
+
+  // The other pair overwrote the group-less file before A's turn ended: the
+  // file now names B. A must NOT adopt (or move) it — A falls back to its own
+  // chat reply; the file stays for B's host to adopt.
+  it("never adopts a group-less file that names another group", () => {
+    writeFileSync(join(reviewsDir, GROUPLESS), grouplessFixture("codex-groupless-review-schema.md", GROUP_B));
+    const before = readFileSync(join(reviewsDir, GROUPLESS), "utf-8");
+    capture.expect("obs_a", codexExpectation(GROUP_A, SPAWN_A));
+    capture.onAssistant("obs_a", assistant([{ type: "text", text: JSON.stringify([STOP]) }], "gpt-5.5"));
+    expect(capture.finalize("obs_a")).toMatchObject({ kind: "written", file: `spawn-${GROUP_A}-codex-observer.md`, findingCount: 1 });
+    expect(readFileSync(join(reviewsDir, GROUPLESS), "utf-8")).toBe(before);
+  });
+
+  // A group-less file with no attributable group (the bare `[]` seen in a
+  // bench instance) is not a review of anyone: the reply is used instead.
+  it("ignores an unattributable group-less file and uses the reply", () => {
+    writeFileSync(join(reviewsDir, GROUPLESS), "[]");
+    capture.expect("obs_a", codexExpectation(GROUP_A, SPAWN_A));
+    capture.onAssistant("obs_a", assistant([{ type: "text", text: "[]" }], "gpt-5.5"));
+    expect(capture.finalize("obs_a")).toMatchObject({ kind: "written" });
+    expect(readFileSync(join(reviewsDir, GROUPLESS), "utf-8")).toBe("[]");
+  });
+
+  // Unchanged path: a canonical group-scoped file wins over a group-less one
+  // for the same checkpoint, and the host stands down exactly as before.
+  it("still stands down for a canonical file even when a group-less copy also exists", () => {
+    const canonical = `spawn-${GROUP_A}-codex-observer.md`;
+    writeFileSync(join(reviewsDir, GROUPLESS), grouplessFixture("codex-groupless-review-schema.md", GROUP_A));
+    writeFileSync(join(reviewsDir, canonical), grouplessFixture("codex-groupless-review-schema.md", GROUP_A));
+    capture.expect("obs_a", codexExpectation(GROUP_A, SPAWN_A));
+    replayLegacyCodexTurn("obs_a");
+    expect(capture.finalize("obs_a")).toMatchObject({ kind: "skipped_existing", file: canonical });
+  });
+
+  // A failed move-aside is reported, not thrown, and the review is still
+  // adopted (the group-less file stays unconsumed by any watcher).
+  it("reports a failed move-aside without losing the adopted review", () => {
+    const failing = new ObserverReplyCapture({
+      now: () => new Date("2026-10-08T12:00:00Z"),
+      writeReview: (path, payload) => writeAtomicJson(path, payload),
+      findExistingReview: (directory, checkpointId, sessionGroupId) =>
+        findOwnReviewForCheckpointSync({ directory, checkpointId, sessionGroupId, normalizeRaw }),
+      moveAside: () => { throw new Error("EACCES"); },
+      resolveCliVersion: () => undefined,
+    });
+    writeFileSync(join(reviewsDir, GROUPLESS), grouplessFixture("codex-groupless-review-schema.md", GROUP_A));
+    failing.expect("obs_a", codexExpectation(GROUP_A, SPAWN_A));
+    expect(failing.finalize("obs_a")).toMatchObject({ kind: "adopted", asideError: "EACCES", hostModel: "gpt-5.5" });
+    expect(existsSync(join(reviewsDir, `spawn-${GROUP_A}-codex-observer.md`))).toBe(true);
+  });
+
+  // The observed model outlives the per-wake slot (for stamping a review
+  // the watcher delivers after finalize) and is dropped on forget.
+  it("remembers the frames' model per session until forget", () => {
+    capture.expect("obs_a", codexExpectation(GROUP_A, SPAWN_A));
+    replayLegacyCodexTurn("obs_a");
+    capture.finalize("obs_a");
+    expect(capture.observedModel("obs_a")).toBe("gpt-5.5");
+    capture.forget("obs_a");
+    expect(capture.observedModel("obs_a")).toBeUndefined();
   });
 });

@@ -169,6 +169,81 @@ export function findReviewForCheckpointSync(opts: {
   return null;
 }
 
+/**
+ * True when `file` is a review name scoped to `sessionGroupId`, i.e. the shape
+ * {@link buildObserverReviewFilename} produces WITH a group id:
+ * `<phase>-<group>-<provider>-observer.md`.
+ *
+ * A group-less `<phase>-<provider>-observer.md` (observed from Codex observers
+ * that ignore the reply-only contract, AuraBench BENCH-H) is NOT group-scoped:
+ * in a workspace shared by several pairs every pair's observer can write the
+ * same name, so the name alone cannot say whose review it is. Only the host
+ * that woke the observer can attribute it (see `ObserverReplyCapture`'s
+ * adoption path), so the per-group watcher never consumes such a file.
+ */
+export function isGroupScopedReviewFilename(file: string, sessionGroupId: string): boolean {
+  if (!OBSERVER_REVIEW_FILE_PATTERN.test(file)) return false;
+  return file.endsWith(`-${sessionGroupId}-claude-observer.md`) || file.endsWith(`-${sessionGroupId}-codex-observer.md`);
+}
+
+/**
+ * Suffix appended to a group-less review file once the host has adopted it
+ * under the canonical group-scoped name. The result no longer ends in `.md`,
+ * so no watcher, rescan or bootstrap reader ({@link OBSERVER_REVIEW_FILE_PATTERN})
+ * can pick it up again — in particular not another pair sharing the directory.
+ */
+export function adoptedReviewAsideName(file: string, sessionGroupId: string, atMs: number): string {
+  return `${file}.adopted-${sessionGroupId}-${atMs}`;
+}
+
+/**
+ * Like {@link findReviewForCheckpointSync}, but only returns a review OWNED by
+ * `sessionGroupId` (payload `session_group_id` matches), preferring the
+ * group-scoped file name over a group-less one when both answer the
+ * checkpoint. A foreign pair's same-checkpoint file never masks ours (the
+ * first-match helper above returns whatever readdir lists first).
+ */
+export function findOwnReviewForCheckpointSync(opts: {
+  directory: string;
+  checkpointId: string;
+  sessionGroupId: string;
+  normalizeRaw?: (raw: string, provider: "claude" | "codex") => string;
+}): { payload: ObserverReviewPayload; file: string; groupScoped: boolean; reviewedAt?: number } | null {
+  let entries: string[];
+  try {
+    entries = readdirSync(opts.directory).filter((f) => OBSERVER_REVIEW_FILE_PATTERN.test(f));
+  } catch {
+    return null;
+  }
+  let groupless: { payload: ObserverReviewPayload; file: string; groupScoped: boolean; reviewedAt?: number } | null = null;
+  for (const file of entries) {
+    const path = join(opts.directory, file);
+    let raw: string;
+    try {
+      raw = readFileSync(path, "utf-8");
+      if (opts.normalizeRaw) {
+        const provider = OBSERVER_REVIEW_FILE_PATTERN.exec(file)?.[1] as "claude" | "codex" | undefined;
+        if (provider) raw = opts.normalizeRaw(raw, provider);
+      }
+    } catch {
+      continue;
+    }
+    const payload = parseObserverReviewPayload(raw);
+    if (!payload || payload.checkpoint_id !== opts.checkpointId) continue;
+    if (payload.session_group_id !== opts.sessionGroupId) continue;
+    let reviewedAt: number | undefined;
+    try {
+      reviewedAt = statSync(path).mtimeMs;
+    } catch {
+      reviewedAt = undefined;
+    }
+    const groupScoped = isGroupScopedReviewFilename(file, opts.sessionGroupId);
+    if (groupScoped) return { payload, file, groupScoped, reviewedAt };
+    groupless ??= { payload, file, groupScoped, reviewedAt };
+  }
+  return groupless;
+}
+
 export type ReviewDropReason =
   | "invalid-schema"
   | "invalid-filename"
@@ -218,6 +293,15 @@ export interface ReviewWatcherOptions {
    * before the timer fires" removes the real-fs.watch timing flake.
    */
   debounceMs?: number;
+  /**
+   * The pair this watcher serves. When set, only review files named for THIS
+   * group ({@link isGroupScopedReviewFilename}) are read; group-less and other
+   * groups' files are skipped without a drop event (they are not this pair's
+   * to consume — a group-less file is adopted, if at all, by the host that
+   * woke its author). Unset = legacy single-tenant behaviour (every
+   * pattern-matching file is read), kept for tests and external callers.
+   */
+  sessionGroupId?: string;
 }
 
 /**
@@ -260,6 +344,7 @@ export async function watchReviews(opts: ReviewWatcherOptions): Promise<void> {
         onDropped("invalid-filename", file);
         continue;
       }
+      if (opts.sessionGroupId !== undefined && !isGroupScopedReviewFilename(file, opts.sessionGroupId)) continue;
 
       // Capture the current mtime as the key for THIS debounce window. If
       // a second event arrives with the same mtime, it's a duplicate FS

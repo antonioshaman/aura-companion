@@ -46,6 +46,9 @@ function makeRecovery(sessions: Map<string, SdkSessionInfo>) {
     isCliConnected: vi.fn(() => false),
     getSession: vi.fn(() => undefined),
     broadcastToSession: vi.fn(),
+    // #327: the drift tick asks how many user messages are queued for the
+    // session before honouring a suppression. Default: none queued.
+    getSessionPendingMessageCount: vi.fn(() => 0),
   };
   // P4/FIX-AUTOHEAL-1: the orchestrator's set carries relaunch-mark ownership.
   const intentionalKills = new IntentionalKills();

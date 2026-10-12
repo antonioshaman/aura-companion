@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -8,12 +8,15 @@ import {
   type CouncilWatcherEntry,
 } from "./council-checkpoint-pipeline.js";
 import { CheckpointLineSnapshots } from "./observer-line-snapshots.js";
-import { ObserverReplyCapture } from "./observer-reply.js";
+import { ObserverReplyCapture, type ObserverReplyCaptureDeps } from "./observer-reply.js";
 import { ObserverReadLedger } from "./observer-read-ledger.js";
 import { readCouncilWakeSentinel } from "./council-wake-sentinel.js";
 import { companionBus } from "./event-bus.js";
 import type { SessionGroupCoordinator } from "./session-group-coordinator.js";
 import type { CheckpointPayload } from "./council-types.js";
+import { writeAtomicJson } from "./atomic-write.js";
+import { log } from "./logger.js";
+import { findOwnReviewForCheckpointSync } from "./review-watcher.js";
 
 // P4/C1a: the checkpoint → wake → review pipeline was extracted verbatim from
 // session-orchestrator.ts. Its behaviour is pinned end-to-end by the
@@ -33,6 +36,7 @@ interface Harness {
   setCoordinator: (c: SessionGroupCoordinator | null) => void;
   setApiLimited: (v: boolean) => void;
   ledger: ObserverReadLedger;
+  capture: ObserverReplyCapture;
   cwd: string;
 }
 
@@ -45,7 +49,10 @@ function activeCoordinator(status = "active"): SessionGroupCoordinator {
   return { get: vi.fn(() => ({ sessionGroupId: GROUP, status })), applyEvent: vi.fn() } as unknown as SessionGroupCoordinator;
 }
 
-function makeHarness(opts: { onObserverAdapterMissing?: (g: string, p: CheckpointPayload) => void } = {}): Harness {
+function makeHarness(opts: {
+  onObserverAdapterMissing?: (g: string, p: CheckpointPayload) => void;
+  captureDeps?: Partial<ObserverReplyCaptureDeps>;
+} = {}): Harness {
   const cwd = realpathSync(mkdtempSync(join(tmpdir(), "council-pipeline-")));
   const watchers = new Map<string, CouncilWatcherEntry>();
   const meta = new Map<string, CheckpointPipelineGroupMeta>();
@@ -53,18 +60,21 @@ function makeHarness(opts: { onObserverAdapterMissing?: (g: string, p: Checkpoin
   let apiLimited = false;
   const send = vi.fn(() => ({ kind: "sent" as const }));
   const ledger = new ObserverReadLedger();
+  const replyCapture = new ObserverReplyCapture({
+    now: () => new Date(),
+    writeReview: () => {},
+    findExistingReview: () => null,
+    moveAside: () => {},
+    resolveCliVersion: () => undefined,
+    ...opts.captureDeps,
+  });
   const pipeline = new CouncilCheckpointPipeline({
     watchers,
     groupMeta: meta,
     getCoordinator: () => coordinator,
     getWsBridge: () => ({ sendObserverWakeFrame: send }),
     isApiLimitReached: () => apiLimited,
-    replyCapture: new ObserverReplyCapture({
-      now: () => new Date(),
-      writeReview: () => {},
-      findExistingReview: () => null,
-      resolveCliVersion: () => undefined,
-    }),
+    replyCapture,
     lineSnapshots: new CheckpointLineSnapshots(),
     readLedger: ledger,
     onObserverAdapterMissing: opts.onObserverAdapterMissing,
@@ -91,7 +101,7 @@ function makeHarness(opts: { onObserverAdapterMissing?: (g: string, p: Checkpoin
     rmSync(cwd, { recursive: true, force: true });
   });
   return {
-    pipeline, watchers, meta, send, cwd, ledger,
+    pipeline, watchers, meta, send, cwd, ledger, capture: replyCapture,
     setCoordinator: (c) => { coordinator = c; },
     setApiLimited: (v) => { apiLimited = v; },
   };
@@ -318,5 +328,132 @@ describe("CouncilCheckpointPipeline (standalone, DI only)", () => {
     h.send.mockReturnValueOnce({ kind: "socket_disconnected" } as never);
     h.pipeline.dispatchObserverWake(GROUP, checkpoint(2));
     expect(hook).toHaveBeenCalledTimes(1);
+  });
+});
+
+// BENCH-H: group-less observer review files + host-stamped observer model.
+describe("CouncilCheckpointPipeline — group-less reviews and host model (BENCH-H)", () => {
+  const ownReview = (overrides: Record<string, unknown> = {}) => ({
+    schema_version: 1,
+    checkpoint_id: "chk_1",
+    phase: "council-plan",
+    session_group_id: GROUP,
+    reviewed_at: "2026-01-01T00:00:00Z",
+    observer_provider: "codex",
+    observer_model: "gpt-5-codex",
+    observer_cli_version: "1",
+    findings: [],
+    ...overrides,
+  });
+  const codexFrame = (text: string) => ({
+    type: "assistant",
+    message: { content: [{ type: "text", text }], model: "gpt-5.5" },
+  });
+  function captureReviews() {
+    const reviews: Array<{ checkpointId: string; observerModel: string }> = [];
+    cleanups.push(companionBus.on("group:review", (e) => { reviews.push(e); }));
+    return reviews;
+  }
+  function spyWarn() {
+    const spy = vi.spyOn(log, "warn");
+    cleanups.push(() => spy.mockRestore());
+    return () => spy.mock.calls.map((c) => c[2] as Record<string, unknown> | undefined);
+  }
+
+  // An observer-written file's self-reported model loses to the model the
+  // observer session's own frames carried; the mismatch is a structured
+  // EC-9-shaped event (event + sessionGroupId + sessionId + role).
+  it("stamps the host-observed model over the file's self-report and logs the mismatch", () => {
+    const h = makeHarness();
+    h.setCoordinator(activeCoordinator());
+    const reviews = captureReviews();
+    const warns = spyWarn();
+    h.pipeline.handleCouncilCheckpoint(GROUP, checkpoint(1));
+    h.capture.onAssistant(OBSERVER, codexFrame("reading"));
+    h.pipeline.handleCouncilReview(GROUP, ownReview() as never);
+    expect(reviews.map((r) => r.observerModel)).toEqual(["gpt-5.5"]);
+    expect(warns()).toContainEqual(expect.objectContaining({
+      event: "council.review.observer_model_mismatch",
+      sessionGroupId: GROUP,
+      sessionId: OBSERVER,
+      role: "observer",
+      reportedModel: "gpt-5-codex",
+      hostModel: "gpt-5.5",
+    }));
+  });
+
+  // No host fact (no frame observed, e.g. recovered after a restart): the
+  // file's value stands and nothing is logged — never invent a model.
+  it("keeps the file's model when the host observed none", () => {
+    const h = makeHarness();
+    h.setCoordinator(activeCoordinator());
+    const reviews = captureReviews();
+    const warns = spyWarn();
+    h.pipeline.handleCouncilReview(GROUP, ownReview() as never);
+    expect(reviews.map((r) => r.observerModel)).toEqual(["gpt-5-codex"]);
+    expect(warns().some((d) => d?.event === "council.review.observer_model_mismatch")).toBe(false);
+  });
+
+  // End-to-end through the pipeline seam with production-equivalent capture
+  // deps: a codex observer writes `council-plan-codex-observer.md` (no group
+  // segment) and replies with prose. finalizeObserverReply adopts it under
+  // the canonical name and logs a structured adoption + model-mismatch event.
+  it("finalizeObserverReply adopts a group-less codex file and logs it structurally", () => {
+    const h = makeHarness({
+      captureDeps: {
+        writeReview: (path, payload) => writeAtomicJson(path, payload),
+        findExistingReview: (directory, checkpointId, sessionGroupId) =>
+          findOwnReviewForCheckpointSync({ directory, checkpointId, sessionGroupId }),
+        moveAside: (directory, file, asideName) => renameSync(join(directory, file), join(directory, asideName)),
+      },
+    });
+    h.meta.get(GROUP)!.pairing = "claude+codex";
+    h.setCoordinator(activeCoordinator());
+    const warns = spyWarn();
+    h.pipeline.handleCouncilCheckpoint(GROUP, checkpoint(1));
+    const reviewsDir = join(h.cwd, ".council", "reviews");
+    mkdirSync(reviewsDir, { recursive: true });
+    writeFileSync(join(reviewsDir, "council-plan-codex-observer.md"), JSON.stringify(ownReview()));
+    h.capture.onAssistant(OBSERVER, codexFrame("Review written."));
+    h.pipeline.finalizeObserverReply(GROUP, OBSERVER);
+
+    const canonical = `council-plan-${GROUP}-codex-observer.md`;
+    expect(JSON.parse(readFileSync(join(reviewsDir, canonical), "utf-8"))).toMatchObject({
+      session_group_id: GROUP, checkpoint_id: "chk_1", observer_model: "gpt-5.5",
+    });
+    expect(existsSync(join(reviewsDir, "council-plan-codex-observer.md"))).toBe(false);
+    expect(warns()).toContainEqual(expect.objectContaining({
+      event: "council.observer_reply.groupless_review_adopted",
+      sessionGroupId: GROUP, sessionId: OBSERVER, role: "observer",
+      file: canonical, sourceFile: "council-plan-codex-observer.md",
+    }));
+    expect(warns()).toContainEqual(expect.objectContaining({
+      event: "council.review.observer_model_mismatch", source: "groupless_file",
+      sessionGroupId: GROUP, sessionId: OBSERVER, role: "observer",
+    }));
+  });
+
+  // Deadline rescan: a neighbour's same-checkpoint review listed first by
+  // readdir must not mask our own review on disk (it used to degrade the group
+  // with `foreign_group_review` while our review sat next to it).
+  it("deadline rescan recovers our own review even when a foreign one sorts first", () => {
+    const h = makeHarness();
+    const coordinator = activeCoordinator();
+    h.setCoordinator(coordinator);
+    const reviews = captureReviews();
+    h.pipeline.handleCouncilCheckpoint(GROUP, checkpoint(1));
+    const reviewsDir = join(h.cwd, ".council", "reviews");
+    mkdirSync(reviewsDir, { recursive: true });
+    // readdir order is filesystem-defined; several foreign names written
+    // AFTER ours put a foreign file before ours in practice (verified: this
+    // test fails against the first-match rescan on ext4). The assertion
+    // holds for ANY order — that order-independence is the fix.
+    writeFileSync(join(reviewsDir, `council-plan-${GROUP}-codex-observer.md`), JSON.stringify(ownReview()));
+    for (const p of ["aaa", "mmm", "zzz", "council-plan"]) {
+      writeFileSync(join(reviewsDir, `${p}-grp_other-codex-observer.md`), JSON.stringify(ownReview({ session_group_id: "grp_other" })));
+    }
+    h.pipeline.handleReviewDeadlineExpired(GROUP, "chk_1");
+    expect(reviews.map((r) => r.checkpointId)).toEqual(["chk_1"]);
+    expect(coordinator.applyEvent).not.toHaveBeenCalled();
   });
 });

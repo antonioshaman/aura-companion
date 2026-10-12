@@ -60,12 +60,18 @@ describe("repo root hygiene (P7/REPO-JUNK)", () => {
     expect(trackedFiles().filter((f) => f.includes("'"))).toEqual([]);
   });
 
-  it("README does not recommend installing the stale npm package", () => {
+  it("README recommends the npm package only while it is publishable", () => {
     const readme = readFileSync(join(repoRoot, "README.md"), "utf-8");
+    const pkg = JSON.parse(readFileSync(join(repoRoot, "web", "package.json"), "utf-8")) as { private?: boolean };
     // Any shell line that installs or runs the npm package counts; prose
-    // mentioning the package name is fine.
-    expect(readme).not.toMatch(/^\s*(?:bunx|npx)\s+aura-companion\b/m);
-    expect(readme).not.toMatch(/^\s*(?:bun|npm)\s+(?:install|i|add)\s+-g\s+aura-companion\b/m);
+    // mentioning the package name is fine. The guard exists because a README
+    // pointing at npm while the package is `private` (never published) sends
+    // users to a stale or foreign release — the audit's supply-chain finding.
+    const recommendsNpm =
+      /^\s*(?:bunx|npx)\s+aura-companion\b/m.test(readme) ||
+      /^\s*(?:bun|npm)\s+(?:install|i|add)\s+-g\s+aura-companion\b/m.test(readme);
+    if (pkg.private) expect(recommendsNpm).toBe(false);
+    // The git-clone path stays documented either way.
     expect(readme).toContain("git clone https://github.com/antonioshaman/aura-companion.git");
   });
 });

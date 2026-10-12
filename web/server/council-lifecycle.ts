@@ -1053,6 +1053,10 @@ export class CouncilLifecycle {
         watchReviews({
           directory: reviewsDir,
           signal: abort.signal,
+          // Only this pair's group-scoped review files: a group-less
+          // `<phase>-<provider>-observer.md` in a shared workspace is
+          // ambiguous and is adopted by the host that woke its author.
+          sessionGroupId,
           onReview: (payload, reviewedAt) => this.deps.handleCouncilReview(sessionGroupId, payload, reviewedAt),
           normalizeRaw: (raw, provider) => this.deps.normalizeObserverReviewRaw(sessionGroupId, raw, provider),
         }),

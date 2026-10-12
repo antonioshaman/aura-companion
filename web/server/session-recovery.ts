@@ -494,16 +494,40 @@ export class SessionRecovery {
       }
 
       if (verdict.suppressedReason) {
-        if (this.driftSuppressedLogged.get(info.sessionId) !== bunLastFrameMs) {
-          this.driftSuppressedLogged.set(info.sessionId, bunLastFrameMs);
-          log.info("session-orchestrator", "silent-stdio drift kill suppressed — no undelivered model output", {
-            event: "silent_stdio_drift.suppressed",
-            sessionId: info.sessionId,
-            reason: verdict.suppressedReason,
-            mtimeDeltaMs: verdict.mtimeDeltaMs,
-          });
+        // Override suppression when the session has pending user messages that
+        // cannot be delivered because the subprocess is stuck on an incomplete
+        // previous turn (context-limit hard-cut with no `result` frame emitted).
+        // In that case the "idle" signal is misleading — the subprocess is not
+        // idle from the user's perspective: it is blocking queued messages.
+        const pendingCount =
+          verdict.suppressedReason === "no_undelivered_output"
+            ? this.wsBridge.getSessionPendingMessageCount(info.sessionId)
+            : 0;
+        if (pendingCount > 0) {
+          log.warn(
+            "session-orchestrator",
+            "silent-stdio drift suppression overridden — session has pending user messages",
+            {
+              event: "silent_stdio_drift.pending_override",
+              sessionId: info.sessionId,
+              suppressedReason: verdict.suppressedReason,
+              pendingMessages: pendingCount,
+              mtimeDeltaMs: verdict.mtimeDeltaMs,
+            },
+          );
+          // Fall through to the kill path below.
+        } else {
+          if (this.driftSuppressedLogged.get(info.sessionId) !== bunLastFrameMs) {
+            this.driftSuppressedLogged.set(info.sessionId, bunLastFrameMs);
+            log.info("session-orchestrator", "silent-stdio drift kill suppressed — no undelivered model output", {
+              event: "silent_stdio_drift.suppressed",
+              sessionId: info.sessionId,
+              reason: verdict.suppressedReason,
+              mtimeDeltaMs: verdict.mtimeDeltaMs,
+            });
+          }
+          continue;
         }
-        continue;
       }
       if (!verdict.drifted) continue;
 
