@@ -38,6 +38,8 @@ beforeEach(() => {
     updateChannel: "stable",
     dockerAutoUpdate: false,
     telemetryEnabled: false,
+    defaultSessionMode: "solo" as const,
+    kbAutoPrime: false,
     updatedAt: 0,
   });
 });
@@ -82,6 +84,8 @@ describe("generateSessionTitle", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
       updatedAt: 0,
     });
 
@@ -133,6 +137,8 @@ describe("generateSessionTitle", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
       updatedAt: 0,
     });
     mockFetch.mockResolvedValueOnce({
@@ -213,6 +219,8 @@ describe("generateSessionTitle", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
       updatedAt: 0,
     });
     mockFetch.mockResolvedValueOnce({

@@ -4,6 +4,7 @@ import { join, sep } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { ARCHIVED_SESSIONS_SUBDIR } from "./cleanup/cleanup-paths.js";
 import { writeAtomicJson } from "./atomic-write.js";
+import { redactStructured } from "./secret-redaction.js";
 import type {
   SessionState,
   BrowserIncomingMessage,
@@ -262,6 +263,14 @@ export class SessionStore {
       const stamped: PersistedSession = {
         ...session,
         schemaVersion: CURRENT_SESSION_SCHEMA_VERSION,
+        // Chat content (user prompts, tool inputs/results, assistant text)
+        // is redacted on its way to disk with the same policy as protocol
+        // recordings. Copies only — the in-memory session keeps the
+        // original. `pendingMessages` is deliberately NOT redacted: it is
+        // the queue of raw frames still to be delivered to the CLI after a
+        // restart, and masking it would change what the model receives.
+        messageHistory: redactStructured(session.messageHistory),
+        ...(session.eventBuffer ? { eventBuffer: redactStructured(session.eventBuffer) } : {}),
       };
       // EC-46 — primary state writes are crash-atomic (tmp+fsync+rename),
       // symmetric with moveToArchive. A raw writeFileSync mid-crash leaves

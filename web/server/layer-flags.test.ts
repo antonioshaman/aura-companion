@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_LAYER_FLAGS,
+  KB_AUTO_PRIME_DIRECTIVE,
   LAYER_ENV_KEYS,
   LAYER_NAMES,
   _resetServerLayerFlagsForTest,
@@ -139,6 +140,34 @@ describe("buildLayerSpawnConfig", () => {
   });
 });
 
+// aura-diet 2026-10: KB on demand. The "load KB at session start" directive
+// is an opt-in extra, independent of the four layer switches.
+describe("buildLayerSpawnConfig — kbAutoPrime opt-in", () => {
+  it("off (default) adds nothing", () => {
+    expect(buildLayerSpawnConfig(DEFAULT_LAYER_FLAGS, {})).toEqual({ disallowedTools: [] });
+    expect(buildLayerSpawnConfig(undefined, { kbAutoPrime: false })).toEqual({ disallowedTools: [] });
+  });
+
+  it("on adds the directive and no deny rules (absent flags = knowledge on)", () => {
+    expect(buildLayerSpawnConfig(undefined, { kbAutoPrime: true }))
+      .toEqual({ disallowedTools: [], systemPrompt: KB_AUTO_PRIME_DIRECTIVE });
+    expect(buildLayerSpawnConfig(DEFAULT_LAYER_FLAGS, { kbAutoPrime: true }).systemPrompt)
+      .toBe(KB_AUTO_PRIME_DIRECTIVE);
+  });
+
+  it("knowledge=off wins: no auto-prime directive, only the disable directive", () => {
+    const cfg = buildLayerSpawnConfig({ ...DEFAULT_LAYER_FLAGS, knowledge: false }, { kbAutoPrime: true });
+    expect(cfg.systemPrompt).toContain("knowledge layer is disabled");
+    expect(cfg.systemPrompt).not.toContain(KB_AUTO_PRIME_DIRECTIVE);
+  });
+
+  it("composes with council=off into one prompt", () => {
+    const cfg = buildLayerSpawnConfig({ ...DEFAULT_LAYER_FLAGS, council: false }, { kbAutoPrime: true });
+    expect(cfg.systemPrompt).toContain("council layer is disabled");
+    expect(cfg.systemPrompt).toContain(KB_AUTO_PRIME_DIRECTIVE);
+  });
+});
+
 describe("isDefaultLayerFlags / composeSystemPrompt", () => {
   it("detects any deviation from the defaults", () => {
     expect(isDefaultLayerFlags(DEFAULT_LAYER_FLAGS)).toBe(true);
@@ -200,6 +229,42 @@ describe("applyLayerFlagsToCreateBody (create-session boundary)", () => {
   it("observer=off still allows a solo session", () => {
     const res = applyLayerFlagsToCreateBody({ cwd: "/w" }, { ...DEFAULT_LAYER_FLAGS, observer: false });
     expect(res.ok).toBe(true);
+  });
+
+  // aura-diet 2026-10 — kbAutoPrime boundary resolution.
+  it("kbAutoPrime: absent + server default off → no key (prod parity)", () => {
+    const res = applyLayerFlagsToCreateBody({ cwd: "/w" }, DEFAULT_LAYER_FLAGS, { kbAutoPrime: false });
+    expect(res.ok && res.body).toEqual({ cwd: "/w" });
+  });
+
+  it("kbAutoPrime: absent + server default on → kbAutoPrime: true", () => {
+    const res = applyLayerFlagsToCreateBody({ cwd: "/w" }, DEFAULT_LAYER_FLAGS, { kbAutoPrime: true });
+    expect(res.ok && res.body).toEqual({ cwd: "/w", kbAutoPrime: true });
+  });
+
+  it("kbAutoPrime: explicit false beats a server default of on", () => {
+    const res = applyLayerFlagsToCreateBody({ cwd: "/w", kbAutoPrime: false }, DEFAULT_LAYER_FLAGS, { kbAutoPrime: true });
+    expect(res.ok && res.body).toEqual({ cwd: "/w" });
+  });
+
+  it("kbAutoPrime: non-boolean falls back to the server default with a warning", () => {
+    const res = applyLayerFlagsToCreateBody({ cwd: "/w", kbAutoPrime: "yes" }, DEFAULT_LAYER_FLAGS);
+    expect(res.ok && res.body).toEqual({ cwd: "/w" });
+    expect(res.warnings.join()).toContain("kbAutoPrime");
+  });
+
+  it("kbAutoPrime is dropped (with a warning) when the knowledge layer is off", () => {
+    const res = applyLayerFlagsToCreateBody(
+      { cwd: "/w", kbAutoPrime: true, layers: { knowledge: "off" } },
+      DEFAULT_LAYER_FLAGS,
+    );
+    expect(res.ok && res.body).not.toHaveProperty("kbAutoPrime");
+    expect(res.warnings.join()).toContain("ignoring kbAutoPrime");
+  });
+
+  it("a request without councilMode stays solo (no council fields added)", () => {
+    const res = applyLayerFlagsToCreateBody({ cwd: "/w" }, DEFAULT_LAYER_FLAGS);
+    expect(res.ok && res.body).not.toHaveProperty("councilMode");
   });
 
   it("does not mutate the caller's body", () => {

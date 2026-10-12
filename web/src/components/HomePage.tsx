@@ -131,12 +131,16 @@ export function HomePage() {
     return true;
   });
 
-  // Council Mode controls — persisted toggle + pairing so the user's last
-  // choice survives a page refresh without resurrecting the council session
-  // itself (the server is the truth for live groups).
-  const [councilEnabled, setCouncilEnabled] = useState<boolean>(
-    () => localStorage.getItem("cc-council-enabled") === "true",
-  );
+  // Council Mode controls. New sessions are SOLO by default (aura-diet,
+  // 2026-10: AuraBench measured the observer at +0pp for 2.4x cost, full
+  // council at −6pp for 2.9x). The toggle starts from the server-side
+  // `defaultSessionMode` setting (default "solo") — NOT from the last
+  // choice, so turning council on for one risky change does not silently
+  // make every later session a paid pair. The pairing stays sticky.
+  const [councilEnabled, setCouncilEnabled] = useState<boolean>(false);
+  // Set once the user flips the toggle, so a late settings response never
+  // overrides an explicit choice.
+  const councilTouchedRef = useRef(false);
   const [councilPairing, setCouncilPairing] = useState<"claude+claude" | "claude+codex">(
     () => (localStorage.getItem("cc-council-pairing") as "claude+claude" | "claude+codex") || "claude+claude",
   );
@@ -264,7 +268,11 @@ export function HomePage() {
     api.getBackends().then(setBackends).catch(() => {});
     api.getSettings().then((s) => {
       setLinearConfigured(s.linearApiKeyConfigured);
+      if (!councilTouchedRef.current) setCouncilEnabled(s.defaultSessionMode === "council");
     }).catch(() => {});
+    // Legacy key: the toggle used to persist its last value here, which made
+    // one opt-in sticky forever. Drop it so it can't resurface.
+    localStorage.removeItem("cc-council-enabled");
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // When backend changes, reset model and mode to defaults
@@ -1384,10 +1392,9 @@ export function HomePage() {
           )}
 
           {/* Council Mode toggle — subordinate to the create button.
-              Off by default; ON reveals a provider-pairing dropdown via
-              height-transition. Backend wiring of the new createSession
-              fields is deferred to a later Phase F backend commit; the
-              client persists the user's choice so it survives a refresh. */}
+              Starts from Settings → "Default session mode" (solo unless
+              changed); ON reveals a provider-pairing dropdown via
+              height-transition. */}
           {!useWorktree && (
             <WorktreeIsolationChoice
               preview={isolationPreview}
@@ -1407,8 +1414,8 @@ export function HomePage() {
                 enabled={councilEnabled}
                 pairing={effectiveCouncilPairing}
                 onEnabledChange={(v) => {
+                  councilTouchedRef.current = true;
                   setCouncilEnabled(v);
-                  localStorage.setItem("cc-council-enabled", v ? "true" : "false");
                 }}
                 onPairingChange={(p) => {
                   setCouncilPairing(p);

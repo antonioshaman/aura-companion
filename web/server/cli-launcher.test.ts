@@ -3806,6 +3806,48 @@ describe("layer flags at spawn (P4/C3)", () => {
     expect(captured.options.systemPrompt).toBeUndefined();
   });
 
+  // aura-diet 2026-10: the KB is consulted on demand. The opt-in
+  // `kbAutoPrime` directive reaches the agent only when asked for, never the
+  // observer half, and is persisted for relaunch.
+  it("kbAutoPrime: absent → no directive; opted-in → one appended directive, persisted", () => {
+    launcher.launch({ cwd: "/tmp/project", layers: ALL_ON });
+    expect(argvOf(0)).not.toContain("--append-system-prompt");
+    mockSpawn.mockReturnValueOnce(createMockProc(12346));
+    const info = launcher.launch({ cwd: "/tmp/project", layers: ALL_ON, kbAutoPrime: true });
+    const argv = argvOf(1);
+    expect(argv.filter((a) => a === "--append-system-prompt")).toHaveLength(1);
+    expect(argv[argv.indexOf("--append-system-prompt") + 1]).toContain("/prime");
+    expect(info.kbAutoPrime).toBe(true);
+  });
+
+  it("kbAutoPrime is ignored when the knowledge layer is off", () => {
+    launcher.launch({ cwd: "/tmp/project", layers: { ...ALL_ON, knowledge: false }, kbAutoPrime: true });
+    const body = argvOf(0)[argvOf(0).indexOf("--append-system-prompt") + 1];
+    expect(body).toContain("knowledge layer is disabled");
+    expect(body).not.toContain("Before starting work in this session");
+  });
+
+  it("kbAutoPrime never reaches a council observer half", () => {
+    launcher.launch({
+      cwd: tempDir,
+      sessionGroupRole: "observer",
+      sessionGroupId: "grp_kb_obs",
+      layers: ALL_ON,
+      kbAutoPrime: true,
+    });
+    const body = argvOf(0)[argvOf(0).indexOf("--append-system-prompt") + 1];
+    expect(body).not.toContain("Before starting work in this session");
+  });
+
+  it("codex: kbAutoPrime reaches the adapter as thread instructions", async () => {
+    mockSpawn.mockReturnValueOnce(createMockCodexProc());
+    let captured: any;
+    companionBus.on("backend:codex-adapter-created", ({ adapter }) => { captured ??= adapter; });
+    launcher.launch({ cwd: "/tmp/project", backendType: "codex", layers: ALL_ON, kbAutoPrime: true });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(captured.options.systemPrompt).toContain("/prime");
+  });
+
   it("codex: the directive survives a relaunch that resumes the thread (FIX-C3-1)", async () => {
     // On stdio every server restart relaunches with the persisted thread id.
     // The relaunched adapter must still carry the directive AND the thread

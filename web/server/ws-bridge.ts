@@ -60,6 +60,7 @@ import { getEffectiveAiValidation } from "./ai-validation-settings.js";
 import { companionBus } from "./event-bus.js";
 import { SessionStateMachine } from "./session-state-machine.js";
 import { metricsCollector } from "./metrics-collector.js";
+import { deliveryMetrics } from "./delivery-metrics.js";
 import { log } from "./logger.js";
 
 // AURA-LOCAL — PLAN T10/T11 (Phase F). Drain dispatch wiring.
@@ -1021,6 +1022,9 @@ export class WsBridge {
       // do NOT advance the clock; only user-driven CLI activity does.
       this.noteCliActivity(session);
       metricsCollector.recordMessageProcessed(msg.type);
+      // Reply-delivery metrics (time to first output, "No response
+      // requested." after a real user message). Backend-agnostic.
+      deliveryMetrics.recordBackendFrame(session.id, msg);
 
       // -- session_init: merge into session state, broadcast, persist -----
       if (msg.type === "session_init") {
@@ -1813,6 +1817,13 @@ export class WsBridge {
    * and reaches "ready" state without depending on user input or browser
    * activity. Claude-only.
    *
+   * **Codex has no init probe.** Its app-server handshake is the JSON-RPC
+   * `initialize` / `initialized` exchange done by the Codex adapter, which
+   * needs no user turn; the `instanceof ClaudeAdapter` guard below makes
+   * this a no-op for Codex, so a Codex session's first user message is
+   * never preceded by a probe and cannot be folded into one. Pinned by
+   * "codex solo session" in init-probe-reconnect.replay.test.ts.
+   *
    * **The kickoff shape changed 2026-09-20 after a prod incident.** The
    * prior implementation sent a bare `control_request{initialize}`; that
    * frame IS accepted by CLI 2.1.265+ but does NOT trigger the CLI's
@@ -1836,7 +1847,9 @@ export class WsBridge {
    *      The user frame is what CLI wants to see for init emit; the
    *      interrupt aborts before an API call generates a phantom reply.
    *      Trade-off: the probe adds one placeholder user turn to the
-   *      CLI's own transcript (jsonl) with a "do not respond" marker.
+   *      CLI's own transcript (jsonl) with the marker line
+   *      ({@link AURA_INIT_PROBE_MARKER} — it must never ask for silence,
+   *      see there and init-probe-reconnect.replay.test.ts).
    *      A brief interrupt-signalled `result` frame may reach the
    *      browser in the split-second before the interrupt lands.
    *   3. If `session.pendingMessages` is non-empty, the queued real
@@ -2215,6 +2228,11 @@ export class WsBridge {
     // -- user_message: store in history before delegating to adapter ------
     if (msg.type === "user_message") {
       metricsCollector.recordTurnStarted(session.id);
+      deliveryMetrics.recordUserMessage(session.id, {
+        text: typeof msg.content === "string" ? msg.content : "",
+        backend: session.backendType,
+        origin,
+      });
       // Council Review #12 (EC-16) — server-driven user_message frames
       // (cron-scheduler, linear-agent-bridge, REST `/sessions/:id/inject`)
       // are NOT user activity and MUST NOT advance the synthetic-turn
@@ -2271,6 +2289,11 @@ export class WsBridge {
       }
       this.persistSession(session);
       this.broadcastToBrowsers(session, userMessage);
+    }
+
+    // -- interrupt: the user cancelled the turn, no answer is owed ---------
+    if (msg.type === "interrupt") {
+      deliveryMetrics.recordInterrupt(session.id);
     }
 
     // -- permission_response: populate updatedInput fallback from pending, then remove -------

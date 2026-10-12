@@ -2105,3 +2105,24 @@ describe("sweep orphans", () => {
     await expect(api.sweepExecute("stale")).rejects.toThrow("conflict");
   });
 });
+
+// ===========================================================================
+// Simple diagnostic GETs — each must hit its own endpoint and return the body
+// unchanged. getDeliveryMetrics feeds the reply-delivery health indicator
+// (server/delivery-metrics.ts); a wrong path would silently blank it.
+// ===========================================================================
+describe("diagnostic getters", () => {
+  it.each([
+    ["getDeliveryMetrics", "/api/metrics/delivery"],
+    ["getModelDiagnostics", "/api/settings/diagnostics"],
+    ["getTailscaleStatus", "/api/tailscale/status"],
+  ] as const)("%s GETs %s", async (method, path) => {
+    const body = { ok: true, method };
+    mockFetch.mockResolvedValueOnce(mockResponse(body));
+    const result = await (api[method] as () => Promise<unknown>)();
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe(path);
+    expect(opts?.method ?? "GET").toBe("GET");
+    expect(result).toEqual(body);
+  });
+});

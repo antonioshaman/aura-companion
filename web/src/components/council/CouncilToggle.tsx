@@ -3,7 +3,10 @@
  * that enables Council Mode and lets the user pick the provider pairing.
  *
  * PLAN T15.1:
- *  - Off by default; subordinate to the Create button.
+ *  - Off by default (solo sessions; the start value follows Settings →
+ *    "Default session mode"); subordinate to the Create button.
+ *  - Help copy says when council is worth it (risky changes, plan review)
+ *    and what it costs (~2–3× — AuraBench 2026-10).
  *  - ON reveals the provider-pairing dropdown via height-transition (no
  *    flicker — content mounts before the height animates open).
  *  - Pairing labels spell out "Orchestrator: Claude · Observer: Codex"
@@ -287,6 +290,7 @@ export function CouncilToggle({
           role="switch"
           aria-checked={enabled}
           aria-label="Toggle Council Mode"
+          aria-describedby="council-toggle-help"
           onClick={() => onEnabledChange(!enabled)}
           className={`mt-0.5 shrink-0 w-9 h-5 rounded-full transition-colors cursor-pointer relative ${
             enabled ? "bg-cc-primary" : "bg-cc-muted/30"
@@ -301,8 +305,12 @@ export function CouncilToggle({
         </button>
         <div className="flex-1 min-w-0">
           <div className="text-sm font-medium text-cc-fg">Council Mode</div>
-          <p className="text-xs text-cc-muted mt-0.5 leading-snug">
-            Pair this session with an independent observer LLM that reviews each checkpoint.
+          <p id="council-toggle-help" className="text-xs text-cc-muted mt-0.5 leading-snug">
+            Pair this session with an independent observer LLM that reviews each checkpoint.{" "}
+            <span data-testid="council-toggle-when">
+              Worth it for risky changes — payments, auth, DB migrations — and plan review.
+              Costs roughly 2–3× a solo session; for routine work solo is as good or better.
+            </span>
           </p>
         </div>
       </div>

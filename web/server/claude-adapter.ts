@@ -52,6 +52,7 @@ import type { CLIDedupState } from "./ws-bridge-cli-ingest.js";
 import { reportProtocolDrift } from "./protocol-monitor.js";
 import { companionBus } from "./event-bus.js";
 import { log } from "./logger.js";
+import { deliveryMetrics } from "./delivery-metrics.js";
 import { isToolUseDeniedForSynthetic, denialMessageForSynthetic } from "./auto-proceed-permissions.js";
 import { resolveModelAvailability } from "./model-availability.js";
 import { SilentStdioWatchdog } from "./silent-stdio-watchdog.js";
@@ -645,6 +646,8 @@ export class ClaudeAdapter implements IBackendAdapter {
    */
   handleTransportClose(): void {
     this.transport = null;
+    // The CLI's background tasks die with it.
+    deliveryMetrics.clearRunningTasks(this.sessionId);
     this.observerTurnState = "idle";
     this.clearObserverWakeWatchdog();
     // Transport gone = no more frames can arrive; the exit + relaunch
@@ -1084,6 +1087,14 @@ export class ClaudeAdapter implements IBackendAdapter {
   // -- System message handling ------------------------------------------------
 
   private handleSystemMessage(msg: CLISystemMessage): void {
+    // Running background tasks, for the drift-recovery metric (a recovery
+    // kills the CLI and every task it still runs). `task_started` has no
+    // browser mapping and is otherwise dropped below.
+    const subtype = (msg as { subtype?: string }).subtype;
+    if (subtype === "task_started" || subtype === "task_notification") {
+      deliveryMetrics.recordTaskFrame(this.sessionId, msg as { subtype?: unknown; task_id?: unknown; task_type?: unknown });
+    }
+
     if (msg.subtype === "init") {
       this.handleSystemInit(msg as CLISystemInitMessage);
       return;

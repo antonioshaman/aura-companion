@@ -61,7 +61,7 @@ Read the matching doc before changing that area:
 - [docs/architecture/recordings-and-eval-sidecar.md](docs/architecture/recordings-and-eval-sidecar.md) — raw protocol recordings (`~/.companion/recordings/`, JSONL, `origin` field) and the opt-in `COMPANION_EVAL_SIDECAR`.
 - [docs/architecture/council-mode.md](docs/architecture/council-mode.md) — `.council/` filesystem protocol, server + browser pipelines, reconnect grace.
 - [docs/architecture/production-deployment.md](docs/architecture/production-deployment.md) — systemd `KillMode=process`, `COMPANION_ALLOWED_ORIGIN`, the `browsers=0` diagnostic.
-- [docs/architecture/layer-flags.md](docs/architecture/layer-flags.md) — `COMPANION_LAYER_*` / per-session `layers` switches for knowledge, observer, council, auto-proceed (fail-closed, default = prod).
+- [docs/architecture/layer-flags.md](docs/architecture/layer-flags.md) — `COMPANION_LAYER_*` / per-session `layers` switches for knowledge, observer, council, auto-proceed (fail-closed, default = all available), plus the session defaults: solo sessions, auto-proceed off, KB on demand.
 - [docs/architecture/worktree-isolation.md](docs/architecture/worktree-isolation.md) — `isolation` auto/isolate/shared: dedicated git worktree when another live session uses the same tree; never deletes dirty worktrees.
 
 ### Council Mode convention floor (do not re-flag in council reviews)
@@ -104,12 +104,12 @@ Always use `agent-browser` CLI command to explore the browser. Never use playwri
 
 ## Self-Learning System
 
-The knowledge base in `.agents/knowledge/*.jsonl` (patterns, gotchas, decisions, anti-patterns, codebase-facts, api-behaviors) is the single source of truth for learnings.
-- `/prime [focus]` at session start (loads relevant entries, records usage via `bun run --cwd web kb:record`).
-- `/learn <insight>` immediately on surprising behavior, test failures, or user corrections.
-- `/self-reflect [scope]` at session end — the step that closes the feedback loop.
+The knowledge base in `.agents/knowledge/*.jsonl` (patterns, gotchas, decisions, anti-patterns, codebase-facts, api-behaviors) is the single source of truth for learnings. It is consulted **on demand**, not loaded at every session start (real-work data: 138 entries, 2 uses).
+- Do **not** run `/prime` at the start of every session. When a task touches an area (a file, subsystem, or protocol), grep `.agents/knowledge/*.jsonl` by its tags / paths first (or run `/prime <focus>` for that area).
+- `/learn <insight>` only for surprising, **verified** facts (reproduced behavior, a confirmed root cause, a user correction) — not for routine notes or guesses.
+- `/self-reflect [scope]` is optional, after a substantial piece of work that produced real learnings.
 
-Entry schema, protocol, and lifecycle (`kb:health`, `kb:prune`): [docs/conventions/self-learning.md](docs/conventions/self-learning.md).
+Aura does not inject the KB into sessions by default; Settings → Session defaults → "Load knowledge base at session start" (`kbAutoPrime`) opts back in. Entry schema, protocol, and lifecycle (`kb:health`, `kb:prune`): [docs/conventions/self-learning.md](docs/conventions/self-learning.md).
 
 ## Production deployment
 

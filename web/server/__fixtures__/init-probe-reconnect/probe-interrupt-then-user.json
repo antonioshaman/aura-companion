@@ -1,0 +1,257 @@
+{
+ "source": "prod recordings 2026-10-12 (sanitized: ids, cwd, tool list, user text replaced)",
+ "frames": [
+  {
+   "dtMs": 0,
+   "dir": "out",
+   "raw": {
+    "type": "user",
+    "message": {
+     "role": "user",
+     "content": "<AURA_INIT_PROBE_MARKER>"
+    }
+   }
+  },
+  {
+   "dtMs": 201,
+   "dir": "out",
+   "raw": {
+    "type": "control_request",
+    "request_id": "req-interrupt",
+    "request": {
+     "subtype": "interrupt"
+    }
+   }
+  },
+  {
+   "dtMs": 419,
+   "dir": "in",
+   "raw": {
+    "type": "control_response",
+    "response": {
+     "subtype": "success",
+     "request_id": "req-interrupt",
+     "response": {
+      "still_queued": []
+     }
+    }
+   }
+  },
+  {
+   "dtMs": 468,
+   "dir": "in",
+   "raw": {
+    "type": "system",
+    "subtype": "init",
+    "cwd": "/workspace/project",
+    "session_id": "cli-replay-0001",
+    "tools": [
+     "Bash",
+     "Read",
+     "Edit"
+    ],
+    "mcp_servers": [],
+    "model": "claude-opus-4-8",
+    "permissionMode": "default",
+    "slash_commands": [],
+    "apiKeySource": "none",
+    "claude_code_version": "2.1.290",
+    "output_style": "default",
+    "agents": [],
+    "skills": [],
+    "uuid": "u-init-1"
+   }
+  },
+  {
+   "dtMs": 491,
+   "dir": "in",
+   "raw": {
+    "type": "system",
+    "subtype": "status",
+    "status": "requesting",
+    "session_id": "cli-replay-0001",
+    "uuid": "u-status-1"
+   }
+  },
+  {
+   "dtMs": 687,
+   "dir": "in",
+   "raw": {
+    "type": "user",
+    "message": {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "[Request interrupted by user]"
+      }
+     ]
+    },
+    "parent_tool_use_id": null,
+    "session_id": "cli-replay-0001",
+    "uuid": "u-intr-1",
+    "timestamp": "2026-10-12T17:23:03.549Z"
+   }
+  },
+  {
+   "dtMs": 691,
+   "dir": "in",
+   "raw": {
+    "type": "result",
+    "subtype": "error_during_execution",
+    "is_error": true,
+    "duration_ms": 272,
+    "duration_api_ms": 0,
+    "num_turns": 2,
+    "stop_reason": null,
+    "terminal_reason": "aborted_streaming",
+    "session_id": "cli-replay-0001",
+    "total_cost_usd": 0,
+    "usage": {
+     "input_tokens": 0,
+     "output_tokens": 0,
+     "cache_creation_input_tokens": 0,
+     "cache_read_input_tokens": 0
+    },
+    "modelUsage": {},
+    "permission_denials": [],
+    "errors": [
+     "[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null"
+    ],
+    "uuid": "u-result-1"
+   }
+  },
+  {
+   "dtMs": 8557,
+   "dir": "browser",
+   "raw": {
+    "type": "user_message",
+    "content": "продолжаем"
+   }
+  }
+ ],
+ "bugReply": [
+  {
+   "type": "stream_event",
+   "event": {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   "session_id": "cli-replay-0001",
+   "parent_tool_use_id": null,
+   "uuid": "u-s1"
+  },
+  {
+   "type": "stream_event",
+   "event": {
+    "type": "content_block_delta",
+    "index": 0,
+    "delta": {
+     "type": "text_delta",
+     "text": "No response"
+    }
+   },
+   "session_id": "cli-replay-0001",
+   "parent_tool_use_id": null,
+   "uuid": "u-s2"
+  },
+  {
+   "type": "assistant",
+   "message": {
+    "model": "claude-opus-5-5",
+    "id": "msg_bug",
+    "type": "message",
+    "role": "assistant",
+    "content": [
+     {
+      "type": "text",
+      "text": "No response requested."
+     }
+    ],
+    "stop_reason": null,
+    "usage": {
+     "input_tokens": 4,
+     "output_tokens": 5
+    }
+   },
+   "parent_tool_use_id": null,
+   "session_id": "cli-replay-0001",
+   "uuid": "u-a1"
+  },
+  {
+   "type": "result",
+   "subtype": "success",
+   "is_error": false,
+   "duration_ms": 1200,
+   "duration_api_ms": 1100,
+   "num_turns": 1,
+   "result": "No response requested.",
+   "session_id": "cli-replay-0001",
+   "total_cost_usd": 0.01,
+   "usage": {
+    "input_tokens": 4,
+    "output_tokens": 5
+   },
+   "uuid": "u-r2"
+  }
+ ],
+ "goodReply": [
+  {
+   "type": "stream_event",
+   "event": {
+    "type": "content_block_start",
+    "index": 0,
+    "content_block": {
+     "type": "text",
+     "text": ""
+    }
+   },
+   "session_id": "cli-replay-0001",
+   "parent_tool_use_id": null,
+   "uuid": "u-g1"
+  },
+  {
+   "type": "assistant",
+   "message": {
+    "model": "claude-opus-4-8",
+    "id": "msg_good",
+    "type": "message",
+    "role": "assistant",
+    "content": [
+     {
+      "type": "text",
+      "text": "Продолжаю: следующий шаг — прогнать тесты."
+     }
+    ],
+    "stop_reason": null,
+    "usage": {
+     "input_tokens": 4,
+     "output_tokens": 12
+    }
+   },
+   "parent_tool_use_id": null,
+   "session_id": "cli-replay-0001",
+   "uuid": "u-g2"
+  },
+  {
+   "type": "result",
+   "subtype": "success",
+   "is_error": false,
+   "duration_ms": 1800,
+   "duration_api_ms": 1700,
+   "num_turns": 1,
+   "result": "Продолжаю",
+   "session_id": "cli-replay-0001",
+   "total_cost_usd": 0.01,
+   "usage": {
+    "input_tokens": 4,
+    "output_tokens": 12
+   },
+   "uuid": "u-r3"
+  }
+ ]
+}

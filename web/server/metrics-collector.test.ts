@@ -475,3 +475,23 @@ describe("edge cases", () => {
     expect(snap.histograms.turnDurationMs.buckets["Infinity"]).toBe(1);
   });
 });
+
+// ── Delivery block ────────────────────────────────────────────────────────
+
+describe("delivery", () => {
+  // GET /api/metrics carries the reply-delivery snapshot alongside the
+  // runtime counters, so one scrape answers "are replies getting through".
+  it("includes the delivery snapshot from the delivery-metrics singleton", async () => {
+    const { deliveryMetrics } = await import("./delivery-metrics.js");
+    deliveryMetrics.reset({ stallThresholdMs: 60_000 });
+    try {
+      deliveryMetrics.recordUserMessage("s-del", { text: "ты тут?", backend: "codex" });
+      const snap = collector.getSnapshot();
+      expect(snap.delivery.stallThresholdMs).toBe(60_000);
+      expect(snap.delivery.global).toMatchObject({ userMessages: 1, nudges: 1, awaitingReply: 1 });
+      expect(snap.delivery.sessions["s-del"].backend).toBe("codex");
+    } finally {
+      deliveryMetrics.reset();
+    }
+  });
+});

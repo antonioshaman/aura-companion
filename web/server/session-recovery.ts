@@ -5,6 +5,7 @@ import { ClaudeAdapter } from "./claude-adapter.js";
 import { containerManager } from "./container-manager.js";
 import { companionBus } from "./event-bus.js";
 import { metricsCollector } from "./metrics-collector.js";
+import { deliveryMetrics } from "./delivery-metrics.js";
 import { log } from "./logger.js";
 import { nextModelInChain, computeSilenceRotation } from "./model-fallback-chain.js";
 import {
@@ -550,6 +551,7 @@ export class SessionRecovery {
           cliWaitChannels: info.pid ? summarizeWaitChannels(info.pid) : null,
         },
       );
+      deliveryMetrics.recordDriftRecovery(info.sessionId, info.backendType ?? "claude");
       this.wsBridge.broadcastToSession(info.sessionId, {
         type: "error",
         message: `Backend transcript ${Math.round(verdict.mtimeDeltaMs / 1000)}s behind CLI's jsonl — relaunching to recover.`,

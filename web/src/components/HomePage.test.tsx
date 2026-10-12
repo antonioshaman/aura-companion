@@ -775,7 +775,9 @@ describe("HomePage", () => {
     // `backend === "claude"` at submit, the create payload would still carry
     // councilMode/councilPairing and the server would spawn an orchestrator+
     // observer PAIR instead of the requested mono Codex session.
-    localStorage.setItem("cc-council-enabled", "true");
+    // Council-on now comes from the server default (Settings → Default session mode),
+    // not from a sticky localStorage flag.
+    mockApi.getSettings.mockResolvedValue({ linearApiKeyConfigured: true, defaultSessionMode: "council" });
     const storeMock = buildStoreMock();
     mockStoreGetState.mockReturnValue(storeMock);
     mockApi.getBackends.mockResolvedValue([
@@ -1765,6 +1767,61 @@ describe("HomePage", () => {
   // both the POST body and the CouncilToggle trigger.  The raw stored preference
   // must NOT be overwritten (non-destructive).
 
+  describe("Solo-by-default session mode", () => {
+    // aura-diet 2026-10: new sessions are SOLO unless the server-side
+    // `defaultSessionMode` setting says "council" or the user flips the
+    // toggle for this one session. The old sticky localStorage flag must
+    // no longer turn every later session into a paid pair.
+    async function submitClaude(prompt = "Ship it") {
+      const storeMock = buildStoreMock();
+      mockStoreGetState.mockReturnValue(storeMock);
+      createSessionStreamMock.mockResolvedValue({ sessionId: "solo-1", state: "starting", cwd: "/repo" });
+      const textarea = screen.getByPlaceholderText("Fix a bug, build a feature, refactor code...");
+      fireEvent.change(textarea, { target: { value: prompt } });
+      fireEvent.click(screen.getByTitle("Send message"));
+      await waitFor(() => expect(createSessionStreamMock).toHaveBeenCalled());
+      return createSessionStreamMock.mock.calls[0][0] as Record<string, unknown>;
+    }
+
+    it("creates a solo session (no council fields) by default, ignoring the legacy sticky flag", async () => {
+      // Legacy key from the old sticky toggle — must be ignored and cleared.
+      localStorage.setItem("cc-council-enabled", "true");
+      mockApi.getSettings.mockResolvedValue({ linearApiKeyConfigured: true, defaultSessionMode: "solo" });
+      render(<HomePage />);
+      await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
+      const toggle = await screen.findByRole("switch", { name: "Toggle Council Mode" });
+      expect(toggle).toHaveAttribute("aria-checked", "false");
+      expect(localStorage.getItem("cc-council-enabled")).toBeNull();
+      const args = await submitClaude();
+      expect(args.councilMode).toBeUndefined();
+      expect(args.councilPairing).toBeUndefined();
+    });
+
+    it("starts the toggle ON when Settings default is council", async () => {
+      mockApi.getSettings.mockResolvedValue({ linearApiKeyConfigured: true, defaultSessionMode: "council" });
+      render(<HomePage />);
+      const toggle = await screen.findByRole("switch", { name: "Toggle Council Mode" });
+      await waitFor(() => expect(toggle).toHaveAttribute("aria-checked", "true"));
+    });
+
+    it("an explicit toggle click is not overridden by a late settings response", async () => {
+      // Settings resolve AFTER the user opts in; the user's choice must win.
+      let resolveSettings!: (v: unknown) => void;
+      mockApi.getSettings.mockReturnValue(new Promise((r) => { resolveSettings = r; }));
+      render(<HomePage />);
+      await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
+      const toggle = await screen.findByRole("switch", { name: "Toggle Council Mode" });
+      fireEvent.click(toggle);
+      expect(toggle).toHaveAttribute("aria-checked", "true");
+      await act(async () => {
+        resolveSettings({ linearApiKeyConfigured: true, defaultSessionMode: "solo" });
+      });
+      expect(toggle).toHaveAttribute("aria-checked", "true");
+      const args = await submitClaude();
+      expect(args.councilMode).toBe("council");
+    });
+  });
+
   describe("Council Mode pairing coercion", () => {
     // Helper: sets up a council-enabled session with the given backend capability
     // flags and localStorage pairing, then submits and returns the call args.
@@ -1777,7 +1834,9 @@ describe("HomePage", () => {
       codexAvailable: boolean;
       codexObserverReviewAvailable: boolean;
     }) {
-      localStorage.setItem("cc-council-enabled", "true");
+      // Council-on now comes from the server default (Settings → Default session mode),
+      // not from a sticky localStorage flag.
+      mockApi.getSettings.mockResolvedValue({ linearApiKeyConfigured: true, defaultSessionMode: "council" });
       localStorage.setItem("cc-council-pairing", storedPairing);
 
       mockApi.getBackends.mockResolvedValue([
@@ -1884,7 +1943,9 @@ describe("HomePage", () => {
       codexObserverReviewAvailable: boolean;
       councilObserverReviewReason?: string;
     }) {
-      localStorage.setItem("cc-council-enabled", "true");
+      // Council-on now comes from the server default (Settings → Default session mode),
+      // not from a sticky localStorage flag.
+      mockApi.getSettings.mockResolvedValue({ linearApiKeyConfigured: true, defaultSessionMode: "council" });
       mockApi.getBackends.mockResolvedValue([
         { id: "claude", name: "Claude", available: true },
         {
