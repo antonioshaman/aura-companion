@@ -50,3 +50,33 @@ a process spawned for a session archived mid-relaunch is killed. A Codex WS spaw
 still picking its port when the session is killed, archived, deleted or relaunched again does
 not start at all (it was not in the process table yet, so there was nothing to kill). The observer auto-heal
 does not reset the auto-relaunch crash budget; only a manual relaunch does.
+
+**Init probe (Claude only).** The Claude CLI emits `system.init` only in response to a `user`
+frame, so on every CLI attach with no queued message the bridge writes a probe `user` frame
+(`AURA_INIT_PROBE_MARKER`) and interrupts it 200 ms later (`sendInitializeKickoff`). The probe
+and its `[Request interrupted by user]` stay in the CLI transcript, and the CLI folds the next
+real prompt into the same human turn. The marker therefore must never ask the model for
+silence: the old "do not respond" wording made the model answer the user's next message with
+"No response requested." after reconnects (introduced in #200, fixed in #335).
+`init-probe-reconnect.replay.test.ts` replays the recorded probe → interrupt → user message
+sequence and pins both properties; `real-cli-reconnect.e2e.test.ts` runs the same path
+against a real CLI (opt-in: `AURA_REAL_CLI_E2E=1`).
+
+**Codex has no init probe.** The Codex app-server handshake is the JSON-RPC `initialize` /
+`initialized` exchange, which needs no user turn; `sendInitializeKickoff` returns early for
+any non-Claude adapter. A Codex session's first user message is sent as-is and cannot be
+swallowed this way, so the `noResponseRequestedReplies` delivery metric stays 0 for Codex
+unless the model says it on its own.
+
+**Reply-delivery metrics** (`delivery-metrics.ts`; `GET /api/metrics` → `delivery`,
+`GET /api/metrics/delivery`, Settings → Diagnostics → *Reply delivery*). In memory since server
+start, global and per session, for both backends: time from a user message to the first
+assistant output (histogram), messages with no output within `COMPANION_DELIVERY_STALL_MS`
+(default 60 s), "No response requested." replies to a real user message, drift-detector
+recoveries, and short RU/EN nudges ("жду", "ты тут?", "are you there?") as a proxy for "the
+user felt ignored". Each also logs a structured `delivery.*` event. The drift detector is
+Claude-only (Codex has no CLI jsonl to compare). Its recovery kills the whole CLI process,
+including every background task it still runs (background Bash, `local_agent` subagents) —
+it fires most often on CLIs running many parallel subagents. The count of such tasks, tracked
+from `task_started` / `task_notification` frames, is logged with `delivery.drift_recovery`
+and summed in `backgroundTasksKilled`.

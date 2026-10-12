@@ -16,6 +16,8 @@
 // session JSON on disk and exposing it to the browser as-is would re-pull
 // the base64 image payloads we're trying to escape.
 
+import { redactSecretsInText } from "./secret-redaction.js";
+
 const MAX_TOOL_RESULT_CHARS = 400;
 const MAX_TOOL_INPUT_CHARS = 160;
 const MAX_THINKING_CHARS = 200;
@@ -198,7 +200,9 @@ export function extractHandoff(args: {
   }
 
   return {
-    markdown: lines.join("\n"),
+    // The brief is written into the workspace (often git-tracked, 0644), so
+    // credentials pasted into chat are masked with the shared policy.
+    markdown: redactSecretsInText(lines.join("\n")),
     meta: {
       sessionId,
       cwd,

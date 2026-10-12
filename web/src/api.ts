@@ -291,6 +291,33 @@ export interface ModelDiagnostics {
       };
 }
 
+/**
+ * Reply-delivery reliability snapshot from `GET /api/metrics/delivery`
+ * (server/delivery-metrics.ts). Counters are in-memory since server start.
+ */
+export interface DeliveryCountersSnapshot {
+  userMessages: number;
+  firstOutputs: number;
+  stalledMessages: number;
+  noResponseRequestedReplies: number;
+  driftRecoveries: number;
+  nudges: number;
+  backgroundTasksKilled: number;
+}
+
+export interface DeliveryMetricsSnapshot {
+  stallThresholdMs: number;
+  global: DeliveryCountersSnapshot & { awaitingReply: number };
+  timeToFirstOutputMs: {
+    count: number;
+    avg: number;
+    p50Bucket: number;
+    p95Bucket: number;
+    max: number;
+  };
+  sessions: Record<string, DeliveryCountersSnapshot & { backend: string | null; runningTasks: number; awaitingSince: number | null; lastEventAt: number }>;
+}
+
 export interface RelaunchSessionOpts {
   model?: string;
 }
@@ -459,6 +486,10 @@ export interface AppSettings {
   updateChannel: "stable" | "prerelease";
   dockerAutoUpdate: boolean;
   telemetryEnabled: boolean;
+  /** UI default for new sessions. "solo" unless the user changed it. */
+  defaultSessionMode?: "solo" | "council";
+  /** Opt-in: ask new sessions to load the knowledge base at start. Default off. */
+  kbAutoPrime?: boolean;
 }
 
 export interface LinearOAuthConnectionSummary {
@@ -1137,6 +1168,8 @@ export const api = {
     updateChannel?: "stable" | "prerelease";
     dockerAutoUpdate?: boolean;
     telemetryEnabled?: boolean;
+    defaultSessionMode?: "solo" | "council";
+    kbAutoPrime?: boolean;
   }) => put<AppSettings>("/settings", data),
   verifyAnthropicKey: (apiKey: string) =>
     post<{ valid: boolean; error?: string }>("/settings/anthropic/verify", { apiKey }),
@@ -1145,6 +1178,7 @@ export const api = {
       "/settings/models/refresh",
     ),
   getModelDiagnostics: () => get<ModelDiagnostics>("/settings/diagnostics"),
+  getDeliveryMetrics: () => get<DeliveryMetricsSnapshot>("/metrics/delivery"),
 
   // Tailscale
   getTailscaleStatus: () => get<TailscaleStatus>("/tailscale/status"),

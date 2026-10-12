@@ -657,3 +657,33 @@ describe2("SessionStore.moveToArchive (PLAN T13 / Phase H)", () => {
     expect2((st.mode & 0o777) & 0o077).toBe(0); // group/world bits cleared.
   });
 });
+
+
+// ─── Secret redaction on persist (2026-10 leak) ───────────────────────────────
+describe("SessionStore — secrets in chat content", () => {
+  // Session JSON carries the full chat history; a pasted credential must not
+  // be persisted in clear. SYNTHETIC value with the npm token shape.
+  const FAKE_NPM = "npm_" + "aB3dE5gH7jK9mN1pQ".repeat(3).slice(0, 36);
+
+  it("redacts messageHistory/eventBuffer on disk but keeps the in-memory session and pendingMessages intact", () => {
+    const userMsg = { type: "user_message", content: `token ${FAKE_NPM}`, timestamp: 1 };
+    const pending = JSON.stringify({ type: "user", message: { content: `token ${FAKE_NPM}` } });
+    const session = makeSession("s-redact", {
+      messageHistory: [userMsg] as unknown as PersistedSession["messageHistory"],
+      eventBuffer: [{ seq: 1, message: userMsg }] as unknown as PersistedSession["eventBuffer"],
+      pendingMessages: [pending],
+    });
+    store.saveSync(session);
+
+    const onDisk = readFileSync(join(tempDir, "s-redact.json"), "utf-8");
+    const parsed = JSON.parse(onDisk) as PersistedSession;
+    expect(JSON.stringify(parsed.messageHistory)).not.toContain(FAKE_NPM);
+    expect(JSON.stringify(parsed.messageHistory)).toContain("npm_[REDACTED]");
+    expect(JSON.stringify(parsed.eventBuffer)).not.toContain(FAKE_NPM);
+    // pendingMessages are frames still to be delivered to the CLI after a
+    // restart — deliberately NOT masked (would change model input).
+    expect(parsed.pendingMessages).toEqual([pending]);
+    // The caller's object is not mutated.
+    expect((session.messageHistory[0] as unknown as typeof userMsg).content).toContain(FAKE_NPM);
+  });
+});
