@@ -66,6 +66,8 @@ beforeEach(() => {
     updateChannel: "stable",
     dockerAutoUpdate: false,
     telemetryEnabled: false,
+    defaultSessionMode: "solo" as const,
+    kbAutoPrime: false,
     updatedAt: 0,
   });
 });
@@ -215,6 +217,8 @@ describe("linear-connections", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
       updatedAt: 0,
     });
     // Need to reset so migration runs with updated mock
@@ -257,6 +261,8 @@ describe("linear-connections", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
       updatedAt: 0,
     });
     _resetForTest(join(tempDir, "linear-connections-migrate.json"));
@@ -318,6 +324,8 @@ describe("linear-connections", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
       updatedAt: 0,
     });
 

@@ -9,7 +9,7 @@ Four Aura meta-layers can be switched on and off independently. This supports ab
 | `council` | `COMPANION_LAYER_COUNCIL` | `council` | Claude: `Skill(council-*)` and `Skill(_council-experts)` go into `--disallowedTools`, plus the directive. Codex gets the directive only. |
 | `autoProceed` | `COMPANION_LAYER_AUTO_PROCEED` | `autoProceed` | Host-side. `autoProceedOnIdle` is removed at the create boundary, and the auto-proceed enactor refuses `arm` for the session. |
 
-- **Defaults.** Every layer is on, which matches current prod. With default flags the create body and the spawn argv are byte-identical to what they were before C3.
+- **Defaults.** Every layer is on, i.e. every layer is *available*. With default flags the create body and the spawn argv are byte-identical to what they were before C3. "Available" is not "used by default" — see [Session defaults](#session-defaults-aura-diet-2026-10) below.
 - **Values.** Accepted values are `on/off/1/0/true/false`, case-insensitive. Any other value **fails closed** to the default and logs a warning:
   - for env values, once at boot (`[layer-flags] …`);
   - for per-session values, on each create request.
@@ -18,6 +18,20 @@ Four Aura meta-layers can be switched on and off independently. This supports ab
   - **Codex** — the directive is sent again on `thread/resume`, because a server restart resumes the thread.
 - **Known confound.** The workspace `CLAUDE.md`/`AGENTS.md` still mentions the KB. The directive tells the agent to ignore those instructions. The bench harness removes the files entirely for the "naked" variants.
 - **Usage.** `POST /api/sessions/create` with `{"cwd": "...", "layers": {"knowledge": "off"}}`. The flags are not exposed in the UI; they are an operator/bench API.
+
+## Session defaults (aura-diet, 2026-10)
+
+The layer flags decide what a session *may* use. Separately, Aura's defaults decide what a new session *does* use. They were flipped on evidence: AuraBench measured the observer at +0pp for 2.4× cost and full council at −6pp for 2.9×; in the real-work corpus observer findings were referenced by commits in only 2 of ~10 projects, and 138 KB entries were used twice.
+
+| What | Default | How to opt in | Where |
+|---|---|---|---|
+| Session mode | **Solo** — one agent, no observer pair | Per session: the Council toggle on the New-Session form, or `councilMode: "council"` + `councilPairing` on `POST /api/sessions/create`. As a UI default: Settings → Session defaults → *Council* (`settings.defaultSessionMode`). | `HomePage.tsx`, `settings-manager.ts` |
+| Auto-proceed | **Off** | `autoProceedOnIdle` on a council create (see below). Nothing in the UI sends it. | `routes.ts`, AP-WIRE |
+| KB at session start | **Off** — agents consult `.agents/knowledge` on demand | Settings → Session defaults → *Load knowledge base at session start* (`settings.kbAutoPrime`), or `kbAutoPrime: true` on create. | `layer-flags.ts` (`KB_AUTO_PRIME_DIRECTIVE`) |
+
+- **`defaultSessionMode` is a UI default only.** The API never creates a pair unless the request says `councilMode: "council"`; the setting only decides where the New-Session Council toggle starts. The toggle no longer remembers its last value (the old `cc-council-enabled` localStorage key is cleared), so one opt-in for a risky change doesn't make every later session a paid pair. The pairing choice is still remembered.
+- **`kbAutoPrime`** is resolved at the create boundary (`applyLayerFlagsToCreateBody`): an explicit boolean wins, otherwise the server setting applies; a non-boolean value falls back to the setting with a warning. It is forwarded only when on, so the default body/argv are unchanged. When on, the directive is appended like the layer directive — Claude `--append-system-prompt`, Codex `developerInstructions` (re-sent on `thread/resume`) — and persisted on `SdkSessionInfo.kbAutoPrime` for relaunch. It is never applied to a Council observer half, and it is dropped (with a warning) when the `knowledge` layer is off, so `COMPANION_LAYER_KNOWLEDGE=off` still wins.
+- **Existing sessions/pairs are unaffected.** Nothing here touches running sessions, persisted groups, or their relaunch options.
 
 ## Auto-proceed wiring (AP-WIRE)
 
