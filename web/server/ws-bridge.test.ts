@@ -5524,6 +5524,11 @@ describe("sendInitializeKickoff", () => {
       const probeParsed = JSON.parse(probeMsg!.trim());
       expect(probeParsed.message.role).toBe("user");
       expect(probeParsed.message.content).toContain("Aura Companion init probe");
+      // The marker must not ask for silence: the CLI folds the next real
+      // prompt into the same turn, and "do not respond" used to make the
+      // model answer the user's message with "No response requested."
+      expect(probeParsed.message.content).not.toMatch(/do not respond|don't respond|no response/i);
+      expect(probeParsed.message.content).toMatch(/answer any user message that follows normally/);
 
       // Interrupt fires 200ms after the probe (AURA_INIT_PROBE_INTERRUPT_DELAY_MS).
       // Before advancing timers, no interrupt has been written yet.

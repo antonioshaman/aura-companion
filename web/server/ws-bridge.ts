@@ -126,13 +126,19 @@ const RETRYABLE_BACKEND_MESSAGE_TYPES = new Set<BrowserOutgoingMessage["type"]>(
 /**
  * Marker text sent as the content of the init-probe `user` frame at
  * kickoff time. See {@link WsBridge.sendInitProbeAndInterrupt} for the
- * rationale. The wording asks Claude not to respond because the interrupt
- * that follows aborts the turn — but on the off-chance the interrupt
- * races behind the API call and a full reply escapes, the request text
- * makes the model's reply obviously bootstrap-related in the transcript.
+ * rationale. The interrupt that follows aborts the probe's own turn.
+ *
+ * The marker must NOT tell the model to stay silent. The probe and its
+ * "[Request interrupted by user]" stay in the transcript, and the CLI
+ * folds the next real prompt into the same human turn. The old wording
+ * ("…not from a user; do not respond") then applied to the user's real
+ * message: prod transcripts show "No response requested." replies to
+ * "продолжаем" / "Continue from where you left off.", and users had to
+ * repeat themselves after every reconnect. So the marker only scopes
+ * itself to its own line and asks for a normal answer to what follows.
  */
 export const AURA_INIT_PROBE_MARKER =
-  "[Aura Companion init probe — bootstrap frame, not from a user; do not respond]";
+  "[Aura Companion init probe: technical reconnect marker, not a request. Ignore only this line; answer any user message that follows normally.]";
 
 /**
  * Milliseconds to wait after sending the probe `user` frame before
