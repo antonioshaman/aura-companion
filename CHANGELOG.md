@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.3.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.2.0...aura-companion-v2.3.0) (2026-10-12)
+
+
+### Features
+
+* **guards:** Claude Code hook pack that gates the costliest agent actions ([#336](https://github.com/antonioshaman/aura-companion/issues/336)) ([698c769](https://github.com/antonioshaman/aura-companion/commit/698c7696c0ee2ef322e88577c227d78b143b962e))
+* **metrics:** measure reply delivery and regression-test the init-probe reconnect path ([#340](https://github.com/antonioshaman/aura-companion/issues/340)) ([3efe901](https://github.com/antonioshaman/aura-companion/commit/3efe9018b258e37f119838fe3ef4a7e5eaa68827))
+* **packs:** aura-check — lessons from 19 projects as executable checks ([#341](https://github.com/antonioshaman/aura-companion/issues/341)) ([783820a](https://github.com/antonioshaman/aura-companion/commit/783820a2a4f4d627ad1093599ae8703c6106f1c1))
+* **sessions:** isolate parallel sessions in dedicated git worktrees by default ([#342](https://github.com/antonioshaman/aura-companion/issues/342)) ([23408af](https://github.com/antonioshaman/aura-companion/commit/23408afbe88e481b79bf0ae341279057d2e2a120))
+* **sessions:** solo sessions and on-demand knowledge base by default ([#337](https://github.com/antonioshaman/aura-companion/issues/337)) ([7458cb6](https://github.com/antonioshaman/aura-companion/commit/7458cb6349dc542c8dcdc1db9f4ea202e5250f30))
+
+
+### Bug Fixes
+
+* **recorder:** redact npm/Gonka/Telegram/KEY=value secrets in recordings, sessions, logs and handoffs ([#338](https://github.com/antonioshaman/aura-companion/issues/338)) ([daff24a](https://github.com/antonioshaman/aura-companion/commit/daff24aa8a54d91f8a7255a5d001b655b5fdabf5))
+
 ## [2.2.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.1.0...aura-companion-v2.2.0) (2026-10-12)
 
 
