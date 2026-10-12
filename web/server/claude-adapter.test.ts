@@ -855,6 +855,28 @@ describe("handleRawMessage() — incoming CLI message routing", () => {
     expect(msg.session.mcp_servers).toEqual([]);
   });
 
+  it("task_started / task_notification feed the delivery metrics' running-task count", async () => {
+    // A drift recovery kills the CLI and every background task it still
+    // runs; the count comes from these frames (task_started has no browser
+    // mapping, so the adapter is the only place that sees it). The CLI
+    // exiting clears the count.
+    const { deliveryMetrics } = await import("./delivery-metrics.js");
+    deliveryMetrics.reset();
+    try {
+      const task = (subtype: string, task_id: string) =>
+        JSON.stringify({ type: "system", subtype, task_id, task_type: "local_agent", uuid: `u-${subtype}-${task_id}`, session_id: "cli-123" }) + "\n";
+      adapter.handleRawMessage(task("task_started", "t1"));
+      adapter.handleRawMessage(task("task_started", "t2"));
+      adapter.handleRawMessage(task("task_notification", "t1"));
+      expect(deliveryMetrics.getSnapshot().sessions["sess-1"].runningTasks).toBe(1);
+
+      adapter.handleTransportClose();
+      expect(deliveryMetrics.getSnapshot().sessions["sess-1"].runningTasks).toBe(0);
+    } finally {
+      deliveryMetrics.reset();
+    }
+  });
+
   it("system status → emits browserMessageCb with status_change", () => {
     // A system status message (e.g. compacting) should be translated to
     // a status_change browser message.

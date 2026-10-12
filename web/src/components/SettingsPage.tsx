@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import { api, type ModelDiagnostics } from "../api.js";
 import { useStore } from "../store.js";
+import { DeliveryHealthIndicator } from "./DeliveryHealthIndicator.js";
 import { getTelemetryPreferenceEnabled, setTelemetryPreferenceEnabled } from "../analytics.js";
 import { navigateToSession, navigateHome } from "../utils/routing.js";
 import type { SdkSessionInfo } from "../types.js";
@@ -1160,6 +1161,8 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                   </dl>
                 )}
               </div>
+
+              <DeliveryHealthIndicator />
             </section>
 
             {/* AI Validation */}

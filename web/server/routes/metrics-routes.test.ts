@@ -46,6 +46,18 @@ vi.mock("../metrics-collector.js", () => {
   };
 });
 
+// Delivery snapshot served by GET /metrics/delivery (Settings → Reply delivery).
+vi.mock("../delivery-metrics.js", () => ({
+  deliveryMetrics: {
+    getSnapshot: vi.fn(() => ({
+      stallThresholdMs: 60_000,
+      global: { userMessages: 4, firstOutputs: 3, stalledMessages: 1, noResponseRequestedReplies: 0, driftRecoveries: 1, nudges: 1, backgroundTasksKilled: 3, awaitingReply: 0 },
+      timeToFirstOutputMs: { count: 3, sum: 9000, min: 1000, max: 5000, avg: 3000, p50Bucket: 2500, p95Bucket: 5000, p99Bucket: 5000, buckets: {} },
+      sessions: {},
+    })),
+  },
+}));
+
 describe("GET /metrics", () => {
   let app: Hono;
 
@@ -99,5 +111,22 @@ describe("GET /metrics", () => {
     expect(json.histograms.sessionInitTimeMs.count).toBe(3);
     expect(json.histograms.turnDurationMs.count).toBe(10);
     expect(json.histograms.permissionDurationMs.count).toBe(5);
+  });
+});
+
+describe("GET /metrics/delivery", () => {
+  // The Settings panel polls this lightweight endpoint instead of the full
+  // snapshot; it must return the delivery block as-is.
+  it("returns the delivery snapshot", async () => {
+    const app = new Hono();
+    registerMetricsRoutes(app, {
+      gaugeProvider: { getSessionMemoryStats: vi.fn(() => []), getSessionPhases: vi.fn(() => new Map()) },
+    });
+    const res = await app.request("/metrics/delivery");
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.stallThresholdMs).toBe(60_000);
+    expect(json.global.stalledMessages).toBe(1);
+    expect(json.timeToFirstOutputMs.count).toBe(3);
   });
 });

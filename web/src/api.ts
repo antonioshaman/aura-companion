@@ -291,6 +291,33 @@ export interface ModelDiagnostics {
       };
 }
 
+/**
+ * Reply-delivery reliability snapshot from `GET /api/metrics/delivery`
+ * (server/delivery-metrics.ts). Counters are in-memory since server start.
+ */
+export interface DeliveryCountersSnapshot {
+  userMessages: number;
+  firstOutputs: number;
+  stalledMessages: number;
+  noResponseRequestedReplies: number;
+  driftRecoveries: number;
+  nudges: number;
+  backgroundTasksKilled: number;
+}
+
+export interface DeliveryMetricsSnapshot {
+  stallThresholdMs: number;
+  global: DeliveryCountersSnapshot & { awaitingReply: number };
+  timeToFirstOutputMs: {
+    count: number;
+    avg: number;
+    p50Bucket: number;
+    p95Bucket: number;
+    max: number;
+  };
+  sessions: Record<string, DeliveryCountersSnapshot & { backend: string | null; runningTasks: number; awaitingSince: number | null; lastEventAt: number }>;
+}
+
 export interface RelaunchSessionOpts {
   model?: string;
 }
@@ -1151,6 +1178,7 @@ export const api = {
       "/settings/models/refresh",
     ),
   getModelDiagnostics: () => get<ModelDiagnostics>("/settings/diagnostics"),
+  getDeliveryMetrics: () => get<DeliveryMetricsSnapshot>("/metrics/delivery"),
 
   // Tailscale
   getTailscaleStatus: () => get<TailscaleStatus>("/tailscale/status"),

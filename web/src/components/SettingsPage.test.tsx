@@ -67,6 +67,7 @@ const mockApi = {
   relaunchSession: vi.fn(),
   refreshModels: vi.fn(),
   getModelDiagnostics: vi.fn(),
+  getDeliveryMetrics: vi.fn(),
 };
 
 const mockTelemetry = {
@@ -85,6 +86,7 @@ vi.mock("../api.js", () => ({
     relaunchSession: (...args: unknown[]) => mockApi.relaunchSession(...args),
     refreshModels: (...args: unknown[]) => mockApi.refreshModels(...args),
     getModelDiagnostics: (...args: unknown[]) => mockApi.getModelDiagnostics(...args),
+    getDeliveryMetrics: (...args: unknown[]) => mockApi.getDeliveryMetrics(...args),
   },
 }));
 
@@ -133,6 +135,12 @@ beforeEach(() => {
   });
   mockApi.relaunchSession.mockResolvedValue({ ok: true });
   mockApi.refreshModels.mockResolvedValue({ claude: "ok", codex: "ok" });
+  mockApi.getDeliveryMetrics.mockResolvedValue({
+    stallThresholdMs: 60_000,
+    global: { userMessages: 5, firstOutputs: 5, stalledMessages: 0, noResponseRequestedReplies: 0, driftRecoveries: 0, nudges: 0, backgroundTasksKilled: 0, awaitingReply: 0 },
+    timeToFirstOutputMs: { count: 5, avg: 2000, p50Bucket: 2500, p95Bucket: 5000, max: 4000 },
+    sessions: {},
+  });
   mockApi.getModelDiagnostics.mockResolvedValue({
     companionHome: "/home/tester/.companion",
     anthropic: {
@@ -152,6 +160,15 @@ beforeEach(() => {
 });
 
 describe("SettingsPage", () => {
+  // The reply-delivery indicator lives next to the model diagnostics and
+  // loads its own snapshot from GET /api/metrics/delivery.
+  it("shows the reply delivery indicator in the diagnostics area", async () => {
+    render(<SettingsPage />);
+    expect(await screen.findByText("Reply delivery")).toBeInTheDocument();
+    expect(await screen.findByText("All messages answered")).toBeInTheDocument();
+    expect(mockApi.getDeliveryMetrics).toHaveBeenCalled();
+  });
+
   describe("Session defaults (aura-diet: solo by default, KB on demand)", () => {
     it("shows solo + KB auto-load off when the server omits the fields (older server)", async () => {
       render(<SettingsPage />);
