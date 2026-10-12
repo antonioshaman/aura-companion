@@ -146,3 +146,24 @@ jobs:
       - name: Build
         working-directory: platform
         run: bun run build
+
+  experience-packs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: aura-check unit tests
+        working-directory: packs/checks
+        run: python3 -m unittest discover -s tests -t .
+
+      # Errors (secrets, tracked .env, inline systemd secrets, bad Alembic ids)
+      # fail the job; warnings are printed for the reviewer.
+      - name: aura-check on this change
+        if: github.event_name == 'pull_request'
+        run: packs/checks/bin/aura-check --changed --base "origin/${{ github.base_ref }}"

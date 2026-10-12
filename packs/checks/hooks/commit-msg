@@ -1,0 +1,4 @@
+#!/bin/sh
+# git commit-msg hook: secrets / personal data in the commit message. Install:
+#   ln -s /path/to/packs/checks/hooks/commit-msg .git/hooks/commit-msg
+exec "${AURA_CHECK:-aura-check}" --commit-msg-file "$1" --pack secrets,pii
