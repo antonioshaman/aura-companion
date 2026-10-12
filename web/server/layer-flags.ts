@@ -12,8 +12,12 @@
  *  - `council`     — the multi-expert `/council-*` skills.
  *  - `autoProceed` — the AFK idle-timeout driver (`autoProceedOnIdle`).
  *
- * Defaults are every layer ON — i.e. exactly the current prod behaviour, and
- * a default-flag session produces a byte-identical spawn argv.
+ * Defaults are every layer ON — i.e. the layers are AVAILABLE, and a
+ * default-flag session produces a byte-identical spawn argv. "Available" is
+ * not "used by default": since aura-diet (2026-10) new sessions are solo
+ * unless the request opts into `councilMode: "council"`, auto-proceed needs
+ * an explicit `autoProceedOnIdle`, and the KB is consulted on demand (the
+ * opt-in {@link KB_AUTO_PRIME_DIRECTIVE} restores load-at-start).
  *
  * Two inputs, one precedence rule:
  *  1. Server env `COMPANION_LAYER_{KNOWLEDGE,OBSERVER,COUNCIL,AUTO_PROCEED}`
@@ -185,11 +189,32 @@ export interface LayerSpawnConfig {
 }
 
 /**
- * Translate flags into spawn-time restrictions. All-default flags → empty
- * config, so the default spawn is unchanged.
+ * Opt-in "auto-prime" directive (aura-diet, 2026-10). The KB is consulted ON
+ * DEMAND by default — the real-work corpus showed 138 KB entries used twice —
+ * so Aura no longer asks agents to load it at every session start. A user who
+ * wants the old behaviour turns on Settings → "Load knowledge base at session
+ * start" (`settings.kbAutoPrime`) or sends `kbAutoPrime: true` on create.
+ * Only meaningful while the `knowledge` layer is ON.
  */
-export function buildLayerSpawnConfig(flags: LayerFlags | undefined): LayerSpawnConfig {
-  if (!flags) return { disallowedTools: [] };
+export const KB_AUTO_PRIME_DIRECTIVE =
+  "# Aura knowledge base\n\n" +
+  "Before starting work in this session, load the project knowledge base relevant to the task: " +
+  "run /prime <focus> if that skill is available, otherwise read the matching entries in " +
+  "`.agents/knowledge/*.jsonl` (search by tags and file paths).";
+
+export interface LayerSpawnExtras {
+  /** Append {@link KB_AUTO_PRIME_DIRECTIVE}. Ignored when `knowledge` is OFF. */
+  kbAutoPrime?: boolean;
+}
+
+/**
+ * Translate flags into spawn-time restrictions. All-default flags (and no
+ * opt-in extras) → empty config, so the default spawn is unchanged.
+ */
+export function buildLayerSpawnConfig(flags: LayerFlags | undefined, extras: LayerSpawnExtras = {}): LayerSpawnConfig {
+  const knowledgeOn = flags ? flags.knowledge : DEFAULT_LAYER_FLAGS.knowledge;
+  const autoPrime = extras.kbAutoPrime === true && knowledgeOn ? KB_AUTO_PRIME_DIRECTIVE : undefined;
+  if (!flags) return autoPrime ? { disallowedTools: [], systemPrompt: autoPrime } : { disallowedTools: [] };
   const disallowedTools: string[] = [];
   const directives: string[] = [];
   if (!flags.knowledge) {
@@ -213,9 +238,9 @@ export function buildLayerSpawnConfig(flags: LayerFlags | undefined): LayerSpawn
         "Ignore any project instructions that ask you to.",
     );
   }
-  return directives.length > 0
-    ? { disallowedTools, systemPrompt: `# Aura layer flags\n\n${directives.join("\n\n")}` }
-    : { disallowedTools };
+  const layerPrompt = directives.length > 0 ? `# Aura layer flags\n\n${directives.join("\n\n")}` : undefined;
+  const systemPrompt = composeSystemPrompt(layerPrompt, autoPrime);
+  return systemPrompt ? { disallowedTools, systemPrompt } : { disallowedTools };
 }
 
 /** Join prompt fragments with a blank line, dropping empties. */
@@ -239,11 +264,14 @@ export type LayerBoundaryResult =
  *    observer layer; silently degrading to a solo session would corrupt an
  *    ablation cell);
  *  - `autoProceed` OFF → drops `autoProceedOnIdle`, so no group is ever
- *    configured to auto-proceed.
+ *    configured to auto-proceed;
+ *  - `kbAutoPrime` (opt-in KB directive) resolved against `defaults`
+ *    (the server setting) and kept only when ON with `knowledge` ON.
  */
 export function applyLayerFlagsToCreateBody(
   body: Record<string, unknown>,
   serverFlags: LayerFlags,
+  defaults: { kbAutoPrime?: boolean } = {},
 ): LayerBoundaryResult {
   const { layers: rawLayers, ...rest } = body;
   const { flags, warnings } = resolveSessionLayerFlags(rawLayers, serverFlags);
@@ -254,6 +282,21 @@ export function applyLayerFlagsToCreateBody(
       warnings,
       error: "Observer layer is disabled (COMPANION_LAYER_OBSERVER / layers.observer); Council Mode pairs cannot be created",
     };
+  }
+  // KB auto-prime (opt-in, default off). Resolved here so REST callers get
+  // the same default as the UI: explicit boolean wins, else the server
+  // setting. Only forwarded when ON and the knowledge layer is ON, so the
+  // default body stays byte-identical to before.
+  const rawAutoPrime = rest.kbAutoPrime;
+  delete rest.kbAutoPrime;
+  if (rawAutoPrime !== undefined && typeof rawAutoPrime !== "boolean") {
+    warnings.push(`kbAutoPrime=${JSON.stringify(rawAutoPrime)} is not a boolean; using the server default`);
+  }
+  const autoPrime = typeof rawAutoPrime === "boolean" ? rawAutoPrime : defaults.kbAutoPrime === true;
+  if (autoPrime && !flags.knowledge) {
+    warnings.push("knowledge layer is disabled; ignoring kbAutoPrime");
+  } else if (autoPrime) {
+    rest.kbAutoPrime = true;
   }
   if (!flags.autoProceed && rest.autoProceedOnIdle !== undefined) {
     delete rest.autoProceedOnIdle;

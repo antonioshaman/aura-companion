@@ -59,6 +59,20 @@ describe("CouncilToggle", () => {
     expect(screen.getByRole("switch")).toHaveAttribute("aria-checked", "true");
   });
 
+  it("explains when Council is worth it and its cost, linked to the switch as its description", () => {
+    // aura-diet 2026-10: solo is the default; the help copy must steer users to
+    // council only for risky changes / plan review and state the ~2-3x cost.
+    render(
+      <CouncilToggle enabled={false} pairing="claude+claude" onEnabledChange={() => {}} onPairingChange={() => {}} />,
+    );
+    const when = screen.getByTestId("council-toggle-when");
+    expect(when).toHaveTextContent(/payments, auth, DB migrations/);
+    expect(when).toHaveTextContent(/plan review/);
+    expect(when).toHaveTextContent(/2–3×/);
+    // Screen readers hear the same guidance on the switch itself.
+    expect(screen.getByRole("switch")).toHaveAccessibleDescription(/Worth it for risky changes/);
+  });
+
   it("calls onEnabledChange with the toggled value when the switch is clicked", () => {
     const onEnabledChange = vi.fn();
     render(

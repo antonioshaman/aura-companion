@@ -22,7 +22,7 @@ Each file contains one JSON object per line (JSONL format) with: `id`, `type`, `
 
 ## Skills
 
-- `/prime [focus]` — Load relevant knowledge before starting work. Auto-filters by branch, modified files, or provided keywords. Run at session start.
+- `/prime [focus]` — Load relevant knowledge before starting work. Auto-filters by branch, modified files, or provided keywords. Run it when a task touches an area the KB covers — not by default at every session start.
 - `/learn <insight>` — Quick-capture a learning mid-session without breaking flow. Auto-classifies and appends to the right knowledge file.
 - `/self-reflect [scope]` — End-of-session reflection. Reviews what happened, extracts learnings, prunes stale entries. Run after completing significant work.
 

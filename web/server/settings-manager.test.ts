@@ -49,8 +49,26 @@ describe("settings-manager", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: true,
+      defaultSessionMode: "solo",
+      kbAutoPrime: false,
       updatedAt: 0,
     });
+  });
+
+  // aura-diet 2026-10: new sessions are solo and the KB is not auto-loaded
+  // unless the user opts in; unknown/garbage persisted values fall back to
+  // those defaults rather than enabling anything.
+  it("defaults to solo + kbAutoPrime off, persists opt-ins, and rejects garbage", () => {
+    expect(getSettings().defaultSessionMode).toBe("solo");
+    expect(getSettings().kbAutoPrime).toBe(false);
+    updateSettings({ defaultSessionMode: "council", kbAutoPrime: true });
+    _resetForTest(settingsPath);
+    expect(getSettings().defaultSessionMode).toBe("council");
+    expect(getSettings().kbAutoPrime).toBe(true);
+    writeFileSync(settingsPath, JSON.stringify({ defaultSessionMode: "pair", kbAutoPrime: "yes" }));
+    _resetForTest(settingsPath);
+    expect(getSettings().defaultSessionMode).toBe("solo");
+    expect(getSettings().kbAutoPrime).toBe(false);
   });
 
   it("updates and persists settings", () => {
@@ -105,6 +123,8 @@ describe("settings-manager", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: true,
+      defaultSessionMode: "solo",
+      kbAutoPrime: false,
       updatedAt: 123,
     });
   });
@@ -185,6 +205,8 @@ describe("settings-manager", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: true,
+      defaultSessionMode: "solo",
+      kbAutoPrime: false,
       updatedAt: 0,
     });
   });

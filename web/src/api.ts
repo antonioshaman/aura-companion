@@ -486,6 +486,10 @@ export interface AppSettings {
   updateChannel: "stable" | "prerelease";
   dockerAutoUpdate: boolean;
   telemetryEnabled: boolean;
+  /** UI default for new sessions. "solo" unless the user changed it. */
+  defaultSessionMode?: "solo" | "council";
+  /** Opt-in: ask new sessions to load the knowledge base at start. Default off. */
+  kbAutoPrime?: boolean;
 }
 
 export interface LinearOAuthConnectionSummary {
@@ -1164,6 +1168,8 @@ export const api = {
     updateChannel?: "stable" | "prerelease";
     dockerAutoUpdate?: boolean;
     telemetryEnabled?: boolean;
+    defaultSessionMode?: "solo" | "council";
+    kbAutoPrime?: boolean;
   }) => put<AppSettings>("/settings", data),
   verifyAnthropicKey: (apiKey: string) =>
     post<{ valid: boolean; error?: string }>("/settings/anthropic/verify", { apiKey }),

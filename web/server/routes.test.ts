@@ -130,6 +130,8 @@ vi.mock("./settings-manager.js", () => ({
     updateChannel: "stable",
     dockerAutoUpdate: false,
     telemetryEnabled: false,
+    defaultSessionMode: "solo" as const,
+    kbAutoPrime: false,
     updatedAt: 0,
   })),
   updateSettings: vi.fn((patch) => ({
@@ -154,6 +156,8 @@ vi.mock("./settings-manager.js", () => ({
     updateChannel: patch.updateChannel ?? "stable",
     dockerAutoUpdate: patch.dockerAutoUpdate ?? false,
     telemetryEnabled: patch.telemetryEnabled ?? true,
+    defaultSessionMode: patch.defaultSessionMode ?? "solo",
+    kbAutoPrime: patch.kbAutoPrime ?? false,
     updatedAt: Date.now(),
   })),
 }));
@@ -496,6 +500,41 @@ describe("POST /api/sessions/create", () => {
 
     expect(res.status).toBe(200);
     expect(orchestrator.createSession).toHaveBeenCalledWith(body);
+  });
+
+  // aura-diet 2026-10: a plain create is SOLO (never routed to the council
+  // pair path) and the KB auto-prime directive follows the server setting.
+  it("plain create stays solo and carries no kbAutoPrime while the setting is off", async () => {
+    orchestrator.createSession.mockResolvedValue({
+      ok: true,
+      session: { sessionId: "s-solo", state: "starting", cwd: "/test", createdAt: Date.now() },
+    });
+    await app.request("/api/sessions/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: "/test" }),
+    });
+    expect(orchestrator.createCouncilGroup).not.toHaveBeenCalled();
+    const arg = orchestrator.createSession.mock.calls.at(-1)![0];
+    expect(arg).not.toHaveProperty("kbAutoPrime");
+    expect(arg).not.toHaveProperty("councilMode");
+  });
+
+  it("forwards kbAutoPrime: true when the server setting is on", async () => {
+    vi.mocked(settingsManager.getSettings).mockReturnValueOnce({
+      ...settingsManager.getSettings(),
+      kbAutoPrime: true,
+    });
+    orchestrator.createSession.mockResolvedValue({
+      ok: true,
+      session: { sessionId: "s-kb", state: "starting", cwd: "/test", createdAt: Date.now() },
+    });
+    await app.request("/api/sessions/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: "/test" }),
+    });
+    expect(orchestrator.createSession).toHaveBeenLastCalledWith({ cwd: "/test", kbAutoPrime: true });
   });
 
   it("returns error status from orchestrator on failure", async () => {
@@ -1555,6 +1594,8 @@ describe("GET /api/sessions/:id/archive-info", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
       updatedAt: 0,
     });
     const res = await app.request("/api/sessions/s1/archive-info", { method: "GET" });
@@ -1926,6 +1967,8 @@ describe("GET /api/settings", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
       updatedAt: 123,
     });
 
@@ -1955,6 +1998,8 @@ describe("GET /api/settings", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
     });
   });
 
@@ -1984,6 +2029,8 @@ describe("GET /api/settings", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
       updatedAt: 123,
     });
 
@@ -2013,6 +2060,8 @@ describe("GET /api/settings", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
     });
   });
 
@@ -2043,6 +2092,8 @@ describe("GET /api/settings", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
       updatedAt: 100,
     });
 
@@ -2081,6 +2132,8 @@ describe("PUT /api/settings", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
       updatedAt: 456,
     });
 
@@ -2132,6 +2185,8 @@ describe("PUT /api/settings", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
     });
   });
 
@@ -2161,6 +2216,8 @@ describe("PUT /api/settings", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
       updatedAt: 789,
     });
 
@@ -2179,6 +2236,43 @@ describe("PUT /api/settings", () => {
       linearAutoTransitionStateId: undefined,
       linearAutoTransitionStateName: undefined,
     });
+  });
+
+  // aura-diet 2026-10: session defaults (solo + KB on demand) are settable
+  // via PUT /settings with closed-set validation and echoed back.
+  it("accepts defaultSessionMode + kbAutoPrime and echoes them", async () => {
+    const base = settingsManager.getSettings();
+    vi.mocked(settingsManager.updateSettings).mockReturnValueOnce({
+      ...base,
+      defaultSessionMode: "council",
+      kbAutoPrime: true,
+    });
+    const res = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ defaultSessionMode: "council", kbAutoPrime: true }),
+    });
+    expect(res.status).toBe(200);
+    expect(settingsManager.updateSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ defaultSessionMode: "council", kbAutoPrime: true }),
+    );
+    const json = await res.json();
+    expect(json.defaultSessionMode).toBe("council");
+    expect(json.kbAutoPrime).toBe(true);
+  });
+
+  it.each([
+    [{ defaultSessionMode: "pair" }, "defaultSessionMode must be 'solo' or 'council'"],
+    [{ kbAutoPrime: "yes" }, "kbAutoPrime must be a boolean"],
+  ])("rejects invalid session defaults %j with 400", async (body, error) => {
+    const res = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error });
+    expect(settingsManager.updateSettings).not.toHaveBeenCalled();
   });
 
   it("updates only model without overriding key", async () => {
@@ -2207,6 +2301,8 @@ describe("PUT /api/settings", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
       updatedAt: 999,
     });
 
@@ -2304,6 +2400,8 @@ describe("PUT /api/settings", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
       updatedAt: 500,
     });
 
@@ -2531,6 +2629,8 @@ describe("GET /api/linear/issues", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -2567,6 +2667,8 @@ describe("GET /api/linear/issues", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
       updatedAt: 0,
     });
 
@@ -2656,6 +2758,8 @@ describe("GET /api/linear/issues", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
       updatedAt: 0,
     });
 
@@ -2752,6 +2856,8 @@ describe("GET /api/linear/issues", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
       updatedAt: 0,
     });
 
@@ -2813,6 +2919,8 @@ describe("GET /api/linear/connection", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -2849,6 +2957,8 @@ describe("GET /api/linear/connection", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
       updatedAt: 0,
     });
 
@@ -2907,6 +3017,8 @@ describe("POST /api/linear/issues/:id/transition", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
       updatedAt: 0,
     });
 
@@ -2947,6 +3059,8 @@ describe("POST /api/linear/issues/:id/transition", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
       updatedAt: 0,
     });
 
@@ -2986,6 +3100,8 @@ describe("POST /api/linear/issues/:id/transition", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -3027,6 +3143,8 @@ describe("POST /api/linear/issues/:id/transition", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
       updatedAt: 0,
     });
 
@@ -3102,6 +3220,8 @@ describe("POST /api/linear/issues/:id/transition", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
       updatedAt: 0,
     });
 
@@ -3156,6 +3276,8 @@ describe("GET /api/linear/projects", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -3192,6 +3314,8 @@ describe("GET /api/linear/projects", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
       updatedAt: 0,
     });
 
@@ -3258,6 +3382,8 @@ describe("GET /api/linear/project-issues", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -3294,6 +3420,8 @@ describe("GET /api/linear/project-issues", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
       updatedAt: 0,
     });
 
@@ -3375,6 +3503,8 @@ describe("GET /api/linear/project-issues", () => {
       updateChannel: "stable",
       dockerAutoUpdate: false,
       telemetryEnabled: false,
+      defaultSessionMode: "solo" as const,
+      kbAutoPrime: false,
       updatedAt: 0,
     });
 

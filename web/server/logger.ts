@@ -26,6 +26,7 @@ import {
 import { join } from "node:path";
 import { COMPANION_HOME } from "./paths.js";
 import { countFileLines } from "./fs-utils.js";
+import { redactSecretsInText } from "./secret-redaction.js";
 
 type LogLevel = "info" | "warn" | "error";
 
@@ -81,6 +82,10 @@ function maskHex64(line: string): string {
 export function maskSecrets(line: string): string {
   let out = line;
   for (const [re, replacement] of SECRET_PATTERNS) out = out.replace(re, replacement);
+  // Shared recorder/session-store policy (npm_, gnk-, Telegram, GitHub, JWT,
+  // KEY=value assignments, ...). The bare-hex rule is skipped: the logger
+  // keeps its context-aware maskHex64 so diagnostic sha256 values survive.
+  out = redactSecretsInText(out, { skip: ["hex64"] });
   return maskHex64(out);
 }
 

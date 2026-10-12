@@ -144,6 +144,11 @@ export interface CreateSessionRequest {
    * Absent → all layers on (prod behaviour). See `layer-flags.ts`.
    */
   layers?: LayerFlags;
+  /**
+   * Opt-in KB "load at session start" directive, resolved at the boundary
+   * (`applyLayerFlagsToCreateBody`): present only when ON. Default off.
+   */
+  kbAutoPrime?: boolean;
 }
 
 export interface RelaunchSessionRequest {
@@ -1238,6 +1243,7 @@ export class SessionOrchestrator {
           sessionGroupId: body.sessionGroupId,
           sessionGroupRole: body.sessionGroupRole,
           layers: body.layers,
+          kbAutoPrime: body.kbAutoPrime === true ? true : undefined,
           autoProceedOnIdle: body.autoProceedOnIdle,
         });
       } catch (e) {
