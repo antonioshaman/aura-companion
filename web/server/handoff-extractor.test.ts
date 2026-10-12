@@ -188,6 +188,20 @@ describe("extractHandoff", () => {
   });
 });
 
+describe("extractHandoff — secret redaction", () => {
+  // The brief lands in the user's workspace (0644, may be committed), so a
+  // credential pasted into chat must be masked. SYNTHETIC npm-shaped value.
+  it("masks secrets from user text and tool results", () => {
+    const fake = "npm_" + "aB3dE5gH7jK9mN1pQ".repeat(3).slice(0, 36);
+    const { markdown } = extractHandoff({
+      sessionId: "s-secret",
+      messageHistory: [userMsg(`publish with ${fake}`), toolResultMsg(`NPM_TOKEN=${fake}`)],
+    });
+    expect(markdown).not.toContain(fake);
+    expect(markdown).toContain("npm_[REDACTED]");
+  });
+});
+
 describe("buildPickupDraft", () => {
   it("references the handoff filename and asks for a structured summary", () => {
     const draft = buildPickupDraft(".aura-handoff-2026-05-21T013747.md");
