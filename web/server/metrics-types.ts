@@ -13,6 +13,8 @@ export interface MetricsSnapshot {
   counters: CounterMetrics;
   gauges: GaugeMetrics;
   histograms: HistogramMetrics;
+  /** Reply-delivery reliability (see delivery-metrics.ts). */
+  delivery: DeliverySnapshot;
 }
 
 // ── Counters (monotonically increasing) ────────────────────────────────────
@@ -105,4 +107,56 @@ export interface HistogramMetrics {
   turnDurationMs: HistogramSnapshot;
   /** Permission request duration: request → response (ms). */
   permissionDurationMs: HistogramSnapshot;
+}
+
+// ── Reply delivery (delivery-metrics.ts) ───────────────────────────────────
+
+/**
+ * Counters for "did the user's message get an answer". Same shape for the
+ * global roll-up and for each session.
+ */
+export interface DeliveryCounters {
+  /** User messages routed to a backend (browser, REST inject, cron, peer). */
+  userMessages: number;
+  /** User messages whose first assistant output (stream token, assistant
+   *  frame or permission request) arrived. */
+  firstOutputs: number;
+  /** User messages with no assistant output within `stallThresholdMs`. */
+  stalledMessages: number;
+  /** Assistant replies that are exactly "No response requested." while a
+   *  real user message was awaiting an answer (the init-probe fold bug). */
+  noResponseRequestedReplies: number;
+  /** Silent-stdio drift detector kills issued to recover a stuck reply
+   *  (Claude only; Codex has no jsonl to compare). */
+  driftRecoveries: number;
+  /** Human messages matching the RU/EN nudge list ("жду", "ты тут?",
+   *  "are you there"...). A proxy for "the user felt ignored", not proof. */
+  nudges: number;
+  /** Background tasks (Bash, `local_agent` subagents) still running in the
+   *  Claude CLI when a drift recovery killed it — they die with the process.
+   *  Counted from `task_started` / `task_notification` frames. */
+  backgroundTasksKilled: number;
+}
+
+export interface SessionDeliveryStats extends DeliveryCounters {
+  backend: string | null;
+  /** Background tasks the CLI reports as running right now (Claude only). */
+  runningTasks: number;
+  /** Epoch ms of the oldest unanswered user message, or null. */
+  awaitingSince: number | null;
+  /** Epoch ms of the last delivery event recorded for this session. */
+  lastEventAt: number;
+}
+
+export interface DeliverySnapshot {
+  /** Threshold behind `stalledMessages` (ms). */
+  stallThresholdMs: number;
+  global: DeliveryCounters & {
+    /** Sessions currently waiting for a first output. */
+    awaitingReply: number;
+  };
+  /** User message → first assistant output (ms). */
+  timeToFirstOutputMs: HistogramSnapshot;
+  /** Per-session counters, most recently active first (bounded). */
+  sessions: Record<string, SessionDeliveryStats>;
 }
