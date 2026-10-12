@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.2.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.1.0...aura-companion-v2.2.0) (2026-10-12)
+
+
+### Features
+
+* aura meta-diet, part 2 — observer reliability, orchestrator split, AuraBench results ([#334](https://github.com/antonioshaman/aura-companion/issues/334)) ([bce5926](https://github.com/antonioshaman/aura-companion/commit/bce5926d486c0ea59b6ec4965deff38d954573a9))
+
+
+### Bug Fixes
+
+* **council:** host adopts group-less observer review files and stamps the model ([#331](https://github.com/antonioshaman/aura-companion/issues/331)) ([0a30349](https://github.com/antonioshaman/aura-companion/commit/0a30349c990107343b0d127c1374172ce95e166d))
+* **session:** stalled answers caught in seconds; reconnect no longer swallows the next message ([#335](https://github.com/antonioshaman/aura-companion/issues/335)) ([d60c663](https://github.com/antonioshaman/aura-companion/commit/d60c6634e474dec3edb7415f41460f5bd59879a6))
+
 ## [2.1.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.0.1...aura-companion-v2.1.0) (2026-10-07)
 
 
