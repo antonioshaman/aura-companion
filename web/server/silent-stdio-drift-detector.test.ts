@@ -331,6 +331,93 @@ describe("checkDrift — undelivered-output evidence gate", () => {
   });
 });
 
+// Prod 2026-10-09, Rapesha_shop_bot (recording 41054082…, CLI jsonl
+// 0537e6d7…): bun's last CLI frame 18:14:43 (control_response); the user's
+// "жду вердикт" reached stdin 18:14:52; the CLI wrote thinking 18:14:56 and
+// its answer 18:15:16 to the jsonl and emitted NOTHING on stdout. The old
+// thresholds never fired (lag 33 s < 90 s, then the jsonl went "idle" at
+// 18:17:16); the user waited 12 min and had to ask again. These tests pin
+// that a short stalled answer is now caught on the first tick after the
+// record is 10 s old, and stays catchable after the jsonl goes quiet.
+describe("checkDrift — short stalled answer (evidence windows)", () => {
+  const at = (hms: string) => Date.parse(`2026-10-09T${hms}.000Z`);
+  const lastFrame = at("18:14:43");
+  const jsonl = [
+    { type: "user", timestamp: "2026-10-09T18:14:52.000Z" },
+    { type: "assistant", timestamp: "2026-10-09T18:14:56.000Z" },
+    { type: "assistant", timestamp: "2026-10-09T18:15:16.000Z" },
+    { type: "system", timestamp: "2026-10-09T18:15:16.000Z" },
+  ];
+  const chunk = jsonl.map((r) => JSON.stringify(r)).join("\n");
+  const tick = (now: number, gated: boolean) =>
+    checkDrift(
+      { sessionId: "s", bunLastFrameMs: lastFrame, jsonlPath: "/replay/cli.jsonl" },
+      {
+        now: () => now,
+        statFile: () => ({ mtimeMs: at("18:15:16") }),
+        undeliveredOutput: gated ? (_p, since, until) => countAssistantRecordsBetween(chunk, since, until) : undefined,
+      },
+    );
+
+  it("timing-only check (no evidence dep) still misses it — documents the old blind spot", () => {
+    expect(tick(at("18:15:30"), false).drifted).toBe(false);
+    expect(tick(at("18:20:00"), false).drifted).toBe(false);
+  });
+
+  it("with the evidence check: kills on the first tick once the answer is 10 s old", () => {
+    // 18:15:20 — the 18:15:16 record is only 4 s old, but the 18:14:56
+    // thinking record already counts: the stall is proven.
+    const v = tick(at("18:15:20"), true);
+    expect(v.drifted).toBe(true);
+    expect(v.undeliveredAssistantRecords).toBe(1);
+  });
+
+  it("with the evidence check: still kills after the jsonl went quiet (old idle cutoff)", () => {
+    const v = tick(at("18:20:00"), true);
+    expect(v.drifted).toBe(true);
+    expect(v.undeliveredAssistantRecords).toBe(2);
+  });
+
+  it("a quiet, healthy session past the 30 min window is not even examined", () => {
+    let reads = 0;
+    const v = checkDrift(
+      { sessionId: "s", bunLastFrameMs: lastFrame, jsonlPath: "/replay/cli.jsonl" },
+      { now: () => at("18:46:00"), statFile: () => ({ mtimeMs: at("18:15:16") }), undeliveredOutput: () => ++reads },
+    );
+    expect(v.drifted).toBe(false);
+    expect(reads).toBe(0);
+  });
+
+  it("a healthy turn whose frames arrived is never killed: no assistant record newer than bun's last frame", () => {
+    // Same jsonl, but bun DID receive the 18:15:16 result frame.
+    const v = checkDrift(
+      { sessionId: "s", bunLastFrameMs: at("18:15:16"), jsonlPath: "/replay/cli.jsonl" },
+      {
+        now: () => at("18:16:00"),
+        statFile: () => ({ mtimeMs: at("18:15:16") }),
+        undeliveredOutput: (_p, since, until) => countAssistantRecordsBetween(chunk, since, until),
+      },
+    );
+    expect(v.drifted).toBe(false);
+  });
+
+  it("a prompt queued on an idle session with no model output yet is withheld (P7 false-kill guard holds)", () => {
+    const v = checkDrift(
+      { sessionId: "s", bunLastFrameMs: at("18:14:43"), jsonlPath: "/replay/cli.jsonl" },
+      {
+        // Prompt written 15 s after bun's last frame (past the 10 s lag
+        // tolerance, so the evidence check runs) and no model output yet.
+        now: () => at("18:15:10"),
+        statFile: () => ({ mtimeMs: at("18:14:58") }),
+        undeliveredOutput: (_p, since, until) =>
+          countAssistantRecordsBetween(JSON.stringify({ type: "user", timestamp: "2026-10-09T18:14:58.000Z" }), since, until),
+      },
+    );
+    expect(v.drifted).toBe(false);
+    expect(v.suppressedReason).toBe("no_undelivered_output");
+  });
+});
+
 // EC-6 replay: real prod kills (journal `silent_stdio_drift.detected`) with
 // the CLI's own jsonl around them, reduced to record type/timestamp (see
 // __fixtures__/silent-stdio-drift/README.md). Each case replays the tick that

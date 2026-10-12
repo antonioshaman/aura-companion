@@ -187,6 +187,29 @@ export const DEFAULT_LAG_TOLERANCE_MS = 90_000;
 export const DEFAULT_JSONL_IDLE_THRESHOLD_MS = 120_000;
 
 /**
+ * Lag tolerance when the caller supplies the undelivered-output evidence
+ * check. The 90 s default was sized for a timing-only detector; with the
+ * evidence gate (an `assistant` record bun never received, at least
+ * {@link UNDELIVERED_OUTPUT_MIN_AGE_MS} old) a short lag is enough to look.
+ *
+ * Prod 2026-10-09 (Rapesha_shop_bot): bun's last frame 18:14:43, prompt
+ * 18:14:52, the CLI wrote its whole 24 s answer to the jsonl by 18:15:16 and
+ * emitted nothing on stdout. Lag 33 s < 90 s, so the detector never fired;
+ * the user waited 12 min and had to ask again. Other stalls were caught only
+ * after 111–138 s.
+ */
+export const EVIDENCE_LAG_TOLERANCE_MS = UNDELIVERED_OUTPUT_MIN_AGE_MS;
+
+/**
+ * jsonl-idle window when the evidence check is supplied. A short answer that
+ * stalls stops writing the jsonl at once; the 120 s idle cutoff then hid it
+ * for good (same 2026-10-09 case: from 18:17:16 on every tick returned
+ * "idle"). Undelivered model output is evidence however old the write is;
+ * the window only bounds how long a quiet session keeps being checked.
+ */
+export const EVIDENCE_JSONL_IDLE_WINDOW_MS = 30 * 60_000;
+
+/**
  * Default stat wrapper — returns null on ENOENT so the caller does
  * not have to try/catch every stat.
  */
@@ -205,12 +228,12 @@ function defaultStatFile(p: PathLike): { mtimeMs: number } | null {
  *
  * Drift conditions (ALL must be met):
  *   1. jsonl exists AND was modified recently (within
- *      `jsonlIdleThresholdMs`). An idle jsonl is not evidence of
- *      anything.
+ *      `jsonlIdleThresholdMs`; 120 s, or 30 min with the evidence
+ *      check). An idle jsonl is not evidence of anything.
  *   2. bun's `bunLastFrameMs` is non-zero — a session that has not
  *      yet received its first CLI frame is booting, not drifting.
  *   3. jsonl's mtime is more than `lagToleranceMs` newer than
- *      `bunLastFrameMs`.
+ *      `bunLastFrameMs` (90 s, or 10 s with the evidence check).
  *   4. with `deps.undeliveredOutput`: the jsonl holds at least one
  *      `assistant` record newer than `bunLastFrameMs` and at least
  *      {@link UNDELIVERED_OUTPUT_MIN_AGE_MS} old.
@@ -233,8 +256,14 @@ export function checkDrift(
 ): DriftVerdict {
   const statFile = deps.statFile ?? defaultStatFile;
   const now = (deps.now ?? Date.now)();
-  const lagTolerance = deps.lagToleranceMs ?? DEFAULT_LAG_TOLERANCE_MS;
-  const jsonlIdleThreshold = deps.jsonlIdleThresholdMs ?? DEFAULT_JSONL_IDLE_THRESHOLD_MS;
+  // With the undelivered-output evidence check the timing heuristics no
+  // longer have to carry the decision alone, so they shrink to the evidence
+  // windows (see EVIDENCE_LAG_TOLERANCE_MS / EVIDENCE_JSONL_IDLE_WINDOW_MS).
+  const hasEvidenceCheck = deps.undeliveredOutput !== undefined;
+  const lagTolerance =
+    deps.lagToleranceMs ?? (hasEvidenceCheck ? EVIDENCE_LAG_TOLERANCE_MS : DEFAULT_LAG_TOLERANCE_MS);
+  const jsonlIdleThreshold =
+    deps.jsonlIdleThresholdMs ?? (hasEvidenceCheck ? EVIDENCE_JSONL_IDLE_WINDOW_MS : DEFAULT_JSONL_IDLE_THRESHOLD_MS);
 
   // No jsonl path known → nothing to compare. Session hasn't produced
   // its cliSessionId yet (fresh spawn pre-init) OR the caller hasn't
