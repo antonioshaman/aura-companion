@@ -152,6 +152,47 @@ beforeEach(() => {
 });
 
 describe("SettingsPage", () => {
+  describe("Session defaults (aura-diet: solo by default, KB on demand)", () => {
+    it("shows solo + KB auto-load off when the server omits the fields (older server)", async () => {
+      render(<SettingsPage />);
+      const solo = await screen.findByRole("radio", { name: /Solo/ });
+      await waitFor(() => expect(solo).toBeChecked());
+      expect(screen.getByRole("switch", { name: "Load knowledge base at session start" })).toHaveAttribute("aria-checked", "false");
+    });
+
+    it("hydrates council + KB on from the server", async () => {
+      mockApi.getSettings.mockResolvedValueOnce({
+        anthropicApiKeyConfigured: true,
+        anthropicModel: "claude-sonnet-4-6",
+        defaultSessionMode: "council",
+        kbAutoPrime: true,
+      });
+      render(<SettingsPage />);
+      await waitFor(() => expect(screen.getByRole("radio", { name: /Council/ })).toBeChecked());
+      expect(screen.getByRole("switch", { name: "Load knowledge base at session start" })).toHaveAttribute("aria-checked", "true");
+    });
+
+    it("persists a mode change and a KB toggle via updateSettings", async () => {
+      render(<SettingsPage />);
+      const council = await screen.findByRole("radio", { name: /Council/ });
+      await waitFor(() => expect(council).not.toBeDisabled());
+      fireEvent.click(council);
+      await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledWith({ defaultSessionMode: "council" }));
+      fireEvent.click(screen.getByRole("switch", { name: "Load knowledge base at session start" }));
+      await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledWith({ kbAutoPrime: true }));
+    });
+
+    it("reverts the KB toggle and shows the error when saving fails", async () => {
+      mockApi.updateSettings.mockRejectedValueOnce(new Error("save failed"));
+      render(<SettingsPage />);
+      const sw = await screen.findByRole("switch", { name: "Load knowledge base at session start" });
+      await waitFor(() => expect(sw).not.toBeDisabled());
+      fireEvent.click(sw);
+      await screen.findByText("save failed");
+      expect(sw).toHaveAttribute("aria-checked", "false");
+    });
+  });
+
   it("loads settings on mount and shows configured status", async () => {
     render(<SettingsPage />);
 

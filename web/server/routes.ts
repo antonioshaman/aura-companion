@@ -441,7 +441,9 @@ export function createRoutes(
     const autoBody = parsed.kind === "absent" ? rest : { ...rest, autoProceedOnIdle: parsed.value };
     // aura-meta-diet C3: resolve layer flags (fail-closed, warn) and apply
     // the host-side gates (observer → no council pair, autoProceed → strip).
-    const layered = applyLayerFlagsToCreateBody(autoBody, getServerLayerFlags());
+    const layered = applyLayerFlagsToCreateBody(autoBody, getServerLayerFlags(), {
+      kbAutoPrime: getSettings().kbAutoPrime,
+    });
     for (const w of layered.warnings) console.warn(`[layer-flags] ${w}`);
     if (!layered.ok) {
       return { ok: false, error: layered.error, status: layered.status };

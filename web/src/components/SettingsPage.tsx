@@ -4,6 +4,7 @@ import { useStore } from "../store.js";
 import { getTelemetryPreferenceEnabled, setTelemetryPreferenceEnabled } from "../analytics.js";
 import { navigateToSession, navigateHome } from "../utils/routing.js";
 import type { SdkSessionInfo } from "../types.js";
+import { SessionDefaultsSettings, type DefaultSessionMode } from "./SessionDefaultsSettings.js";
 
 interface SettingsPageProps {
   embedded?: boolean;
@@ -11,6 +12,7 @@ interface SettingsPageProps {
 
 const CATEGORIES = [
   { id: "general", label: "General" },
+  { id: "session-defaults", label: "Session defaults" },
   { id: "webhooks", label: "Webhooks" },
   { id: "authentication", label: "Authentication" },
   { id: "notifications", label: "Notifications" },
@@ -51,6 +53,9 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
   const notificationApiAvailable = typeof Notification !== "undefined";
   const [telemetryEnabled, setTelemetryEnabled] = useState(getTelemetryPreferenceEnabled());
   const [usageCounterEnabled, setUsageCounterEnabled] = useState(true);
+  // aura-diet defaults: solo sessions, KB consulted on demand.
+  const [defaultSessionMode, setDefaultSessionMode] = useState<DefaultSessionMode>("solo");
+  const [kbAutoPrime, setKbAutoPrime] = useState(false);
   const [aiValidationEnabled, setAiValidationEnabled] = useState(false);
   const [aiValidationAutoApprove, setAiValidationAutoApprove] = useState(true);
   const [aiValidationAutoDeny, setAiValidationAutoDeny] = useState(false);
@@ -188,6 +193,8 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
         }
         setAnthropicModel(s.anthropicModel || "claude-sonnet-4-6");
         if (typeof s.telemetryEnabled === "boolean") setUsageCounterEnabled(s.telemetryEnabled);
+        if (s.defaultSessionMode === "solo" || s.defaultSessionMode === "council") setDefaultSessionMode(s.defaultSessionMode);
+        if (typeof s.kbAutoPrime === "boolean") setKbAutoPrime(s.kbAutoPrime);
         if (typeof s.aiValidationEnabled === "boolean") setAiValidationEnabled(s.aiValidationEnabled);
         if (typeof s.aiValidationAutoApprove === "boolean") setAiValidationAutoApprove(s.aiValidationAutoApprove);
         if (typeof s.aiValidationAutoDeny === "boolean") setAiValidationAutoDeny(s.aiValidationAutoDeny);
@@ -483,6 +490,35 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                   Last commit shows only uncommitted changes. Default branch shows all changes since diverging from main.
                 </p>
               </div>
+            </section>
+
+            {/* Session defaults (aura-diet: solo by default, KB on demand) */}
+            <section id="session-defaults" ref={setSectionRef("session-defaults")}>
+              <h2 className="text-sm font-semibold text-cc-fg mb-4">Session defaults</h2>
+              <SessionDefaultsSettings
+                mode={defaultSessionMode}
+                kbAutoPrime={kbAutoPrime}
+                disabled={loading}
+                onModeChange={async (next) => {
+                  const prev = defaultSessionMode;
+                  setDefaultSessionMode(next);
+                  try {
+                    await api.updateSettings({ defaultSessionMode: next });
+                  } catch (e: unknown) {
+                    setDefaultSessionMode(prev);
+                    setError(e instanceof Error ? e.message : String(e));
+                  }
+                }}
+                onKbAutoPrimeChange={async (next) => {
+                  setKbAutoPrime(next);
+                  try {
+                    await api.updateSettings({ kbAutoPrime: next });
+                  } catch (e: unknown) {
+                    setKbAutoPrime(!next);
+                    setError(e instanceof Error ? e.message : String(e));
+                  }
+                }}
+              />
             </section>
 
             {/* Webhooks */}

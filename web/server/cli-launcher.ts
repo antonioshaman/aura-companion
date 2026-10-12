@@ -271,6 +271,9 @@ export interface SdkSessionInfo {
   /** aura-meta-diet C3 — non-default layer flags (absent = all layers on).
    *  Persisted so a relaunch re-applies the same restrictions. */
   layers?: LayerFlags;
+  /** Opt-in KB auto-prime directive (default off). Persisted so a relaunch
+   *  re-applies it. */
+  kbAutoPrime?: boolean;
   /** aura-meta-diet AP-WIRE — validated auto-proceed opt-in; set only on a
    *  council orchestrator-half. Persisted so the opt-in survives restarts. */
   autoProceedOnIdle?: { idleMs: number; maxIterations: number };
@@ -386,6 +389,9 @@ export interface LaunchOptions {
   /** aura-meta-diet C3 — resolved layer flags. Absent or all-default →
    *  spawn argv unchanged. See `layer-flags.ts`. */
   layers?: LayerFlags;
+  /** Opt-in KB auto-prime directive (see `KB_AUTO_PRIME_DIRECTIVE`). Never
+   *  applied to a Council observer half. */
+  kbAutoPrime?: boolean;
   /** AP-WIRE — auto-proceed opt-in; stored only when `sessionGroupRole` is
    *  `orchestrator` (the manager's gate refuses any other half anyway). */
   autoProceedOnIdle?: { idleMs: number; maxIterations: number };
@@ -1075,6 +1081,9 @@ export class CliLauncher {
     if (options.layers) {
       info.layers = options.layers;
     }
+    if (options.kbAutoPrime === true) {
+      info.kbAutoPrime = true;
+    }
     if (options.autoProceedOnIdle && options.sessionGroupRole === "orchestrator") {
       info.autoProceedOnIdle = {
         idleMs: options.autoProceedOnIdle.idleMs,
@@ -1213,7 +1222,11 @@ export class CliLauncher {
    * never widening. Default flags → options returned unchanged.
    */
   private applyLayerSpawnOverrides(options: LaunchOptions): LaunchOptions {
-    const layer = buildLayerSpawnConfig(options.layers);
+    // The observer half is a read-only reviewer with its own prompt — the KB
+    // auto-prime directive is for the agent doing the work only.
+    const layer = buildLayerSpawnConfig(options.layers, {
+      kbAutoPrime: options.kbAutoPrime === true && options.sessionGroupRole !== "observer",
+    });
     if (layer.disallowedTools.length === 0 && !layer.systemPrompt) return options;
     return {
       ...options,
@@ -1416,6 +1429,7 @@ export class CliLauncher {
         sessionGroupId: info.sessionGroupId,
         sessionGroupRole: info.sessionGroupRole,
         layers: info.layers,
+        kbAutoPrime: info.kbAutoPrime,
       }
       : {
         model: info.model,
@@ -1429,6 +1443,7 @@ export class CliLauncher {
         sessionGroupId: info.sessionGroupId,
         sessionGroupRole: info.sessionGroupRole,
         layers: info.layers,
+        kbAutoPrime: info.kbAutoPrime,
       };
     // Council Review 2026-05-15-0820 P2 #7: detect drift in observer
     // prompt provenance across the relaunch boundary. Snapshot captured

@@ -10,6 +10,16 @@ export const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6";
 
 export type UpdateChannel = "stable" | "prerelease";
 
+/**
+ * Default mode for a NEW session created from the UI.
+ *  - `solo`    — one agent (the default since aura-diet: AuraBench measured the
+ *                observer at +0pp for 2.4x cost and full council at −6pp for 2.9x).
+ *  - `council` — the create-session Council toggle starts ON. The REST API is
+ *                unaffected: a pair is only ever created on an explicit
+ *                `councilMode: "council"` in the request body.
+ */
+export type DefaultSessionMode = "solo" | "council";
+
 export interface CompanionSettings {
   anthropicApiKey: string;
   anthropicModel: string;
@@ -44,6 +54,14 @@ export interface CompanionSettings {
   dockerAutoUpdate: boolean;
   /** Opt-in: send an anonymous 30-day heartbeat to the global usage counter. Default off. */
   telemetryEnabled: boolean;
+  /** UI default for new sessions. Default `solo` — see {@link DefaultSessionMode}. */
+  defaultSessionMode: DefaultSessionMode;
+  /**
+   * Opt-in: append a "consult the knowledge base at session start" directive to
+   * new sessions' system prompt (Claude `--append-system-prompt` / Codex
+   * `developerInstructions`). Default off — the KB is consulted on demand.
+   */
+  kbAutoPrime: boolean;
   updatedAt: number;
 }
 
@@ -76,6 +94,8 @@ let settings: CompanionSettings = {
   updateChannel: "stable",
   dockerAutoUpdate: false,
   telemetryEnabled: true,
+  defaultSessionMode: "solo",
+  kbAutoPrime: false,
   updatedAt: 0,
 };
 
@@ -108,6 +128,8 @@ function normalize(raw: Partial<CompanionSettings> | null | undefined): Companio
     updateChannel: raw?.updateChannel === "prerelease" ? "prerelease" : "stable",
     dockerAutoUpdate: typeof raw?.dockerAutoUpdate === "boolean" ? raw.dockerAutoUpdate : false,
     telemetryEnabled: typeof raw?.telemetryEnabled === "boolean" ? raw.telemetryEnabled : true,
+    defaultSessionMode: raw?.defaultSessionMode === "council" ? "council" : "solo",
+    kbAutoPrime: typeof raw?.kbAutoPrime === "boolean" ? raw.kbAutoPrime : false,
     updatedAt: typeof raw?.updatedAt === "number" ? raw.updatedAt : 0,
   };
 }
@@ -138,7 +160,7 @@ export function getSettings(): CompanionSettings {
 }
 
 export function updateSettings(
-  patch: Partial<Pick<CompanionSettings, "anthropicApiKey" | "anthropicModel" | "claudeCodeOAuthToken" | "openaiApiKey" | "onboardingCompleted" | "linearApiKey" | "linearAutoTransition" | "linearAutoTransitionStateId" | "linearAutoTransitionStateName" | "linearArchiveTransition" | "linearArchiveTransitionStateId" | "linearArchiveTransitionStateName" | "linearOAuthClientId" | "linearOAuthClientSecret" | "linearOAuthWebhookSecret" | "linearOAuthAccessToken" | "linearOAuthRefreshToken" | "aiValidationEnabled" | "aiValidationAutoApprove" | "aiValidationAutoDeny" | "publicUrl" | "updateChannel" | "dockerAutoUpdate" | "telemetryEnabled">>,
+  patch: Partial<Pick<CompanionSettings, "anthropicApiKey" | "anthropicModel" | "claudeCodeOAuthToken" | "openaiApiKey" | "onboardingCompleted" | "linearApiKey" | "linearAutoTransition" | "linearAutoTransitionStateId" | "linearAutoTransitionStateName" | "linearArchiveTransition" | "linearArchiveTransitionStateId" | "linearArchiveTransitionStateName" | "linearOAuthClientId" | "linearOAuthClientSecret" | "linearOAuthWebhookSecret" | "linearOAuthAccessToken" | "linearOAuthRefreshToken" | "aiValidationEnabled" | "aiValidationAutoApprove" | "aiValidationAutoDeny" | "publicUrl" | "updateChannel" | "dockerAutoUpdate" | "telemetryEnabled" | "defaultSessionMode" | "kbAutoPrime">>,
 ): CompanionSettings {
   ensureLoaded();
   settings = normalize({
@@ -166,6 +188,8 @@ export function updateSettings(
     updateChannel: patch.updateChannel ?? settings.updateChannel,
     dockerAutoUpdate: patch.dockerAutoUpdate ?? settings.dockerAutoUpdate,
     telemetryEnabled: patch.telemetryEnabled ?? settings.telemetryEnabled,
+    defaultSessionMode: patch.defaultSessionMode ?? settings.defaultSessionMode,
+    kbAutoPrime: patch.kbAutoPrime ?? settings.kbAutoPrime,
     updatedAt: Date.now(),
   });
   persist();

@@ -2,7 +2,7 @@ import type { Hono } from "hono";
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { DEFAULT_ANTHROPIC_MODEL, getSettings, updateSettings, type UpdateChannel } from "../settings-manager.js";
+import { DEFAULT_ANTHROPIC_MODEL, getSettings, updateSettings, type DefaultSessionMode, type UpdateChannel } from "../settings-manager.js";
 import { linearCache } from "../linear-cache.js";
 import { listConnections } from "../linear-connections.js";
 import { hasContainerCodexAuth } from "../codex-container-auth.js";
@@ -40,6 +40,8 @@ export function registerSettingsRoutes(api: Hono): void {
       updateChannel: settings.updateChannel,
       dockerAutoUpdate: settings.dockerAutoUpdate,
       telemetryEnabled: settings.telemetryEnabled,
+      defaultSessionMode: settings.defaultSessionMode,
+      kbAutoPrime: settings.kbAutoPrime,
     });
   });
 
@@ -117,6 +119,12 @@ export function registerSettingsRoutes(api: Hono): void {
     if (body.telemetryEnabled !== undefined && typeof body.telemetryEnabled !== "boolean") {
       return c.json({ error: "telemetryEnabled must be a boolean" }, 400);
     }
+    if (body.defaultSessionMode !== undefined && body.defaultSessionMode !== "solo" && body.defaultSessionMode !== "council") {
+      return c.json({ error: "defaultSessionMode must be 'solo' or 'council'" }, 400);
+    }
+    if (body.kbAutoPrime !== undefined && typeof body.kbAutoPrime !== "boolean") {
+      return c.json({ error: "kbAutoPrime must be a boolean" }, 400);
+    }
     const hasAnyField = body.anthropicApiKey !== undefined || body.anthropicModel !== undefined
       || body.claudeCodeOAuthToken !== undefined || body.openaiApiKey !== undefined
       || body.onboardingCompleted !== undefined
@@ -131,7 +139,9 @@ export function registerSettingsRoutes(api: Hono): void {
       || body.publicUrl !== undefined
       || body.updateChannel !== undefined
       || body.dockerAutoUpdate !== undefined
-      || body.telemetryEnabled !== undefined;
+      || body.telemetryEnabled !== undefined
+      || body.defaultSessionMode !== undefined
+      || body.kbAutoPrime !== undefined;
     if (!hasAnyField) {
       return c.json({ error: "At least one settings field is required" }, 400);
     }
@@ -229,6 +239,14 @@ export function registerSettingsRoutes(api: Hono): void {
         typeof body.telemetryEnabled === "boolean"
           ? body.telemetryEnabled
           : undefined,
+      defaultSessionMode:
+        body.defaultSessionMode === "solo" || body.defaultSessionMode === "council"
+          ? (body.defaultSessionMode as DefaultSessionMode)
+          : undefined,
+      kbAutoPrime:
+        typeof body.kbAutoPrime === "boolean"
+          ? body.kbAutoPrime
+          : undefined,
     });
 
     const connectionsAfterUpdate = listConnections();
@@ -254,6 +272,8 @@ export function registerSettingsRoutes(api: Hono): void {
       updateChannel: settings.updateChannel,
       dockerAutoUpdate: settings.dockerAutoUpdate,
       telemetryEnabled: settings.telemetryEnabled,
+      defaultSessionMode: settings.defaultSessionMode,
+      kbAutoPrime: settings.kbAutoPrime,
     });
   });
 
