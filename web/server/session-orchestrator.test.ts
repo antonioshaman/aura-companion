@@ -21,6 +21,22 @@ vi.mock("./git-utils.js", () => ({
   removeWorktree: vi.fn(() => ({ removed: true })),
 }));
 
+// Worktree isolation: real pure decision logic, mocked git/fs side effects
+// (the git operations themselves are covered on temp repos in
+// worktree-isolation.test.ts).
+vi.mock("./worktree-isolation.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./worktree-isolation.js")>();
+  return {
+    ...actual,
+    gitToplevel: vi.fn(() => null),
+    findLiveSessionsInTree: vi.fn(() => []),
+    listSystemdServiceDirs: vi.fn(() => []),
+    getWorktreesBaseDir: vi.fn(() => "/home/u/.companion/worktrees"),
+    createIsolatedWorktree: vi.fn(),
+    cleanupIsolatedWorktree: vi.fn(() => ({ removed: true, branchDeleted: true })),
+  };
+});
+
 vi.mock("./session-names.js", () => ({
   getName: vi.fn(() => undefined),
   setName: vi.fn(),
@@ -138,6 +154,7 @@ import { containerManager } from "./container-manager.js";
 import * as envManager from "./env-manager.js";
 import * as sandboxManager from "./sandbox-manager.js";
 import * as gitUtils from "./git-utils.js";
+import * as worktreeIsolation from "./worktree-isolation.js";
 import * as sessionNames from "./session-names.js";
 import * as sessionLinearIssues from "./session-linear-issues.js";
 import * as settingsManager from "./settings-manager.js";
@@ -209,6 +226,7 @@ function createMockTracker() {
     addMapping: vi.fn(),
     getBySession: vi.fn(() => null),
     removeBySession: vi.fn(),
+    updateMapping: vi.fn(),
     isWorktreeInUse: vi.fn(() => false),
   } as any;
 }
@@ -2345,6 +2363,167 @@ describe("SessionOrchestrator", () => {
   });
 
   // ── getSession ────────────────────────────────────────────────────────────
+
+  // ── Worktree isolation (default when another live session shares the tree) ──
+
+  describe("worktree isolation", () => {
+    const iso = vi.mocked(worktreeIsolation);
+    const created = {
+      worktreePath: "/home/u/.companion/worktrees/repo/s1",
+      cwd: "/home/u/.companion/worktrees/repo/s1/web",
+      branch: "aura/s1",
+      baseCommit: "abc123",
+      repoRoot: "/repo",
+    };
+    const sibling = { sessionId: "other", cwd: "/repo", state: "connected" as const, backendType: "codex" };
+
+    beforeEach(() => {
+      iso.gitToplevel.mockReturnValue("/repo");
+      iso.findLiveSessionsInTree.mockReturnValue([]);
+      iso.listSystemdServiceDirs.mockReturnValue([]);
+      iso.createIsolatedWorktree.mockReturnValue(created);
+      iso.cleanupIsolatedWorktree.mockReturnValue({ removed: true, branchDeleted: true });
+    });
+
+    it("auto + a live sibling in the same tree → launches in a dedicated worktree and tracks it", async () => {
+      iso.findLiveSessionsInTree.mockReturnValue([sibling]);
+      const result = await orchestrator.createSession({ cwd: "/repo/web", isolation: "auto" });
+      expect(result.ok).toBe(true);
+      expect(iso.createIsolatedWorktree).toHaveBeenCalledWith({ cwd: "/repo/web", baseDir: "/home/u/.companion/worktrees" });
+      expect(deps.launcher.launch).toHaveBeenCalledWith(expect.objectContaining({ cwd: created.cwd }));
+      expect(deps.worktreeTracker.addMapping).toHaveBeenCalledWith(expect.objectContaining({
+        sessionId: "session-1",
+        worktreePath: created.worktreePath,
+        branch: "aura/s1",
+        isolated: true,
+        baseCommit: "abc123",
+      }));
+      // Created worktree is owned by the tracker now — no rollback cleanup.
+      expect(iso.cleanupIsolatedWorktree).not.toHaveBeenCalled();
+    });
+
+    it("auto + single session in the repo → unchanged behaviour (no worktree)", async () => {
+      const result = await orchestrator.createSession({ cwd: "/repo", isolation: "auto" });
+      expect(result.ok).toBe(true);
+      expect(iso.createIsolatedWorktree).not.toHaveBeenCalled();
+      expect(deps.launcher.launch).toHaveBeenCalledWith(expect.objectContaining({ cwd: "/repo" }));
+    });
+
+    it("shared (UI opt-out) never isolates even with live siblings", async () => {
+      iso.findLiveSessionsInTree.mockReturnValue([sibling]);
+      await orchestrator.createSession({ cwd: "/repo", isolation: "shared" });
+      expect(iso.createIsolatedWorktree).not.toHaveBeenCalled();
+    });
+
+    it("absent isolation (internal callers: cron/agents/handoff) keeps legacy shared behaviour", async () => {
+      iso.findLiveSessionsInTree.mockReturnValue([sibling]);
+      await orchestrator.createSession({ cwd: "/repo" });
+      expect(iso.gitToplevel).not.toHaveBeenCalled();
+      expect(iso.createIsolatedWorktree).not.toHaveBeenCalled();
+    });
+
+    it("works for Codex sessions too", async () => {
+      iso.findLiveSessionsInTree.mockReturnValue([sibling]);
+      const result = await orchestrator.createSession({ cwd: "/repo/web", isolation: "auto", backend: "codex" });
+      expect(result.ok).toBe(true);
+      expect(deps.launcher.launch).toHaveBeenCalledWith(expect.objectContaining({ cwd: created.cwd, backendType: "codex" }));
+    });
+
+    it("council halves are never isolated (pair shares one workspace)", async () => {
+      iso.findLiveSessionsInTree.mockReturnValue([sibling]);
+      await orchestrator.createSession({ cwd: "/repo", isolation: "isolate", sessionGroupId: "grp_1", sessionGroupRole: "observer" });
+      expect(iso.createIsolatedWorktree).not.toHaveBeenCalled();
+    });
+
+    it("a requested branch with a live sibling becomes a worktree instead of a checkout in the shared tree", async () => {
+      iso.findLiveSessionsInTree.mockReturnValue([sibling]);
+      vi.mocked(gitUtils.getRepoInfo).mockReturnValue({
+        repoRoot: "/repo", repoName: "repo", currentBranch: "main", defaultBranch: "main", isWorktree: false,
+      });
+      vi.mocked(gitUtils.ensureWorktree).mockReturnValue({
+        worktreePath: "/wt/feat", branch: "feat", actualBranch: "feat-wt-1234", isNew: true,
+      } as any);
+      await orchestrator.createSession({ cwd: "/repo", branch: "feat", isolation: "auto" });
+      expect(gitUtils.checkoutOrCreateBranch).not.toHaveBeenCalled();
+      expect(gitUtils.ensureWorktree).toHaveBeenCalled();
+      expect(deps.worktreeTracker.addMapping).toHaveBeenCalledWith(expect.objectContaining({ worktreePath: "/wt/feat", isolated: true }));
+    });
+
+    it("worktree creation failure is surfaced, not silently ignored", async () => {
+      iso.createIsolatedWorktree.mockImplementation(() => {
+        throw new worktreeIsolation.WorktreeIsolationError("base dir inside repo", 400);
+      });
+      const result = await orchestrator.createSession({ cwd: "/repo", isolation: "isolate" });
+      expect(result).toMatchObject({ ok: false, status: 400 });
+      expect(deps.launcher.launch).not.toHaveBeenCalled();
+    });
+
+    it("rolls back (non-forced) the created worktree when the CLI launch fails", async () => {
+      iso.findLiveSessionsInTree.mockReturnValue([sibling]);
+      vi.mocked(deps.launcher.launch).mockImplementationOnce(() => { throw new Error("spawn ENOENT"); });
+      const result = await orchestrator.createSession({ cwd: "/repo", isolation: "auto" });
+      expect(result.ok).toBe(false);
+      expect(iso.cleanupIsolatedWorktree).toHaveBeenCalledWith(expect.objectContaining({ worktreePath: created.worktreePath }));
+      expect(deps.worktreeTracker.addMapping).not.toHaveBeenCalled();
+    });
+
+    it("emits a progress warning when the worktree dir is inside a systemd service dir", async () => {
+      iso.findLiveSessionsInTree.mockReturnValue([sibling]);
+      iso.listSystemdServiceDirs.mockReturnValue([{ unit: "app.service", dir: "/home/u" }]);
+      const progress: Array<[string, string, string, string | undefined]> = [];
+      await orchestrator.createSessionStreaming({ cwd: "/repo", isolation: "auto" }, async (step, label, status, detail) => {
+        progress.push([step, label, status, detail]);
+      });
+      const done = progress.find(([step, , status]) => step === "creating_worktree" && status === "done");
+      expect(done?.[3]).toContain("app.service");
+    });
+
+    describe("archive/delete cleanup of isolated worktrees", () => {
+      const mapping = {
+        sessionId: "s1",
+        repoRoot: "/repo",
+        branch: "aura/s1",
+        actualBranch: "aura/s1",
+        worktreePath: "/wt/s1",
+        createdAt: 1,
+        isolated: true,
+        baseCommit: "abc123",
+      };
+
+      it("removes a clean isolated worktree on archive", async () => {
+        deps.worktreeTracker.getBySession.mockReturnValue(mapping);
+        const result = await orchestrator.archiveSession("s1");
+        expect(result.worktree).toMatchObject({ cleaned: true, path: "/wt/s1" });
+        expect(deps.worktreeTracker.removeBySession).toHaveBeenCalledWith("s1");
+        expect(gitUtils.removeWorktree).not.toHaveBeenCalled();
+      });
+
+      it("keeps a dirty isolated worktree even with force=true and flags it retained", async () => {
+        deps.worktreeTracker.getBySession.mockReturnValue(mapping);
+        iso.cleanupIsolatedWorktree.mockReturnValue({ removed: false, retained: "dirty", reason: "dirty" });
+        const result = await orchestrator.archiveSession("s1", { force: true });
+        expect(result.worktree).toMatchObject({ cleaned: false, dirty: true, path: "/wt/s1" });
+        expect(deps.worktreeTracker.updateMapping).toHaveBeenCalledWith("s1", { retained: "dirty" });
+        expect(deps.worktreeTracker.removeBySession).not.toHaveBeenCalled();
+        expect(gitUtils.removeWorktree).not.toHaveBeenCalled();
+      });
+
+      it("deleteSession (always forced for legacy worktrees) still never deletes a dirty isolated one", async () => {
+        deps.worktreeTracker.getBySession.mockReturnValue(mapping);
+        iso.cleanupIsolatedWorktree.mockReturnValue({ removed: false, retained: "dirty", reason: "dirty" });
+        const result = await orchestrator.deleteSession("s1");
+        expect(result.worktree).toMatchObject({ cleaned: false, dirty: true });
+        expect(gitUtils.removeWorktree).not.toHaveBeenCalled();
+      });
+    });
+
+    it("previewIsolation / getSessionWorktree expose the read side", () => {
+      deps.worktreeTracker.getBySession.mockReturnValue({ sessionId: "s1", worktreePath: "/wt/s1" });
+      expect(orchestrator.getSessionWorktree("s1")).toMatchObject({ worktreePath: "/wt/s1" });
+      iso.gitToplevel.mockReturnValue(null);
+      expect(orchestrator.previewIsolation("/nowhere")).toMatchObject({ isGitRepo: false });
+    });
+  });
 
   describe("getSession()", () => {
     it("delegates to launcher.getSession", () => {

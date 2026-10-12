@@ -499,7 +499,8 @@ describe("POST /api/sessions/create", () => {
     });
 
     expect(res.status).toBe(200);
-    expect(orchestrator.createSession).toHaveBeenCalledWith(body);
+    // Public create routes add the worktree-isolation default (`auto`).
+    expect(orchestrator.createSession).toHaveBeenCalledWith({ ...body, isolation: "auto" });
   });
 
   // aura-diet 2026-10: a plain create is SOLO (never routed to the council
@@ -534,7 +535,7 @@ describe("POST /api/sessions/create", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ cwd: "/test" }),
     });
-    expect(orchestrator.createSession).toHaveBeenLastCalledWith({ cwd: "/test", kbAutoPrime: true });
+    expect(orchestrator.createSession).toHaveBeenLastCalledWith({ cwd: "/test", kbAutoPrime: true, isolation: "auto" });
   });
 
   it("returns error status from orchestrator on failure", async () => {
@@ -598,9 +599,49 @@ describe("POST /api/sessions/create", () => {
       body: "not-json",
     });
 
-    // Route catches JSON parse errors and defaults to {}
+    // Route catches JSON parse errors and defaults to {} (+ isolation default)
     expect(res.status).toBe(200);
-    expect(orchestrator.createSession).toHaveBeenCalledWith({});
+    expect(orchestrator.createSession).toHaveBeenCalledWith({ isolation: "auto" });
+  });
+
+  // Worktree isolation: the public route defaults to `auto` (isolate only
+  // when another live session uses the same tree) and validates the field.
+  it("defaults isolation to auto and forwards an explicit opt-out", async () => {
+    await app.request("/api/sessions/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: "/test", isolation: "shared" }),
+    });
+    expect(orchestrator.createSession).toHaveBeenCalledWith(expect.objectContaining({ isolation: "shared" }));
+  });
+
+  it("rejects an unknown isolation value with 400", async () => {
+    const res = await app.request("/api/sessions/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: "/test", isolation: "sometimes" }),
+    });
+    expect(res.status).toBe(400);
+    expect(orchestrator.createSession).not.toHaveBeenCalled();
+  });
+});
+
+describe("GET /api/sessions/isolation-preview", () => {
+  it("returns the orchestrator preview for cwd", async () => {
+    const preview = {
+      isGitRepo: true, repoRoot: "/repo", liveSessions: [{ sessionId: "s9" }], recommended: "isolate",
+      worktreesBaseDir: "/wt", warnings: [], repoServiceUnits: [],
+    };
+    orchestrator.previewIsolation = vi.fn(() => preview);
+    const res = await app.request("/api/sessions/isolation-preview?cwd=%2Frepo");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(preview);
+    expect(orchestrator.previewIsolation).toHaveBeenCalledWith("/repo");
+  });
+
+  it("requires cwd", async () => {
+    const res = await app.request("/api/sessions/isolation-preview");
+    expect(res.status).toBe(400);
   });
 });
 
@@ -915,6 +956,22 @@ describe("POST /api/groups/:groupId/restore-gaps/ignore", () => {
 });
 
 describe("GET /api/sessions", () => {
+  // Sessions running in an Aura-tracked worktree expose its path/branch
+  // (and `retained` when archive kept a dirty worktree) for the sidebar.
+  it("enriches sessions with their tracked worktree", async () => {
+    launcher.listSessions.mockReturnValue([{ sessionId: "s1", state: "running", cwd: "/wt/s1" }]);
+    vi.mocked(sessionNames.getAllNames).mockReturnValue({});
+    orchestrator.getSessionWorktree = vi.fn(() => ({
+      sessionId: "s1", repoRoot: "/repo", branch: "aura/s1", actualBranch: "aura/s1",
+      worktreePath: "/wt/s1", createdAt: 1, isolated: true, retained: "dirty",
+    }));
+    const res = await app.request("/api/sessions");
+    const json = await res.json();
+    expect(json[0].worktree).toEqual({
+      path: "/wt/s1", branch: "aura/s1", repoRoot: "/repo", isolated: true, retained: "dirty",
+    });
+  });
+
   it("returns the list of sessions enriched with names", async () => {
     const sessions = [
       { sessionId: "s1", state: "running", cwd: "/a" },
@@ -4591,8 +4648,9 @@ describe("POST /api/sessions/create-stream", () => {
     });
 
     expect(res.status).toBe(200);
+    // The stream route applies the same worktree-isolation default (`auto`).
     expect(orchestrator.createSessionStreaming).toHaveBeenCalledWith(
-      body,
+      { ...body, isolation: "auto" },
       expect.any(Function),
     );
   });

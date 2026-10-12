@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
+import { WorktreeIsolationChoice, type IsolationChoice } from "./home/WorktreeIsolationChoice.js";
 import { useStore } from "../store.js";
 import {
   api,
@@ -27,7 +28,7 @@ import { BranchPicker } from "./home/BranchPicker.js";
 import { CouncilToggle, coerceCouncilPairing } from "./council/index.js";
 import { MentionMenu } from "./MentionMenu.js";
 import { useMentionMenu } from "../utils/use-mention-menu.js";
-import type { SavedPrompt } from "../api.js";
+import type { SavedPrompt, IsolationPreview } from "../api.js";
 import type { SdkSessionInfo } from "../types.js";
 
 type ResumeCandidate = {
@@ -210,6 +211,9 @@ export function HomePage() {
   // Git branch state (owned here, driven by BranchPicker + LinearSection)
   const [gitRepoInfo, setGitRepoInfo] = useState<GitRepoInfo | null>(null);
   const [useWorktree, setUseWorktree] = useState(false);
+  // Worktree isolation (default when another live session uses this tree)
+  const [isolationPreview, setIsolationPreview] = useState<IsolationPreview | null>(null);
+  const [isolationChoice, setIsolationChoice] = useState<IsolationChoice>("isolate");
   const [selectedBranch, setSelectedBranch] = useState("");
   const [isNewBranch, setIsNewBranch] = useState(false);
   const [branches, setBranches] = useState<GitBranchInfo[]>([]);
@@ -389,6 +393,22 @@ export function HomePage() {
       setIsNewBranch(false);
     });
   }, [cwd]);
+
+  // Ask the server whether a new session here would share a working tree
+  // with another live session (Claude or Codex). Reset to the safe default
+  // (isolate) whenever the folder changes.
+  useEffect(() => {
+    setIsolationChoice("isolate");
+    if (!cwd || !gitRepoInfo) {
+      setIsolationPreview(null);
+      return;
+    }
+    let cancelled = false;
+    api.getIsolationPreview(cwd)
+      .then((p) => { if (!cancelled) setIsolationPreview(p); })
+      .catch(() => { if (!cancelled) setIsolationPreview(null); });
+    return () => { cancelled = true; };
+  }, [cwd, gitRepoInfo]);
 
   const selectedModel = MODELS.find((m) => m.value === model)
     || (backend === "codex" && model
@@ -715,6 +735,9 @@ export function HomePage() {
           branch: effectiveBranch,
           createBranch: effectiveCreateBranch ? true : undefined,
           useWorktree: effectiveUseWorktree ? true : undefined,
+          // Server default is `auto` (isolate only if another live session
+          // uses this tree); the user can explicitly opt out.
+          isolation: isolationChoice === "shared" ? "shared" : "auto",
           backend,
           codexInternetAccess: backend === "codex" ? true : undefined,
           resumeSessionAt: effectiveResumeSessionAt,
@@ -1372,6 +1395,19 @@ export function HomePage() {
               Starts from Settings → "Default session mode" (solo unless
               changed); ON reveals a provider-pairing dropdown via
               height-transition. */}
+          {!useWorktree && (
+            <WorktreeIsolationChoice
+              preview={isolationPreview}
+              choice={isolationChoice}
+              onChange={setIsolationChoice}
+              disabledReason={
+                backend === "claude" && councilEnabled
+                  ? "Council pairs share one workspace by design; isolation is not applied to a pair."
+                  : undefined
+              }
+            />
+          )}
+
           {backend === "claude" && (
             <div className="max-w-md mx-auto">
               <CouncilToggle

@@ -1,7 +1,7 @@
 import type { CliLauncher, SdkSessionInfo } from "./cli-launcher.js";
 import type { WsBridge } from "./ws-bridge.js";
 import type { SessionStore } from "./session-store.js";
-import type { WorktreeTracker } from "./worktree-tracker.js";
+import type { WorktreeTracker, WorktreeMapping } from "./worktree-tracker.js";
 import type { AgentExecutor } from "./agent-executor.js";
 import type { BackendType, CreationStepId, SessionGroupRole } from "./session-types.js";
 import type { ContainerConfig, ContainerInfo } from "./container-manager.js";
@@ -12,6 +12,8 @@ import * as envManager from "./env-manager.js";
 import { ConvergenceTracker } from "./convergence-tracker.js";
 import * as sandboxManager from "./sandbox-manager.js";
 import * as gitUtils from "./git-utils.js";
+import * as worktreeIsolation from "./worktree-isolation.js";
+import type { IsolationMode, IsolationPreview } from "./worktree-isolation.js";
 import * as sessionNames from "./session-names.js";
 import * as sessionLinearIssues from "./session-linear-issues.js";
 import { getConnection, resolveApiKey } from "./linear-connections.js";
@@ -119,6 +121,15 @@ export interface CreateSessionRequest {
   branch?: string;
   createBranch?: boolean;
   useWorktree?: boolean;
+  /**
+   * Working-tree isolation (see worktree-isolation.ts). `auto` creates a
+   * dedicated git worktree only when another LIVE session already uses the
+   * same working tree; `isolate` always does; `shared` never does.
+   * Absent → `shared` (legacy) for internal callers; the public create
+   * routes default it to `auto`. Ignored for council halves (the pair
+   * shares one workspace by design) and container sessions.
+   */
+  isolation?: IsolationMode;
   container?: { image?: string; ports?: number[]; volumes?: string[] };
   resumeSessionAt?: string;
   forkSession?: boolean;
@@ -907,6 +918,9 @@ export class SessionOrchestrator {
     body: CreateSessionRequest,
     onProgress?: ProgressCallback,
   ): Promise<CreateSessionResult> {
+    // Tracked outside `try` so a failed launch can remove the (still clean)
+    // isolated worktree it created instead of leaking it.
+    let createdIsolated: worktreeIsolation.IsolatedWorktree | undefined;
     try {
       const resumeSessionAt =
         typeof body.resumeSessionAt === "string" && body.resumeSessionAt.trim()
@@ -976,15 +990,91 @@ export class SessionOrchestrator {
       if (onProgress) await onProgress("resolving_env", "Environment resolved", "done");
 
       let cwd = body.cwd;
-      let worktreeInfo: { isWorktree: boolean; repoRoot: string; branch: string; actualBranch: string; worktreePath: string } | undefined;
+      let worktreeInfo: {
+        isWorktree: boolean;
+        repoRoot: string;
+        branch: string;
+        actualBranch: string;
+        worktreePath: string;
+        isolated?: boolean;
+        baseCommit?: string;
+      } | undefined;
 
       // Validate branch name to prevent command injection
       if (body.branch && !/^[a-zA-Z0-9/_.\-]+$/.test(body.branch)) {
         return { ok: false, error: "Invalid branch name", status: 400 };
       }
 
+      // --- Step: Worktree isolation (host only, solo sessions) ---
+      // Parallel agents sharing one working tree broke prod (a sibling's
+      // `git add` swept up unfinished work; a sibling switched the branch
+      // of a checkout services run from). When another live session
+      // already uses this tree, give the new one its own worktree.
+      let promoteBranchToWorktree = false;
+      const isolationMode: IsolationMode = body.isolation ?? "shared";
+      if (!isDockerSession && cwd && !body.useWorktree && !body.sessionGroupId && isolationMode !== "shared") {
+        const treeRoot = worktreeIsolation.gitToplevel(cwd);
+        if (treeRoot) {
+          const live = worktreeIsolation.findLiveSessionsInTree(treeRoot, this.launcher.listSessions());
+          const decision = worktreeIsolation.decideIsolation({ mode: isolationMode, liveSiblingCount: live.length });
+          log.info("orchestrator", "worktree isolation decision", {
+            event: "worktree.isolation.decided",
+            treeRoot,
+            mode: isolationMode,
+            isolate: decision.isolate,
+            reason: decision.reason,
+            liveSiblings: live.map((s) => s.sessionId),
+          });
+          if (decision.isolate && body.branch) {
+            // A branch was requested: never `git checkout` it in a tree a
+            // sibling is using — provision it as a worktree instead.
+            promoteBranchToWorktree = true;
+          } else if (decision.isolate) {
+            if (onProgress) await onProgress("creating_worktree", "Creating isolated worktree...", "in_progress");
+            const baseDir = worktreeIsolation.getWorktreesBaseDir();
+            const units = worktreeIsolation.servicesRunningFrom(baseDir, worktreeIsolation.listSystemdServiceDirs());
+            const serviceWarning = units.length > 0
+              ? `Warning: worktree dir ${baseDir} is inside the working directory of systemd service ${units.join(", ")}`
+              : undefined;
+            if (serviceWarning) {
+              log.warn("orchestrator", "isolated worktree inside a systemd service dir", {
+                event: "worktree.isolation.service_dir_warning",
+                baseDir,
+                units,
+              });
+            }
+            try {
+              createdIsolated = worktreeIsolation.createIsolatedWorktree({ cwd, baseDir });
+            } catch (e) {
+              const status = e instanceof worktreeIsolation.WorktreeIsolationError ? e.status : 500;
+              const msg = e instanceof Error ? e.message : String(e);
+              if (onProgress) await onProgress("creating_worktree", "Worktree creation failed", "error", msg);
+              return { ok: false, error: `Worktree isolation failed: ${msg}`, status };
+            }
+            cwd = createdIsolated.cwd;
+            worktreeInfo = {
+              isWorktree: true,
+              repoRoot: createdIsolated.repoRoot,
+              branch: createdIsolated.branch,
+              actualBranch: createdIsolated.branch,
+              worktreePath: createdIsolated.worktreePath,
+              isolated: true,
+              baseCommit: createdIsolated.baseCommit,
+            };
+            if (onProgress) {
+              await onProgress(
+                "creating_worktree",
+                `Isolated worktree ready (${createdIsolated.branch})`,
+                "done",
+                serviceWarning ?? createdIsolated.worktreePath,
+              );
+            }
+          }
+        }
+      }
+
       // --- Step: Git operations (host only) ---
-      if (!isDockerSession && body.useWorktree && body.branch && cwd) {
+      if (!isDockerSession && (body.useWorktree || promoteBranchToWorktree) && body.branch && cwd) {
         const repoInfo = gitUtils.getRepoInfo(cwd);
         if (repoInfo) {
           if (onProgress) await onProgress("fetching_git", "Fetching from remote...", "in_progress");
@@ -1007,6 +1097,7 @@ export class SessionOrchestrator {
             branch: body.branch,
             actualBranch: result.actualBranch,
             worktreePath: result.worktreePath,
+            ...(promoteBranchToWorktree ? { isolated: true } : {}),
           };
         }
         if (onProgress) await onProgress("creating_worktree", "Worktree ready", "done");
@@ -1267,8 +1358,11 @@ export class SessionOrchestrator {
           actualBranch: worktreeInfo.actualBranch,
           worktreePath: worktreeInfo.worktreePath,
           createdAt: Date.now(),
+          ...(worktreeInfo.isolated ? { isolated: true } : {}),
+          ...(worktreeInfo.baseCommit ? { baseCommit: worktreeInfo.baseCommit } : {}),
         });
       }
+      createdIsolated = undefined; // owned by the tracker from here on
 
       if (linearSystemPrompt && backend === "claude") {
         this.wsBridge.injectSystemPrompt(session.sessionId, linearSystemPrompt);
@@ -1287,7 +1381,31 @@ export class SessionOrchestrator {
       const msg = e instanceof Error ? e.message : String(e);
       log.error("orchestrator", "Failed to create session", { error: msg });
       return { ok: false, error: msg, status: 500 };
+    } finally {
+      // Any exit (throw OR early `ok:false` return) before the tracker took
+      // ownership: remove the isolated worktree we just created. Never
+      // forced — if anything was written into it, it is kept.
+      if (createdIsolated) {
+        worktreeIsolation.cleanupIsolatedWorktree({
+          repoRoot: createdIsolated.repoRoot,
+          worktreePath: createdIsolated.worktreePath,
+          branch: createdIsolated.branch,
+          baseCommit: createdIsolated.baseCommit,
+        });
+      }
     }
+  }
+
+  // ── Worktree isolation: read side ─────────────────────────────────────────
+
+  /** Worktree Aura created/tracks for a session (null when it runs in place). */
+  getSessionWorktree(sessionId: string): WorktreeMapping | null {
+    return this.worktreeTracker.getBySession(sessionId);
+  }
+
+  /** What `isolation: "auto"` would do for `cwd` right now (New Session UI). */
+  previewIsolation(cwd: string): IsolationPreview {
+    return worktreeIsolation.previewIsolation(cwd, this.launcher.listSessions());
   }
 
   // ── Kill ───────────────────────────────────────────────────────────────────
@@ -1785,6 +1903,31 @@ export class SessionOrchestrator {
     if (this.worktreeTracker.isWorktreeInUse(mapping.worktreePath, sessionId)) {
       this.worktreeTracker.removeBySession(sessionId);
       return { cleaned: false, path: mapping.worktreePath };
+    }
+
+    if (mapping.isolated) {
+      // Auto-isolated worktrees: `force` is deliberately ignored — a worktree
+      // with uncommitted changes is NEVER deleted; it is kept, flagged
+      // `retained`, and stays visible on the (archived) session.
+      const result = worktreeIsolation.cleanupIsolatedWorktree({
+        repoRoot: mapping.repoRoot,
+        worktreePath: mapping.worktreePath,
+        branch: mapping.actualBranch || mapping.branch,
+        baseCommit: mapping.baseCommit,
+      });
+      log.info("orchestrator", "isolated worktree cleanup", {
+        event: "worktree.isolation.cleanup",
+        sessionId,
+        worktreePath: mapping.worktreePath,
+        removed: result.removed,
+        ...(result.removed ? { branchKept: result.branchKept } : { retained: result.retained }),
+      });
+      if (!result.removed) {
+        this.worktreeTracker.updateMapping(sessionId, { retained: result.retained });
+        return { cleaned: false, dirty: result.retained === "dirty", path: mapping.worktreePath };
+      }
+      this.worktreeTracker.removeBySession(sessionId);
+      return { cleaned: true, path: mapping.worktreePath };
     }
 
     const dirty = gitUtils.isWorktreeDirty(mapping.worktreePath);

@@ -1,3 +1,5 @@
+import type { SessionWorktreeInfo } from "../types.js";
+
 export interface SessionItem {
   id: string;
   model: string;
@@ -21,6 +23,8 @@ export interface SessionItem {
   cronJobName?: string;
   agentId?: string;
   agentName?: string;
+  /** Git worktree the session runs in (path + branch shown on the row). */
+  worktree?: SessionWorktreeInfo;
 }
 
 export interface ProjectGroup {
