@@ -1144,6 +1144,21 @@ export class WsBridge {
             }
           }
         }
+        // WS-3 A-2 (prompt-cache audit C-6): per-turn cache telemetry as a
+        // structured line — the fields were already proxied to the UI but no
+        // ratio was observable anywhere. Counters only, никакого контента.
+        if (resultData.usage) {
+          const u = resultData.usage;
+          console.log(JSON.stringify({
+            event: "llm.turn_usage",
+            sessionId: session.id,
+            input_tokens: u.input_tokens ?? null,
+            output_tokens: u.output_tokens ?? null,
+            cache_read_input_tokens: u.cache_read_input_tokens ?? null,
+            cache_creation_input_tokens: u.cache_creation_input_tokens ?? null,
+            num_turns: resultData.num_turns ?? null,
+          }));
+        }
         this.refreshGitInfo(session, { broadcastUpdate: true, notifyPoller: true });
         this.appendHistory(session, msg);
         session.stateMachine.transition("ready", "turn_completed");
@@ -1940,6 +1955,24 @@ export class WsBridge {
     const session = this.sessions.get(sessionId);
     if (!session) {
       console.error(`[ws-bridge] Cannot inject system prompt: session ${sessionId} not found`);
+      return;
+    }
+    // WS-3 A-1 (prompt-cache audit C-5): a second initialize{appendSystemPrompt}
+    // AFTER the conversation has started rewrites the system prompt and busts
+    // the CLI's entire prompt-cache prefix for the hottest path. All three
+    // legitimate call sites run before the first user message — refuse
+    // (fail-closed) any future mid-session caller instead of silently
+    // degrading cache behaviour.
+    const hasUserTurn = session.messageHistory.some(
+      (m) => (m as { type?: string }).type === "user"
+    );
+    if (hasUserTurn) {
+      console.warn(
+        `[ws-bridge] injectSystemPrompt REFUSED for ${sessionId}: ` +
+        `conversation already has user turns — a mid-session initialize ` +
+        `would rewrite the system prompt and invalidate the prompt cache ` +
+        `(WS-3 A-1 guard)`
+      );
       return;
     }
     // OBS-STOP-1 fix: if the adapter is not yet connected, buffer the
