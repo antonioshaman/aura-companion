@@ -988,7 +988,19 @@ function handleParsedMessage(
       upsertAssistantMessage(sessionId, chatMsg);
       // Refresh the context meter from this turn's real occupancy so it drops
       // immediately after a /compact (see contextTokensFromUsage rationale).
-      trackContextUsage(sessionId, msg.usage);
+      // WS-3 A-3 (prompt-cache audit C-7): the server synthesizes an
+      // interrupted-stream assistant frame with usage {0,0,0,0} — tracking it
+      // zeroed the meter until the next real turn. Skip synthetic/empty usage.
+      const u = msg.usage;
+      const usageIsEmpty =
+        !u ||
+        ((u.input_tokens ?? 0) === 0 &&
+          (u.output_tokens ?? 0) === 0 &&
+          (u.cache_read_input_tokens ?? 0) === 0 &&
+          (u.cache_creation_input_tokens ?? 0) === 0);
+      if (data.streamStatus !== "interrupted" && !usageIsEmpty) {
+        trackContextUsage(sessionId, msg.usage);
+      }
       store.setStreaming(sessionId, null);
       streamingPhaseBySession.delete(sessionId);
       // Reset streaming text accumulators so subsequent deltas in the same
