@@ -15,7 +15,7 @@
  * - Playground route renders lazy Playground
  * - Various page routes (settings, environments, etc.)
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { act, render, screen, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom";
 
@@ -40,6 +40,7 @@ const { mockStoreState, mockGetState } = vi.hoisted(() => {
     setGitChangedFilesCount: vi.fn(),
     sessions: new Map(),
     sdkSessions: [],
+    sdkSessionsLoaded: false,
     setCurrentSession: vi.fn(),
     setSidebarOpen: vi.fn(),
     setTaskPanelOpen: vi.fn(),
@@ -190,7 +191,7 @@ vi.mock("./components/AgentsPage.js", () => ({
 import App from "./App.js";
 import { api } from "./api.js";
 import { navigateToSession, navigateHome, parseHash } from "./utils/routing.js";
-import { disconnectSession } from "./ws.js";
+import { connectSession, disconnectSession } from "./ws.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────
 
@@ -221,6 +222,7 @@ beforeEach(() => {
     setGitChangedFilesCount: vi.fn(),
     sessions: new Map(),
     sdkSessions: [],
+    sdkSessionsLoaded: false,
     setCurrentSession: vi.fn(),
     setSidebarOpen: vi.fn(),
     setTaskPanelOpen: vi.fn(),
@@ -350,27 +352,34 @@ describe("App", () => {
   });
 
   describe("archived auto-restore bounce", () => {
-    // On reload the app auto-restores the last-open session from localStorage
-    // and opens a live socket before the session list has loaded. If that
-    // session was archived/exited meanwhile, the tab would silently reconnect
-    // to a dead session and park it as the main panel (the "extra archived
-    // session reconnecting" anomaly). Once the list loads we must drop the
-    // socket and land on home — but ONLY for the auto-restore path, never for
-    // an explicit click on an archived session (which views its transcript).
+    // On reload the app reopens the last session and opens a live socket
+    // before the session list has loaded. If that session was archived
+    // meanwhile, the tab would silently reconnect to it and park it as the
+    // main panel (the "extra archived session reconnecting" anomaly). Once the
+    // SERVER list loads (`sdkSessionsLoaded`) we drop the socket and land on
+    // home — for a hash-less restore AND for a browser reload of a session URL
+    // (review 2026-10-14-2248 #2), never for an explicit click or a pasted
+    // deep link. Exited-but-not-archived sessions are kept (a message resumes
+    // them). The pure decision is unit-tested in utils/restore-bounce.test.ts;
+    // these pin the App wiring.
+    const archived = { sessionId: "arch1", state: "exited", cwd: "/repo", createdAt: 100, archived: true };
+    let navType: string;
+
     beforeEach(() => {
       setStoreValues({ isAuthenticated: true });
+      navType = "navigate";
+      vi.spyOn(performance, "getEntriesByType").mockImplementation(
+        () => [{ type: navType } as unknown as PerformanceEntry],
+      );
+    });
+    afterEach(() => {
+      vi.restoreAllMocks();
     });
 
     it("drops the socket and goes home when the auto-restored session is archived", async () => {
       // currentSessionId set at mount = the localStorage-restored id, so the
-      // auto-restore effect records it; the session list then reveals it as
-      // archived, which must trigger disconnect + navigate-home.
-      setStoreValues({
-        currentSessionId: "arch1",
-        sdkSessions: [
-          { sessionId: "arch1", state: "exited", cwd: "/repo", createdAt: 100, archived: true },
-        ],
-      });
+      // auto-restore effect records it; the loaded list reveals it archived.
+      setStoreValues({ currentSessionId: "arch1", sdkSessions: [archived], sdkSessionsLoaded: true });
 
       render(<App />);
 
@@ -381,21 +390,97 @@ describe("App", () => {
     });
 
     it("keeps a live auto-restored session connected (no bounce when not archived)", async () => {
-      // The common case: the restored session is still live. We must NOT drop
-      // its socket or navigate away.
       setStoreValues({
         currentSessionId: "live1",
-        sdkSessions: [
-          { sessionId: "live1", state: "connected", cwd: "/repo", createdAt: 100, archived: false },
-        ],
+        sdkSessions: [{ sessionId: "live1", state: "connected", cwd: "/repo", createdAt: 100, archived: false }],
+        sdkSessionsLoaded: true,
       });
 
       render(<App />);
 
-      // Give effects a chance to run, then assert no bounce happened.
       await waitFor(() => {
         expect(navigateToSession).toHaveBeenCalledWith("live1", true);
       });
+      expect(disconnectSession).not.toHaveBeenCalled();
+      expect(navigateHome).not.toHaveBeenCalled();
+    });
+
+    it("keeps an exited-but-not-archived restored session (review B-10: exited ≠ archived)", async () => {
+      setStoreValues({
+        currentSessionId: "ex1",
+        sdkSessions: [{ sessionId: "ex1", state: "exited", cwd: "/repo", createdAt: 100, archived: false }],
+        sdkSessionsLoaded: true,
+      });
+      render(<App />);
+      await waitFor(() => {
+        expect(navigateToSession).toHaveBeenCalledWith("ex1", true);
+      });
+      expect(disconnectSession).not.toHaveBeenCalled();
+    });
+
+    it("waits for the server list: no bounce at mount, bounce once the list lands later (review B-4)", async () => {
+      // Real ordering after a reload: the list is NOT loaded at mount. A local
+      // seed in sdkSessions must not count as the server's answer either.
+      setStoreValues({ currentSessionId: "arch1", sdkSessions: [archived], sdkSessionsLoaded: false });
+      const { rerender } = render(<App />);
+      await waitFor(() => {
+        expect(navigateToSession).toHaveBeenCalledWith("arch1", true);
+      });
+      expect(disconnectSession).not.toHaveBeenCalled();
+
+      setStoreValues({ sdkSessionsLoaded: true });
+      rerender(<App />);
+      await waitFor(() => {
+        expect(disconnectSession).toHaveBeenCalledWith("arch1");
+      });
+    });
+
+    it("F5 on #/session/<id> of an archived session bounces home (review #2)", async () => {
+      navType = "reload";
+      window.location.hash = "#/session/arch1";
+      (parseHash as ReturnType<typeof vi.fn>).mockReturnValue({ page: "session", sessionId: "arch1" });
+      setStoreValues({ currentSessionId: "arch1", sdkSessions: [archived], sdkSessionsLoaded: true });
+
+      render(<App />);
+
+      await waitFor(() => {
+        expect(disconnectSession).toHaveBeenCalledWith("arch1");
+      });
+      expect(navigateHome).toHaveBeenCalledWith(true);
+    });
+
+    it("a pasted / followed deep link to an archived session is explicit intent — no bounce (review B-5)", async () => {
+      navType = "navigate";
+      window.location.hash = "#/session/arch1";
+      (parseHash as ReturnType<typeof vi.fn>).mockReturnValue({ page: "session", sessionId: "arch1" });
+      setStoreValues({ currentSessionId: "arch1", sdkSessions: [archived], sdkSessionsLoaded: true });
+
+      render(<App />);
+
+      await waitFor(() => {
+        expect(connectSession).toHaveBeenCalledWith("arch1");
+      });
+      expect(disconnectSession).not.toHaveBeenCalled();
+      expect(navigateHome).not.toHaveBeenCalled();
+    });
+
+    it("disarms when the user navigates elsewhere before the list lands (review #9)", async () => {
+      navType = "reload";
+      window.location.hash = "#/session/arch1";
+      (parseHash as ReturnType<typeof vi.fn>).mockReturnValue({ page: "session", sessionId: "arch1" });
+      setStoreValues({ currentSessionId: "arch1", sdkSessions: [], sdkSessionsLoaded: false });
+      const { rerender } = render(<App />);
+
+      // User clicks Settings before the first poll answers.
+      (parseHash as ReturnType<typeof vi.fn>).mockReturnValue({ page: "settings" });
+      await act(async () => {
+        window.location.hash = "#/settings";
+        window.dispatchEvent(new HashChangeEvent("hashchange"));
+      });
+      // Then the list lands and says the session is archived — too late to bounce.
+      setStoreValues({ sdkSessions: [archived], sdkSessionsLoaded: true });
+      rerender(<App />);
+      await act(async () => {});
       expect(disconnectSession).not.toHaveBeenCalled();
       expect(navigateHome).not.toHaveBeenCalled();
     });

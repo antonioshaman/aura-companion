@@ -2,7 +2,7 @@
 import { render, screen, fireEvent } from "@testing-library/react";
 import "@testing-library/jest-dom";
 import { axe } from "vitest-axe";
-import { getDefaultConfig, type TaskPanelConfig } from "./task-panel-sections.js";
+import { getDefaultConfig, getInitialTaskPanelConfig, type TaskPanelConfig } from "./task-panel-sections.js";
 
 vi.mock("../api.js", () => ({
   api: {
@@ -337,10 +337,31 @@ describe("TasksSection — Codex", () => {
   it("keeps tasks visible for a Codex session from a legacy persisted config", () => {
     // Existing Codex users already have `tasks` in their stored order/enabled
     // (the old gate was a render filter, never a persistence filter). Flipping
-    // backends:null must not hide it for them on the next load.
-    seedCodex({ taskPanelConfig: getDefaultConfig() });
+    // backends:null must not hide it for them on the next load. The fixture is
+    // a LITERAL pre-Task-6 stored config (review B-8), loaded through the real
+    // forward-merge loader — not today's getDefaultConfig().
+    const legacy = {
+      order: ["tasks", "usage-limits", "git-branch", "github-pr", "linear-issue", "mcp-servers"],
+      enabled: { tasks: true, "usage-limits": true, "git-branch": false, "github-pr": true, "linear-issue": true, "mcp-servers": true },
+    };
+    localStorage.setItem("cc-task-panel-config", JSON.stringify(legacy));
+    try {
+      const loaded = getInitialTaskPanelConfig();
+      expect(loaded.order).toContain("tasks");
+      expect(loaded.enabled.tasks).toBe(true);
+      seedCodex({ taskPanelConfig: loaded });
+      render(<TaskPanel sessionId="s1" />);
+      expect(screen.getByText("Add tests")).toBeInTheDocument();
+    } finally {
+      localStorage.removeItem("cc-task-panel-config");
+    }
+  });
+
+  it("toggling the tasks section in the Codex config view calls the store action (review B-9)", () => {
+    seedCodex({ taskPanelConfigMode: true });
     render(<TaskPanel sessionId="s1" />);
-    expect(screen.getByText("Add tests")).toBeInTheDocument();
+    fireEvent.click(screen.getByTestId("toggle-tasks"));
+    expect(mockState.toggleSectionEnabled).toHaveBeenCalledWith("tasks");
   });
 });
 
@@ -1122,30 +1143,38 @@ describe("GitHubPRDisplay", () => {
 });
 
 describe("TaskPanel — backend detection via sdkSessions", () => {
-  it("uses sdkSession backendType when session lacks backend_type", () => {
-    // If the session object does not have backend_type, the panel still falls
-    // back to the SDK session's backendType for backend-specific sections
-    // (e.g. usage limits). The Tasks section is backend-agnostic now, so it
-    // appears regardless of the detected backend.
+  // Every section is backend-agnostic since Task 6, so backend detection is
+  // only observable where a section renders backend-SPECIFIC content: the
+  // usage-limits renderer picks Codex rate limits vs Claude context (review
+  // B-6 — the old assertions on the Tasks section could no longer fail).
+  const usage = {
+    codex_rate_limits: {
+      primary: { usedPercent: 62, windowDurationMins: 300, resetsAt: Date.now() + 7_200_000 },
+      secondary: null,
+    },
+    context_used_percent: 40,
+  };
+
+  it("falls back to the sdkSession backendType when the session lacks backend_type", () => {
+    // The live session object has no backend_type yet; the REST snapshot says codex.
     resetStore({
-      sessions: new Map([["s1", {}]]),
+      sessions: new Map([["s1", { ...usage }]]),
       sdkSessions: [{ sessionId: "s1", backendType: "codex" }],
-      taskPanelConfigMode: true,
     });
     render(<TaskPanel sessionId="s1" />);
-    expect(screen.getByTestId("config-section-tasks")).toBeInTheDocument();
+    // Codex rate limits render only on the Codex branch of the usage renderer.
+    expect(screen.getByText("5h Limit")).toBeInTheDocument();
   });
 
-  it("treats unknown backend as claude (shows tasks section)", () => {
-    // When no backend_type is specified at all, it defaults to claude behavior
+  it("treats an unknown backend as claude (no Codex limits rendered)", () => {
     resetStore({
-      sessions: new Map([["s1", {}]]),
+      sessions: new Map([["s1", { ...usage }]]),
       sdkSessions: [],
-      taskPanelConfigMode: true,
     });
     render(<TaskPanel sessionId="s1" />);
-    // Without a codex backend, tasks section should be visible
-    expect(screen.getByTestId("config-section-tasks")).toBeInTheDocument();
+    // Same session data, no codex signal anywhere → Claude branch: the Codex
+    // limits are ignored even though the session carries them.
+    expect(screen.queryByText("5h Limit")).not.toBeInTheDocument();
   });
 });
 

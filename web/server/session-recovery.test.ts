@@ -918,8 +918,8 @@ describe("SessionRecovery.driftDetectorTick — liveness, guards and EC-52 recov
     return { ...ctx, readWaitChannels };
   }
 
-  const events = (spy: ReturnType<typeof vi.spyOn>, event: string) =>
-    spy.mock.calls.filter((c) => (c[2] as { event?: string } | undefined)?.event === event).map((c) => c as unknown[]);
+  const events = (spy: { mock: { calls: unknown[][] } }, event: string): unknown[][] =>
+    spy.mock.calls.filter((c) => (c[2] as { event?: string } | undefined)?.event === event);
 
   it("live subagent tree → no kill; the suppressed log names the real reason and the undelivered count (review #4)", () => {
     const { recovery, launcher } = setup({ subagentWriteAgoMs: 5_000 });

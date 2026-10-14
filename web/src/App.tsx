@@ -4,6 +4,7 @@ import { connectSession, disconnectSession } from "./ws.js";
 import { api } from "./api.js";
 import { capturePageView } from "./analytics.js";
 import { parseHash, navigateToSession, navigateHome } from "./utils/routing.js";
+import { decideRestoreBounce, isReloadNavigation, type ArmedRestore } from "./utils/restore-bounce.js";
 import { useBrowserTitleAlert } from "./use-browser-title-alert.js";
 import { useCouncilShortcuts } from "./use-council-shortcuts.js";
 import { useSwUpdate } from "./use-sw-update.js";
@@ -66,6 +67,7 @@ export default function App() {
   const creationProgress = useStore((s) => s.creationProgress);
   const creationError = useStore((s) => s.creationError);
   const sdkSessions = useStore((s) => s.sdkSessions);
+  const sdkSessionsLoaded = useStore((s) => s.sdkSessionsLoaded);
   const hash = useHash();
   const route = useMemo(() => parseHash(hash), [hash]);
   const isSettingsPage = route.page === "settings";
@@ -110,22 +112,30 @@ export default function App() {
   // so the mount logic can use it even if the hash-sync branch would clear it.
   const restoredIdRef = useRef(useStore.getState().currentSessionId);
   const initialServerSessionRecoveryRef = useRef(false);
-  // Which session (if any) we auto-restored from localStorage on this mount.
-  // The session list is empty at mount (not persisted across reload), so we
-  // can't tell yet whether that session is archived; we re-check once the
-  // list loads — see the archived-auto-restore bounce effect below.
-  const autoRestoredSessionIdRef = useRef<string | null>(null);
+  // The session (if any) this page load reopened on its own — a hash-less
+  // localStorage restore, or a browser reload of `#/session/<id>`. The session
+  // list is empty at mount (not persisted across reload), so whether it is
+  // archived is decided once the server's list lands — see the bounce effect.
+  const autoRestoredRef = useRef<ArmedRestore | null>(null);
+  const mountRouteHandledRef = useRef(false);
 
   // Sync hash → store. On mount, restore a localStorage session into the URL first.
   useEffect(() => {
+    const isMountRoute = !mountRouteHandledRef.current;
+    mountRouteHandledRef.current = true;
     // On first mount with no session hash, restore from localStorage
     if (restoredIdRef.current !== null && route.page === "home") {
-      autoRestoredSessionIdRef.current = restoredIdRef.current;
+      autoRestoredRef.current = { sessionId: restoredIdRef.current, sawSessionRoute: false };
       navigateToSession(restoredIdRef.current, true);
       restoredIdRef.current = null;
       return; // navigateToSession triggers hashchange → this effect re-runs with the session route
     }
     restoredIdRef.current = null;
+    // A reload of a session URL reopens it just like the hash-less restore
+    // (review 2026-10-14-2248 #2); a pasted / followed deep link does not arm.
+    if (isMountRoute && route.page === "session" && isReloadNavigation()) {
+      autoRestoredRef.current = { sessionId: route.sessionId, sawSessionRoute: true };
+    }
 
     if (route.page === "session") {
       const store = useStore.getState();
@@ -142,29 +152,28 @@ export default function App() {
     // For other pages (settings, etc.), preserve currentSessionId
   }, [route]);
 
-  // Archived auto-restore bounce. On reload we auto-restore the last-open
-  // session from localStorage and open a live socket before the session list
-  // has loaded — so if that session was archived (or exited) meanwhile, the tab
-  // silently reconnects to a dead session and parks it as the main panel (the
-  // "extra archived session reconnecting" anomaly). Once the list loads, if the
-  // session we auto-restored turns out to be archived, drop the live socket and
-  // land on home instead. This only fires for the auto-restore path — an
-  // explicit click on an archived session (to view its transcript) never sets
-  // `autoRestoredSessionIdRef`, so that read-only view still works.
+  // Archived auto-restore bounce. A session this page load reopened on its
+  // own (see `autoRestoredRef`) gets its socket before the session list
+  // arrives; if the server's list shows it archived, drop the socket and land
+  // on home instead of parking a dead session as the main panel. Exited (not
+  // archived) sessions are kept: a message resumes them. Never fires for an
+  // explicit click or a pasted deep link (those never arm), and disarms if the
+  // user navigates elsewhere before the list lands. Decision: `decideRestoreBounce`.
   useEffect(() => {
-    const restoredId = autoRestoredSessionIdRef.current;
-    if (!restoredId) return;
-    if (sdkSessions.length === 0) return; // list not loaded yet — can't tell
-    const info = sdkSessions.find((s) => s.sessionId === restoredId);
-    if (!info) return; // unknown to the server (e.g. just-created) — leave it
-    autoRestoredSessionIdRef.current = null; // one-shot: decided for this mount
-    if (info.archived) {
-      disconnectSession(restoredId);
-      if (useStore.getState().currentSessionId === restoredId) {
-        navigateHome(true);
-      }
+    const armed = autoRestoredRef.current;
+    if (!armed) return;
+    const decision = decideRestoreBounce(armed, route, sdkSessions, sdkSessionsLoaded);
+    if (decision.kind === "wait") {
+      autoRestoredRef.current = decision.armed;
+      return;
     }
-  }, [sdkSessions]);
+    autoRestoredRef.current = null; // one-shot: decided for this page load
+    if (!decision.bounce) return;
+    disconnectSession(armed.sessionId);
+    if (useStore.getState().currentSessionId === armed.sessionId) {
+      navigateHome(true);
+    }
+  }, [route, sdkSessions, sdkSessionsLoaded]);
 
   // If the browser opens with no persisted selection but the server already has
   // live sessions (for example an agent was started from a CLI-side entrypoint),

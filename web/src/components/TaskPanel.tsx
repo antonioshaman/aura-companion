@@ -973,7 +973,9 @@ function TasksSection({ sessionId }: { sessionId: string }) {
   const session = useStore((s) => s.sessions.get(sessionId));
 
   // Re-render every 30s so the relative "updated N ago" hint keeps advancing
-  // while the session is idle and no new TodoWrite frame arrives.
+  // while the session is idle and no new task-list update arrives. The 5-min
+  // staleness threshold applies to both backends: Claude TodoWrite and Codex
+  // plan updates both stamp `sessionTasksUpdatedAt` with the frame time.
   const [, setNowTick] = useState(0);
   useEffect(() => {
     if (!updatedAt) return;
@@ -1038,8 +1040,8 @@ function TasksSection({ sessionId }: { sessionId: string }) {
                 className={`mb-1.5 px-2.5 text-[10px] flex items-center gap-1 ${badgeTone === "behind" ? "text-cc-warning" : "text-cc-muted"}`}
                 title={
                   badgeTone === "behind"
-                    ? "The agent is actively working but hasn't refreshed its task list — this snapshot is behind live progress until the next TodoWrite."
-                    : "The task list mirrors the agent's last TodoWrite — it may lag behind actual progress until the agent updates it."
+                    ? "The agent is actively working but hasn't refreshed its task list — this snapshot is behind live progress until the agent next updates it."
+                    : "The task list mirrors the agent's last task-list update — it may lag behind actual progress until the agent updates it."
                 }
               >
                 {badgeTone === "behind" && (

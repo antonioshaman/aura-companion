@@ -207,6 +207,20 @@ describe("Session management", () => {
     expect(state.sdkSessions[0].sessionId).toBe("s2");
   });
 
+  it("setSdkSessions: sdkSessionsLoaded flips only for a server-authoritative list (review #9)", () => {
+    // A local seed (HomePage after create, model-switch mirrors) must not
+    // count as "the server's list has landed"; an empty server list does.
+    const sdk1: SdkSessionInfo = { sessionId: "s1", state: "connected", cwd: "/test", createdAt: Date.now() };
+    expect(useStore.getState().sdkSessionsLoaded).toBe(false);
+    useStore.getState().setSdkSessions([sdk1]);
+    expect(useStore.getState().sdkSessionsLoaded).toBe(false);
+    useStore.getState().setSdkSessions([], { fromServer: true });
+    expect(useStore.getState().sdkSessionsLoaded).toBe(true);
+    // A later local write keeps it loaded.
+    useStore.getState().setSdkSessions([sdk1]);
+    expect(useStore.getState().sdkSessionsLoaded).toBe(true);
+  });
+
   it("setSdkSessions: marks live REST sessions as CLI connected", () => {
     // The REST session list is an authoritative recovery snapshot after page
     // reload/server restart. Use it to clear stale disconnected composer state

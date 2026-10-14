@@ -45,6 +45,7 @@ export const useStore = create<AppState>((...args) => ({
       // resets so the user's sidebar collapse preferences persist.
       sessions: new Map(),
       sdkSessions: [],
+      sdkSessionsLoaded: false,
       currentSessionId: null,
       connectionStatus: new Map(),
       cliConnected: new Map(),

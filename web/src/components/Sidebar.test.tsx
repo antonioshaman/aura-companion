@@ -935,7 +935,7 @@ describe("Sidebar", () => {
       expect(mockApi.listSessions).toHaveBeenCalled();
     });
     await vi.waitFor(() => {
-      expect(mockState.setSdkSessions).toHaveBeenCalledWith(serverSessions);
+      expect(mockState.setSdkSessions).toHaveBeenCalledWith(serverSessions, { fromServer: true });
     });
     expect(mockConnectAllSessions).toHaveBeenCalledWith(serverSessions);
     expect(mockState.setSessionName).toHaveBeenCalledWith("s1", "Server Name");
@@ -1009,7 +1009,7 @@ describe("Sidebar", () => {
     render(<Sidebar />);
 
     await vi.waitFor(() => {
-      expect(mockState.setSdkSessions).toHaveBeenCalledWith(serverSessions);
+      expect(mockState.setSdkSessions).toHaveBeenCalledWith(serverSessions, { fromServer: true });
     });
     expect(mockState.setCliConnected).not.toHaveBeenCalled();
     expect(mockState.setConnectionStatus).not.toHaveBeenCalled();
@@ -1023,7 +1023,7 @@ describe("Sidebar", () => {
     render(<Sidebar />);
 
     await vi.waitFor(() => {
-      expect(mockState.setSdkSessions).toHaveBeenCalledWith(serverSessions);
+      expect(mockState.setSdkSessions).toHaveBeenCalledWith(serverSessions, { fromServer: true });
     });
     expect(mockState.setCliConnected).not.toHaveBeenCalled();
   });
@@ -1041,7 +1041,7 @@ describe("Sidebar", () => {
     render(<Sidebar />);
 
     await vi.waitFor(() => {
-      expect(mockState.setSdkSessions).toHaveBeenCalledWith(serverSessions);
+      expect(mockState.setSdkSessions).toHaveBeenCalledWith(serverSessions, { fromServer: true });
     });
     expect(mockState.setCliConnected).not.toHaveBeenCalled();
     expect(mockState.setConnectionStatus).not.toHaveBeenCalled();
@@ -1093,8 +1093,9 @@ describe("Sidebar", () => {
       expect(mockState.removeSession).toHaveBeenCalledWith("stale-id");
     });
 
-    // setSdkSessions should have been called with the empty list from the server
-    expect(mockState.setSdkSessions).toHaveBeenCalledWith([]);
+    // setSdkSessions should have been called with the empty list from the server,
+    // flagged as the server-authoritative list (drives `sdkSessionsLoaded`).
+    expect(mockState.setSdkSessions).toHaveBeenCalledWith([], { fromServer: true });
   });
 
   it("poll does not remove sessions that still exist on the server", async () => {
@@ -1117,7 +1118,7 @@ describe("Sidebar", () => {
       expect(mockApi.listSessions).toHaveBeenCalled();
     });
     await vi.waitFor(() => {
-      expect(mockState.setSdkSessions).toHaveBeenCalledWith(serverSessions);
+      expect(mockState.setSdkSessions).toHaveBeenCalledWith(serverSessions, { fromServer: true });
     });
 
     // The active session is still on the server — removeSession must NOT be called
@@ -1160,7 +1161,7 @@ describe("Sidebar", () => {
       expect(mockApi.listSessions).toHaveBeenCalled();
     });
     await vi.waitFor(() => {
-      expect(mockState.setSdkSessions).toHaveBeenCalledWith([]);
+      expect(mockState.setSdkSessions).toHaveBeenCalledWith([], { fromServer: true });
     });
 
     // The newly-connected session must NOT be evicted — it's live even though it
