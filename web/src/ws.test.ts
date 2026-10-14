@@ -3188,6 +3188,91 @@ describe("handleMessage: keep_alive", () => {
 });
 
 // ===========================================================================
+// Heartbeat watchdog: recover a half-open socket after a server restart
+// ===========================================================================
+// The server sends a `keep_alive` every 25s; the client arms a 60s watchdog
+// and re-arms it on every incoming frame. If the server vanishes behind a
+// proxy/VPN, the client's TCP can stay half-open — readyState OPEN, no onclose
+// — so nothing reconnects until the user sends a message. The watchdog breaks
+// that deadlock by force-closing the dead socket, which triggers reconnect.
+describe("heartbeat watchdog", () => {
+  beforeEach(() => {
+    // shouldReconnectSession must see s1 as a live, non-archived session.
+    useStore.getState().setSdkSessions([
+      { sessionId: "s1", state: "connected", cwd: "/", createdAt: 0 },
+    ]);
+  });
+
+  it("force-closes the socket after the heartbeat timeout when no frame arrives", () => {
+    wsModule.connectSession("s1");
+    lastWs.onopen?.(new Event("open"));
+    const ws = lastWs;
+    expect(ws.close).not.toHaveBeenCalled();
+    // No frames at all (not even keep_alive) for 60s → watchdog force-closes.
+    vi.advanceTimersByTime(60_000);
+    expect(ws.close).toHaveBeenCalled();
+  });
+
+  it("re-arms on a keep_alive frame, so a live connection is never force-closed", () => {
+    wsModule.connectSession("s1");
+    lastWs.onopen?.(new Event("open"));
+    const ws = lastWs;
+    // 59s in — just under the window — a keep_alive arrives and resets it.
+    vi.advanceTimersByTime(59_000);
+    fireMessage({ type: "keep_alive" });
+    // 59s more: 118s total but only 59s since the last frame → still alive.
+    vi.advanceTimersByTime(59_000);
+    expect(ws.close).not.toHaveBeenCalled();
+    // Now the server really goes silent past the 60s window.
+    vi.advanceTimersByTime(1_500);
+    expect(ws.close).toHaveBeenCalled();
+  });
+
+  it("recovers a half-open socket (readyState stays OPEN, no onclose fires)", () => {
+    // The exact user-reported bug: after a server restart behind a proxy the
+    // socket reads OPEN forever and emits no frames, so onclose never fires and
+    // the dialog never auto-restores until the user types. The watchdog fixes it.
+    wsModule.connectSession("s1");
+    lastWs.onopen?.(new Event("open"));
+    const dead = lastWs;
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    dead.readyState = MockWebSocket.OPEN; // half-open: never transitions to CLOSED on its own
+
+    vi.advanceTimersByTime(60_000);
+    expect(dead.close).toHaveBeenCalled();
+
+    // The real browser now surfaces the close → reconnect timer → fresh socket.
+    dead.readyState = MockWebSocket.CLOSED;
+    dead.onclose?.();
+    vi.advanceTimersByTime(2_000);
+    expect(lastWs).not.toBe(dead);
+  });
+
+  it("onclose reflects the drop in the UI (cliConnected → false, status disconnected)", () => {
+    wsModule.connectSession("s1");
+    lastWs.onopen?.(new Event("open"));
+    const ws = lastWs;
+    useStore.getState().setCliConnected("s1", true);
+
+    ws.readyState = MockWebSocket.CLOSED;
+    ws.onclose?.();
+
+    expect(useStore.getState().cliConnected.get("s1")).toBe(false);
+    expect(useStore.getState().connectionStatus.get("s1")).toBe("disconnected");
+  });
+
+  it("disconnectSession clears the watchdog — no force-close after teardown", () => {
+    wsModule.connectSession("s1");
+    lastWs.onopen?.(new Event("open"));
+    const ws = lastWs;
+    wsModule.disconnectSession("s1");
+    ws.close.mockClear();
+    vi.advanceTimersByTime(120_000);
+    expect(ws.close).not.toHaveBeenCalled();
+  });
+});
+
+// ===========================================================================
 // assistant message: per-tool progress clearing (not blanket clear)
 // ===========================================================================
 describe("handleMessage: assistant clears only completed tool progress", () => {

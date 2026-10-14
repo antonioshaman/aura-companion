@@ -8,8 +8,19 @@ import type { ToolActivityEntry } from "./store/tasks-slice.js";
 import { api } from "./api.js";
 
 const WS_RECONNECT_DELAY_MS = 2000;
+/**
+ * If no frame (including the server's 25s `keep_alive`) arrives within this
+ * window, the socket is assumed dead and force-closed to trigger the normal
+ * reconnect path. Covers the half-open-socket case: when the server restarts
+ * behind a proxy/VPN (Tailscale/nginx), the client's TCP can stay OPEN so
+ * `onclose`/`onerror` never fire and nothing recovers until the user sends.
+ * 60s tolerates two missed 25s heartbeats plus margin.
+ */
+const WS_HEARTBEAT_TIMEOUT_MS = 60_000;
 const sockets = new Map<string, WebSocket>();
 const reconnectTimers = new Map<string, ReturnType<typeof setTimeout>>();
+/** Per-session liveness watchdog; reset on every incoming frame. */
+const heartbeatWatchdogs = new Map<string, ReturnType<typeof setTimeout>>();
 /**
  * Tracks sessionIds that are mid-reconnect. Set on `ws.onclose`,
  * cleared on the replacement socket's `ws.onopen`. Required because
@@ -790,6 +801,11 @@ function handleMessage(sessionId: string, event: MessageEvent) {
     console.warn(`[ws] Failed to parse incoming message for session ${sessionId}:`, event.data?.substring?.(0, 120));
     return;
   }
+
+  // Any frame — including the 25s `keep_alive` — proves the server is alive, so
+  // re-arm the liveness watchdog. Without this, a half-open socket is never
+  // detected and the dialog never auto-restores after a server restart.
+  resetHeartbeatWatchdog(sessionId);
 
   // Promote to "connected" on any valid message. A stale close/recovery path can
   // leave the UI marked disconnected even after a replacement socket starts
@@ -1863,6 +1879,8 @@ export function connectSession(sessionId: string) {
   ws.onopen = () => {
     // Stay in "connecting" until we receive the first message from the server,
     // proving the subscription succeeded. handleMessage promotes to "connected".
+    // Arm the liveness watchdog now; every incoming frame re-arms it.
+    resetHeartbeatWatchdog(sessionId);
     const lastSeq = getLastSeq(sessionId);
     ws.send(JSON.stringify({ type: "session_subscribe", last_seq: lastSeq }));
     flushQueuedOutgoing(sessionId, ws);
@@ -1892,7 +1910,13 @@ export function connectSession(sessionId: string) {
     // Guard against stale close events from a replaced socket.
     if (sockets.get(sessionId) !== ws) return;
     sockets.delete(sessionId);
-    useStore.getState().setConnectionStatus(sessionId, "disconnected");
+    clearHeartbeatWatchdog(sessionId);
+    // Reflect the drop honestly: the composer gates on `cliConnected`, so
+    // without this the tab looks connected (and silently can't reach the CLI)
+    // until the user types. The reconnect path restores it from `session_init`.
+    const store = useStore.getState();
+    store.setConnectionStatus(sessionId, "disconnected");
+    store.setCliConnected(sessionId, false);
     // Mark this session as mid-reconnect BEFORE scheduling the timer.
     // The replacement socket's onopen reads this flag (and clears it)
     // to decide whether to fire the post-reconnect group refetch. We
@@ -1905,6 +1929,36 @@ export function connectSession(sessionId: string) {
   ws.onerror = () => {
     ws.close();
   };
+}
+
+/**
+ * (Re)arm the liveness watchdog for a session's socket. Called on connect and
+ * on every incoming frame. If it fires, the server has gone silent past
+ * {@link WS_HEARTBEAT_TIMEOUT_MS} (not even a `keep_alive` arrived) — the socket
+ * is almost certainly half-open, so force-close it. The `onclose` handler then
+ * runs the normal reconnect, which re-subscribes and re-hydrates the dialog.
+ */
+function resetHeartbeatWatchdog(sessionId: string) {
+  const existing = heartbeatWatchdogs.get(sessionId);
+  if (existing) clearTimeout(existing);
+  const timer = setTimeout(() => {
+    heartbeatWatchdogs.delete(sessionId);
+    const ws = sockets.get(sessionId);
+    if (!ws) return;
+    // readyState may still read OPEN on a half-open socket — that is exactly
+    // the case we recover from. Closing triggers onclose → scheduleReconnect.
+    console.warn(`[ws] No heartbeat for ${WS_HEARTBEAT_TIMEOUT_MS}ms on session ${sessionId}; forcing reconnect.`);
+    try { ws.close(); } catch {}
+  }, WS_HEARTBEAT_TIMEOUT_MS);
+  heartbeatWatchdogs.set(sessionId, timer);
+}
+
+function clearHeartbeatWatchdog(sessionId: string) {
+  const timer = heartbeatWatchdogs.get(sessionId);
+  if (timer) {
+    clearTimeout(timer);
+    heartbeatWatchdogs.delete(sessionId);
+  }
 }
 
 function scheduleReconnect(sessionId: string) {
@@ -1929,6 +1983,7 @@ export function disconnectSession(sessionId: string) {
     reconnectTimers.delete(sessionId);
   }
   reconnectingSessions.delete(sessionId);
+  clearHeartbeatWatchdog(sessionId);
   const ws = sockets.get(sessionId);
   if (ws) {
     ws.close();
