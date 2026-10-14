@@ -59,3 +59,33 @@ in `anthropic-models-cache.test.ts`. If you tighten the parser
 (e.g., adopt strict ISO-8601 regex on `created_at` per Persistence
 P3-4), the test will RED — extend this fixture with the new reject
 shape AND update this table.
+
+## `drift/cli-2.1.283/`
+
+Replay fixture for the silent-stdio drift kill decision
+(`silent-stdio-drift-replay.test.ts`, EC-6) and the CLI layout canary.
+Record shapes are copied key-for-key from a real Claude CLI 2.1.283 session.
+All content is a placeholder, so no user data is included.
+
+- `projects/-root-proj/<cliSid>.jsonl`: main chain only, every record
+  `isSidechain:false`. The Task `tool_use` reached bun. Two later assistant
+  records (`msg_fixture_0002/0003`) never reached stdout (the 2026-10-14 incident
+  shape).
+- `projects/-root-proj/<cliSid>/subagents/agent-*.jsonl` (+ `.meta.json`) and
+  `tool-results/`: the sibling tree where CLI 2.1.283 writes Task-subagent
+  output (`isSidechain:true`). The drift liveness gate stats this tree.
+- `recording.jsonl`: recorder v3. `dir:"in", ch:"cli"` frames are what bun
+  actually received. The last one gives `bunLastFrameMs` (T−290 s).
+
+The tests set file mtimes at runtime. The negative and positive scenarios
+replay the same bytes and differ only in liveness evidence.
+
+### Refreshing
+
+After a Claude CLI upgrade, check the layout on a real session of the new
+version: look under `~/.claude/projects/<slug>/<cliSid>/`. Then regenerate these
+files with the same keys, and bump `SUBAGENT_LAYOUT_VERIFIED_CLI_VERSION` in
+`silent-stdio-drift-detector.ts` in the same change. The canary tests fail
+until the version and the fixture agree. In prod, the drift tick logs
+`silent_stdio_drift.cli_layout_unverified` once per session running another
+version.
