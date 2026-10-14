@@ -1939,6 +1939,7 @@ export class CodexAdapter implements IBackendAdapter {
       case "mcpServer/startupStatus/updated":
       case "remoteControl/status/changed":
       case "sessionConfigured":
+      case "skills/changed":
       case "windows/worldWritableWarning":
         // Informational app-server notifications; not user-actionable here.
         break;

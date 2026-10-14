@@ -4374,6 +4374,9 @@ describe("CodexAdapter with ICodexTransport", () => {
       { method: "mcpServer/startupStatus/updated", params: { status: "ready" } },
       { method: "thread/settings/updated", params: { threadId: "thr_init" } },
       { method: "thread/goal/cleared", params: { threadId: "thr_init" } },
+      // Newer Codex CLIs emit this (empty payload) when the skills set
+      // changes; it surfaced to the observer UI as "protocol drift".
+      { method: "skills/changed", params: {} },
     ];
 
     for (const notification of informationalNotifications) {
