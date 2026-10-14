@@ -215,7 +215,7 @@ class ImagePullManager {
   }
 
   private async doLocalBuild(localTag: string): Promise<void> {
-    const dockerfilePath = join(WEB_DIR, "docker", "Dockerfile.the-companion");
+    const dockerfilePath = join(WEB_DIR, "docker", "Dockerfile.aura-companion-sandbox");
     if (!existsSync(dockerfilePath)) {
       this.markError(localTag, `Dockerfile not found at ${dockerfilePath}`);
       return;

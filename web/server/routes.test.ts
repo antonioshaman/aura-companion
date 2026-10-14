@@ -1273,7 +1273,7 @@ describe("POST /api/sessions/:id/editor/start", () => {
     vi.spyOn(containerManager, "getContainer").mockReturnValue({
       containerId: "cid-1",
       name: "companion-s1",
-      image: "the-companion:latest",
+      image: "aura-companion-sandbox:latest",
       portMappings: [{ containerPort: 13337, hostPort: 49152 }],
       hostCwd: "/repo",
       containerCwd: "/workspace",
@@ -1959,15 +1959,15 @@ describe("Saved prompts API", () => {
 describe("GET /api/images/:tag/status", () => {
   it("returns the pull state for an image", async () => {
     mockImagePullGetState.mockReturnValueOnce({
-      image: "the-companion:latest",
+      image: "aura-companion-sandbox:latest",
       status: "ready",
       progress: [],
     });
 
-    const res = await app.request("/api/images/the-companion%3Alatest/status");
+    const res = await app.request("/api/images/aura-companion-sandbox%3Alatest/status");
     expect(res.status).toBe(200);
     const json = await res.json();
-    expect(json.image).toBe("the-companion:latest");
+    expect(json.image).toBe("aura-companion-sandbox:latest");
     expect(json.status).toBe("ready");
   });
 });
@@ -1976,25 +1976,25 @@ describe("POST /api/images/:tag/pull", () => {
   it("triggers a pull and returns the current state", async () => {
     vi.spyOn(containerManager, "checkDocker").mockReturnValue(true);
     mockImagePullGetState.mockReturnValueOnce({
-      image: "the-companion:latest",
+      image: "aura-companion-sandbox:latest",
       status: "pulling",
       progress: [],
       startedAt: Date.now(),
     });
 
-    const res = await app.request("/api/images/the-companion%3Alatest/pull", {
+    const res = await app.request("/api/images/aura-companion-sandbox%3Alatest/pull", {
       method: "POST",
     });
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json.ok).toBe(true);
-    expect(mockImagePullPull).toHaveBeenCalledWith("the-companion:latest");
+    expect(mockImagePullPull).toHaveBeenCalledWith("aura-companion-sandbox:latest");
   });
 
   it("returns 503 when Docker is not available", async () => {
     vi.spyOn(containerManager, "checkDocker").mockReturnValue(false);
 
-    const res = await app.request("/api/images/the-companion%3Alatest/pull", {
+    const res = await app.request("/api/images/aura-companion-sandbox%3Alatest/pull", {
       method: "POST",
     });
     expect(res.status).toBe(503);
@@ -5298,7 +5298,7 @@ describe("POST /api/sessions/:id/browser/start", () => {
     vi.spyOn(containerManager, "getContainer").mockReturnValue({
       containerId: "cid-1",
       name: "companion-s1",
-      image: "the-companion:latest",
+      image: "aura-companion-sandbox:latest",
       portMappings: [{ containerPort: 6080, hostPort: 49200 }],
       hostCwd: "/repo",
       containerCwd: "/workspace",
@@ -5331,7 +5331,7 @@ describe("POST /api/sessions/:id/browser/start", () => {
     vi.spyOn(containerManager, "getContainer").mockReturnValue({
       containerId: "cid-1",
       name: "companion-s1",
-      image: "the-companion:latest",
+      image: "aura-companion-sandbox:latest",
       portMappings: [{ containerPort: 6080, hostPort: 49200 }],
       hostCwd: "/repo",
       containerCwd: "/workspace",
@@ -5369,7 +5369,7 @@ describe("POST /api/sessions/:id/browser/start", () => {
     vi.spyOn(containerManager, "getContainer").mockReturnValue({
       containerId: "cid-1",
       name: "companion-s1",
-      image: "the-companion:latest",
+      image: "aura-companion-sandbox:latest",
       portMappings: [{ containerPort: 6080, hostPort: 49200 }],
       hostCwd: "/repo",
       containerCwd: "/workspace",
@@ -5403,7 +5403,7 @@ describe("POST /api/sessions/:id/browser/start", () => {
     vi.spyOn(containerManager, "getContainer").mockReturnValue({
       containerId: "cid-1",
       name: "companion-s1",
-      image: "the-companion:latest",
+      image: "aura-companion-sandbox:latest",
       portMappings: [{ containerPort: 6080, hostPort: 49200 }],
       hostCwd: "/repo",
       containerCwd: "/workspace",
@@ -5484,7 +5484,7 @@ describe("POST /api/sessions/:id/browser/navigate", () => {
     vi.spyOn(containerManager, "getContainer").mockReturnValue({
       containerId: "cid-1",
       name: "companion-s1",
-      image: "the-companion:latest",
+      image: "aura-companion-sandbox:latest",
       portMappings: [],
       hostCwd: "/repo",
       containerCwd: "/workspace",
@@ -5540,7 +5540,7 @@ describe("GET /api/sessions/:id/browser/proxy/*", () => {
     vi.spyOn(containerManager, "getContainer").mockReturnValue({
       containerId: "cid-1",
       name: "companion-s1",
-      image: "the-companion:latest",
+      image: "aura-companion-sandbox:latest",
       portMappings: [{ containerPort: 6080, hostPort: 49200 }],
       hostCwd: "/repo",
       containerCwd: "/workspace",

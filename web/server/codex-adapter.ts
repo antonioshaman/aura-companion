@@ -1178,7 +1178,7 @@ export class CodexAdapter implements IBackendAdapter {
       // Step 1: Send initialize request
       await this.transport.call("initialize", {
         clientInfo: {
-          name: "thecompanion",
+          name: "aura-companion",
           title: "Aura Companion",
           version: "1.0.0",
         },
