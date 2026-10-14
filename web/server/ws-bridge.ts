@@ -1964,7 +1964,7 @@ export class WsBridge {
     // (fail-closed) any future mid-session caller instead of silently
     // degrading cache behaviour.
     const hasUserTurn = session.messageHistory.some(
-      (m) => (m as { type?: string }).type === "user"
+      (m) => m.type === "user_message"
     );
     if (hasUserTurn) {
       console.warn(

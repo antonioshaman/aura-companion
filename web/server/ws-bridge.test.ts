@@ -6167,3 +6167,30 @@ describe("countDistinctBrowsers", () => {
     expect(bridge.countDistinctBrowsers()).toBe(0);
   });
 });
+
+// WS-3 A-1 (prompt-cache audit C-5): a mid-session initialize{appendSystemPrompt}
+// rewrites the system prompt and busts the CLI's whole prompt-cache prefix.
+// The guard must refuse injection once the conversation has a user turn.
+// History stores user turns as type "user_message" — the first version of the
+// guard checked "user" and was a silent no-op; this pins the real tag.
+describe("injectSystemPrompt mid-session guard (WS-3 A-1)", () => {
+  it("buffers the prompt for kickoff when no user turn exists yet", () => {
+    const session = bridge.getOrCreateSession("s-guard-1");
+    bridge.injectSystemPrompt("s-guard-1", "extra context");
+    expect(session.pendingSystemPromptInjection).toBe("extra context");
+  });
+
+  it("refuses injection once the conversation has a user_message turn", () => {
+    const session = bridge.getOrCreateSession("s-guard-2");
+    session.messageHistory.push({
+      type: "user_message",
+      content: "hi",
+      timestamp: Date.now(),
+    } as never);
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    bridge.injectSystemPrompt("s-guard-2", "late context");
+    expect(session.pendingSystemPromptInjection).toBeUndefined();
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("REFUSED"));
+    warnSpy.mockRestore();
+  });
+});
