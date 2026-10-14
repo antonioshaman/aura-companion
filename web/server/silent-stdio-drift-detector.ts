@@ -26,12 +26,12 @@
  *
  * The detector is a pure module. It does NOT touch the process, kill
  * anything, or send any bus events itself — it only OBSERVES and
- * REPORTS via a callback. Wiring (interval + orchestrator listener +
- * kill decision) lives in `session-orchestrator.ts`.
+ * REPORTS a verdict. Wiring (interval + kill decision) lives in
+ * `session-recovery.ts` (`driftDetectorTick` + `decideDriftAction`).
  */
 
 import type { PathLike } from "node:fs";
-import { closeSync, openSync, readdirSync, readSync, statSync } from "node:fs";
+import { closeSync, fstatSync, lstatSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 /** Per-session state maintained across ticks. */
@@ -145,10 +145,13 @@ export interface DriftDetectorDeps {
   /**
    * Liveness check run only after the undelivered-output evidence is positive:
    * returns true if any file under `<sessionDir>/subagents/` or
-   * `<sessionDir>/tool-results/` has an mtime newer than `sinceMs` (bun's last
-   * frame). Fresh activity means the CLI is alive mid Task fan-out, so the
-   * quiet stdout is expected and the kill is withheld. When given, a positive
-   * result suppresses the kill as `live_subagent_activity`.
+   * `<sessionDir>/tool-results/` has an mtime newer than `sinceMs`. The
+   * detector passes `max(bunLastFrameMs, now - SUBAGENT_LIVENESS_WINDOW_MS)`:
+   * activity must be RECENT, not merely "after bun's last frame" (that clock
+   * freezes on a real stdout death, so one stale write would suppress forever).
+   * Fresh activity means the CLI is alive mid Task fan-out, so the quiet stdout
+   * is expected and the kill is withheld. When given, a positive result
+   * suppresses the kill as `live_subagent_activity`.
    */
   readonly subagentActivitySince?: (sessionDir: string, sinceMs: number) => boolean;
 }
@@ -203,7 +206,9 @@ export function countUndeliveredAssistantRecords(jsonlPath: string, sinceMs: num
   let fd: number | null = null;
   try {
     fd = openSync(jsonlPath, "r");
-    const size = statSync(jsonlPath).size;
+    // fstat the open fd, not the path: a CLI that ever replaced the jsonl
+    // (rename-over) would otherwise pair one file's size with another's bytes.
+    const size = fstatSync(fd).size;
     const len = Math.min(size, UNDELIVERED_OUTPUT_TAIL_BYTES);
     const buf = Buffer.alloc(len);
     readSync(fd, buf, 0, len, size - len);
@@ -257,14 +262,29 @@ function defaultStatFile(p: PathLike): { mtimeMs: number } | null {
 }
 
 /** Subdirectories under a session dir that a live Task fan-out writes to. */
-const SUBAGENT_ACTIVITY_SUBDIRS = ["subagents", "tool-results"] as const;
+export const SUBAGENT_ACTIVITY_SUBDIRS = ["subagents", "tool-results"] as const;
 
 /**
- * Default liveness check: true if any file directly under
+ * How recent a subagent-tree write must be to count as proof of life
+ * (review 2026-10-14-2248 #1). Measured from `now`, floored at bun's last
+ * frame. A live fan-out appends to `subagents/agent-*.jsonl` on every subagent
+ * message and tool result, so a working tree is touched far more often than
+ * this; the window only has to outlast one long subagent tool call (a slow
+ * Bash / test run). 5 min matches the adapter's silent-stdio watchdog, so a
+ * genuine stdout death that happened mid fan-out is recovered at most ~5 min
+ * after the tree goes quiet — instead of never.
+ */
+export const SUBAGENT_LIVENESS_WINDOW_MS = 5 * 60_000;
+
+/**
+ * Default liveness check: true if any regular file directly under
  * `<sessionDir>/subagents/` or `<sessionDir>/tool-results/` has an mtime newer
  * than `sinceMs`. Runs only after the undelivered-output evidence is already
- * positive (rare), so the per-file stat loop is off the hot path. Returns false
- * on any read error — absence of evidence must not suppress a genuine kill.
+ * positive, and the layout is flat on the verified CLI (≤ a few hundred
+ * entries), so the per-file `lstat` loop is cheap. `lstat`, not `stat`: a
+ * symlink's target or a nested directory's entry-change mtime is not evidence
+ * that the CLI is writing its own subagent output. Returns false on any read
+ * error — absence of evidence must not suppress a genuine kill.
  */
 export function defaultSubagentActivitySince(sessionDir: string, sinceMs: number): boolean {
   for (const sub of SUBAGENT_ACTIVITY_SUBDIRS) {
@@ -277,9 +297,10 @@ export function defaultSubagentActivitySince(sessionDir: string, sinceMs: number
     }
     for (const name of entries) {
       try {
-        if (statSync(join(dir, name)).mtimeMs > sinceMs) return true;
+        const st = lstatSync(join(dir, name));
+        if (st.isFile() && st.mtimeMs > sinceMs) return true;
       } catch {
-        // entry vanished between readdir and stat — ignore
+        // entry vanished between readdir and lstat — ignore
       }
     }
   }
@@ -329,88 +350,47 @@ export function checkDrift(
   const jsonlIdleThreshold =
     deps.jsonlIdleThresholdMs ?? (hasEvidenceCheck ? EVIDENCE_JSONL_IDLE_WINDOW_MS : DEFAULT_JSONL_IDLE_THRESHOLD_MS);
 
+  // Every verdict shares these fields; each gate below only overrides what it
+  // decided. One base keeps a new verdict field from being missed in a branch.
+  const notDrifted = (fields: Partial<DriftVerdict> = {}): DriftVerdict => ({
+    sessionId: state.sessionId,
+    drifted: false,
+    mtimeDeltaMs: 0,
+    bunLastFrameMs: state.bunLastFrameMs,
+    jsonlMtimeMs: 0,
+    undeliveredAssistantRecords: null,
+    suppressedReason: null,
+    reason: null,
+    ...fields,
+  });
+
   // No jsonl path known → nothing to compare. Session hasn't produced
   // its cliSessionId yet (fresh spawn pre-init) OR the caller hasn't
   // resolved the path. Skip.
-  if (!state.jsonlPath) {
-    return {
-      sessionId: state.sessionId,
-      drifted: false,
-      mtimeDeltaMs: 0,
-      bunLastFrameMs: state.bunLastFrameMs,
-      jsonlMtimeMs: 0,
-      undeliveredAssistantRecords: null,
-      suppressedReason: null,
-      reason: null,
-    };
-  }
+  if (!state.jsonlPath) return notDrifted();
 
   const jsonlStat = statFile(state.jsonlPath);
-  const jsonlMtimeMs = jsonlStat?.mtimeMs ?? 0;
-
-  if (!jsonlStat) {
-    // jsonl not present — CLI hasn't written anything yet. Not drift.
-    return {
-      sessionId: state.sessionId,
-      drifted: false,
-      mtimeDeltaMs: 0,
-      bunLastFrameMs: state.bunLastFrameMs,
-      jsonlMtimeMs,
-      undeliveredAssistantRecords: null,
-      suppressedReason: null,
-      reason: null,
-    };
-  }
+  // jsonl not present — CLI hasn't written anything yet. Not drift.
+  if (!jsonlStat) return notDrifted();
+  const jsonlMtimeMs = jsonlStat.mtimeMs;
 
   const mtimeDeltaMs = jsonlMtimeMs - state.bunLastFrameMs;
   const jsonlAgeMs = now - jsonlMtimeMs;
+  const timing = { mtimeDeltaMs, jsonlMtimeMs };
 
   // Condition 1: jsonl must be recent. An idle jsonl (last written
   // more than jsonlIdleThreshold ago) means the CLI is not doing
   // anything right now — no active drift, regardless of the delta.
-  if (jsonlAgeMs > jsonlIdleThreshold) {
-    return {
-      sessionId: state.sessionId,
-      drifted: false,
-      mtimeDeltaMs,
-      bunLastFrameMs: state.bunLastFrameMs,
-      jsonlMtimeMs,
-      undeliveredAssistantRecords: null,
-      suppressedReason: null,
-      reason: null,
-    };
-  }
+  if (jsonlAgeMs > jsonlIdleThreshold) return notDrifted(timing);
 
   // Condition 2: baseline must exist — an adapter that has never seen a
   // CLI frame is booting, not drifting. `bunLastFrameMs === 0` means
   // `attachTransport` has not yet run. Skip cleanly.
-  if (state.bunLastFrameMs === 0) {
-    return {
-      sessionId: state.sessionId,
-      drifted: false,
-      mtimeDeltaMs,
-      bunLastFrameMs: state.bunLastFrameMs,
-      jsonlMtimeMs,
-      undeliveredAssistantRecords: null,
-      suppressedReason: null,
-      reason: null,
-    };
-  }
+  if (state.bunLastFrameMs === 0) return notDrifted(timing);
 
   // Condition 3: jsonl mtime is more than lag-tolerance newer than
   // bun's last-received-frame timestamp.
-  if (mtimeDeltaMs <= lagTolerance) {
-    return {
-      sessionId: state.sessionId,
-      drifted: false,
-      mtimeDeltaMs,
-      bunLastFrameMs: state.bunLastFrameMs,
-      jsonlMtimeMs,
-      undeliveredAssistantRecords: null,
-      suppressedReason: null,
-      reason: null,
-    };
-  }
+  if (mtimeDeltaMs <= lagTolerance) return notDrifted(timing);
 
   // Condition 4 (only with an `undeliveredOutput` dep): the jsonl must hold
   // model output bun never received. Condition 3 alone fires on any idle
@@ -423,38 +403,21 @@ export function checkDrift(
     ? deps.undeliveredOutput(state.jsonlPath, state.bunLastFrameMs, now - UNDELIVERED_OUTPUT_MIN_AGE_MS)
     : null;
   if (undelivered === 0) {
-    return {
-      sessionId: state.sessionId,
-      drifted: false,
-      mtimeDeltaMs,
-      bunLastFrameMs: state.bunLastFrameMs,
-      jsonlMtimeMs,
-      undeliveredAssistantRecords: 0,
-      suppressedReason: "no_undelivered_output",
-      reason: null,
-    };
+    return notDrifted({ ...timing, undeliveredAssistantRecords: 0, suppressedReason: "no_undelivered_output" });
   }
 
   // Liveness gate (only with a `subagentActivitySince` dep): there IS
   // undelivered main-stream output, but if the CLI's subagent/tool-results
-  // tree has fresh writes since bun's last frame the process is provably alive
-  // mid Task fan-out (a council / long multi-subagent turn). The quiet stdout
-  // is expected, not a dead pipe — killing here destroys in-flight subagents.
-  // Withhold; a genuine stdout death leaves the tree idle and still fires.
-  if (
-    state.sessionDir &&
-    deps.subagentActivitySince?.(state.sessionDir, state.bunLastFrameMs)
-  ) {
-    return {
-      sessionId: state.sessionId,
-      drifted: false,
-      mtimeDeltaMs,
-      bunLastFrameMs: state.bunLastFrameMs,
-      jsonlMtimeMs,
-      undeliveredAssistantRecords: undelivered,
-      suppressedReason: "live_subagent_activity",
-      reason: null,
-    };
+  // tree was written RECENTLY the process is provably alive mid Task fan-out
+  // (a council / long multi-subagent turn). The quiet stdout is expected, not
+  // a dead pipe — killing here destroys in-flight subagents. "Recently" is
+  // bounded by `now` (review 2026-10-14-2248 #1): on a real stdout death
+  // `bunLastFrameMs` freezes, so a floor of bun's last frame alone would let
+  // one stale write suppress forever. A tree quiet for longer than
+  // SUBAGENT_LIVENESS_WINDOW_MS lets the kill fire.
+  const livenessSinceMs = Math.max(state.bunLastFrameMs, now - SUBAGENT_LIVENESS_WINDOW_MS);
+  if (state.sessionDir && deps.subagentActivitySince?.(state.sessionDir, livenessSinceMs)) {
+    return notDrifted({ ...timing, undeliveredAssistantRecords: undelivered, suppressedReason: "live_subagent_activity" });
   }
 
   return {
@@ -502,11 +465,49 @@ export function resolveJsonlPath(
   cwd: string | undefined | null,
   cliSessionId: string | undefined | null,
 ): string | null {
+  return resolveCliSessionPaths(claudeHome, cwd, cliSessionId)?.jsonlPath ?? null;
+}
+
+/**
+ * The CLI session id becomes a path segment; it must be one segment and
+ * nothing else (no `/`, no `..`). Real ids are UUIDs; tests use short slugs.
+ * EC-7: the filesystem predicates downstream only ever see a contained path.
+ */
+const CLI_SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+
+/**
+ * Both on-disk locations of one Claude CLI session, from ONE slug derivation:
+ * the flat main transcript `<claudeHome>/projects/<slug>/<cliSid>.jsonl` and
+ * its sibling dir `<claudeHome>/projects/<slug>/<cliSid>/` that holds
+ * `subagents/` + `tool-results/` (verified on CLI 2.1.283 — see
+ * {@link SUBAGENT_LAYOUT_VERIFIED_CLI_VERSION}). Keeping the layout rule in one
+ * function means the next CLI layout change is a one-place edit.
+ *
+ * `null` if either input is empty (session not initialised yet) or the
+ * session id is not a single id-shaped path segment.
+ */
+export function resolveCliSessionPaths(
+  claudeHome: string,
+  cwd: string | undefined | null,
+  cliSessionId: string | undefined | null,
+): { jsonlPath: string; sessionDir: string } | null {
   if (!cwd || !cliSessionId) return null;
+  if (!CLI_SESSION_ID_PATTERN.test(cliSessionId)) return null;
   // Mirror the CLI's slug conversion: `/` AND `_` both collapse to `-`.
   // A future refactor that spots more character classes CLI converts
   // (e.g. `.`, spaces) should update this regex in lockstep with a real
   // filesystem test against `~/.claude/projects/` on a live install.
   const slug = cwd.replace(/[/_]/g, "-");
-  return `${claudeHome}/projects/${slug}/${cliSessionId}.jsonl`;
+  const sessionDir = `${claudeHome}/projects/${slug}/${cliSessionId}`;
+  return { jsonlPath: `${sessionDir}.jsonl`, sessionDir };
 }
+
+/**
+ * The Claude CLI version whose on-disk layout this module was verified
+ * against: Task-subagent output in `<cliSid>/subagents/agent-<id>.jsonl` +
+ * `<cliSid>/tool-results/`, never in the flat main jsonl (all main records
+ * `isSidechain:false`). A session reporting another version is not known to
+ * be wrong — just unverified; the drift tick logs it once so a layout change
+ * shows up in logs, and `fixtures/drift/` pins the shape in a test.
+ */
+export const SUBAGENT_LAYOUT_VERIFIED_CLI_VERSION = "2.1.283";

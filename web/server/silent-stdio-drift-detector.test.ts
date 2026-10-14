@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, utimesSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -7,8 +7,10 @@ import {
   countAssistantRecordsBetween,
   countUndeliveredAssistantRecords,
   defaultSubagentActivitySince,
+  resolveCliSessionPaths,
   resolveJsonlPath,
   DEFAULT_LAG_TOLERANCE_MS,
+  SUBAGENT_LIVENESS_WINDOW_MS,
   DEFAULT_JSONL_IDLE_THRESHOLD_MS,
   UNDELIVERED_OUTPUT_MIN_AGE_MS,
   UNDELIVERED_OUTPUT_TAIL_BYTES,
@@ -228,6 +230,26 @@ describe("resolveJsonlPath", () => {
 // or hours old; the CLI writes the queued prompt to jsonl within ms). The
 // kill now also needs evidence: an `assistant` record in the jsonl, newer
 // than bun's last frame and >= UNDELIVERED_OUTPUT_MIN_AGE_MS old.
+describe("resolveCliSessionPaths", () => {
+  it("returns the main jsonl and its sibling session dir from one slug derivation", () => {
+    expect(resolveCliSessionPaths("/h/.claude", "/root/Rapesha_shop_bot", "0537e6d7-aaaa-4bbb-8ccc-123456789abc")).toEqual({
+      jsonlPath: "/h/.claude/projects/-root-Rapesha-shop-bot/0537e6d7-aaaa-4bbb-8ccc-123456789abc.jsonl",
+      sessionDir: "/h/.claude/projects/-root-Rapesha-shop-bot/0537e6d7-aaaa-4bbb-8ccc-123456789abc",
+    });
+  });
+
+  it("returns null for a missing cwd / cliSessionId", () => {
+    expect(resolveCliSessionPaths("/h/.claude", "", "abc")).toBeNull();
+    expect(resolveCliSessionPaths("/h/.claude", "/x", null)).toBeNull();
+  });
+
+  it("rejects a cliSessionId that is not id-shaped (no path segments escape projects/<slug>/) — review #7", () => {
+    expect(resolveCliSessionPaths("/h/.claude", "/x", "../../etc")).toBeNull();
+    expect(resolveCliSessionPaths("/h/.claude", "/x", "a/b")).toBeNull();
+    expect(resolveJsonlPath("/h/.claude", "/x", "../../etc")).toBeNull();
+  });
+});
+
 describe("countAssistantRecordsBetween", () => {
   const T0 = Date.parse("2026-10-01T00:00:00.000Z");
   const rec = (type: string, atMs: number) => JSON.stringify({ type, timestamp: new Date(atMs).toISOString() });
@@ -377,8 +399,45 @@ describe("checkDrift — live-subagent-activity liveness gate", () => {
     expect(v.drifted).toBe(false);
     expect(v.suppressedReason).toBe("live_subagent_activity");
     expect(v.undeliveredAssistantRecords).toBe(3);
-    // Liveness asked about the session dir, floored at bun's last frame.
-    expect(calls).toEqual([["/tmp/cli", NOW - 400_000]]);
+    // Liveness asked about the session dir over the recent window only: bun's
+    // last frame (400 s ago) is older than the window, so the floor is
+    // `now - SUBAGENT_LIVENESS_WINDOW_MS` (review 2026-10-14-2248 #1).
+    expect(calls).toEqual([["/tmp/cli", NOW - SUBAGENT_LIVENESS_WINDOW_MS]]);
+  });
+
+  it("floors the liveness window at bun's last frame when that is more recent", () => {
+    // A write before bun's last frame was already delivered context, never
+    // evidence of fresh life — the floor is max(bunLastFrameMs, now - window).
+    const calls: number[] = [];
+    checkDrift(
+      { ...base, bunLastFrameMs: NOW - 60_000 },
+      {
+        now: () => NOW,
+        statFile: stat,
+        undeliveredOutput: () => 3,
+        subagentActivitySince: (_dir, since) => { calls.push(since); return true; },
+      },
+    );
+    expect(calls).toEqual([NOW - 60_000]);
+  });
+
+  it("a subagent write after bun's last frame but older than the window does NOT suppress (review #1 wedge)", () => {
+    // Review 2026-10-14-2248 P1 #1: stdout dies at T0 (bunLastFrameMs freezes),
+    // the fan-out finishes a little later and its subagent file keeps an mtime
+    // > T0 forever. Measured only "since bun's last frame", that stale write
+    // suppressed the kill on every tick until the 30 min idle window dropped the
+    // session for good. Liveness must mean "written recently", so a tree that
+    // went quiet longer than the window ago lets the recovery fire.
+    const lastSubagentWriteMs = NOW - SUBAGENT_LIVENESS_WINDOW_MS - 30_000; // > bunLastFrameMs, < window
+    expect(lastSubagentWriteMs).toBeGreaterThan(base.bunLastFrameMs);
+    const v = checkDrift(base, {
+      now: () => NOW,
+      statFile: stat,
+      undeliveredOutput: () => 3,
+      subagentActivitySince: (_dir, since) => lastSubagentWriteMs > since,
+    });
+    expect(v.drifted).toBe(true);
+    expect(v.suppressedReason).toBeNull();
   });
 
   it("still kills when the subagent tree is idle (genuine stdout death)", () => {
@@ -446,6 +505,40 @@ describe("defaultSubagentActivitySince (reads the sibling subagent tree)", () =>
   it("returns false when the session dir has no subagent subtrees", () => {
     dir = mkdtempSync(join(tmpdir(), "drift-sub-"));
     expect(defaultSubagentActivitySince(dir, 0)).toBe(false);
+  });
+
+  it("counts a fresh tool-results/ file as activity (not only subagents/)", () => {
+    // Review B-2: an implementation that scanned only subagents/ passed every test.
+    dir = mkdtempSync(join(tmpdir(), "drift-sub-"));
+    mkdirSync(join(dir, "tool-results"));
+    const f = join(dir, "tool-results", "r1.txt");
+    writeFileSync(f, "x");
+    const nowSec = Date.now() / 1000;
+    utimesSync(f, nowSec, nowSec);
+    expect(defaultSubagentActivitySince(dir, Date.now() - 60_000)).toBe(true);
+  });
+
+  it("mtime equal to sinceMs is not activity (strict boundary)", () => {
+    dir = mkdtempSync(join(tmpdir(), "drift-sub-"));
+    mkdirSync(join(dir, "subagents"));
+    const f = join(dir, "subagents", "agent-1.jsonl");
+    writeFileSync(f, "{}\n");
+    const atMs = Math.floor(Date.now() / 1000) * 1000 - 5_000; // whole second: exact round-trip
+    utimesSync(f, atMs / 1000, atMs / 1000);
+    expect(defaultSubagentActivitySince(dir, atMs)).toBe(false);
+    expect(defaultSubagentActivitySince(dir, atMs - 1)).toBe(true);
+  });
+
+  it("ignores symlinks and directories — only regular files are evidence (review #8)", () => {
+    // A symlink's target mtime (or a nested dir's entry-change mtime) says
+    // nothing about the CLI writing its own subagent output.
+    dir = mkdtempSync(join(tmpdir(), "drift-sub-"));
+    mkdirSync(join(dir, "subagents"));
+    const outside = join(dir, "outside.txt");
+    writeFileSync(outside, "x");
+    symlinkSync(outside, join(dir, "subagents", "agent-link.jsonl"));
+    mkdirSync(join(dir, "subagents", "nested"));
+    expect(defaultSubagentActivitySince(dir, Date.now() - 60_000)).toBe(false);
   });
 });
 
