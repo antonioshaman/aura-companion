@@ -88,6 +88,7 @@ vi.mock("./store.js", () => {
 
 vi.mock("./ws.js", () => ({
   connectSession: vi.fn(),
+  disconnectSession: vi.fn(),
 }));
 
 vi.mock("./api.js", () => ({
@@ -188,7 +189,8 @@ vi.mock("./components/AgentsPage.js", () => ({
 // ─── Import SUT after mocks ─────────────────────────────────────
 import App from "./App.js";
 import { api } from "./api.js";
-import { navigateToSession, parseHash } from "./utils/routing.js";
+import { navigateToSession, navigateHome, parseHash } from "./utils/routing.js";
+import { disconnectSession } from "./ws.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────
 
@@ -344,6 +346,58 @@ describe("App", () => {
       await waitFor(() => {
         expect(navigateToSession).toHaveBeenCalledWith("newest-live", true);
       });
+    });
+  });
+
+  describe("archived auto-restore bounce", () => {
+    // On reload the app auto-restores the last-open session from localStorage
+    // and opens a live socket before the session list has loaded. If that
+    // session was archived/exited meanwhile, the tab would silently reconnect
+    // to a dead session and park it as the main panel (the "extra archived
+    // session reconnecting" anomaly). Once the list loads we must drop the
+    // socket and land on home — but ONLY for the auto-restore path, never for
+    // an explicit click on an archived session (which views its transcript).
+    beforeEach(() => {
+      setStoreValues({ isAuthenticated: true });
+    });
+
+    it("drops the socket and goes home when the auto-restored session is archived", async () => {
+      // currentSessionId set at mount = the localStorage-restored id, so the
+      // auto-restore effect records it; the session list then reveals it as
+      // archived, which must trigger disconnect + navigate-home.
+      setStoreValues({
+        currentSessionId: "arch1",
+        sdkSessions: [
+          { sessionId: "arch1", state: "exited", cwd: "/repo", createdAt: 100, archived: true },
+        ],
+      });
+
+      render(<App />);
+
+      await waitFor(() => {
+        expect(disconnectSession).toHaveBeenCalledWith("arch1");
+      });
+      expect(navigateHome).toHaveBeenCalledWith(true);
+    });
+
+    it("keeps a live auto-restored session connected (no bounce when not archived)", async () => {
+      // The common case: the restored session is still live. We must NOT drop
+      // its socket or navigate away.
+      setStoreValues({
+        currentSessionId: "live1",
+        sdkSessions: [
+          { sessionId: "live1", state: "connected", cwd: "/repo", createdAt: 100, archived: false },
+        ],
+      });
+
+      render(<App />);
+
+      // Give effects a chance to run, then assert no bounce happened.
+      await waitFor(() => {
+        expect(navigateToSession).toHaveBeenCalledWith("live1", true);
+      });
+      expect(disconnectSession).not.toHaveBeenCalled();
+      expect(navigateHome).not.toHaveBeenCalled();
     });
   });
 

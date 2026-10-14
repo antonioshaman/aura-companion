@@ -1,9 +1,9 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useStore } from "./store.js";
-import { connectSession } from "./ws.js";
+import { connectSession, disconnectSession } from "./ws.js";
 import { api } from "./api.js";
 import { capturePageView } from "./analytics.js";
-import { parseHash, navigateToSession } from "./utils/routing.js";
+import { parseHash, navigateToSession, navigateHome } from "./utils/routing.js";
 import { useBrowserTitleAlert } from "./use-browser-title-alert.js";
 import { useCouncilShortcuts } from "./use-council-shortcuts.js";
 import { useSwUpdate } from "./use-sw-update.js";
@@ -110,11 +110,17 @@ export default function App() {
   // so the mount logic can use it even if the hash-sync branch would clear it.
   const restoredIdRef = useRef(useStore.getState().currentSessionId);
   const initialServerSessionRecoveryRef = useRef(false);
+  // Which session (if any) we auto-restored from localStorage on this mount.
+  // The session list is empty at mount (not persisted across reload), so we
+  // can't tell yet whether that session is archived; we re-check once the
+  // list loads — see the archived-auto-restore bounce effect below.
+  const autoRestoredSessionIdRef = useRef<string | null>(null);
 
   // Sync hash → store. On mount, restore a localStorage session into the URL first.
   useEffect(() => {
     // On first mount with no session hash, restore from localStorage
     if (restoredIdRef.current !== null && route.page === "home") {
+      autoRestoredSessionIdRef.current = restoredIdRef.current;
       navigateToSession(restoredIdRef.current, true);
       restoredIdRef.current = null;
       return; // navigateToSession triggers hashchange → this effect re-runs with the session route
@@ -135,6 +141,30 @@ export default function App() {
     }
     // For other pages (settings, etc.), preserve currentSessionId
   }, [route]);
+
+  // Archived auto-restore bounce. On reload we auto-restore the last-open
+  // session from localStorage and open a live socket before the session list
+  // has loaded — so if that session was archived (or exited) meanwhile, the tab
+  // silently reconnects to a dead session and parks it as the main panel (the
+  // "extra archived session reconnecting" anomaly). Once the list loads, if the
+  // session we auto-restored turns out to be archived, drop the live socket and
+  // land on home instead. This only fires for the auto-restore path — an
+  // explicit click on an archived session (to view its transcript) never sets
+  // `autoRestoredSessionIdRef`, so that read-only view still works.
+  useEffect(() => {
+    const restoredId = autoRestoredSessionIdRef.current;
+    if (!restoredId) return;
+    if (sdkSessions.length === 0) return; // list not loaded yet — can't tell
+    const info = sdkSessions.find((s) => s.sessionId === restoredId);
+    if (!info) return; // unknown to the server (e.g. just-created) — leave it
+    autoRestoredSessionIdRef.current = null; // one-shot: decided for this mount
+    if (info.archived) {
+      disconnectSession(restoredId);
+      if (useStore.getState().currentSessionId === restoredId) {
+        navigateHome(true);
+      }
+    }
+  }, [sdkSessions]);
 
   // If the browser opens with no persisted selection but the server already has
   // live sessions (for example an agent was started from a CLI-side entrypoint),
