@@ -31,7 +31,8 @@
  */
 
 import type { PathLike } from "node:fs";
-import { closeSync, openSync, readSync, statSync } from "node:fs";
+import { closeSync, openSync, readdirSync, readSync, statSync } from "node:fs";
+import { join } from "node:path";
 
 /** Per-session state maintained across ticks. */
 export interface DriftDetectorSessionState {
@@ -57,6 +58,17 @@ export interface DriftDetectorSessionState {
    * refreshes state with a resolved path.
    */
   readonly jsonlPath: string | null;
+  /**
+   * The CLI's per-session sibling directory
+   * (`~/.claude/projects/<proj-slug>/<cliSessionId>/`) that holds the
+   * `subagents/` and `tool-results/` subtrees. On current Claude CLIs a Task
+   * fan-out writes its subagent output HERE, not into the flat main jsonl —
+   * so fresh mtimes under this dir prove the CLI is alive and productively
+   * working even while the main stdout stream is quiet (a long council /
+   * multi-subagent turn). Nullable like {@link jsonlPath}; the detector skips
+   * the liveness check when it is absent.
+   */
+  readonly sessionDir?: string | null;
 }
 
 /**
@@ -87,12 +99,17 @@ export interface DriftVerdict {
   readonly undeliveredAssistantRecords: number | null;
   /**
    * Set when the lag crossed the tolerance but the kill was withheld:
-   * `no_undelivered_output` = the jsonl grew (queued prompt, attachment,
-   * pr-link…) but holds no model output bun missed, so there is no evidence
-   * the stdout channel is dead — typically an idle session that just got
-   * input, whose last frame is the previous turn's result.
+   * - `no_undelivered_output` = the jsonl grew (queued prompt, attachment,
+   *   pr-link…) but holds no model output bun missed, so there is no evidence
+   *   the stdout channel is dead — typically an idle session that just got
+   *   input, whose last frame is the previous turn's result.
+   * - `live_subagent_activity` = there IS undelivered main-stream output, but
+   *   the CLI's `subagents/`/`tool-results/` tree has fresh writes since bun's
+   *   last frame, proving the process is alive mid Task fan-out (a council /
+   *   long multi-subagent turn). Killing here destroys in-flight subagents; the
+   *   quiet stdout is expected, not a dead pipe.
    */
-  readonly suppressedReason: "no_undelivered_output" | null;
+  readonly suppressedReason: "no_undelivered_output" | "live_subagent_activity" | null;
   /** Human-readable reason if `drifted=true`. */
   readonly reason: string | null;
 }
@@ -125,6 +142,15 @@ export interface DriftDetectorDeps {
    * When given, drift requires at least one.
    */
   readonly undeliveredOutput?: (jsonlPath: string, sinceMs: number, untilMs: number) => number;
+  /**
+   * Liveness check run only after the undelivered-output evidence is positive:
+   * returns true if any file under `<sessionDir>/subagents/` or
+   * `<sessionDir>/tool-results/` has an mtime newer than `sinceMs` (bun's last
+   * frame). Fresh activity means the CLI is alive mid Task fan-out, so the
+   * quiet stdout is expected and the kill is withheld. When given, a positive
+   * result suppresses the kill as `live_subagent_activity`.
+   */
+  readonly subagentActivitySince?: (sessionDir: string, sinceMs: number) => boolean;
 }
 
 /**
@@ -143,13 +169,21 @@ export function countAssistantRecordsBetween(jsonlChunk: string, sinceMs: number
   let count = 0;
   for (const line of jsonlChunk.split("\n")) {
     if (!line.includes('"assistant"')) continue;
-    let rec: { type?: unknown; timestamp?: unknown };
+    let rec: { type?: unknown; timestamp?: unknown; isSidechain?: unknown; parentToolUseID?: unknown };
     try {
       rec = JSON.parse(line);
     } catch {
       continue;
     }
     if (rec.type !== "assistant" || typeof rec.timestamp !== "string") continue;
+    // Belt-and-braces: never count subagent (Task-tool) output as "undelivered
+    // main-stream output". On current CLIs these live in the sibling
+    // `<cliSid>/subagents/` tree (not this flat jsonl), but an older/mixed
+    // layout interleaves them here flagged `isSidechain:true` /
+    // `parentToolUseID:<id>`. The history renderer already excludes them
+    // (claude-session-history.ts). A missing/false field means main-chain → counted.
+    if (rec.isSidechain === true) continue;
+    if (typeof rec.parentToolUseID === "string") continue;
     const t = Date.parse(rec.timestamp);
     if (Number.isFinite(t) && t > sinceMs && t <= untilMs) count++;
   }
@@ -220,6 +254,36 @@ function defaultStatFile(p: PathLike): { mtimeMs: number } | null {
   } catch {
     return null;
   }
+}
+
+/** Subdirectories under a session dir that a live Task fan-out writes to. */
+const SUBAGENT_ACTIVITY_SUBDIRS = ["subagents", "tool-results"] as const;
+
+/**
+ * Default liveness check: true if any file directly under
+ * `<sessionDir>/subagents/` or `<sessionDir>/tool-results/` has an mtime newer
+ * than `sinceMs`. Runs only after the undelivered-output evidence is already
+ * positive (rare), so the per-file stat loop is off the hot path. Returns false
+ * on any read error — absence of evidence must not suppress a genuine kill.
+ */
+export function defaultSubagentActivitySince(sessionDir: string, sinceMs: number): boolean {
+  for (const sub of SUBAGENT_ACTIVITY_SUBDIRS) {
+    const dir = join(sessionDir, sub);
+    let entries: string[];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      continue; // subdir absent (no fan-out of this kind) — not an error
+    }
+    for (const name of entries) {
+      try {
+        if (statSync(join(dir, name)).mtimeMs > sinceMs) return true;
+      } catch {
+        // entry vanished between readdir and stat — ignore
+      }
+    }
+  }
+  return false;
 }
 
 /**
@@ -367,6 +431,28 @@ export function checkDrift(
       jsonlMtimeMs,
       undeliveredAssistantRecords: 0,
       suppressedReason: "no_undelivered_output",
+      reason: null,
+    };
+  }
+
+  // Liveness gate (only with a `subagentActivitySince` dep): there IS
+  // undelivered main-stream output, but if the CLI's subagent/tool-results
+  // tree has fresh writes since bun's last frame the process is provably alive
+  // mid Task fan-out (a council / long multi-subagent turn). The quiet stdout
+  // is expected, not a dead pipe — killing here destroys in-flight subagents.
+  // Withhold; a genuine stdout death leaves the tree idle and still fires.
+  if (
+    state.sessionDir &&
+    deps.subagentActivitySince?.(state.sessionDir, state.bunLastFrameMs)
+  ) {
+    return {
+      sessionId: state.sessionId,
+      drifted: false,
+      mtimeDeltaMs,
+      bunLastFrameMs: state.bunLastFrameMs,
+      jsonlMtimeMs,
+      undeliveredAssistantRecords: undelivered,
+      suppressedReason: "live_subagent_activity",
       reason: null,
     };
   }

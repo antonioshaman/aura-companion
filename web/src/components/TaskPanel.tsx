@@ -960,14 +960,17 @@ function GitBranchSection({ sessionId }: { sessionId: string }) {
 /** Threshold past which the task snapshot is flagged as possibly stale (5 min). */
 const TASKS_STALE_AFTER_MS = 5 * 60 * 1000;
 
-/** Tasks section — only visible for Claude Code sessions */
+/**
+ * Tasks section — shows the agent's task list and completion.
+ * Backend-agnostic: Claude drives it via TodoWrite frames; Codex drives it via
+ * plan updates the adapter re-emits as synthetic TodoWrite frames
+ * (codex-adapter.ts `handleTurnPlanUpdated`), both landing in `sessionTasks`.
+ */
 function TasksSection({ sessionId }: { sessionId: string }) {
   const tasks = useStore((s) => s.sessionTasks.get(sessionId) || EMPTY_TASKS);
   const updatedAt = useStore((s) => s.sessionTasksUpdatedAt.get(sessionId));
   const runState = useStore((s) => s.sessionStatus.get(sessionId));
   const session = useStore((s) => s.sessions.get(sessionId));
-  const sdk = useSdkSession(sessionId);
-  const isCodex = (session?.backend_type || sdk?.backendType) === "codex";
 
   // Re-render every 30s so the relative "updated N ago" hint keeps advancing
   // while the session is idle and no new TodoWrite frame arrives.
@@ -978,7 +981,7 @@ function TasksSection({ sessionId }: { sessionId: string }) {
     return () => clearInterval(id);
   }, [updatedAt]);
 
-  if (!session || isCodex) return null;
+  if (!session) return null;
 
   const isStale = updatedAt != null && Date.now() - updatedAt > TASKS_STALE_AFTER_MS;
   const isRunning = runState === "running" || runState === "compacting";

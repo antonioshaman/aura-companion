@@ -11,6 +11,7 @@ import { nextModelInChain, computeSilenceRotation } from "./model-fallback-chain
 import {
   checkDrift,
   countUndeliveredAssistantRecords,
+  defaultSubagentActivitySince,
   resolveJsonlPath,
 } from "./silent-stdio-drift-detector.js";
 import { nextCompactionMilestone } from "./context-size-suggester.js";
@@ -448,13 +449,22 @@ export class SessionRecovery {
       const adapter = this.wsBridge.getSession(info.sessionId)?.backendAdapter;
       if (!(adapter instanceof ClaudeAdapter)) continue;
       const bunLastFrameMs = adapter.getLastCliFrameReceivedMs();
+      // The CLI's per-session sibling dir (`<slug>/<cliSid>/`) is the jsonl
+      // path minus its `.jsonl` suffix — it holds `subagents/`/`tool-results/`,
+      // whose fresh mtimes prove the CLI is alive mid Task fan-out even while
+      // stdout is quiet (council / long multi-subagent turn).
+      const sessionDir = jsonlPath.endsWith(".jsonl") ? jsonlPath.slice(0, -".jsonl".length) : null;
       const verdict = checkDrift(
         {
           sessionId: info.sessionId,
           bunLastFrameMs,
           jsonlPath,
+          sessionDir,
         },
-        { undeliveredOutput: countUndeliveredAssistantRecords },
+        {
+          undeliveredOutput: countUndeliveredAssistantRecords,
+          subagentActivitySince: defaultSubagentActivitySince,
+        },
       );
       // Cache last snapshot for future delta-over-time detection.
       this.driftPrevSnapshot.set(info.sessionId, {

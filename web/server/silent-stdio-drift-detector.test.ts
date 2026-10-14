@@ -1,11 +1,12 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   checkDrift,
   countAssistantRecordsBetween,
   countUndeliveredAssistantRecords,
+  defaultSubagentActivitySince,
   resolveJsonlPath,
   DEFAULT_LAG_TOLERANCE_MS,
   DEFAULT_JSONL_IDLE_THRESHOLD_MS,
@@ -257,6 +258,24 @@ describe("countAssistantRecordsBetween", () => {
     ].join("\n");
     expect(countAssistantRecordsBetween(chunk, T0 - 1, T0 + 10_000)).toBe(0);
   });
+
+  it("excludes subagent/sidechain records (isSidechain:true, parentToolUseID) — only main-chain counts", () => {
+    // Belt-and-braces for a CLI layout that interleaves subagent output into
+    // the flat jsonl: those records are not main-stream output bun missed, so
+    // they must not count as evidence of a dead stdout pipe.
+    const chunk = [
+      JSON.stringify({ type: "assistant", timestamp: new Date(T0 + 1_000).toISOString(), isSidechain: true }),
+      JSON.stringify({ type: "assistant", timestamp: new Date(T0 + 2_000).toISOString(), parentToolUseID: "toolu_abc" }),
+      JSON.stringify({ type: "assistant", timestamp: new Date(T0 + 3_000).toISOString(), isSidechain: false }),
+    ].join("\n");
+    // Only the main-chain record (isSidechain:false) counts.
+    expect(countAssistantRecordsBetween(chunk, T0, T0 + 10_000)).toBe(1);
+  });
+
+  it("counts a record missing isSidechain/parentToolUseID as main-chain (fail-safe for older CLIs)", () => {
+    const chunk = rec("assistant", T0 + 1_000); // no isSidechain field
+    expect(countAssistantRecordsBetween(chunk, T0, T0 + 10_000)).toBe(1);
+  });
 });
 
 describe("countUndeliveredAssistantRecords (reads the jsonl tail)", () => {
@@ -328,6 +347,105 @@ describe("checkDrift — undelivered-output evidence gate", () => {
     expect(v.drifted).toBe(false);
     expect(v.undeliveredAssistantRecords).toBeNull();
     expect(reads).toBe(0);
+  });
+});
+
+describe("checkDrift — live-subagent-activity liveness gate", () => {
+  const NOW = 1_800_000_000_000;
+  // Undelivered main-stream output present (lag 400s, 3 records) — without the
+  // liveness gate this would kill. sessionDir points at the CLI's sibling tree.
+  const base: DriftDetectorSessionState = {
+    sessionId: "s",
+    bunLastFrameMs: NOW - 400_000,
+    jsonlPath: "/tmp/cli.jsonl",
+    sessionDir: "/tmp/cli",
+  };
+  const stat = (p: unknown) => (String(p) === "/tmp/cli.jsonl" ? { mtimeMs: NOW - 3_000 } : null);
+
+  it("withholds the kill when the subagent tree has fresh writes (council / Task fan-out)", () => {
+    // The CLI is alive mid fan-out — quiet stdout is expected, not a dead pipe.
+    const calls: Array<[string, number]> = [];
+    const v = checkDrift(base, {
+      now: () => NOW,
+      statFile: stat,
+      undeliveredOutput: () => 3,
+      subagentActivitySince: (dir, since) => {
+        calls.push([dir, since]);
+        return true;
+      },
+    });
+    expect(v.drifted).toBe(false);
+    expect(v.suppressedReason).toBe("live_subagent_activity");
+    expect(v.undeliveredAssistantRecords).toBe(3);
+    // Liveness asked about the session dir, floored at bun's last frame.
+    expect(calls).toEqual([["/tmp/cli", NOW - 400_000]]);
+  });
+
+  it("still kills when the subagent tree is idle (genuine stdout death)", () => {
+    const v = checkDrift(base, {
+      now: () => NOW,
+      statFile: stat,
+      undeliveredOutput: () => 3,
+      subagentActivitySince: () => false,
+    });
+    expect(v.drifted).toBe(true);
+    expect(v.suppressedReason).toBeNull();
+    expect(v.undeliveredAssistantRecords).toBe(3);
+  });
+
+  it("does not consult the liveness check when there is no undelivered output", () => {
+    // The fs scan must stay off the hot path — only runs after positive evidence.
+    let called = 0;
+    const v = checkDrift(base, {
+      now: () => NOW,
+      statFile: stat,
+      undeliveredOutput: () => 0,
+      subagentActivitySince: () => { called++; return true; },
+    });
+    expect(v.suppressedReason).toBe("no_undelivered_output");
+    expect(called).toBe(0);
+  });
+
+  it("kills (no liveness suppression) when sessionDir is unknown", () => {
+    const v = checkDrift(
+      { ...base, sessionDir: null },
+      { now: () => NOW, statFile: stat, undeliveredOutput: () => 3, subagentActivitySince: () => true },
+    );
+    expect(v.drifted).toBe(true);
+    expect(v.suppressedReason).toBeNull();
+  });
+});
+
+describe("defaultSubagentActivitySince (reads the sibling subagent tree)", () => {
+  let dir: string | null = null;
+  afterEach(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    dir = null;
+  });
+
+  it("returns true when a subagents/ file is newer than sinceMs", () => {
+    dir = mkdtempSync(join(tmpdir(), "drift-sub-"));
+    mkdirSync(join(dir, "subagents"));
+    const f = join(dir, "subagents", "agent-1.jsonl");
+    writeFileSync(f, "{}\n");
+    const nowSec = Date.now() / 1000;
+    utimesSync(f, nowSec, nowSec); // mtime = now
+    expect(defaultSubagentActivitySince(dir, Date.now() - 60_000)).toBe(true);
+  });
+
+  it("returns false when all subagent files are older than sinceMs", () => {
+    dir = mkdtempSync(join(tmpdir(), "drift-sub-"));
+    mkdirSync(join(dir, "tool-results"));
+    const f = join(dir, "tool-results", "r1.json");
+    writeFileSync(f, "{}\n");
+    const oldSec = (Date.now() - 600_000) / 1000;
+    utimesSync(f, oldSec, oldSec);
+    expect(defaultSubagentActivitySince(dir, Date.now() - 60_000)).toBe(false);
+  });
+
+  it("returns false when the session dir has no subagent subtrees", () => {
+    dir = mkdtempSync(join(tmpdir(), "drift-sub-"));
+    expect(defaultSubagentActivitySince(dir, 0)).toBe(false);
   });
 });
 
