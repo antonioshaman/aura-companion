@@ -120,7 +120,7 @@ vi.mock("./container-manager.js", () => ({
     createContainer: vi.fn(() => ({
       containerId: "cid-1",
       name: "companion-1",
-      image: "the-companion:latest",
+      image: "aura-companion-sandbox:latest",
       portMappings: [],
       hostCwd: "/test",
       containerCwd: "/workspace",
@@ -266,7 +266,7 @@ describe("SessionOrchestrator", () => {
     vi.mocked(containerManager.createContainer).mockReturnValue({
       containerId: "cid-1",
       name: "companion-1",
-      image: "the-companion:latest",
+      image: "aura-companion-sandbox:latest",
       portMappings: [],
       hostCwd: "/test",
       containerCwd: "/workspace",

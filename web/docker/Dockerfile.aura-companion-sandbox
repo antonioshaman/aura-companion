@@ -3,7 +3,7 @@
 # can work on any project out of the box.
 # Includes Docker-in-Docker and PostgreSQL for full-stack development.
 #
-# Build:  docker build -t the-companion:latest -f Dockerfile.the-companion .
+# Build:  docker build -t aura-companion-sandbox:latest -f Dockerfile.aura-companion-sandbox .
 # Usage:  Automatically used by Aura Companion when creating containerized sessions
 # Note:   Run with --privileged for Docker-in-Docker support
 

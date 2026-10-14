@@ -20,11 +20,14 @@ const STDERR_LOG = join(LOG_DIR, "companion.error.log");
 
 // ─── macOS (launchd) Constants ──────────────────────────────────────────────────
 
-const LABEL = "sh.thecompanion.app";
-const OLD_LABEL = "co.thevibecompany.companion";
+const LABEL = "space.auraco.companion";
+// Reverse-DNS labels from earlier brands. Detected so uninstall/status still
+// find an existing install, and migrate-on-install removes them. Newest-first:
+// `sh.thecompanion.app` (the-companion era), then the pre-fork Vibe Company id.
+const LEGACY_LABELS = ["sh.thecompanion.app", "co.thevibecompany.companion"] as const;
 const PLIST_DIR = join(homedir(), "Library", "LaunchAgents");
 const PLIST_PATH = join(PLIST_DIR, `${LABEL}.plist`);
-const OLD_PLIST_PATH = join(PLIST_DIR, `${OLD_LABEL}.plist`);
+const legacyPlistPath = (label: string): string => join(PLIST_DIR, `${label}.plist`);
 
 // ─── Linux (systemd) Constants ──────────────────────────────────────────────────
 
@@ -190,19 +193,22 @@ function removePlist(plistPath: string): void {
 }
 
 function migrateLegacyInstallIfNeeded(): void {
-  if (!existsSync(OLD_PLIST_PATH)) return;
-
-  console.log("Found legacy The Vibe Companion service. Migrating...");
-  unloadLaunchdService(OLD_PLIST_PATH);
-  removePlist(OLD_PLIST_PATH);
+  for (const label of LEGACY_LABELS) {
+    const plistPath = legacyPlistPath(label);
+    if (!existsSync(plistPath)) continue;
+    console.log(`Found legacy service (${label}). Migrating...`);
+    unloadLaunchdService(plistPath);
+    removePlist(plistPath);
+  }
 }
 
 function getInstalledLaunchdService():
   | { label: string; plistPath: string }
   | undefined {
   if (existsSync(PLIST_PATH)) return { label: LABEL, plistPath: PLIST_PATH };
-  if (existsSync(OLD_PLIST_PATH)) {
-    return { label: OLD_LABEL, plistPath: OLD_PLIST_PATH };
+  for (const label of LEGACY_LABELS) {
+    const plistPath = legacyPlistPath(label);
+    if (existsSync(plistPath)) return { label, plistPath };
   }
   return undefined;
 }

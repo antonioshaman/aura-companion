@@ -1951,7 +1951,7 @@ describe("codex websocket launcher", () => {
     mockGetContainerById.mockReturnValue({
       containerId: "abc123def456",
       name: "companion-codex",
-      image: "the-companion:latest",
+      image: "aura-companion-sandbox:latest",
       portMappings: [{ containerPort: 4502, hostPort: 55021 }],
       hostCwd: "/tmp/project",
       containerCwd: "/workspace",

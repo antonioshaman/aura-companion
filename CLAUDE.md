@@ -53,7 +53,7 @@ Browser (React) ←→ WebSocket ←→ Hono Server (Bun) ←→ stdin/stdout (N
      :5174              /ws/browser/:id     :3456 prod / :3457 dev   pipes         (stream-json)
 ```
 
-All code lives under `web/`: `web/server/` (Hono + Bun backend; core router `ws-bridge.ts`, spawner `cli-launcher.ts`, lifecycle `session-orchestrator.ts`, types `session-types.ts`, REST `routes.ts`), `web/src/` (React 19 + Zustand; slices in `store/`, WS client `ws.ts`, components in `components/` and `components/council/`), `web/bin/cli.ts` (the `bunx the-companion` entry). Protocol reference: `WEBSOCKET_PROTOCOL_REVERSED.md`.
+All code lives under `web/`: `web/server/` (Hono + Bun backend; core router `ws-bridge.ts`, spawner `cli-launcher.ts`, lifecycle `session-orchestrator.ts`, types `session-types.ts`, REST `routes.ts`), `web/src/` (React 19 + Zustand; slices in `store/`, WS client `ws.ts`, components in `components/` and `components/council/`), `web/bin/cli.ts` (the `aura-companion` / `companion` CLI entry). Protocol reference: `WEBSOCKET_PROTOCOL_REVERSED.md`.
 
 Read the matching doc before changing that area:
 - [docs/architecture/overview.md](docs/architecture/overview.md) — data flow step by step, per-file map of `web/server` / `web/src`, CLI message types.

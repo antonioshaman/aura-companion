@@ -61,7 +61,7 @@ export function registerEnvRoutes(
 
   api.post("/docker/build-base", async (c) => {
     if (!containerManager.checkDocker()) return c.json({ error: "Docker is not available" }, 503);
-    const dockerfilePath = join(options.webDir, "docker", "Dockerfile.the-companion");
+    const dockerfilePath = join(options.webDir, "docker", "Dockerfile.aura-companion-sandbox");
     if (!existsSync(dockerfilePath)) {
       return c.json({ error: "Base Dockerfile not found at " + dockerfilePath }, 404);
     }
