@@ -1,5 +1,22 @@
 # Changelog
 
+## [2.4.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.3.0...aura-companion-v2.4.0) (2026-10-14)
+
+
+### Features
+
+* **home:** show coding-CLI sign-in status in the New Session screen ([#350](https://github.com/antonioshaman/aura-companion/issues/350)) ([f219ce6](https://github.com/antonioshaman/aura-companion/commit/f219ce68dbd4bdff2e86ff6ccc5055d03becb9fe))
+
+
+### Bug Fixes
+
+* **landing:** actualize auraco.space — council chronology, 22 named experts, voice/avatar removal ([#343](https://github.com/antonioshaman/aura-companion/issues/343)) ([a9d72e1](https://github.com/antonioshaman/aura-companion/commit/a9d72e12ce4625f32efc47a97bcfd043e460c9bd))
+* **landing:** self-updating release version + card/SBP donations via CloudTips ([#345](https://github.com/antonioshaman/aura-companion/issues/345)) ([cb2e939](https://github.com/antonioshaman/aura-companion/commit/cb2e939e4129724f7825fd8b34dc487e668f8a6d))
+* **server:** keep active model across relaunch + drop false-positive systemd worktree banner ([#349](https://github.com/antonioshaman/aura-companion/issues/349)) ([e2020d0](https://github.com/antonioshaman/aura-companion/commit/e2020d0b6d1485b0eec77ab36973ae0bda45d8e5))
+* **telemetry:** WS-3 prompt-cache audit — mid-session inject guard, per-turn cache log, interrupted-frame meter fix ([#346](https://github.com/antonioshaman/aura-companion/issues/346)) ([b4d28ab](https://github.com/antonioshaman/aura-companion/commit/b4d28ab482f00adc1d4a5fe6dd4d8a866b3ded85))
+* **ws-bridge:** session model reflects the model actually used, not the spawn --model ([#348](https://github.com/antonioshaman/aura-companion/issues/348)) ([71eaf70](https://github.com/antonioshaman/aura-companion/commit/71eaf708c6b3547435b63a4a7385502379da3edc))
+* **ws-bridge:** WS-3 inject guard actually fires; tolerate codex skills/changed ([#347](https://github.com/antonioshaman/aura-companion/issues/347)) ([abf8310](https://github.com/antonioshaman/aura-companion/commit/abf8310abaf7c1989c6f72cb4f3ef2daa74249a5))
+
 ## [2.3.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.2.0...aura-companion-v2.3.0) (2026-10-12)
 
 
