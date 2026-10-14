@@ -147,6 +147,25 @@ export interface CompanionEventMap {
   };
 
   /**
+   * The session's ACTIVE model changed after spawn — either the user ran
+   * `/model` inside the CLI (surfaced via the result frame's `modelUsage`)
+   * or picked a new model in the composer (`set_model`). The orchestrator
+   * handler persists it to the launcher's stored `info.model` so a later
+   * relaunch (`--resume`) re-spawns on the CURRENT model instead of the
+   * frozen spawn-time `--model`. Without this, any relaunch — transport
+   * drop, server restart, idle-kill — silently reverts the session to the
+   * model it was first spawned with. Distinct from `session:model-fallback`
+   * (that is an automatic downgrade; this is the user's own choice).
+   */
+  "session:model-active-changed": {
+    sessionId: string;
+    /** The model now in effect (the value a relaunch should spawn with). */
+    model: string;
+    /** Where we learned about the change, for logs. */
+    source: "modelUsage" | "set_model";
+  };
+
+  /**
    * Pre-spawn substitution of a `--model` argument to work around a
    * known upstream CLI bug (see `broken-model-substitution.ts` for the
    * substitution table + rationale). Fires at spawn time when

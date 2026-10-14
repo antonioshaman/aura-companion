@@ -6231,4 +6231,54 @@ describe("session model sync from result modelUsage", () => {
     }));
     expect(bridge.getSession("sm2")!.state.model).toBe("claude-sonnet-4-6");
   });
+
+  // The model change must be PERSISTED for relaunch, not just reflected in the
+  // UI label. The bridge emits `session:model-active-changed`; the orchestrator
+  // listener turns that into launcher.setModel so a `--resume` relaunch spawns
+  // on the current model instead of the frozen spawn-time --model.
+  it("emits session:model-active-changed so the relaunch model tracks the switch", async () => {
+    const events: Array<{ sessionId: string; model: string; source: string }> = [];
+    const off = companionBus.on("session:model-active-changed", (e) => { events.push(e); });
+    try {
+      const cli = makeCliSocket("sm3");
+      bridge.handleCLIOpen(cli, "sm3");
+      await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "sm3", model: "claude-fable-5" }));
+      await bridge.handleCLIMessage(cli, JSON.stringify({
+        type: "result", subtype: "success", is_error: false,
+        duration_ms: 1, duration_api_ms: 1, num_turns: 1, total_cost_usd: 0,
+        stop_reason: "end_turn", session_id: "sm3", uuid: "r3",
+        usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        modelUsage: {
+          "claude-opus-4-8": { inputTokens: 1000, outputTokens: 200, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, contextWindow: 200000, maxOutputTokens: 8192, costUSD: 0 },
+        },
+      }));
+      expect(events).toContainEqual({ sessionId: "sm3", model: "claude-opus-4-8", source: "modelUsage" });
+    } finally {
+      off();
+    }
+  });
+
+  // No spurious persistence when the model did not actually change turn-to-turn
+  // (the launcher.setModel → persistState would be wasted write churn otherwise).
+  it("does not emit when the primary model equals the current model", async () => {
+    const events: unknown[] = [];
+    const off = companionBus.on("session:model-active-changed", (e) => { events.push(e); });
+    try {
+      const cli = makeCliSocket("sm4");
+      bridge.handleCLIOpen(cli, "sm4");
+      await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "sm4", model: "claude-opus-4-8" }));
+      await bridge.handleCLIMessage(cli, JSON.stringify({
+        type: "result", subtype: "success", is_error: false,
+        duration_ms: 1, duration_api_ms: 1, num_turns: 1, total_cost_usd: 0,
+        stop_reason: "end_turn", session_id: "sm4", uuid: "r4",
+        usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        modelUsage: {
+          "claude-opus-4-8": { inputTokens: 1000, outputTokens: 200, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, contextWindow: 200000, maxOutputTokens: 8192, costUSD: 0 },
+        },
+      }));
+      expect(events).toEqual([]);
+    } finally {
+      off();
+    }
+  });
 });

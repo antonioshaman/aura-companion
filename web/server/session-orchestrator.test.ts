@@ -2469,7 +2469,11 @@ describe("SessionOrchestrator", () => {
 
     it("emits a progress warning when the worktree dir is inside a systemd service dir", async () => {
       iso.findLiveSessionsInTree.mockReturnValue([sibling]);
-      iso.listSystemdServiceDirs.mockReturnValue([{ unit: "app.service", dir: "/home/u" }]);
+      // Service dir must contain the worktree base dir (/home/u/.companion/worktrees)
+      // AND be a real sub-path, not a bare home dir: a service whose cwd is the
+      // home itself (/home/u, /root) is filtered as a meaningless anchor so stock
+      // login/rescue units don't spuriously flag every box.
+      iso.listSystemdServiceDirs.mockReturnValue([{ unit: "app.service", dir: "/home/u/.companion" }]);
       const progress: Array<[string, string, string, string | undefined]> = [];
       await orchestrator.createSessionStreaming({ cwd: "/repo", isolation: "auto" }, async (step, label, status, detail) => {
         progress.push([step, label, status, detail]);

@@ -643,6 +643,22 @@ export class SessionOrchestrator {
       await this.recovery.handleModelFallback(sessionId, from, to, reason);
     });
 
+    // The user changed the active model after spawn (via `/model` in the CLI
+    // or the composer). Persist it to the launcher's stored model so a later
+    // relaunch (`--resume`) re-spawns on the CURRENT model instead of the
+    // frozen spawn-time `--model` — the bug where a reconnect/restart silently
+    // reverted a session to the model it was first launched with.
+    // `setModel` is a no-op when the model already matches (same value from a
+    // prior turn) or the session is gone, so this is safe to fire per-turn.
+    companionBus.on("session:model-active-changed", ({ sessionId, model, source }) => {
+      const current = this.launcher.getSession(sessionId)?.model;
+      if (current === model) return;
+      log.info("orchestrator", "Active model changed; persisting for relaunch", {
+        sessionId, from: current ?? null, to: model, source,
+      });
+      this.launcher.setModel(sessionId, model);
+    });
+
     // Pre-spawn substitution of a known-broken model — surface a
     // browser toast so the user knows their model choice was overridden.
     // Silent substitution is user-hostile; the toast makes the override

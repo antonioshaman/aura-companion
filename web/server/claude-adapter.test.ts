@@ -696,6 +696,21 @@ describe("send() — outgoing message translation", () => {
     expect(sent.request.model).toBe("claude-opus-4-6");
   });
 
+  it("set_model → emits session:model-active-changed so the choice persists for relaunch", () => {
+    // Beyond forwarding to the CLI, the composer's model choice must reach the
+    // launcher's stored model (via the orchestrator listener) so a relaunch
+    // spawns on it rather than the frozen spawn-time --model. The applied model
+    // is what's emitted (here it equals the request — no substitution mocked).
+    const events: Array<{ sessionId: string; model: string; source: string }> = [];
+    const off = companionBus.on("session:model-active-changed", (e) => { events.push(e); });
+    try {
+      adapter.send({ type: "set_model", model: "claude-opus-4-6" });
+    } finally {
+      off();
+    }
+    expect(events).toContainEqual({ sessionId: "sess-1", model: "claude-opus-4-6", source: "set_model" });
+  });
+
   it("set_model (proactive gate: substituted) → sends ONE frame for the replacement + emits model_substitution", () => {
     // Task 5: a retired target is swapped for its same-tier replacement BEFORE
     // the frame crosses the wire. Exactly one control_request is sent, carrying

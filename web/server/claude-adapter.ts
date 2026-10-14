@@ -922,6 +922,16 @@ export class ClaudeAdapter implements IBackendAdapter {
       request: { subtype: "set_model", model },
     });
     this.sendToBackend(ndjson);
+    // Persist the composer's model choice to the launcher so a relaunch
+    // before the next turn completes still spawns on it (the authoritative
+    // confirmation — `modelUsage` on the next result — corrects it if the
+    // CLI ends up running something else). Fixes relaunch reverting to the
+    // frozen spawn-time `--model`.
+    companionBus.emit("session:model-active-changed", {
+      sessionId: this.sessionId,
+      model,
+      source: "set_model",
+    });
     return true;
   }
 

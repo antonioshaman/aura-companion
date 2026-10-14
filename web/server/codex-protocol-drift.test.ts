@@ -58,6 +58,10 @@ describe("Codex adapter method drift vs upstream protocol snapshot", () => {
       "thread/goal/updated",
       "mcpServer/startupStatus/updated",
       "remoteControl/status/changed",
+      // App-server notification emitted by newer Codex runtimes (added to the
+      // adapter's informational no-op group in #347) but not yet in the pinned
+      // upstream snapshot. Re-pin the snapshot to promote it.
+      "skills/changed",
       "codex/event/stream_error",
       "codex/event/error",
       "codex/event/token_count",

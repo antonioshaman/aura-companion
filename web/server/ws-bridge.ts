@@ -1159,6 +1159,15 @@ export class WsBridge {
           }
           if (primaryModel && primaryModel !== session.state.model) {
             session.state.model = primaryModel;
+            // Persist the actually-used model to the launcher so a relaunch
+            // (`--resume`) spawns on THIS model, not the frozen spawn-time
+            // `--model`. The orchestrator owns the launcher reference, so we
+            // route through the bus rather than reach across modules.
+            companionBus.emit("session:model-active-changed", {
+              sessionId: session.id,
+              model: primaryModel,
+              source: "modelUsage",
+            });
           }
         }
         // WS-3 A-2 (prompt-cache audit C-6): per-turn cache telemetry as a
