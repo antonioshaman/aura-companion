@@ -618,6 +618,24 @@ describe("HomePage", () => {
     expect(screen.queryByRole("button", { name: /branch from session/i })).not.toBeInTheDocument();
   });
 
+  it("shows the sign-in badge for the selected backend when the server reports authState", async () => {
+    // The /backends auth status must reach the New Session screen for the
+    // currently-selected backend (Claude here). An expired Claude OAuth token
+    // surfaces as a visible warning with a re-auth CTA.
+    mockApi.getBackends.mockResolvedValue([
+      { id: "claude", name: "Claude", available: true, authState: "expired", authMethod: "oauth" },
+      { id: "codex", name: "Codex", available: true, authState: "authorized", authMethod: "oauth" },
+    ]);
+    mockApi.getBackendModels.mockResolvedValue([]);
+
+    render(<HomePage />);
+    await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
+
+    // Claude is the default backend → its expired badge shows.
+    expect(await screen.findByText(/Claude token expired/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /re-authenticate/i })).toBeInTheDocument();
+  });
+
   it("disables unavailable backends in the toggle", async () => {
     // An unavailable backend should be rendered as a disabled button.
     mockApi.getBackends.mockResolvedValue([

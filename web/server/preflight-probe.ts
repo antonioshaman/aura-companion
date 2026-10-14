@@ -2,11 +2,13 @@ import type { BackendType } from "./session-types.js";
 
 /**
  * Capability probe for Council Mode pairings. Before exposing
- * `claude+codex` in the UI, the server must verify the target user
- * actually has both binaries installed AND authenticated. A probe that
- * runs as the wrong uid (e.g. root) will lie — auth tokens live in
- * the spawning user's home (`~/.codex`, `~/.claude`). Inject the runner;
- * the caller is responsible for running it as the correct identity.
+ * `claude+codex` in the UI, the server verifies both binaries are
+ * installed and resolvable (`which <binary>` + `<binary> --version`).
+ * NOTE: this checks PRESENCE, not sign-in — login state is a separate
+ * concern handled by `host-auth-status.ts` (credential-file / env probe).
+ * Still run it as the spawning user: `which` under the wrong uid (e.g.
+ * root) can resolve a different binary than the session will. Inject the
+ * runner; the caller is responsible for running it as the correct identity.
  *
  * Pure module: takes a {@link ProbeRunner} dependency so tests inject a
  * fake without spawning real processes. Real wiring (Bun.spawn against

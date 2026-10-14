@@ -25,6 +25,7 @@ import { FolderPicker } from "./FolderPicker.js";
 import { readFileAsBase64, type ImageAttachment } from "../utils/image.js";
 import { LinearSection } from "./home/LinearSection.js";
 import { BranchPicker } from "./home/BranchPicker.js";
+import { BackendAuthBadge } from "./home/BackendAuthBadge.js";
 import { CouncilToggle, coerceCouncilPairing } from "./council/index.js";
 import { MentionMenu } from "./MentionMenu.js";
 import { useMentionMenu } from "../utils/use-mention-menu.js";
@@ -1390,6 +1391,21 @@ export function HomePage() {
               </div>
             </div>
           )}
+
+          {/* Sign-in status for the selected backend — reassures when
+              authorized, and routes to Settings → Providers when the CLI
+              isn't usable (expired / not signed in). */}
+          {(() => {
+            const sel = backends.find((b) => b.id === backend);
+            if (!sel?.available) return null;
+            return (
+              <BackendAuthBadge
+                backendName={sel.name}
+                authState={sel.authState}
+                onFix={() => { window.location.hash = "#/settings"; }}
+              />
+            );
+          })()}
 
           {/* Council Mode toggle — subordinate to the create button.
               Starts from Settings → "Default session mode" (solo unless

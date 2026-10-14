@@ -245,10 +245,17 @@ export interface CreateSessionOpts {
   councilPairing?: "claude+claude" | "claude+codex";
 }
 
+/** Local (no-network) sign-in state for a coding CLI; see server host-auth-status.ts. */
+export type BackendAuthState = "authorized" | "expired" | "unauthorized";
+export type BackendAuthMethod = "env" | "oauth" | "api_key" | "settings_token";
+
 export interface BackendInfo {
   id: string;
   name: string;
   available: boolean;
+  /** Sign-in status, present only when the binary is available. */
+  authState?: BackendAuthState;
+  authMethod?: BackendAuthMethod;
   /** Council-mode mixed pairing capability for a Codex observer, if published by the server. */
   councilObserverReviewAvailable?: boolean;
   councilObserverReviewReason?: string;

@@ -68,6 +68,7 @@ import { originalRequest } from "./middleware/body-limit.js";
 import QRCode from "qrcode";
 import { VSCODE_EDITOR_CONTAINER_PORT, NOVNC_CONTAINER_PORT } from "./constants.js";
 import { probePairingCapability, type ProbeRunner, type PairingCapability } from "./preflight-probe.js";
+import { getClaudeAuthStatus, getCodexAuthStatus, type AuthState, type AuthMethod } from "./host-auth-status.js";
 import { applyLayerFlagsToCreateBody, getServerLayerFlags } from "./layer-flags.js";
 
 const ROUTES_DIR = dirname(fileURLToPath(import.meta.url));
@@ -2131,6 +2132,8 @@ export function createRoutes(
       id: string;
       name: string;
       available: boolean;
+      authState?: AuthState;
+      authMethod?: AuthMethod;
       councilObserverReviewAvailable?: boolean;
       councilObserverReviewReason?: string;
     }> = [];
@@ -2142,11 +2145,24 @@ export function createRoutes(
       ? undefined
       : (pairingCapability.observer.reason ?? pairingCapability.primary.reason ?? "Mixed council pairing is unavailable.");
 
-    backends.push({ id: "claude", name: "Claude Code", available: claudeAvailable });
+    // Local (no network) sign-in status per provider, so the New Session UI can
+    // show "authorized ✓ / token expired / not signed in" before a session is
+    // spawned. Only computed for a present binary — auth is moot when the CLI
+    // isn't installed, and it saves the credential-file read.
+    const claudeAuth = claudeAvailable ? getClaudeAuthStatus() : undefined;
+    const codexAuth = codexAvailable ? getCodexAuthStatus() : undefined;
+
+    backends.push({
+      id: "claude",
+      name: "Claude Code",
+      available: claudeAvailable,
+      ...(claudeAuth ? { authState: claudeAuth.authState, ...(claudeAuth.authMethod ? { authMethod: claudeAuth.authMethod } : {}) } : {}),
+    });
     backends.push({
       id: "codex",
       name: "Codex",
       available: codexAvailable,
+      ...(codexAuth ? { authState: codexAuth.authState, ...(codexAuth.authMethod ? { authMethod: codexAuth.authMethod } : {}) } : {}),
       councilObserverReviewAvailable: codexObserverReviewAvailable,
       ...(codexObserverReviewReason ? { councilObserverReviewReason: codexObserverReviewReason } : {}),
     });
