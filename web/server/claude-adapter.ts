@@ -922,16 +922,14 @@ export class ClaudeAdapter implements IBackendAdapter {
       request: { subtype: "set_model", model },
     });
     this.sendToBackend(ndjson);
-    // Persist the composer's model choice to the launcher so a relaunch
-    // before the next turn completes still spawns on it (the authoritative
-    // confirmation — `modelUsage` on the next result — corrects it if the
-    // CLI ends up running something else). Fixes relaunch reverting to the
-    // frozen spawn-time `--model`.
-    companionBus.emit("session:model-active-changed", {
-      sessionId: this.sessionId,
-      model,
-      source: "set_model",
-    });
+    // NOTE: we do NOT persist `model` to the launcher here. A composer choice
+    // is only "sent", not confirmed — a model the static pre-send gate passes
+    // can still be rejected by the account's subscription/tier at the CLI on
+    // the NEXT turn (it 404s there, not in the registry this gate consults).
+    // Persisting it optimistically would make a relaunch in that window spawn
+    // the rejected model. The launcher's model is updated only once the main
+    // assistant frame confirms the CLI is actually running the new model
+    // (ws-bridge → `session:model-active-changed`).
     return true;
   }
 

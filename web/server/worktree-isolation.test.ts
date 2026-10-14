@@ -159,6 +159,16 @@ describe("systemd service detection", () => {
     expect(servicesUnderTree(repo, services).sort()).toEqual(["repo.service", "sub.service"]);
   });
 
+  it("servicesUnderTree reports a service whose dir IS the tree root even when the root is a home dir (finding 4)", () => {
+    // isBroadServiceDir must NOT suppress the repo-root-itself case: a repo
+    // checked out at /root (or /home/<user>) with a real service running from
+    // that same dir is still a genuine "runs from this tree" warning.
+    expect(servicesUnderTree("/root", [{ unit: "app.service", dir: "/root" }])).toEqual(["app.service"]);
+    expect(servicesUnderTree("/home/alice", [{ unit: "bot.service", dir: "/home/alice" }])).toEqual(["bot.service"]);
+    // An ancestor is still excluded by direction.
+    expect(servicesUnderTree("/root/project", [{ unit: "anc.service", dir: "/root" }])).toEqual([]);
+  });
+
   it("isBroadServiceDir rejects home/root dirs that are meaningless service anchors", () => {
     expect(isBroadServiceDir("/")).toBe(true);
     expect(isBroadServiceDir("/root")).toBe(true);

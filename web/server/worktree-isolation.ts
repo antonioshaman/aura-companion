@@ -297,11 +297,16 @@ export function servicesRunningFrom(path: string, services: readonly SystemdServ
  * repo warning flagged any unit whose `WorkingDirectory` was an ANCESTOR of
  * the repo (e.g. `/root`), which is a false positive — an ancestor service
  * does not run the repo's files.
+ *
+ * No broad-dir filtering here: the direction check already excludes ancestors
+ * (`/root`, `/home`, …), and a service whose `WorkingDirectory` IS the tree
+ * root is always a meaningful anchor — even if the tree root itself happens to
+ * be a home dir (a repo checked out at `/root` or `/home/<user>`). Filtering
+ * those would silently drop a genuine "runs from this tree" warning.
  */
 export function servicesUnderTree(treeRoot: string, services: readonly SystemdServiceDir[]): string[] {
   const units = new Set<string>();
   for (const s of services) {
-    if (isBroadServiceDir(s.dir)) continue;
     if (isPathInside(s.dir, treeRoot)) units.add(s.unit);
   }
   return [...units];

@@ -147,22 +147,25 @@ export interface CompanionEventMap {
   };
 
   /**
-   * The session's ACTIVE model changed after spawn — either the user ran
-   * `/model` inside the CLI (surfaced via the result frame's `modelUsage`)
-   * or picked a new model in the composer (`set_model`). The orchestrator
-   * handler persists it to the launcher's stored `info.model` so a later
-   * relaunch (`--resume`) re-spawns on the CURRENT model instead of the
-   * frozen spawn-time `--model`. Without this, any relaunch — transport
-   * drop, server restart, idle-kill — silently reverts the session to the
-   * model it was first spawned with. Distinct from `session:model-fallback`
-   * (that is an automatic downgrade; this is the user's own choice).
+   * The session's ACTIVE model changed after spawn — the user ran `/model`
+   * inside the CLI or picked a new model in the composer, and the MAIN
+   * assistant frame (`parent_tool_use_id === null`) now reports a different
+   * model. The orchestrator handler persists it to the launcher's stored
+   * `info.model` so a later relaunch (`--resume`) re-spawns on the CURRENT
+   * model instead of the frozen spawn-time `--model`. Without this, any
+   * relaunch — transport drop, server restart, idle-kill — silently reverts
+   * the session to the model it was first spawned with. Distinct from
+   * `session:model-fallback` (that is an automatic downgrade; this is the
+   * user's own choice). Sourced from the authoritative main assistant frame,
+   * never a subagent frame or a token-dominance guess, and never for an
+   * observer (its model is fixed at spawn — EC-1).
    */
   "session:model-active-changed": {
     sessionId: string;
     /** The model now in effect (the value a relaunch should spawn with). */
     model: string;
     /** Where we learned about the change, for logs. */
-    source: "modelUsage" | "set_model";
+    source: "assistant";
   };
 
   /**

@@ -6195,87 +6195,119 @@ describe("injectSystemPrompt mid-session guard (WS-3 A-1)", () => {
   });
 });
 
-// Session model stays in sync with the model the CLI actually used (not the
-// spawn-time --model). Fixes the stale/alarming label after a /model switch.
-describe("session model sync from result modelUsage", () => {
-  it("updates session.state.model to the primary model of the turn", async () => {
+// Session model stays in sync with the model the MAIN session actually runs —
+// taken from the main assistant frame (parent_tool_use_id === null), NOT from
+// a token-dominance guess over result.modelUsage (which can pick a subagent's
+// model). Fixes the stale/alarming label after a /model switch, and persists
+// the real model so a relaunch doesn't revert to the spawn-time --model.
+describe("session model sync from the main assistant frame", () => {
+  /** Build a Claude assistant frame; `parent` null = main turn, non-null = subagent. */
+  function assistantFrame(sessionId: string, model: string, parent: string | null, uuid: string): string {
+    return JSON.stringify({
+      type: "assistant",
+      message: {
+        id: uuid, type: "message", role: "assistant", model,
+        content: [{ type: "text", text: "hi" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      },
+      parent_tool_use_id: parent,
+      uuid,
+      session_id: sessionId,
+    });
+  }
+
+  it("updates session.state.model to the MAIN assistant frame's model", async () => {
     const cli = makeCliSocket("sm1");
     bridge.handleCLIOpen(cli, "sm1");
     await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "sm1", model: "claude-fable-5" }));
     expect(bridge.getSession("sm1")!.state.model).toBe("claude-fable-5");
 
-    await bridge.handleCLIMessage(cli, JSON.stringify({
-      type: "result", subtype: "success", is_error: false,
-      duration_ms: 1, duration_api_ms: 1, num_turns: 1, total_cost_usd: 0,
-      stop_reason: "end_turn", session_id: "sm1", uuid: "r1",
-      usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
-      modelUsage: {
-        "claude-opus-4-8": { inputTokens: 1000, outputTokens: 200, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, contextWindow: 200000, maxOutputTokens: 8192, costUSD: 0 },
-        "claude-haiku-4-5": { inputTokens: 5, outputTokens: 2, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, contextWindow: 200000, maxOutputTokens: 8192, costUSD: 0 },
-      },
-    }));
-
-    // primary = opus (dominant token share), not the subagent haiku, not the stale fable
+    await bridge.handleCLIMessage(cli, assistantFrame("sm1", "claude-opus-4-8", null, "a1"));
     expect(bridge.getSession("sm1")!.state.model).toBe("claude-opus-4-8");
   });
 
-  it("leaves model unchanged when a result carries no modelUsage", async () => {
+  it("IGNORES a subagent frame (parent_tool_use_id !== null) — a Task on another model never overwrites the session model", async () => {
     const cli = makeCliSocket("sm2");
     bridge.handleCLIOpen(cli, "sm2");
-    await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "sm2", model: "claude-sonnet-4-6" }));
+    await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "sm2", model: "claude-opus-4-8" }));
+    // A subagent frame on haiku must not change the session's model.
+    await bridge.handleCLIMessage(cli, assistantFrame("sm2", "claude-haiku-4-5", "toolu_sub", "a2"));
+    expect(bridge.getSession("sm2")!.state.model).toBe("claude-opus-4-8");
+  });
+
+  it("skips the <synthetic> sentinel (stamped when a model is unavailable)", async () => {
+    const cli = makeCliSocket("sm3");
+    bridge.handleCLIOpen(cli, "sm3");
+    await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "sm3", model: "claude-opus-4-8" }));
+    await bridge.handleCLIMessage(cli, assistantFrame("sm3", "<synthetic>", null, "a3"));
+    expect(bridge.getSession("sm3")!.state.model).toBe("claude-opus-4-8");
+  });
+
+  it("result.modelUsage drives context% but NOT the model", async () => {
+    const cli = makeCliSocket("sm4");
+    bridge.handleCLIOpen(cli, "sm4");
+    await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "sm4", model: "claude-opus-4-8" }));
     await bridge.handleCLIMessage(cli, JSON.stringify({
       type: "result", subtype: "success", is_error: false,
       duration_ms: 1, duration_api_ms: 1, num_turns: 1, total_cost_usd: 0,
-      stop_reason: "end_turn", session_id: "sm2", uuid: "r2",
+      stop_reason: "end_turn", session_id: "sm4", uuid: "r4",
       usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      modelUsage: {
+        // Even if a subagent model dominates tokens here, the session model is
+        // unchanged — modelUsage is for context%, not model identity.
+        "claude-haiku-4-5": { inputTokens: 99999, outputTokens: 200, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, contextWindow: 200000, maxOutputTokens: 8192, costUSD: 0 },
+      },
     }));
-    expect(bridge.getSession("sm2")!.state.model).toBe("claude-sonnet-4-6");
+    const s = bridge.getSession("sm4")!;
+    expect(s.state.model).toBe("claude-opus-4-8");
+    expect(s.state.context_used_percent).toBeGreaterThan(0);
   });
 
   // The model change must be PERSISTED for relaunch, not just reflected in the
   // UI label. The bridge emits `session:model-active-changed`; the orchestrator
   // listener turns that into launcher.setModel so a `--resume` relaunch spawns
   // on the current model instead of the frozen spawn-time --model.
-  it("emits session:model-active-changed so the relaunch model tracks the switch", async () => {
+  it("emits session:model-active-changed (source=assistant) so the relaunch model tracks the switch", async () => {
     const events: Array<{ sessionId: string; model: string; source: string }> = [];
     const off = companionBus.on("session:model-active-changed", (e) => { events.push(e); });
     try {
-      const cli = makeCliSocket("sm3");
-      bridge.handleCLIOpen(cli, "sm3");
-      await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "sm3", model: "claude-fable-5" }));
-      await bridge.handleCLIMessage(cli, JSON.stringify({
-        type: "result", subtype: "success", is_error: false,
-        duration_ms: 1, duration_api_ms: 1, num_turns: 1, total_cost_usd: 0,
-        stop_reason: "end_turn", session_id: "sm3", uuid: "r3",
-        usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
-        modelUsage: {
-          "claude-opus-4-8": { inputTokens: 1000, outputTokens: 200, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, contextWindow: 200000, maxOutputTokens: 8192, costUSD: 0 },
-        },
-      }));
-      expect(events).toContainEqual({ sessionId: "sm3", model: "claude-opus-4-8", source: "modelUsage" });
+      const cli = makeCliSocket("sm5");
+      bridge.handleCLIOpen(cli, "sm5");
+      await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "sm5", model: "claude-fable-5" }));
+      await bridge.handleCLIMessage(cli, assistantFrame("sm5", "claude-opus-4-8", null, "a5"));
+      expect(events).toContainEqual({ sessionId: "sm5", model: "claude-opus-4-8", source: "assistant" });
     } finally {
       off();
     }
   });
 
-  // No spurious persistence when the model did not actually change turn-to-turn
-  // (the launcher.setModel → persistState would be wasted write churn otherwise).
-  it("does not emit when the primary model equals the current model", async () => {
+  it("does not emit when the model did not change turn-to-turn (no write churn)", async () => {
     const events: unknown[] = [];
     const off = companionBus.on("session:model-active-changed", (e) => { events.push(e); });
     try {
-      const cli = makeCliSocket("sm4");
-      bridge.handleCLIOpen(cli, "sm4");
-      await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "sm4", model: "claude-opus-4-8" }));
-      await bridge.handleCLIMessage(cli, JSON.stringify({
-        type: "result", subtype: "success", is_error: false,
-        duration_ms: 1, duration_api_ms: 1, num_turns: 1, total_cost_usd: 0,
-        stop_reason: "end_turn", session_id: "sm4", uuid: "r4",
-        usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
-        modelUsage: {
-          "claude-opus-4-8": { inputTokens: 1000, outputTokens: 200, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, contextWindow: 200000, maxOutputTokens: 8192, costUSD: 0 },
-        },
-      }));
+      const cli = makeCliSocket("sm6");
+      bridge.handleCLIOpen(cli, "sm6");
+      await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "sm6", model: "claude-opus-4-8" }));
+      await bridge.handleCLIMessage(cli, assistantFrame("sm6", "claude-opus-4-8", null, "a6"));
+      expect(events).toEqual([]);
+    } finally {
+      off();
+    }
+  });
+
+  it("does NOT emit for an observer session (its model is fixed at spawn — EC-1)", async () => {
+    const events: unknown[] = [];
+    const off = companionBus.on("session:model-active-changed", (e) => { events.push(e); });
+    try {
+      const cli = makeCliSocket("sm7");
+      bridge.handleCLIOpen(cli, "sm7");
+      await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "sm7", model: "claude-opus-4-8" }));
+      const s = bridge.getSession("sm7")!;
+      s.state.sessionGroupId = "grp_x";
+      s.state.sessionGroupRole = "observer";
+      // Even a genuine main-frame model change must not persist for an observer.
+      await bridge.handleCLIMessage(cli, assistantFrame("sm7", "claude-sonnet-4-6", null, "a7"));
       expect(events).toEqual([]);
     } finally {
       off();
