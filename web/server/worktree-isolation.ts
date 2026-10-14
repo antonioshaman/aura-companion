@@ -128,6 +128,23 @@ export function isPathInside(child: string, parent: string): boolean {
   return c.startsWith(p === sep ? p : p + sep);
 }
 
+/**
+ * A systemd `WorkingDirectory` so broad it says nothing about "runs from
+ * THIS tree": `/`, a user home (`/root`, `/home/<user>`, the running
+ * user's home), or the `/home` root. Stock units — `rescue.service`,
+ * `emergency.service`, `friendly-recovery.service` — declare
+ * `WorkingDirectory=/root` (or `-/root`), which is an ancestor of any
+ * repo under `/root`. Treating such a dir as a service anchor flags every
+ * project on the box, so these are skipped by both service matchers.
+ */
+export function isBroadServiceDir(dir: string): boolean {
+  const d = normalize(dir);
+  if (d === sep) return true;
+  if (d === normalize(homedir())) return true;
+  if (d === "/root" || d === "/home") return true;
+  return /^\/home\/[^/]+$/.test(d);
+}
+
 // ─── Git helpers ────────────────────────────────────────────────────────────
 
 function git(args: string[], cwd: string): string {
@@ -263,8 +280,34 @@ export function listSystemdServiceDirs(unitDirs: string[] = defaultUnitDirs()): 
 export function servicesRunningFrom(path: string, services: readonly SystemdServiceDir[]): string[] {
   const units = new Set<string>();
   for (const s of services) {
-    if (s.dir === "/") continue; // a unit running from / says nothing useful
+    if (isBroadServiceDir(s.dir)) continue; // "/", a home dir, etc. say nothing useful
     if (isPathInside(path, s.dir)) units.add(s.unit);
+  }
+  return [...units];
+}
+
+/**
+ * Units whose code lives INSIDE `treeRoot` — i.e. `WorkingDirectory` is the
+ * tree or a subdirectory of it, so editing files in the tree and restarting
+ * the unit can change what it runs.
+ *
+ * This is the OPPOSITE direction from {@link servicesRunningFrom}: there we
+ * ask "is this path inside a service's dir" (for the worktree base dir); here
+ * we ask "is the service's dir inside this tree". Using the former for the
+ * repo warning flagged any unit whose `WorkingDirectory` was an ANCESTOR of
+ * the repo (e.g. `/root`), which is a false positive — an ancestor service
+ * does not run the repo's files.
+ *
+ * No broad-dir filtering here: the direction check already excludes ancestors
+ * (`/root`, `/home`, …), and a service whose `WorkingDirectory` IS the tree
+ * root is always a meaningful anchor — even if the tree root itself happens to
+ * be a home dir (a repo checked out at `/root` or `/home/<user>`). Filtering
+ * those would silently drop a genuine "runs from this tree" warning.
+ */
+export function servicesUnderTree(treeRoot: string, services: readonly SystemdServiceDir[]): string[] {
+  const units = new Set<string>();
+  for (const s of services) {
+    if (isPathInside(s.dir, treeRoot)) units.add(s.unit);
   }
   return [...units];
 }
@@ -435,7 +478,7 @@ export function previewIsolation(
   if (isPathInside(baseDir, repoRoot)) {
     warnings.push(`Worktree base dir ${baseDir} is inside this repository; isolation will be refused.`);
   }
-  const repoServiceUnits = servicesRunningFrom(repoRoot, services);
+  const repoServiceUnits = servicesUnderTree(repoRoot, services);
   return {
     isGitRepo: true,
     repoRoot,

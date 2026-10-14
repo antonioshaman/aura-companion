@@ -19,6 +19,8 @@ import {
   isPathInside,
   listSystemdServiceDirs,
   servicesRunningFrom,
+  servicesUnderTree,
+  isBroadServiceDir,
   createIsolatedWorktree,
   cleanupIsolatedWorktree,
   commitsBeyondBase,
@@ -146,6 +148,37 @@ describe("systemd service detection", () => {
     // A unit running from "/" must not flag every path on the box.
     expect(servicesRunningFrom(join(tmp, "other"), services)).toEqual([]);
   });
+
+  it("servicesUnderTree matches units whose dir is AT or BELOW the tree, not ancestors", () => {
+    const services = [
+      { unit: "root.service", dir: tmp },                 // ancestor → excluded
+      { unit: "repo.service", dir: repo },                // equal → included
+      { unit: "sub.service", dir: join(repo, "src") },    // below → included
+      { unit: "other.service", dir: join(tmp, "x") },     // sibling → excluded
+    ];
+    expect(servicesUnderTree(repo, services).sort()).toEqual(["repo.service", "sub.service"]);
+  });
+
+  it("servicesUnderTree reports a service whose dir IS the tree root even when the root is a home dir (finding 4)", () => {
+    // isBroadServiceDir must NOT suppress the repo-root-itself case: a repo
+    // checked out at /root (or /home/<user>) with a real service running from
+    // that same dir is still a genuine "runs from this tree" warning.
+    expect(servicesUnderTree("/root", [{ unit: "app.service", dir: "/root" }])).toEqual(["app.service"]);
+    expect(servicesUnderTree("/home/alice", [{ unit: "bot.service", dir: "/home/alice" }])).toEqual(["bot.service"]);
+    // An ancestor is still excluded by direction.
+    expect(servicesUnderTree("/root/project", [{ unit: "anc.service", dir: "/root" }])).toEqual([]);
+  });
+
+  it("isBroadServiceDir rejects home/root dirs that are meaningless service anchors", () => {
+    expect(isBroadServiceDir("/")).toBe(true);
+    expect(isBroadServiceDir("/root")).toBe(true);
+    expect(isBroadServiceDir("/root/")).toBe(true);
+    expect(isBroadServiceDir("/home")).toBe(true);
+    expect(isBroadServiceDir("/home/alice")).toBe(true);
+    // A real project dir under a home is NOT broad.
+    expect(isBroadServiceDir("/home/alice/myrepo")).toBe(false);
+    expect(isBroadServiceDir("/srv/app")).toBe(false);
+  });
 });
 
 describe("createIsolatedWorktree (real git)", () => {
@@ -263,8 +296,30 @@ describe("previewIsolation", () => {
         { unit: "bot.service", dir: repo },
       ],
     });
+    // `app.service` runs from `tmp` (the repo's PARENT) — the worktree base
+    // dir lives under it, so it is a legit base-dir warning...
     expect(p.warnings.join("\n")).toContain("app.service");
-    expect(p.repoServiceUnits.sort()).toEqual(["app.service", "bot.service"]);
+    // ...but it does NOT "run from this tree": its code is an ancestor of the
+    // repo, so editing repo files cannot change it. Only `bot.service`, whose
+    // WorkingDirectory IS the repo, is reported. (Previously the ancestor
+    // `app.service` was wrongly listed — the false positive that flagged
+    // stock `/root` units like rescue/emergency on this box.)
+    expect(p.repoServiceUnits.sort()).toEqual(["bot.service"]);
+  });
+
+  it("does not flag units whose WorkingDirectory is an ANCESTOR of the repo (the /root false positive)", () => {
+    // Regression: stock units (rescue/emergency/friendly-recovery) declare
+    // WorkingDirectory=/root (or -/root). A repo under the home dir must NOT
+    // report them as "running from this tree". A sub-dir unit still counts.
+    const p = previewIsolation(repo, [], {
+      baseDir,
+      services: [
+        { unit: "ancestor.service", dir: tmp },        // parent of repo
+        { unit: "sibling.service", dir: join(tmp, "other") }, // unrelated sibling
+        { unit: "inner.service", dir: join(repo, "src") },    // inside the repo
+      ],
+    });
+    expect(p.repoServiceUnits.sort()).toEqual(["inner.service"]);
   });
 
   it("reports non-repos as not git", () => {

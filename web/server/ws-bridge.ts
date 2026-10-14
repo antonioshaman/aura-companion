@@ -1111,6 +1111,38 @@ export class WsBridge {
         this.appendHistory(session, assistantMsg);
         this.persistSession(session);
         companionBus.emit("message:assistant", { sessionId: session.id, message: assistantMsg });
+
+        // Keep the session's model in sync with the model the MAIN session is
+        // actually running. `parent_tool_use_id === null` means this is the
+        // main turn, not a Task subagent frame (a subagent may run a different
+        // model, and must never overwrite the session's model). This is the
+        // authoritative signal after a `/model` switch or a composer set_model
+        // — more reliable than aggregating result.modelUsage by token count.
+        // It drives BOTH the UI label (fixes the stale/alarming wrong-model
+        // label) AND the model persisted for relaunch: on change we emit
+        // `session:model-active-changed`, which the orchestrator turns into
+        // launcher.setModel so a `--resume` relaunch spawns on THIS model
+        // rather than the frozen spawn-time `--model`. The `<synthetic>`
+        // sentinel (stamped when a model is unavailable) is skipped, and
+        // observers are skipped for persistence — their model is fixed at
+        // spawn (EC-1) and must not be mutated by a transient frame.
+        const mainModel = msg.message?.model;
+        if (
+          msg.parent_tool_use_id === null
+          && typeof mainModel === "string"
+          && mainModel.length > 0
+          && mainModel !== "<synthetic>"
+          && mainModel !== session.state.model
+        ) {
+          session.state.model = mainModel;
+          if (session.state.sessionGroupRole !== "observer") {
+            companionBus.emit("session:model-active-changed", {
+              sessionId: session.id,
+              model: mainModel,
+              source: "assistant",
+            });
+          }
+        }
       }
 
       if (msg.type === "stream_event") {
@@ -1135,30 +1167,19 @@ export class WsBridge {
           session.state.total_lines_removed = resultData.total_lines_removed;
         }
         if (resultData.modelUsage) {
-          // Keep session.state.model in sync with the model the CLI ACTUALLY
-          // used this turn. The spawn-time model goes stale after a /model
-          // switch or a set_model (the stored field only updated on
-          // system.init), so the UI showed a wrong — and alarming — label
-          // while the session was really served by another model. Pick the
-          // modelUsage entry with the most tokens: the main session dominates,
-          // so a subagent's model can never outweigh it.
-          let primaryModel: string | null = null;
-          let primaryTokens = -1;
-          for (const [modelName, usage] of Object.entries(resultData.modelUsage)) {
+          // Context-window usage only. NOTE: the session's MODEL is NOT derived
+          // here — modelUsage aggregates every model the turn touched (including
+          // a Task subagent on a different model), so token-dominance could pick
+          // a subagent's model. The authoritative "model the session is on" is
+          // the main assistant frame (parent_tool_use_id === null), handled in
+          // the `assistant` branch above.
+          for (const usage of Object.values(resultData.modelUsage)) {
             if (usage.contextWindow > 0) {
               const pct = Math.round(
                 ((usage.inputTokens + usage.outputTokens) / usage.contextWindow) * 100
               );
               session.state.context_used_percent = Math.max(0, Math.min(pct, 100));
             }
-            const turnTokens = (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0);
-            if (turnTokens > primaryTokens) {
-              primaryTokens = turnTokens;
-              primaryModel = modelName;
-            }
-          }
-          if (primaryModel && primaryModel !== session.state.model) {
-            session.state.model = primaryModel;
           }
         }
         // WS-3 A-2 (prompt-cache audit C-6): per-turn cache telemetry as a

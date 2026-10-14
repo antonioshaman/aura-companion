@@ -696,6 +696,21 @@ describe("send() — outgoing message translation", () => {
     expect(sent.request.model).toBe("claude-opus-4-6");
   });
 
+  it("set_model does NOT persist the choice to the launcher (only a confirmed main assistant frame does)", () => {
+    // A composer choice is only "sent", not confirmed: a model the static gate
+    // passes can still 404 at the account's subscription tier on the next turn.
+    // Persisting it here would make a relaunch in that window spawn the rejected
+    // model. So no session:model-active-changed is emitted from set_model.
+    const events: unknown[] = [];
+    const off = companionBus.on("session:model-active-changed", (e) => { events.push(e); });
+    try {
+      adapter.send({ type: "set_model", model: "claude-opus-4-6" });
+    } finally {
+      off();
+    }
+    expect(events).toEqual([]);
+  });
+
   it("set_model (proactive gate: substituted) → sends ONE frame for the replacement + emits model_substitution", () => {
     // Task 5: a retired target is swapped for its same-tier replacement BEFORE
     // the frame crosses the wire. Exactly one control_request is sent, carrying
