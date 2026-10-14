@@ -54,6 +54,14 @@ vi.mock("./path-resolver.js", () => ({
 vi.mock("./preflight-probe.js", () => ({
   probePairingCapability: mockProbePairingCapability,
 }));
+// Host sign-in detection reads real credential files / env; mock it so the
+// /backends assertions are deterministic. Default: both unauthorized.
+const mockGetClaudeAuthStatus = vi.hoisted(() => vi.fn(() => ({ authState: "unauthorized" }) as any));
+const mockGetCodexAuthStatus = vi.hoisted(() => vi.fn(() => ({ authState: "unauthorized" }) as any));
+vi.mock("./host-auth-status.js", () => ({
+  getClaudeAuthStatus: mockGetClaudeAuthStatus,
+  getCodexAuthStatus: mockGetCodexAuthStatus,
+}));
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
@@ -4109,11 +4117,13 @@ index 0000000..e69de29
 // ─── Backends ─────────────────────────────────────────────────────────────────
 
 describe("GET /api/backends", () => {
-  it("returns both backends with availability status", async () => {
+  it("returns both backends with availability + per-backend auth status", async () => {
     // resolveBinary returns a path for both binaries
     mockResolveBinary
       .mockReturnValueOnce("/usr/bin/claude")
       .mockReturnValueOnce("/usr/bin/codex");
+    mockGetClaudeAuthStatus.mockReturnValueOnce({ authState: "authorized", authMethod: "oauth" });
+    mockGetCodexAuthStatus.mockReturnValueOnce({ authState: "unauthorized" });
     mockProbePairingCapability.mockResolvedValueOnce({
       primary: { binary: "claude", available: true, version: "1.0.0" },
       observer: { binary: "codex", available: true, version: "1.0.0" },
@@ -4125,17 +4135,34 @@ describe("GET /api/backends", () => {
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json).toEqual([
-      { id: "claude", name: "Claude Code", available: true },
+      { id: "claude", name: "Claude Code", available: true, authState: "authorized", authMethod: "oauth" },
       {
         id: "codex",
         name: "Codex",
         available: true,
+        authState: "unauthorized",
         councilObserverReviewAvailable: true,
       },
     ]);
   });
 
-  it("marks backends as unavailable when binary is not found", async () => {
+  it("surfaces an expired Claude OAuth token as authState=expired", async () => {
+    mockResolveBinary
+      .mockReturnValueOnce("/usr/bin/claude")
+      .mockReturnValueOnce(null);
+    mockGetClaudeAuthStatus.mockReturnValueOnce({ authState: "expired", authMethod: "oauth" });
+    mockProbePairingCapability.mockResolvedValueOnce({
+      primary: { binary: "claude", available: true, version: "1.0.0" },
+      observer: { binary: "codex", available: false, reason: "Codex CLI not detected — install or sign in." },
+      supported: false,
+    });
+
+    const res = await app.request("/api/backends", { method: "GET" });
+    const json = await res.json();
+    expect(json[0]).toMatchObject({ id: "claude", authState: "expired", authMethod: "oauth" });
+  });
+
+  it("marks backends as unavailable when binary is not found (auth not probed)", async () => {
     // resolveBinary returns null for both
     mockResolveBinary
       .mockReturnValueOnce(null)
@@ -4150,6 +4177,7 @@ describe("GET /api/backends", () => {
 
     expect(res.status).toBe(200);
     const json = await res.json();
+    // No authState when the binary is absent — auth is moot and not computed.
     expect(json).toEqual([
       { id: "claude", name: "Claude Code", available: false },
       {
@@ -4160,12 +4188,15 @@ describe("GET /api/backends", () => {
         councilObserverReviewReason: "Codex CLI not detected — install or sign in.",
       },
     ]);
+    expect(mockGetClaudeAuthStatus).not.toHaveBeenCalled();
+    expect(mockGetCodexAuthStatus).not.toHaveBeenCalled();
   });
 
   it("handles mixed availability", async () => {
     mockResolveBinary
       .mockReturnValueOnce("/usr/bin/claude") // claude found
       .mockReturnValueOnce(null); // codex not found
+    mockGetClaudeAuthStatus.mockReturnValueOnce({ authState: "authorized", authMethod: "env" });
     mockProbePairingCapability.mockResolvedValueOnce({
       primary: { binary: "claude", available: true, version: "1.0.0" },
       observer: { binary: "codex", available: false, reason: "Codex CLI not detected — install or sign in." },
@@ -4177,7 +4208,9 @@ describe("GET /api/backends", () => {
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json[0].available).toBe(true);
+    expect(json[0].authState).toBe("authorized");
     expect(json[1].available).toBe(false);
+    expect(json[1].authState).toBeUndefined();
     expect(json[1].councilObserverReviewAvailable).toBe(false);
     expect(json[1].councilObserverReviewReason).toBe("Codex CLI not detected — install or sign in.");
   });
