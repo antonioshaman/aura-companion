@@ -6194,3 +6194,41 @@ describe("injectSystemPrompt mid-session guard (WS-3 A-1)", () => {
     warnSpy.mockRestore();
   });
 });
+
+// Session model stays in sync with the model the CLI actually used (not the
+// spawn-time --model). Fixes the stale/alarming label after a /model switch.
+describe("session model sync from result modelUsage", () => {
+  it("updates session.state.model to the primary model of the turn", async () => {
+    const cli = makeCliSocket("sm1");
+    bridge.handleCLIOpen(cli, "sm1");
+    await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "sm1", model: "claude-fable-5" }));
+    expect(bridge.getSession("sm1")!.state.model).toBe("claude-fable-5");
+
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "result", subtype: "success", is_error: false,
+      duration_ms: 1, duration_api_ms: 1, num_turns: 1, total_cost_usd: 0,
+      stop_reason: "end_turn", session_id: "sm1", uuid: "r1",
+      usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      modelUsage: {
+        "claude-opus-4-8": { inputTokens: 1000, outputTokens: 200, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, contextWindow: 200000, maxOutputTokens: 8192, costUSD: 0 },
+        "claude-haiku-4-5": { inputTokens: 5, outputTokens: 2, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, contextWindow: 200000, maxOutputTokens: 8192, costUSD: 0 },
+      },
+    }));
+
+    // primary = opus (dominant token share), not the subagent haiku, not the stale fable
+    expect(bridge.getSession("sm1")!.state.model).toBe("claude-opus-4-8");
+  });
+
+  it("leaves model unchanged when a result carries no modelUsage", async () => {
+    const cli = makeCliSocket("sm2");
+    bridge.handleCLIOpen(cli, "sm2");
+    await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "sm2", model: "claude-sonnet-4-6" }));
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "result", subtype: "success", is_error: false,
+      duration_ms: 1, duration_api_ms: 1, num_turns: 1, total_cost_usd: 0,
+      stop_reason: "end_turn", session_id: "sm2", uuid: "r2",
+      usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+    }));
+    expect(bridge.getSession("sm2")!.state.model).toBe("claude-sonnet-4-6");
+  });
+});

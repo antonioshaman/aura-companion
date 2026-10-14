@@ -1135,13 +1135,30 @@ export class WsBridge {
           session.state.total_lines_removed = resultData.total_lines_removed;
         }
         if (resultData.modelUsage) {
-          for (const usage of Object.values(resultData.modelUsage)) {
+          // Keep session.state.model in sync with the model the CLI ACTUALLY
+          // used this turn. The spawn-time model goes stale after a /model
+          // switch or a set_model (the stored field only updated on
+          // system.init), so the UI showed a wrong — and alarming — label
+          // while the session was really served by another model. Pick the
+          // modelUsage entry with the most tokens: the main session dominates,
+          // so a subagent's model can never outweigh it.
+          let primaryModel: string | null = null;
+          let primaryTokens = -1;
+          for (const [modelName, usage] of Object.entries(resultData.modelUsage)) {
             if (usage.contextWindow > 0) {
               const pct = Math.round(
                 ((usage.inputTokens + usage.outputTokens) / usage.contextWindow) * 100
               );
               session.state.context_used_percent = Math.max(0, Math.min(pct, 100));
             }
+            const turnTokens = (usage.inputTokens ?? 0) + (usage.outputTokens ?? 0);
+            if (turnTokens > primaryTokens) {
+              primaryTokens = turnTokens;
+              primaryModel = modelName;
+            }
+          }
+          if (primaryModel && primaryModel !== session.state.model) {
+            session.state.model = primaryModel;
           }
         }
         // WS-3 A-2 (prompt-cache audit C-6): per-turn cache telemetry as a
