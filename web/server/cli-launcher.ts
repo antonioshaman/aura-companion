@@ -427,7 +427,7 @@ export class CliLauncher {
   private store: SessionStore | null = null;
   private recorder: RecorderManager | null = null;
   private stdioCliOpener:
-    | ((sessionId: string, transport: CliTransport, opts?: { resume?: boolean }) => ClaudeAdapter)
+    | ((sessionId: string, transport: CliTransport, opts?: { resume?: boolean; spawnModel?: string }) => ClaudeAdapter)
     | null = null;
   constructor(port: number) {
     this.port = port;
@@ -463,7 +463,7 @@ export class CliLauncher {
    * and recorder.
    */
   setStdioCliOpener(
-    opener: (sessionId: string, transport: CliTransport, opts?: { resume?: boolean }) => ClaudeAdapter,
+    opener: (sessionId: string, transport: CliTransport, opts?: { resume?: boolean; spawnModel?: string }) => ClaudeAdapter,
   ): void {
     this.stdioCliOpener = opener;
   }
@@ -1958,7 +1958,11 @@ export class CliLauncher {
     // first API round-trip before `system.init`, legitimately blowing past the
     // 30s cold deadline on a large transcript / slow API.
     const isResume = args.includes("--resume");
-    const adapter = opener(sessionId, transport, { resume: isResume });
+    // Same source of truth for the model this process actually runs: the
+    // bridge baselines model-switch persistence on it (`Session.launcherModel`).
+    const modelIdx = args.indexOf("--model");
+    const spawnModel = modelIdx >= 0 ? args[modelIdx + 1] : undefined;
+    const adapter = opener(sessionId, transport, { resume: isResume, spawnModel });
 
     // stdout carries the protocol, so it is pumped into the adapter rather
     // than logged. Line buffering happens inside pumpStdoutLines — a pipe can

@@ -6282,6 +6282,105 @@ describe("session model sync from the main assistant frame", () => {
     }
   });
 
+  // Observed live (session 8b26ccb7, 2026-10-12..15): after a composer
+  // set_model the CLI emits a SECOND init frame carrying the new model
+  // BEFORE the first assistant frame. That init updated state.model, so the
+  // assistant-frame check (model !== state.model) was already false and the
+  // persistence event never fired — 25 relaunches in a row spawned the
+  // creation-time --model claude-fable-5 over the user's opus-4-8 choice.
+  // Persistence must compare against the model THIS process was spawned
+  // with, not the UI label the post-switch init already moved.
+  it("emits after a model switch even when the CLI's post-switch init frame already moved state.model", async () => {
+    const events: Array<{ sessionId: string; model: string; source: string }> = [];
+    const off = companionBus.on("session:model-active-changed", (e) => { events.push(e); });
+    try {
+      const cli = makeCliSocket("sm8");
+      bridge.handleCLIOpen(cli, "sm8");
+      // Spawn-time init: the process runs fable.
+      await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "sm8", model: "claude-fable-5" }));
+      // set_model → the CLI re-emits init with the new model (UI label moves).
+      await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "sm8", model: "claude-opus-4-8" }));
+      expect(bridge.getSession("sm8")!.state.model).toBe("claude-opus-4-8");
+      // First main assistant frame confirms the switch → must persist.
+      await bridge.handleCLIMessage(cli, assistantFrame("sm8", "claude-opus-4-8", null, "a8"));
+      expect(events).toContainEqual({ sessionId: "sm8", model: "claude-opus-4-8", source: "assistant" });
+      // Steady state afterwards: no churn on the next same-model turn.
+      events.length = 0;
+      await bridge.handleCLIMessage(cli, assistantFrame("sm8", "claude-opus-4-8", null, "a8b"));
+      expect(events).toEqual([]);
+    } finally {
+      off();
+    }
+  });
+
+  // A fresh spawn re-baselines: after a relaunch the new process's first init
+  // is the spawn model (= the launcher's persisted model), so a same-model
+  // assistant frame on the new process does not re-emit.
+  it("re-baselines on a new CLI connection (relaunch) — no spurious emit", async () => {
+    const events: unknown[] = [];
+    const off = companionBus.on("session:model-active-changed", (e) => { events.push(e); });
+    try {
+      const cli1 = makeCliSocket("sm9");
+      bridge.handleCLIOpen(cli1, "sm9");
+      await bridge.handleCLIMessage(cli1, makeInitMsg({ session_id: "sm9", model: "claude-fable-5" }));
+      await bridge.handleCLIMessage(cli1, makeInitMsg({ session_id: "sm9", model: "claude-opus-4-8" }));
+      await bridge.handleCLIMessage(cli1, assistantFrame("sm9", "claude-opus-4-8", null, "a9"));
+      expect(events).toHaveLength(1);
+      // Relaunch spawns on the persisted opus-4-8.
+      const cli2 = makeCliSocket("sm9");
+      bridge.handleCLIOpen(cli2, "sm9");
+      await bridge.handleCLIMessage(cli2, makeInitMsg({ session_id: "sm9", model: "claude-opus-4-8" }));
+      await bridge.handleCLIMessage(cli2, assistantFrame("sm9", "claude-opus-4-8", null, "a9b"));
+      expect(events).toHaveLength(1);
+    } finally {
+      off();
+    }
+  });
+
+  // Observer review cp 152 (WARN): a legacy WS reconnect can re-dial the
+  // SAME live process. If the baseline were reset there, a set_model →
+  // reconnect → init(new) → assistant(new) sequence would re-seed the
+  // baseline with the new model and swallow the switch again.
+  it("a WS reconnect to the same process keeps the baseline — the switch still persists", async () => {
+    const events: Array<{ model: string }> = [];
+    const off = companionBus.on("session:model-active-changed", (e) => { events.push(e); });
+    try {
+      const cli1 = makeCliSocket("sm10");
+      bridge.handleCLIOpen(cli1, "sm10");
+      await bridge.handleCLIMessage(cli1, makeInitMsg({ session_id: "sm10", model: "claude-fable-5" }));
+      await bridge.handleCLIMessage(cli1, makeInitMsg({ session_id: "sm10", model: "claude-opus-4-8" }));
+      // Socket drops and the same CLI re-dials before its next turn.
+      const cli2 = makeCliSocket("sm10");
+      bridge.handleCLIOpen(cli2, "sm10");
+      await bridge.handleCLIMessage(cli2, makeInitMsg({ session_id: "sm10", model: "claude-opus-4-8" }));
+      await bridge.handleCLIMessage(cli2, assistantFrame("sm10", "claude-opus-4-8", null, "a10"));
+      expect(events.map((e) => e.model)).toEqual(["claude-opus-4-8"]);
+    } finally {
+      off();
+    }
+  });
+
+  // A stdio open is always a fresh process: the launcher passes the real
+  // spawn --model, which becomes the baseline even before any init frame.
+  it("a stdio spawn seeds the baseline from the launcher's spawn model", async () => {
+    const events: Array<{ model: string }> = [];
+    const off = companionBus.on("session:model-active-changed", (e) => { events.push(e); });
+    try {
+      const transport = {
+        kind: "stdio" as const, raw: {}, send: () => {}, isOpen: () => true,
+        bufferedAmount: () => 0, close: () => {},
+      };
+      bridge.handleCLIStdioOpen("sm11", transport, { spawnModel: "claude-fable-5" });
+      expect(bridge.getSession("sm11")!.launcherModel).toBe("claude-fable-5");
+      // A post-switch init does NOT move the baseline …
+      const adapter = bridge.getSession("sm11")!.backendAdapter as unknown as { handleRawMessage: (l: string) => void };
+      adapter.handleRawMessage(makeInitMsg({ session_id: "sm11", model: "claude-opus-5-5" }));
+      expect(bridge.getSession("sm11")!.launcherModel).toBe("claude-fable-5");
+    } finally {
+      off();
+    }
+  });
+
   it("does not emit when the model did not change turn-to-turn (no write churn)", async () => {
     const events: unknown[] = [];
     const off = companionBus.on("session:model-active-changed", (e) => { events.push(e); });

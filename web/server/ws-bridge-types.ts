@@ -99,6 +99,18 @@ export interface Session {
    * silently losing the partial text. Not persisted itself — recomputed
    * deterministically from incoming wire frames.
    */
+  /**
+   * Model the launcher has persisted for the CURRENT CLI process: set by the
+   * process's first init frame (its spawn `--model`), then by each main
+   * assistant frame. A main assistant frame on a different model is a
+   * confirmed switch → `session:model-active-changed` → launcher.setModel.
+   * Seeded from the launcher's spawn argv on every stdio spawn
+   * (`handleCLIStdioOpen`); never reset on a WS reconnect, which can re-dial
+   * the same live process. Distinct from
+   * `state.model` (UI label), which the CLI's post-set_model init frame
+   * moves BEFORE the switch is confirmed.
+   */
+  launcherModel?: string;
   streamingAssistant?: {
     id: string;
     text: string;
