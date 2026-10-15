@@ -12,9 +12,10 @@ import {
   checkDrift,
   countUndeliveredAssistantRecords,
   defaultSubagentActivitySince,
+  defaultSubagentOpenToolCallSince,
   resolveCliSessionPaths,
+  subagentTreeLive,
   SUBAGENT_LAYOUT_VERIFIED_CLI_VERSION,
-  SUBAGENT_LIVENESS_WINDOW_MS,
   type DriftVerdict,
 } from "./silent-stdio-drift-detector.js";
 import { nextCompactionMilestone } from "./context-size-suggester.js";
@@ -218,6 +219,8 @@ export interface SessionRecoveryDeps {
   readWaitChannels?: (pid: number) => string | null;
   /** Subagent-tree liveness probe (tests inject; default stats the CLI's sibling dir). */
   subagentActivitySince?: (sessionDir: string, sinceMs: number) => boolean;
+  /** Open-subagent-tool-call probe (tests inject; default tails `subagents/*.jsonl`). */
+  subagentOpenToolCallSince?: (sessionDir: string, sinceMs: number) => boolean;
 }
 
 export class SessionRecovery {
@@ -228,6 +231,7 @@ export class SessionRecovery {
   private readonly noteApiLimitReached: (sessionId: string) => void;
   private readonly readWaitChannels: (pid: number) => string | null;
   private readonly subagentActivitySince: (sessionDir: string, sinceMs: number) => boolean;
+  private readonly subagentOpenToolCallSince: (sessionDir: string, sinceMs: number) => boolean;
 
   // Auto-relaunch state
   private relaunchingSet = new Set<string>();
@@ -324,6 +328,7 @@ export class SessionRecovery {
     this.noteApiLimitReached = deps.noteApiLimitReached;
     this.readWaitChannels = deps.readWaitChannels ?? ((pid) => summarizeWaitChannels(pid));
     this.subagentActivitySince = deps.subagentActivitySince ?? defaultSubagentActivitySince;
+    this.subagentOpenToolCallSince = deps.subagentOpenToolCallSince ?? defaultSubagentOpenToolCallSince;
   }
 
   stopDriftDetector(): void {
@@ -584,7 +589,11 @@ export class SessionRecovery {
       const bunLastFrameMs = adapter.getLastCliFrameReceivedMs();
       const verdict = checkDrift(
         { sessionId: info.sessionId, bunLastFrameMs, jsonlPath, sessionDir },
-        { undeliveredOutput: countUndeliveredAssistantRecords, subagentActivitySince: this.subagentActivitySince },
+        {
+          undeliveredOutput: countUndeliveredAssistantRecords,
+          subagentActivitySince: this.subagentActivitySince,
+          subagentOpenToolCallSince: this.subagentOpenToolCallSince,
+        },
       );
       // Cache last snapshot for future delta-over-time detection.
       this.driftPrevSnapshot.set(info.sessionId, {
@@ -630,10 +639,10 @@ export class SessionRecovery {
       this.noteUnverifiedLayout(info.sessionId, cliVersion);
       const waitChannels = info.pid ? this.readWaitChannels(info.pid) : null;
       const now = Date.now();
-      const subagentActive = this.subagentActivitySince(
-        sessionDir,
-        Math.max(bunLastFrameMs, now - SUBAGENT_LIVENESS_WINDOW_MS),
-      );
+      const subagentActive = subagentTreeLive(sessionDir, bunLastFrameMs, now, {
+        subagentActivitySince: this.subagentActivitySince,
+        subagentOpenToolCallSince: this.subagentOpenToolCallSince,
+      });
       const recent = pruneDriftRecoveries(this.driftRecoveryTimes.get(info.sessionId) ?? [], now);
       this.driftRecoveryTimes.set(info.sessionId, recent);
       const kill = decideDriftKill({ waitChannels, subagentActive, recentRecoveries: recent.length });

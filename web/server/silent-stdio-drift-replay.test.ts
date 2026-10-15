@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync } from "node:fs";
+import { appendFileSync, cpSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CliLauncher, SdkSessionInfo } from "./cli-launcher.js";
@@ -239,6 +239,34 @@ describe("drift replay — council turn vs genuine stdout death (PLAN Task 5, EC
     expect(launcher.kill).toHaveBeenCalledWith("s1");
     expect(launcher.relaunch).toHaveBeenCalledWith("s1");
     expect(launcher.kill.mock.invocationCallOrder[0]).toBeLessThan(launcher.relaunch.mock.invocationCallOrder[0]);
+  });
+
+  it("LONG TOOL CALL — subagent quiet for 8 min inside one open tool call: no kill (observer review WARN 1)", async () => {
+    // Same incident bytes, but the subagent's last record is an assistant
+    // tool_use (record shape as on CLI 2.1.283) still waiting on its result —
+    // e.g. a slow test run. The tree is quiet past the 5 min window; the open
+    // call keeps it alive within the 15 min ceiling.
+    const agentFile = join(paths.sessionDir, "subagents", "agent-afixture01.jsonl");
+    const last = readJsonl(agentFile).at(-1)!;
+    appendFileSync(
+      agentFile,
+      JSON.stringify({
+        ...last,
+        uuid: "s-open-001",
+        parentUuid: last.uuid,
+        message: {
+          ...(last.message as object),
+          id: "msg_fixture_sub_open",
+          content: [{ type: "tool_use", id: "toolu_fixture_sub_bash", name: "Bash", input: { command: "[fixture long test run]" } }],
+          stop_reason: "tool_use",
+        },
+      }) + "\n",
+    );
+    setSubagentTreeMtime(NOW - 8 * 60_000);
+    const { recovery, launcher } = makeTick("futex_wait_queue×9, ep_poll×2");
+    recovery.driftDetectorTick();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(launcher.kill).not.toHaveBeenCalled();
   });
 
   it("WEDGE — the subagent finished after stdout died but went quiet past the window: still recovers (review #1)", async () => {
