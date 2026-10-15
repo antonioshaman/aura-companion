@@ -11,7 +11,11 @@ import { nextModelInChain, computeSilenceRotation } from "./model-fallback-chain
 import {
   checkDrift,
   countUndeliveredAssistantRecords,
-  resolveJsonlPath,
+  defaultSubagentActivitySince,
+  resolveCliSessionPaths,
+  SUBAGENT_LAYOUT_VERIFIED_CLI_VERSION,
+  SUBAGENT_LIVENESS_WINDOW_MS,
+  type DriftVerdict,
 } from "./silent-stdio-drift-detector.js";
 import { nextCompactionMilestone } from "./context-size-suggester.js";
 import { homedir } from "node:os";
@@ -57,7 +61,7 @@ export const RELAUNCH_COOLDOWN_MS = 5_000;
  */
 export const RELAUNCH_SETTLE_MS = 60_000;
 
-export type RelaunchSource = "manual" | "autoheal" | "auto_relaunch" | "boot_watchdog";
+export type RelaunchSource = "manual" | "autoheal" | "auto_relaunch" | "boot_watchdog" | "drift_recovery";
 
 export interface RelaunchOutcome {
   ok: boolean;
@@ -90,6 +94,111 @@ export const RECURRING_SILENCE_ROTATE_THRESHOLD = 2;
  */
 export const DRIFT_DETECTOR_TICK_MS = 15_000;
 
+/**
+ * Drift-recovery rate guard (PLAN Task 4b). A clean relaunch resets
+ * `autoRelaunchCounts`, so a chronically false-firing detector never trips the
+ * crash budget — it loops invisibly (destroy work → burn tokens → re-read a
+ * growing jsonl). Past this many drift recoveries of one session inside
+ * {@link DRIFT_RECOVERY_RATE_WINDOW_MS}, the tick stops relaunching and surfaces
+ * one diagnostic instead.
+ */
+export const DRIFT_RECOVERY_RATE_MAX = 3;
+export const DRIFT_RECOVERY_RATE_WINDOW_MS = 30 * 60_000;
+
+/**
+ * First stage of the drift decision (PLAN Tasks 3 + review #5): what a verdict
+ * means for this tick, given the session's queued-message count and the
+ * recovery guards. Pure — the tick does the I/O and side effects around it.
+ *
+ * - `skip`      nothing to do (healthy, or a guard says the session is not ours to recover);
+ * - `suppress`  the detector withheld the kill — log it (once per stall + reason);
+ * - `candidate` recovery is warranted pending the kill-time guards ({@link decideDriftKill}).
+ *
+ * The suppression override is per reason (PLAN Task 3, switch without default):
+ * - `no_undelivered_output` — queued user messages override it: a subprocess
+ *   stuck on an incomplete previous turn (context-limit hard-cut, no `result`
+ *   frame) looks idle while it blocks the queue (#327).
+ * - `live_subagent_activity` — NOT overridable: a queued prompt is not
+ *   evidence the CLI is dead, and killing it destroys an in-flight Task
+ *   fan-out. The prompt waits for the fan-out to collapse.
+ */
+export type DriftTickAction =
+  | { kind: "skip" }
+  | { kind: "suppress"; reason: NonNullable<DriftVerdict["suppressedReason"]>; pendingMessages: number }
+  | { kind: "candidate"; trigger: "drift" | "pending_override"; pendingMessages: number };
+
+export function decideDriftAction(
+  verdict: Pick<DriftVerdict, "drifted" | "suppressedReason">,
+  ctx: { pendingMessages: number; intentionallyKilled: boolean; relaunchExhausted: boolean },
+): DriftTickAction {
+  let trigger: "drift" | "pending_override";
+  const reason = verdict.suppressedReason;
+  if (reason === null) {
+    if (!verdict.drifted) return { kind: "skip" };
+    trigger = "drift";
+  } else {
+    switch (reason) {
+      case "no_undelivered_output":
+        if (ctx.pendingMessages === 0) return { kind: "suppress", reason, pendingMessages: 0 };
+        trigger = "pending_override";
+        break;
+      case "live_subagent_activity":
+        return { kind: "suppress", reason, pendingMessages: ctx.pendingMessages };
+      default: {
+        const unknown: never = reason;
+        throw new Error(`unhandled drift suppression reason: ${String(unknown)}`);
+      }
+    }
+  }
+  // Belt-and-braces guards mirroring `handleBackendSilent`.
+  if (ctx.intentionallyKilled || ctx.relaunchExhausted) return { kind: "skip" };
+  return { kind: "candidate", trigger, pendingMessages: ctx.pendingMessages };
+}
+
+/** A CLI thread parked in `pipe_write` = bun stopped draining its stdout. */
+export function waitChannelsShowPipeWrite(waitChannels: string | null): boolean {
+  return waitChannels !== null && /(^|, )pipe_write×/.test(waitChannels);
+}
+
+/**
+ * Second stage, run only for a `candidate` (PLAN Tasks 2 + 4b). Pure.
+ *
+ * Task 2 — the model-output signal alone cannot tell "stdout pipe dead" from
+ * "CLI busy on a long multi-subagent turn". A destructive kill requires
+ * liveness evidence of actual stdout death: a `pipe_write` wait channel (bun
+ * stalled draining — the pipe really is wedged) OR no recent subagent
+ * activity. The 2026-10-14 incident signature `futex_wait_queue/ep_poll, NO
+ * pipe_write` with a live subagent tree is a busy CLI → `withhold_live`. This
+ * is what guards the `pending_override` path, which never ran the detector's
+ * liveness gate. Unknown wait channels (no pid / no /proc) fall back to the
+ * subagent evidence alone.
+ *
+ * Task 4b — a recovery the guard allows still respects the per-session rate
+ * cap; past it → `rate_limited` (diagnostic, no kill).
+ */
+export type DriftKillDecision =
+  | { kind: "recover"; pipeWrite: boolean }
+  | { kind: "withhold_live" }
+  | { kind: "rate_limited"; recentRecoveries: number };
+
+export function decideDriftKill(input: {
+  waitChannels: string | null;
+  subagentActive: boolean;
+  recentRecoveries: number;
+}): DriftKillDecision {
+  const pipeWrite = waitChannelsShowPipeWrite(input.waitChannels);
+  if (!pipeWrite && input.subagentActive) return { kind: "withhold_live" };
+  if (input.recentRecoveries >= DRIFT_RECOVERY_RATE_MAX) {
+    return { kind: "rate_limited", recentRecoveries: input.recentRecoveries };
+  }
+  return { kind: "recover", pipeWrite };
+}
+
+/** Drop timestamps outside the rate window; returns the kept (recent) ones. */
+export function pruneDriftRecoveries(history: readonly number[], now: number): number[] {
+  return history.filter((t) => now - t < DRIFT_RECOVERY_RATE_WINDOW_MS);
+}
+
 // Proactive keepalive: base delay before relaunching a crashed CLI (doubles per attempt)
 export const KEEPALIVE_BASE_DELAY_MS = 3_000;
 
@@ -105,6 +214,10 @@ export interface SessionRecoveryDeps {
   onRelaunchSucceeded: (sessionId: string) => void;
   /** Rate-limit / out-of-credits fallback pauses AFK auto-proceed. */
   noteApiLimitReached: (sessionId: string) => void;
+  /** Kernel wait channels of a CLI pid (tests inject; default reads /proc). */
+  readWaitChannels?: (pid: number) => string | null;
+  /** Subagent-tree liveness probe (tests inject; default stats the CLI's sibling dir). */
+  subagentActivitySince?: (sessionDir: string, sinceMs: number) => boolean;
 }
 
 export class SessionRecovery {
@@ -113,6 +226,8 @@ export class SessionRecovery {
   private readonly intentionalKills: IntentionalKills;
   private readonly onRelaunchSucceeded: (sessionId: string) => void;
   private readonly noteApiLimitReached: (sessionId: string) => void;
+  private readonly readWaitChannels: (pid: number) => string | null;
+  private readonly subagentActivitySince: (sessionDir: string, sinceMs: number) => boolean;
 
   // Auto-relaunch state
   private relaunchingSet = new Set<string>();
@@ -177,11 +292,20 @@ export class SessionRecovery {
   private driftPrevSnapshot = new Map<string, { jsonlMtimeMs: number; bunLastFrameMs: number }>();
 
   /**
-   * `bunLastFrameMs` of the stall whose suppressed kill was already logged,
-   * per session — one `silent_stdio_drift.suppressed` line per stall, not
-   * one every tick.
+   * `<bunLastFrameMs>:<reason>` of the stall whose suppressed kill was already
+   * logged, per session — one `silent_stdio_drift.suppressed` line per stall
+   * and reason, not one every tick (a reason switch mid-stall logs again).
    */
-  private readonly driftSuppressedLogged = new Map<string, number>();
+  private readonly driftSuppressedLogged = new Map<string, string>();
+
+  /** Timestamps of recent drift recoveries per session (rate guard, Task 4b). */
+  private readonly driftRecoveryTimes = new Map<string, number[]>();
+  /** Oldest in-window recovery already reported as rate-limited (one diagnostic per window). */
+  private readonly driftRateLimitNotified = new Map<string, number>();
+  /** Sessions whose CLI version differs from the verified subagent layout (logged once). */
+  private readonly driftLayoutUnverifiedLogged = new Set<string>();
+  /** A drift recovery (kill → relaunch) in flight, per session. */
+  private readonly driftRecoveryInFlight = new Set<string>();
 
   /**
    * Per-session highest compaction-advisory milestone we've already
@@ -198,6 +322,8 @@ export class SessionRecovery {
     this.intentionalKills = deps.intentionalKills;
     this.onRelaunchSucceeded = deps.onRelaunchSucceeded;
     this.noteApiLimitReached = deps.noteApiLimitReached;
+    this.readWaitChannels = deps.readWaitChannels ?? ((pid) => summarizeWaitChannels(pid));
+    this.subagentActivitySince = deps.subagentActivitySince ?? defaultSubagentActivitySince;
   }
 
   stopDriftDetector(): void {
@@ -242,6 +368,9 @@ export class SessionRecovery {
     this.relaunchingSet.delete(sessionId);
     this.lastRelaunchOkAt.delete(sessionId);
     this.cancelSettleRecheck(sessionId);
+    this.driftRecoveryTimes.delete(sessionId);
+    this.driftRateLimitNotified.delete(sessionId);
+    this.driftLayoutUnverifiedLogged.delete(sessionId);
   }
 
   private cancelSettleRecheck(sessionId: string): void {
@@ -415,12 +544,11 @@ export class SessionRecovery {
   }
 
   /**
-   * One pass of the drift detector. For each active Claude session
-   * with a resolved `cliSessionId + cwd`, resolve the CLI's jsonl
-   * path, stat it against the bun transcript, and — if `checkDrift`
-   * returns drifted=true — surface a browser toast + SIGTERM the
-   * subprocess. The existing `session:exited` → `scheduleProactiveRelaunch`
-   * path then respawns with `--resume`, giving a fresh stdio pipe.
+   * One pass of the drift detector. For each active Claude session with a
+   * resolved `cliSessionId + cwd`: compute the verdict (pure `checkDrift`),
+   * decide (pure {@link decideDriftAction} → {@link decideDriftKill}), then act
+   * — log a suppression, withhold, report a rate limit, or recover via
+   * {@link recoverFromDrift} (kill → `--resume` relaunch, EC-52).
    *
    * Codex-half sessions are skipped: Codex has a different jsonl
    * layout (or none) and different failure modes; the detector is
@@ -431,13 +559,18 @@ export class SessionRecovery {
     const sessions = this.launcher.listSessions();
     const listed = new Set(sessions.map((s) => s.sessionId));
     for (const id of this.driftSuppressedLogged.keys()) if (!listed.has(id)) this.driftSuppressedLogged.delete(id);
+    for (const id of this.driftPrevSnapshot.keys()) if (!listed.has(id)) this.driftPrevSnapshot.delete(id);
     for (const info of sessions) {
       if (info.archived) continue;
       if (info.backendType === "codex") continue;
       if (info.state !== "connected" && info.state !== "running") continue;
-      if (!info.cliSessionId || !info.cwd) continue;
-      const jsonlPath = resolveJsonlPath(claudeHome, info.cwd, info.cliSessionId);
-      if (!jsonlPath) continue;
+      if (this.driftRecoveryInFlight.has(info.sessionId)) continue;
+      // One slug derivation for both the main jsonl and its sibling
+      // `<cliSid>/` dir (subagents/ + tool-results/). Null = not initialised
+      // yet, or a cliSessionId that is not a single id-shaped path segment.
+      const paths = resolveCliSessionPaths(claudeHome, info.cwd, info.cliSessionId);
+      if (!paths) continue;
+      const { jsonlPath, sessionDir } = paths;
       // Read the "bun freshness" signal from the live adapter, NOT from
       // the transcript file mtime. See {@link ClaudeAdapter.getLastCliFrameReceivedMs}
       // and `silent-stdio-drift-detector.ts` for why the transcript mtime
@@ -445,123 +578,216 @@ export class SessionRecovery {
       // masked real stdio-pipe-death in the 2026-09-20 incident).
       // If the adapter isn't a ClaudeAdapter (unlikely — codex was
       // filtered above) or is missing, skip: nothing meaningful to check.
-      const adapter = this.wsBridge.getSession(info.sessionId)?.backendAdapter;
+      const bridgeSession = this.wsBridge.getSession(info.sessionId);
+      const adapter = bridgeSession?.backendAdapter;
       if (!(adapter instanceof ClaudeAdapter)) continue;
       const bunLastFrameMs = adapter.getLastCliFrameReceivedMs();
       const verdict = checkDrift(
-        {
-          sessionId: info.sessionId,
-          bunLastFrameMs,
-          jsonlPath,
-        },
-        { undeliveredOutput: countUndeliveredAssistantRecords },
+        { sessionId: info.sessionId, bunLastFrameMs, jsonlPath, sessionDir },
+        { undeliveredOutput: countUndeliveredAssistantRecords, subagentActivitySince: this.subagentActivitySince },
       );
       // Cache last snapshot for future delta-over-time detection.
       this.driftPrevSnapshot.set(info.sessionId, {
         jsonlMtimeMs: verdict.jsonlMtimeMs,
         bunLastFrameMs: verdict.bunLastFrameMs,
       });
+      this.maybeFireCompactionAdvisory(info.sessionId, jsonlPath);
 
-      // Compaction-advisory piggyback: cheap stat on the same jsonl
-      // we already tracked. If size crossed a new milestone since
-      // last advisory, surface a browser toast suggesting `/compact`.
-      // Prevents silent-stdio flares before they happen (empirical
-      // pattern: sessions >1.5 MB start flaring, >3 MB flare hourly).
-      // Fires at most once per milestone per session lifetime.
-      try {
-        const jsonlSize = statSync(jsonlPath).size;
-        const lastFired = this.compactionAdvisoryFired.get(info.sessionId) ?? 0;
-        const advisory = nextCompactionMilestone(jsonlSize, lastFired);
-        if (advisory) {
-          this.compactionAdvisoryFired.set(info.sessionId, advisory.milestoneBytes);
-          log.warn(
-            "session-orchestrator",
-            "compaction advisory fired — session context large",
+      const cliVersion = bridgeSession?.state?.claude_code_version || null;
+      const action = decideDriftAction(verdict, {
+        pendingMessages:
+          verdict.suppressedReason === null ? 0 : this.wsBridge.getSessionPendingMessageCount(info.sessionId),
+        intentionallyKilled: this.intentionalKills.has(info.sessionId),
+        relaunchExhausted: this.relaunchExhaustedNotified.has(info.sessionId),
+      });
+      if (action.kind === "skip") continue;
+      if (action.kind === "suppress") {
+        const key = `${bunLastFrameMs}:${action.reason}`;
+        if (this.driftSuppressedLogged.get(info.sessionId) !== key) {
+          this.driftSuppressedLogged.set(info.sessionId, key);
+          log.info(
+            "session-recovery",
+            action.reason === "live_subagent_activity"
+              ? "silent-stdio drift kill suppressed — CLI alive mid subagent fan-out"
+              : "silent-stdio drift kill suppressed — no undelivered model output",
             {
-              event: "context_size.compaction_advisory",
-              sessionId: info.sessionId,
-              jsonlSize,
-              milestoneBytes: advisory.milestoneBytes,
-            },
-          );
-          this.wsBridge.broadcastToSession(info.sessionId, {
-            type: "error",
-            message: advisory.message,
-          });
-        }
-      } catch {
-        // jsonl stat failed (file gone between checkDrift and here,
-        // or permission changed) — skip silently. Next tick retries.
-      }
-
-      if (verdict.suppressedReason) {
-        // Override suppression when the session has pending user messages that
-        // cannot be delivered because the subprocess is stuck on an incomplete
-        // previous turn (context-limit hard-cut with no `result` frame emitted).
-        // In that case the "idle" signal is misleading — the subprocess is not
-        // idle from the user's perspective: it is blocking queued messages.
-        const pendingCount =
-          verdict.suppressedReason === "no_undelivered_output"
-            ? this.wsBridge.getSessionPendingMessageCount(info.sessionId)
-            : 0;
-        if (pendingCount > 0) {
-          log.warn(
-            "session-orchestrator",
-            "silent-stdio drift suppression overridden — session has pending user messages",
-            {
-              event: "silent_stdio_drift.pending_override",
-              sessionId: info.sessionId,
-              suppressedReason: verdict.suppressedReason,
-              pendingMessages: pendingCount,
-              mtimeDeltaMs: verdict.mtimeDeltaMs,
-            },
-          );
-          // Fall through to the kill path below.
-        } else {
-          if (this.driftSuppressedLogged.get(info.sessionId) !== bunLastFrameMs) {
-            this.driftSuppressedLogged.set(info.sessionId, bunLastFrameMs);
-            log.info("session-orchestrator", "silent-stdio drift kill suppressed — no undelivered model output", {
               event: "silent_stdio_drift.suppressed",
               sessionId: info.sessionId,
-              reason: verdict.suppressedReason,
+              reason: action.reason,
               mtimeDeltaMs: verdict.mtimeDeltaMs,
-            });
-          }
-          continue;
+              bunLastFrameMs,
+              undeliveredAssistantRecords: verdict.undeliveredAssistantRecords,
+              pendingMessages: action.pendingMessages,
+              cliVersion,
+            },
+          );
         }
+        continue;
       }
-      if (!verdict.drifted) continue;
 
-      // Belt-and-braces guards mirroring `handleBackendSilent`:
-      if (this.intentionalKills.has(info.sessionId)) continue;
-      if (this.relaunchExhaustedNotified.has(info.sessionId)) continue;
-
-      log.warn(
-        "session-orchestrator",
-        "silent-stdio drift detected — killing subprocess for relaunch",
-        {
-          event: "silent_stdio_drift.detected",
-          sessionId: info.sessionId,
-          mtimeDeltaMs: verdict.mtimeDeltaMs,
-          undeliveredAssistantRecords: verdict.undeliveredAssistantRecords,
-          reason: verdict.reason,
-          // P7/SERVER-STDOUT-STALL: which side stopped? A CLI thread in
-          // `pipe_write` means bun stopped draining stdout; none means the
-          // CLI itself stopped writing. Read before the kill below.
-          cliWaitChannels: info.pid ? summarizeWaitChannels(info.pid) : null,
-        },
+      // `candidate`: kill-time guards. Bounded sync /proc read + a second
+      // liveness probe, only on a crossed-tolerance tick (rare).
+      this.noteUnverifiedLayout(info.sessionId, cliVersion);
+      const waitChannels = info.pid ? this.readWaitChannels(info.pid) : null;
+      const now = Date.now();
+      const subagentActive = this.subagentActivitySince(
+        sessionDir,
+        Math.max(bunLastFrameMs, now - SUBAGENT_LIVENESS_WINDOW_MS),
       );
+      const recent = pruneDriftRecoveries(this.driftRecoveryTimes.get(info.sessionId) ?? [], now);
+      this.driftRecoveryTimes.set(info.sessionId, recent);
+      const kill = decideDriftKill({ waitChannels, subagentActive, recentRecoveries: recent.length });
+      const evidence = {
+        sessionId: info.sessionId,
+        trigger: action.trigger,
+        pendingMessages: action.pendingMessages,
+        mtimeDeltaMs: verdict.mtimeDeltaMs,
+        undeliveredAssistantRecords: verdict.undeliveredAssistantRecords,
+        reason: verdict.reason,
+        // P7/SERVER-STDOUT-STALL: which side stopped? A CLI thread in
+        // `pipe_write` means bun stopped draining stdout; none means the
+        // CLI itself stopped writing (or is busy).
+        cliWaitChannels: waitChannels,
+        subagentActive,
+        cliVersion,
+      };
+      if (kill.kind === "withhold_live") {
+        const key = `${bunLastFrameMs}:withhold_live`;
+        if (this.driftSuppressedLogged.get(info.sessionId) !== key) {
+          this.driftSuppressedLogged.set(info.sessionId, key);
+          log.info("session-recovery", "silent-stdio drift kill withheld — CLI busy (no pipe_write) with live subagents", {
+            event: "silent_stdio_drift.withheld_live",
+            ...evidence,
+          });
+        }
+        continue;
+      }
+      if (kill.kind === "rate_limited") {
+        if (this.driftRateLimitNotified.get(info.sessionId) !== recent[0]) {
+          this.driftRateLimitNotified.set(info.sessionId, recent[0]);
+          log.warn("session-recovery", "silent-stdio drift recovery rate-limited — detector may be misfiring", {
+            event: "silent_stdio_drift.rate_limited",
+            ...evidence,
+            recentRecoveries: kill.recentRecoveries,
+            windowMs: DRIFT_RECOVERY_RATE_WINDOW_MS,
+          });
+          this.wsBridge.broadcastToSession(info.sessionId, {
+            type: "error",
+            message:
+              `Backend output looks stalled, but it was already auto-recovered ${kill.recentRecoveries} times in ` +
+              `${Math.round(DRIFT_RECOVERY_RATE_WINDOW_MS / 60_000)} min — automatic recovery paused. ` +
+              "Relaunch the session manually if it stays stuck.",
+          });
+        }
+        continue;
+      }
+      log.warn("session-recovery", "silent-stdio drift detected — relaunching subprocess to recover", {
+        event: "silent_stdio_drift.detected",
+        ...evidence,
+      });
+      recent.push(now);
       deliveryMetrics.recordDriftRecovery(info.sessionId, info.backendType ?? "claude");
       this.wsBridge.broadcastToSession(info.sessionId, {
         type: "error",
         message: `Backend transcript ${Math.round(verdict.mtimeDeltaMs / 1000)}s behind CLI's jsonl — relaunching to recover.`,
       });
-      // Fire-and-forget kill; the session:exited handler picks up.
-      // We do NOT await here because the outer setInterval callback
-      // is sync — a per-session kill blocking further sessions would
-      // delay the whole tick. `launcher.kill` is idempotent on
-      // already-dead sessions.
-      void this.launcher.kill(info.sessionId);
+      // Fire-and-forget: the outer setInterval callback is sync — a
+      // per-session recovery blocking further sessions would delay the
+      // whole tick. `driftRecoveryInFlight` keeps the next tick off it.
+      void this.recoverFromDrift(info.sessionId);
+    }
+  }
+
+  /**
+   * Drift recovery (PLAN Task 4a, EC-2 / EC-52). Mark the session intentional
+   * BEFORE the kill so its `session:exited` neither arms the council reconnect
+   * cycle (a healthy sibling would flicker `reconnecting`/`degraded`) nor
+   * schedules a keepalive relaunch racing this one; `launcher.kill` gives the
+   * stuck CLI SIGTERM → 5 s → SIGKILL so no second writer survives on the
+   * cliSessionId; then relaunch with `--resume` through the single-flight gate.
+   * The mark is transient and always released in `finally` (EC-52) — unless a
+   * durable writer (archive / delete / group teardown) claimed it meanwhile.
+   *
+   * Only the drifting half is marked: the sibling is not killed, and a durable
+   * mark on it would lock it out of its own recovery. A failed relaunch falls
+   * back to the budgeted keepalive path so the session is never left dead.
+   */
+  private async recoverFromDrift(sessionId: string): Promise<void> {
+    this.driftRecoveryInFlight.add(sessionId);
+    const ownsMark = this.intentionalKills.addTransient(sessionId);
+    let outcome: RelaunchOutcome | null = null;
+    try {
+      await this.launcher.kill(sessionId);
+      if (this.launcher.getSession(sessionId)?.archived) return;
+      this.wsBridge.getSession(sessionId)?.stateMachine?.transition("starting", "relaunch_initiated");
+      outcome = await this.relaunchOnce(sessionId, "drift_recovery");
+    } catch (err) {
+      outcome = { ok: false, error: err instanceof Error ? err.message : String(err) };
+    } finally {
+      if (ownsMark) this.intentionalKills.releaseTransient(sessionId);
+      this.driftRecoveryInFlight.delete(sessionId);
+    }
+    if (outcome && !outcome.ok) {
+      log.warn("session-recovery", "drift recovery relaunch failed — falling back to keepalive", {
+        event: "silent_stdio_drift.relaunch_failed",
+        sessionId,
+        error: outcome.error,
+      });
+      if (outcome.error) this.wsBridge.broadcastToSession(sessionId, { type: "error", message: outcome.error });
+      this.scheduleProactiveRelaunch(sessionId);
+    }
+  }
+
+  /**
+   * Version canary (PLAN Task 5): the liveness gate rests on the subagent
+   * sibling-tree layout verified for {@link SUBAGENT_LAYOUT_VERIFIED_CLI_VERSION}.
+   * A session on another CLI version is logged once, so a layout change after
+   * a CLI bump shows up next to the kills it may cause.
+   */
+  private noteUnverifiedLayout(sessionId: string, cliVersion: string | null): void {
+    if (!cliVersion || cliVersion === SUBAGENT_LAYOUT_VERIFIED_CLI_VERSION) return;
+    if (this.driftLayoutUnverifiedLogged.has(sessionId)) return;
+    this.driftLayoutUnverifiedLogged.add(sessionId);
+    log.warn("session-recovery", "drift liveness gate running on an unverified CLI layout", {
+      event: "silent_stdio_drift.cli_layout_unverified",
+      sessionId,
+      cliVersion,
+      verifiedCliVersion: SUBAGENT_LAYOUT_VERIFIED_CLI_VERSION,
+    });
+  }
+
+  /**
+   * Compaction-advisory piggyback: cheap stat on the same jsonl the drift
+   * tick tracks. If size crossed a new milestone since last advisory, surface
+   * a browser toast suggesting `/compact`. Prevents silent-stdio flares before
+   * they happen (empirical pattern: sessions >1.5 MB start flaring, >3 MB
+   * flare hourly). Fires at most once per milestone per session lifetime.
+   */
+  private maybeFireCompactionAdvisory(sessionId: string, jsonlPath: string): void {
+    try {
+      const jsonlSize = statSync(jsonlPath).size;
+      const lastFired = this.compactionAdvisoryFired.get(sessionId) ?? 0;
+      const advisory = nextCompactionMilestone(jsonlSize, lastFired);
+      if (advisory) {
+        this.compactionAdvisoryFired.set(sessionId, advisory.milestoneBytes);
+        log.warn(
+          "session-orchestrator",
+          "compaction advisory fired — session context large",
+          {
+            event: "context_size.compaction_advisory",
+            sessionId,
+            jsonlSize,
+            milestoneBytes: advisory.milestoneBytes,
+          },
+        );
+        this.wsBridge.broadcastToSession(sessionId, {
+          type: "error",
+          message: advisory.message,
+        });
+      }
+    } catch {
+      // jsonl stat failed (file gone between checkDrift and here,
+      // or permission changed) — skip silently. Next tick retries.
     }
   }
 

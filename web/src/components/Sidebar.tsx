@@ -315,7 +315,7 @@ export function Sidebar() {
         const list = await api.listSessions();
         if (active) {
           const store = useStore.getState();
-          store.setSdkSessions(list);
+          store.setSdkSessions(list, { fromServer: true });
           for (const s of list) {
             if (s.archived) continue;
             if (s.state !== "connected") continue;
@@ -588,7 +588,7 @@ export function Sidebar() {
     useStore.getState().removeBridgeSession(sessionId);
     try {
       const list = await api.listSessions();
-      useStore.getState().setSdkSessions(list);
+      useStore.getState().setSdkSessions(list, { fromServer: true });
     } catch {
       // best-effort
     }
@@ -627,7 +627,7 @@ export function Sidebar() {
     }
     try {
       const list = await api.listSessions();
-      useStore.getState().setSdkSessions(list);
+      useStore.getState().setSdkSessions(list, { fromServer: true });
     } catch {
       // best-effort
     }

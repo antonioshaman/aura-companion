@@ -1,0 +1,1 @@
+{"agentType": "general-purpose", "description": "[fixture subagent]", "toolUseId": "toolu_fixture_task1", "spawnDepth": 1, "requestShape": "background", "requestNonInteractive": true}

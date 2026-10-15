@@ -4,12 +4,19 @@ import type { WsBridge } from "./ws-bridge.js";
 import { companionBus } from "./event-bus.js";
 import { IntentionalKills } from "./intentional-kills.js";
 import { log } from "./logger.js";
-import { DEFAULT_LAG_TOLERANCE_MS, resolveJsonlPath } from "./silent-stdio-drift-detector.js";
+import { DEFAULT_LAG_TOLERANCE_MS, resolveJsonlPath, SUBAGENT_LIVENESS_WINDOW_MS } from "./silent-stdio-drift-detector.js";
+import type { SessionRecoveryDeps } from "./session-recovery.js";
 import { ClaudeAdapter } from "./claude-adapter.js";
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
+  decideDriftAction,
+  decideDriftKill,
+  DRIFT_RECOVERY_RATE_MAX,
+  DRIFT_RECOVERY_RATE_WINDOW_MS,
+  pruneDriftRecoveries,
+  waitChannelsShowPipeWrite,
   DRIFT_DETECTOR_TICK_MS,
   KEEPALIVE_BASE_DELAY_MS,
   MAX_AUTO_RELAUNCHES,
@@ -33,7 +40,10 @@ function info(sessionId: string, overrides: Partial<SdkSessionInfo> = {}): SdkSe
   return { sessionId, state: "exited", cwd: "/tmp", createdAt: 0, ...overrides } as SdkSessionInfo;
 }
 
-function makeRecovery(sessions: Map<string, SdkSessionInfo>) {
+function makeRecovery(
+  sessions: Map<string, SdkSessionInfo>,
+  extraDeps: Pick<SessionRecoveryDeps, "readWaitChannels" | "subagentActivitySince"> = {},
+) {
   const launcher = {
     getSession: vi.fn((id: string) => sessions.get(id)),
     listSessions: vi.fn(() => [...sessions.values()]),
@@ -60,6 +70,7 @@ function makeRecovery(sessions: Map<string, SdkSessionInfo>) {
     intentionalKills,
     onRelaunchSucceeded,
     noteApiLimitReached,
+    ...extraDeps,
   });
   return { recovery, launcher, wsBridge, intentionalKills, onRelaunchSucceeded, noteApiLimitReached };
 }
@@ -728,4 +739,355 @@ describe("SessionRecovery.driftDetectorTick — undelivered-output gate (P7/FIX-
       expect((detected?.[2] as { cliWaitChannels?: unknown }).cliWaitChannels).toMatch(/^[\w.]+×\d+(, [\w.]+×\d+)*$/);
     },
   );
+});
+
+// ── PLAN Tasks 2-4 + review 2026-10-14-2248 #3/#4/#5 ─────────────────────────
+// The kill decision is two pure stages (`decideDriftAction` → `decideDriftKill`)
+// so every policy row is testable without a SessionRecovery; the tick-level
+// tests below pin the wiring on a real jsonl + real subagent sibling tree.
+
+describe("decideDriftAction — per-reason suppression override (PLAN Task 3)", () => {
+  const ok = { pendingMessages: 0, intentionallyKilled: false, relaunchExhausted: false };
+
+  it("healthy verdict → skip; drifted → recovery candidate", () => {
+    expect(decideDriftAction({ drifted: false, suppressedReason: null }, ok)).toEqual({ kind: "skip" });
+    expect(decideDriftAction({ drifted: true, suppressedReason: null }, ok)).toEqual({
+      kind: "candidate",
+      trigger: "drift",
+      pendingMessages: 0,
+    });
+  });
+
+  it("no_undelivered_output: suppressed when nothing is queued, overridden by queued messages (#327 kept)", () => {
+    const v = { drifted: false, suppressedReason: "no_undelivered_output" as const };
+    expect(decideDriftAction(v, ok)).toEqual({ kind: "suppress", reason: "no_undelivered_output", pendingMessages: 0 });
+    expect(decideDriftAction(v, { ...ok, pendingMessages: 2 })).toEqual({
+      kind: "candidate",
+      trigger: "pending_override",
+      pendingMessages: 2,
+    });
+  });
+
+  it("live_subagent_activity is NOT overridable by queued messages — a queued prompt is not evidence of death", () => {
+    // Before Task 3 the override was keyed to the other reason by accident;
+    // this pins it as policy: the queued prompt waits for the fan-out.
+    const v = { drifted: false, suppressedReason: "live_subagent_activity" as const };
+    expect(decideDriftAction(v, { ...ok, pendingMessages: 5 })).toEqual({
+      kind: "suppress",
+      reason: "live_subagent_activity",
+      pendingMessages: 5,
+    });
+  });
+
+  it("intentional-kill / exhausted guards skip a candidate but never turn a suppression into a kill", () => {
+    const drifted = { drifted: true, suppressedReason: null };
+    expect(decideDriftAction(drifted, { ...ok, intentionallyKilled: true })).toEqual({ kind: "skip" });
+    expect(decideDriftAction(drifted, { ...ok, relaunchExhausted: true })).toEqual({ kind: "skip" });
+    const overridden = { drifted: false, suppressedReason: "no_undelivered_output" as const };
+    expect(decideDriftAction(overridden, { ...ok, pendingMessages: 1, intentionallyKilled: true })).toEqual({ kind: "skip" });
+  });
+});
+
+describe("decideDriftKill — wait-channel guard (PLAN Task 2) + rate guard (PLAN Task 4b)", () => {
+  const INCIDENT = "futex_wait_queue×9, ep_poll×1"; // 2026-10-14 signature: busy, NOT pipe-dead
+  const STALLED = "pipe_write×1, futex_wait_queue×8";
+
+  it("incident signature (no pipe_write) with live subagents → withhold the kill", () => {
+    expect(decideDriftKill({ waitChannels: INCIDENT, subagentActive: true, recentRecoveries: 0 })).toEqual({
+      kind: "withhold_live",
+    });
+  });
+
+  it("pipe_write proves bun stopped draining stdout → recover even with live subagents", () => {
+    expect(decideDriftKill({ waitChannels: STALLED, subagentActive: true, recentRecoveries: 0 })).toEqual({
+      kind: "recover",
+      pipeWrite: true,
+    });
+  });
+
+  it("no pipe_write and an idle subagent tree → recover (the CLI itself stopped writing stdout)", () => {
+    expect(decideDriftKill({ waitChannels: INCIDENT, subagentActive: false, recentRecoveries: 0 })).toEqual({
+      kind: "recover",
+      pipeWrite: false,
+    });
+  });
+
+  it("unknown wait channels (no pid / no /proc) fall back to the subagent evidence alone", () => {
+    expect(decideDriftKill({ waitChannels: null, subagentActive: true, recentRecoveries: 0 }).kind).toBe("withhold_live");
+    expect(decideDriftKill({ waitChannels: null, subagentActive: false, recentRecoveries: 0 }).kind).toBe("recover");
+  });
+
+  it("past DRIFT_RECOVERY_RATE_MAX recent recoveries → rate_limited instead of another relaunch", () => {
+    expect(
+      decideDriftKill({ waitChannels: STALLED, subagentActive: false, recentRecoveries: DRIFT_RECOVERY_RATE_MAX - 1 }).kind,
+    ).toBe("recover");
+    expect(decideDriftKill({ waitChannels: STALLED, subagentActive: false, recentRecoveries: DRIFT_RECOVERY_RATE_MAX })).toEqual({
+      kind: "rate_limited",
+      recentRecoveries: DRIFT_RECOVERY_RATE_MAX,
+    });
+  });
+
+  it("waitChannelsShowPipeWrite matches the summarizeWaitChannels format exactly", () => {
+    expect(waitChannelsShowPipeWrite("pipe_write×1, ep_poll×2")).toBe(true);
+    expect(waitChannelsShowPipeWrite("ep_poll×2, pipe_write×1")).toBe(true);
+    expect(waitChannelsShowPipeWrite("xpipe_write×1")).toBe(false);
+    expect(waitChannelsShowPipeWrite("ep_poll×2")).toBe(false);
+    expect(waitChannelsShowPipeWrite(null)).toBe(false);
+  });
+
+  it("pruneDriftRecoveries keeps only recoveries inside the rate window", () => {
+    const now = 10 * DRIFT_RECOVERY_RATE_WINDOW_MS;
+    expect(pruneDriftRecoveries([now - DRIFT_RECOVERY_RATE_WINDOW_MS, now - DRIFT_RECOVERY_RATE_WINDOW_MS + 1, now - 5], now)).toEqual([
+      now - DRIFT_RECOVERY_RATE_WINDOW_MS + 1,
+      now - 5,
+    ]);
+  });
+});
+
+// Tick wiring on a real jsonl + a real `<cliSid>/subagents/` tree under a temp
+// HOME (review B-1: deleting the sessionDir derivation or the liveness dep
+// must turn these red).
+describe("SessionRecovery.driftDetectorTick — liveness, guards and EC-52 recovery (PLAN Tasks 2-4)", () => {
+  const NOW = Date.parse("2026-10-14T12:00:00.000Z");
+  const BUN_LAST = NOW - 110_000;
+  let home: string;
+  let prevHome: string | undefined;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    prevHome = process.env.HOME;
+    home = mkdtempSync(join(tmpdir(), "drift-tick-live-"));
+    process.env.HOME = home;
+    // Earlier describes spy on `log` without restoring; start from clean spies
+    // so each test only sees its own log calls.
+    vi.restoreAllMocks();
+  });
+  afterEach(() => {
+    process.env.HOME = prevHome;
+    rmSync(home, { recursive: true, force: true });
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    companionBus.clear();
+  });
+
+  /**
+   * One Claude session with undelivered model output in its jsonl (an
+   * assistant record 60 s old that bun never received — bun's last frame is
+   * 110 s old). `subagentWriteAgoMs` = age of the newest subagent file, or
+   * null for no subagent tree. Wait channels are injected (AP-1 seam).
+   */
+  function setup(opts: {
+    subagentWriteAgoMs: number | null;
+    waitChannels?: string | null;
+    undelivered?: boolean;
+    cliVersion?: string;
+    pid?: number;
+  }) {
+    const sessions = new Map([
+      ["s1", info("s1", { state: "running", cwd: "/root/proj", cliSessionId: "cli-1", pid: opts.pid ?? 4242 })],
+    ]);
+    const readWaitChannels = vi.fn(() => (opts.waitChannels === undefined ? "futex_wait_queue×9, ep_poll×1" : opts.waitChannels));
+    const ctx = makeRecovery(sessions, { readWaitChannels });
+    const adapter = Object.create(ClaudeAdapter.prototype) as ClaudeAdapter;
+    adapter.getLastCliFrameReceivedMs = () => BUN_LAST;
+    ctx.wsBridge.getSession.mockReturnValue({
+      backendAdapter: adapter,
+      state: { claude_code_version: opts.cliVersion ?? "2.1.283" },
+    } as never);
+    const path = resolveJsonlPath(join(home, ".claude"), "/root/proj", "cli-1")!;
+    mkdirSync(dirname(path), { recursive: true });
+    const records =
+      opts.undelivered === false
+        ? [{ type: "user", atMs: NOW - 2_000 }]
+        : [
+            { type: "user", atMs: NOW - 100_000 },
+            { type: "assistant", atMs: NOW - 60_000 },
+            { type: "user", atMs: NOW - 2_000 },
+          ];
+    writeFileSync(path, records.map((r) => JSON.stringify({ type: r.type, timestamp: new Date(r.atMs).toISOString() })).join("\n") + "\n");
+    utimesSync(path, (NOW - 2_000) / 1000, (NOW - 2_000) / 1000);
+    if (opts.subagentWriteAgoMs !== null) {
+      const sessionDir = path.slice(0, -".jsonl".length);
+      mkdirSync(join(sessionDir, "subagents"), { recursive: true });
+      const agent = join(sessionDir, "subagents", "agent-a1.jsonl");
+      writeFileSync(agent, "{}\n");
+      const t = (NOW - opts.subagentWriteAgoMs) / 1000;
+      utimesSync(agent, t, t);
+    }
+    return { ...ctx, readWaitChannels };
+  }
+
+  const events = (spy: { mock: { calls: unknown[][] } }, event: string): unknown[][] =>
+    spy.mock.calls.filter((c) => (c[2] as { event?: string } | undefined)?.event === event);
+
+  it("live subagent tree → no kill; the suppressed log names the real reason and the undelivered count (review #4)", () => {
+    const { recovery, launcher } = setup({ subagentWriteAgoMs: 5_000 });
+    const infoSpy = vi.spyOn(log, "info");
+    recovery.driftDetectorTick();
+    recovery.driftDetectorTick();
+    expect(launcher.kill).not.toHaveBeenCalled();
+    const suppressed = events(infoSpy, "silent_stdio_drift.suppressed");
+    expect(suppressed).toHaveLength(1); // once per stall + reason, not every tick
+    expect(suppressed[0][1]).toMatch(/alive mid subagent fan-out/);
+    expect(suppressed[0][2]).toMatchObject({ reason: "live_subagent_activity", undeliveredAssistantRecords: 1 });
+  });
+
+  it("subagent tree quiet for longer than the liveness window → recovers (review #1 at the tick)", () => {
+    // Written after bun's last frame? No — but even a write after it that is
+    // older than the window must not suppress; here the tree went quiet
+    // SUBAGENT_LIVENESS_WINDOW_MS + 10 s ago.
+    const { recovery, launcher } = setup({ subagentWriteAgoMs: SUBAGENT_LIVENESS_WINDOW_MS + 10_000 });
+    recovery.driftDetectorTick();
+    expect(launcher.kill).toHaveBeenCalledWith("s1");
+  });
+
+  it("queued user messages do not override live_subagent_activity (PLAN Task 3)", () => {
+    const { recovery, launcher, wsBridge } = setup({ subagentWriteAgoMs: 5_000 });
+    wsBridge.getSessionPendingMessageCount.mockReturnValue(2);
+    const infoSpy = vi.spyOn(log, "info");
+    recovery.driftDetectorTick();
+    expect(launcher.kill).not.toHaveBeenCalled();
+    expect(events(infoSpy, "silent_stdio_drift.suppressed")[0][2]).toMatchObject({ pendingMessages: 2 });
+  });
+
+  it("pending-message override with a live subagent tree and no pipe_write → withheld (PLAN Task 2 guards the override path)", () => {
+    // no_undelivered_output + queued message used to kill unconditionally,
+    // even mid fan-out. The kill-time guard now asks the process layer.
+    const { recovery, launcher, wsBridge } = setup({ subagentWriteAgoMs: 5_000, undelivered: false });
+    wsBridge.getSessionPendingMessageCount.mockReturnValue(1);
+    const infoSpy = vi.spyOn(log, "info");
+    recovery.driftDetectorTick();
+    expect(launcher.kill).not.toHaveBeenCalled();
+    expect(events(infoSpy, "silent_stdio_drift.withheld_live")[0][2]).toMatchObject({
+      trigger: "pending_override",
+      subagentActive: true,
+      cliWaitChannels: "futex_wait_queue×9, ep_poll×1",
+    });
+  });
+
+  it("pending-message override with pipe_write → recovers despite subagent activity (PLAN Task 2)", () => {
+    const { recovery, launcher, wsBridge } = setup({
+      subagentWriteAgoMs: 5_000,
+      undelivered: false,
+      waitChannels: "pipe_write×1, futex_wait_queue×8",
+    });
+    wsBridge.getSessionPendingMessageCount.mockReturnValue(1);
+    recovery.driftDetectorTick();
+    expect(launcher.kill).toHaveBeenCalledWith("s1");
+  });
+
+  it("recovery marks the session intentional BEFORE the kill, relaunches with --resume, clears the mark after (EC-2/EC-52, PLAN Task 4a)", async () => {
+    // Without the mark, the kill's `session:exited` arms the council reconnect
+    // cycle (sibling flickers reconnecting/degraded) and schedules a keepalive
+    // relaunch racing ours.
+    const { recovery, launcher, intentionalKills, onRelaunchSucceeded } = setup({ subagentWriteAgoMs: null });
+    const order: string[] = [];
+    launcher.kill.mockImplementation(async () => {
+      order.push(`kill:marked=${intentionalKills.has("s1")}`);
+      return true;
+    });
+    launcher.relaunch.mockImplementation(async () => {
+      order.push(`relaunch:marked=${intentionalKills.has("s1")}`);
+      return { ok: true };
+    });
+    recovery.driftDetectorTick();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(order).toEqual(["kill:marked=true", "relaunch:marked=true"]);
+    expect(onRelaunchSucceeded).toHaveBeenCalledWith("s1");
+    expect(intentionalKills.has("s1")).toBe(false);
+    // The keepalive path saw nothing to do (no duplicate relaunch armed).
+    expect([...recovery.keepaliveSessionIds()]).toEqual([]);
+  });
+
+  it("a failed drift relaunch clears the mark and falls back to the keepalive path (EC-52 finally)", async () => {
+    const { recovery, launcher, intentionalKills } = setup({ subagentWriteAgoMs: null });
+    launcher.relaunch.mockResolvedValue({ ok: false, error: "spawn failed" });
+    launcher.getSession.mockImplementation(() => info("s1", { state: "exited", cwd: "/root/proj", cliSessionId: "cli-1" }));
+    const warn = vi.spyOn(log, "warn");
+    // listSessions still reports the running record for the tick itself.
+    launcher.listSessions.mockReturnValue([info("s1", { state: "running", cwd: "/root/proj", cliSessionId: "cli-1", pid: 4242 })]);
+    recovery.driftDetectorTick();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(intentionalKills.has("s1")).toBe(false);
+    expect(events(warn, "silent_stdio_drift.relaunch_failed")).toHaveLength(1);
+    expect([...recovery.keepaliveSessionIds()]).toEqual(["s1"]);
+  });
+
+  it("a kill that throws still releases the mark (EC-52 finally)", async () => {
+    const { recovery, launcher, intentionalKills } = setup({ subagentWriteAgoMs: null });
+    launcher.kill.mockRejectedValue(new Error("boom"));
+    recovery.driftDetectorTick();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(intentionalKills.has("s1")).toBe(false);
+    expect(launcher.relaunch).not.toHaveBeenCalled();
+  });
+
+  it("a durable mark set during the recovery (archive / group teardown) survives it", async () => {
+    const { recovery, launcher, intentionalKills } = setup({ subagentWriteAgoMs: null });
+    launcher.kill.mockImplementation(async () => {
+      intentionalKills.add("s1"); // archive claimed it mid-flight
+      return true;
+    });
+    recovery.driftDetectorTick();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(intentionalKills.has("s1")).toBe(true);
+  });
+
+  it("rate guard: after DRIFT_RECOVERY_RATE_MAX recoveries in the window the tick stops relaunching and warns once (PLAN Task 4b)", async () => {
+    const { recovery, launcher, wsBridge } = setup({ subagentWriteAgoMs: null });
+    const warn = vi.spyOn(log, "warn");
+    for (let i = 0; i < DRIFT_RECOVERY_RATE_MAX; i++) {
+      recovery.driftDetectorTick();
+      await vi.advanceTimersByTimeAsync(1);
+    }
+    expect(launcher.kill).toHaveBeenCalledTimes(DRIFT_RECOVERY_RATE_MAX);
+    recovery.driftDetectorTick();
+    recovery.driftDetectorTick();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(launcher.kill).toHaveBeenCalledTimes(DRIFT_RECOVERY_RATE_MAX);
+    expect(events(warn, "silent_stdio_drift.rate_limited")).toHaveLength(1);
+    const pausedToasts = wsBridge.broadcastToSession.mock.calls.filter((c) =>
+      String((c[1] as { message?: string }).message).includes("automatic recovery paused"),
+    );
+    expect(pausedToasts).toHaveLength(1);
+  });
+
+  it("does not start a second recovery while one is in flight", async () => {
+    const { recovery, launcher } = setup({ subagentWriteAgoMs: null });
+    let release!: () => void;
+    launcher.kill.mockImplementation(() => new Promise<boolean>((r) => { release = () => r(true); }));
+    recovery.driftDetectorTick();
+    recovery.driftDetectorTick();
+    expect(launcher.kill).toHaveBeenCalledTimes(1);
+    release();
+    await vi.advanceTimersByTimeAsync(1);
+  });
+
+  it("logs the unverified-layout canary once when the CLI version differs from the verified one (PLAN Task 5)", () => {
+    const { recovery } = setup({ subagentWriteAgoMs: 5_000, undelivered: false, cliVersion: "2.2.0" });
+    // Candidate path is where the canary runs — force it via a queued message.
+    const { wsBridge } = { wsBridge: (recovery as unknown as { wsBridge: { getSessionPendingMessageCount: ReturnType<typeof vi.fn> } }).wsBridge };
+    wsBridge.getSessionPendingMessageCount.mockReturnValue(1);
+    const warn = vi.spyOn(log, "warn");
+    recovery.driftDetectorTick();
+    recovery.driftDetectorTick();
+    const canary = events(warn, "silent_stdio_drift.cli_layout_unverified");
+    expect(canary).toHaveLength(1);
+    expect(canary[0][2]).toMatchObject({ cliVersion: "2.2.0", verifiedCliVersion: "2.1.283" });
+  });
+
+  it("logs again when the suppression reason switches mid-stall (dedup keyed on reason, review #4)", () => {
+    const { recovery, wsBridge } = setup({ subagentWriteAgoMs: 5_000 });
+    const infoSpy = vi.spyOn(log, "info");
+    recovery.driftDetectorTick(); // live_subagent_activity
+    // The model output gets delivered-equivalent: rewrite jsonl with no assistant record.
+    const path = resolveJsonlPath(join(home, ".claude"), "/root/proj", "cli-1")!;
+    writeFileSync(path, JSON.stringify({ type: "user", timestamp: new Date(NOW - 2_000).toISOString() }) + "\n");
+    utimesSync(path, (NOW - 2_000) / 1000, (NOW - 2_000) / 1000);
+    wsBridge.getSessionPendingMessageCount.mockReturnValue(0);
+    recovery.driftDetectorTick(); // no_undelivered_output
+    const reasons = events(infoSpy, "silent_stdio_drift.suppressed").map((c) => (c[2] as { reason: string }).reason);
+    expect(reasons).toEqual(["live_subagent_activity", "no_undelivered_output"]);
+  });
 });

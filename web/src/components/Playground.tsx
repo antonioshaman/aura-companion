@@ -1585,7 +1585,7 @@ export function Playground() {
         {/* ─── Task Panel ──────────────────────────────── */}
         <Section
           title="Tasks"
-          description="Task list states: pending, in progress, completed, blocked"
+          description="Task list states: pending, in progress, completed, blocked. Backend-agnostic — fed by Claude TodoWrite frames and by Codex plan updates (re-emitted as synthetic TodoWrite)."
         >
           <div className="w-[280px] border border-cc-border rounded-xl overflow-hidden bg-cc-card">
             {/* Session stats mock */}

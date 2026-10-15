@@ -2765,6 +2765,49 @@ describe("task extraction: TodoWrite", () => {
     expect(tasks[1].subject).toBe("Write tests");
     expect(tasks[1].status).toBe("pending");
   });
+
+  it("accepts the Codex synthetic TodoWrite shape (no activeForm) — subject comes from content (review B-7)", () => {
+    // codex-adapter `handleTurnPlanUpdated` re-emits plan steps as TodoWrite
+    // with `{ content, status }` and only sometimes `activeForm`; the tool_use
+    // id is `codex-plan-<turnId>-<n>`. The Tasks section must get the content
+    // as the subject and no activeForm (TaskRow then shows the subject only).
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    fireMessage({
+      type: "assistant",
+      message: {
+        id: "codex-msg-plan-1",
+        type: "message",
+        role: "assistant",
+        model: "gpt-5.5",
+        content: [
+          {
+            type: "tool_use",
+            id: "codex-plan-turn-1-1",
+            name: "TodoWrite",
+            input: {
+              todos: [
+                { content: "Inspect the adapter", status: "completed" },
+                { content: "Patch the parser", status: "in_progress" },
+                { content: "Run the tests", status: "pending" },
+              ],
+            },
+          },
+        ],
+        stop_reason: "tool_use",
+        usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      },
+      parent_tool_use_id: null,
+    });
+    const tasks = useStore.getState().sessionTasks.get("s1")!;
+    expect(tasks.map((t) => [t.subject, t.status])).toEqual([
+      ["Inspect the adapter", "completed"],
+      ["Patch the parser", "in_progress"],
+      ["Run the tests", "pending"],
+    ]);
+    expect(tasks[1].activeForm).toBeUndefined();
+    expect(useStore.getState().sessionTasksUpdatedAt.get("s1")).toEqual(expect.any(Number));
+  });
 });
 
 // ===========================================================================

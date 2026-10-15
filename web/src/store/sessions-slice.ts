@@ -31,6 +31,13 @@ function getInitialCollapsedProjects(): Set<string> {
 export interface SessionsSlice {
   sessions: Map<string, SessionState>;
   sdkSessions: SdkSessionInfo[];
+  /**
+   * True once a server-authoritative session list (`GET /api/sessions`) has
+   * landed in this page load. `sdkSessions.length > 0` cannot stand in for it:
+   * a local seed (HomePage after create) fills the list early, and a server
+   * with zero sessions leaves it empty while loaded.
+   */
+  sdkSessionsLoaded: boolean;
   currentSessionId: string | null;
   connectionStatus: Map<string, "connecting" | "connected" | "disconnected">;
   cliConnected: Map<string, boolean>;
@@ -68,7 +75,8 @@ export interface SessionsSlice {
   updateSession: (sessionId: string, updates: Partial<SessionState>) => void;
   removeSession: (sessionId: string) => void;
   removeBridgeSession: (sessionId: string) => void;
-  setSdkSessions: (sessions: SdkSessionInfo[]) => void;
+  /** `fromServer: true` when `sessions` is a full `GET /api/sessions` answer. */
+  setSdkSessions: (sessions: SdkSessionInfo[], opts?: { fromServer?: boolean }) => void;
   setConnectionStatus: (sessionId: string, status: "connecting" | "connected" | "disconnected") => void;
   setCliConnected: (sessionId: string, connected: boolean) => void;
   setCliReconnecting: (sessionId: string, reconnecting: boolean) => void;
@@ -95,6 +103,7 @@ export interface SessionsSlice {
 export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> = (set) => ({
   sessions: new Map(),
   sdkSessions: [],
+  sdkSessionsLoaded: false,
   currentSessionId: getInitialSessionId(),
   connectionStatus: new Map(),
   cliConnected: new Map(),
@@ -238,7 +247,7 @@ export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> 
       return { sessions };
     }),
 
-  setSdkSessions: (sessions) =>
+  setSdkSessions: (sessions, opts) =>
     set((s) => {
       const cliConnected = new Map(s.cliConnected);
       const cliReconnecting = new Map(s.cliReconnecting);
@@ -252,7 +261,12 @@ export const createSessionsSlice: StateCreator<AppState, [], [], SessionsSlice> 
           cliReconnecting.delete(session.sessionId);
         }
       }
-      return { sdkSessions: sessions, cliConnected, cliReconnecting };
+      return {
+        sdkSessions: sessions,
+        cliConnected,
+        cliReconnecting,
+        ...(opts?.fromServer ? { sdkSessionsLoaded: true } : {}),
+      };
     }),
 
   setConnectionStatus: (sessionId, status) =>
