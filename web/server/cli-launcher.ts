@@ -1551,6 +1551,31 @@ export class CliLauncher {
         this.clearPidAndPersist(sessionId, "observer_prompt_source_drift_refused");
         return { ok: false, error: reason };
       }
+      // Same-source sha drift on a codex observer: spawnCodex resumes the
+      // thread (threadId = info.cliSessionId) and the updated prompt rides
+      // along as developerInstructions on thread/resume — but the resumed
+      // history still contains the OLD instructions plus replies the model
+      // made under them, and the model keeps following that stale contract
+      // (observed live, grp_879b81b6 2026-10-15). Drop the thread so the
+      // fresh spawn goes through thread/start with only the new
+      // instructions in context. Claude is untouched: its observer
+      // relaunch resumes via --resume with the prompt baked at spawn
+      // (CR-3), so a mid-thread instruction swap cannot happen there.
+      if (info.backendType === "codex") {
+        const droppedThreadId = info.cliSessionId;
+        info.cliSessionId = undefined;
+        log.info(
+          "council.observer-prompt.fresh-thread",
+          "observer prompt drifted in place — dropping codex thread for a fresh start",
+          {
+            event: "council.observer-prompt.fresh-thread",
+            sessionGroupId: info.sessionGroupId,
+            sessionId,
+            role: "observer",
+            droppedThreadId,
+          },
+        );
+      }
     }
     if (info.backendType === "codex") {
       this.spawnCodex(sessionId, info, effectiveRelaunchOptions);

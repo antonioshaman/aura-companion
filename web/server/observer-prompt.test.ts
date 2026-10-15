@@ -752,3 +752,25 @@ describe("observer system prompt budget (P3/B1)", () => {
     expect(text).toContain("## Failsafe");
   });
 });
+
+// Observed live (grp_879b81b6, 2026-10-15): a codex observer that could not
+// read checkpoint artifacts filed its OWN tooling failure as a NOTE finding
+// against the artifact, on every delivery — polluting reviews with
+// refusal loops instead of judging the work. The prompt must carry an
+// explicit rule: tooling failures are reported once, as INFO, with the
+// `OBSERVER-BLOCKED:` prefix, and never attributed to the work under
+// review. Both prompt sources must carry the rule or a relaunch can swap
+// it away.
+describe("observer prompt — tooling-failure ≠ finding rule", () => {
+  const WORKSPACE_PROMPT = fileURLToPath(new URL("../../.council/prompts/observer-system.md", import.meta.url));
+
+  it.each([
+    ["workspace", () => _readFileSync(WORKSPACE_PROMPT, "utf-8")],
+    ["bundled", () => BUNDLED_OBSERVER_PROMPT],
+  ] as const)("%s prompt instructs OBSERVER-BLOCKED INFO reporting for tooling failures", (_label, load) => {
+    const text = load();
+    expect(text).toContain("OBSERVER-BLOCKED:");
+    // The rule must bind the failure mode to INFO severity, not NOTE/WARN/STOP.
+    expect(text).toMatch(/OBSERVER-BLOCKED[\s\S]{0,400}INFO|INFO[\s\S]{0,400}OBSERVER-BLOCKED/);
+  });
+});

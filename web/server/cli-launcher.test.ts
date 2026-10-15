@@ -3215,6 +3215,129 @@ describe("observer-prompt bundled fallback (Task 9 — integration)", () => {
     expect(driftCalls).toHaveLength(0);
     warnSpy.mockRestore();
   });
+
+  // Codex observers RESUME their thread on relaunch (threadId =
+  // info.cliSessionId at spawnCodex), and codex re-sends the observer
+  // prompt as developerInstructions on thread/resume. Observed live
+  // (grp_879b81b6, 2026-10-15): the resumed thread's history still
+  // contains the OLD instructions plus the model's own replies made
+  // under them, and the model keeps following the old contract — the
+  // new prompt is delivered but has no effect. A same-source sha drift
+  // must therefore drop the thread and start fresh, so the only
+  // instructions the model has ever seen are the current ones.
+  it("codex observer starts a FRESH thread when the observer prompt sha drifts across relaunch (same source)", async () => {
+    process.env.COMPANION_CODEX_TRANSPORT = "ws";
+    mockResolveBinary.mockReturnValue("/opt/fake/codex");
+    const { mkdirSync, writeFileSync } = await import("node:fs");
+    const workspacePromptDir = join(tempDir, ".council", "prompts");
+    mkdirSync(workspacePromptDir, { recursive: true });
+    const promptPath = join(workspacePromptDir, "observer-system.md");
+    writeFileSync(promptPath, "<!-- observer-system-prompt v1 -->\n\n" + "y".repeat(512));
+
+    let resolveCodex1!: (code: number) => void;
+    const codexProc1 = {
+      pid: 7001,
+      kill: vi.fn(() => resolveCodex1(0)),
+      exited: new Promise<number>((r) => { resolveCodex1 = r; }),
+      stdout: null,
+      stderr: null,
+    };
+    const proxy1 = createPendingCodexWsProxyProc(7002);
+    proxy1.proc.kill.mockImplementation(() => proxy1.resolveExit(0));
+    const codexProc2 = createMockProc(7003);
+    const proxy2 = createPendingCodexWsProxyProc(7004);
+    mockSpawn
+      .mockReturnValueOnce(codexProc1 as any)
+      .mockReturnValueOnce(proxy1.proc as any)
+      .mockReturnValueOnce(codexProc2 as any)
+      .mockReturnValueOnce(proxy2.proc as any);
+
+    const info = launcher.launch({
+      backendType: "codex",
+      cwd: tempDir,
+      sessionGroupRole: "observer",
+      sessionGroupId: "grp_int_drift_fresh_thread",
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    // Simulate the established Codex thread from the first spawn.
+    launcher.setCLISessionId(info.sessionId, "thread-old-01");
+
+    // Edit the workspace prompt in place — same source, new sha.
+    writeFileSync(promptPath, "<!-- observer-system-prompt v1 -->\n\n" + "z".repeat(512));
+
+    const warnSpy = vi.spyOn(log, "warn");
+    const infoSpy = vi.spyOn(log, "info");
+    const result = await launcher.relaunch(info.sessionId);
+    expect(result.ok).toBe(true);
+
+    // The poisoned thread must not be resumed.
+    expect(info.cliSessionId).toBeUndefined();
+
+    // Same-source drift still logs WARN (forensic record, no refusal) …
+    const driftCalls = warnSpy.mock.calls.filter(
+      (call) => call[0] === "council.observer-prompt.source-drift",
+    );
+    expect(driftCalls).toHaveLength(1);
+    // … and the fresh-thread decision is a structured EC-9 log line.
+    const freshCalls = infoSpy.mock.calls.filter(
+      (call) => call[0] === "council.observer-prompt.fresh-thread",
+    );
+    expect(freshCalls).toHaveLength(1);
+    const payload = freshCalls[0][2] as Record<string, unknown>;
+    expect(payload.event).toBe("council.observer-prompt.fresh-thread");
+    expect(payload.sessionGroupId).toBe("grp_int_drift_fresh_thread");
+    expect(payload.sessionId).toBe(info.sessionId);
+    expect(payload.role).toBe("observer");
+    expect(payload.droppedThreadId).toBe("thread-old-01");
+    warnSpy.mockRestore();
+    infoSpy.mockRestore();
+  });
+
+  // Negative control: without prompt drift the codex observer keeps its
+  // thread across relaunch — dropping continuity on every restart would
+  // throw away the observer's review context for no reason.
+  it("codex observer keeps its thread across relaunch when the prompt is unchanged", async () => {
+    process.env.COMPANION_CODEX_TRANSPORT = "ws";
+    mockResolveBinary.mockReturnValue("/opt/fake/codex");
+    const { mkdirSync, writeFileSync } = await import("node:fs");
+    const workspacePromptDir = join(tempDir, ".council", "prompts");
+    mkdirSync(workspacePromptDir, { recursive: true });
+    writeFileSync(
+      join(workspacePromptDir, "observer-system.md"),
+      "<!-- observer-system-prompt v1 -->\n\n" + "y".repeat(512),
+    );
+
+    let resolveCodex1!: (code: number) => void;
+    const codexProc1 = {
+      pid: 7101,
+      kill: vi.fn(() => resolveCodex1(0)),
+      exited: new Promise<number>((r) => { resolveCodex1 = r; }),
+      stdout: null,
+      stderr: null,
+    };
+    const proxy1 = createPendingCodexWsProxyProc(7102);
+    proxy1.proc.kill.mockImplementation(() => proxy1.resolveExit(0));
+    const codexProc2 = createMockProc(7103);
+    const proxy2 = createPendingCodexWsProxyProc(7104);
+    mockSpawn
+      .mockReturnValueOnce(codexProc1 as any)
+      .mockReturnValueOnce(proxy1.proc as any)
+      .mockReturnValueOnce(codexProc2 as any)
+      .mockReturnValueOnce(proxy2.proc as any);
+
+    const info = launcher.launch({
+      backendType: "codex",
+      cwd: tempDir,
+      sessionGroupRole: "observer",
+      sessionGroupId: "grp_int_drift_keep_thread",
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    launcher.setCLISessionId(info.sessionId, "thread-keep-01");
+
+    const result = await launcher.relaunch(info.sessionId);
+    expect(result.ok).toBe(true);
+    expect(info.cliSessionId).toBe("thread-keep-01");
+  });
 });
 
 // Council Plan Bug B Cleanup Task 14: EC-19 static-grep canary anchoring
