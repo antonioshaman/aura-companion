@@ -1126,16 +1126,25 @@ export class WsBridge {
         // sentinel (stamped when a model is unavailable) is skipped, and
         // observers are skipped for persistence — their model is fixed at
         // spawn (EC-1) and must not be mutated by a transient frame.
+        //
+        // Persistence compares against `launcherModel` (the model this
+        // process was spawned with, or the last confirmed switch), NOT
+        // `state.model`: the CLI re-emits an init frame carrying the new
+        // model right after a set_model, which moved `state.model` first and
+        // silently defeated the old `!== state.model` check — a session kept
+        // relaunching on its creation-time model for days (8b26ccb7,
+        // 2026-10-12..15).
         const mainModel = msg.message?.model;
         if (
           msg.parent_tool_use_id === null
           && typeof mainModel === "string"
           && mainModel.length > 0
           && mainModel !== "<synthetic>"
-          && mainModel !== session.state.model
         ) {
+          const persistedBaseline = session.launcherModel ?? session.state.model;
           session.state.model = mainModel;
-          if (session.state.sessionGroupRole !== "observer") {
+          session.launcherModel = mainModel;
+          if (mainModel !== persistedBaseline && session.state.sessionGroupRole !== "observer") {
             companionBus.emit("session:model-active-changed", {
               sessionId: session.id,
               model: mainModel,
@@ -1278,7 +1287,14 @@ export class WsBridge {
       if (meta.cliSessionId) {
         companionBus.emit("session:cli-id-received", { sessionId: session.id, cliSessionId: meta.cliSessionId });
       }
-      if (meta.model) session.state.model = meta.model;
+      if (meta.model) {
+        // Baseline seed only when the spawn did not provide one (no --model
+        // flag, or the legacy WS path's first connect). Later inits (the CLI
+        // re-emits one after a set_model) only move the UI label —
+        // persistence waits for the main assistant frame to confirm.
+        if (session.launcherModel === undefined) session.launcherModel = meta.model;
+        session.state.model = meta.model;
+      }
       // For containerized sessions, the CLI reports the container's cwd (e.g. /workspace).
       // Keep the host path (set by markContainerized()) for correct project grouping.
       if (meta.cwd && !session.state.is_containerized) {
@@ -1475,10 +1491,16 @@ export class WsBridge {
   handleCLIStdioOpen(
     sessionId: string,
     transport: CliTransport,
-    opts?: { resume?: boolean },
+    opts?: { resume?: boolean; spawnModel?: string },
   ): ClaudeAdapter {
     this.recorder?.recordEvent(sessionId, "ws_open", "cli");
-    return this.openCliTransport(sessionId, transport, opts);
+    // A stdio open is always a freshly spawned process, so its spawn
+    // `--model` (from the launcher's real argv) IS the persisted baseline.
+    // The legacy WS path never resets it: a WS reconnect can re-dial the SAME
+    // live process, whose baseline must survive (observer review, cp 152).
+    // Undefined (no --model flag) → the process's first init seeds it.
+    this.getOrCreateSession(sessionId).launcherModel = opts?.spawnModel;
+    return this.openCliTransport(sessionId, transport, { resume: opts?.resume });
   }
 
   /**

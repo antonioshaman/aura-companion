@@ -1183,6 +1183,31 @@ describe("stdio transport", () => {
     expect(capturedOpts).toEqual({ resume: true });
   });
 
+  // The bridge baselines model-switch persistence on the model the process
+  // ACTUALLY runs (Session.launcherModel). Source of truth is the real argv's
+  // --model, same as `resume` above — not a re-derived option value.
+  it("passes the argv --model to the stdio opener as spawnModel", () => {
+    let capturedOpts: { resume?: boolean; spawnModel?: string } | undefined;
+    launcher.setStdioCliOpener((_sid, _t, opts) => {
+      capturedOpts = opts;
+      return createStubClaudeAdapter() as unknown as ClaudeAdapter;
+    });
+    mockSpawn.mockReturnValue({
+      pid: 7003,
+      kill: vi.fn(),
+      exited: new Promise<number>(() => {}),
+      stdin: { write: vi.fn(), flush: vi.fn(), end: vi.fn() },
+      stdout: new ReadableStream<Uint8Array>({ start() {} }),
+      stderr: new ReadableStream<Uint8Array>({ start() {} }),
+    });
+
+    launcher.launch({ cwd: "/tmp/project", model: "claude-opus-4-8" });
+
+    const argv = mockSpawn.mock.calls[0][0] as string[];
+    expect(argv[argv.indexOf("--model") + 1]).toBe("claude-opus-4-8");
+    expect(capturedOpts?.spawnModel).toBe("claude-opus-4-8");
+  });
+
   it("kills a restart-survived stdio process instead of waiting for a reconnect that cannot happen", async () => {
     // stdio pipes die with the previous server process, so a surviving PID can
     // never talk to us again. Leaving it "starting" strands a session that
