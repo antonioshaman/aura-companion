@@ -38,9 +38,17 @@ export interface ResultFrameLike {
   errors?: string[];
 }
 
+/** Terminal reasons the CLI uses for a turn cut off by a restart:
+ *  `aborted_streaming` (mid-text) and `aborted_tools` (mid-tool-call —
+ *  observed live 2026-10-15, session 40f03a1e: a server restart killed a
+ *  running Bash tool; the resume frame carried
+ *  `[ede_diagnostic] … stop_reason=tool_use`). Same bookkeeping class,
+ *  same rendering. Everything else stays fail-closed toward "real error". */
+const ABORTED_TERMINAL_REASONS = new Set(["aborted_streaming", "aborted_tools"]);
+
 export function isResumeInterruptedResult(r: ResultFrameLike | null | undefined): boolean {
   if (!r || r.is_error !== true) return false;
-  if (r.terminal_reason !== "aborted_streaming") return false;
+  if (typeof r.terminal_reason !== "string" || !ABORTED_TERMINAL_REASONS.has(r.terminal_reason)) return false;
   const errors = r.errors;
   if (!Array.isArray(errors) || errors.length === 0) return false;
   return errors.every((e) => typeof e === "string" && e.startsWith(EDE_DIAGNOSTIC_PREFIX));
