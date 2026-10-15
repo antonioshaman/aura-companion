@@ -251,7 +251,7 @@ export interface SdkSessionInfo {
   /** Whether internet/web search is enabled for Codex sessions */
   codexInternetAccess?: boolean;
   /** Sandbox mode selected for Codex sessions */
-  codexSandbox?: "workspace-write" | "danger-full-access";
+  codexSandbox?: "read-only" | "workspace-write" | "danger-full-access";
   /** If this session was spawned by a cron job */
   cronJobId?: string;
   /** Human-readable name of the cron job that spawned this session */
@@ -351,7 +351,7 @@ export interface LaunchOptions {
   env?: Record<string, string | undefined>;
   backendType?: BackendType;
   /** Codex sandbox mode. */
-  codexSandbox?: "workspace-write" | "danger-full-access";
+  codexSandbox?: "read-only" | "workspace-write" | "danger-full-access";
   /** Whether Codex internet/web search should be enabled for this session. */
   codexInternetAccess?: boolean;
   /** Optional override for CODEX_HOME used by Codex sessions. */
@@ -1200,12 +1200,26 @@ export class CliLauncher {
         ? callerAllowed.filter((t) => OBSERVER_ALLOWED_TOOLS.includes(t))
         : [...OBSERVER_ALLOWED_TOOLS];
       info.permissionMode = OBSERVER_PERMISSION_MODE;
+      // Codex ignores the Claude tool allow/deny lists above and spawns with
+      // approvalPolicy=never + danger-full-access by default — which would
+      // leave the observer prompt as the only guard against writes. The
+      // observer's sole write surface is its final reply message (the server
+      // records the review), so a read-only sandbox loses nothing and makes
+      // the "do not write" rule an enforced boundary (EC-1 at spawn, never
+      // widened by the caller's value).
+      const codexObserverSandbox = info.backendType === "codex"
+        ? { codexSandbox: "read-only" as const }
+        : {};
+      if (info.backendType === "codex") {
+        info.codexSandbox = "read-only";
+      }
       return {
         ...options,
         systemPrompt: composedSystemPrompt,
         allowedTools: intersectedAllowed,
         disallowedTools: [...OBSERVER_DISALLOWED_TOOLS],
         permissionMode: OBSERVER_PERMISSION_MODE,
+        ...codexObserverSandbox,
       };
     } catch (err) {
       throw new Error(

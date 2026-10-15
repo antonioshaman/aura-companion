@@ -62,6 +62,10 @@ describe("Codex adapter method drift vs upstream protocol snapshot", () => {
       // adapter's informational no-op group in #347) but not yet in the pinned
       // upstream snapshot. Re-pin the snapshot to promote it.
       "skills/changed",
+      // Generic per-thread warning notification (codex-cli 0.162+, e.g.
+      // "ignoring 1 unrecognized configuration setting") — informational
+      // no-op in the adapter, same treatment as skills/changed.
+      "warning",
       "codex/event/stream_error",
       "codex/event/error",
       "codex/event/token_count",

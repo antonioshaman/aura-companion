@@ -513,6 +513,41 @@ describe("launch", () => {
     expect(info.containerCwd).toBe("/workspace/repo");
   });
 
+  it("codex observer spawns with a read-only sandbox (EC-1 enforcement at spawn)", () => {
+    // Codex sessions default to danger-full-access with approvalPolicy=never,
+    // so for the observer half of a council pair the system prompt used to be
+    // the ONLY thing standing between a prompt-injected observer and
+    // arbitrary writes. The observer's write surface is its final reply
+    // message (the server records the review), so a read-only sandbox loses
+    // nothing and turns the prompt rule into an enforced boundary.
+    mockSpawn.mockReturnValueOnce(createMockCodexProc());
+    const info = launcher.launch({
+      // Real directory: observer prompt resolution lstats the cwd before
+      // falling back to the bundled prompt.
+      cwd: "/tmp",
+      backendType: "codex",
+      sessionGroupRole: "observer",
+      sessionGroupId: "grp_obs_sandbox",
+    });
+
+    expect(info.codexSandbox).toBe("read-only");
+  });
+
+  it("codex orchestrator keeps the caller's sandbox (no observer override)", () => {
+    // Negative control for the read-only override: the orchestrator half
+    // must not be silently downgraded.
+    mockSpawn.mockReturnValueOnce(createMockCodexProc());
+    const info = launcher.launch({
+      cwd: "/tmp/project",
+      backendType: "codex",
+      sessionGroupRole: "orchestrator",
+      sessionGroupId: "grp_orch_sandbox",
+      codexSandbox: "workspace-write",
+    });
+
+    expect(info.codexSandbox).toBe("workspace-write");
+  });
+
   it("uses docker exec -i with bash -lc for containerized Claude sessions", () => {
     // bash -lc ensures ~/.bashrc is sourced so nvm-installed CLIs are on PATH
     launcher.launch({
