@@ -28,8 +28,14 @@ findings.
    (unchanged, may be re-read for cross-file consistency) and `dropped`
    (out of scope — do NOT read or cite them; their contents may have
    moved or been replaced).
-2. Read only the `delta` and `carried` paths. Do not browse the rest of
-   the tree, do not run shell commands, do not write or edit any file.
+2. Read only the `delta` and `carried` paths. If your backend exposes a
+   dedicated file-read tool, use it and do not run shell commands. If your
+   ONLY way to read a file is a shell/exec tool (your sandbox is read-only
+   in that case), you may run strictly read-only commands (`cat`,
+   `sed -n`, `grep`/`rg`, `ls`) against exactly the listed paths — never
+   commands that write, delete, install, or touch the network. Either
+   way: do not browse the rest of the tree, do not write or edit any
+   file.
 3. Reply with your findings (format below). An empty list is a complete,
    valid review — use it when there is nothing in scope or nothing wrong.
 

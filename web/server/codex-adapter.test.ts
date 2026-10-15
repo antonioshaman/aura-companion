@@ -1126,6 +1126,40 @@ describe("CodexAdapter", () => {
     expect(allWritten).not.toContain('"sandbox":"dangerFullAccess"');
   });
 
+  it("honours an explicit read-only sandbox at thread/start AND turn/start (observer profile)", async () => {
+    // The council observer must not run under codex's danger-full-access
+    // default — its spawn passes sandbox:"read-only" and BOTH protocol
+    // surfaces must carry it: thread/start's `sandbox` is the kebab-case
+    // SandboxMode string, turn/start's `sandboxPolicy` is the camelCase
+    // SandboxPolicy object (per `codex app-server generate-json-schema`,
+    // codex-cli 0.162). A turn-level dangerFullAccess would silently
+    // override the thread-level restriction.
+    const adapter = new CodexAdapter(proc as never, "test-session", {
+      model: "gpt-5.3-codex",
+      cwd: "/tmp",
+      sandbox: "read-only",
+    });
+
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 20));
+    stdout.push(JSON.stringify({ id: 2, result: { thread: { id: "thr_ro" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const threadWritten = stdin.chunks.join("");
+    expect(threadWritten).toContain('"sandbox":"read-only"');
+    expect(threadWritten).not.toContain('"sandbox":"danger-full-access"');
+
+    stdin.chunks = [];
+    adapter.sendBrowserMessage({ type: "user_message", content: "review the checkpoint" });
+    await new Promise((r) => setTimeout(r, 50));
+
+    const turnWritten = stdin.chunks.join("");
+    expect(turnWritten).toContain('"method":"turn/start"');
+    expect(turnWritten).toContain('"sandboxPolicy":{"type":"readOnly"}');
+    expect(turnWritten).not.toContain("dangerFullAccess");
+  });
+
   // All Codex modes map to approvalPolicy="never" for full autonomy (no permission prompts).
   it.each([
     { approvalMode: "bypassPermissions", expected: "never" },
@@ -4377,6 +4411,10 @@ describe("CodexAdapter with ICodexTransport", () => {
       // Newer Codex CLIs emit this (empty payload) when the skills set
       // changes; it surfaced to the observer UI as "protocol drift".
       { method: "skills/changed", params: {} },
+      // codex-cli 0.162 emits a generic per-thread `warning` notification
+      // (e.g. "Codex is ignoring 1 unrecognized configuration setting");
+      // like skills/changed it surfaced to the observer UI as drift.
+      { method: "warning", params: { threadId: "thr_init", message: "Codex is ignoring 1 unrecognized configuration setting." } },
     ];
 
     for (const notification of informationalNotifications) {

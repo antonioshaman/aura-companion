@@ -188,7 +188,7 @@ export interface CodexAdapterOptions {
   /** Runtime cwd for Codex RPC calls. Falls back to `cwd` when omitted. */
   executionCwd?: string;
   approvalMode?: string;
-  sandbox?: "workspace-write" | "danger-full-access";
+  sandbox?: "read-only" | "workspace-write" | "danger-full-access";
   /** If provided, resume an existing thread instead of starting a new one. */
   threadId?: string;
   /** Optional recorder for raw message capture. */
@@ -1940,6 +1940,10 @@ export class CodexAdapter implements IBackendAdapter {
       case "remoteControl/status/changed":
       case "sessionConfigured":
       case "skills/changed":
+      // Generic per-thread warning (codex-cli 0.162+), e.g. "Codex is
+      // ignoring 1 unrecognized configuration setting". Operational noise
+      // for the launcher config, not user-actionable in the session.
+      case "warning":
       case "windows/worldWritableWarning":
         // Informational app-server notifications; not user-actionable here.
         break;
@@ -3304,7 +3308,16 @@ export class CodexAdapter implements IBackendAdapter {
 
   /** Map permission mode to SandboxPolicy object (for turn/start's sandboxPolicy field). */
   private mapSandboxPolicyObject(_mode?: string): { type: string } {
-    // Always full access — matches approvalPolicy: "never" for full autonomy.
+    // An explicit spawn-time sandbox restriction (council observer profile)
+    // must survive at the turn level too — thread/start's `sandbox` string
+    // alone is not enough, a turn-level dangerFullAccess would override it.
+    // SandboxPolicy variants are camelCase per the app-server JSON schema
+    // (`readOnly`, `workspaceWrite`, `dangerFullAccess`); networkAccess
+    // defaults to false for readOnly, which is what the observer wants.
+    if (this.options.sandbox === "read-only") {
+      return { type: "readOnly" };
+    }
+    // Otherwise full access — matches approvalPolicy: "never" for full autonomy.
     return { type: "dangerFullAccess" };
   }
 
