@@ -7,7 +7,10 @@ import {
   countAssistantRecordsBetween,
   countUndeliveredAssistantRecords,
   defaultSubagentActivitySince,
+  defaultSubagentOpenToolCallSince,
+  endsInOpenToolCall,
   resolveCliSessionPaths,
+  SUBAGENT_OPEN_TOOL_CALL_CEILING_MS,
   resolveJsonlPath,
   DEFAULT_LAG_TOLERANCE_MS,
   SUBAGENT_LIVENESS_WINDOW_MS,
@@ -681,5 +684,121 @@ describe("checkDrift — replay of prod drift kills", () => {
     const v = replayAtKillTick(fx, true);
     expect(v.drifted).toBe(true);
     expect(v.undeliveredAssistantRecords).toBeGreaterThan(0);
+  });
+});
+
+
+// Observer review 2026-10-14 WARN 1: a subagent inside ONE long tool call
+// (slow test run, long fetch) writes nothing under its tree until the call
+// returns, so the 5 min mtime window alone would read it as dead mid fan-out.
+// An open tool call keeps the tree alive up to SUBAGENT_OPEN_TOOL_CALL_CEILING_MS.
+describe("endsInOpenToolCall (subagent transcript tail)", () => {
+  const rec = (o: object) => JSON.stringify(o);
+  const toolUse = rec({ type: "assistant", message: { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Bash", input: {} }] } });
+  const toolResult = rec({ type: "user", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] } });
+  const endTurn = rec({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "done" }], stop_reason: "end_turn" } });
+  const attachment = rec({ type: "attachment" });
+
+  it("true when the last meaningful record is an assistant tool_use", () => {
+    expect(endsInOpenToolCall([toolResult, toolUse].join("\n") + "\n")).toBe(true);
+  });
+
+  it("skips trailing attachment records (CLI 2.1.283 interleaves them)", () => {
+    expect(endsInOpenToolCall([toolUse, attachment, attachment].join("\n"))).toBe(true);
+  });
+
+  it("false once the tool_result landed, or when the subagent finished its turn", () => {
+    expect(endsInOpenToolCall([toolUse, toolResult].join("\n"))).toBe(false);
+    expect(endsInOpenToolCall([toolUse, toolResult, attachment, endTurn].join("\n"))).toBe(false);
+  });
+
+  it("tolerates a tail that starts mid-record and empty input", () => {
+    expect(endsInOpenToolCall('tent":"x"}}\n' + toolUse)).toBe(true);
+    expect(endsInOpenToolCall("")).toBe(false);
+  });
+});
+
+describe("checkDrift — open subagent tool call keeps a quiet tree alive", () => {
+  const NOW = 1_800_000_000_000;
+  const base: DriftDetectorSessionState = {
+    sessionId: "s",
+    bunLastFrameMs: NOW - 20 * 60_000,
+    jsonlPath: "/tmp/cli.jsonl",
+    sessionDir: "/tmp/cli",
+  };
+  const stat = (p: unknown) => (String(p) === "/tmp/cli.jsonl" ? { mtimeMs: NOW - 3_000 } : null);
+
+  it("quiet past the 5 min window but an open tool call → live_subagent_activity, probed with the 15 min ceiling (not floored at bun's last frame)", () => {
+    const since: number[] = [];
+    const v = checkDrift(base, {
+      now: () => NOW,
+      statFile: stat,
+      undeliveredOutput: () => 2,
+      subagentActivitySince: () => false,
+      subagentOpenToolCallSince: (_d, s) => { since.push(s); return true; },
+    });
+    expect(v).toMatchObject({ drifted: false, suppressedReason: "live_subagent_activity" });
+    expect(since).toEqual([NOW - SUBAGENT_OPEN_TOOL_CALL_CEILING_MS]);
+  });
+
+  it("an open call last written beyond the ceiling no longer suppresses (no wedge from a subagent that died mid-call)", () => {
+    const lastWrite = NOW - SUBAGENT_OPEN_TOOL_CALL_CEILING_MS - 60_000;
+    const v = checkDrift(base, {
+      now: () => NOW,
+      statFile: stat,
+      undeliveredOutput: () => 2,
+      subagentActivitySince: () => false,
+      subagentOpenToolCallSince: (_d, s) => lastWrite > s,
+    });
+    expect(v.drifted).toBe(true);
+  });
+
+  it("the open-call probe is not consulted when recent activity already proves life", () => {
+    let called = 0;
+    checkDrift(base, {
+      now: () => NOW,
+      statFile: stat,
+      undeliveredOutput: () => 2,
+      subagentActivitySince: () => true,
+      subagentOpenToolCallSince: () => { called++; return true; },
+    });
+    expect(called).toBe(0);
+  });
+});
+
+describe("defaultSubagentOpenToolCallSince (real files)", () => {
+  let dir: string | null = null;
+  afterEach(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+    dir = null;
+  });
+  const toolUse = JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: {} }] } });
+  const endTurn = JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "done" }] } });
+
+  function agent(name: string, body: string, agoMs: number) {
+    mkdirSync(join(dir!, "subagents"), { recursive: true });
+    const f = join(dir!, "subagents", name);
+    writeFileSync(f, body + "\n");
+    const t = (Date.now() - agoMs) / 1000;
+    utimesSync(f, t, t);
+  }
+
+  it("true for an agent transcript written after sinceMs that ends in an open tool call", () => {
+    dir = mkdtempSync(join(tmpdir(), "drift-open-"));
+    agent("agent-a.jsonl", toolUse, 8 * 60_000);
+    expect(defaultSubagentOpenToolCallSince(dir, Date.now() - 15 * 60_000)).toBe(true);
+  });
+
+  it("false for a finished agent, a transcript older than sinceMs, or a non-jsonl file", () => {
+    dir = mkdtempSync(join(tmpdir(), "drift-open-"));
+    agent("agent-done.jsonl", endTurn, 60_000);
+    agent("agent-old.jsonl", toolUse, 20 * 60_000);
+    agent("agent-x.meta.json", toolUse, 60_000);
+    expect(defaultSubagentOpenToolCallSince(dir, Date.now() - 15 * 60_000)).toBe(false);
+  });
+
+  it("false when there is no subagents/ dir", () => {
+    dir = mkdtempSync(join(tmpdir(), "drift-open-"));
+    expect(defaultSubagentOpenToolCallSince(dir, 0)).toBe(false);
   });
 });

@@ -154,6 +154,18 @@ export interface DriftDetectorDeps {
    * suppresses the kill as `live_subagent_activity`.
    */
   readonly subagentActivitySince?: (sessionDir: string, sinceMs: number) => boolean;
+  /**
+   * Second liveness probe, consulted when the tree has been quiet for longer
+   * than {@link SUBAGENT_LIVENESS_WINDOW_MS}: true if a subagent transcript
+   * written after `sinceMs` ends in an OPEN tool call (its last meaningful
+   * record is an `assistant` `tool_use` with no `tool_result` yet). A subagent
+   * inside one long tool call (slow test run, long fetch) writes nothing until
+   * the call returns. The detector passes `now - SUBAGENT_OPEN_TOOL_CALL_CEILING_MS`
+   * (not floored at bun's last frame — a long call often starts before the
+   * stall), so a crashed subagent that never closed its call cannot suppress
+   * forever.
+   */
+  readonly subagentOpenToolCallSince?: (sessionDir: string, sinceMs: number) => boolean;
 }
 
 /**
@@ -308,6 +320,99 @@ export function defaultSubagentActivitySince(sessionDir: string, sinceMs: number
 }
 
 /**
+ * How long an open subagent tool call keeps the tree "alive" after its last
+ * write (observer review 2026-10-14, WARN 1). Covers a Bash call up to its
+ * 10 min timeout with margin; past it, even an open call no longer suppresses,
+ * so a subagent that died mid-call cannot wedge recovery (review #1).
+ */
+export const SUBAGENT_OPEN_TOOL_CALL_CEILING_MS = 15 * 60_000;
+
+/** Tail read per subagent transcript by {@link defaultSubagentOpenToolCallSince}. */
+export const SUBAGENT_TAIL_BYTES = 64 * 1024;
+
+/**
+ * True if the last meaningful record of a subagent jsonl chunk is an
+ * `assistant` record carrying a `tool_use` block — the subagent is waiting on
+ * a tool result. `user` (tool_result / prompt) and `assistant` records decide;
+ * everything else (`attachment`, …) is skipped. Unparseable lines (a tail read
+ * may start mid-record) are skipped.
+ */
+export function endsInOpenToolCall(jsonlChunk: string): boolean {
+  const lines = jsonlChunk.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (!line) continue;
+    let rec: { type?: unknown; message?: { content?: unknown } };
+    try {
+      rec = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (rec.type === "user") return false;
+    if (rec.type !== "assistant") continue;
+    const content = rec.message?.content;
+    return Array.isArray(content) && content.some((c) => (c as { type?: unknown })?.type === "tool_use");
+  }
+  return false;
+}
+
+/**
+ * Default open-tool-call probe: any regular `subagents/*.jsonl` modified after
+ * `sinceMs` whose tail ends in an open tool call. Runs only when the cheap
+ * mtime probe already said "quiet", after positive undelivered evidence — so
+ * the bounded tail reads stay off the hot path. False on any read error.
+ */
+export function defaultSubagentOpenToolCallSince(sessionDir: string, sinceMs: number): boolean {
+  const dir = join(sessionDir, "subagents");
+  let entries: string[];
+  try {
+    entries = readdirSync(dir);
+  } catch {
+    return false;
+  }
+  for (const name of entries) {
+    if (!name.endsWith(".jsonl")) continue;
+    const path = join(dir, name);
+    let fd: number | null = null;
+    try {
+      const st = lstatSync(path);
+      if (!st.isFile() || st.mtimeMs <= sinceMs) continue;
+      fd = openSync(path, "r");
+      const size = fstatSync(fd).size;
+      const len = Math.min(size, SUBAGENT_TAIL_BYTES);
+      const buf = Buffer.alloc(len);
+      readSync(fd, buf, 0, len, size - len);
+      if (endsInOpenToolCall(buf.toString("utf-8"))) return true;
+    } catch {
+      // vanished / unreadable — not evidence
+    } finally {
+      if (fd !== null) closeSync(fd);
+    }
+  }
+  return false;
+}
+
+/**
+ * The liveness verdict shared by the detector and the kill-time guard:
+ * - recent writes under the tree: after bun's last frame AND within
+ *   {@link SUBAGENT_LIVENESS_WINDOW_MS} of now (a write bun already saw past
+ *   is not fresh evidence; review #1 bounds it by now);
+ * - or an open subagent tool call whose transcript was written within
+ *   {@link SUBAGENT_OPEN_TOOL_CALL_CEILING_MS}. This one is NOT floored at bun's
+ *   last frame: "the call is still open" is a statement about now, and a long
+ *   call routinely starts before the stall. The ceiling alone bounds it.
+ */
+export function subagentTreeLive(
+  sessionDir: string,
+  bunLastFrameMs: number,
+  now: number,
+  deps: Pick<DriftDetectorDeps, "subagentActivitySince" | "subagentOpenToolCallSince">,
+): boolean {
+  if (deps.subagentActivitySince?.(sessionDir, Math.max(bunLastFrameMs, now - SUBAGENT_LIVENESS_WINDOW_MS))) return true;
+  return deps.subagentOpenToolCallSince?.(sessionDir, now - SUBAGENT_OPEN_TOOL_CALL_CEILING_MS) ?? false;
+}
+
+/**
  * Evaluate one session for drift. Pure function of the inputs — no side
  * effects. Returns a verdict the caller can log + optionally act on.
  *
@@ -415,8 +520,13 @@ export function checkDrift(
   // `bunLastFrameMs` freezes, so a floor of bun's last frame alone would let
   // one stale write suppress forever. A tree quiet for longer than
   // SUBAGENT_LIVENESS_WINDOW_MS lets the kill fire.
-  const livenessSinceMs = Math.max(state.bunLastFrameMs, now - SUBAGENT_LIVENESS_WINDOW_MS);
-  if (state.sessionDir && deps.subagentActivitySince?.(state.sessionDir, livenessSinceMs)) {
+  // A subagent inside one long tool call writes nothing until it returns, so a
+  // quiet tree with an OPEN tool call (written within the longer ceiling) is
+  // still alive (observer review WARN 1).
+  if (
+    state.sessionDir &&
+    subagentTreeLive(state.sessionDir, state.bunLastFrameMs, now, deps)
+  ) {
     return notDrifted({ ...timing, undeliveredAssistantRecords: undelivered, suppressedReason: "live_subagent_activity" });
   }
 
