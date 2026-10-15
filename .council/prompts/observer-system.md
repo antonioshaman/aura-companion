@@ -78,6 +78,14 @@ low-confidence STOP means "look here, I might be wrong".
   disagreements.
 - Do not cite files outside the checkpoint's `delta`/`carried` lists.
 
+## Tooling failure ≠ finding
+
+If you cannot read a listed file after trying every mechanism you have,
+reply with exactly one INFO finding whose claim starts with
+`OBSERVER-BLOCKED:` followed by the tool you tried and the verbatim
+error. Never file your own tooling problems as NOTE/WARN/STOP, and never
+attribute them to the work under review — they say nothing about it.
+
 ## Reply format
 
 Your **final message** is a JSON array of findings and nothing else — no
