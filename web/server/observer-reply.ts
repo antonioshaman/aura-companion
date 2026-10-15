@@ -49,6 +49,7 @@ import {
   type CouncilParserDropReason,
   type ObserverReviewPayload,
   COUNCIL_SCHEMA_VERSION,
+  STALE_REVIEW_SLACK_MS,
   isBoundedToken,
   normalizeObserverFindingShapeRaw,
   parseObserverReviewPayload,
@@ -256,7 +257,15 @@ export interface ObserverReplyExpectation {
 
 export type ObserverReplyOutcome =
   | { kind: "no_expectation" }
-  | { kind: "written"; expectation: ObserverReplyExpectation; file: string; findingCount: number }
+  | {
+      kind: "written";
+      expectation: ObserverReplyExpectation;
+      file: string;
+      findingCount: number;
+      /** A review file for this checkpoint was on disk but predated the wake
+       *  dispatch (EC-13 redelivery) — it was ignored and overwritten. */
+      staleExistingIgnored?: string;
+    }
   | { kind: "skipped_existing"; expectation: ObserverReplyExpectation; file: string }
   | {
       kind: "adopted";
@@ -291,12 +300,14 @@ export interface ObserverReplyCaptureDeps {
   writeReview(path: string, payload: ObserverReviewPayload): void;
   /** Review already on disk for this group's checkpoint, if any — owned by
    *  the group (payload `session_group_id`), group-scoped name preferred
-   *  (production: `findOwnReviewForCheckpointSync`). */
+   *  (production: `findOwnReviewForCheckpointSync`). `reviewedAt` is the
+   *  file's mtime in epoch ms — a host-observed fact (the payload's own
+   *  `reviewed_at` is LLM-stamped on observer-written files and untrusted). */
   findExistingReview(
     reviewsDir: string,
     checkpointId: string,
     sessionGroupId: string,
-  ): { file: string; payload: ObserverReviewPayload; groupScoped: boolean } | null;
+  ): { file: string; payload: ObserverReviewPayload; groupScoped: boolean; reviewedAt?: number } | null;
   /** Move an adopted group-less file to `asideName` in the same directory
    *  (production: `renameSync`). */
   moveAside(reviewsDir: string, file: string, asideName: string): void;
@@ -309,6 +320,10 @@ interface CaptureSlot {
   /** Text blocks since the last tool activity — the candidate final reply. */
   tail: string[];
   model: string | undefined;
+  /** Server clock when the wake was dispatched ({@link ObserverReplyCapture.expect}).
+   *  A review file whose `reviewed_at` predates this answered a PREVIOUS
+   *  delivery of the checkpoint, not this wake. */
+  dispatchedAtMs: number;
 }
 
 type ContentBlock = { type?: unknown; text?: unknown };
@@ -340,7 +355,12 @@ export class ObserverReplyCapture {
   constructor(private readonly deps: ObserverReplyCaptureDeps) {}
 
   expect(observerSessionId: string, expectation: ObserverReplyExpectation): void {
-    this.slots.set(observerSessionId, { expectation, tail: [], model: undefined });
+    this.slots.set(observerSessionId, {
+      expectation,
+      tail: [],
+      model: undefined,
+      dispatchedAtMs: this.deps.now().getTime(),
+    });
   }
 
   /** Cheap no-op for every session without an outstanding wake. */
@@ -382,7 +402,17 @@ export class ObserverReplyCapture {
     const reviewsDir = join(expectation.cwd, ".council", "reviews");
 
     // Transition: a pre-B1 observer wrote the file itself during the turn.
-    const existing = this.deps.findExistingReview(reviewsDir, expectation.checkpointId, expectation.sessionGroupId);
+    // A file that PREDATES this wake answered a previous delivery of the
+    // same checkpoint (EC-13 redelivery) — it must not stand as this wake's
+    // review, and it must not suppress the fresh reply (observed live
+    // 2026-10-15, grp_879b81b6: a 66-minute-old refusal masked the real
+    // answer to a redelivered checkpoint).
+    const found = this.deps.findExistingReview(reviewsDir, expectation.checkpointId, expectation.sessionGroupId);
+    const staleExisting =
+      found && found.reviewedAt !== undefined && found.reviewedAt < slot.dispatchedAtMs - STALE_REVIEW_SLACK_MS
+        ? found
+        : null;
+    const existing = staleExisting ? null : found;
     if (existing?.groupScoped) {
       // Canonical, group-scoped name: unambiguous; the watcher consumes it.
       this.consecutiveRejections.delete(sessionId);
@@ -424,8 +454,15 @@ export class ObserverReplyCapture {
       return { kind: "write_failed", expectation, file, error: err instanceof Error ? err.message : String(err) };
     }
     this.consecutiveRejections.delete(sessionId);
-    return { kind: "written", expectation, file, findingCount: built.payload.findings.length };
+    return {
+      kind: "written",
+      expectation,
+      file,
+      findingCount: built.payload.findings.length,
+      ...(staleExisting ? { staleExistingIgnored: staleExisting.file } : {}),
+    };
   }
+
 
   /**
    * Re-emit an observer-written GROUP-LESS review under the canonical

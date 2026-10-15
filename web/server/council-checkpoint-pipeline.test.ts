@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -455,5 +455,67 @@ describe("CouncilCheckpointPipeline — group-less reviews and host model (BENCH
     h.pipeline.handleReviewDeadlineExpired(GROUP, "chk_1");
     expect(reviews.map((r) => r.checkpointId)).toEqual(["chk_1"]);
     expect(coordinator.applyEvent).not.toHaveBeenCalled();
+  });
+
+  // Observed live (grp_879b81b6, 2026-10-15): a checkpoint REDELIVERY found
+  // the review from the PREVIOUS delivery on disk (written 13:58, wake
+  // dispatched 15:04) and "recovered" it as the answer to the new wake. A
+  // review whose file mtime predates the watchdog arming cannot be a reply
+  // to this wake — ignore it and degrade with the honest reason.
+  it("deadline rescan ignores a review that predates the wake and degrades the group", () => {
+    const h = makeHarness();
+    const coordinator = activeCoordinator();
+    h.setCoordinator(coordinator);
+    const reviews = captureReviews();
+    const warns = spyWarn();
+    // Review from a previous delivery of the same checkpoint id, 60s old.
+    const reviewsDir = join(h.cwd, ".council", "reviews");
+    mkdirSync(reviewsDir, { recursive: true });
+    const file = join(reviewsDir, `council-plan-${GROUP}-codex-observer.md`);
+    writeFileSync(file, JSON.stringify(ownReview()));
+    const past = new Date(Date.now() - 60_000);
+    utimesSync(file, past, past);
+    // Redelivered wake arms the watchdog NOW; the stale file predates it.
+    h.pipeline.handleCouncilCheckpoint(GROUP, checkpoint(1));
+    h.pipeline.handleReviewDeadlineExpired(GROUP, "chk_1");
+    expect(reviews).toHaveLength(0);
+    expect(coordinator.applyEvent).toHaveBeenCalledWith(GROUP, expect.objectContaining({
+      type: "half_died",
+      role: "observer",
+      reason: "wake_produced_no_review",
+    }));
+    expect(warns()).toContainEqual(expect.objectContaining({
+      event: "council.review.stale_review_ignored_at_deadline",
+      sessionGroupId: GROUP,
+      checkpointId: "chk_1",
+    }));
+  });
+
+  // Observer review of this very change (checkpoint 149, STOP): the LIVE
+  // handler path had the same blindness as the rescan — a delayed/replayed
+  // watcher callback carrying the PREVIOUS delivery's review file would
+  // disarm the fresh wake's watchdog and fan the old findings out. The
+  // freshness guard must run BEFORE any mutation.
+  it("handleCouncilReview rejects a review whose mtime predates the armed wake (stale replay)", () => {
+    const h = makeHarness();
+    const coordinator = activeCoordinator();
+    h.setCoordinator(coordinator);
+    const reviews = captureReviews();
+    const warns = spyWarn();
+    h.pipeline.handleCouncilCheckpoint(GROUP, checkpoint(1));
+    // Replayed watcher event: file mtime 60s BEFORE the wake armed.
+    h.pipeline.handleCouncilReview(GROUP, ownReview() as never, Date.now() - 60_000);
+    expect(reviews).toHaveLength(0);
+    // Watchdog stays armed — the fresh wake is still owed its review.
+    expect(h.watchers.get(GROUP)!.pendingReviewDeadline?.checkpointId).toBe("chk_1");
+    expect(warns()).toContainEqual(expect.objectContaining({
+      event: "council.review.stale_review_ignored",
+      sessionGroupId: GROUP,
+      checkpointId: "chk_1",
+    }));
+    // A fresh review for the same checkpoint is then accepted normally.
+    h.pipeline.handleCouncilReview(GROUP, ownReview() as never, Date.now());
+    expect(reviews.map((r) => r.checkpointId)).toEqual(["chk_1"]);
+    expect(h.watchers.get(GROUP)!.pendingReviewDeadline).toBeNull();
   });
 });

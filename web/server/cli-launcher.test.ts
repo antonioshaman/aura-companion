@@ -608,7 +608,9 @@ describe("launch", () => {
     expect(cmdAndArgs).toContain("--enable");
     expect(cmdAndArgs).toContain("multi_agent");
     expect(cmdAndArgs).toContain("-c");
-    expect(cmdAndArgs).toContain("tools.webSearch=true");
+    // snake_case: codex 0.162 ignores camelCase `tools.webSearch` as an
+    // unrecognized setting (verified live) — web search silently stayed off.
+    expect(cmdAndArgs).toContain("tools.web_search=true");
     expect(options.cwd).toBe("/tmp/project");
   });
 
@@ -628,7 +630,7 @@ describe("launch", () => {
     expect(cmdAndArgs).toContain("--enable");
     expect(cmdAndArgs).toContain("multi_agent");
     expect(cmdAndArgs).toContain("-c");
-    expect(cmdAndArgs).toContain("tools.webSearch=false");
+    expect(cmdAndArgs).toContain("tools.web_search=false");
   });
 
   it("spawns codex via sibling node binary to bypass shebang issues", () => {

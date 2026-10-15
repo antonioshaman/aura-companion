@@ -2234,7 +2234,9 @@ export class CliLauncher {
     // Enable Codex multi-agent mode by default (product decision).
     args.push("--enable", "multi_agent");
     const internetEnabled = options.codexInternetAccess !== false;
-    args.push("-c", `tools.webSearch=${internetEnabled ? "true" : "false"}`);
+    // snake_case key: codex 0.162 treats camelCase `tools.webSearch` as an
+    // unrecognized setting (warning notification + web search silently off).
+    args.push("-c", `tools.web_search=${internetEnabled ? "true" : "false"}`);
     const codexHome = resolveCompanionCodexSessionHome(
       sessionId,
       options.codexHome,
@@ -2514,7 +2516,9 @@ export class CliLauncher {
     // Enable Codex multi-agent mode by default (product decision).
     args.push("--enable", "multi_agent");
     const internetEnabled = options.codexInternetAccess !== false;
-    args.push("-c", `tools.webSearch=${internetEnabled ? "true" : "false"}`);
+    // snake_case key: codex 0.162 treats camelCase `tools.webSearch` as an
+    // unrecognized setting (warning notification + web search silently off).
+    args.push("-c", `tools.web_search=${internetEnabled ? "true" : "false"}`);
     const codexHome = resolveCompanionCodexSessionHome(
       sessionId,
       options.codexHome,
