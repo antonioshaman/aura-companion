@@ -333,6 +333,27 @@ const MSG_ASSISTANT: ChatMessage = {
   timestamp: Date.now() - 50000,
 };
 
+// Council observer final reply (observer reply contract): a bare JSON
+// findings array renders as severity cards, an empty array as the
+// "review clean" status line (ObserverFindingsBlock inside MessageBubble).
+const MSG_OBSERVER_FINDINGS: ChatMessage = {
+  id: "msg-obs-1",
+  role: "assistant",
+  content: JSON.stringify([
+    { severity: "STOP", claim: "ws-bridge drops the ack when the socket closes mid-flush — the browser never learns the frame was lost.", evidence_path: "web/server/ws-bridge.ts", evidence_lines: [112, 128], confidence: "high" },
+    { severity: "WARN", claim: "Extracted helper has no direct coverage; the only test exercises it through the happy path.", evidence_path: "web/server/routes.ts", confidence: "medium" },
+    { severity: "INFO", claim: "OBSERVER-BLOCKED: exec_command failed to read the checkpoint file: bwrap: Operation not permitted", evidence_path: ".council/review-input/plan.md", confidence: "high" },
+  ]),
+  timestamp: Date.now() - 42000,
+};
+
+const MSG_OBSERVER_FINDINGS_CLEAN: ChatMessage = {
+  id: "msg-obs-2",
+  role: "assistant",
+  content: "[]",
+  timestamp: Date.now() - 41000,
+};
+
 const MSG_ASSISTANT_TOOLS: ChatMessage = {
   id: "msg-4",
   role: "assistant",
@@ -1118,6 +1139,12 @@ export function Playground() {
             </Card>
             <Card label="Assistant message (with tool calls)">
               <MessageBubble message={MSG_ASSISTANT_TOOLS} />
+            </Card>
+            <Card label="Observer review reply (findings cards)">
+              <MessageBubble message={MSG_OBSERVER_FINDINGS} isObserverSession />
+            </Card>
+            <Card label="Observer review reply (clean — no findings)">
+              <MessageBubble message={MSG_OBSERVER_FINDINGS_CLEAN} isObserverSession />
             </Card>
             <Card label="Assistant message (streaming)">
               <MessageBubble message={MSG_ASSISTANT_STREAMING} />

@@ -17,7 +17,7 @@
  *    `__fixtures__/observer-reply/`, provenance in its README).
  */
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -245,15 +245,56 @@ describe("ObserverReplyCapture", () => {
 
   it("stands down when the observer wrote its own review file (pre-B1 prompt)", () => {
     const file = "council-plan-grp_cap-claude-observer.md";
+    // Written DURING the turn: the file's mtime lands after the wake
+    // dispatch, so the freshness gate lets the stand-down happen.
     const own = buildHostObserverReview([STOP], { sessionGroupId: "grp_cap", checkpointId: "chk_cap", phase: "council-plan", provider: "claude", model: "m", cliVersion: "1", reviewedAt: new Date(0) });
     if (!own.ok) throw new Error("fixture");
+    capture.expect("obs", expectation());
     writeAtomicJson(join(cwd, ".council", "reviews", file), own.payload);
     const before = readFileSync(join(cwd, ".council", "reviews", file), "utf-8");
-    capture.expect("obs", expectation());
     capture.onAssistant("obs", assistant([{ type: "text", text: "Done. Review written." }]));
     expect(capture.finalize("obs")).toMatchObject({ kind: "skipped_existing", file });
     // The observer's file is untouched.
     expect(readFileSync(join(cwd, ".council", "reviews", file), "utf-8")).toBe(before);
+  });
+
+  // Observed live (grp_879b81b6, 2026-10-15 15:04): a checkpoint REDELIVERY
+  // (EC-13 "a checkpoint you already reviewed may arrive again") found the
+  // review file from the PREVIOUS delivery on disk and stood down — the
+  // observer's fresh reply to the redelivered wake was discarded and a
+  // review written 66 minutes BEFORE the wake stood as that wake's answer.
+  // A review whose file mtime predates the wake dispatch is not a reply to
+  // it (mtime, not the payload's reviewed_at — the latter is LLM-stamped on
+  // observer-written files and untrusted).
+  it("ignores a review file that predates the wake — the fresh reply wins", () => {
+    const file = "council-plan-grp_cap-claude-observer.md";
+    const stale = buildHostObserverReview([STOP], { sessionGroupId: "grp_cap", checkpointId: "chk_cap", phase: "council-plan", provider: "claude", model: "m", cliVersion: "1", reviewedAt: new Date("2026-09-28T04:00:00Z") });
+    if (!stale.ok) throw new Error("fixture");
+    writeAtomicJson(join(cwd, ".council", "reviews", file), stale.payload);
+    // File mtime before the dispatch clock (deps.now() = 05:00).
+    const past = new Date("2026-09-28T04:00:00Z");
+    utimesSync(join(cwd, ".council", "reviews", file), past, past);
+    capture.expect("obs", expectation());
+    capture.onAssistant("obs", assistant([{ type: "text", text: "[]" }]));
+    const out = capture.finalize("obs");
+    expect(out).toMatchObject({ kind: "written", findingCount: 0, staleExistingIgnored: file });
+    // The fresh (empty) review replaced the stale one.
+    expect(readReview(file)).toMatchObject({ reviewed_at: "2026-09-28T05:00:00.000Z", findings: [] });
+  });
+
+  // Staleness must not resurrect a bad reply: with ONLY a stale file on disk
+  // and an unusable fresh reply, the outcome is a rejection — the stale file
+  // never counts as this wake's review.
+  it("rejects an unusable reply even when a stale review file exists", () => {
+    const file = "council-plan-grp_cap-claude-observer.md";
+    const stale = buildHostObserverReview([], { sessionGroupId: "grp_cap", checkpointId: "chk_cap", phase: "council-plan", provider: "claude", model: "m", cliVersion: "1", reviewedAt: new Date("2026-09-28T04:58:00Z") });
+    if (!stale.ok) throw new Error("fixture");
+    writeAtomicJson(join(cwd, ".council", "reviews", file), stale.payload);
+    const past = new Date("2026-09-28T04:58:00Z");
+    utimesSync(join(cwd, ".council", "reviews", file), past, past);
+    capture.expect("obs", expectation());
+    capture.onAssistant("obs", assistant([{ type: "text", text: "looks fine to me" }]));
+    expect(capture.finalize("obs")).toMatchObject({ kind: "rejected", reason: "no_json" });
   });
 
   it("does not stand down for another group's review of the same checkpoint id", () => {

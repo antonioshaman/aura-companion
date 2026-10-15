@@ -4,9 +4,10 @@ import remarkGfm from "remark-gfm";
 import type { ChatMessage, ContentBlock } from "../types.js";
 import { ToolBlock, getToolIcon, getToolLabel, getPreview, ToolIcon } from "./ToolBlock.js";
 import { AssistantAvatar } from "./chat/AssistantAvatar.js";
+import { ObserverFindingsBlock, parseObserverFindingsMessage } from "./chat/ObserverFindingsBlock.js";
 import { RESUME_INTERRUPTED_LABEL } from "../utils/resume-interrupted.js";
 
-export function MessageBubble({ message }: { message: ChatMessage }) {
+export function MessageBubble({ message, isObserverSession = false }: { message: ChatMessage; isObserverSession?: boolean }) {
   if (message.role === "system" && message.systemVariant === "resume-interrupted") {
     return <ResumeInterruptedNote diagnostic={message.content} />;
   }
@@ -62,7 +63,7 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
   // Assistant message
   return (
     <div className="animate-[fadeSlideIn_0.3s_ease-out]">
-      <AssistantMessage message={message} />
+      <AssistantMessage message={message} isObserverSession={isObserverSession} />
     </div>
   );
 }
@@ -245,7 +246,7 @@ function parseToolAuthError(content: string, toolName?: string): ParsedToolAuthE
   return { message, requestId, statusCode: numericStatus, raw: trimmed };
 }
 
-function AssistantMessage({ message }: { message: ChatMessage }) {
+function AssistantMessage({ message, isObserverSession = false }: { message: ChatMessage; isObserverSession?: boolean }) {
   const blocks = message.contentBlocks || [];
 
   const grouped = useMemo(() => groupContentBlocks(blocks), [blocks]);
@@ -262,7 +263,7 @@ function AssistantMessage({ message }: { message: ChatMessage }) {
           {isThinkingPhase ? (
             <ThinkingBlock text={message.content} />
           ) : (
-            <MarkdownContent text={message.content} showCursor={!!message.isStreaming} />
+            <AssistantTextContent text={message.content} showCursor={!!message.isStreaming} isStreaming={!!message.isStreaming} isObserverSession={isObserverSession} />
           )}
           {isInterrupted ? <InterruptedBadge /> : null}
         </div>
@@ -276,7 +277,7 @@ function AssistantMessage({ message }: { message: ChatMessage }) {
       <div className="flex-1 min-w-0 space-y-3">
         {grouped.map((group, i) => {
           if (group.kind === "content") {
-            return <ContentBlockRenderer key={i} block={group.block} toolUseById={toolUseById} />;
+            return <ContentBlockRenderer key={i} block={group.block} toolUseById={toolUseById} isObserverSession={isObserverSession} isStreaming={!!message.isStreaming} />;
           }
           // Single tool_use renders as before
           if (group.items.length === 1) {
@@ -311,6 +312,27 @@ function InterruptedBadge() {
       <span>Interrupted — CLI disconnected before reply completed</span>
     </div>
   );
+}
+
+/**
+ * Assistant text with the observer-reply special case: a council observer's
+ * final message is a bare JSON findings array (observer reply contract) —
+ * render it as severity cards instead of raw JSON. A streaming message is
+ * never card-rendered (partial JSON cannot parse, and the gate keeps the
+ * raw→card flip from happening mid-stream); everything that is not a strict
+ * findings array falls through to markdown unchanged.
+ */
+function AssistantTextContent({ text, showCursor = false, isStreaming = false, isObserverSession = false }: { text: string; showCursor?: boolean; isStreaming?: boolean; isObserverSession?: boolean }) {
+  // Provenance gate (observer review 2026-10-15, checkpoint 149 WARN): JSON
+  // shape alone cannot distinguish an observer reply from an ordinary
+  // assistant message that happens to be a findings-shaped array (e.g. a
+  // plain "[]"). Only messages from the council pair's OBSERVER session may
+  // card-render.
+  const findings = isStreaming || !isObserverSession ? null : parseObserverFindingsMessage(text);
+  if (findings) {
+    return <ObserverFindingsBlock findings={findings} />;
+  }
+  return <MarkdownContent text={text} showCursor={showCursor} />;
 }
 
 function MarkdownContent({ text, showCursor = false }: { text: string; showCursor?: boolean }) {
@@ -431,12 +453,19 @@ function MarkdownContent({ text, showCursor = false }: { text: string; showCurso
 function ContentBlockRenderer({
   block,
   toolUseById,
+  isObserverSession = false,
+  isStreaming = false,
 }: {
   block: ContentBlock;
   toolUseById: Map<string, ToolUseInfo>;
+  isObserverSession?: boolean;
+  /** Observer review 2026-10-15 (checkpoint 150, STOP): the streaming gate
+   *  must cover the content-block path too — without it a streaming message
+   *  whose text arrives as blocks could card-render mid-stream. */
+  isStreaming?: boolean;
 }) {
   if (block.type === "text") {
-    return <MarkdownContent text={block.text} />;
+    return <AssistantTextContent text={block.text} isObserverSession={isObserverSession} isStreaming={isStreaming} />;
   }
 
   if (block.type === "thinking") {

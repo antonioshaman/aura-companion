@@ -371,7 +371,7 @@ function ToolMessageGroup({ group }: { group: ToolMsgGroup }) {
   );
 }
 
-function FeedEntries({ entries, toolActivity }: { entries: FeedEntry[]; toolActivity?: ToolActivityEntry[] }) {
+function FeedEntries({ entries, toolActivity, isObserverSession = false }: { entries: FeedEntry[]; toolActivity?: ToolActivityEntry[]; isObserverSession?: boolean }) {
   return (
     <>
       {entries.map((entry, i) => {
@@ -390,7 +390,7 @@ function FeedEntries({ entries, toolActivity }: { entries: FeedEntry[]; toolActi
         const allComplete = matchingActivity.length > 0 && matchingActivity.every((a) => a.completedAt);
         return (
           <div key={msg.id}>
-            <MessageBubble message={msg} />
+            <MessageBubble message={msg} isObserverSession={isObserverSession} />
             {allComplete && <ToolTurnSummary entries={matchingActivity} />}
           </div>
         );
@@ -579,6 +579,14 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
     s.streamingOutputTokens.get(sessionId),
   );
   const sessionStatus = useStore((s) => s.sessionStatus.get(sessionId));
+  // Provenance for the observer-findings card renderer: only the council
+  // pair's OBSERVER session may card-render a findings-shaped JSON reply
+  // (an ordinary assistant answering "[]" must stay plain markdown).
+  const isObserverSession = useStore((s) => {
+    const groupId = s.groupBySessionId?.get(sessionId);
+    const group = groupId ? s.groups?.get(groupId) : undefined;
+    return group?.observerSessionId === sessionId;
+  });
   const toolProgress = useStore((s) => s.toolProgress.get(sessionId));
   const toolActivity = useStore((s) => s.toolActivity.get(sessionId));
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -892,7 +900,7 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
               </button>
             </div>
           )}
-          <FeedEntries entries={visibleEntries} toolActivity={toolActivity} />
+          <FeedEntries entries={visibleEntries} toolActivity={toolActivity} isObserverSession={isObserverSession} />
 
           {/* Tool progress indicator */}
           {toolProgress && toolProgress.size > 0 && !hasStreamingAssistant && (

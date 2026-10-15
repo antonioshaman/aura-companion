@@ -769,3 +769,56 @@ describe("MessageBubble - ContentBlockRenderer", () => {
     expect(screen.getByText("file contents here")).toBeTruthy();
   });
 });
+
+// Observer findings card gate (observer review 2026-10-15, checkpoint 149
+// WARN): a findings-shaped JSON reply card-renders ONLY with observer
+// provenance — an ordinary assistant replying "[]" stays plain markdown.
+describe("observer findings rendering gate", () => {
+  const FINDINGS_TEXT = JSON.stringify([
+    { severity: "STOP", claim: "swallowed error", evidence_path: "src/a.ts", confidence: "high" },
+  ]);
+
+  it("card-renders a findings array for an observer session (plain content path)", () => {
+    const msg = makeMessage({ role: "assistant", content: FINDINGS_TEXT });
+    render(<MessageBubble message={msg} isObserverSession />);
+    expect(screen.getByRole("list", { name: "Observer findings" })).toBeTruthy();
+    expect(screen.getByText("swallowed error")).toBeTruthy();
+  });
+
+  it("card-renders a findings array in a content block for an observer session", () => {
+    const msg = makeMessage({
+      role: "assistant",
+      content: "",
+      contentBlocks: [{ type: "text", text: "[]" }],
+    });
+    render(<MessageBubble message={msg} isObserverSession />);
+    expect(screen.getByRole("status")).toBeTruthy();
+  });
+
+  it("does NOT card-render for a non-observer session — raw JSON stays markdown", () => {
+    const msg = makeMessage({ role: "assistant", content: "[]" });
+    render(<MessageBubble message={msg} />);
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.queryByRole("list", { name: "Observer findings" })).toBeNull();
+  });
+
+  it("does NOT card-render while streaming (partial JSON must not flip mid-stream)", () => {
+    const msg = makeMessage({ role: "assistant", content: FINDINGS_TEXT, isStreaming: true });
+    render(<MessageBubble message={msg} isObserverSession />);
+    expect(screen.queryByRole("list", { name: "Observer findings" })).toBeNull();
+  });
+
+  // Observer review 2026-10-15 (checkpoint 150, STOP): the content-block
+  // path must honour the same streaming gate — a streaming message whose
+  // text arrives as contentBlocks must not card-render mid-stream either.
+  it("does NOT card-render a streaming message with contentBlocks", () => {
+    const msg = makeMessage({
+      role: "assistant",
+      content: "",
+      isStreaming: true,
+      contentBlocks: [{ type: "text", text: "[]" }],
+    });
+    render(<MessageBubble message={msg} isObserverSession />);
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+});

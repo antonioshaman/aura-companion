@@ -7,6 +7,7 @@ import type { CheckpointPayload, ObserverReviewPayload } from "./council-types.j
 import {
   OBSERVER_WAKE_PAYLOAD_VERSION,
   OBSERVER_WAKE_TIMEOUT_MS,
+  STALE_REVIEW_SLACK_MS,
   normalizeCodexObserverReviewRaw,
   isBoundedToken,
   normalizeObserverFindingShapeRaw,
@@ -86,7 +87,14 @@ export interface CouncilWatcherEntry {
    * checkpoint's watchdog clears the prior one (newest checkpoint is the
    * one the observer is now expected to review). Cleared on teardown.
    */
-  pendingReviewDeadline: { checkpointId: string; timer: ReturnType<typeof setTimeout> } | null;
+  pendingReviewDeadline: {
+    checkpointId: string;
+    timer: ReturnType<typeof setTimeout>;
+    /** Server clock when the wake was dispatched (watchdog armed). The
+     *  deadline rescan uses it to reject a review file that PREDATES the
+     *  wake — a leftover from a previous delivery of the same checkpoint. */
+    armedAtMs: number;
+  } | null;
 }
 
 /**
@@ -714,7 +722,7 @@ export class CouncilCheckpointPipeline {
     // Do not keep the event loop alive solely for this watchdog — a process
     // that is otherwise idle should still be allowed to exit.
     if (typeof timer.unref === "function") timer.unref();
-    entry.pendingReviewDeadline = { checkpointId, timer };
+    entry.pendingReviewDeadline = { checkpointId, timer, armedAtMs: Date.now() };
   }
 
   /**
@@ -747,6 +755,7 @@ export class CouncilCheckpointPipeline {
           ...base,
           file: outcome.file,
           findingCount: outcome.findingCount,
+          ...(outcome.staleExistingIgnored ? { staleExistingIgnored: outcome.staleExistingIgnored } : {}),
         });
         return;
       case "skipped_existing":
@@ -869,6 +878,7 @@ export class CouncilCheckpointPipeline {
       // this callback running. Only act if the slot still tracks THIS
       // checkpoint.
       if (!entry || entry.pendingReviewDeadline?.checkpointId !== checkpointId) return;
+      const armedAtMs = entry.pendingReviewDeadline.armedAtMs;
       entry.pendingReviewDeadline = null;
 
       const meta = this.deps.groupMeta.get(sessionGroupId);
@@ -917,6 +927,25 @@ export class CouncilCheckpointPipeline {
           payloadSessionGroupId: recovered.payload.session_group_id,
           checkpointId,
           file: recovered.file,
+        });
+      } else if (recovered && recovered.reviewedAt !== undefined && recovered.reviewedAt < armedAtMs - STALE_REVIEW_SLACK_MS) {
+        // The file on disk PREDATES this wake: it answered a previous
+        // delivery of the same checkpoint (EC-13 redelivery), the observer
+        // produced nothing for THIS wake. Recovering it would let a stale
+        // review silently stand as the fresh answer (observed live
+        // 2026-10-15, grp_879b81b6: a 13:58 refusal "recovered" for a 15:04
+        // wake). Fall through to the honest degrade instead. A file with no
+        // readable mtime (reviewedAt undefined) keeps the legacy recover
+        // path — never degrade on a stat failure.
+        metricsCollector.recordError("council.review.stale_review_ignored_at_deadline");
+        log.warn("session-orchestrator", "deadline rescan matched a review that predates the wake — ignoring", {
+          event: "council.review.stale_review_ignored_at_deadline",
+          sessionGroupId,
+          observerSessionId: meta.observerSessionId,
+          checkpointId,
+          file: recovered.file,
+          reviewedAt: recovered.reviewedAt,
+          wakeDispatchedAt: armedAtMs,
         });
       } else if (recovered) {
         log.warn("session-orchestrator", "review recovered from disk at deadline — watcher missed the event", {
@@ -1075,6 +1104,32 @@ export class CouncilCheckpointPipeline {
       // model the observer session's OWN frames carried; with none observed
       // (e.g. review recovered after a restart) the file's value stands.
       payload = this.stampHostObserverModel(sessionGroupId, payload);
+
+      // Observer review 2026-10-15 (checkpoint 149, STOP): freshness guard
+      // BEFORE any mutation. A delayed/replayed watcher callback can carry
+      // the review file left by a PREVIOUS delivery of this checkpoint
+      // (EC-13 redelivery after a restart); without this check it would
+      // disarm the fresh wake's watchdog and fan the old findings out.
+      // Only guarded while a wake for this checkpoint is armed — a late
+      // review landing after the watchdog already resolved keeps the
+      // legacy accept (late findings beat lost findings). `reviewedAt`
+      // undefined (stat failure) also keeps the legacy accept.
+      if (
+        entry.pendingReviewDeadline &&
+        entry.pendingReviewDeadline.checkpointId === payload.checkpoint_id &&
+        reviewedAt !== undefined &&
+        reviewedAt < entry.pendingReviewDeadline.armedAtMs - STALE_REVIEW_SLACK_MS
+      ) {
+        metricsCollector.recordError("council.review.stale_review_ignored");
+        log.warn("session-orchestrator", "review predates the armed wake — stale replay ignored", {
+          event: "council.review.stale_review_ignored",
+          sessionGroupId,
+          checkpointId: payload.checkpoint_id,
+          reviewedAt,
+          wakeDispatchedAt: entry.pendingReviewDeadline.armedAtMs,
+        });
+        return;
+      }
 
       // Council Review 2026-06-13 (P1 #1): a review arrived — disarm the
       // wake→review watchdog if it was tracking this checkpoint. A review

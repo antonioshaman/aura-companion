@@ -36,6 +36,14 @@ export const OBSERVER_WAKE_MAX_BYTES = 32 * 1024;
  *  cannot displace `carried`/`dropped` from the observer's view. */
 export const OBSERVER_WAKE_MAX_PATHS_PER_SECTION = 50;
 
+/** A review file whose mtime predates the wake dispatch by MORE than this
+ *  answered a PREVIOUS delivery of the checkpoint (EC-13 redelivery) and
+ *  must not stand as the current wake's review. The slack absorbs clock
+ *  skew between `Date.now()` and the kernel's coarse-grained file-timestamp
+ *  clock (mtime can lag wall time by a few ms); genuine redeliveries are
+ *  separated by at least a server restart or a failsafe tick (≥ minutes). */
+export const STALE_REVIEW_SLACK_MS = 10_000;
+
 /**
  * Council Mode auto-wake — frontend-side timeout bound for the
  * `reviewing` panel state. Published on the `group_created` wire frame
