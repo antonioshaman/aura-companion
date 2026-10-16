@@ -27,30 +27,49 @@ describe("probeMessageIds", () => {
 // Prod 2026-10-16 (grp_879b81b6): wakes are NOT echoed into the browser feed
 // as user messages, so after one probe the "up to the next user message" span
 // never closed and every later findings reply rendered as a collapsed probe
-// row with raw JSON. These pin the two extra span terminators.
-describe("probeMessageIds — span ends without a following user message", () => {
+// row with raw JSON. The span is now bound to the probe's TURN: it closes at
+// the message the turn's `result` frame marked `turnEnd`.
+describe("probeMessageIds — the probe is bound to its turn", () => {
   const findings = '[\n  {\n    "severity": "STOP",\n    "claim": "Дедупликация сравнивает позднюю находку",\n    "evidence_lines": [402, 415],\n    "confidence": "high"\n  }\n]';
-  const tool = (id: string) => ({ id, role: "assistant", content: "", contentBlocks: [{ type: "tool_use" }] });
 
-  it("a findings-shaped reply is review output, never probe traffic, and ends the span", () => {
+  it("a later-turn findings reply is a review, not probe traffic", () => {
     const ids = probeMessageIds([
       { id: "p1", role: "user", content: "[liveness probe] кто ты?" },
-      { id: "a1", role: "assistant", content: "Я Observer…" },
-      { id: "f1", role: "assistant", content: findings },
-      { id: "x1", role: "assistant", content: "прозаический ответ после ревью" },
-      { id: "f2", role: "assistant", content: "[]" },
+      { id: "a1", role: "assistant", content: "Я Observer…", turnEnd: true },
+      // next turn = a wake (not in the feed as a user message)
+      { id: "t1", role: "assistant", content: "" },
+      { id: "f1", role: "assistant", content: findings, turnEnd: true },
     ]);
     expect([...ids]).toEqual(["p1", "a1"]);
   });
 
-  it("a tool call after the probe's text answer belongs to the next turn and ends the span", () => {
+  it("`[]` answering the probe is probe traffic; `[]` in the next turn is a review", () => {
+    // Observer WARN on PR #374: a JSON-shape rule would show the probe's own
+    // "[]" answer as a green "no findings — clean" review.
+    const ids = probeMessageIds([
+      { id: "p1", role: "user", content: "[probe] Ответь []" },
+      { id: "a1", role: "assistant", content: "[]", turnEnd: true },
+      { id: "r1", role: "assistant", content: "[]", turnEnd: true },
+    ]);
+    expect([...ids]).toEqual(["p1", "a1"]);
+  });
+
+  it("every message inside the probe turn stays probe traffic until the turn ends", () => {
     const ids = probeMessageIds([
       { id: "p1", role: "user", content: "[probe] что видел последним в .council/?" },
-      tool("t0"), // the probe turn may read files BEFORE answering — still probe traffic
-      { id: "a1", role: "assistant", content: "Видел checkpoint 165." },
-      tool("t1"), // next wake's work
-      { id: "a2", role: "assistant", content: "не-JSON ответ следующего хода" },
+      { id: "t0", role: "assistant", content: "" }, // reads files before answering
+      { id: "a1", role: "assistant", content: "[]" }, // findings-shaped, same turn
+      { id: "a2", role: "assistant", content: "Видел checkpoint 165.", turnEnd: true },
+      { id: "a3", role: "assistant", content: "ответ следующего хода" },
     ]);
-    expect([...ids]).toEqual(["p1", "t0", "a1"]);
+    expect([...ids]).toEqual(["p1", "t0", "a1", "a2"]);
+  });
+
+  it("a probe whose turn ended without any reply closes immediately", () => {
+    const ids = probeMessageIds([
+      { id: "p1", role: "user", content: "[ping]", turnEnd: true },
+      { id: "f1", role: "assistant", content: "[]", turnEnd: true },
+    ]);
+    expect([...ids]).toEqual(["p1"]);
   });
 });

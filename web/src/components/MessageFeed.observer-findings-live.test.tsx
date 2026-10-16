@@ -162,4 +162,36 @@ describe("observer findings cards — live frame path", () => {
     expect(screen.queryByTestId("observer-probe-message")).toBeNull();
     expect(container.textContent).toContain('"severity"');
   });
+
+  it("`[]` answering the probe stays a probe row; `[]` from the next turn is the clean review", () => {
+    // Observer WARN on PR #374: the probe is bound to its turn via the
+    // `result` frame, so the probe's own "[]" is never shown as a green
+    // "no findings — clean" review — only a reply from a later turn is.
+    hydratePair();
+    connectSession(OBSERVER);
+    render(<MessageFeed sessionId={OBSERVER} />);
+    const assistant = (id: string, text: string, ts: number) => ({
+      type: "assistant",
+      message: { id, type: "message", role: "assistant", model: "gpt-6.1-sol", content: [{ type: "text", text }], stop_reason: "end_turn" },
+      parent_tool_use_id: null,
+      timestamp: ts,
+    });
+    const result = { type: "result", data: { type: "result", subtype: "success", is_error: false, num_turns: 1, total_cost_usd: 0 } };
+    // Reload: the probe turn comes back through message_history…
+    fire({
+      type: "message_history",
+      messages: [
+        { type: "user_message", id: "user-probe", content: "[probe] Ответь []", timestamp: 1 },
+        assistant("codex-agent-msg_probe", "[]", 2),
+        result,
+      ],
+    });
+    expect(screen.getAllByTestId("observer-probe-message").map((r) => r.getAttribute("data-role"))).toEqual(["user", "assistant"]);
+    expect(screen.queryByText("Observer review: no findings — clean")).toBeNull();
+    // …and the next (wake) turn arrives live: that "[]" IS a clean review.
+    fire(assistant("codex-agent-msg_review", "[]", 3));
+    fire(result);
+    expect(screen.getAllByTestId("observer-probe-message")).toHaveLength(2);
+    expect(screen.getAllByText("Observer review: no findings — clean")).toHaveLength(1);
+  });
 });

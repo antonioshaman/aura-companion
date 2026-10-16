@@ -5,8 +5,6 @@
  * collapsed probe row instead of between the findings.
  */
 
-import { parseObserverFindingsMessage } from "./observer-findings.js";
-
 export const OBSERVER_PROBE_TAG = /^\s*\[(?:liveness[\s-]?probe|probe|ping)\]/i;
 
 export function isObserverProbeText(text: unknown): boolean {
@@ -17,47 +15,36 @@ interface FeedMessageLike {
   id: string;
   role: string;
   content: string;
-  contentBlocks?: ReadonlyArray<{ type: string }>;
+  /** Set when the turn's `result` frame closed the turn at this message. */
+  turnEnd?: boolean;
 }
 
 /**
  * Ids of probe user messages and of the assistant replies that answer them.
  *
- * The span opened by a probe ends at the next user message — but a wake is
- * NOT a user message in the browser feed (the server injects it without
- * echoing it into the history), so "up to the next user message" alone
- * swallowed every later review. Prod 2026-10-16 (grp_879b81b6): one
- * `[liveness probe]` early in the observer's history turned every findings
- * reply after it into a collapsed "Ответ на пробу" row showing raw JSON.
- * The span therefore also ends:
- *   - at a findings-shaped reply (the observer reply contract — that is
- *     review output by definition, never probe traffic; not marked), and
- *   - at a tool call that follows the probe's text answer (the probe turn
- *     ended with that answer; a new tool call is the next wake's work).
+ * A probe is bound to ITS turn: the span covers the probe and every message
+ * up to and including the one the turn's `result` frame closed (`turnEnd`).
+ * Every reply inside the probe turn is probe traffic even when it looks like
+ * findings (`[]` answering "[probe] ответь []" is not a clean review); a
+ * reply in a later turn never is.
+ *
+ * "Up to the next user message" alone is not a boundary: a wake is never
+ * echoed into the browser feed as a user message. Prod 2026-10-16
+ * (grp_879b81b6): one `[liveness probe]` early in the observer's history
+ * turned every later findings reply into a collapsed probe row of raw JSON.
+ * A new user message still closes the span (and may open a new one).
  */
 export function probeMessageIds(messages: readonly FeedMessageLike[]): Set<string> {
   const ids = new Set<string>();
   let inProbe = false;
-  let answered = false;
   for (const m of messages) {
     if (m.role === "user") {
       inProbe = isObserverProbeText(m.content);
-      answered = false;
       if (inProbe) ids.add(m.id);
-      continue;
+    } else if (inProbe && m.role === "assistant") {
+      ids.add(m.id);
     }
-    if (!inProbe || m.role !== "assistant") continue;
-    if (parseObserverFindingsMessage(m.content) !== null) {
-      inProbe = false;
-      continue;
-    }
-    const hasToolUse = m.contentBlocks?.some((b) => b.type === "tool_use") ?? false;
-    if (answered && hasToolUse) {
-      inProbe = false;
-      continue;
-    }
-    if (m.content.trim().length > 0) answered = true;
-    ids.add(m.id);
+    if (m.turnEnd) inProbe = false;
   }
   return ids;
 }
