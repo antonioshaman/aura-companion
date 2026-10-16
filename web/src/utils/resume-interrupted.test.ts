@@ -66,11 +66,13 @@ describe("isResumeInterruptedResult — narrow match keeps real errors red", () 
     expect(isResumeInterruptedResult({ ...base, terminal_reason: undefined })).toBe(false);
   });
 
-  // Observed live (session 40f03a1e, 2026-10-15): a turn killed mid-TOOL-CALL
-  // by a server restart closes with terminal_reason "aborted_tools" and
-  // errors=["[ede_diagnostic] … stop_reason=tool_use"] — same bookkeeping
-  // class as aborted_streaming, but it leaked into the feed as a red
-  // "Error: [ede_diagnostic] …" line. Shape verified against the recording.
+  // Observed live (session 40f03a1e, 2026-10-15): a turn cut mid-TOOL-CALL
+  // closes with terminal_reason "aborted_tools" and
+  // errors=["[ede_diagnostic] … stop_reason=tool_use"]. The recording shows
+  // the frame right after the browser's `interrupt` control_request — a USER
+  // STOP, not a restart (a restart mid-tool can yield the same shape on
+  // resume). Same bookkeeping class as aborted_streaming; it used to leak into
+  // the feed as a red "Error: [ede_diagnostic] …" line.
   it("recognises the aborted_tools bookkeeping frame (turn cut mid-tool-call)", () => {
     expect(
       isResumeInterruptedResult({

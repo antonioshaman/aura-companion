@@ -152,8 +152,10 @@ const AUTH_ERROR_TYPE_RE =
   /(authentication|unauthorized|permission|invalid[_-]?(?:x[_-]?)?api[_-]?key|oauth)/i;
 
 /**
- * Muted, collapsed note for the result frame Claude's `--resume` emits to close
- * a turn a restart cut off (`utils/resume-interrupted.ts`). Not an error of the
+ * Muted, collapsed note for the result frame Claude emits to close a turn that
+ * was cut off — by a restart (`--resume`) or by the user's Stop; the frame
+ * cannot tell which, so the label is cause-neutral
+ * (`utils/resume-interrupted.ts`). Not an error of the
  * current work, so it reads like the other system dividers; the raw diagnostic
  * stays one click away for debugging.
  */

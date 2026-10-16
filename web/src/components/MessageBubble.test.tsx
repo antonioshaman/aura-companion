@@ -97,7 +97,10 @@ describe("MessageBubble - result error variants", () => {
     const note = screen.getByTestId("resume-interrupted-note") as HTMLDetailsElement;
     // Collapsed by default: only the human label is visible.
     expect(note.open).toBe(false);
-    expect(screen.getByText("Previous turn was interrupted by a restart")).toBeTruthy();
+    // Cause-neutral label: the same frame closes a turn cut by a restart AND
+    // one the user stopped mid-tool-call, so it must not claim "restart".
+    expect(screen.getByText("Turn interrupted (stopped or restarted)")).toBeTruthy();
+    expect(screen.queryByText(/by a restart/)).toBeNull();
     // Nothing in the note uses the error color — this is the whole point.
     expect(container.querySelector(".text-cc-error")).toBeNull();
   });

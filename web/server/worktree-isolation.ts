@@ -138,11 +138,24 @@ export function isPathInside(child: string, parent: string): boolean {
  * project on the box, so these are skipped by both service matchers.
  */
 export function isBroadServiceDir(dir: string): boolean {
-  const d = normalize(dir);
-  if (d === sep) return true;
-  if (d === normalize(homedir())) return true;
-  if (d === "/root" || d === "/home") return true;
-  return /^\/home\/[^/]+$/.test(d);
+  // Check BOTH the lexical and the symlink-resolved form. On macOS `/home`
+  // is an autofs mount point that realpath()s to `/System/Volumes/Data/home`
+  // (and `/var` -> `/private/var`), so a realpath-only check misses the
+  // literal `/home` a unit file declares.
+  const lexical = stripTrailingSlashes(resolve(dir));
+  const real = normalize(dir);
+  const home = normalize(homedir());
+  return [lexical, real].some((d) => d === sep || d === home || isHomeLikeDir(d));
+}
+
+function stripTrailingSlashes(p: string): string {
+  return p.length > 1 ? p.replace(/\/+$/, "") : p;
+}
+
+/** `/root`, `/home`, `/home/<user>`, macOS `/Users`, `/Users/<user>` (+ the macOS data-volume aliases). */
+function isHomeLikeDir(d: string): boolean {
+  if (d === "/root") return true;
+  return /^(?:\/System\/Volumes\/Data)?\/(?:home|Users)(?:\/[^/]+)?$/.test(d);
 }
 
 // ─── Git helpers ────────────────────────────────────────────────────────────

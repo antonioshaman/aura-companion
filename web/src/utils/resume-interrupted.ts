@@ -1,6 +1,11 @@
 /**
  * Recognise the result frame Claude Code emits to close a turn that was cut
- * off by a process restart.
+ * off before it finished — by a process restart OR by the user pressing Stop.
+ *
+ * The frame does not say which: the same `[ede_diagnostic]` shape is emitted
+ * (a) by `--resume` closing a turn a restart killed, and (b) directly after an
+ * `interrupt` control_request when the user stops a running tool call. The
+ * label therefore names the effect ("turn interrupted"), not a guessed cause.
  *
  * When the server relaunches a Claude session with `--resume` (server restart,
  * auto-relaunch, keepalive), the CLI replays the transcript, finds the last
@@ -28,7 +33,8 @@
  * Codex counterpart of this noise. The predicate never matches a Codex frame.
  */
 
-export const RESUME_INTERRUPTED_LABEL = "Previous turn was interrupted by a restart";
+/** Cause-neutral on purpose — the frame cannot distinguish restart from Stop. */
+export const RESUME_INTERRUPTED_LABEL = "Turn interrupted (stopped or restarted)";
 
 const EDE_DIAGNOSTIC_PREFIX = "[ede_diagnostic]";
 
@@ -38,12 +44,16 @@ export interface ResultFrameLike {
   errors?: string[];
 }
 
-/** Terminal reasons the CLI uses for a turn cut off by a restart:
- *  `aborted_streaming` (mid-text) and `aborted_tools` (mid-tool-call —
- *  observed live 2026-10-15, session 40f03a1e: a server restart killed a
- *  running Bash tool; the resume frame carried
- *  `[ede_diagnostic] … stop_reason=tool_use`). Same bookkeeping class,
- *  same rendering. Everything else stays fail-closed toward "real error". */
+/** Terminal reasons the CLI uses for a cut-off turn: `aborted_streaming`
+ *  (mid-text; the `--resume` bookkeeping frame after a restart) and
+ *  `aborted_tools` (mid-tool-call). The `aborted_tools` frame observed live
+ *  2026-10-15 (session 40f03a1e,
+ *  `[ede_diagnostic] … stop_reason=tool_use`) was NOT a restart: the recording
+ *  shows it 30 ms after the browser's `interrupt` control_request, i.e. the
+ *  user pressed Stop during a running Bash tool. A restart mid-tool-call can
+ *  produce the same frame on resume. Either way it is the closing bookkeeping
+ *  of an interrupted turn, not a failure — same muted rendering, with a
+ *  cause-neutral label. Everything else stays fail-closed toward "real error". */
 const ABORTED_TERMINAL_REASONS = new Set(["aborted_streaming", "aborted_tools"]);
 
 export function isResumeInterruptedResult(r: ResultFrameLike | null | undefined): boolean {
