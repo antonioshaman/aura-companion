@@ -1198,9 +1198,13 @@ export class SessionRecovery {
         from: currentModel,
         to: decision.rotateTo,
       });
-      this.wsBridge.broadcastToSession(sessionId, {
-        type: "error",
-        message: `Model ${currentModel} silent on this session — rotating to ${decision.rotateTo} and relaunching.`,
+      // Task A.2: a persistent from→to notice (banner with "switch back"),
+      // recorded on the session state — not an ephemeral toast.
+      this.wsBridge.recordModelFallback(sessionId, {
+        from: currentModel,
+        to: decision.rotateTo,
+        reason: "unresponsive",
+        detail: "The model went silent on repeated turns; Aura relaunched on the next model in the fallback chain.",
       });
       this.launcher.setModel(sessionId, decision.rotateTo);
       this.silenceRecurrenceCounts.delete(sessionId);
@@ -1296,9 +1300,12 @@ export class SessionRecovery {
       to: nextModel,
       reason,
     });
-    this.wsBridge.broadcastToSession(sessionId, {
-      type: "error",
-      message: `Model ${currentModel} hit ${reason}; falling back to ${nextModel}…`,
+    // Task A.2: persistent from→to notice instead of an ephemeral toast.
+    this.wsBridge.recordModelFallback(sessionId, {
+      from: currentModel,
+      to: nextModel,
+      reason: "unavailable",
+      detail: `The API reported ${reason.replace(/_/g, " ")}.`,
     });
     this.launcher.setModel(sessionId, nextModel);
     await this.launcher.kill(sessionId);

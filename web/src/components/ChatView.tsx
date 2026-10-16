@@ -9,8 +9,8 @@ import { AiValidationBadge } from "./AiValidationBadge.js";
 import { BlockerBanner } from "./council/index.js";
 import { SectionErrorBoundary } from "./SectionErrorBoundary.js";
 import { CliFailedBanner } from "./CliFailedBanner.js";
-import { ModelFallbackBanner } from "./ModelFallbackBanner.js";
 import { AutoResumeBanner } from "./AutoResumeBanner.js";
+import { ModelFallbackNotice } from "./ModelFallbackNotice.js";
 import { ModelSubstitutionDialog } from "./ModelSubstitutionDialog.js";
 import { ModelAvailabilityAnnouncer } from "./ModelAvailabilityAnnouncer.js";
 import { navigateHome } from "../utils/routing.js";
@@ -131,9 +131,7 @@ export function ChatView({ sessionId }: { sessionId: string }) {
   // dismissible notice (same-tier auto-swap) or a pending cross-tier proposal
   // (never silent). Resolve model ids → human labels via the same catalog the
   // ModelSwitcher reads (dynamic list, falling back to the static set).
-  const substitutionNotice = useStore((s) => s.modelSubstitutionNotices.get(sessionId));
   const crossTierSwitch = useStore((s) => s.pendingCrossTierSwitches.get(sessionId));
-  const clearModelSubstitutionNotice = useStore((s) => s.clearModelSubstitutionNotice);
   const clearPendingCrossTierSwitch = useStore((s) => s.clearPendingCrossTierSwitch);
   const setPendingClaudeModelSwitch = useStore((s) => s.setPendingClaudeModelSwitch);
   const updateSession = useStore((s) => s.updateSession);
@@ -179,10 +177,6 @@ export function ChatView({ sessionId }: { sessionId: string }) {
   const handleCrossTierCancel = useCallback(() => {
     clearPendingCrossTierSwitch(sessionId);
   }, [clearPendingCrossTierSwitch, sessionId]);
-
-  const handleSubstitutionDismiss = useCallback(() => {
-    clearModelSubstitutionNotice(sessionId);
-  }, [clearModelSubstitutionNotice, sessionId]);
 
   // Council Mode: observer half has its permission-mode locked at spawn
   // (EC-1, applyCouncilObserverSpawnConfig). Mounting Composer under the
@@ -312,20 +306,13 @@ export function ChatView({ sessionId }: { sessionId: string }) {
         </div>
       )}
 
-      {/* Model Registry Task 9 — proactive same-tier substitution notice. A
-          calm, additive warning banner (NOT priority-gated like the slot above):
-          a model fallback is infrastructure info, never a blocker, so it sits in
-          its own slot and coexists with the chat. */}
-      {substitutionNotice && (
-        <div className="shrink-0 border-t border-cc-border bg-cc-card">
-          <ModelFallbackBanner
-            fromModel={modelLabel(substitutionNotice.requested)}
-            toModel={modelLabel(substitutionNotice.applied)}
-            reason={substitutionNotice.reason}
-            onDismiss={handleSubstitutionDismiss}
-          />
-        </div>
-      )}
+      {/* Model fallback notice (Task 9 + Task A.2) — one persistent banner for
+          every "running on a different model than you chose" path: client
+          gate/revert notices AND server-recorded fallbacks (spawn substitution,
+          Codex rejection, chain fallback, silence rotation). Additive, NOT
+          priority-gated like the slot above: infrastructure info, never a
+          blocker, so it coexists with the chat. */}
+      <ModelFallbackNotice sessionId={sessionId} />
 
       {/* Composer — suppressed for the observer half of a Council pair.
           The toggle's set_permission_mode would be rejected server-side

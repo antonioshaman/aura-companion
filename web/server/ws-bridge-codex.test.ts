@@ -199,6 +199,19 @@ describe("attachCodexAdapterHandlers", () => {
     expect(deps.persistSession).toHaveBeenCalledWith(session);
   });
 
+  it("session_init on a different model than model_fallback.to clears the stale fallback record (review STOP)", () => {
+    // Codex switches by relaunch; the new process's session_init carries the
+    // model now in effect. If it is not the fallback target, the banner's
+    // record is stale and must be dropped (persisted + broadcast with the state).
+    session.state.model_fallback = { from: "gpt-6.1-sol", to: "gpt-5.3-codex", reason: "rejected", at: 1 };
+    attachCodexAdapterHandlers("test-session", session, adapter as unknown as CodexAdapter, deps);
+    adapter._trigger("onBrowserMessage", { type: "session_init", session: { ...session.state, model: "gpt-5.3-codex" } });
+    expect(session.state.model_fallback?.to).toBe("gpt-5.3-codex");
+    adapter._trigger("onBrowserMessage", { type: "session_init", session: { ...session.state, model: "gpt-6.1-sol" } });
+    expect(session.state.model_fallback).toBeNull();
+    expect(deps.persistSession).toHaveBeenCalledWith(session);
+  });
+
   it("session_init preserves pre-populated commands/skills when adapter sends empty arrays", () => {
     // When prePopulateCommands has set commands/skills on the session before
     // the Codex adapter sends session_init with empty arrays, the pre-populated

@@ -4,38 +4,48 @@ import {
   resolveModelSubstitution,
 } from "./broken-model-substitution.js";
 
+import type { BrokenModelSubstitution } from "./broken-model-substitution.js";
+
+// Fixture table: the live table is empty since the 2026-10-16 re-probe (CLI
+// 2.1.283 emits opus-5 / fable-5-1 / opus-4-7 on stdout again), so the
+// lookup MECHANISM is exercised against an injected table. Shape mirrors the
+// historical entries so a future re-add behaves exactly like these.
+const FIXTURE: readonly BrokenModelSubstitution[] = [
+  { from: "claude-opus-5", to: "claude-opus-4-8", reason: "Claude CLI 2.1.265+ does not emit opus-5 responses on stdout (fixture)" },
+  { from: "claude-opus-4-7", to: "claude-opus-4-8", reason: "Claude CLI 2.1.266 does not reliably emit opus-4-7 responses (fixture)" },
+  { from: "claude-fable-5-1", to: "claude-opus-4-8", reason: "Claude CLI 2.1.266 does not emit fable-5-1 (Opus 5 API codename) (fixture)" },
+];
+
 describe("resolveModelSubstitution", () => {
-  it("returns the substitution entry for a listed broken model", () => {
-    const sub = resolveModelSubstitution("claude-opus-5");
+  it("returns the substitution entry for a listed broken model (injected table)", () => {
+    const sub = resolveModelSubstitution("claude-opus-5", FIXTURE);
     expect(sub).not.toBeNull();
     expect(sub?.from).toBe("claude-opus-5");
     expect(sub?.to).toBe("claude-opus-4-8");
     expect(sub?.reason).toContain("Claude CLI 2.1.265");
   });
 
-  it("substitutes claude-opus-4-7 → claude-opus-4-8 (added 2026-09-10 after field verification)", () => {
-    const sub = resolveModelSubstitution("claude-opus-4-7");
-    expect(sub).not.toBeNull();
+  it("substitutes claude-opus-4-7 → claude-opus-4-8 when listed (injected table)", () => {
+    const sub = resolveModelSubstitution("claude-opus-4-7", FIXTURE);
     expect(sub?.from).toBe("claude-opus-4-7");
     expect(sub?.to).toBe("claude-opus-4-8");
-    expect(sub?.reason).toContain("Claude CLI 2.1.266");
   });
 
-  it("substitutes claude-fable-5-1 → claude-opus-4-8 (API codename for Opus 5, added 2026-09-11)", () => {
-    // The CLI's init frame reports the API model codename
-    // (`claude-fable-5-1`) rather than the composer's display name
-    // (`claude-opus-5`). bun persists whichever form the CLI last
-    // reported, so persistence-across-restart may land on either
-    // string. Both must substitute to the SAME target to prevent
-    // the substitution table missing the codename form (verified
-    // gap 2026-09-11 when two sessions spawned with fable-5-1
-    // hit the identical silent-stdio pattern the opus-5 entry
-    // was meant to pre-empt).
-    const sub = resolveModelSubstitution("claude-fable-5-1");
-    expect(sub).not.toBeNull();
+  it("matches the API codename claude-fable-5-1 independently of claude-opus-5 (injected table)", () => {
+    // The CLI's init frame reports the API codename, so persisted state may
+    // land on either literal; each form needs its own exact-match entry.
+    const sub = resolveModelSubstitution("claude-fable-5-1", FIXTURE);
     expect(sub?.from).toBe("claude-fable-5-1");
     expect(sub?.to).toBe("claude-opus-4-8");
-    expect(sub?.reason).toContain("Opus 5 API codename");
+  });
+
+  it("live table no longer rewrites Opus 5 / fable-5-1 / opus-4-7 (re-probed on CLI 2.1.283, 2026-10-16)", () => {
+    // Regression guard for the silent downgrade: the user picked Opus 5,
+    // ran on it until the next relaunch, then got rewritten to 4.8. The
+    // probe (two-turn stdin stream-json) showed all three emit on stdout.
+    expect(resolveModelSubstitution("claude-opus-5")).toBeNull();
+    expect(resolveModelSubstitution("claude-fable-5-1")).toBeNull();
+    expect(resolveModelSubstitution("claude-opus-4-7")).toBeNull();
   });
 
   it("returns null for non-broken Claude models", () => {

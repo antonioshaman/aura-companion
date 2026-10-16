@@ -3352,6 +3352,44 @@ function CouncilModeSection() {
         <Card label="AutoResumeBanner — reset time unknown (fallback), cancelling">
           <AutoResumeBanner resetAt={Date.now() + 5 * 3_600_000} fireAt={Date.now() + 5 * 3_600_000 + 60_000} resetSource="fallback" onCancel={() => {}} cancelling />
         </Card>
+        {/* Task A.2 — server-recorded fallbacks (persistent across reloads). */}
+        <Card label="ModelFallbackBanner — overloaded, with Switch back">
+          <ModelFallbackBanner
+            fromModel="Opus 5"
+            toModel="Opus 4.8"
+            reason="overloaded"
+            onSwitchBack={() => {}}
+            onDismiss={() => {}}
+          />
+        </Card>
+        <Card label="ModelFallbackBanner — silence rotation (unresponsive)">
+          <ModelFallbackBanner
+            fromModel="Opus 4.8"
+            toModel="Opus 4.7"
+            reason="unresponsive"
+            detail="The model went silent on repeated turns; Aura relaunched on the next model in the fallback chain."
+            onSwitchBack={() => {}}
+            onDismiss={() => {}}
+          />
+        </Card>
+        <Card label="ModelFallbackBanner — Codex model rejected by account">
+          <ModelFallbackBanner
+            fromModel="gpt-6.1-sol"
+            toModel="gpt-5.3-codex"
+            reason="rejected"
+            detail="model gpt-6.1-sol is not available for this account"
+            onDismiss={() => {}}
+          />
+        </Card>
+        <Card label="ModelFallbackBanner — CLI-incompatible (broken-model table)">
+          <ModelFallbackBanner
+            fromModel="Opus 5"
+            toModel="Opus 4.8"
+            reason="cli-incompatible"
+            detail="Claude CLI 2.1.266 does not emit opus-5 responses on stdout"
+            onDismiss={() => {}}
+          />
+        </Card>
 
         {/* PWA update prompt — info-tone toaster shown when a new Service
             Worker version is waiting to activate after a frontend deploy. */}

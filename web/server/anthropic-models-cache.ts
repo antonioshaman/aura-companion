@@ -191,6 +191,12 @@ export interface BackendModelInfo {
    */
   status?: ModelStatus;
   replacement?: string | null;
+  /**
+   * `true` when the model is NOT in the registry — offered (the catalogue
+   * lists it) but never verified on this install. Additive; the dropdown
+   * renders a subtle "Untested" hint.
+   */
+  untested?: true;
 }
 
 // ── Per-request result discriminated union (Backend R1 + Fowler R1) ─────────

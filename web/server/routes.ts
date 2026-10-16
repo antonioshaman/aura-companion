@@ -257,7 +257,8 @@ function shellEscapeArg(value: string): string {
  * whether a model is `status`/`replacement`-annotated so it can render a tag.
  *
  * Additive merge (Task 3): a model absent from the registry passes through
- * untouched, so an old frontend still parses the payload. Hunt REC-4: only
+ * with only an additive `untested: true` flag, so an old frontend still
+ * parses the payload. Hunt REC-4: only
  * `status` and `replacement` cross the wire — `riskFlags`, `tier`, and the
  * on-disk file path stay operator-internal.
  */
@@ -267,7 +268,11 @@ function enrichModelsWithRegistry(
 ): BackendModelInfo[] {
   return models.map((m) => {
     const entry = lookupModel(backend, m.value);
-    if (entry === null) return m;
+    // Not in the registry → nobody verified it runs on this install (the
+    // Claude list is the API-key /v1/models catalogue, which can include
+    // models the subscription can't use). Say so honestly; no lifecycle
+    // `status` is invented.
+    if (entry === null) return { ...m, untested: true };
     return { ...m, status: entry.status, replacement: entry.replacement };
   });
 }

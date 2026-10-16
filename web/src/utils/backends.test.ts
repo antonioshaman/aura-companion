@@ -19,6 +19,17 @@ import {
 } from "./backends.js";
 
 describe("toModelOptions", () => {
+  it("carries the server's untested flag through (and omits it when absent)", () => {
+    // Registry-unknown models arrive flagged `untested: true`; the dropdown
+    // renders an honest hint from it. Absent stays absent (shape unchanged).
+    const options = toModelOptions([
+      { value: "claude-opus-5", label: "Opus 5", description: "", untested: true },
+      { value: "claude-opus-4-8", label: "Opus 4.8", description: "" },
+    ]);
+    expect(options[0].untested).toBe(true);
+    expect(options[1]).not.toHaveProperty("untested");
+  });
+
   it("converts server model info to frontend ModelOption with icons", () => {
     const models = [
       { value: "gpt-5.2-codex", label: "gpt-5.2-codex", description: "Frontier" },

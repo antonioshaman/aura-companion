@@ -1267,6 +1267,39 @@ describe("handleMessage: result", () => {
     expect(msgs.some((m) => m.role === "system" && m.content.includes("claude-fable-5") && m.content.includes("claude-opus-4-8"))).toBe(true);
   });
 
+  it("a reactive revert also raises the persistent fallback banner naming from→to and why (Task A.2)", () => {
+    // The system message scrolls away; the banner stays until dismissed.
+    useStore.setState({
+      sdkSessions: [{ sessionId: "s1", backendType: "claude", cwd: "/test", state: "running", createdAt: Date.now() }],
+    });
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    useStore.getState().setPendingClaudeModelSwitch("s1", "claude-opus-5", "claude-opus-4-8");
+    useStore.getState().updateSession("s1", { model: "claude-opus-5" });
+
+    fireMessage({
+      type: "result",
+      data: {
+        type: "result",
+        subtype: "success",
+        is_error: true,
+        api_error_status: 529,
+        result: "Overloaded",
+        duration_ms: 1000,
+        duration_api_ms: 800,
+        num_turns: 1,
+        total_cost_usd: 0.01,
+        stop_reason: "stop_sequence",
+        usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        uuid: "u-ovl",
+        session_id: "s1",
+      },
+    });
+
+    const notice = useStore.getState().modelSubstitutionNotices.get("s1");
+    expect(notice).toMatchObject({ requested: "claude-opus-5", applied: "claude-opus-4-8", reason: "overloaded" });
+  });
+
   it("clears a pending Claude switch without reverting when the turn succeeds", () => {
     useStore.setState({
       sdkSessions: [{ sessionId: "s1", backendType: "claude", cwd: "/test", state: "running", createdAt: Date.now() }],
@@ -1838,6 +1871,25 @@ describe("handleMessage: model_substitution", () => {
     expect(notice.applied).toBe("claude-opus-4-8");
     expect(notice.reason).toBe("retired");
     expect((state.messages.get("s1") ?? []).some((m) => m.role === "system")).toBe(false);
+  });
+
+  it("substituted with reason cli-incompatible (broken-model table) keeps that reason on the notice", () => {
+    // The set_model gate now consults the broken-model table; the banner must
+    // say the CLI is the cause, not mislabel it as retired.
+    useStore.setState({
+      sdkSessions: [{ sessionId: "s1", backendType: "claude", cwd: "/test", state: "running", createdAt: Date.now() }],
+    });
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    useStore.getState().setPendingClaudeModelSwitch("s1", "claude-opus-5", "claude-opus-4-8");
+    fireMessage({
+      type: "model_substitution",
+      requested: "claude-opus-5",
+      applied: "claude-opus-4-8",
+      outcome: "substituted",
+      reason: "cli-incompatible",
+    });
+    expect(useStore.getState().modelSubstitutionNotices.get("s1")!.reason).toBe("cli-incompatible");
   });
 
   it("needs-user-action: reverts the optimistic switch, clears the marker, holds a cross-tier proposal", () => {
