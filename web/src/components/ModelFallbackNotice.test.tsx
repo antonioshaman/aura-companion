@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom";
 import "vitest-axe/extend-expect";
 
@@ -17,12 +17,12 @@ import "vitest-axe/extend-expect";
  */
 
 const mockSendToSession = vi.fn();
-const mockRelaunchSession = vi.fn(async () => ({ ok: true }));
+const mockRelaunchSession = vi.fn<(...args: unknown[]) => Promise<unknown>>(async () => ({ ok: true }));
 vi.mock("../ws.js", () => ({
   sendToSession: (...args: unknown[]) => mockSendToSession(...args),
 }));
 vi.mock("../api.js", () => ({
-  api: { relaunchSession: (...args: unknown[]) => mockRelaunchSession(...(args as [])) },
+  api: { relaunchSession: (...args: unknown[]) => mockRelaunchSession(...args) },
 }));
 
 const actions = {
@@ -161,6 +161,50 @@ describe("ModelFallbackNotice", () => {
     fireEvent.click(screen.getByRole("button", { name: "Switch back to GPT-6.1 Sol" }));
     expect(actions.setPendingCodexModelSwitch).toHaveBeenCalledWith("s1", "gpt-6.1-sol");
     expect(mockRelaunchSession).toHaveBeenCalledWith("s1", { model: "gpt-6.1-sol" });
+  });
+
+  // Observer WARN (PR #367): the Codex switch-back is a relaunch REQUEST that
+  // can fail. The notice used to be dismissed (locally + server-side) before
+  // the request settled, so a failure left the user on the fallback model with
+  // no notice and no error. Keep it until success; on failure show the error.
+  it("Codex switch back: keeps the notice and shows the error when the relaunch request fails", async () => {
+    mockRelaunchSession.mockRejectedValueOnce(new Error("Relaunch failed: codex cache missing"));
+    setup({
+      backend: "codex",
+      model: "gpt-5.3-codex",
+      serverFallback: { from: "gpt-6.1-sol", to: "gpt-5.3-codex", reason: "overloaded", at: 100 },
+    });
+    render(<ModelFallbackNotice sessionId="s1" />);
+    fireEvent.click(screen.getByRole("button", { name: "Switch back to GPT-6.1 Sol" }));
+
+    expect(await screen.findByText(/Couldn't switch back to GPT-6\.1 Sol: Relaunch failed: codex cache missing/)).toBeInTheDocument();
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    expect(actions.clearPendingCodexModelSwitch).toHaveBeenCalledWith("s1");
+    // Nothing was dismissed — neither the shared server record nor locally.
+    expect(mockSendToSession).not.toHaveBeenCalledWith("s1", expect.objectContaining({ type: "dismiss_model_fallback" }));
+    expect(window.localStorage.getItem("cc-model-fallback-dismissed:s1")).toBeNull();
+    // The user can retry.
+    expect(screen.getByRole("button", { name: "Switch back to GPT-6.1 Sol" })).not.toBeDisabled();
+  });
+
+  it("Codex switch back: dismisses only after the relaunch request succeeds", async () => {
+    let resolve!: (v: unknown) => void;
+    mockRelaunchSession.mockImplementationOnce(() => new Promise((r) => { resolve = r; }));
+    setup({
+      backend: "codex",
+      model: "gpt-5.3-codex",
+      serverFallback: { from: "gpt-6.1-sol", to: "gpt-5.3-codex", reason: "overloaded", at: 100 },
+    });
+    render(<ModelFallbackNotice sessionId="s1" />);
+    fireEvent.click(screen.getByRole("button", { name: "Switch back to GPT-6.1 Sol" }));
+    // In flight: notice still visible, action disabled (no double relaunch).
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Switching back/ })).toBeDisabled();
+    expect(mockSendToSession).not.toHaveBeenCalled();
+
+    resolve({ ok: true });
+    await waitFor(() => expect(screen.queryByRole("status")).not.toBeInTheDocument());
+    expect(mockSendToSession).toHaveBeenCalledWith("s1", { type: "dismiss_model_fallback", at: 100 });
   });
 
   it.each(["rejected", "retired", "blocked", "cli-incompatible", "unavailable"])(

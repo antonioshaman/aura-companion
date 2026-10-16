@@ -37,6 +37,10 @@ interface ModelFallbackBannerProps {
   detail?: string;
   /** Return to `fromModel`. Omit when that model can't be selected. */
   onSwitchBack?: () => void;
+  /** A switch-back request is in flight — the action is disabled. */
+  switchingBack?: boolean;
+  /** Why the last switch-back attempt failed (notice stays open, retry allowed). */
+  switchBackError?: string;
   /** Dismiss the notice. The fallback stays in effect; this only hides the banner. */
   onDismiss?: () => void;
 }
@@ -68,6 +72,8 @@ export function ModelFallbackBanner({
   reason,
   detail,
   onSwitchBack,
+  switchingBack = false,
+  switchBackError,
   onDismiss,
 }: ModelFallbackBannerProps) {
   return (
@@ -91,15 +97,21 @@ export function ModelFallbackBanner({
           {detail && (
             <p className="text-[11px] text-cc-muted leading-snug mb-2 break-words">{detail}</p>
           )}
+          {switchBackError && (
+            <p className="text-[11px] text-cc-error leading-snug mb-2 break-words">
+              Couldn't switch back to {fromModel}: {switchBackError}
+            </p>
+          )}
           {(onSwitchBack || onDismiss) && (
             <div className="flex items-center gap-3">
               {onSwitchBack && (
                 <button
                   type="button"
                   onClick={onSwitchBack}
-                  className="text-xs font-medium text-cc-fg underline underline-offset-2 hover:text-cc-primary cursor-pointer"
+                  disabled={switchingBack}
+                  className="text-xs font-medium text-cc-fg underline underline-offset-2 hover:text-cc-primary cursor-pointer disabled:cursor-wait disabled:opacity-60"
                 >
-                  Switch back to {fromModel}
+                  {switchingBack ? `Switching back to ${fromModel}…` : `Switch back to ${fromModel}`}
                 </button>
               )}
               {onDismiss && (

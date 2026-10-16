@@ -21,7 +21,7 @@
  * clears the record itself once the session confirms a different model.
  */
 
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useStore } from "../store.js";
 import { api } from "../api.js";
 import { sendToSession } from "../ws.js";
@@ -59,6 +59,15 @@ export function ModelFallbackNotice({ sessionId }: { sessionId: string }) {
   const dynamicModels = useStore((s) => s.dynamicBackendModels[backendType]);
   const catalog = dynamicModels ?? getModelsForBackend(backendType);
   const [dismissedAt, setDismissedAt] = useState<number | null>(() => readDismissedAt(sessionId));
+  // Codex switch-back is an async relaunch REQUEST: keep the notice until it
+  // succeeds; on failure keep it and show why (observer WARN, PR #367).
+  const [switchingBack, setSwitchingBack] = useState(false);
+  const [switchBackError, setSwitchBackError] = useState<string | undefined>(undefined);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   // Show whichever event is NEWER: a client notice (firedAt) or the server
   // record (at). An older in-tab notice must not hide a fresh server fallback.
@@ -94,10 +103,24 @@ export function ModelFallbackNotice({ sessionId }: { sessionId: string }) {
     const target = notice.from;
     const store = useStore.getState();
     if (backendType === "codex") {
+      if (switchingBack) return;
       store.setPendingCodexModelSwitch(sessionId, target);
-      api.relaunchSession(sessionId, { model: target }).catch(() => {
-        useStore.getState().clearPendingCodexModelSwitch(sessionId);
-      });
+      setSwitchingBack(true);
+      setSwitchBackError(undefined);
+      api.relaunchSession(sessionId, { model: target }).then(
+        () => {
+          if (!mountedRef.current) return;
+          setSwitchingBack(false);
+          dismiss();
+        },
+        (err: unknown) => {
+          useStore.getState().clearPendingCodexModelSwitch(sessionId);
+          if (!mountedRef.current) return;
+          setSwitchingBack(false);
+          setSwitchBackError(err instanceof Error && err.message ? err.message : "the relaunch request failed");
+        },
+      );
+      return;
     } else {
       // Same single-marker optimistic path as ModelSwitcher: if the original
       // model fails again on the next turn, ws.ts reverts to the current one.
@@ -110,7 +133,7 @@ export function ModelFallbackNotice({ sessionId }: { sessionId: string }) {
       );
     }
     dismiss();
-  }, [notice, backendType, sessionId, runtimeModel, sdkSession?.model, dismiss]);
+  }, [notice, backendType, sessionId, runtimeModel, sdkSession?.model, dismiss, switchingBack]);
 
   if (!notice) return null;
 
@@ -129,6 +152,8 @@ export function ModelFallbackNotice({ sessionId }: { sessionId: string }) {
         reason={notice.reason}
         detail={notice.detail}
         onSwitchBack={canSwitchBack ? switchBack : undefined}
+        switchingBack={switchingBack}
+        switchBackError={switchBackError}
         onDismiss={dismiss}
       />
     </div>

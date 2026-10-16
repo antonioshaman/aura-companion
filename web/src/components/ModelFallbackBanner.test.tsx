@@ -88,6 +88,20 @@ describe("ModelFallbackBanner", () => {
     expect(onSwitchBack).toHaveBeenCalledOnce();
   });
 
+  it("renders a switch-back error and a disabled in-flight state", () => {
+    // Codex switch-back is an async relaunch: while it runs the action is
+    // disabled; if it fails the reason is shown inside the (still open) notice.
+    const { rerender } = render(
+      <ModelFallbackBanner fromModel="GPT-6.1 Sol" toModel="GPT-5.3" onSwitchBack={() => {}} switchingBack />,
+    );
+    expect(screen.getByRole("button", { name: "Switching back to GPT-6.1 Sol…" })).toBeDisabled();
+    rerender(
+      <ModelFallbackBanner fromModel="GPT-6.1 Sol" toModel="GPT-5.3" onSwitchBack={() => {}} switchBackError="boom" />,
+    );
+    expect(screen.getByText("Couldn't switch back to GPT-6.1 Sol: boom")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Switch back to GPT-6.1 Sol" })).not.toBeDisabled();
+  });
+
   it("passes axe checks with detail + switch-back + dismiss rendered", async () => {
     const { axe } = await import("vitest-axe");
     const { container } = render(
