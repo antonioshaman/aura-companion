@@ -712,3 +712,84 @@ describe("resolveOrphanReaperGate — COMPANION_ORPHAN_REAPER boot gate", () => 
     expect(r.warning).toContain('"of"');
   });
 });
+
+describe("reapOrphans — SIGTERM-ignoring orphan escalates to SIGKILL (W10a)", () => {
+  // Prod regression: a codex `app-server` orphan (PPID=1) ignored SIGTERM for
+  // weeks while every boot logged "orphan reaped via SIGTERM". The reaper must
+  // (1) observe exit before claiming a reap, (2) escalate to SIGKILL after the
+  // SIGTERM grace, and (3) report a survivor honestly instead of as reaped.
+  function codexCmdline(): string {
+    return ["/usr/bin/node", "/usr/lib/node_modules/@openai/codex/bin/codex.js", "app-server", "--listen", "ws://127.0.0.1:4502"].join("\0") + "\0";
+  }
+  function depsWith(over: Partial<OrphanReaperDeps>): OrphanReaperDeps {
+    let t = 1_700_000_001_000;
+    return {
+      loadedSessions: [],
+      sentinelRoot: tmpRoot,
+      sessionsRoot: tmpRoot,
+      platform: () => "linux",
+      listProcPids: () => [4502],
+      readStat: () => fakeStat("node", 1),
+      readCmdline: () => codexCmdline(),
+      sleep: async (ms: number) => { t += ms; },
+      now: () => t,
+      ...over,
+    };
+  }
+  const reapedLogs = () =>
+    infoSpy.mock.calls.filter((c: unknown[]) => (c[2] as { event?: string } | undefined)?.event === "orphan_reaped");
+
+  it("SIGTERM ignored → SIGKILL sent → exit observed → reaped, logged as SIGKILL", async () => {
+    let alive = true;
+    const kill = vi.fn((_pid: number, sig: string) => { if (sig === "SIGKILL") alive = false; });
+    const sum = await reapOrphans(depsWith({ kill, killCheck: () => alive }));
+    expect(kill.mock.calls.map((c) => c[1])).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(sum.reaped).toBe(1);
+    expect(sum.escalatedToSigkill).toBe(1);
+    expect(sum.survived).toBe(0);
+    expect(reapedLogs()).toHaveLength(1);
+    expect(reapedLogs()[0][1]).toBe("orphan reaped via SIGKILL");
+    expect(reapedLogs()[0][2]).toMatchObject({ signal: "SIGKILL" });
+    expect(existsSync(join(tmpRoot, REAPING_SENTINEL_SUBDIR, "4502.json"))).toBe(false);
+  });
+
+  it("process exits on SIGTERM → no SIGKILL, logged as SIGTERM", async () => {
+    let alive = true;
+    const kill = vi.fn(() => { alive = false; });
+    const sum = await reapOrphans(depsWith({ kill, killCheck: () => alive }));
+    expect(kill).toHaveBeenCalledTimes(1);
+    expect(kill).toHaveBeenCalledWith(4502, "SIGTERM");
+    expect(sum.reaped).toBe(1);
+    expect(sum.escalatedToSigkill).toBe(0);
+    expect(reapedLogs()[0][1]).toBe("orphan reaped via SIGTERM");
+  });
+
+  it("survives SIGTERM and SIGKILL → NOT counted as reaped, survived=1, honest WARN", async () => {
+    const kill = vi.fn();
+    const sum = await reapOrphans(depsWith({ kill, killCheck: () => true }));
+    expect(kill.mock.calls.map((c) => c[1])).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(sum.reaped).toBe(0);
+    expect(sum.survived).toBe(1);
+    expect(reapedLogs()).toHaveLength(0);
+    expect(warnSpy).toHaveBeenCalledWith(
+      "orphan-reaper",
+      expect.stringContaining("survived"),
+      expect.objectContaining({ event: "orphan_reaper.survived", pid: 4502 }),
+    );
+  });
+
+  it("identity drifts during the SIGTERM grace (PID reuse) → SIGKILL is NOT sent", async () => {
+    // The first two cmdline reads (classify + pre-SIGTERM re-verify) see the
+    // orphan; afterwards the pid belongs to an unrelated process.
+    let reads = 0;
+    const kill = vi.fn();
+    const sum = await reapOrphans(depsWith({
+      kill,
+      killCheck: () => true,
+      readCmdline: () => (++reads <= 2 ? codexCmdline() : ["/usr/bin/vim", "notes.txt"].join("\0") + "\0"),
+    }));
+    expect(kill.mock.calls.map((c) => c[1])).toEqual(["SIGTERM"]);
+    expect(sum.reaped).toBe(0);
+    expect(sum.killAbortedDrift).toBe(1);
+  });
+});
