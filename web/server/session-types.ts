@@ -283,6 +283,21 @@ export interface CLIStreamlinedToolUseSummaryMessage {
   uuid: string;
 }
 
+/**
+ * Queue lifecycle of a uuid-stamped stdin command (CLI 2.1.278+). Emitted only
+ * for inbound messages that carried a client-supplied `uuid` — and for the
+ * CLI's own scheduled commands (durable cron prompts), which is how a host
+ * learns that a turn it did not send is running. `command_uuid` is the uuid
+ * of the inbound message; `uuid` is this frame's own id.
+ */
+export interface CLICommandLifecycleMessage {
+  type: "command_lifecycle";
+  command_uuid: string;
+  state: "queued" | "started" | "completed" | "cancelled" | "discarded" | "refused" | (string & {});
+  uuid?: string;
+  session_id?: string;
+}
+
 /** Predicted next user prompts (enabled via promptSuggestions in initialize). */
 export interface CLIPromptSuggestionMessage {
   type: "prompt_suggestion";
@@ -309,7 +324,8 @@ export type CLIMessage =
   | CLIControlCancelRequestMessage
   | CLIStreamlinedTextMessage
   | CLIStreamlinedToolUseSummaryMessage
-  | CLIPromptSuggestionMessage;
+  | CLIPromptSuggestionMessage
+  | CLICommandLifecycleMessage;
 
 // ─── Content Block Types ──────────────────────────────────────────────────────
 

@@ -1,0 +1,798 @@
+{
+ "source": "prod 2026-10-15, session 40f03a1e (CLI 2.1.283). jsonl = the CLI's own transcript lines 447-463 (the previous, delivered answer through the stalled turn); recording = recorder v3 frames of the spawn that went silent (cli channel + the browser user_message). Sanitized: cli session id, cwd, git remote, tool list, thinking signatures, answer text, hook list.",
+ "note": "bun got zero CLI frames after system.init (15:03:21.002); the CLI wrote thinking + tool_use (git push) + tool_result + thinking + text(end_turn) by 15:03:34.506. The drift tick at 15:03:37.256 killed it and relaunched with --resume; the resumed CLI re-emitted nothing, so the answer never reached the browser.",
+ "detectedAtMs": 1792076617256,
+ "jsonlMtimeMs": 1792076614635,
+ "waitChannels": "futex_wait_queue×11, ep_poll×2, wait_woken×1",
+ "recording": [
+  {
+   "ts": 1792076573087,
+   "dir": "in",
+   "ch": "cli",
+   "event": "ws_open"
+  },
+  {
+   "ts": 1792076573094,
+   "dir": "out",
+   "ch": "cli",
+   "raw": {
+    "type": "control_request",
+    "request_id": "6daa6be4-29d2-4f70-92a9-228d17e43e17",
+    "request": {
+     "subtype": "mcp_status"
+    }
+   }
+  },
+  {
+   "ts": 1792076576556,
+   "dir": "out",
+   "ch": "cli",
+   "raw": {
+    "type": "control_request",
+    "request_id": "015af5f0-f341-4929-a8cd-2981310faa88",
+    "request": {
+     "subtype": "mcp_status"
+    }
+   }
+  },
+  {
+   "ts": 1792076576563,
+   "dir": "in",
+   "ch": "cli",
+   "raw": {
+    "type": "control_response",
+    "response": {
+     "subtype": "success",
+     "request_id": "6daa6be4-29d2-4f70-92a9-228d17e43e17",
+     "response": {
+      "mcpServers": []
+     }
+    }
+   }
+  },
+  {
+   "ts": 1792076576565,
+   "dir": "in",
+   "ch": "cli",
+   "raw": {
+    "type": "control_response",
+    "response": {
+     "subtype": "success",
+     "request_id": "015af5f0-f341-4929-a8cd-2981310faa88",
+     "response": {
+      "mcpServers": []
+     }
+    }
+   }
+  },
+  {
+   "ts": 1792076600890,
+   "dir": "in",
+   "ch": "browser",
+   "raw": {
+    "type": "user_message",
+    "content": "да",
+    "session_id": "40f03a1e-2b12-48f0-bf91-7c33c2631c6a",
+    "client_msg_id": "cmsg-1792076600534-67"
+   }
+  },
+  {
+   "ts": 1792076600892,
+   "dir": "out",
+   "ch": "cli",
+   "raw": {
+    "type": "user",
+    "message": {
+     "role": "user",
+     "content": "да"
+    },
+    "parent_tool_use_id": null,
+    "session_id": "40f03a1e-2b12-48f0-bf91-7c33c2631c6a"
+   }
+  },
+  {
+   "ts": 1792076601002,
+   "dir": "in",
+   "ch": "cli",
+   "raw": {
+    "type": "system",
+    "subtype": "init",
+    "cwd": "/workspace/project",
+    "session_id": "cli-drift-reply-0001",
+    "tools": [
+     "Task",
+     "Bash",
+     "Read",
+     "Edit"
+    ],
+    "mcp_servers": [],
+    "model": "claude-opus-4-8",
+    "permissionMode": "bypassPermissions",
+    "slash_commands": [],
+    "terminal_slash_commands": [
+     "doctor",
+     "color",
+     "focus",
+     "reload-plugins"
+    ],
+    "apiKeySource": "none",
+    "claude_code_version": "2.1.283",
+    "output_style": "default",
+    "agents": [],
+    "skills": [],
+    "plugins": [],
+    "capabilities": [
+     "interrupt_receipt_v1",
+     "interrupt_cancel_queued_v1",
+     "msg_lifecycle_v1",
+     "mcp_read_resource_v1",
+     "mcp_tool_ui_meta_v1"
+    ],
+    "analytics_disabled": false,
+    "product_feedback_disabled": false,
+    "uuid": "790baefe-08c2-4baf-a23d-4ca4c6330620",
+    "memory_paths": {
+     "auto": "/home/user/.claude/projects/-workspace-project/memory/"
+    },
+    "messaging_socket_path": "/tmp/cc-socks/3223719.sock",
+    "fast_mode_state": "off",
+    "fast_mode_disabled_reason": "sdk_opt_in_required",
+    "per_turn_effort_active": false,
+    "view_mode": "default"
+   }
+  }
+ ],
+ "jsonl": [
+  {
+   "parentUuid": "1f2ec292-2335-4ec1-92f5-1922bbca8eb3",
+   "isSidechain": false,
+   "message": {
+    "model": "claude-opus-4-8",
+    "id": "msg_011Cg4CjN93rsQjiTQC6ZD99",
+    "type": "message",
+    "role": "assistant",
+    "content": [
+     {
+      "type": "thinking",
+      "thinking": "",
+      "signature": "<redacted-signature>"
+     }
+    ],
+    "container": null,
+    "stop_reason": "end_turn",
+    "stop_sequence": null,
+    "stop_details": null,
+    "usage": {
+     "input_tokens": 2,
+     "cache_creation_input_tokens": 1334,
+     "cache_read_input_tokens": 152310,
+     "output_tokens": 1128,
+     "output_tokens_details": {
+      "thinking_tokens": 389
+     },
+     "server_tool_use": {
+      "web_search_requests": 0,
+      "web_fetch_requests": 0
+     },
+     "service_tier": "standard",
+     "cache_creation": {
+      "ephemeral_1h_input_tokens": 1334,
+      "ephemeral_5m_input_tokens": 0
+     },
+     "inference_geo": "global",
+     "iterations": [
+      {
+       "input_tokens": 2,
+       "output_tokens": 1128,
+       "cache_read_input_tokens": 152310,
+       "cache_creation_input_tokens": 1334,
+       "cache_creation": {
+        "ephemeral_5m_input_tokens": 0,
+        "ephemeral_1h_input_tokens": 1334
+       },
+       "type": "message"
+      }
+     ],
+     "speed": "standard"
+    },
+    "input_transformations": [],
+    "diagnostics": null,
+    "context_management": null
+   },
+   "apiBlockIndex": 0,
+   "requestId": "req_011Cg4CjMvQNvv4RjTqoabNo",
+   "type": "assistant",
+   "uuid": "ba4dfbdd-4d3d-4b3c-97cc-869798df731a",
+   "timestamp": "2026-10-15T14:45:36.549Z",
+   "effort": "high",
+   "perTurnEffort": null,
+   "userType": "external",
+   "entrypoint": "sdk-cli",
+   "cwd": "/workspace/project",
+   "sessionId": "cli-drift-reply-0001",
+   "version": "2.1.283",
+   "gitBranch": "main"
+  },
+  {
+   "parentUuid": "ba4dfbdd-4d3d-4b3c-97cc-869798df731a",
+   "isSidechain": false,
+   "message": {
+    "model": "claude-opus-4-8",
+    "id": "msg_011Cg4CjN93rsQjiTQC6ZD99",
+    "type": "message",
+    "role": "assistant",
+    "content": [
+     {
+      "type": "text",
+      "text": "[fixture: answer text of msg_011Cg4CjN93rsQjiTQC6ZD99 replaced]"
+     }
+    ],
+    "container": null,
+    "stop_reason": "end_turn",
+    "stop_sequence": null,
+    "stop_details": null,
+    "usage": {
+     "input_tokens": 2,
+     "cache_creation_input_tokens": 1334,
+     "cache_read_input_tokens": 152310,
+     "output_tokens": 1128,
+     "output_tokens_details": {
+      "thinking_tokens": 389
+     },
+     "server_tool_use": {
+      "web_search_requests": 0,
+      "web_fetch_requests": 0
+     },
+     "service_tier": "standard",
+     "cache_creation": {
+      "ephemeral_1h_input_tokens": 1334,
+      "ephemeral_5m_input_tokens": 0
+     },
+     "inference_geo": "global",
+     "iterations": [
+      {
+       "input_tokens": 2,
+       "output_tokens": 1128,
+       "cache_read_input_tokens": 152310,
+       "cache_creation_input_tokens": 1334,
+       "cache_creation": {
+        "ephemeral_5m_input_tokens": 0,
+        "ephemeral_1h_input_tokens": 1334
+       },
+       "type": "message"
+      }
+     ],
+     "speed": "standard"
+    },
+    "input_transformations": [],
+    "diagnostics": null,
+    "context_management": null
+   },
+   "apiBlockIndex": 1,
+   "requestId": "req_011Cg4CjMvQNvv4RjTqoabNo",
+   "type": "assistant",
+   "uuid": "b2f5cd9e-4c9c-4682-b9d9-78ee2732cf36",
+   "timestamp": "2026-10-15T14:45:50.405Z",
+   "effort": "high",
+   "perTurnEffort": null,
+   "userType": "external",
+   "entrypoint": "sdk-cli",
+   "cwd": "/workspace/project",
+   "sessionId": "cli-drift-reply-0001",
+   "version": "2.1.283",
+   "gitBranch": "main"
+  },
+  {
+   "parentUuid": "b2f5cd9e-4c9c-4682-b9d9-78ee2732cf36",
+   "isSidechain": false,
+   "type": "system",
+   "subtype": "stop_hook_summary",
+   "hookCount": 2,
+   "hookInfos": [],
+   "hookErrors": [],
+   "hookAdditionalContext": [],
+   "preventedContinuation": false,
+   "stopReason": "",
+   "hasOutput": false,
+   "level": "suggestion",
+   "timestamp": "2026-10-15T14:45:50.510Z",
+   "uuid": "98472678-8f6a-406e-a268-617093c1c1d6",
+   "toolUseID": "6def8c0c-6fb3-4e7a-9d70-b718c3c16853",
+   "userType": "external",
+   "entrypoint": "sdk-cli",
+   "cwd": "/workspace/project",
+   "sessionId": "cli-drift-reply-0001",
+   "version": "2.1.283",
+   "gitBranch": "main"
+  },
+  {
+   "type": "last-prompt",
+   "lastPrompt": "на чем остановились если нужно было мое подтверждение то делааем",
+   "leafUuid": "98472678-8f6a-406e-a268-617093c1c1d6",
+   "sessionId": "cli-drift-reply-0001"
+  },
+  {
+   "type": "cost-state",
+   "sessionId": "cli-drift-reply-0001",
+   "totalCostUSD": 6.360469000000003,
+   "totalAPIDuration": 984600,
+   "totalAPIDurationWithoutRetries": 984440,
+   "totalToolDuration": 55476,
+   "totalLinesAdded": 207,
+   "totalLinesRemoved": 11,
+   "totalDuration": 66148729,
+   "startTime": 1792010338342,
+   "modelUsage": {
+    "claude-opus-4-8": {
+     "inputTokens": 114,
+     "outputTokens": 65809,
+     "thinkingTokens": 40190,
+     "cacheReadInputTokens": 5931928,
+     "cacheCreationInputTokens": 174871,
+     "webSearchRequests": 0,
+     "costUSD": 6.360469000000003
+    }
+   },
+   "hasUnknownModelCost": false
+  },
+  {
+   "type": "queue-operation",
+   "operation": "enqueue",
+   "timestamp": "2026-10-15T15:03:20.895Z",
+   "sessionId": "cli-drift-reply-0001",
+   "content": "да"
+  },
+  {
+   "type": "queue-operation",
+   "operation": "dequeue",
+   "timestamp": "2026-10-15T15:03:20.896Z",
+   "sessionId": "cli-drift-reply-0001"
+  },
+  {
+   "parentUuid": "98472678-8f6a-406e-a268-617093c1c1d6",
+   "isSidechain": false,
+   "promptId": "cacbb963-95b3-4660-aa0d-b3558a0de172",
+   "type": "user",
+   "message": {
+    "role": "user",
+    "content": "да"
+   },
+   "uuid": "18125468-c3e6-4d6a-9404-4f636e5ae7bf",
+   "timestamp": "2026-10-15T15:03:20.947Z",
+   "permissionMode": "bypassPermissions",
+   "promptSource": "sdk",
+   "turnOrigin": "sdk",
+   "userType": "external",
+   "entrypoint": "sdk-cli",
+   "cwd": "/workspace/project",
+   "sessionId": "cli-drift-reply-0001",
+   "version": "2.1.283",
+   "gitBranch": "main"
+  },
+  {
+   "parentUuid": "18125468-c3e6-4d6a-9404-4f636e5ae7bf",
+   "isSidechain": false,
+   "attachment": {
+    "type": "total_tokens_reminder",
+    "text": "<total_tokens>15000000 tokens left</total_tokens>"
+   },
+   "type": "attachment",
+   "uuid": "5ed41da1-9a94-45b6-b4c3-66bd3fa585c9",
+   "timestamp": "2026-10-15T15:03:20.946Z",
+   "rendered": [
+    {
+     "content": "<system-reminder>\n<total_tokens>15000000 tokens left</total_tokens>\n</system-reminder>"
+    }
+   ],
+   "userType": "external",
+   "entrypoint": "sdk-cli",
+   "cwd": "/workspace/project",
+   "sessionId": "cli-drift-reply-0001",
+   "version": "2.1.283",
+   "gitBranch": "main"
+  },
+  {
+   "parentUuid": "5ed41da1-9a94-45b6-b4c3-66bd3fa585c9",
+   "isSidechain": false,
+   "message": {
+    "model": "claude-opus-4-8",
+    "id": "msg_011Cg4E6MKP3HVwCfxNUs9vZ",
+    "type": "message",
+    "role": "assistant",
+    "content": [
+     {
+      "type": "thinking",
+      "thinking": "",
+      "signature": "<redacted-signature>"
+     }
+    ],
+    "container": null,
+    "stop_reason": "tool_use",
+    "stop_sequence": null,
+    "stop_details": null,
+    "usage": {
+     "input_tokens": 2,
+     "cache_creation_input_tokens": 1155,
+     "cache_read_input_tokens": 153644,
+     "output_tokens": 257,
+     "output_tokens_details": {
+      "thinking_tokens": 151
+     },
+     "server_tool_use": {
+      "web_search_requests": 0,
+      "web_fetch_requests": 0
+     },
+     "service_tier": "standard",
+     "cache_creation": {
+      "ephemeral_1h_input_tokens": 1155,
+      "ephemeral_5m_input_tokens": 0
+     },
+     "inference_geo": "global",
+     "iterations": [
+      {
+       "input_tokens": 2,
+       "output_tokens": 257,
+       "cache_read_input_tokens": 153644,
+       "cache_creation_input_tokens": 1155,
+       "cache_creation": {
+        "ephemeral_5m_input_tokens": 0,
+        "ephemeral_1h_input_tokens": 1155
+       },
+       "type": "message"
+      }
+     ],
+     "speed": "standard"
+    },
+    "input_transformations": [],
+    "diagnostics": null,
+    "context_management": null
+   },
+   "apiBlockIndex": 0,
+   "requestId": "req_011Cg4E6M5k9KMexY41MMHfi",
+   "type": "assistant",
+   "uuid": "737b42eb-4f3b-4f98-b890-251641b429c5",
+   "timestamp": "2026-10-15T15:03:24.089Z",
+   "effort": "high",
+   "perTurnEffort": null,
+   "userType": "external",
+   "entrypoint": "sdk-cli",
+   "cwd": "/workspace/project",
+   "sessionId": "cli-drift-reply-0001",
+   "version": "2.1.283",
+   "gitBranch": "main"
+  },
+  {
+   "parentUuid": "737b42eb-4f3b-4f98-b890-251641b429c5",
+   "isSidechain": false,
+   "message": {
+    "model": "claude-opus-4-8",
+    "id": "msg_011Cg4E6MKP3HVwCfxNUs9vZ",
+    "type": "message",
+    "role": "assistant",
+    "content": [
+     {
+      "type": "tool_use",
+      "id": "toolu_01Fai8qvSvXKQFMAmt1FzJ8v",
+      "name": "Bash",
+      "input": {
+       "command": "git push origin main 2>&1 | tail -15",
+       "description": "Push main to origin"
+      },
+      "caller": {
+       "type": "direct"
+      }
+     }
+    ],
+    "container": null,
+    "stop_reason": "tool_use",
+    "stop_sequence": null,
+    "stop_details": null,
+    "usage": {
+     "input_tokens": 2,
+     "cache_creation_input_tokens": 1155,
+     "cache_read_input_tokens": 153644,
+     "output_tokens": 257,
+     "output_tokens_details": {
+      "thinking_tokens": 151
+     },
+     "server_tool_use": {
+      "web_search_requests": 0,
+      "web_fetch_requests": 0
+     },
+     "service_tier": "standard",
+     "cache_creation": {
+      "ephemeral_1h_input_tokens": 1155,
+      "ephemeral_5m_input_tokens": 0
+     },
+     "inference_geo": "global",
+     "iterations": [
+      {
+       "input_tokens": 2,
+       "output_tokens": 257,
+       "cache_read_input_tokens": 153644,
+       "cache_creation_input_tokens": 1155,
+       "cache_creation": {
+        "ephemeral_5m_input_tokens": 0,
+        "ephemeral_1h_input_tokens": 1155
+       },
+       "type": "message"
+      }
+     ],
+     "speed": "standard"
+    },
+    "input_transformations": [],
+    "diagnostics": null,
+    "context_management": null
+   },
+   "wireToolInputs": {
+    "toolu_01Fai8qvSvXKQFMAmt1FzJ8v": {
+     "command": "cd /workspace/project && git push origin main 2>&1 | tail -15",
+     "description": "Push main to origin"
+    }
+   },
+   "wireIngestContext": {
+    "toolu_01Fai8qvSvXKQFMAmt1FzJ8v": {
+     "cwd": "/workspace/project"
+    }
+   },
+   "apiBlockIndex": 1,
+   "requestId": "req_011Cg4E6M5k9KMexY41MMHfi",
+   "type": "assistant",
+   "uuid": "73f0929c-aaa5-43bc-87a3-243f968c918d",
+   "timestamp": "2026-10-15T15:03:24.822Z",
+   "effort": "high",
+   "perTurnEffort": null,
+   "userType": "external",
+   "entrypoint": "sdk-cli",
+   "cwd": "/workspace/project",
+   "sessionId": "cli-drift-reply-0001",
+   "version": "2.1.283",
+   "gitBranch": "main"
+  },
+  {
+   "parentUuid": "73f0929c-aaa5-43bc-87a3-243f968c918d",
+   "isSidechain": false,
+   "promptId": "cacbb963-95b3-4660-aa0d-b3558a0de172",
+   "type": "user",
+   "message": {
+    "role": "user",
+    "content": [
+     {
+      "tool_use_id": "toolu_01Fai8qvSvXKQFMAmt1FzJ8v",
+      "type": "tool_result",
+      "content": "To git.example:owner/project.git\n   8e5a737..6eca6e3  main -> main",
+      "is_error": false
+     }
+    ]
+   },
+   "uuid": "2ee2751b-5b0b-4451-bb3a-efe900c9436d",
+   "timestamp": "2026-10-15T15:03:27.090Z",
+   "toolUseResult": {
+    "stdout": "To git.example:owner/project.git\n   8e5a737..6eca6e3  main -> main",
+    "stderr": "",
+    "interrupted": false,
+    "isImage": false,
+    "noOutputExpected": false,
+    "gitOperation": {
+     "push": {
+      "branch": "main"
+     }
+    }
+   },
+   "sourceToolAssistantUUID": "73f0929c-aaa5-43bc-87a3-243f968c918d",
+   "userType": "external",
+   "entrypoint": "sdk-cli",
+   "cwd": "/workspace/project",
+   "sessionId": "cli-drift-reply-0001",
+   "version": "2.1.283",
+   "gitBranch": "main"
+  },
+  {
+   "parentUuid": "2ee2751b-5b0b-4451-bb3a-efe900c9436d",
+   "isSidechain": false,
+   "attachment": {
+    "type": "total_tokens_reminder",
+    "text": "<total_tokens>14999716 tokens left</total_tokens>"
+   },
+   "type": "attachment",
+   "uuid": "12b098eb-4c6b-495e-95a8-f8861157e09c",
+   "timestamp": "2026-10-15T15:03:27.112Z",
+   "rendered": [
+    {
+     "content": "<system-reminder>\n<total_tokens>14999716 tokens left</total_tokens>\n</system-reminder>"
+    }
+   ],
+   "userType": "external",
+   "entrypoint": "sdk-cli",
+   "cwd": "/workspace/project",
+   "sessionId": "cli-drift-reply-0001",
+   "version": "2.1.283",
+   "gitBranch": "main"
+  },
+  {
+   "parentUuid": "12b098eb-4c6b-495e-95a8-f8861157e09c",
+   "isSidechain": false,
+   "attachment": {
+    "type": "deferred_tools_record",
+    "entries": [],
+    "toolInputCopies": [
+     {
+      "id": "toolu_01Fai8qvSvXKQFMAmt1FzJ8v",
+      "copy": "wire"
+     }
+    ]
+   },
+   "type": "attachment",
+   "uuid": "21130f1c-33f1-4a71-b3ad-2d5ebc8eebda",
+   "timestamp": "2026-10-15T15:03:30.525Z",
+   "userType": "external",
+   "entrypoint": "sdk-cli",
+   "cwd": "/workspace/project",
+   "sessionId": "cli-drift-reply-0001",
+   "version": "2.1.283",
+   "gitBranch": "main"
+  },
+  {
+   "parentUuid": "21130f1c-33f1-4a71-b3ad-2d5ebc8eebda",
+   "isSidechain": false,
+   "message": {
+    "model": "claude-opus-4-8",
+    "id": "msg_011Cg4E6oQ2tb8t9i4SBHnGC",
+    "type": "message",
+    "role": "assistant",
+    "content": [
+     {
+      "type": "thinking",
+      "thinking": "",
+      "signature": "<redacted-signature>"
+     }
+    ],
+    "container": null,
+    "stop_reason": "end_turn",
+    "stop_sequence": null,
+    "stop_details": null,
+    "usage": {
+     "input_tokens": 2,
+     "cache_creation_input_tokens": 329,
+     "cache_read_input_tokens": 154799,
+     "output_tokens": 408,
+     "output_tokens_details": {
+      "thinking_tokens": 168
+     },
+     "server_tool_use": {
+      "web_search_requests": 0,
+      "web_fetch_requests": 0
+     },
+     "service_tier": "standard",
+     "cache_creation": {
+      "ephemeral_1h_input_tokens": 329,
+      "ephemeral_5m_input_tokens": 0
+     },
+     "inference_geo": "global",
+     "iterations": [
+      {
+       "input_tokens": 2,
+       "output_tokens": 408,
+       "cache_read_input_tokens": 154799,
+       "cache_creation_input_tokens": 329,
+       "cache_creation": {
+        "ephemeral_5m_input_tokens": 0,
+        "ephemeral_1h_input_tokens": 329
+       },
+       "type": "message"
+      }
+     ],
+     "speed": "standard"
+    },
+    "input_transformations": [],
+    "diagnostics": null,
+    "context_management": null
+   },
+   "apiBlockIndex": 0,
+   "requestId": "req_011Cg4E6o2TP2jpTk7Wc3pp6",
+   "type": "assistant",
+   "uuid": "5d903931-512b-40a0-88bc-695b33fd34f5",
+   "timestamp": "2026-10-15T15:03:30.524Z",
+   "effort": "high",
+   "perTurnEffort": null,
+   "userType": "external",
+   "entrypoint": "sdk-cli",
+   "cwd": "/workspace/project",
+   "sessionId": "cli-drift-reply-0001",
+   "version": "2.1.283",
+   "gitBranch": "main"
+  },
+  {
+   "parentUuid": "5d903931-512b-40a0-88bc-695b33fd34f5",
+   "isSidechain": false,
+   "message": {
+    "model": "claude-opus-4-8",
+    "id": "msg_011Cg4E6oQ2tb8t9i4SBHnGC",
+    "type": "message",
+    "role": "assistant",
+    "content": [
+     {
+      "type": "text",
+      "text": "[fixture: answer text of msg_011Cg4E6oQ2tb8t9i4SBHnGC replaced]"
+     }
+    ],
+    "container": null,
+    "stop_reason": "end_turn",
+    "stop_sequence": null,
+    "stop_details": null,
+    "usage": {
+     "input_tokens": 2,
+     "cache_creation_input_tokens": 329,
+     "cache_read_input_tokens": 154799,
+     "output_tokens": 408,
+     "output_tokens_details": {
+      "thinking_tokens": 168
+     },
+     "server_tool_use": {
+      "web_search_requests": 0,
+      "web_fetch_requests": 0
+     },
+     "service_tier": "standard",
+     "cache_creation": {
+      "ephemeral_1h_input_tokens": 329,
+      "ephemeral_5m_input_tokens": 0
+     },
+     "inference_geo": "global",
+     "iterations": [
+      {
+       "input_tokens": 2,
+       "output_tokens": 408,
+       "cache_read_input_tokens": 154799,
+       "cache_creation_input_tokens": 329,
+       "cache_creation": {
+        "ephemeral_5m_input_tokens": 0,
+        "ephemeral_1h_input_tokens": 329
+       },
+       "type": "message"
+      }
+     ],
+     "speed": "standard"
+    },
+    "input_transformations": [],
+    "diagnostics": null,
+    "context_management": null
+   },
+   "apiBlockIndex": 1,
+   "requestId": "req_011Cg4E6o2TP2jpTk7Wc3pp6",
+   "type": "assistant",
+   "uuid": "da075caa-1ec4-4cbd-809d-1a1080b79a7a",
+   "timestamp": "2026-10-15T15:03:34.506Z",
+   "effort": "high",
+   "perTurnEffort": null,
+   "userType": "external",
+   "entrypoint": "sdk-cli",
+   "cwd": "/workspace/project",
+   "sessionId": "cli-drift-reply-0001",
+   "version": "2.1.283",
+   "gitBranch": "main"
+  },
+  {
+   "parentUuid": "da075caa-1ec4-4cbd-809d-1a1080b79a7a",
+   "isSidechain": false,
+   "type": "system",
+   "subtype": "stop_hook_summary",
+   "hookCount": 2,
+   "hookInfos": [],
+   "hookErrors": [],
+   "hookAdditionalContext": [],
+   "preventedContinuation": false,
+   "stopReason": "",
+   "hasOutput": false,
+   "level": "suggestion",
+   "timestamp": "2026-10-15T15:03:34.635Z",
+   "uuid": "d38ffb64-252c-409b-a9b6-c32b1fb2d6b4",
+   "toolUseID": "18189c7c-6bd5-474d-a2a3-9511e4ed8211",
+   "userType": "external",
+   "entrypoint": "sdk-cli",
+   "cwd": "/workspace/project",
+   "sessionId": "cli-drift-reply-0001",
+   "version": "2.1.283",
+   "gitBranch": "main"
+  }
+ ]
+}
