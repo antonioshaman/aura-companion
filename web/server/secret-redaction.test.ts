@@ -310,7 +310,7 @@ describe("redaction gates — performance on the prod pathological input", () =>
     const r = spawnSync("bun", ["--version"], { encoding: "utf-8" });
     return r.status === 0 ? "bun" : null;
   })();
-  it.skipIf(!bunBin)("under Bun/JSC the gated redactor is >10x faster than the legacy pre-screen", () => {
+  it.skipIf(!bunBin)("under Bun/JSC the gated redactor is fast and >10x faster wherever the legacy pre-screen is slow", () => {
     const modulePath = fileURLToPath(new URL("./secret-redaction.ts", import.meta.url));
     const script = `
       const { SECRET_RULES, redactSecretsInText } = await import(${JSON.stringify(modulePath)});
@@ -325,9 +325,14 @@ describe("redaction gates — performance on the prod pathological input", () =>
     const r = spawnSync(bunBin!, ["-e", script], { encoding: "utf-8", timeout: 60_000 });
     expect(r.status, r.stderr).toBe(0);
     const { legacy, gated } = JSON.parse(r.stdout.trim().split("\n").pop()!);
-    // Measured on the prod box: legacy ≈ 100 ms per 7 KB signature, gated
-    // ≈ 0.05 ms. A 10x floor leaves ample headroom for noisy CI runners.
-    expect(gated * 10).toBeLessThan(legacy);
+    // Measured on the prod box (linux x64): legacy ≈ 100 ms per 7 KB
+    // signature, gated ≈ 0.05 ms. Whether JSC JITs the lookbehind pre-screen
+    // depends on the platform/build (the macOS CI runner ran it fast enough
+    // that a fixed 10x ratio flaked), so the ratio is only asserted where the
+    // legacy path actually reproduces the stall. The absolute bound is the
+    // property prod needs on every platform: 50 x 7 KB never blocks the loop.
+    expect(gated).toBeLessThan(250);
+    if (legacy > 500) expect(gated * 10).toBeLessThan(legacy);
   });
 
   it("redacts 1.4 MB of thinking-signature-like base64 well under a second", () => {
