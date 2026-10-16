@@ -64,3 +64,14 @@ web/.council/state/
 # Scratch planning specs that pair with the root PLAN-*.md scratch docs above
 /specs/session-map-eviction-and-boot-hygiene.md
 /specs/system-resource-reclamation.md
+# Python bytecode (packs/guards tests etc.)
+__pycache__/
+*.pyc
+# Council diet / review scratch inputs
+.council/diet-review/
+.council/review-input/
+# Session handoff + scope scratch docs (repo-root only)
+/.aura-handoff-*.md
+/SCOPE-*.md
+# `node_modules/` (dir pattern) does not match a symlinked node_modules in a worktree
+web/node_modules
