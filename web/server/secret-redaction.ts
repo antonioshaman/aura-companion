@@ -69,6 +69,21 @@ export interface RedactionRule {
   /** Stable name used in tests and diagnostics. */
   readonly name: string;
   readonly re: RegExp;
+  /**
+   * Cheap NECESSARY condition for `re`: a case-insensitive, non-global,
+   * lookbehind-free regex that matches every string `re` can match (it tests
+   * for a literal fragment every match must contain). `re` only runs when the
+   * gate passes, so the output is identical to always running `re`.
+   *
+   * Why (2026-10 event-loop stalls): every rule starts with the {@link LB}
+   * lookbehind, and JavaScriptCore does not JIT regexes with lookbehind — they
+   * run in the bytecode interpreter at ~100x the cost. The old combined
+   * `ANY_RULE` pre-screen (all rules OR-ed, flag `i`) cost ~7 s per save of a
+   * 2.6 MB session history on prod (thinking-block `signature` base64 blobs
+   * were the worst: ~100 ms per 7 KB string), blocking the event loop.
+   * The gates are JIT-compiled and scan the same history in a few ms.
+   */
+  readonly gate: RegExp;
   readonly replacement: string | ((match: string, ...groups: string[]) => string);
 }
 
@@ -89,36 +104,42 @@ export const SECRET_RULES: readonly RedactionRule[] = [
   // (sk-ant-oat01-… / sk-ant-ort01-…), admin keys. Keep the typed prefix.
   {
     name: "anthropic",
+    gate: /sk-ant-/i,
     re: new RegExp(`${LB}(sk-ant-(?:[a-z]+\\d{2}-)?)[A-Za-z0-9_-]{16,}${RB_TOKEN}`, "g"),
     replacement: `$1${R}`,
   },
   // OpenAI and other `sk-` keys (project / user / service-account / admin).
   {
     name: "openai",
+    gate: /sk-/i,
     re: new RegExp(`${LB}(sk-(?:proj-|user-|svcacct-|admin-)?)[A-Za-z0-9_-]{20,}${RB_TOKEN}`, "g"),
     replacement: `$1${R}`,
   },
   // GitHub classic PAT / OAuth / app / refresh tokens.
   {
     name: "github",
+    gate: /gh[pousr]_/i,
     re: new RegExp(`${LB}(gh[pousr]_)[A-Za-z0-9]{20,}${RB_ALNUM}`, "g"),
     replacement: `$1${R}`,
   },
   // GitHub fine-grained PAT.
   {
     name: "github-fine-grained",
+    gate: /github_pat_/i,
     re: new RegExp(`${LB}(github_pat_)[A-Za-z0-9_]{20,}${RB_ALNUM}`, "g"),
     replacement: `$1${R}`,
   },
   // npm automation/publish tokens: npm_ + 36 alphanumerics.
   {
     name: "npm",
+    gate: /npm_/i,
     re: new RegExp(`${LB}(npm_)[A-Za-z0-9]{36}${RB_ALNUM}`, "g"),
     replacement: `$1${R}`,
   },
   // Gonka inference keys: gnk-…
   {
     name: "gonka",
+    gate: /gnk-/i,
     re: new RegExp(`${LB}(gnk-)[A-Za-z0-9_-]{16,}${RB_TOKEN}`, "g"),
     replacement: `$1${R}`,
   },
@@ -126,12 +147,14 @@ export const SECRET_RULES: readonly RedactionRule[] = [
   // id, kept so the reader knows which bot's token leaked.
   {
     name: "telegram-bot",
+    gate: /\d:AA/i,
     re: new RegExp(`${LB}(\\d{8,10}:)AA[A-Za-z0-9_-]{33}${RB_TOKEN}`, "g"),
     replacement: `$1${R}`,
   },
   // JWTs (three base64url segments, header starts with eyJ).
   {
     name: "jwt",
+    gate: /eyJ/i,
     re: new RegExp(
       `${LB}eyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}${RB_TOKEN}`,
       "g",
@@ -141,12 +164,14 @@ export const SECRET_RULES: readonly RedactionRule[] = [
   // HTTP Authorization header values.
   {
     name: "bearer",
+    gate: /Bearer\s/i,
     re: /(Bearer\s+)[A-Za-z0-9._~+/=-]{16,}/g,
     replacement: `$1${R}`,
   },
   // Companion auth token (or any token) in a URL query string.
   {
     name: "query-token",
+    gate: /[?&](?:token|access_token|api_key|apikey|key)=/i,
     re: /([?&](?:token|access_token|api_key|apikey|key)=)[A-Za-z0-9._~+/=-]{16,}/gi,
     replacement: `$1${R}`,
   },
@@ -164,6 +189,7 @@ export const SECRET_RULES: readonly RedactionRule[] = [
   //  - names ending in hash/sha/digest/id (`tokenHash`, `key_id`) are kept.
   {
     name: "assignment",
+    gate: /(?:key|token|secret|password|passwd|credential)[A-Za-z0-9_]*\\?["']?\s*[:=]/i,
     re: new RegExp(
       String.raw`([A-Za-z0-9_-]*(?:key|token|secret|password|passwd|credential)[A-Za-z0-9_]*)` +
         String.raw`(\\?["']?\s*[:=]\s*\\?["']?)` +
@@ -180,13 +206,22 @@ export const SECRET_RULES: readonly RedactionRule[] = [
   // incidental sha256 digests — accepted trade (see Hunt finding #7).
   {
     name: "hex64",
+    gate: /[0-9a-f]{64}/i,
     re: new RegExp(`${LB}(0x)?[0-9a-fA-F]{64}${RB_ALNUM}`, "g"),
     replacement: `$1${R}`,
   },
 ];
 
-/** Combined cheap test: does the string possibly contain a secret? */
-const ANY_RULE = new RegExp(SECRET_RULES.map((r) => `(?:${r.re.source})`).join("|"), "i");
+/**
+ * Cheap test: does the string possibly contain a value-shape secret? True
+ * whenever any rule could match (each gate is a necessary condition of its
+ * rule, case-insensitively). Replaces the former OR-of-all-rules regex, which
+ * carried the non-JIT lookbehinds and dominated save/record CPU time.
+ */
+function anyGateMatches(text: string): boolean {
+  for (const rule of SECRET_RULES) if (rule.gate.test(text)) return true;
+  return false;
+}
 
 /**
  * Apply every value-shape rule to a string. Pure. Works on plain text and on
@@ -199,10 +234,13 @@ export function redactSecretsInText(
   text: string,
   opts?: { skip?: readonly string[] },
 ): string {
-  if (!text || !ANY_RULE.test(text)) return text;
+  if (!text) return text;
   let out = text;
   for (const rule of SECRET_RULES) {
     if (opts?.skip?.includes(rule.name)) continue;
+    // Gate on the CURRENT text (earlier rules may have rewritten it): the
+    // gate is a necessary condition for `re` matching, so skipping is exact.
+    if (!rule.gate.test(out)) continue;
     const { re, replacement } = rule;
     out = typeof replacement === "string" ? out.replace(re, replacement) : out.replace(re, replacement);
   }
@@ -269,5 +307,5 @@ function walk(value: unknown): unknown {
 /** Cheap check used by callers that want byte-identical passthrough. */
 export function mayContainSecret(text: string): boolean {
   if (!text) return false;
-  return ANY_RULE.test(text) || SECRET_KEY_WORD.test(text);
+  return anyGateMatches(text) || SECRET_KEY_WORD.test(text);
 }
