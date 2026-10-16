@@ -57,6 +57,7 @@ import { isToolUseDeniedForSynthetic, denialMessageForSynthetic } from "./auto-p
 import { resolveModelAvailability } from "./model-availability.js";
 import { SilentStdioWatchdog } from "./silent-stdio-watchdog.js";
 import { classifyFallbackReason, nextModelInChain } from "./model-fallback-chain.js";
+import { resolveModelSubstitution } from "./broken-model-substitution.js";
 
 // --- Constants ----------------------------------------------------------------
 
@@ -879,6 +880,20 @@ export class ClaudeAdapter implements IBackendAdapter {
     // process kill, no relaunch; idle-kill / auto-relaunch / --resume / PID
     // reconnect are all untouched. Exactly one frame (or none) reaches the CLI,
     // so no second in-flight marker is ever seeded.
+    // Broken-model table FIRST — the same table the spawn/relaunch path
+    // (`cli-launcher.ts`) rewrites with. Without this the switcher ran the
+    // listed model until the next relaunch, then got silently rewritten.
+    const brokenSub = resolveModelSubstitution(model);
+    if (brokenSub) {
+      this.browserMessageCb?.({
+        type: "model_substitution",
+        requested: brokenSub.from,
+        applied: brokenSub.to,
+        outcome: "substituted",
+        reason: "cli-incompatible",
+      });
+      return this.emitSetModel(brokenSub.to);
+    }
     const resolution = resolveModelAvailability({ backend: "claude", requested: model });
     switch (resolution.kind) {
       case "ok":

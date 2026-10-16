@@ -47,6 +47,20 @@ vi.mock("./model-availability.js", () => ({
       : { kind: "ok", model: opts.requested },
 }));
 
+// Broken-model table (single source of truth, shared with spawn). The live
+// table is empty since the 2026-10-16 re-probe; tests inject entries.
+const mockBrokenModelTable = vi.hoisted(() => ({
+  entries: [] as Array<{ from: string; to: string; reason: string }>,
+}));
+vi.mock("./broken-model-substitution.js", async (importOriginal) => {
+  const actual = (await importOriginal()) as typeof import("./broken-model-substitution.js");
+  return {
+    ...actual,
+    resolveModelSubstitution: (model: string | null | undefined) =>
+      (model && mockBrokenModelTable.entries.find((e) => e.from === model)) || null,
+  };
+});
+
 import { ClaudeAdapter, resolveSilentStdioTimeoutMs, resolveInitFrameTimeoutMs } from "./claude-adapter.js";
 import { log } from "./logger.js";
 import { companionBus } from "./event-bus.js";
@@ -735,6 +749,29 @@ describe("send() — outgoing message translation", () => {
       outcome: "substituted",
       reason: "retired",
     });
+  });
+
+  it("set_model consults the broken-model table: sends the spawn substitute + emits a cli-incompatible model_substitution", () => {
+    // Previously the switcher's set_model bypassed the table: the user ran the
+    // listed model until the next relaunch, then was silently rewritten. Now
+    // set_model and spawn agree (one table) and the browser is told why.
+    mockBrokenModelTable.entries = [
+      { from: "claude-opus-5", to: "claude-opus-4-8", reason: "CLI x.y does not emit opus-5 on stdout" },
+    ];
+    try {
+      const result = adapter.send({ type: "set_model", model: "claude-opus-5" });
+      expect(result).toBe(true);
+      expect(getLastSent().request.model).toBe("claude-opus-4-8");
+      expect(browserMessageCb).toHaveBeenCalledWith({
+        type: "model_substitution",
+        requested: "claude-opus-5",
+        applied: "claude-opus-4-8",
+        outcome: "substituted",
+        reason: "cli-incompatible",
+      });
+    } finally {
+      mockBrokenModelTable.entries = [];
+    }
   });
 
   it("set_model (proactive gate: needs-user-action) → sends NO frame + emits model_substitution", () => {
