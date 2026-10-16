@@ -13,6 +13,7 @@ import type {
   BrowserObserverDowngrade,
   ModelFallbackReason,
   ModelFallbackRecord,
+  BrowserCheckpointCoverageGap,
 } from "../server/session-types.js";
 
 export type {
@@ -30,6 +31,7 @@ export type {
   BrowserObserverDowngrade,
   ModelFallbackReason,
   ModelFallbackRecord,
+  BrowserCheckpointCoverageGap,
 };
 export type { SessionPhase } from "../server/session-state-machine.js";
 
@@ -194,16 +196,25 @@ export interface GroupRecord {
    * CONV-DOWNGRADE). Cleared by the next counted review.
    */
   lastReviewNotCounted?: ConvergenceNotCountedReason;
+  /** Id of the most recent checkpoint received (from `group_checkpoint`). */
+  lastCheckpointId?: string;
+  /**
+   * Observer rigor: checkpoints not covered by a real review — "без ревью"
+   * (never reviewed) or "не проверено" (empty review, nothing beyond the
+   * prose artifact was read). REST bootstrap replaces it; live frames merge.
+   */
+  checkpointCoverage?: BrowserCheckpointCoverageGap[];
 }
 
 /** P3/CONV-HONEST: why a STOP-free review did not advance the counter. */
-export type ConvergenceNotCountedReason = "no_changed_files" | "no_files_read" | "downgraded_stop";
+export type ConvergenceNotCountedReason = "no_changed_files" | "no_files_read" | "downgraded_stop" | "unverified_clean";
 
 /** User-facing copy for {@link ConvergenceNotCountedReason}. */
 export const CONVERGENCE_NOT_COUNTED_COPY: Record<ConvergenceNotCountedReason, string> = {
   no_changed_files: "Not counted: no changed files",
   no_files_read: "Not counted: no files read",
   downgraded_stop: "Not counted: downgraded STOP",
+  unverified_clean: "Not counted: unverified clean review",
 };
 
 /** Inline form of {@link CONVERGENCE_NOT_COUNTED_COPY} ("…: downgraded STOP"

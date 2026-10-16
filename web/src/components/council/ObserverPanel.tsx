@@ -38,6 +38,7 @@ import { FindingsLog, formatRelativeTime } from "./FindingsLog.js";
 import { DegradedBanner } from "./DegradedBanner.js";
 import { AutoProceedRestoreNotice } from "./AutoProceedRestoreNotice.js";
 import { ProviderBadges } from "./ProviderBadges.js";
+import { CheckpointCoverageList } from "./CheckpointCoverageList.js";
 
 export interface ObserverPanelProps {
   /**
@@ -430,6 +431,10 @@ export function ObserverPanel({
           Last review — {convergenceNotCountedInline(group.lastReviewNotCounted)}
         </div>
       )}
+
+      {/* Observer rigor: checkpoints with no review ("без ревью") or only an
+          unverified empty one ("не проверено") are listed, never silent. */}
+      <CheckpointCoverageList gaps={group.checkpointCoverage ?? []} />
 
       {/* Degraded banner — lives in the header, NOT in the composer slot. */}
       {state.name === "degraded" && onRespawnHalf && (

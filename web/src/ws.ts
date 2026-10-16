@@ -1767,6 +1767,10 @@ function handleParsedMessage(
           // FIX-AP-4: an incomplete hold restore may have no parseable review
           // at all, so the pause is reported before the reviewCount check.
           store.setAutoProceedRestoreGaps(res.sessionGroupId, res.autoProceedRestoreGaps ?? []);
+          // Observer rigor: "без ревью" / "не проверено" rows from disk.
+          if (Array.isArray(res.checkpointCoverage)) {
+            store.setCheckpointCoverage(res.sessionGroupId, res.checkpointCoverage);
+          }
           if (res.reviewCount === 0) return; // nothing to bootstrap
           // Bootstrap calls appendObserverReview with a synthetic
           // checkpoint envelope per review — slice already dedups by
@@ -1845,6 +1849,7 @@ function handleParsedMessage(
         ...(data.supersededCheckpointIds !== undefined
           ? { supersededCheckpointIds: data.supersededCheckpointIds }
           : {}),
+        ...(data.verification === "unverified" ? { verification: "unverified" as const } : {}),
       });
       break;
     }

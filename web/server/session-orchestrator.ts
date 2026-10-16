@@ -40,6 +40,8 @@ import { findOwnReviewForCheckpointSync } from "./review-watcher.js";
 import { CheckpointLineSnapshots } from "./observer-line-snapshots.js";
 import { ObserverReplyCapture } from "./observer-reply.js";
 import { ObserverReadLedger } from "./observer-read-ledger.js";
+import { ObserverProbeTracker } from "./observer-probe.js";
+import { readProseArtifactSamples, recentUserTexts, resolveClaimLanguage, type ClaimLanguage } from "./observer-language.js";
 import {
   CouncilCheckpointPipeline,
   type CouncilWatcherEntry,
@@ -333,7 +335,11 @@ export class SessionOrchestrator {
     lineSnapshots: this.checkpointLineSnapshots,
     readLedger: this.observerReadLedger,
     onObserverAdapterMissing: (gid, payload) => this.observerScheduler.requestCatchupWake(gid, payload),
+    resolveClaimLanguage: (gid, payload, cwd) => this.resolveObserverClaimLanguage(gid, payload, cwd),
+    isObserverProbeInFlight: (observerSessionId) => this.observerProbes.inFlight(observerSessionId),
   });
+  /** Observer rigor: liveness-probe turns per observer session (`observer-probe.ts`). */
+  private observerProbes = new ObserverProbeTracker();
   /** P4/OBS-AUTOHEAL: bounded observer-only relaunch when its adapter is gone. */
   private observerAutoheal = new ObserverAutoheal({
     relaunchObserver: (id) => this.relaunchObserverForAutoheal(id),
@@ -357,6 +363,7 @@ export class SessionOrchestrator {
     },
     isSessionStoppedByUser: (sessionId) => this.recovery.isStoppedByUser(sessionId),
     autoheal: this.observerAutoheal,
+    normalizeReviewRaw: (gid, raw, provider) => this.checkpointPipeline.normalizeObserverReviewRaw(gid, raw, provider),
   });
   private councilGroupDegradedReason = new Map<string, CouncilDegradedReason>();
   /**
@@ -529,6 +536,26 @@ export class SessionOrchestrator {
     companionBus.on("message:assistant", ({ sessionId, message }) => {
       this.observerReplyCapture.onAssistant(sessionId, message);
       this.observerReadLedger.onAssistant(sessionId, message);
+    });
+    // Observer rigor: liveness probes are not review traffic (observer-probe.ts).
+    companionBus.on("observer:probe-injected", ({ sessionId }) => {
+      const groupId = this.councilGroupBySessionId.get(sessionId);
+      const meta = groupId ? this.councilGroupMeta.get(groupId) : undefined;
+      if (!groupId || !meta || meta.observerSessionId !== sessionId) return;
+      this.observerProbes.noteProbe(sessionId);
+      const midWake = this.observerReplyCapture.noteProbe(sessionId);
+      log.info("session-orchestrator", "liveness probe sent to observer", {
+        event: "council.observer_probe.injected",
+        sessionGroupId: groupId,
+        sessionId,
+        role: "observer",
+        midWake,
+      });
+    });
+    companionBus.on("message:result", ({ sessionId }) => {
+      if (!this.observerProbes.noteTurnEnded(sessionId)) return;
+      const groupId = this.councilGroupBySessionId.get(sessionId);
+      if (groupId) this.drainPendingObserverWake(groupId);
     });
     companionBus.on("observer:turn-done", ({ sessionId }) => {
       try {
@@ -918,6 +945,21 @@ export class SessionOrchestrator {
 
   private drainPendingObserverWake(sessionGroupId: string): void {
     this.checkpointPipeline.drainPendingObserverWake(sessionGroupId);
+  }
+
+  /** Observer rigor: the language the observer writes its claims in. */
+  private resolveObserverClaimLanguage(
+    sessionGroupId: string,
+    payload: { artifact_paths: readonly string[] },
+    cwd: string,
+  ): ClaimLanguage | null {
+    const meta = this.councilGroupMeta.get(sessionGroupId);
+    const history = meta ? this.wsBridge.getSession(meta.primarySessionId)?.messageHistory ?? [] : [];
+    return resolveClaimLanguage({
+      override: process.env.COMPANION_OBSERVER_CLAIM_LANGUAGE,
+      conversation: recentUserTexts(history),
+      artifactTexts: () => readProseArtifactSamples(cwd, payload.artifact_paths),
+    });
   }
 
   private finalizeObserverReply(sessionGroupId: string, observerSessionId: string): void {

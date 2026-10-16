@@ -7,7 +7,7 @@ import { writeAtomicJson } from "./atomic-write.js";
 import { buildCheckpointFilename } from "./checkpoint-watcher.js";
 import { readCouncilWakeSentinel } from "./council-wake-sentinel.js";
 import type { CheckpointLineSnapshots } from "./observer-line-snapshots.js";
-import type { CouncilWatcherEntry } from "./council-checkpoint-pipeline.js";
+import { findFreshOwnReview, type CouncilWatcherEntry } from "./council-checkpoint-pipeline.js";
 import type { ObserverAutoheal } from "./council-observer-autoheal.js";
 import { log } from "./logger.js";
 
@@ -120,6 +120,9 @@ export interface CouncilObserverSchedulerDeps {
    * strike/degrade behaviour.
    */
   autoheal?: ObserverAutoheal;
+  /** Provider-native review normalisation (the pipeline's), so a review the
+   *  watcher would accept also counts as "already reviewed" here. */
+  normalizeReviewRaw?: (sessionGroupId: string, raw: string, provider: "claude" | "codex") => string;
 }
 
 export class CouncilObserverScheduler {
@@ -309,6 +312,27 @@ export class CouncilObserverScheduler {
         // woken for. The dispatcher's Gate 0 would also skip, but
         // surfacing it here keeps the structured log self-contained.
         if (sentinel && sentinel.last_woken_sequence >= highest.sequence) {
+          continue;
+        }
+        // Observer rigor (prod 2026-10-13..16): the sentinel is cleared on
+        // every degrade/exit, so after a restart `lastWokenSequence` is null
+        // and the newest checkpoint was re-reviewed on every restart (146
+        // ×6, 153 ×5) — each time through a 30 s poll and an observer
+        // auto-heal relaunch. A fresh review of ours on disk means the
+        // checkpoint was answered: nothing is missed, nothing to wake.
+        const fresh = findFreshOwnReview(entry.cwd, groupId, highest, this.deps.normalizeReviewRaw
+          ? (raw, provider) => this.deps.normalizeReviewRaw!(groupId, raw, provider)
+          : undefined);
+        if (fresh) {
+          log.info("session-orchestrator", "catchup wake skipped: checkpoint already reviewed", {
+            event: "council.wake.restart_catchup_skipped_reviewed",
+            trigger,
+            sessionGroupId: groupId,
+            checkpointId: highest.checkpoint_id,
+            sequence: highest.sequence,
+            file: fresh.file,
+            reviewedAt: fresh.reviewedAt,
+          });
           continue;
         }
         const stoppedObserverId = this.deps.groupMeta.get(groupId)?.observerSessionId;

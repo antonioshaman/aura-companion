@@ -311,6 +311,15 @@ export interface CompanionEventMap {
     sessionId: string;
   };
 
+  /**
+   * Observer rigor: a liveness-probe user message (`observer-probe.ts`) was
+   * sent to a session whose council role is `observer`. Emitted by the
+   * bridge; the orchestrator keeps the probe's turn off the review channel.
+   */
+  "observer:probe-injected": {
+    sessionId: string;
+  };
+
   /** Codex synthetic observer wake failed after dispatch was accepted. */
   "observer:wake-failed": {
     /** Companion sessionId of the observer half (NOT cliSessionId). */
@@ -370,6 +379,9 @@ export interface CompanionEventMap {
     /** P3/CONV-HONEST: how many of those the HOST saw the observer read
      *  (`observer-read-ledger.ts`), not what the model claims. */
     artifactsRead: number;
+    /** Observer rigor: host verdict on an empty review whose turn looked at
+     *  nothing beyond the prose artifact. Absent = no claim. */
+    verification?: "unverified";
   };
 
   /**
@@ -394,6 +406,6 @@ export interface CompanionEventMap {
     convergenceThreshold: number;
     convergenceState: "in-progress" | "converged" | "revoked";
     /** Set on `not-counted` only. */
-    notCountedReason?: "no_changed_files" | "no_files_read" | "downgraded_stop";
+    notCountedReason?: "no_changed_files" | "no_files_read" | "downgraded_stop" | "unverified_clean";
   };
 }

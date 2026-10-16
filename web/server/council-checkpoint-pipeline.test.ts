@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   CouncilCheckpointPipeline,
   type CheckpointPipelineGroupMeta,
+  type CouncilCheckpointPipelineDeps,
   type CouncilWatcherEntry,
 } from "./council-checkpoint-pipeline.js";
 import { CheckpointLineSnapshots } from "./observer-line-snapshots.js";
@@ -52,6 +53,7 @@ function activeCoordinator(status = "active"): SessionGroupCoordinator {
 function makeHarness(opts: {
   onObserverAdapterMissing?: (g: string, p: CheckpointPayload) => void;
   captureDeps?: Partial<ObserverReplyCaptureDeps>;
+  pipelineDeps?: Partial<CouncilCheckpointPipelineDeps>;
 } = {}): Harness {
   const cwd = realpathSync(mkdtempSync(join(tmpdir(), "council-pipeline-")));
   const watchers = new Map<string, CouncilWatcherEntry>();
@@ -78,6 +80,7 @@ function makeHarness(opts: {
     lineSnapshots: new CheckpointLineSnapshots(),
     readLedger: ledger,
     onObserverAdapterMissing: opts.onObserverAdapterMissing,
+    ...opts.pipelineDeps,
   });
   watchers.set(GROUP, {
     cwd,
@@ -469,10 +472,15 @@ describe("CouncilCheckpointPipeline — group-less reviews and host model (BENCH
     const reviews = captureReviews();
     const warns = spyWarn();
     // Review from a previous delivery of the same checkpoint id, 60s old.
+    // It is a tooling refusal (OBSERVER-BLOCKED) — not an answer, so the
+    // redelivered wake still fires (observer rigor: a real review on disk
+    // would suppress the redelivery altogether, see `already_reviewed`).
     const reviewsDir = join(h.cwd, ".council", "reviews");
     mkdirSync(reviewsDir, { recursive: true });
     const file = join(reviewsDir, `council-plan-${GROUP}-codex-observer.md`);
-    writeFileSync(file, JSON.stringify(ownReview()));
+    writeFileSync(file, JSON.stringify(ownReview({
+      findings: [{ severity: "INFO", claim: "OBSERVER-BLOCKED: shell: bwrap: Operation not permitted", evidence_path: "a.ts" }],
+    })));
     const past = new Date(Date.now() - 60_000);
     utimesSync(file, past, past);
     // Redelivered wake arms the watchdog NOW; the stale file predates it.
@@ -517,5 +525,124 @@ describe("CouncilCheckpointPipeline — group-less reviews and host model (BENCH
     h.pipeline.handleCouncilReview(GROUP, ownReview() as never, Date.now());
     expect(reviews.map((r) => r.checkpointId)).toEqual(["chk_1"]);
     expect(h.watchers.get(GROUP)!.pendingReviewDeadline).toBeNull();
+  });
+});
+
+
+// ── Observer rigor (2026-10-16) ──────────────────────────────────────────────
+describe("CouncilCheckpointPipeline — observer rigor", () => {
+  function spyInfo() {
+    const spy = vi.spyOn(log, "info");
+    cleanups.push(() => spy.mockRestore());
+    return () => spy.mock.calls.map((c) => c[2] as Record<string, unknown>);
+  }
+  function writeOwnReview(cwd: string, checkpointId: string, findings: unknown[] = [], mtime?: Date) {
+    const dir = join(cwd, ".council", "reviews");
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, `council-plan-${GROUP}-claude-observer.md`);
+    writeFileSync(file, JSON.stringify({
+      schema_version: 1, checkpoint_id: checkpointId, phase: "council-plan", session_group_id: GROUP,
+      reviewed_at: "2026-10-15T10:00:00Z", observer_provider: "claude", observer_model: "m", observer_cli_version: "1",
+      observer_wake_payload_version_echo: 1, findings,
+    }));
+    if (mtime) utimesSync(file, mtime, mtime);
+  }
+
+  // Prod 2026-10-13..16: the sentinel is cleared on every degrade/exit, so
+  // each restart re-woke checkpoints 146/153 although their reviews were on
+  // disk. The review file is the durable proof of "answered".
+  it("does not wake for a checkpoint whose fresh review is already on disk (already_reviewed)", () => {
+    const h = makeHarness();
+    h.setCoordinator(activeCoordinator());
+    writeOwnReview(h.cwd, "chk_1");
+    const infos = spyInfo();
+    const out = h.pipeline.dispatchObserverWake(GROUP, checkpoint(1));
+    expect(out).toEqual({ kind: "skipped", reason: "already_reviewed" });
+    expect(h.send).not.toHaveBeenCalled();
+    expect(infos()).toContainEqual(expect.objectContaining({ event: "group.observer_wake_skipped", reason: "already_reviewed", checkpointId: "chk_1" }));
+  });
+
+  it("a review older than the checkpoint's emission, or a tooling refusal, does not count as reviewed", () => {
+    const h = makeHarness();
+    h.setCoordinator(activeCoordinator());
+    // mtime a day before emitted_at (2026-01-01) → stale.
+    writeOwnReview(h.cwd, "chk_1", [], new Date("2025-12-31T00:00:00Z"));
+    expect(h.pipeline.dispatchObserverWake(GROUP, checkpoint(1))).toMatchObject({ kind: "dispatched" });
+
+    const h2 = makeHarness();
+    h2.setCoordinator(activeCoordinator());
+    writeOwnReview(h2.cwd, "chk_1", [{ severity: "INFO", claim: "OBSERVER-BLOCKED: bwrap: Operation not permitted", evidence_path: "a.ts" }]);
+    expect(h2.pipeline.dispatchObserverWake(GROUP, checkpoint(1))).toMatchObject({ kind: "dispatched" });
+  });
+
+  // Concurrent deliveries of the same checkpoint (catch-up + failsafe + a
+  // re-arm after the sentinel was cleared) must not run two reviews at once.
+  it("a second wake for the checkpoint already in flight is skipped (wake_in_flight)", () => {
+    const h = makeHarness();
+    h.setCoordinator(activeCoordinator());
+    expect(h.pipeline.dispatchObserverWake(GROUP, checkpoint(1))).toMatchObject({ kind: "dispatched" });
+    // The durable sentinel is gone (degrade cleared it) — only the in-flight gate is left.
+    rmSync(join(h.cwd, ".council", "state"), { recursive: true, force: true });
+    expect(h.pipeline.dispatchObserverWake(GROUP, checkpoint(1))).toEqual({ kind: "skipped", reason: "wake_in_flight" });
+    expect(h.send).toHaveBeenCalledTimes(1);
+  });
+
+  // Prod 2026-10-15: a liveness probe's prose reply surfaced on the findings
+  // channel. A wake dispatched while the probe's turn runs would capture the
+  // probe's prose as its reply — it is queued and drained afterwards.
+  it("queues the wake behind a running liveness probe and drains it after", () => {
+    let probing = true;
+    const h = makeHarness({ pipelineDeps: { isObserverProbeInFlight: () => probing } });
+    h.setCoordinator(activeCoordinator());
+    expect(h.pipeline.dispatchObserverWake(GROUP, checkpoint(1))).toEqual({ kind: "skipped", reason: "probe_in_flight" });
+    expect(h.send).not.toHaveBeenCalled();
+    expect(h.watchers.get(GROUP)!.pendingCheckpoint?.checkpoint_id).toBe("chk_1");
+    probing = false;
+    h.pipeline.drainPendingObserverWake(GROUP);
+    expect(h.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("a wake turn that ends with probe prose is a probe_turn: watchdog disarmed, no review", () => {
+    const h = makeHarness();
+    h.setCoordinator(activeCoordinator());
+    const reviews: unknown[] = [];
+    cleanups.push(companionBus.on("group:review", (e) => { reviews.push(e); }));
+    h.pipeline.dispatchObserverWake(GROUP, checkpoint(1));
+    h.capture.noteProbe(OBSERVER);
+    h.capture.onAssistant(OBSERVER, { type: "assistant", message: { content: [{ type: "text", text: "Я Observer, независимый ревьюер Council." }] } });
+    h.pipeline.finalizeObserverReply(GROUP, OBSERVER);
+    expect(h.watchers.get(GROUP)!.pendingReviewDeadline).toBeNull();
+    expect(reviews).toHaveLength(0);
+  });
+
+  // Prod 2026-10-13..16: Russian-speaking user, English claims.
+  it("names the claim language in the wake when the resolver returns one", () => {
+    const h = makeHarness({ pipelineDeps: { resolveClaimLanguage: () => "ru" } });
+    h.setCoordinator(activeCoordinator());
+    h.pipeline.dispatchObserverWake(GROUP, checkpoint(1));
+    const body = h.send.mock.calls[0]![1] as string;
+    expect(body).toContain("Write every `claim` in Russian (русский)");
+    expect(body).toContain("verbatim");
+  });
+
+  it("omits the language line without a resolver verdict, and a throwing resolver never blocks the wake", () => {
+    const h = makeHarness({ pipelineDeps: { resolveClaimLanguage: () => { throw new Error("boom"); } } });
+    h.setCoordinator(activeCoordinator());
+    expect(h.pipeline.dispatchObserverWake(GROUP, checkpoint(1))).toMatchObject({ kind: "dispatched" });
+    expect(h.send.mock.calls[0]![1] as string).not.toContain("Write every `claim` in");
+  });
+
+  it("group:review carries the host's `unverified` verdict", () => {
+    const h = makeHarness();
+    h.setCoordinator(activeCoordinator());
+    const reviews: Array<{ verification?: string }> = [];
+    cleanups.push(companionBus.on("group:review", (e) => { reviews.push(e); }));
+    h.pipeline.handleCouncilCheckpoint(GROUP, checkpoint(1, "chk_1", GROUP, ["docs/plan.md"]));
+    h.pipeline.handleCouncilReview(GROUP, {
+      schema_version: 1, checkpoint_id: "chk_1", phase: "council-plan", session_group_id: GROUP,
+      reviewed_at: "2026-10-15T10:00:00Z", observer_provider: "claude", observer_model: "m", observer_cli_version: "1",
+      observer_wake_payload_version_echo: 1, findings: [], host_verification: "unverified",
+    } as never, Date.now());
+    expect(reviews).toEqual([expect.objectContaining({ verification: "unverified" })]);
   });
 });
