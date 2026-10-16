@@ -2774,6 +2774,90 @@ describe("CodexAdapter", () => {
     expect(updates.some((u) => u.session.last_context_tokens === 1050)).toBe(true);
   });
 
+  it("W6 review: subagent-thread tokenUsage neither leaks into the main turn result nor overwrites session context state", async () => {
+    // A collab subagent runs on its own thread and reports its own cumulative
+    // totals. Interleaved with the main thread (and duplicated, as real
+    // recordings are), it must not wipe/double the main turn's usage, and the
+    // session-level context meter / last_context_tokens / codex_token_details
+    // must reflect the MAIN thread only.
+    const messages: BrowserIncomingMessage[] = [];
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini" });
+    adapter.onBrowserMessage((msg) => messages.push(msg));
+
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 20));
+    stdout.push(JSON.stringify({ id: 2, result: { thread: { id: "thr_main" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const usage = (threadId: string, turnId: string, total: number, last: Record<string, number>) => JSON.stringify({
+      method: "thread/tokenUsage/updated",
+      params: { threadId, turnId, tokenUsage: { total: { totalTokens: total, inputTokens: total, outputTokens: 0 }, last, modelContextWindow: 100_000 } },
+    }) + "\n";
+    stdout.push(usage("thr_main", "turn_m", 1000, { inputTokens: 900, cachedInputTokens: 500, outputTokens: 100 }));
+    stdout.push(usage("thr_sub", "turn_s", 400, { inputTokens: 80_000, cachedInputTokens: 0, outputTokens: 20 }));
+    stdout.push(usage("thr_main", "turn_m", 1000, { inputTokens: 900, cachedInputTokens: 500, outputTokens: 100 }));
+    stdout.push(usage("thr_sub", "turn_s", 400, { inputTokens: 80_000, cachedInputTokens: 0, outputTokens: 20 }));
+    stdout.push(usage("thr_main", "turn_m", 2200, { inputTokens: 1100, cachedInputTokens: 800, outputTokens: 100 }));
+    stdout.push(usage("thr_sub", "turn_s", 900, { inputTokens: 90_000, cachedInputTokens: 0, outputTokens: 20 }));
+    stdout.push(JSON.stringify({
+      method: "turn/completed",
+      params: { threadId: "thr_main", turn: { id: "turn_m", status: "completed", items: [] } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const result = messages.find((m) => m.type === "result") as Extract<BrowserIncomingMessage, { type: "result" }>;
+    expect(result.data.usage).toEqual({
+      input_tokens: 400 + 300,
+      cache_read_input_tokens: 1300,
+      cache_creation_input_tokens: 0,
+      output_tokens: 200,
+    });
+    const updates = messages.filter((m) => m.type === "session_update") as Array<{ session: Record<string, unknown> }>;
+    const withCtx = updates.filter((u) => u.session.last_context_tokens !== undefined);
+    expect(withCtx.at(-1)!.session.last_context_tokens).toBe(1100);
+    expect(withCtx.every((u) => (u.session.last_context_tokens as number) < 80_000)).toBe(true);
+    const withPct = updates.filter((u) => u.session.context_used_percent !== undefined);
+    expect(withPct.every((u) => (u.session.context_used_percent as number) < 50)).toBe(true);
+    const withDetails = updates.filter((u) => u.session.codex_token_details !== undefined);
+    expect(withDetails.every((u) => (u.session.codex_token_details as { inputTokens: number }).inputTokens <= 2200)).toBe(true);
+  });
+
+  it("W6 review: legacy codex/event/token_count does not disturb v2 per-turn accounting", async () => {
+    // Legacy frames carry no threadId/turnId. Interleaved with v2
+    // notifications they used to reset the duplicate detector, so a later v2
+    // duplicate was counted twice.
+    const messages: BrowserIncomingMessage[] = [];
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini" });
+    adapter.onBrowserMessage((msg) => messages.push(msg));
+
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 20));
+    stdout.push(JSON.stringify({ id: 2, result: { thread: { id: "thr_main" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const v2 = JSON.stringify({
+      method: "thread/tokenUsage/updated",
+      params: { threadId: "thr_main", turnId: "turn_m", tokenUsage: { total: { totalTokens: 1000 }, last: { inputTokens: 900, cachedInputTokens: 500, outputTokens: 100 }, modelContextWindow: 100_000 } },
+    }) + "\n";
+    const legacy = JSON.stringify({
+      method: "codex/event/token_count",
+      params: { msg: { info: { total_token_usage: { total_tokens: 1234, input_tokens: 1100 }, last_token_usage: { total_tokens: 1000, input_tokens: 900, cached_input_tokens: 500, output_tokens: 100 }, model_context_window: 100_000 } } },
+    }) + "\n";
+    stdout.push(v2);
+    stdout.push(legacy);
+    stdout.push(v2); // duplicate of the v2 frame — must still be recognised as one
+    stdout.push(JSON.stringify({
+      method: "turn/completed",
+      params: { threadId: "thr_main", turn: { id: "turn_m", status: "completed", items: [] } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const result = messages.find((m) => m.type === "result") as Extract<BrowserIncomingMessage, { type: "result" }>;
+    expect(result.data.usage).toEqual({ input_tokens: 400, cache_read_input_tokens: 500, cache_creation_input_tokens: 0, output_tokens: 100 });
+  });
+
   // ─── ExitPlanMode ───────────────────────────────────────────────────────────
 
   it("routes item/tool/call ExitPlanMode to permission_request with bare tool name", async () => {

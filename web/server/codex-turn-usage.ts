@@ -64,52 +64,93 @@ export function normalizeCodexUsage(u: CodexUsageCounters): NormalizedTurnUsage 
 
 /** How many completed turn ids to remember for late-duplicate rejection. */
 const COMPLETED_MEMORY = 32;
+/** Bound on per-thread state (main + collab subagent threads). */
+const THREAD_MEMORY = 64;
 
+type Sum = { inputTokens: number; cachedInputTokens: number; cacheWriteInputTokens: number; outputTokens: number };
+
+interface ThreadState {
+  lastTotalTokens: number | null;
+  lastPromptTokens: number | null;
+  bucket: { turnId: string; sum: Sum } | null;
+  completed: string[];
+}
+
+/**
+ * Keyed by `threadId`: collab subagents run on their own threads with their
+ * own cumulative `total`, so duplicate detection and the per-turn bucket are
+ * per thread. A notification without a threadId (older app-server) shares
+ * the "" key. Callers decide which thread's usage feeds the turn result
+ * (the adapter claims only the main thread's).
+ */
 export class CodexTurnUsageAccumulator {
-  private lastTotalTokens: number | null = null;
-  private bucket: { turnId: string; sum: Required<Pick<CodexUsageCounters, "inputTokens" | "cachedInputTokens" | "cacheWriteInputTokens" | "outputTokens">> } | null = null;
-  private completed: string[] = [];
-  /** Full prompt size (cached included) of the most recent model request. */
-  lastPromptTokens: number | null = null;
+  private threads = new Map<string, ThreadState>();
 
-  /** Feed a `thread/tokenUsage/updated` params object. */
-  onTokenUsage(params: Record<string, unknown>): void {
-    const tokenUsage = params.tokenUsage as { total?: CodexUsageCounters; last?: CodexUsageCounters } | undefined;
-    const total = tokenUsage?.total;
-    const last = tokenUsage?.last;
-    if (!total || !last) return;
-    const totalTokens = num(total.totalTokens);
-    // Duplicate delivery / resume replay: the cumulative counter did not move,
-    // so no new model request happened.
-    if (this.lastTotalTokens !== null && totalTokens === this.lastTotalTokens) return;
-    this.lastTotalTokens = totalTokens;
-    this.lastPromptTokens = num(last.inputTokens);
-
-    const turnId = typeof params.turnId === "string" ? params.turnId : null;
-    if (!turnId || this.completed.includes(turnId)) return;
-    if (this.bucket?.turnId !== turnId) {
-      this.bucket = { turnId, sum: { inputTokens: 0, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0 } };
+  private stateFor(threadId: string | undefined): ThreadState {
+    const key = threadId ?? "";
+    let st = this.threads.get(key);
+    if (!st) {
+      st = { lastTotalTokens: null, lastPromptTokens: null, bucket: null, completed: [] };
+      this.threads.set(key, st);
+      if (this.threads.size > THREAD_MEMORY) {
+        const oldest = this.threads.keys().next().value;
+        if (oldest !== undefined && oldest !== key) this.threads.delete(oldest);
+      }
     }
-    this.bucket.sum.inputTokens += num(last.inputTokens);
-    this.bucket.sum.cachedInputTokens += num(last.cachedInputTokens);
-    this.bucket.sum.cacheWriteInputTokens += num(last.cacheWriteInputTokens);
-    this.bucket.sum.outputTokens += num(last.outputTokens);
+    return st;
   }
 
   /**
-   * Claim the accumulated usage for a completing turn. Returns null when no
-   * usage was seen for it (interrupted before any request, or a duplicate
-   * `turn/completed` whose usage was already claimed).
+   * Feed a `thread/tokenUsage/updated` params object. Returns true when it was
+   * a NEW model request (not a duplicate / replay) — callers use this to avoid
+   * re-applying session-level side effects for duplicates.
    */
-  takeForTurn(turnId: string | null): NormalizedTurnUsage | null {
-    if (!turnId) return null;
-    if (!this.completed.includes(turnId)) {
-      this.completed.push(turnId);
-      if (this.completed.length > COMPLETED_MEMORY) this.completed.shift();
+  onTokenUsage(params: Record<string, unknown>): boolean {
+    const tokenUsage = params.tokenUsage as { total?: CodexUsageCounters; last?: CodexUsageCounters } | undefined;
+    const total = tokenUsage?.total;
+    const last = tokenUsage?.last;
+    if (!total || !last) return false;
+    const st = this.stateFor(typeof params.threadId === "string" ? params.threadId : undefined);
+    const totalTokens = num(total.totalTokens);
+    // Duplicate delivery / resume replay: this thread's cumulative counter did
+    // not move, so no new model request happened.
+    if (st.lastTotalTokens !== null && totalTokens === st.lastTotalTokens) return false;
+    st.lastTotalTokens = totalTokens;
+    st.lastPromptTokens = num(last.inputTokens);
+
+    const turnId = typeof params.turnId === "string" ? params.turnId : null;
+    if (!turnId || st.completed.includes(turnId)) return true;
+    if (st.bucket?.turnId !== turnId) {
+      st.bucket = { turnId, sum: { inputTokens: 0, cachedInputTokens: 0, cacheWriteInputTokens: 0, outputTokens: 0 } };
     }
-    if (this.bucket?.turnId !== turnId) return null;
-    const usage = normalizeCodexUsage(this.bucket.sum);
-    this.bucket = null;
+    st.bucket.sum.inputTokens += num(last.inputTokens);
+    st.bucket.sum.cachedInputTokens += num(last.cachedInputTokens);
+    st.bucket.sum.cacheWriteInputTokens += num(last.cacheWriteInputTokens);
+    st.bucket.sum.outputTokens += num(last.outputTokens);
+    return true;
+  }
+
+  /** Full prompt size (cached included) of a thread's most recent model request. */
+  lastPromptTokensFor(threadId: string | undefined): number | null {
+    return this.threads.get(threadId ?? "")?.lastPromptTokens ?? null;
+  }
+
+  /**
+   * Claim the accumulated usage for a completing turn on `threadId`. Returns
+   * null when no usage was seen for it (interrupted before any request, a
+   * duplicate `turn/completed` whose usage was already claimed, or a turn id
+   * that belongs to another thread).
+   */
+  takeForTurn(turnId: string | null, threadId: string | undefined): NormalizedTurnUsage | null {
+    if (!turnId) return null;
+    const st = this.stateFor(threadId);
+    if (!st.completed.includes(turnId)) {
+      st.completed.push(turnId);
+      if (st.completed.length > COMPLETED_MEMORY) st.completed.shift();
+    }
+    if (st.bucket?.turnId !== turnId) return null;
+    const usage = normalizeCodexUsage(st.bucket.sum);
+    st.bucket = null;
     return usage;
   }
 }

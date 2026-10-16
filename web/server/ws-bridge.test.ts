@@ -6517,3 +6517,43 @@ describe("prompt-cache telemetry (W6/W7)", () => {
     expect(bridge.getSession("tu4")!.state.last_context_tokens).toBe(81005);
   });
 });
+
+// Review fix (PR #365 NOTE): turns that are not opened by a routed
+// user_message (council wakes injected in the adapter, auto-proceed, codex
+// observer turns) must still get a turn-start time, otherwise
+// minutesSinceLastTurn degenerates to "previous completion → this result".
+describe("prompt-cache telemetry — turn start without a user_message", () => {
+  it("the first assistant/stream frame after a result opens the turn for the idle-gap measurement", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      const T0 = Date.parse("2026-10-16T09:00:00Z");
+      vi.setSystemTime(T0);
+      const cli = makeCliSocket("ts1");
+      bridge.handleCLIOpen(cli, "ts1");
+      await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "ts1" }));
+      const result = () => JSON.stringify({
+        type: "result", subtype: "success", is_error: false, duration_ms: 1, duration_api_ms: 1,
+        num_turns: 1, total_cost_usd: 0, stop_reason: "end_turn", session_id: "ts1", uuid: `r-${Date.now()}`,
+        usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 30000 },
+      });
+      await bridge.handleCLIMessage(cli, result());
+      // 90 min later a server-driven turn starts streaming (no user_message routed)...
+      vi.setSystemTime(T0 + 90 * 60_000);
+      await bridge.handleCLIMessage(cli, JSON.stringify({
+        type: "assistant",
+        message: { id: "m-wake", type: "message", role: "assistant", model: "claude-sonnet-4-6", content: [{ type: "text", text: "x" }], stop_reason: "end_turn", usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 30000 } },
+        parent_tool_use_id: null, uuid: "m-wake", session_id: "ts1",
+      }));
+      // ...and completes 10 min after that.
+      vi.setSystemTime(T0 + 100 * 60_000);
+      await bridge.handleCLIMessage(cli, result());
+      const calls = (console.log as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+      const lines = calls
+        .map(([a]) => (typeof a === "string" && a.startsWith("{") ? JSON.parse(a) : null))
+        .filter((l): l is Record<string, unknown> => l?.event === "llm.turn_usage");
+      expect(lines.at(-1)!.minutesSinceLastTurn).toBe(90);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

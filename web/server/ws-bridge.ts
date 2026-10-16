@@ -1026,6 +1026,14 @@ export class WsBridge {
       // Reply-delivery metrics (time to first output, "No response
       // requested." after a real user message). Backend-agnostic.
       deliveryMetrics.recordBackendFrame(session.id, msg);
+      // Prompt-cache telemetry: the first model-output frame after a result
+      // opens the turn when no routed user_message did (council wakes,
+      // auto-proceed, adapter-injected observer turns) — otherwise the idle
+      // gap in llm.turn_usage would be measured up to the RESULT instead of
+      // the request that hit (or missed) the cache.
+      if (session.turnStartedAt === undefined && (msg.type === "stream_event" || msg.type === "assistant")) {
+        session.turnStartedAt = Date.now();
+      }
 
       // -- session_init: merge into session state, broadcast, persist -----
       if (msg.type === "session_init") {

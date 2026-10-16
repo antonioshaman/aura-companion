@@ -27,7 +27,7 @@ function replay(file: string) {
     if (msg.method === "thread/tokenUsage/updated") acc.onTokenUsage(msg.params);
     if (msg.method === "turn/completed") {
       const turnId = (msg.params.turn as { id: string }).id;
-      completed.push({ turnId, usage: acc.takeForTurn(turnId) });
+      completed.push({ turnId, usage: acc.takeForTurn(turnId, msg.params.threadId as string) });
     }
   }
   return completed;
@@ -99,11 +99,67 @@ describe("CodexTurnUsageAccumulator — replay of real recordings (session 17fbf
         last: { totalTokens: 1000, inputTokens: 900, cachedInputTokens: 0, outputTokens: 100 },
       },
     });
-    expect(acc.lastPromptTokens).toBe(900);
+    expect(acc.lastPromptTokensFor(undefined)).toBe(900);
   });
 
   it("a turn with no usage notification (e.g. interrupted before any request) yields null", () => {
     const acc = new CodexTurnUsageAccumulator();
-    expect(acc.takeForTurn("never-seen")).toBeNull();
+    expect(acc.takeForTurn("never-seen", "main")).toBeNull();
+  });
+});
+
+// Review fix (PR #365 STOP): collab subagent threads send their OWN
+// thread/tokenUsage/updated with their own cumulative `total`. A single
+// thread-agnostic accumulator let them wipe the main turn's bucket and
+// corrupt the duplicate detector (lost usage / double counting). State is
+// now keyed by threadId and a turn's usage is claimed per (thread, turn).
+describe("CodexTurnUsageAccumulator — multi-thread (main + collab subagent)", () => {
+  const frame = (threadId: string, turnId: string, total: number, inputTokens: number, cachedInputTokens: number, outputTokens: number) => ({
+    threadId,
+    turnId,
+    tokenUsage: {
+      total: { totalTokens: total },
+      last: { inputTokens, cachedInputTokens, outputTokens },
+    },
+  });
+
+  it("interleaved main/subagent frames with duplicates: main turn gets exactly its own requests", () => {
+    const acc = new CodexTurnUsageAccumulator();
+    acc.onTokenUsage(frame("main", "t1", 1000, 900, 500, 100));
+    acc.onTokenUsage(frame("sub", "s1", 400, 380, 0, 20));
+    acc.onTokenUsage(frame("main", "t1", 1000, 900, 500, 100)); // dup of main#1 after a sub frame
+    acc.onTokenUsage(frame("sub", "s1", 400, 380, 0, 20)); // dup of sub#1
+    acc.onTokenUsage(frame("sub", "s1", 900, 480, 300, 20));
+    acc.onTokenUsage(frame("main", "t1", 2200, 1100, 800, 100));
+    acc.onTokenUsage(frame("main", "t1", 2200, 1100, 800, 100)); // dup
+
+    expect(acc.takeForTurn("t1", "main")).toEqual({
+      input_tokens: (900 - 500) + (1100 - 800),
+      cache_read_input_tokens: 1300,
+      cache_creation_input_tokens: 0,
+      output_tokens: 200,
+    });
+    // Subagent usage stays attributable to its own thread/turn, never the main result.
+    expect(acc.takeForTurn("s1", "sub")).toEqual({
+      input_tokens: 380 + (480 - 300),
+      cache_read_input_tokens: 300,
+      cache_creation_input_tokens: 0,
+      output_tokens: 40,
+    });
+  });
+
+  it("a subagent turn id never claims the main thread's bucket", () => {
+    const acc = new CodexTurnUsageAccumulator();
+    acc.onTokenUsage(frame("main", "t1", 1000, 900, 500, 100));
+    expect(acc.takeForTurn("t1", "sub")).toBeNull();
+    expect(acc.takeForTurn("t1", "main")).not.toBeNull();
+  });
+
+  it("lastPromptTokensFor reports per thread", () => {
+    const acc = new CodexTurnUsageAccumulator();
+    acc.onTokenUsage(frame("main", "t1", 1000, 900, 500, 100));
+    acc.onTokenUsage(frame("sub", "s1", 400, 380, 0, 20));
+    expect(acc.lastPromptTokensFor("main")).toBe(900);
+    expect(acc.lastPromptTokensFor("sub")).toBe(380);
   });
 });
