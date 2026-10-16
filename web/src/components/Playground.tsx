@@ -31,6 +31,8 @@ import { UpdateAvailableBanner } from "./UpdateAvailableBanner.js";
 import {
   AutoProceedRestoreNotice,
   BlockerBanner,
+  CheckpointCoverageList,
+  ObserverProbeMessage,
   CouncilToggle,
   DegradedBanner,
   FindingsLog,
@@ -3296,6 +3298,24 @@ function CouncilModeSection() {
           />
         </Card>
 
+        {/* Observer rigor (2026-10-16) — checkpoints with no review ("без ревью")
+            or only an unverified rubber-stamp review ("не проверено"). */}
+        <Card label="CheckpointCoverageList — без ревью + не проверено (collapsible)">
+          <CheckpointCoverageList
+            gaps={[
+              { checkpointId: "council-plan-145", phase: "council-plan", sequence: 145, kind: "unreviewed", reason: "superseded" },
+              { checkpointId: "council-plan-147", phase: "council-plan", sequence: 147, kind: "unreviewed", reason: "degraded" },
+              { checkpointId: "council-review-148-taska-closure-rereview", phase: "council-review", sequence: 148, kind: "unverified" },
+              { checkpointId: "council-review-150", phase: "council-review", sequence: 150, kind: "unreviewed", reason: "probe_reply" },
+            ]}
+          />
+        </Card>
+        {/* Observer rigor — liveness probe + reply in the observer's chat feed. */}
+        <Card label="ObserverProbeMessage — probe and observer reply (collapsed rows)">
+          <ObserverProbeMessage role="user" text="[liveness probe] Это проверка связи после перезапуска на новой модели. Ответь одной короткой строкой: кто ты (роль) и что видел последним в .council/." />
+          <ObserverProbeMessage role="assistant" text="Я Observer, независимый ревьюер Council; содержимое .council/ после перезапуска ещё не видел." />
+        </Card>
+
         {/* PLAN-aura-model-registry Task 8 — model fallback notice. Warning
             channel (reuses the DegradedBanner recipe), one card per reason. */}
         <Card label="ModelFallbackBanner — retired model">
@@ -3451,6 +3471,11 @@ function CouncilModeSection() {
             <CouncilNotCountedPanelDemo reason="downgraded_stop" />
           </div>
         </Card>
+        <Card label="ObserverPanel — latest review not counted: unverified clean review (observer rigor)">
+          <div className="h-[460px] bg-cc-bg rounded-md overflow-hidden">
+            <CouncilNotCountedPanelDemo reason="unverified_clean" />
+          </div>
+        </Card>
         {/* Worst-case header stack in a SHORT column — layout-stability spec rec 3.
             reviewing-stalled banner + first-run hint + dense findings; the panel
             must clip internally (findings scroll), never overflow the column. */}
@@ -3545,6 +3570,15 @@ function CouncilNotCountedPanelDemo({ reason }: { reason: ConvergenceNotCountedR
       observerSessionId: `playground-council-not-counted-${reason}-obs`,
       status: "active",
       pairing: "claude+codex",
+      // Observer rigor: the unverified demo also shows the coverage list.
+      ...(reason === "unverified_clean"
+        ? {
+          checkpointCoverage: [
+            { checkpointId: "council-plan-147", phase: "council-plan", sequence: 147, kind: "unreviewed" as const, reason: "degraded" as const },
+            { checkpointId: "council-review-148", phase: "council-review", sequence: 148, kind: "unverified" as const },
+          ],
+        }
+        : {}),
     });
     applyConvergence({
       sessionGroupId: group,

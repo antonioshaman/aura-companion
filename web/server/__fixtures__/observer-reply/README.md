@@ -28,3 +28,13 @@ does not need to be true, only realistic).
 
 Both name `spawn-codex-observer.md` with no `grp_…` segment, the shape seen in
 4/16 bench pairs. Used by `observer-reply.test.ts` to pin host adoption.
+
+## Rubber-stamp turn (observer rigor, 2026-10-16)
+
+| File | Provider | Source turn | Content |
+|---|---|---|---|
+| `codex-rubber-stamp-turn.jsonl` | codex (gpt-6.1-sol) | `council-review-148-taska-closure-rereview`, grp_879b81b6, 2026-10-15 (recording `17fbf63f-…_2026-10-15T15-02-48.413Z_95ce2f.jsonl`) | verbatim: one `cat` of the closure note `.council/review-input/task-a-model-rotation-closure.md`, then `[]` 4 s later — the closure's claims were false |
+
+Used by `observer-reply.test.ts` to pin that such a `[]` is stamped
+`host_verification: "unverified"`, not written as a clean review. No
+workspace path appears in the frames (the command is workspace-relative).

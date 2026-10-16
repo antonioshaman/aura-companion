@@ -176,15 +176,31 @@ export interface DriftDetectorDeps {
 export const UNDELIVERED_OUTPUT_MIN_AGE_MS = 10_000;
 
 /**
- * Count `assistant` records with `sinceMs < timestamp <= untilMs` in a chunk
- * of Claude CLI jsonl. Lines that do not parse (the chunk may start
- * mid-record) are skipped.
+ * A main-chain `assistant` record from the CLI's jsonl. On CLI 2.1.283 each
+ * record carries ONE content block of an API message (the same `message.id`
+ * spans several records) — byte-identical to the `assistant` frame the CLI
+ * writes to stdout for that block (verified on prod recording vs jsonl,
+ * 51/51 frames, 2026-10-16).
  */
-export function countAssistantRecordsBetween(jsonlChunk: string, sinceMs: number, untilMs: number): number {
-  let count = 0;
+export interface JsonlAssistantRecord {
+  /** The record's `message` object, as the stdout `assistant` frame carries it. */
+  message: Record<string, unknown>;
+  /** Parsed `timestamp` (ms). */
+  timestampMs: number;
+  /** The record's own `uuid` (null if absent). */
+  uuid: string | null;
+}
+
+/**
+ * Main-chain `assistant` records with `sinceMs < timestamp <= untilMs` in a
+ * chunk of Claude CLI jsonl, in file order. Lines that do not parse (the chunk
+ * may start mid-record) are skipped.
+ */
+export function assistantRecordsBetween(jsonlChunk: string, sinceMs: number, untilMs: number): JsonlAssistantRecord[] {
+  const out: JsonlAssistantRecord[] = [];
   for (const line of jsonlChunk.split("\n")) {
     if (!line.includes('"assistant"')) continue;
-    let rec: { type?: unknown; timestamp?: unknown; isSidechain?: unknown; parentToolUseID?: unknown };
+    let rec: { type?: unknown; timestamp?: unknown; isSidechain?: unknown; parentToolUseID?: unknown; message?: unknown; uuid?: unknown };
     try {
       rec = JSON.parse(line);
     } catch {
@@ -200,9 +216,26 @@ export function countAssistantRecordsBetween(jsonlChunk: string, sinceMs: number
     if (rec.isSidechain === true) continue;
     if (typeof rec.parentToolUseID === "string") continue;
     const t = Date.parse(rec.timestamp);
-    if (Number.isFinite(t) && t > sinceMs && t <= untilMs) count++;
+    if (Number.isFinite(t) && t > sinceMs && t <= untilMs) {
+      out.push({
+        // A record without a message object still counts as evidence; the
+        // recovery skips it (nothing to deliver).
+        message: rec.message && typeof rec.message === "object" ? (rec.message as Record<string, unknown>) : {},
+        timestampMs: t,
+        uuid: typeof rec.uuid === "string" ? rec.uuid : null,
+      });
+    }
   }
-  return count;
+  return out;
+}
+
+/**
+ * Count `assistant` records with `sinceMs < timestamp <= untilMs` in a chunk
+ * of Claude CLI jsonl. Lines that do not parse (the chunk may start
+ * mid-record) are skipped.
+ */
+export function countAssistantRecordsBetween(jsonlChunk: string, sinceMs: number, untilMs: number): number {
+  return assistantRecordsBetween(jsonlChunk, sinceMs, untilMs).length;
 }
 
 /** Tail window read by {@link countUndeliveredAssistantRecords}. */
@@ -230,6 +263,43 @@ export function countUndeliveredAssistantRecords(jsonlPath: string, sinceMs: num
   } finally {
     if (fd !== null) closeSync(fd);
   }
+}
+
+/** Read the last {@link UNDELIVERED_OUTPUT_TAIL_BYTES} of a jsonl; null on any error. */
+function readJsonlTail(jsonlPath: string): string | null {
+  let fd: number | null = null;
+  try {
+    fd = openSync(jsonlPath, "r");
+    const size = fstatSync(fd).size;
+    const len = Math.min(size, UNDELIVERED_OUTPUT_TAIL_BYTES);
+    const buf = Buffer.alloc(len);
+    readSync(fd, buf, 0, len, size - len);
+    return buf.toString("utf-8");
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
+}
+
+/**
+ * How far before bun's last received CLI frame the drift recovery looks for
+ * undelivered records. The CLI appends the jsonl record a moment BEFORE it
+ * writes the stdout frame, so a record stamped just before the last frame bun
+ * got can still be one bun never got. Already-delivered records inside the
+ * window are filtered out against the session history by the bridge.
+ */
+export const RECOVERY_LOOKBACK_MS = 30_000;
+
+/**
+ * The reply the drift recovery must deliver itself: every main-chain
+ * `assistant` record the CLI wrote after `sinceMs` (no upper bound — read
+ * after the kill, so the file is final). [] on any read error.
+ */
+export function readUndeliveredAssistantRecords(jsonlPath: string, sinceMs: number): JsonlAssistantRecord[] {
+  const tail = readJsonlTail(jsonlPath);
+  if (tail === null) return [];
+  return assistantRecordsBetween(tail, sinceMs, Number.POSITIVE_INFINITY).filter((r) => Array.isArray(r.message.content));
 }
 
 /** Default lag tolerance — 90s (see rationale on the field). */

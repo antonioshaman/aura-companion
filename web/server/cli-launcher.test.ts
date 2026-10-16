@@ -4198,3 +4198,110 @@ describe("prompt-cache prefix stability of the claude spawn argv", () => {
     expect(a.filter((x) => x === "--append-system-prompt")).toHaveLength(1);
   });
 });
+
+// ─── W2: boot resume of sessions alive before a restart ─────────────────────
+// Prod 2026-10-15/16: after `systemctl restart aura-companion`, stdio Claude and
+// host Codex sessions came back `exited` (their pipes / proxy died with the old
+// server) and stayed down until a browser opened them — an orchestrator with no
+// tab open was dead for ~2 h and a CLI cron missed its 06:30 run. Council pairs
+// were worse: graceful shutdown KILLS both halves (shutdownAllGroups), which
+// persists them as `exited`, indistinguishable from a really-dead session.
+// These tests pin which sessions the launcher hands the orchestrator for a
+// proactive `--resume` at boot.
+describe("W2 boot resume candidates", () => {
+  afterEach(async () => {
+    const procIdentity = await import("./process-identity.js");
+    procIdentity.__resetProcReaderForTests();
+  });
+
+  /** Every inherited PID reads as gone (the CLI died with the old server). */
+  async function allPidsGone() {
+    const procIdentity = await import("./process-identity.js");
+    procIdentity.setProcReaderForTests({ platform: () => "linux", killCheck: () => false });
+  }
+
+  it("returns sessions that were alive before the restart and came back exited — Claude and Codex", async () => {
+    await allPidsGone();
+    store.saveLauncher([
+      // Alive at shutdown (crash / plain stdio session): persisted non-exited.
+      { sessionId: "claude-live", pid: 101, state: "connected", cwd: "/tmp", createdAt: 1, cliSessionId: "c1" },
+      { sessionId: "codex-live", pid: 102, state: "running", cwd: "/tmp", createdAt: 1, cliSessionId: "t1", backendType: "codex" },
+      // Council half killed BY the graceful shutdown: exited + boot mark.
+      { sessionId: "observer-killed-by-shutdown", state: "exited", exitCode: 143, cwd: "/tmp", createdAt: 1, cliSessionId: "t2", backendType: "codex", resumeOnBoot: true },
+      // Really down before the restart (user stop, crash budget spent, idle-kill).
+      { sessionId: "was-down", state: "exited", exitCode: 1, cwd: "/tmp", createdAt: 1, cliSessionId: "c3" },
+      // Archived sessions never come back, mark or not.
+      { sessionId: "archived", pid: 103, state: "connected", archived: true, cwd: "/tmp", createdAt: 1, cliSessionId: "c4" },
+      { sessionId: "archived-marked", state: "exited", archived: true, resumeOnBoot: true, cwd: "/tmp", createdAt: 1, cliSessionId: "c5" },
+      // Nothing to resume: never got a CLI session id.
+      { sessionId: "no-conversation", pid: 104, state: "connected", cwd: "/tmp", createdAt: 1 },
+    ]);
+    const fresh = new CliLauncher(3456);
+    fresh.setStore(store);
+    fresh.restoreFromDisk();
+
+    expect(fresh.takeBootResumeCandidates()).toEqual(["claude-live", "codex-live", "observer-killed-by-shutdown"]);
+    // One-shot: the orchestrator schedules the boot resume at most once.
+    expect(fresh.takeBootResumeCandidates()).toEqual([]);
+    // The mark is consumed so it cannot resurrect the session on a later boot.
+    expect(fresh.getSession("observer-killed-by-shutdown")?.resumeOnBoot).toBeUndefined();
+  });
+
+  it("leaves a session restored as `starting` (WS transport reconnect) to the reconnection watchdog", async () => {
+    // WS transport: a surviving CLI with a matching identity re-dials the new
+    // server; it must not ALSO be boot-resumed (double spawn).
+    process.env.COMPANION_CLAUDE_TRANSPORT = "ws";
+    // No /proc (identity `unavailable`) → legacy liveness probe says alive.
+    const procIdentity = await import("./process-identity.js");
+    procIdentity.setProcReaderForTests({ platform: () => "darwin" });
+    const killSpy = vi.spyOn(process, "kill").mockImplementation((() => true) as never);
+    try {
+      store.saveLauncher([
+        { sessionId: "ws-live", pid: 201, state: "connected", cwd: "/tmp", createdAt: 1, cliSessionId: "c1" },
+      ]);
+      const fresh = new CliLauncher(3456);
+      fresh.setStore(store);
+      fresh.restoreFromDisk();
+      expect(fresh.getSession("ws-live")?.state).toBe("starting");
+      expect(fresh.takeBootResumeCandidates()).toEqual([]);
+    } finally {
+      killSpy.mockRestore();
+      delete process.env.COMPANION_CLAUDE_TRANSPORT;
+    }
+  });
+
+  it("markLiveForBootResume persists a mark on live + keepalive-pending sessions only, before the shutdown kills them", async () => {
+    await allPidsGone();
+    store.saveLauncher([
+      { sessionId: "live", pid: 301, state: "connected", cwd: "/tmp", createdAt: 1, cliSessionId: "c1" },
+      { sessionId: "crashed-keepalive-pending", state: "exited", exitCode: 1, cwd: "/tmp", createdAt: 1, cliSessionId: "c2" },
+      { sessionId: "down", state: "exited", exitCode: 1, cwd: "/tmp", createdAt: 1, cliSessionId: "c3" },
+      { sessionId: "user-stopped", pid: 302, state: "connected", cwd: "/tmp", createdAt: 1, cliSessionId: "c4" },
+      { sessionId: "archived", pid: 303, state: "connected", archived: true, cwd: "/tmp", createdAt: 1, cliSessionId: "c5" },
+    ]);
+    // Simulate the running server: load the records, then flip states the way
+    // the live process sees them (restore marks gone PIDs exited).
+    const running = new CliLauncher(3456);
+    running.setStore(store);
+    running.restoreFromDisk();
+    running.getSession("live")!.state = "connected";
+    // A user stop killed it (exited). Even listed as keepalive-pending, the
+    // exclude predicate wins: a user-stopped session stays down.
+    running.getSession("user-stopped")!.state = "exited";
+
+    const marked = running.markLiveForBootResume(
+      ["crashed-keepalive-pending", "user-stopped"],
+      (id) => id === "user-stopped",
+    );
+    expect(marked).toBe(2);
+
+    // Shutdown then kills the live session (council teardown): exited on disk.
+    running.getSession("live")!.state = "exited";
+    (running as unknown as { persistState(): void }).persistState();
+
+    const next = new CliLauncher(3456);
+    next.setStore(store);
+    next.restoreFromDisk();
+    expect(next.takeBootResumeCandidates()).toEqual(["live", "crashed-keepalive-pending"]);
+  });
+});

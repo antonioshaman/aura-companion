@@ -26,6 +26,7 @@ import {
 } from "./council-types.js";
 import { mkdirSync, symlinkSync } from "node:fs";
 import { readFileSync as _readFileSync } from "node:fs";
+import { realpathSync } from "node:fs";
 
 // The minimum bytes guard is in the source; padding lets us write tiny
 // fixtures and still pass the floor without copy-pasting the constant.
@@ -772,5 +773,44 @@ describe("observer prompt — tooling-failure ≠ finding rule", () => {
     expect(text).toContain("OBSERVER-BLOCKED:");
     // The rule must bind the failure mode to INFO severity, not NOTE/WARN/STOP.
     expect(text).toMatch(/OBSERVER-BLOCKED[\s\S]{0,400}INFO|INFO[\s\S]{0,400}OBSERVER-BLOCKED/);
+  });
+});
+
+// Observer rigor (2026-10-16). Rubber stamp: prod checkpoint 148 — the
+// observer read only the closure note and replied `[]`; the claims were
+// false. Language: Russian-speaking user, English-only claims. Both prompt
+// sources must carry the verify-before-pass and claim-language rules, and the
+// wake must permit (and ask for) opening the code an artifact cites.
+describe("observer prompt — verify-before-pass and claim language (observer rigor)", () => {
+  const WORKSPACE_PROMPT = fileURLToPath(new URL("../../.council/prompts/observer-system.md", import.meta.url));
+
+  it.each([
+    ["workspace", () => _readFileSync(WORKSPACE_PROMPT, "utf-8")],
+    ["bundled", () => BUNDLED_OBSERVER_PROMPT],
+  ] as const)("%s prompt requires opening every cited file:line before `[]` on closure checkpoints", (_label, load) => {
+    const text = load();
+    expect(text).toContain("## Verify before you pass");
+    expect(text).toMatch(/closure[\s\S]{0,200}already implemented/);
+    expect(text).toMatch(/EVERY `file:line`/);
+    expect(text).toContain("unverified");
+    expect(text).toMatch(/\*\*Language\.\*\*[\s\S]{0,200}`claim`[\s\S]{0,200}verbatim/);
+  });
+
+  it("the wake asks the observer to open cited code and allows it", () => {
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "wake-rigor-")));
+    try {
+      const result = buildObserverWakePayload({
+        checkpoint: { session_group_id: "grp_x", checkpoint_id: "c1", phase: "council-review", sequence: 1 },
+        manifest: { delta: [], carried: [], dropped: [] },
+        workspaceRoot: root,
+        observerProvider: "codex",
+        claimLanguage: "ru",
+      });
+      expect(result.textBody).not.toContain("Read only the workspace-relative paths");
+      expect(result.textBody).toMatch(/cites code \(`file:line`\), open that code and check it before you reply `\[\]`/);
+      expect(result.textBody).toContain("Write every `claim` in Russian (русский)");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

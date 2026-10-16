@@ -20,3 +20,7 @@ export {
   providerChipClass,
 } from "./ProviderBadges.js";
 export type { ProviderBadgesProps } from "./ProviderBadges.js";
+export { CheckpointCoverageList } from "./CheckpointCoverageList.js";
+export type { CheckpointCoverageListProps } from "./CheckpointCoverageList.js";
+export { ObserverProbeMessage } from "./ObserverProbeMessage.js";
+export type { ObserverProbeMessageProps } from "./ObserverProbeMessage.js";
