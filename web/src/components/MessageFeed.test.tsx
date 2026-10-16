@@ -6,6 +6,9 @@ beforeAll(() => {
 });
 
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import "@testing-library/jest-dom";
+import { axe } from "vitest-axe";
 import type { ChatMessage } from "../types.js";
 
 const { getClaudeSessionHistoryMock } = vi.hoisted(() => ({
@@ -643,6 +646,181 @@ describe("MessageFeed - tool-only message detection", () => {
     // Should render as a regular message, not grouped
     expect(screen.getByText("Let me check something")).toBeTruthy();
     expect(screen.getByText("Read File")).toBeTruthy();
+  });
+});
+
+// ─── W16: collapsing repeated restart/drift-recovery system markers ─────────
+// A long-lived session can collect 15+ "Turn interrupted (stopped or
+// restarted)" notes (resume-interrupted) and "Backend transcript …s behind
+// CLI's jsonl — relaunching to recover." lines (drift-recovery) in a row —
+// pure noise. MessageFeed folds a run of 2+ adjacent markers of either kind
+// into one "Interrupted ×N" row; a lone marker (or a run broken by any other
+// content) renders exactly as before.
+
+function makeResumeInterruptedMessage(
+  overrides: Partial<ChatMessage> & { id: string },
+): ChatMessage {
+  return makeMessage({
+    role: "system",
+    content: "Error: [ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null",
+    systemVariant: "resume-interrupted",
+    ...overrides,
+  });
+}
+
+function makeDriftRecoveryMessage(overrides: Partial<ChatMessage> & { id: string }): ChatMessage {
+  return makeMessage({
+    role: "system",
+    content: "Backend transcript 1813s behind CLI's jsonl — relaunching to recover.",
+    systemVariant: "drift-recovery",
+    ...overrides,
+  });
+}
+
+describe("MessageFeed - collapsing repeated restart/drift-recovery system markers", () => {
+  it("renders a single marker unchanged (no collapsing for N=1)", () => {
+    const sid = "test-marker-single";
+    setStoreMessages(sid, [
+      makeMessage({ id: "u1", role: "user", content: "do the thing" }),
+      makeResumeInterruptedMessage({ id: "r1" }),
+    ]);
+
+    render(<MessageFeed sessionId={sid} />);
+
+    expect(screen.getByTestId("resume-interrupted-note")).toBeInTheDocument();
+    expect(screen.queryByTestId("collapsed-system-markers")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Interrupted ×/)).not.toBeInTheDocument();
+  });
+
+  it("collapses a run of N>=2 consecutive markers (mixing both kinds) into one row", () => {
+    const sid = "test-marker-collapse";
+    setStoreMessages(sid, [
+      makeMessage({ id: "u1", role: "user", content: "do the thing" }),
+      makeResumeInterruptedMessage({ id: "r1" }),
+      makeDriftRecoveryMessage({ id: "d1" }),
+      makeResumeInterruptedMessage({ id: "r2" }),
+      makeResumeInterruptedMessage({ id: "r3" }),
+    ]);
+
+    render(<MessageFeed sessionId={sid} />);
+
+    expect(screen.getByTestId("collapsed-system-markers")).toBeInTheDocument();
+    expect(screen.getByText(/Interrupted ×4/)).toBeInTheDocument();
+    // None of the four individual notes render as standalone rows.
+    expect(screen.queryByTestId("resume-interrupted-note")).not.toBeInTheDocument();
+  });
+
+  it("does NOT collapse across a user message in between", () => {
+    const sid = "test-marker-no-collapse-user";
+    setStoreMessages(sid, [
+      makeResumeInterruptedMessage({ id: "r1" }),
+      makeMessage({ id: "u1", role: "user", content: "still here" }),
+      makeResumeInterruptedMessage({ id: "r2" }),
+    ]);
+
+    render(<MessageFeed sessionId={sid} />);
+
+    // Two separate single-marker notes, not one collapsed row.
+    expect(screen.queryByTestId("collapsed-system-markers")).not.toBeInTheDocument();
+    expect(screen.getAllByTestId("resume-interrupted-note")).toHaveLength(2);
+    expect(screen.getByText("still here")).toBeInTheDocument();
+  });
+
+  it("does NOT collapse across an assistant message in between", () => {
+    const sid = "test-marker-no-collapse-assistant";
+    setStoreMessages(sid, [
+      makeResumeInterruptedMessage({ id: "r1" }),
+      makeMessage({ id: "a1", role: "assistant", content: "Here is the answer." }),
+      makeDriftRecoveryMessage({ id: "d1" }),
+      makeDriftRecoveryMessage({ id: "d2" }),
+    ]);
+
+    render(<MessageFeed sessionId={sid} />);
+
+    // The lone resume-interrupted note stays uncollapsed...
+    expect(screen.getByTestId("resume-interrupted-note")).toBeInTheDocument();
+    // ...while the two adjacent drift-recovery lines after it collapse.
+    expect(screen.getByTestId("collapsed-system-markers")).toBeInTheDocument();
+    expect(screen.getByText(/Interrupted ×2/)).toBeInTheDocument();
+  });
+
+  it("does NOT collapse across an unrelated plain system message", () => {
+    const sid = "test-marker-no-collapse-plain-system";
+    setStoreMessages(sid, [
+      makeResumeInterruptedMessage({ id: "r1" }),
+      makeMessage({ id: "s1", role: "system", content: "Context compacted successfully" }),
+      makeResumeInterruptedMessage({ id: "r2" }),
+    ]);
+
+    render(<MessageFeed sessionId={sid} />);
+
+    expect(screen.queryByTestId("collapsed-system-markers")).not.toBeInTheDocument();
+    expect(screen.getAllByTestId("resume-interrupted-note")).toHaveLength(2);
+    expect(screen.getByText("Context compacted successfully")).toBeInTheDocument();
+  });
+
+  it("expands via click to reveal every individual marker, then collapses again", () => {
+    const sid = "test-marker-expand-click";
+    setStoreMessages(sid, [
+      makeResumeInterruptedMessage({ id: "r1" }),
+      makeDriftRecoveryMessage({ id: "d1" }),
+      makeResumeInterruptedMessage({ id: "r2" }),
+    ]);
+
+    render(<MessageFeed sessionId={sid} />);
+
+    const toggle = screen.getByRole("button", { name: /Interrupted ×3/ });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByTestId("collapsed-system-markers-list")).not.toBeInTheDocument();
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    const rows = screen.getByTestId("collapsed-system-markers-list").querySelectorAll("li");
+    expect(rows).toHaveLength(3);
+    expect(screen.getByText("Backend transcript 1813s behind CLI's jsonl — relaunching to recover.")).toBeInTheDocument();
+
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByTestId("collapsed-system-markers-list")).not.toBeInTheDocument();
+  });
+
+  it("expands via the keyboard (Tab + Enter)", async () => {
+    const user = userEvent.setup();
+    const sid = "test-marker-expand-keyboard";
+    setStoreMessages(sid, [
+      makeResumeInterruptedMessage({ id: "r1" }),
+      makeDriftRecoveryMessage({ id: "d1" }),
+    ]);
+
+    render(<MessageFeed sessionId={sid} />);
+
+    const toggle = screen.getByRole("button", { name: /Interrupted ×2/ });
+    await user.tab();
+    // The collapsed-markers toggle may not be the first tab stop if other
+    // focusable elements precede it — keep tabbing until it is focused or we
+    // run out of plausible stops.
+    for (let i = 0; i < 10 && toggle !== document.activeElement; i++) {
+      await user.tab();
+    }
+    expect(toggle).toHaveFocus();
+
+    await user.keyboard("{Enter}");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("passes axe both collapsed and expanded", async () => {
+    const sid = "test-marker-axe";
+    setStoreMessages(sid, [
+      makeResumeInterruptedMessage({ id: "r1" }),
+      makeDriftRecoveryMessage({ id: "d1" }),
+      makeResumeInterruptedMessage({ id: "r2" }),
+    ]);
+
+    const { container } = render(<MessageFeed sessionId={sid} />);
+    expect(await axe(container)).toHaveNoViolations();
+
+    fireEvent.click(screen.getByRole("button", { name: /Interrupted ×3/ }));
+    expect(await axe(container)).toHaveNoViolations();
   });
 });
 

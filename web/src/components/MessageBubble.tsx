@@ -164,8 +164,15 @@ const AUTH_ERROR_TYPE_RE =
  * (`utils/resume-interrupted.ts`). Not an error of the
  * current work, so it reads like the other system dividers; the raw diagnostic
  * stays one click away for debugging.
+ *
+ * Exported so `chat/CollapsedSystemMarkers.tsx` can reuse it verbatim inside
+ * an expanded collapsed-marker group — a council review on PR #370 flagged
+ * that the group was discarding `item.content` in favour of the generic
+ * `RESUME_INTERRUPTED_LABEL`, losing the per-marker diagnostic
+ * (`result_type`, `stop_reason`, …) that a lone marker still exposes through
+ * this component.
  */
-function ResumeInterruptedNote({ diagnostic }: { diagnostic: string }) {
+export function ResumeInterruptedNote({ diagnostic }: { diagnostic: string }) {
   return (
     <details className="group py-1 min-w-0" data-testid="resume-interrupted-note">
       <summary className="flex items-center gap-3 cursor-pointer list-none [&::-webkit-details-marker]:hidden min-w-0">
