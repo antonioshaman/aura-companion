@@ -350,6 +350,9 @@ export type BrowserOutgoingMessage =
   | { type: "mcp_toggle"; serverName: string; enabled: boolean; client_msg_id?: string }
   | { type: "mcp_reconnect"; serverName: string; client_msg_id?: string }
   | { type: "mcp_set_servers"; servers: Record<string, McpServerConfig>; client_msg_id?: string }
+  // Dismiss the server-recorded model fallback notice for EVERY device. `at`
+  // must match the current record so a stale dismiss never hides a newer one.
+  | { type: "dismiss_model_fallback"; at: number }
   | { type: "set_ai_validation"; aiValidationEnabled?: boolean | null; aiValidationAutoApprove?: boolean | null; aiValidationAutoDeny?: boolean | null; client_msg_id?: string }
   | { type: "end_session"; reason?: string; client_msg_id?: string }
   | { type: "stop_task"; task_id: string; client_msg_id?: string }
@@ -823,6 +826,47 @@ export interface SessionState {
   sessionGroupId?: string;
   /** Council Mode pairing — the role this session plays within {@link sessionGroupId}. */
   sessionGroupRole?: SessionGroupRole;
+  /**
+   * The most recent time the SERVER moved this session off the model the
+   * user chose (spawn substitution, Codex account rejection, chain fallback,
+   * silence rotation). Persisted with the session state and replayed in the
+   * `session_init` snapshot, so the browser shows a persistent "running on a
+   * fallback model" notice — even after a reload — instead of an ephemeral
+   * toast. Absent = the session runs on the model the user picked.
+   */
+  model_fallback?: ModelFallbackRecord | null;
+}
+
+/**
+ * Why the session is running on a different model than the one chosen.
+ * Shared by the server-recorded {@link ModelFallbackRecord} and the
+ * browser-side substitution/revert notices so all paths render one copy.
+ * - `retired` / `blocked` — registry status (or a 404/403 at runtime).
+ * - `overloaded`          — 429/5xx at runtime.
+ * - `cli-incompatible`    — `broken-model-substitution.ts` rewrote it at spawn.
+ * - `rejected`            — the Codex account/app-server refused the model.
+ * - `unavailable`         — the API reported the model unknown/not available.
+ * - `unresponsive`        — recurring silent turns triggered a chain rotation.
+ */
+export type ModelFallbackReason =
+  | "retired"
+  | "blocked"
+  | "overloaded"
+  | "cli-incompatible"
+  | "rejected"
+  | "unavailable"
+  | "unresponsive";
+
+export interface ModelFallbackRecord {
+  /** The model the user chose / the session was running. */
+  from: string;
+  /** The model the session runs on now. */
+  to: string;
+  reason: ModelFallbackReason;
+  /** Optional operator detail (e.g. the substitution table's reason). */
+  detail?: string;
+  /** Epoch ms when the fallback happened — the browser's dismissal key. */
+  at: number;
 }
 
 /** Roles a session can play inside a Council Mode pair. */

@@ -5,7 +5,7 @@ import type {
 } from "./session-types.js";
 import type { CodexAdapter } from "./codex-adapter.js";
 import type { Session } from "./ws-bridge-types.js";
-import { appendHistory } from "./ws-bridge-persist.js";
+import { appendHistory, clearStaleModelFallback } from "./ws-bridge-persist.js";
 import { validatePermission } from "./ai-validator.js";
 import { getEffectiveAiValidation } from "./ai-validation-settings.js";
 import { companionBus } from "./event-bus.js";
@@ -54,6 +54,11 @@ export function attachCodexAdapterHandlers(
         backend_type: "codex",
       };
       deps.refreshGitInfo(session, { notifyPoller: true });
+      // Codex switches model by relaunch: a new process on a model other
+      // than the fallback target means the fallback notice is stale.
+      if (clearStaleModelFallback(session, session.state.model)) {
+        deps.broadcastToBrowsers(session, { type: "session_update", session: { model_fallback: null } });
+      }
       deps.persistSession(session);
       session.stateMachine.transition("ready", "codex_session_init");
     } else if (msg.type === "session_update") {
@@ -67,6 +72,11 @@ export function attachCodexAdapterHandlers(
         backend_type: "codex",
       };
       deps.refreshGitInfo(session, { notifyPoller: true });
+      // Codex switches model by relaunch: a new process on a model other
+      // than the fallback target means the fallback notice is stale.
+      if (clearStaleModelFallback(session, session.state.model)) {
+        deps.broadcastToBrowsers(session, { type: "session_update", session: { model_fallback: null } });
+      }
       deps.persistSession(session);
     } else if (msg.type === "status_change") {
       session.state.is_compacting = msg.status === "compacting";

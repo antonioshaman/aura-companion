@@ -686,20 +686,33 @@ export class SessionOrchestrator {
       this.launcher.setModel(sessionId, model);
     });
 
-    // Pre-spawn substitution of a known-broken model — surface a
-    // browser toast so the user knows their model choice was overridden.
-    // Silent substitution is user-hostile; the toast makes the override
-    // visible without gating the spawn. Fires once per spawn (the
-    // launcher persists info.model to the substitute, so subsequent
-    // respawns don't re-fire).
+    // Pre-spawn substitution of a known-broken model (Task A.2): record a
+    // PERSISTENT fallback on the session state — the browser renders a
+    // banner naming from→to and why, with a "switch back" action, and it
+    // survives a reload. (Was an ephemeral `error` toast.) Fires once per
+    // spawn: the launcher persists info.model to the substitute.
     companionBus.on("session:model-substituted", ({ sessionId, from, to, reason }) => {
       log.warn("orchestrator", "Model auto-substituted at spawn", {
         sessionId, from, to, reason,
       });
-      this.wsBridge.broadcastToSession(sessionId, {
-        type: "error",
-        message: `Model ${from} auto-substituted to ${to}: ${reason}`,
+      this.wsBridge.recordModelFallback(
+        sessionId,
+        { from, to, reason: "cli-incompatible", detail: reason },
+        this.launcher.getSession(sessionId)?.backendType,
+      );
+    });
+
+    // Any other launcher-side fallback (Codex model rejected by the account /
+    // not launchable) — same persistent notice.
+    companionBus.on("session:model-fell-back", ({ sessionId, from, to, reason, detail }) => {
+      log.warn("orchestrator", "Session fell back to a different model", {
+        sessionId, from, to, reason,
       });
+      this.wsBridge.recordModelFallback(
+        sessionId,
+        { from, to, reason, ...(detail ? { detail } : {}) },
+        this.launcher.getSession(sessionId)?.backendType,
+      );
     });
 
     // Init-frame health canary tripped — the CLI subprocess opened

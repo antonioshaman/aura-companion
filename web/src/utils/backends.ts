@@ -14,6 +14,11 @@ export interface ModelOption {
    */
   status?: "active" | "degraded" | "retired" | "blocked";
   replacement?: string | null;
+  /**
+   * The model is offered by the catalogue but absent from the registry, i.e.
+   * nobody verified it on this install. Rendered as a subtle "Untested" hint.
+   */
+  untested?: true;
 }
 
 export interface ModeOption {
@@ -58,6 +63,7 @@ export function toModelOptions(models: BackendModelInfo[]): ModelOption[] {
     // common (un-annotated) path stays byte-for-byte the same.
     ...(m.status !== undefined ? { status: m.status } : {}),
     ...(m.replacement !== undefined ? { replacement: m.replacement } : {}),
+    ...(m.untested === true ? { untested: true as const } : {}),
   }));
 }
 

@@ -57,6 +57,7 @@ function makeRecovery(
     isCliConnected: vi.fn(() => false),
     getSession: vi.fn(() => undefined),
     broadcastToSession: vi.fn(),
+    recordModelFallback: vi.fn(),
     // #327: the drift tick asks how many user messages are queued for the
     // session before honouring a suppression. Default: none queued.
     getSessionPendingMessageCount: vi.fn(() => 0),
@@ -183,6 +184,30 @@ describe("SessionRecovery (P4/C1d DI seam)", () => {
     expect(noteApiLimitReached).toHaveBeenCalledWith("s1");
     expect(launcher.kill).not.toHaveBeenCalled();
     expect(launcher.setModel).not.toHaveBeenCalled();
+  });
+
+  it("unknown-model chain fallback records a persistent from→to notice (Task A.2), not just a toast", async () => {
+    // The user must see WHICH model they were moved off and onto, and why,
+    // in a notice that survives a reload — recorded on the bridge state.
+    const sessions = new Map([["s1", info("s1", { state: "running", model: "claude-opus-4-8" })]]);
+    const { recovery, launcher, wsBridge } = makeRecovery(sessions);
+    await recovery.handleModelFallback("s1", "<synthetic>", "<resolve-at-orchestrator>", "unknown_model");
+    expect(launcher.setModel).toHaveBeenCalledWith("s1", "claude-opus-4-7");
+    expect(wsBridge.recordModelFallback).toHaveBeenCalledWith(
+      "s1",
+      expect.objectContaining({ from: "claude-opus-4-8", to: "claude-opus-4-7", reason: "unavailable" }),
+    );
+  });
+
+  it("silence rotation records a persistent 'unresponsive' fallback notice (Task A.2)", async () => {
+    const sessions = new Map([["s1", info("s1", { state: "running", model: "claude-opus-4-8" })]]);
+    const { recovery, wsBridge } = makeRecovery(sessions);
+    await recovery.handleBackendSilent("s1", 300_000, "silent_stdio_watchdog");
+    await recovery.handleBackendSilent("s1", 300_000, "silent_stdio_watchdog");
+    expect(wsBridge.recordModelFallback).toHaveBeenCalledWith(
+      "s1",
+      expect.objectContaining({ from: "claude-opus-4-8", to: "claude-opus-4-7", reason: "unresponsive" }),
+    );
   });
 
   it("silence strikes accumulate per session and reset on noteTurnSucceeded", async () => {

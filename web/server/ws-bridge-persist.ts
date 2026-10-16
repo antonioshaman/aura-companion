@@ -109,3 +109,17 @@ export function serializeForStore(session: Session): PersistedSession {
     processedClientMessageIds: session.processedClientMessageIds,
   };
 }
+
+/**
+ * Drop a stale `model_fallback` record once the session CONFIRMS a model other
+ * than the fallback target (the user switched back or picked another model).
+ * Without this the persistent banner kept saying "switched to X" forever.
+ * Returns true when it cleared — the caller persists + broadcasts
+ * `session_update { model_fallback: null }` so every device drops the banner.
+ */
+export function clearStaleModelFallback(session: Session, confirmedModel: string | undefined): boolean {
+  const fb = session.state.model_fallback;
+  if (!fb || !confirmedModel || confirmedModel === fb.to) return false;
+  session.state.model_fallback = null;
+  return true;
+}

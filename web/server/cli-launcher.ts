@@ -563,6 +563,28 @@ export class CliLauncher {
     this.syncRejectedCodexModels(sessionId, next);
   }
 
+  /**
+   * Task A.2: announce a launcher-side Codex model swap so the orchestrator
+   * records a persistent fallback notice (from→to + why + "switch back").
+   * No-op when nothing actually changed.
+   */
+  private announceCodexFallback(
+    sessionId: string,
+    from: string | undefined,
+    to: string,
+    reason: "rejected" | "unavailable",
+    detail?: string,
+  ): void {
+    if (!from || from === to) return;
+    companionBus.emit("session:model-fell-back", {
+      sessionId,
+      from,
+      to,
+      reason,
+      ...(detail ? { detail: detail.slice(0, 300) } : {}),
+    });
+  }
+
   private isCodexModelAvailabilityError(error: string): boolean {
     return /model/i.test(error) && /(available|unsupported|access|account|not found|rejected)/i.test(error);
   }
@@ -1053,6 +1075,9 @@ export class CliLauncher {
     const cwd = options.cwd || process.cwd();
     const backendType = options.backendType || "claude";
     let launchModel = options.model;
+    // Task A.2: a Codex slug swap decided below, announced once the session
+    // is registered (so the orchestrator can resolve its backend type).
+    let fallbackAnnouncement: { from: string; to: string } | null = null;
 
     if (backendType === "codex") {
       // Best-effort verified-model selection: when the models cache is present
@@ -1065,6 +1090,9 @@ export class CliLauncher {
       const resolved = this.resolveCodexLaunchModel(sessionId, options.model);
       if (resolved.ok) {
         launchModel = resolved.model;
+        if (resolved.fallbackFrom) {
+          fallbackAnnouncement = { from: resolved.fallbackFrom, to: resolved.model };
+        }
       }
       this.syncRejectedCodexModels(sessionId, new Set());
     } else {
@@ -1161,6 +1189,15 @@ export class CliLauncher {
     );
 
     this.sessions.set(sessionId, info);
+    if (fallbackAnnouncement) {
+      this.announceCodexFallback(
+        sessionId,
+        fallbackAnnouncement.from,
+        fallbackAnnouncement.to,
+        "unavailable",
+        "The requested model is not in this account's launchable Codex model list.",
+      );
+    }
     if (effectiveOptions.env) {
       this.sessionEnvs.set(sessionId, { ...effectiveOptions.env });
     }
@@ -1359,6 +1396,15 @@ export class CliLauncher {
         return { ok: false, error: resolved.error };
       }
       validatedCodexModel = resolved.model;
+      if (resolved.fallbackFrom) {
+        this.announceCodexFallback(
+          sessionId,
+          resolved.fallbackFrom,
+          resolved.model,
+          "unavailable",
+          "The requested model is not in this account's launchable Codex model list.",
+        );
+      }
     }
 
     // Kill old process(es) if still alive.
@@ -2470,6 +2516,7 @@ export class CliLauncher {
           this.markCodexModelRejected(sessionId, session.model);
           const resolved = this.resolveCodexLaunchModel(sessionId, session.model);
           if (resolved.ok && resolved.model !== session.model) {
+            this.announceCodexFallback(sessionId, session.model, resolved.model, "rejected", error);
             session.state = "starting";
             session.exitCode = undefined;
             session.cliSessionId = undefined;
@@ -2720,6 +2767,7 @@ export class CliLauncher {
           this.markCodexModelRejected(sessionId, session.model);
           const resolved = this.resolveCodexLaunchModel(sessionId, session.model);
           if (resolved.ok && resolved.model !== session.model) {
+            this.announceCodexFallback(sessionId, session.model, resolved.model, "rejected", error);
             session.state = "starting";
             session.exitCode = undefined;
             session.cliSessionId = undefined;

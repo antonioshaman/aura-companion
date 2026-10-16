@@ -31,6 +31,7 @@
  *   served list will not appear — the registry annotates, it does not list.
  */
 
+import { resolveModelSubstitution } from "./broken-model-substitution.js";
 import { readFileSync, statSync, realpathSync } from "node:fs";
 import { join, resolve as resolvePath, sep } from "node:path";
 import { COMPANION_HOME } from "./paths.js";
@@ -501,7 +502,24 @@ export function getModelRegistry(): LoadedModelRegistry {
  * enrichment.
  */
 export function lookupModel(backend: BackendType, id: string): ModelRegistryEntry | null {
-  return getModelRegistry().entries.get(registryKey(backend, id)) ?? null;
+  const entry = getModelRegistry().entries.get(registryKey(backend, id)) ?? null;
+  // Single source of truth for "the spawn path rewrites this model": a Claude
+  // id in the broken-model table reads as `blocked` with the spawn substitute
+  // as its replacement — so the dropdown never offers it as selectable and
+  // the availability resolver agrees with `cli-launcher.ts`.
+  if (backend === "claude") {
+    const sub = resolveModelSubstitution(id);
+    if (sub) {
+      return {
+        id,
+        backend,
+        status: "blocked",
+        replacement: sub.to,
+        ...(entry?.tier !== undefined ? { tier: entry.tier } : {}),
+      };
+    }
+  }
+  return entry;
 }
 
 /** Test-only: drop the cached registry so the next access re-polls disk. */

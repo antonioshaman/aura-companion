@@ -1,7 +1,7 @@
 // Typed event map for the Companion internal event bus.
 // Each key is a namespaced event name; values are the payload passed to handlers.
 
-import type { BrowserIncomingMessage } from "./session-types.js";
+import type { BrowserIncomingMessage, ModelFallbackReason } from "./session-types.js";
 import type { CodexAdapter } from "./codex-adapter.js";
 import type { SessionPhase } from "./session-state-machine.js";
 import type { GroupDegradeReason } from "./group-state-machine.js";
@@ -182,6 +182,21 @@ export interface CompanionEventMap {
     from: string;
     to: string;
     reason: string;
+  };
+
+  /**
+   * The launcher moved a session to a different model for a reason OTHER
+   * than the broken-model table (today: a Codex model the account/app-server
+   * rejected, or a requested Codex slug that is not launchable). The
+   * orchestrator records it on the session state so the browser renders a
+   * persistent fallback notice with a "switch back" action.
+   */
+  "session:model-fell-back": {
+    sessionId: string;
+    from: string;
+    to: string;
+    reason: ModelFallbackReason;
+    detail?: string;
   };
 
   /**

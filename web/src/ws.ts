@@ -787,9 +787,12 @@ function logRegistryDisagreementIfActive(
  * status; the `overloaded` arm exists only for parity with the reactive copy
  * and is never produced by the proactive gate.
  */
-function substitutionNoticeReason(reason: string): "retired" | "blocked" | "overloaded" {
+function substitutionNoticeReason(reason: string): "retired" | "blocked" | "overloaded" | "cli-incompatible" {
   if (reason === "blocked") return "blocked";
   if (reason === "overloaded") return "overloaded";
+  // Broken-model table (claude-adapter set_model gate) — the CLI, not the
+  // model's lifecycle, is the cause.
+  if (reason === "cli-incompatible") return "cli-incompatible";
   return "retired";
 }
 
@@ -1162,6 +1165,15 @@ function handleParsedMessage(
                 sdk.sessionId === sessionId ? { ...sdk, model: revertedTo } : sdk,
               ),
             );
+          }
+          // Task A.2: the system message scrolls away — also raise the
+          // persistent fallback banner (from→to + why) until dismissed.
+          if (revertedTo) {
+            store.setModelSubstitutionNotice(sessionId, {
+              requested: requestedModel,
+              applied: revertedTo,
+              reason: runtimeFailure,
+            });
           }
           const revertNotice = modelFailureNotice(runtimeFailure, requestedModel, revertedTo);
           store.appendMessage(sessionId, {

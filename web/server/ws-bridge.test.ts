@@ -6222,6 +6222,51 @@ describe("session model sync from the main assistant frame", () => {
     });
   }
 
+  // Review STOP (PR #367): a model_fallback record must not outlive the
+  // fallback. Once the main session CONFIRMS a model other than fallback.to
+  // (user picked another model / switched back), the record is cleared,
+  // persisted and the clear is broadcast, so every device drops the banner.
+  it("clears model_fallback when the confirmed main model moves away from fallback.to", async () => {
+    const cli = makeCliSocket("fb1");
+    bridge.handleCLIOpen(cli, "fb1");
+    const browser = makeBrowserSocket("fb1");
+    bridge.handleBrowserOpen(browser, "fb1");
+    await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "fb1", model: "claude-opus-4-7" }));
+    bridge.recordModelFallback("fb1", { from: "claude-opus-4-8", to: "claude-opus-4-7", reason: "unresponsive" });
+
+    // Still on the fallback model → record stays.
+    await bridge.handleCLIMessage(cli, assistantFrame("fb1", "claude-opus-4-7", null, "f1"));
+    expect(bridge.getSession("fb1")!.state.model_fallback?.to).toBe("claude-opus-4-7");
+    // A subagent on another model is NOT a session model change.
+    await bridge.handleCLIMessage(cli, assistantFrame("fb1", "claude-haiku-4-5", "tool-1", "f2"));
+    expect(bridge.getSession("fb1")!.state.model_fallback).toBeTruthy();
+
+    browser.send.mockClear();
+    await bridge.handleCLIMessage(cli, assistantFrame("fb1", "claude-sonnet-4-6", null, "f3"));
+    expect(bridge.getSession("fb1")!.state.model_fallback).toBeNull();
+    const frames = browser.send.mock.calls.map((c: unknown[]) => JSON.parse(c[0] as string));
+    expect(frames).toContainEqual(expect.objectContaining({ type: "session_update", session: { model_fallback: null } }));
+  });
+
+  it("dismiss_model_fallback clears the record server-side only for the matching event", async () => {
+    // Dismissal used to live only in one browser's localStorage, so another
+    // device brought the banner back. Now it clears the shared state — but a
+    // stale dismiss (older `at`) never clears a NEWER fallback.
+    const browser = makeBrowserSocket("fb2");
+    bridge.handleBrowserOpen(browser, "fb2");
+    bridge.recordModelFallback("fb2", { from: "a", to: "b", reason: "rejected" });
+    const at = bridge.getSession("fb2")!.state.model_fallback!.at;
+
+    await bridge.handleBrowserMessage(browser, JSON.stringify({ type: "dismiss_model_fallback", at: at - 1 }));
+    expect(bridge.getSession("fb2")!.state.model_fallback).toBeTruthy();
+
+    browser.send.mockClear();
+    await bridge.handleBrowserMessage(browser, JSON.stringify({ type: "dismiss_model_fallback", at }));
+    expect(bridge.getSession("fb2")!.state.model_fallback).toBeNull();
+    const frames = browser.send.mock.calls.map((c: unknown[]) => JSON.parse(c[0] as string));
+    expect(frames).toContainEqual(expect.objectContaining({ type: "session_update", session: { model_fallback: null } }));
+  });
+
   it("updates session.state.model to the MAIN assistant frame's model", async () => {
     const cli = makeCliSocket("sm1");
     bridge.handleCLIOpen(cli, "sm1");
@@ -6416,6 +6461,49 @@ describe("session model sync from the main assistant frame", () => {
     } finally {
       off();
     }
+  });
+});
+
+describe("recordModelFallback (persistent fallback notice)", () => {
+  // Validates Task A.2: when the server moves a session off the user's model
+  // the record lands on session.state (so the session_init snapshot replays
+  // it to a reloaded tab), is broadcast to live browsers as a session_update,
+  // and is persisted — not just an ephemeral error toast.
+  it("stores the record on state, broadcasts a session_update, and replays it on reconnect", () => {
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+    browser.send.mockClear();
+
+    bridge.recordModelFallback("s1", {
+      from: "gpt-6.1-sol",
+      to: "gpt-5.3-codex",
+      reason: "rejected",
+      detail: "model not available for this account",
+    });
+
+    const session = bridge.getSession("s1")!;
+    expect(session.state.model_fallback).toMatchObject({
+      from: "gpt-6.1-sol",
+      to: "gpt-5.3-codex",
+      reason: "rejected",
+    });
+    expect(typeof session.state.model_fallback!.at).toBe("number");
+
+    const frames = browser.send.mock.calls.map((c: unknown[]) => JSON.parse(c[0] as string));
+    const update = frames.find((f: { type: string }) => f.type === "session_update");
+    expect(update.session.model_fallback.to).toBe("gpt-5.3-codex");
+
+    // A tab that connects later (reload) gets it through the snapshot.
+    const late = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(late, "s1");
+    const init = JSON.parse(late.send.mock.calls[0][0]);
+    expect(init.type).toBe("session_init");
+    expect(init.session.model_fallback.from).toBe("gpt-6.1-sol");
+  });
+
+  it("creates the bridge session when the fallback happens before any browser attached (spawn-time)", () => {
+    bridge.recordModelFallback("fresh", { from: "a-model", to: "b-model", reason: "cli-incompatible" });
+    expect(bridge.getSession("fresh")?.state.model_fallback?.reason).toBe("cli-incompatible");
   });
 });
 

@@ -1,4 +1,8 @@
-import { resolveModelSubstitution } from "./broken-model-substitution.js";
+import {
+  BROKEN_MODEL_SUBSTITUTIONS,
+  type BrokenModelSubstitution,
+  resolveModelSubstitution,
+} from "./broken-model-substitution.js";
 
 /**
  * Model fallback chain + rate-limit-class error classification.
@@ -41,12 +45,15 @@ export const CLAUDE_MODEL_FALLBACK_CHAIN: readonly string[] = [
  * means "no fallback available" — caller should relaunch on the same
  * model rather than downgrade blindly.
  */
-export function nextModelInChain(current: string | undefined | null): string | null {
+export function nextModelInChain(
+  current: string | undefined | null,
+  substitutions: readonly BrokenModelSubstitution[] = BROKEN_MODEL_SUBSTITUTIONS,
+): string | null {
   if (!current) return null;
   const idx = CLAUDE_MODEL_FALLBACK_CHAIN.indexOf(current);
   if (idx < 0) return null;
   for (const candidate of CLAUDE_MODEL_FALLBACK_CHAIN.slice(idx + 1)) {
-    if (resolveModelSubstitution(candidate) === null) {
+    if (resolveModelSubstitution(candidate, substitutions) === null) {
       return candidate;
     }
   }

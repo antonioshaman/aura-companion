@@ -42,52 +42,24 @@ export interface BrokenModelSubstitution {
  * entry should be a deliberate act tied to a known incident, not a
  * defensive "just in case" default.
  *
- * When Claude CLI 2.1.266+ fixes the opus-5 stdout emit bug, delete the
- * `claude-opus-5` entry below.
+ * EMPTY since 2026-10-16. The three former entries (`claude-opus-5`,
+ * `claude-fable-5-1`, `claude-opus-4-7` → `claude-opus-4-8`) worked around
+ * the CLI 2.1.265/2.1.266 stdout stream-json emit regression. Re-probed on
+ * the prod box with CLI 2.1.283, in the exact transport Aura uses
+ * (`-p --input-format stream-json --output-format stream-json --verbose`,
+ * two consecutive user turns): all three models emitted `system.init`, both
+ * `assistant` frames and both `result` frames on stdout. The upstream bug is
+ * fixed, so keeping the rewrite only silently downgraded users who picked
+ * Opus 5 (and the dropdown kept offering it). The silent-stdio watchdog +
+ * recurring-silence rotation remain the safety net if it regresses.
+ *
+ * Every consumer reads THIS table (single source of truth): the spawn /
+ * relaunch rewrite in `cli-launcher.ts`, the fallback chain, and — via
+ * `lookupModel` in `model-registry.ts` — both the `set_model` pre-send gate
+ * and the dropdown's status overlay (a listed model renders as `blocked`
+ * with `replacement = to`, so the picker never offers what spawn rewrites).
  */
-export const BROKEN_MODEL_SUBSTITUTIONS: readonly BrokenModelSubstitution[] = [
-  {
-    from: "claude-fable-5-1",
-    to: "claude-opus-4-8",
-    // API codename for Opus 5 — same underlying model as
-    // "claude-opus-5" but resolved at a different layer. When
-    // Aura Companion's session state persists a session that was
-    // created via composer's "Opus 5" selection, the model id can
-    // land in the state file as either literal string depending on
-    // which layer wrote it last (composer set_model uses the
-    // display-name form; the CLI's own jsonl records the API
-    // codename in `assistant.message.model`, which bun then writes
-    // back on init). Both forms hit the SAME stdout-emit regression.
-    // Verified 2026-09-11: two sessions with `--model
-    // claude-fable-5-1` reproduced the silent-stdio pattern
-    // identically to `claude-opus-5`. Substitution table only
-    // knowing the literal `claude-opus-5` string missed them.
-    reason: "Claude CLI 2.1.266 does not emit fable-5-1 (Opus 5 API codename) responses on stdout — auto-downgraded to Opus 4.8 until upstream fix",
-  },
-  {
-    from: "claude-opus-5",
-    to: "claude-opus-4-8",
-    // See `feedback_claude_cli_opus5_stdout_dead_jsonl_alive.md` and PR
-    // #175 for full trace. Reproduced 2026-09-09 on aura-companion prod:
-    // subprocess spawns fine, writes assistant frames to
-    // `~/.claude/projects/*.jsonl`, but its stdout stream-json emitter
-    // never fires. Same session (`--resume`) works instantly when
-    // respawned with `--model claude-opus-4-8`.
-    reason: "Claude CLI 2.1.265+ does not emit opus-5 responses on stdout (jsonl still writes) — auto-downgraded to Opus 4.8 until upstream fix",
-  },
-  {
-    from: "claude-opus-4-7",
-    to: "claude-opus-4-8",
-    // Same stdout-emit regression class as opus-5 — verified 2026-09-10
-    // on aura-companion prod (grp_f0903abe pair, CLI 2.1.266). Two
-    // user_messages in a row on opus-4-7 produced zero assistant
-    // frames to bun over ~4 minutes despite subprocess `state=connected`,
-    // `pid` alive, and jsonl growing. Substituting to opus-4-8 (which
-    // works reliably under 2.1.266) is a stopgap; the durable fix is
-    // the recurring-silence rotation in `session-orchestrator.ts`.
-    reason: "Claude CLI 2.1.266 does not reliably emit opus-4-7 responses on stdout — auto-downgraded to Opus 4.8 until upstream fix",
-  },
-];
+export const BROKEN_MODEL_SUBSTITUTIONS: readonly BrokenModelSubstitution[] = [];
 
 /**
  * Return the substitution entry for `model`, or `null` if the model is
@@ -102,7 +74,10 @@ export const BROKEN_MODEL_SUBSTITUTIONS: readonly BrokenModelSubstitution[] = [
  * alternative — a runtime probe that silently disables the workaround
  * against an older CLI on some hosts — is worse.
  */
-export function resolveModelSubstitution(model: string | undefined | null): BrokenModelSubstitution | null {
+export function resolveModelSubstitution(
+  model: string | undefined | null,
+  table: readonly BrokenModelSubstitution[] = BROKEN_MODEL_SUBSTITUTIONS,
+): BrokenModelSubstitution | null {
   if (!model) return null;
-  return BROKEN_MODEL_SUBSTITUTIONS.find((s) => s.from === model) ?? null;
+  return table.find((s) => s.from === model) ?? null;
 }

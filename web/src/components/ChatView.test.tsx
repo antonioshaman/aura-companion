@@ -482,6 +482,22 @@ describe("ChatView", () => {
     expect(mockClearModelSubstitutionNotice).toHaveBeenCalledWith("s1");
   });
 
+  it("renders the persistent banner for a SERVER-recorded fallback on the session state (Task A.2)", () => {
+    // Spawn substitution / Codex rejection / chain fallback are recorded on
+    // session.model_fallback (replayed on reload) — ChatView must surface them
+    // in the same banner slot, not as an ephemeral toast.
+    setupStore();
+    (mockStoreState.sessions as Map<string, Record<string, unknown>>).set("s1", {
+      model: "claude-opus-4-8",
+      model_fallback: { from: "claude-opus-4-7", to: "claude-opus-4-8", reason: "unresponsive", at: 5 },
+    });
+    render(<ChatView sessionId="s1" />);
+    const banner = screen.getByTestId("model-fallback-banner");
+    expect(banner.getAttribute("data-from")).toBe("Opus 4.7");
+    expect(banner.getAttribute("data-to")).toBe("Opus 4.8");
+    expect(banner.getAttribute("data-reason")).toBe("unresponsive");
+  });
+
   it("does NOT render the notice banner when no substitution notice exists", () => {
     setupStore();
     render(<ChatView sessionId="s1" />);

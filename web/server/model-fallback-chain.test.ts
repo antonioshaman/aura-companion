@@ -10,7 +10,9 @@ import { BROKEN_MODEL_SUBSTITUTIONS } from "./broken-model-substitution.js";
 describe("nextModelInChain", () => {
   it("returns the next usable model for chain members", () => {
     expect(nextModelInChain("claude-opus-5")).toBe("claude-opus-4-8");
-    expect(nextModelInChain("claude-opus-4-8")).toBe("claude-opus-4-6");
+    // Substitution table is empty since 2026-10-16 (CLI 2.1.283 re-probe),
+    // so 4.8 falls back to 4.7 again instead of skipping it.
+    expect(nextModelInChain("claude-opus-4-8")).toBe("claude-opus-4-7");
     expect(nextModelInChain("claude-opus-4-7")).toBe("claude-opus-4-6");
     expect(nextModelInChain("claude-opus-4-6")).toBe("claude-sonnet-4-6");
     expect(nextModelInChain("claude-sonnet-4-6")).toBe("claude-haiku-4-5");
@@ -34,10 +36,11 @@ describe("nextModelInChain", () => {
   });
 
   it("skips fallback targets that are substituted back to an earlier model", () => {
-    // `claude-opus-4-7` currently spawns as 4.8 due a CLI stdout bug.
-    // Rotating 4.8 -> 4.7 would therefore relaunch right back on 4.8
-    // and reset the silence counter forever.
-    expect(nextModelInChain("claude-opus-4-8")).toBe("claude-opus-4-6");
+    // If `claude-opus-4-7` spawns as 4.8 (substitution entry), rotating
+    // 4.8 -> 4.7 would relaunch right back on 4.8 and reset the silence
+    // counter forever. Injected table: the live one is empty since 2026-10-16.
+    const table = [{ from: "claude-opus-4-7", to: "claude-opus-4-8", reason: "fixture: CLI stdout bug" }];
+    expect(nextModelInChain("claude-opus-4-8", table)).toBe("claude-opus-4-6");
   });
 
   it("chain is ordered strongest-to-weakest by convention (opus > sonnet > haiku)", () => {
@@ -176,12 +179,11 @@ describe("computeSilenceRotation", () => {
 });
 
 describe("BROKEN_MODEL_SUBSTITUTIONS content sanity — regression guard", () => {
-  it("opus-4-7 is in the substitution table (added 2026-09-10 after field verification)", () => {
-    // Belt-and-braces: even before the recurring-silence rotation
-    // catches it empirically, the substitution table pre-empts opus-4-7
-    // at spawn time. This test guards against accidental removal.
+  it("opus-4-7 is NOT substituted any more (re-probed OK on CLI 2.1.283, 2026-10-16)", () => {
+    // The entry was added 2026-09-10 for the CLI 2.1.266 stdout-emit bug.
+    // A two-turn stdin stream-json probe on 2.1.283 emitted every frame, so
+    // the entry was removed; the recurring-silence rotation is the net.
     const entry = BROKEN_MODEL_SUBSTITUTIONS.find((s) => s.from === "claude-opus-4-7");
-    expect(entry).toBeDefined();
-    expect(entry?.to).toBe("claude-opus-4-8");
+    expect(entry).toBeUndefined();
   });
 });

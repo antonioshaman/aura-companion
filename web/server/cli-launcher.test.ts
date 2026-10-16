@@ -2130,6 +2130,9 @@ describe("codex onInitError model-rejection auto-respawn", () => {
     const info = launcher.getSession("test-session-id")!;
     expect(info.model).toBe("gpt-5.2-codex");
     const spawnCallsBefore = mockSpawn.mock.calls.length;
+    // Task A.2: the fallback must be announced (persistent notice), not silent.
+    const fellBack: Array<{ from: string; to: string; reason: string }> = [];
+    companionBus.on("session:model-fell-back", (p) => { fellBack.push(p); });
 
     // Drive the init-error handler with a model-availability error.
     fireInitError(
@@ -2145,6 +2148,9 @@ describe("codex onInitError model-rejection auto-respawn", () => {
       Array.from((launcher as any).rejectedCodexModels.get("test-session-id") ?? []),
     ).toContain("gpt-5.2-codex");
     expect(info.model).toBe("gpt-5.1-codex-mini");
+    expect(fellBack).toEqual([
+      expect.objectContaining({ from: "gpt-5.2-codex", to: "gpt-5.1-codex-mini", reason: "rejected" }),
+    ]);
     // The respawn immediately re-enters spawnCodex, which marks the session
     // connected again — the meaningful guarantee is that it was NOT left exited.
     expect(info.state).not.toBe("exited");
@@ -2218,14 +2224,43 @@ describe("codex onInitError model-rejection auto-respawn", () => {
 
     const info = launcher.getSession("test-session-id")!;
     const spawnCallsBefore = mockSpawn.mock.calls.length;
+    // Task A.2: the stdio rejection fallback is announced too.
+    const fellBack: Array<{ from: string; to: string; reason: string }> = [];
+    companionBus.on("session:model-fell-back", (p) => { fellBack.push(p); });
 
     fireInitError(capturedAdapter, "model gpt-5.2-codex is not available for this account");
     await new Promise((r) => setTimeout(r, 0));
 
     expect(info.model).toBe("gpt-5.1-codex-mini");
+    expect(fellBack).toEqual([
+      expect.objectContaining({ from: "gpt-5.2-codex", to: "gpt-5.1-codex-mini", reason: "rejected" }),
+    ]);
     expect(info.state).not.toBe("exited");
     expect(codexProc1.kill).toHaveBeenCalledWith("SIGTERM");
     expect(mockSpawn.mock.calls.length).toBeGreaterThan(spawnCallsBefore);
+  });
+
+  it("launch: a requested Codex slug that is not launchable announces the substitute (Task A.2)", async () => {
+    // selectLaunchableCodexModel returns `fallbackFrom` when the requested
+    // slug is not in the account's launchable list; the launcher used to
+    // swap silently. Now it emits session:model-fell-back (→ persistent banner).
+    mockResolveBinary.mockReturnValue("/opt/fake/codex");
+    mockSpawn.mockReturnValueOnce(createMockCodexProc(8121) as any);
+    const fellBack: Array<{ from: string; to: string; reason: string }> = [];
+    companionBus.on("session:model-fell-back", (p) => { fellBack.push(p); });
+
+    launcher.launch({
+      backendType: "codex",
+      cwd: "/tmp/project",
+      model: "gpt-9-imaginary",
+      codexSandbox: "workspace-write",
+    });
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(launcher.getSession("test-session-id")!.model).toBe("gpt-5.2-codex");
+    expect(fellBack).toEqual([
+      expect.objectContaining({ sessionId: "test-session-id", from: "gpt-9-imaginary", to: "gpt-5.2-codex", reason: "unavailable" }),
+    ]);
   });
 
   it("stdio: a non-availability init error marks the session exited without respawn", async () => {

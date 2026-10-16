@@ -4233,9 +4233,10 @@ describe("GET /api/backends/:id/models", () => {
     expect(res.status).toBe(200);
     const json = await res.json();
     // Should only include visible models, sorted by priority
+    // Registry mock returns null for every slug → each is flagged untested.
     expect(json).toEqual([
-      { value: "gpt-5.2-codex", label: "gpt-5.2-codex", description: "Frontier model" },
-      { value: "gpt-5.1-codex-mini", label: "gpt-5.1-codex-mini", description: "Fast model" },
+      { value: "gpt-5.2-codex", label: "gpt-5.2-codex", description: "Frontier model", untested: true },
+      { value: "gpt-5.1-codex-mini", label: "gpt-5.1-codex-mini", description: "Fast model", untested: true },
     ]);
   });
 
@@ -4286,9 +4287,10 @@ describe("GET /api/backends/:id/models", () => {
 
     expect(res.status).toBe(200);
     const body = await res.json();
+    // Registry mock returns null → each served model carries `untested: true`.
     expect(body).toEqual([
-      { value: "claude-opus-4-8", label: "Opus 4.8", description: "Claude Opus 4.8" },
-      { value: "claude-sonnet-4-6", label: "Sonnet 4.6", description: "Claude Sonnet 4.6" },
+      { value: "claude-opus-4-8", label: "Opus 4.8", description: "Claude Opus 4.8", untested: true },
+      { value: "claude-sonnet-4-6", label: "Sonnet 4.6", description: "Claude Sonnet 4.6", untested: true },
     ]);
   });
 
@@ -4366,7 +4368,7 @@ describe("GET /api/backends/:id/models", () => {
     expect(json[0]).not.toHaveProperty("riskFlags");
   });
 
-  it("leaves a model untouched when the registry does not annotate it (backward-compatible passthrough)", async () => {
+  it("marks a model the registry does not annotate as untested (honest status; additive field old clients ignore)", async () => {
     const cacheContent = JSON.stringify({
       models: [
         { slug: "gpt-5.2-codex", display_name: "gpt-5.2-codex", description: "Frontier model", visibility: "list", priority: 0 },
@@ -4374,14 +4376,17 @@ describe("GET /api/backends/:id/models", () => {
     });
     vi.mocked(existsSync).mockReturnValue(true);
     vi.mocked(readFileSync).mockReturnValue(cacheContent);
-    // Default mock already returns null; assert no status/replacement is added.
+    // Default mock returns null (not in registry). No lifecycle status is
+    // invented, but the model is flagged `untested` so the dropdown can say
+    // so instead of implying it was verified.
     const res = await app.request("/api/backends/codex/models", { method: "GET" });
 
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json).toEqual([
-      { value: "gpt-5.2-codex", label: "gpt-5.2-codex", description: "Frontier model" },
+      { value: "gpt-5.2-codex", label: "gpt-5.2-codex", description: "Frontier model", untested: true },
     ]);
+    expect(json[0]).not.toHaveProperty("status");
   });
 
   it("overlays registry annotations onto claude models (claude branch)", async () => {
