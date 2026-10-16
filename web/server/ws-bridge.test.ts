@@ -6413,3 +6413,46 @@ describe("session model sync from the main assistant frame", () => {
     }
   });
 });
+
+describe("recordModelFallback (persistent fallback notice)", () => {
+  // Validates Task A.2: when the server moves a session off the user's model
+  // the record lands on session.state (so the session_init snapshot replays
+  // it to a reloaded tab), is broadcast to live browsers as a session_update,
+  // and is persisted — not just an ephemeral error toast.
+  it("stores the record on state, broadcasts a session_update, and replays it on reconnect", () => {
+    const browser = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(browser, "s1");
+    browser.send.mockClear();
+
+    bridge.recordModelFallback("s1", {
+      from: "gpt-6.1-sol",
+      to: "gpt-5.3-codex",
+      reason: "rejected",
+      detail: "model not available for this account",
+    });
+
+    const session = bridge.getSession("s1")!;
+    expect(session.state.model_fallback).toMatchObject({
+      from: "gpt-6.1-sol",
+      to: "gpt-5.3-codex",
+      reason: "rejected",
+    });
+    expect(typeof session.state.model_fallback!.at).toBe("number");
+
+    const frames = browser.send.mock.calls.map((c: unknown[]) => JSON.parse(c[0] as string));
+    const update = frames.find((f: { type: string }) => f.type === "session_update");
+    expect(update.session.model_fallback.to).toBe("gpt-5.3-codex");
+
+    // A tab that connects later (reload) gets it through the snapshot.
+    const late = makeBrowserSocket("s1");
+    bridge.handleBrowserOpen(late, "s1");
+    const init = JSON.parse(late.send.mock.calls[0][0]);
+    expect(init.type).toBe("session_init");
+    expect(init.session.model_fallback.from).toBe("gpt-6.1-sol");
+  });
+
+  it("creates the bridge session when the fallback happens before any browser attached (spawn-time)", () => {
+    bridge.recordModelFallback("fresh", { from: "a-model", to: "b-model", reason: "cli-incompatible" });
+    expect(bridge.getSession("fresh")?.state.model_fallback?.reason).toBe("cli-incompatible");
+  });
+});

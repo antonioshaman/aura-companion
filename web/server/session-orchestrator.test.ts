@@ -204,6 +204,7 @@ function createMockBridge() {
     prePopulateCommands: vi.fn(),
     broadcastNameUpdate: vi.fn(),
     broadcastToSession: vi.fn(),
+    recordModelFallback: vi.fn(),
     broadcastToGroup: vi.fn(),
     injectSystemPrompt: vi.fn(),
     attachBackendAdapter: vi.fn(),
@@ -522,6 +523,40 @@ describe("SessionOrchestrator", () => {
       );
       expect(deps.launcher.setModel).not.toHaveBeenCalled();
       expect(deps.launcher.kill).not.toHaveBeenCalled();
+    });
+
+    it("spawn-time model substitution records a persistent cli-incompatible fallback (Task A.2)", () => {
+      // Previously only an `error` toast; now the notice lives on session
+      // state so the banner (with a switch-back action) survives reloads.
+      deps.launcher.getSession.mockReturnValue({ sessionId: "s-sub", backendType: "claude" });
+      orchestrator.initialize();
+      companionBus.emit("session:model-substituted", {
+        sessionId: "s-sub",
+        from: "claude-opus-5",
+        to: "claude-opus-4-8",
+        reason: "CLI bug",
+      });
+      expect(deps.wsBridge.recordModelFallback).toHaveBeenCalledWith(
+        "s-sub",
+        { from: "claude-opus-5", to: "claude-opus-4-8", reason: "cli-incompatible", detail: "CLI bug" },
+        "claude",
+      );
+    });
+
+    it("launcher fallback events (Codex rejection) record a persistent notice (Task A.2)", () => {
+      deps.launcher.getSession.mockReturnValue({ sessionId: "s-cx", backendType: "codex" });
+      orchestrator.initialize();
+      companionBus.emit("session:model-fell-back", {
+        sessionId: "s-cx",
+        from: "gpt-6.1-sol",
+        to: "gpt-5.3-codex",
+        reason: "rejected",
+      });
+      expect(deps.wsBridge.recordModelFallback).toHaveBeenCalledWith(
+        "s-cx",
+        { from: "gpt-6.1-sol", to: "gpt-5.3-codex", reason: "rejected" },
+        "codex",
+      );
     });
 
     it("session exit callback notifies agentExecutor", () => {
@@ -7214,20 +7249,19 @@ describe("SessionOrchestrator", () => {
       expect(strikeCount("s-silent")).toBe(1);
     });
 
-    it("rotates the model + toasts the browser once the strike threshold (2) is crossed (P2-4)", async () => {
+    it("rotates the model + records a persistent fallback notice once the strike threshold (2) is crossed (P2-4)", async () => {
       deps.launcher.getSession.mockReturnValue({ sessionId: "s-rot", model: "claude-opus-4-8", archived: false } as any);
       await callSilent("s-rot"); // strike 1
       await callSilent("s-rot"); // strike 2 → rotate
-      // opus-4-8 → next non-substituted chain entry is opus-4-6 (opus-4-7 is a
-      // broken-model substitution `from`, skipped by nextModelInChain).
-      expect(deps.launcher.setModel).toHaveBeenCalledWith("s-rot", "claude-opus-4-6");
-      const toast = vi.mocked(deps.wsBridge.broadcastToSession).mock.calls.find(
-        (call: unknown[]) => {
-          const msg = call[1] as { type?: string; message?: string };
-          return msg?.type === "error" && /rotating to claude-opus-4-6/i.test(msg.message ?? "");
-        },
+      // opus-4-8 → next chain entry is opus-4-7 (the substitution table is
+      // empty since the 2026-10-16 CLI 2.1.283 re-probe, so 4.7 is no longer
+      // skipped). The user is told through the PERSISTENT fallback record
+      // (Task A.2) rather than an ephemeral error toast.
+      expect(deps.launcher.setModel).toHaveBeenCalledWith("s-rot", "claude-opus-4-7");
+      expect(deps.wsBridge.recordModelFallback).toHaveBeenCalledWith(
+        "s-rot",
+        expect.objectContaining({ from: "claude-opus-4-8", to: "claude-opus-4-7", reason: "unresponsive" }),
       );
-      expect(toast).toBeDefined();
       // Rotation clears the strike count (new model gets a clean scorecard).
       expect(strikeCount("s-rot")).toBeUndefined();
       expect(deps.launcher.kill).toHaveBeenCalledTimes(2);

@@ -6,6 +6,7 @@ import type {
   PermissionRequest,
   BackendType,
   McpServerConfig,
+  ModelFallbackRecord,
 } from "./session-types.js";
 import type { SessionStore } from "./session-store.js";
 import type { IBackendAdapter, ServerSyntheticSendOutcome } from "./backend-adapter.js";
@@ -321,6 +322,26 @@ export class WsBridge {
     if (!session) return;
     session.state.linearSessionId = linearSessionId;
     this.persistSession(session);
+  }
+
+  /**
+   * Record that the server moved this session off the user's model (Task A.2).
+   * Lives on `session.state` so it is persisted AND replayed in every
+   * `session_init` snapshot — a reloaded tab still shows the notice — and is
+   * pushed to live tabs as a `session_update`. `backendType` is only used
+   * when the bridge session does not exist yet (spawn-time fallback before
+   * any browser/CLI attached), so a Codex session is never created as Claude.
+   */
+  recordModelFallback(
+    sessionId: string,
+    fallback: Omit<ModelFallbackRecord, "at">,
+    backendType?: BackendType,
+  ): void {
+    const session = this.getOrCreateSession(sessionId, backendType);
+    const record: ModelFallbackRecord = { ...fallback, at: Date.now() };
+    session.state.model_fallback = record;
+    this.persistSession(session);
+    this.broadcastToBrowsers(session, { type: "session_update", session: { model_fallback: record } });
   }
 
   /** Return all sessions that have a linearSessionId set (for map restoration on startup). */

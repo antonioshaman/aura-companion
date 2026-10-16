@@ -19,6 +19,11 @@ describe("ModelFallbackBanner", () => {
     ["retired", /is no longer available/i],
     ["blocked", /blocked for this session/i],
     ["overloaded", /temporarily overloaded/i],
+    // Server-recorded fallbacks (Task A.2) get their own honest clause.
+    ["cli-incompatible", /installed Claude CLI/i],
+    ["rejected", /rejected by your account/i],
+    ["unavailable", /reported as unavailable/i],
+    ["unresponsive", /stopped responding/i],
   ] as const)("renders reason-specific copy for %s", (reason, matcher) => {
     render(<ModelFallbackBanner fromModel="Opus 4.7" toModel="Opus 4.8" reason={reason} />);
     expect(screen.getByText(matcher)).toBeInTheDocument();
@@ -61,6 +66,41 @@ describe("ModelFallbackBanner", () => {
     expect(dismiss).toHaveFocus();
     await user.keyboard("{Enter}");
     expect(onDismiss).toHaveBeenCalledOnce();
+  });
+
+  it("renders the optional operator detail under the from→to line", () => {
+    render(
+      <ModelFallbackBanner fromModel="Opus 5" toModel="Opus 4.8" reason="cli-incompatible" detail="CLI 2.1.266 stdout bug" />,
+    );
+    expect(screen.getByText("CLI 2.1.266 stdout bug")).toBeInTheDocument();
+  });
+
+  it("offers a 'Switch back' action naming the original model when onSwitchBack is supplied", async () => {
+    // Task A.2: the user must be able to return to the model they picked.
+    const user = userEvent.setup();
+    const onSwitchBack = vi.fn();
+    const { rerender } = render(<ModelFallbackBanner fromModel="Opus 5" toModel="Opus 4.8" />);
+    expect(screen.queryByRole("button", { name: /Switch back/i })).not.toBeInTheDocument();
+    rerender(<ModelFallbackBanner fromModel="Opus 5" toModel="Opus 4.8" onSwitchBack={onSwitchBack} />);
+    const btn = screen.getByRole("button", { name: "Switch back to Opus 5" });
+    btn.focus();
+    await user.keyboard("{Enter}");
+    expect(onSwitchBack).toHaveBeenCalledOnce();
+  });
+
+  it("passes axe checks with detail + switch-back + dismiss rendered", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(
+      <ModelFallbackBanner
+        fromModel="Opus 5"
+        toModel="Opus 4.8"
+        reason="rejected"
+        detail="model not available"
+        onSwitchBack={() => {}}
+        onDismiss={() => {}}
+      />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
   });
 
   it("passes axe accessibility checks", async () => {

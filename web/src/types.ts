@@ -11,6 +11,8 @@ import type {
   CreationProgressEvent,
   BrowserObserverFinding,
   BrowserObserverDowngrade,
+  ModelFallbackReason,
+  ModelFallbackRecord,
 } from "../server/session-types.js";
 
 export type {
@@ -26,6 +28,8 @@ export type {
   CreationProgressEvent,
   BrowserObserverFinding,
   BrowserObserverDowngrade,
+  ModelFallbackReason,
+  ModelFallbackRecord,
 };
 export type { SessionPhase } from "../server/session-state-machine.js";
 
