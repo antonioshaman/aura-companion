@@ -3317,6 +3317,9 @@ function CouncilModeSection() {
         <Card label="AutoResumeBanner — weekly limit (other day)">
           <AutoResumeBanner resetAt={Date.now() + 3 * 86_400_000} fireAt={Date.now() + 3 * 86_400_000 + 75_000} resetSource="rate_limit_event" onCancel={() => {}} />
         </Card>
+        <Card label="AutoResumeBanner — paused (limit still active after two resumes)">
+          <AutoResumeBanner resetAt={Date.now() + 3_600_000} fireAt={Date.now() + 3_600_000} resetSource="fallback" paused onCancel={() => {}} />
+        </Card>
         <Card label="AutoResumeBanner — reset time unknown (fallback), cancelling">
           <AutoResumeBanner resetAt={Date.now() + 5 * 3_600_000} fireAt={Date.now() + 5 * 3_600_000 + 60_000} resetSource="fallback" onCancel={() => {}} cancelling />
         </Card>

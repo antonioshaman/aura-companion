@@ -99,6 +99,21 @@ describe("ClaudeAdapter usage-limit detection", () => {
     expect(events).toHaveLength(0);
   });
 
+  // Review WARN1: the REAL adapter path passes no defaultTimeZone — a
+  // zoneless "resets 3pm" resolves in the server zone and is flagged.
+  it("zoneless 'resets 3pm' through the real adapter path → server-zone time, source text_no_zone", () => {
+    vi.setSystemTime(new Date(2026, 9, 16, 10, 0));
+    adapter.handleRawMessage(`${JSON.stringify({ type: "result", subtype: "success", is_error: true, result: "You've hit your session limit · resets 3pm", api_error_status: 429, session_id: "x" })}\n`);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ resetAt: new Date(2026, 9, 16, 15, 0).getTime(), resetSource: "text_no_zone" });
+  });
+
+  it("zoneless time 5 min ahead through the real adapter path → safe fallback", () => {
+    vi.setSystemTime(new Date(2026, 9, 16, 10, 0));
+    adapter.handleRawMessage(`${JSON.stringify({ type: "result", subtype: "success", is_error: true, result: "You've hit your session limit · resets 10:05am", api_error_status: 429, session_id: "x" })}\n`);
+    expect(events[0]).toMatchObject({ resetSource: "fallback" });
+  });
+
   it("an unrelated error result does not emit", () => {
     adapter.handleRawMessage(`${JSON.stringify({ type: "result", subtype: "error_during_execution", is_error: true, result: "Tool crashed", session_id: "x" })}\n`);
     expect(events).toHaveLength(0);

@@ -35,6 +35,7 @@ function deps(state: {
   missing?: string[];
   group?: { sessionGroupId: string; orchestratorSessionId: string; observerSessionId: string } | null;
   relaunchOk?: boolean;
+  userMessagedSince?: (sessionId: string, since: number) => boolean;
 }) {
   const calls: string[] = [];
   const d: AutoResumeExecutorDeps = {
@@ -51,6 +52,7 @@ function deps(state: {
     wakeObserver: vi.fn((groupId: string) => {
       calls.push(`wake:${groupId}`);
     }),
+    ...(state.userMessagedSince ? { userMessagedSince: state.userMessagedSince } : {}),
   };
   return { d, calls };
 }
@@ -113,5 +115,18 @@ describe("createAutoResumeExecutor", () => {
     const { d, calls } = deps({ alive: { obs: false }, archived: { obs: true }, group: GROUP });
     await createAutoResumeExecutor(d)(schedule({ role: "orchestrator" }));
     expect(calls).toEqual([`inject:orch:${AUTO_RESUME_PROMPT}`]);
+  });
+
+  // Review NOTE (cancel/fire race): the schedule is deleted before resume
+  // runs, and a relaunch can take seconds — if the user typed in the
+  // meantime (since the schedule was created) the prompt must not be injected
+  // on top of their message.
+  it("skips the injection when the user sent a message after the schedule was created", async () => {
+    const since = vi.fn(() => true);
+    const { d, calls } = deps({ alive: { orch: false }, userMessagedSince: since });
+    const out = await createAutoResumeExecutor(d)(schedule({ scheduledAt: 1234 }));
+    expect(since).toHaveBeenCalledWith("orch", 1234);
+    expect(calls).toEqual(["relaunch:orch"]);
+    expect(out).toMatchObject({ ok: true, outcome: "user_took_over" });
   });
 });

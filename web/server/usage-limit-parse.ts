@@ -14,18 +14,32 @@
  *
  * Fallback when no reset time is known anywhere: `now + 5h` (the longest
  * rolling window that is not weekly). Choosing a fixed cap over polling the
- * usage endpoint keeps this dependency-free; if the limit is still active when
- * the resume fires, the resulting limit frame simply schedules the next
- * attempt (self-healing, at most one retry message per cap).
+ * usage endpoint keeps this dependency-free. If the limit is still active when
+ * the resume fires, the resulting limit frame schedules the next attempt; the
+ * scheduler pauses auto-resume after two consecutive fires that immediately
+ * re-hit a limit (see `auto-resume-scheduler.ts`), so a wrong guess costs at
+ * most two extra prompts, not one per cap for a whole week.
+ *
+ * Zoneless text ("resets 3pm", Codex "Try again at 3:45 PM.") is read in the
+ * SERVER zone — correct for Codex (it formats in its own local zone, same
+ * host) and a guess for Claude. Such resets are tagged `text_no_zone` so the
+ * guess is visible in logs, and a zoneless time that is already past or less
+ * than {@link NO_ZONE_MIN_LEAD_MS} away is not trusted (a zone mismatch is
+ * the likely cause) → `now + NO_ZONE_SAFE_FALLBACK_MS` with source `fallback`.
  */
 
 export const USAGE_LIMIT_FALLBACK_MS = 5 * 60 * 60 * 1000;
+/** A zoneless reset closer than this (or past) is treated as untrustworthy. */
+export const NO_ZONE_MIN_LEAD_MS = 15 * 60 * 1000;
+/** Retry delay used instead of an untrustworthy zoneless reset. */
+export const NO_ZONE_SAFE_FALLBACK_MS = 60 * 60 * 1000;
 
 export type UsageLimitResetSource =
   | "rate_limit_event"
   | "codex_rate_limits"
   | "resets_in_seconds"
   | "text"
+  | "text_no_zone"
   | "fallback";
 
 export interface ResolvedUsageLimit {
@@ -107,6 +121,16 @@ const UNIT_MS: Record<string, number> = {
  * A missing or unknown timezone label uses `defaultTimeZone` (server zone).
  */
 export function parseResetFromText(text: string, now: number, defaultTimeZone?: string): number | null {
+  return parseResetDetailed(text, now, defaultTimeZone)?.at ?? null;
+}
+
+interface ParsedReset {
+  at: number;
+  /** False when the time was read in the fallback zone (no / unknown zone label). */
+  zoneExplicit: boolean;
+}
+
+function parseResetDetailed(text: string, now: number, defaultTimeZone?: string): ParsedReset | null {
   if (!text) return null;
   const fallbackTz = defaultTimeZone && isValidTimeZone(defaultTimeZone) ? defaultTimeZone : serverTimeZone();
 
@@ -120,7 +144,7 @@ export function parseResetFromText(text: string, now: number, defaultTimeZone?: 
       const unit = UNIT_MS[mm[2].toLowerCase()];
       if (unit) total += Number(mm[1]) * unit;
     }
-    if (total > 0) return now + total;
+    if (total > 0) return { at: now + total, zoneExplicit: true };
   }
 
   const re = new RegExp(
@@ -142,7 +166,8 @@ export function parseResetFromText(text: string, now: number, defaultTimeZone?: 
   else if (pm) hour += 12;
 
   const tzCandidate = tzLabel?.trim();
-  const tz = tzCandidate && isValidTimeZone(tzCandidate) ? tzCandidate : fallbackTz;
+  const zoneExplicit = !!tzCandidate && isValidTimeZone(tzCandidate);
+  const tz = zoneExplicit ? (tzCandidate as string) : fallbackTz;
   const today = zonedParts(now, tz);
 
   if (monthName) {
@@ -154,14 +179,27 @@ export function parseResetFromText(text: string, now: number, defaultTimeZone?: 
       year += 1;
       at = zonedToEpoch(year, month, day, hour, minute, tz);
     }
-    return at;
+    return { at, zoneExplicit };
   }
 
   let at = zonedToEpoch(today.y, today.m, today.d, hour, minute, tz);
   if (at < now - 5 * 60_000) {
     at = zonedToEpoch(today.y, today.m, today.d + 1, hour, minute, tz);
   }
-  return at;
+  return { at, zoneExplicit };
+}
+
+/** Text → resolved reset, applying the zoneless trust rule (see module doc). */
+function resolveFromText(text: string, now: number, defaultTimeZone?: string): ResolvedUsageLimit | null {
+  const parsed = parseResetDetailed(text, now, defaultTimeZone);
+  if (!parsed) return null;
+  if (parsed.zoneExplicit) {
+    return parsed.at > now - 5 * 60_000 ? { resetAt: parsed.at, resetSource: "text", limitType: null } : null;
+  }
+  if (parsed.at - now < NO_ZONE_MIN_LEAD_MS) {
+    return { resetAt: now + NO_ZONE_SAFE_FALLBACK_MS, resetSource: "fallback", limitType: null };
+  }
+  return { resetAt: parsed.at, resetSource: "text_no_zone", limitType: null };
 }
 
 /**
@@ -222,10 +260,8 @@ export function resolveClaudeUsageLimit(input: {
   if (rejected && lastRejected?.resetAt && lastRejected.resetAt > now) {
     return { resetAt: lastRejected.resetAt, resetSource: "rate_limit_event", limitType: lastRejected.limitType };
   }
-  const fromText = parseResetFromText(text, now, input.defaultTimeZone);
-  if (fromText !== null && fromText > now - 5 * 60_000) {
-    return { resetAt: fromText, resetSource: "text", limitType: null };
-  }
+  const fromText = resolveFromText(text, now, input.defaultTimeZone);
+  if (fromText) return fromText;
   return { resetAt: now + USAGE_LIMIT_FALLBACK_MS, resetSource: "fallback", limitType: null };
 }
 
@@ -294,9 +330,7 @@ export function resolveCodexUsageLimit(input: {
     if (at && at > now) return { resetAt: at, resetSource: "resets_in_seconds", limitType: null };
   }
 
-  const fromText = parseResetFromText(message, now, input.defaultTimeZone);
-  if (fromText !== null && fromText > now - 5 * 60_000) {
-    return { resetAt: fromText, resetSource: "text", limitType: null };
-  }
+  const fromText = resolveFromText(message, now, input.defaultTimeZone);
+  if (fromText) return fromText;
   return { resetAt: now + USAGE_LIMIT_FALLBACK_MS, resetSource: "fallback", limitType: null };
 }

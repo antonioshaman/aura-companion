@@ -259,4 +259,89 @@ describe("AutoResumeScheduler", () => {
     await vi.advanceTimersByTimeAsync(86_400_000 + 120_000);
     expect(resume).toHaveBeenCalledTimes(1);
   });
+
+  // Review WARN2: a limit that is still active after a resume (typical when
+  // the +5h fallback guessed a weekly limit) must not loop every ~5h for a
+  // week. After two consecutive fires that immediately re-hit a limit, the
+  // scheduler pauses: no more injections, a "paused" banner, until the user
+  // acts (any cancel clears the pause + history). History is persisted.
+  describe("repeat-limit guard", () => {
+    const FALLBACK = 5 * 3_600_000;
+    function fallbackHit(): AutoResumeHit {
+      return hit({ resetAt: Date.now() + FALLBACK, resetSource: "fallback", limitType: null });
+    }
+
+    it("pauses after 2 consecutive fires that immediately re-hit; a week of re-hits injects only twice", async () => {
+      const info = vi.spyOn(log, "info").mockImplementation(() => {});
+      const s = make();
+      s.schedule(fallbackHit());
+      for (let i = 0; i < 30; i++) {
+        await vi.advanceTimersByTimeAsync(FALLBACK + 121_000);
+        // The resumed turn immediately hits the limit again.
+        s.schedule(fallbackHit());
+      }
+      // fire #1 → re-hit (1) → reschedule; fire #2 → re-hit (2) → pause.
+      expect(resume).toHaveBeenCalledTimes(2);
+      expect(s.get("s1")).toBeUndefined();
+      expect(s.isPaused("s1")).toBe(true);
+      expect(publish).toHaveBeenLastCalledWith("s1", expect.objectContaining({ paused: true }));
+      const events = info.mock.calls.map((c) => (c[2] as Record<string, unknown>)?.event);
+      expect(events).toContain("usage_limit.auto_resume.paused");
+      info.mockRestore();
+    });
+
+    it("a hit long after the last fire (the resume made progress) resets the counter", async () => {
+      const s = make();
+      s.schedule(fallbackHit());
+      await vi.advanceTimersByTimeAsync(FALLBACK + 121_000);
+      s.schedule(fallbackHit()); // immediate re-hit #1
+      await vi.advanceTimersByTimeAsync(FALLBACK + 121_000);
+      await vi.advanceTimersByTimeAsync(60 * 60_000); // an hour of real work…
+      s.schedule(fallbackHit()); // …then a fresh limit: not a re-hit
+      expect(s.isPaused("s1")).toBe(false);
+      expect(s.get("s1")).toBeDefined();
+    });
+
+    it("cancel (user message) clears the pause and the history", async () => {
+      const s = make();
+      s.schedule(fallbackHit());
+      for (let i = 0; i < 2; i++) {
+        await vi.advanceTimersByTimeAsync(FALLBACK + 121_000);
+        s.schedule(fallbackHit());
+      }
+      expect(s.isPaused("s1")).toBe(true);
+      expect(s.cancel("s1", "user_message")).toBe(true);
+      expect(s.isPaused("s1")).toBe(false);
+      expect(publish).toHaveBeenLastCalledWith("s1", null);
+      expect(s.schedule(fallbackHit())).not.toBeNull();
+    });
+
+    it("pause and re-hit history survive a restart", async () => {
+      const first = make();
+      first.schedule(fallbackHit());
+      for (let i = 0; i < 2; i++) {
+        await vi.advanceTimersByTimeAsync(FALLBACK + 121_000);
+        first.schedule(fallbackHit());
+      }
+      first.dispose();
+      const restarted = make();
+      restarted.restore();
+      expect(restarted.isPaused("s1")).toBe(true);
+      expect(publish).toHaveBeenLastCalledWith("s1", expect.objectContaining({ paused: true }));
+      expect(restarted.schedule(fallbackHit())).toBeNull();
+    });
+
+    it("re-hit history survives a restart between fire and re-hit", async () => {
+      const first = make();
+      first.schedule(fallbackHit());
+      await vi.advanceTimersByTimeAsync(FALLBACK + 121_000);
+      first.schedule(fallbackHit()); // re-hit #1
+      await vi.advanceTimersByTimeAsync(FALLBACK + 121_000); // fire #2
+      first.dispose();
+      const restarted = make();
+      restarted.restore();
+      restarted.schedule(fallbackHit()); // re-hit #2 after restart
+      expect(restarted.isPaused("s1")).toBe(true);
+    });
+  });
 });

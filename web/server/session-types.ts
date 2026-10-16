@@ -772,7 +772,13 @@ export interface SessionState {
     resetAt: number;
     /** Epoch ms when the continuation prompt will be sent. */
     fireAt: number;
-    resetSource: "rate_limit_event" | "codex_rate_limits" | "resets_in_seconds" | "text" | "fallback";
+    resetSource: "rate_limit_event" | "codex_rate_limits" | "resets_in_seconds" | "text" | "text_no_zone" | "fallback";
+    /**
+     * Auto-resume paused: the last two resumes immediately re-hit a limit, so
+     * Aura stopped injecting until the user acts (banner: "лимит всё ещё
+     * активен — автопродолжение приостановлено").
+     */
+    paused?: boolean;
   } | null;
   /** If this session was spawned by a cron job */
   cronJobId?: string;

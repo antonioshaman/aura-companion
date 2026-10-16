@@ -352,6 +352,24 @@ describe("SessionOrchestrator — usage-limit auto-resume", () => {
     orchestrator.shutdown();
   });
 
+  // Review NOTE (cancel/fire race): the user types while the dead session is
+  // being relaunched for the resume → the continuation prompt is skipped.
+  it("a user message during the resume's relaunch suppresses the injection", async () => {
+    alive.delete("solo");
+    const h = boot();
+    h.launcher.relaunch.mockImplementation(async (id: string) => {
+      alive.add(id);
+      vi.setSystemTime(Date.now() + 1_000);
+      h.typeAsUser(id);
+      return { ok: true };
+    });
+    companionBus.emit("session:usage-limit", limitEvent("solo", NOW + 60_000));
+    await vi.advanceTimersByTimeAsync(60_000 + 121_000);
+    expect(h.launcher.relaunch).toHaveBeenCalled();
+    expect(h.wsBridge.injectUserMessage).not.toHaveBeenCalled();
+    h.orchestrator.shutdown();
+  });
+
   it("council pair: the orchestrator is resumed and a dead observer is relaunched too", async () => {
     alive.delete("obs");
     const { orchestrator, launcher, wsBridge } = boot();

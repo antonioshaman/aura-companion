@@ -136,7 +136,7 @@ function setupStore(overrides: {
   cliFailureReason?: "relaunch_exhausted" | "container_missing" | "container_stopped" | "binary_missing" | "browser_closed_no_reconnect";
   substitutionNotice?: { requested: string; applied: string; reason: "retired" | "blocked" | "overloaded" };
   crossTierSwitch?: { requested: string; replacement: string; previousModel: string };
-  autoResume?: { resetAt: number; fireAt: number; resetSource: string };
+  autoResume?: { resetAt: number; fireAt: number; resetSource: string; paused?: boolean };
 } = {}) {
   const {
     connectionStatus = "connected",
@@ -254,6 +254,12 @@ describe("ChatView", () => {
     expect(screen.getByTestId("auto-resume-banner").textContent).toContain("автопродолжение в 15:01");
     fireEvent.click(screen.getByRole("button", { name: "Отменить" }));
     expect(mockCancelAutoResume).toHaveBeenCalledWith("s1");
+  });
+
+  it("passes the server's paused flag to the banner", () => {
+    setupStore({ autoResume: { resetAt: 1, fireAt: 1, resetSource: "fallback", paused: true } });
+    render(<ChatView sessionId="s1" />);
+    expect(screen.getByTestId("auto-resume-banner").textContent).toContain("автопродолжение приостановлено");
   });
 
   it("does not show the auto-resume banner without a scheduled resume", () => {

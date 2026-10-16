@@ -4544,6 +4544,33 @@ describe("CodexAdapter with ICodexTransport", () => {
     errorSpy.mockRestore();
   });
 
+  // Review WARN1: real adapter path (no defaultTimeZone, no rateLimits
+  // snapshot) — Codex formats "Try again at" in its own local zone, read here
+  // in the server zone and flagged text_no_zone.
+  it("zoneless 'Try again at h:mm PM' via the real adapter path → server-zone reset, source text_no_zone", async () => {
+    const { mock } = await initAdapter({ model: "gpt-6.1-sol" });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const events: Array<Record<string, unknown>> = [];
+    const off = companionBus.on("session:usage-limit", (e) => {
+      events.push(e as unknown as Record<string, unknown>);
+    });
+    const target = new Date(Date.now() + 2 * 3_600_000);
+    target.setSeconds(0, 0);
+    const h12 = target.getHours() % 12 === 0 ? 12 : target.getHours() % 12;
+    const clock = `${h12}:${String(target.getMinutes()).padStart(2, "0")} ${target.getHours() < 12 ? "AM" : "PM"}`;
+    mock.pushNotification("error", {
+      error: { message: `You've hit your usage limit. Try again at ${clock}.`, codexErrorInfo: "usageLimitExceeded", additionalDetails: null },
+      willRetry: false,
+      threadId: "thr_1",
+      turnId: "turn_tz",
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ resetAt: target.getTime(), resetSource: "text_no_zone" });
+    off();
+    errorSpy.mockRestore();
+  });
+
   it("a non-limit Codex error (real model-not-supported frame) does not emit session:usage-limit", async () => {
     const { mock } = await initAdapter();
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});

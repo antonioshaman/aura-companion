@@ -16,6 +16,14 @@
  *  - At most one schedule per session. The same limit reported again (the
  *    CLI emits an assistant frame AND a result frame per failure) is a no-op;
  *    a different reset time replaces the schedule ("a new limit hit wins").
+ *  - Repeat-limit guard: a limit hit within {@link REHIT_WINDOW_MS} of a fire
+ *    is a "re-hit" (the resumed turn ran straight back into the limit — e.g.
+ *    the +5h fallback guessed a weekly limit). After two consecutive fires
+ *    that re-hit, auto-resume for that session is PAUSED: nothing more is
+ *    injected, the banner says the limit is still active, and only a user
+ *    action (message, cancel, stop, archive) clears it. A hit later than the
+ *    window means the resume made progress and resets the count. The fire
+ *    history and pauses are persisted with the schedules.
  *  - Persisted to `~/.companion/auto-resume.json` on every mutation and
  *    re-armed by {@link restore} on boot. Overdue schedules fire after a boot
  *    grace (lets CLI reconnects settle); schedules of sessions that no longer
@@ -56,6 +64,19 @@ export interface AutoResumePublicState {
   resetAt: number;
   fireAt: number;
   resetSource: UsageLimitResetSource;
+  /** Set when the repeat-limit guard paused auto-resume for the session. */
+  paused?: boolean;
+}
+
+interface AttemptRecord {
+  /** Epoch ms of the last fire. */
+  lastFiredAt: number;
+  /** Consecutive fires that were immediately followed by another limit hit. */
+  rehits: number;
+}
+
+interface PausedRecord extends AutoResumeHit {
+  pausedAt: number;
 }
 
 export interface AutoResumeOutcome {
@@ -94,6 +115,10 @@ export const AUTO_RESUME_JITTER_MAX_MS = 120_000;
 const SAME_LIMIT_TOLERANCE_MS = 5 * 60_000;
 /** setTimeout clamps delays above 2^31-1 ms (~24.8 days) to 1 ms — chunk instead. */
 const MAX_TIMER_MS = 2_147_483_647;
+/** A limit hit this soon after a fire counts as an immediate re-hit. */
+export const REHIT_WINDOW_MS = 15 * 60_000;
+/** Consecutive immediate re-hits after which auto-resume pauses. */
+export const MAX_CONSECUTIVE_REHITS = 2;
 const FILE_VERSION = 1;
 
 function iso(ms: number): string {
@@ -116,6 +141,8 @@ function isSchedule(raw: unknown): raw is AutoResumeSchedule {
 export class AutoResumeScheduler {
   private schedules = new Map<string, AutoResumeSchedule>();
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
+  private attempts = new Map<string, AttemptRecord>();
+  private paused = new Map<string, PausedRecord>();
   private readonly now: () => number;
   private readonly random: () => number;
   private readonly bootGraceMs: number;
@@ -134,6 +161,10 @@ export class AutoResumeScheduler {
     return [...this.schedules.values()];
   }
 
+  isPaused(sessionId: string): boolean {
+    return this.paused.has(sessionId);
+  }
+
   /**
    * Arm (or keep, or replace) the one-shot resume for `hit.sessionId`.
    * Returns the active schedule, or null when the feature is disabled.
@@ -147,11 +178,31 @@ export class AutoResumeScheduler {
       });
       return null;
     }
+    if (this.paused.has(hit.sessionId)) {
+      log.info("auto-resume", "usage limit hit; auto-resume paused for this session", {
+        event: "usage_limit.auto_resume.skipped",
+        reason: "paused",
+        ...this.logFields(hit),
+      });
+      return null;
+    }
     const existing = this.schedules.get(hit.sessionId);
     if (existing && Math.abs(existing.resetAt - hit.resetAt) < SAME_LIMIT_TOLERANCE_MS) {
       return existing;
     }
     const now = this.now();
+    const attempt = this.attempts.get(hit.sessionId);
+    if (attempt && now - attempt.lastFiredAt <= REHIT_WINDOW_MS) {
+      const rehits = attempt.rehits + 1;
+      this.attempts.set(hit.sessionId, { ...attempt, rehits });
+      if (rehits >= MAX_CONSECUTIVE_REHITS) {
+        this.pause(hit, rehits);
+        return null;
+      }
+    } else if (attempt) {
+      // The resume made progress before this limit — start counting afresh.
+      this.attempts.delete(hit.sessionId);
+    }
     const jitter =
       AUTO_RESUME_JITTER_MIN_MS +
       Math.floor(Math.min(Math.max(this.random(), 0), 0.999999) * (AUTO_RESUME_JITTER_MAX_MS - AUTO_RESUME_JITTER_MIN_MS + 1));
@@ -174,12 +225,20 @@ export class AutoResumeScheduler {
     return schedule;
   }
 
-  /** Cancel the schedule for `sessionId`. Returns true when one existed. */
+  /**
+   * Cancel the schedule (or pause) for `sessionId` and forget its fire
+   * history. Returns true when a schedule or pause existed.
+   */
   cancel(sessionId: string, reason: AutoResumeCancelReason): boolean {
-    const schedule = this.schedules.get(sessionId);
-    if (!schedule) return false;
+    const schedule = this.schedules.get(sessionId) ?? this.paused.get(sessionId);
+    const hadAttempts = this.attempts.delete(sessionId);
+    if (!schedule) {
+      if (hadAttempts) this.persist();
+      return false;
+    }
     this.clearTimer(sessionId);
     this.schedules.delete(sessionId);
+    this.paused.delete(sessionId);
     this.persist();
     this.deps.publish(sessionId, null);
     log.info("auto-resume", "auto-resume cancelled", {
@@ -191,7 +250,7 @@ export class AutoResumeScheduler {
   }
 
   cancelAll(reason: AutoResumeCancelReason): void {
-    for (const id of [...this.schedules.keys()]) this.cancel(id, reason);
+    for (const id of new Set([...this.schedules.keys(), ...this.paused.keys()])) this.cancel(id, reason);
   }
 
   /**
@@ -199,8 +258,19 @@ export class AutoResumeScheduler {
    * re-armed. Overdue ones fire after the boot grace; orphans are dropped.
    */
   restore(): number {
-    const loaded = this.load();
+    const { schedules: loaded, attempts, paused } = this.load();
     const now = this.now();
+    for (const a of attempts) {
+      // Older than the window → any later hit resets the count anyway.
+      if (now - a.lastFiredAt <= REHIT_WINDOW_MS && this.deps.isSessionResumable(a.sessionId)) {
+        this.attempts.set(a.sessionId, { lastFiredAt: a.lastFiredAt, rehits: a.rehits });
+      }
+    }
+    for (const p of paused) {
+      if (!this.deps.isSessionResumable(p.sessionId)) continue;
+      this.paused.set(p.sessionId, p);
+      this.deps.publish(p.sessionId, this.pausedState(p));
+    }
     let armed = 0;
     let dropped = false;
     for (const schedule of loaded) {
@@ -224,7 +294,9 @@ export class AutoResumeScheduler {
         fireAt: iso(rearmed.fireAt),
       });
     }
-    if (dropped || armed !== loaded.length) this.persist();
+    if (dropped || armed !== loaded.length || attempts.length !== this.attempts.size || paused.length !== this.paused.size) {
+      this.persist();
+    }
     return armed;
   }
 
@@ -237,9 +309,13 @@ export class AutoResumeScheduler {
   private async fire(sessionId: string): Promise<void> {
     const schedule = this.schedules.get(sessionId);
     if (!schedule) return;
-    // Fire-once: drop the record (memory + disk) BEFORE resuming.
+    // Fire-once: drop the record (memory + disk) BEFORE resuming, and note
+    // the fire for the repeat-limit guard (before resume: the resumed turn
+    // can re-hit the limit before `resume` resolves).
     this.timers.delete(sessionId);
     this.schedules.delete(sessionId);
+    const previous = this.attempts.get(sessionId);
+    this.attempts.set(sessionId, { lastFiredAt: this.now(), rehits: previous?.rehits ?? 0 });
     this.persist();
     this.deps.publish(sessionId, null);
 
@@ -263,6 +339,27 @@ export class AutoResumeScheduler {
       ...this.logFields(schedule),
       ...outcome,
     });
+  }
+
+  private pause(hit: AutoResumeHit, rehits: number): void {
+    const existing = this.schedules.get(hit.sessionId);
+    if (existing) {
+      this.clearTimer(hit.sessionId);
+      this.schedules.delete(hit.sessionId);
+    }
+    const record: PausedRecord = { ...hit, pausedAt: this.now() };
+    this.paused.set(hit.sessionId, record);
+    this.persist();
+    this.deps.publish(hit.sessionId, this.pausedState(record));
+    log.info("auto-resume", "auto-resume paused: limit still active after consecutive resumes", {
+      event: "usage_limit.auto_resume.paused",
+      ...this.logFields(hit),
+      consecutiveRehits: rehits,
+    });
+  }
+
+  private pausedState(p: PausedRecord): AutoResumePublicState {
+    return { resetAt: p.resetAt, fireAt: p.resetAt, resetSource: p.resetSource, paused: true };
   }
 
   private arm(schedule: AutoResumeSchedule): void {
@@ -308,18 +405,35 @@ export class AutoResumeScheduler {
     };
   }
 
-  private load(): AutoResumeSchedule[] {
+  private load(): { schedules: AutoResumeSchedule[]; attempts: Array<AttemptRecord & { sessionId: string }>; paused: PausedRecord[] } {
+    const empty = { schedules: [], attempts: [], paused: [] };
     try {
-      if (!existsSync(this.deps.filePath)) return [];
-      const parsed = JSON.parse(readFileSync(this.deps.filePath, "utf-8")) as { schedules?: unknown };
-      if (!parsed || !Array.isArray(parsed.schedules)) return [];
-      return parsed.schedules.filter(isSchedule);
+      if (!existsSync(this.deps.filePath)) return empty;
+      const parsed = JSON.parse(readFileSync(this.deps.filePath, "utf-8")) as {
+        schedules?: unknown;
+        attempts?: unknown;
+        paused?: unknown;
+      };
+      if (!parsed || typeof parsed !== "object") return empty;
+      const schedules = Array.isArray(parsed.schedules) ? parsed.schedules.filter(isSchedule) : [];
+      const attempts = Array.isArray(parsed.attempts)
+        ? (parsed.attempts as unknown[]).filter((raw): raw is AttemptRecord & { sessionId: string } => {
+          const a = raw as Record<string, unknown> | null;
+          return !!a && typeof a.sessionId === "string" && typeof a.lastFiredAt === "number" && typeof a.rehits === "number";
+        })
+        : [];
+      const paused = Array.isArray(parsed.paused)
+        ? (parsed.paused as unknown[]).filter(
+          (p): p is PausedRecord => isSchedule({ ...(p as object), fireAt: 0 }) && typeof (p as PausedRecord).pausedAt === "number",
+        )
+        : [];
+      return { schedules, attempts, paused };
     } catch (err) {
       log.warn("auto-resume", "auto-resume file unreadable; starting empty", {
         event: "usage_limit.auto_resume.load_failed",
         error: err instanceof Error ? err.message : String(err),
       });
-      return [];
+      return empty;
     }
   }
 
@@ -327,7 +441,12 @@ export class AutoResumeScheduler {
     try {
       writeAtomicJson(
         this.deps.filePath,
-        { version: FILE_VERSION, schedules: [...this.schedules.values()] },
+        {
+          version: FILE_VERSION,
+          schedules: [...this.schedules.values()],
+          attempts: [...this.attempts.entries()].map(([sessionId, a]) => ({ sessionId, ...a })),
+          paused: [...this.paused.values()],
+        },
         { maxBytes: Number.POSITIVE_INFINITY, space: 2 },
       );
     } catch (err) {

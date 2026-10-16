@@ -46,6 +46,28 @@ describe("AutoResumeBanner", () => {
     expect(banner).not.toHaveTextContent("Лимит до");
   });
 
+  // Review WARN2: after two resumes that immediately re-hit the limit the
+  // server pauses auto-resume; the banner says so and offers to dismiss.
+  it("paused: says the limit is still active and auto-resume is paused; 'Скрыть' dismisses", () => {
+    const onCancel = vi.fn();
+    render(<AutoResumeBanner resetAt={RESET} fireAt={RESET} paused onCancel={onCancel} now={NOW} />);
+    const banner = screen.getByTestId("auto-resume-banner");
+    expect(banner).toHaveTextContent("Лимит всё ещё активен — автопродолжение приостановлено");
+    expect(banner).not.toHaveTextContent("автопродолжение в");
+    fireEvent.click(screen.getByRole("button", { name: "Скрыть" }));
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("zoneless guess (text_no_zone) renders like a known reset", () => {
+    render(<AutoResumeBanner resetAt={RESET} fireAt={FIRE} resetSource="text_no_zone" onCancel={() => {}} now={NOW} />);
+    expect(screen.getByTestId("auto-resume-banner")).toHaveTextContent("Лимит до 15:00 — автопродолжение в 15:01");
+  });
+
+  it("passes accessibility scan (paused)", async () => {
+    const { container } = render(<AutoResumeBanner resetAt={RESET} fireAt={RESET} paused onCancel={() => {}} now={NOW} />);
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
   it("calls onCancel when 'Отменить' is clicked", () => {
     const onCancel = vi.fn();
     render(<AutoResumeBanner resetAt={RESET} fireAt={FIRE} onCancel={onCancel} now={NOW} />);

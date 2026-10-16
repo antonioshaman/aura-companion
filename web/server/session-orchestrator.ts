@@ -280,6 +280,8 @@ export class SessionOrchestrator {
 
   /** Usage-limit auto-resume scheduler; null when not configured. */
   private autoResume: AutoResumeScheduler | null = null;
+  /** Last browser-typed user message per session (auto-resume cancel/fire race guard). */
+  private lastUserFrameAt = new Map<string, number>();
   private readonly autoResumeConfig: { filePath: string } | undefined;
 
   // Council Mode — per-group watcher state. Each entry owns an
@@ -523,6 +525,7 @@ export class SessionOrchestrator {
           this.resumeOnUserMessage(sessionId);
           // The user took over — a pending usage-limit auto-resume would
           // inject a stale "continue" on top of their own message.
+          this.lastUserFrameAt.set(sessionId, Date.now());
           this.autoResume?.cancel(sessionId, "user_message");
         }),
       onSessionExited: (cb) => companionBus.on("session:exited", ({ sessionId }) => cb(sessionId)),
@@ -827,6 +830,7 @@ export class SessionOrchestrator {
           : null;
       },
       inject: (id, content) => this.wsBridge.injectUserMessage(id, content, "server:auto-resume"),
+      userMessagedSince: (id, since) => (this.lastUserFrameAt.get(id) ?? 0) >= since,
       wakeObserver: (sessionGroupId) => {
         this.drainPendingObserverWake(sessionGroupId);
         this.scanForMissedObserverWakes("failsafe");
@@ -1839,6 +1843,7 @@ export class SessionOrchestrator {
 
   async deleteSession(sessionId: string): Promise<DeleteSessionResult> {
     this.autoResume?.cancel(sessionId, "deleted");
+    this.lastUserFrameAt.delete(sessionId);
     this.intentionalKills.add(sessionId);
     this.recovery.cancelKeepaliveTimer(sessionId);
     this.wsBridge.cancelDisconnectTimer(sessionId);

@@ -305,6 +305,7 @@ export function ChatView({ sessionId }: { sessionId: string }) {
             resetAt={autoResume.resetAt}
             fireAt={autoResume.fireAt}
             resetSource={autoResume.resetSource}
+            paused={autoResume.paused === true}
             onCancel={handleCancelAutoResume}
             cancelling={cancellingAutoResume}
           />

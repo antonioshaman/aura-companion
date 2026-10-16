@@ -7,6 +7,9 @@
  * Times are rendered in the browser's local zone; a date is added when the
  * moment is not today (weekly limits). When the reset time was unknown
  * (`resetSource: "fallback"`) the copy says so instead of inventing a time.
+ * When the server PAUSED auto-resume (two resumes in a row ran straight back
+ * into the limit) the copy says the limit is still active and nothing more
+ * will be sent automatically; the button just dismisses the notice.
  *
  * Info palette (`cc-info`), not warning: nothing is broken, the session will
  * continue by itself. Works the same for Claude Code and Codex sessions.
@@ -23,6 +26,8 @@ export interface AutoResumeBannerProps {
   onCancel: () => void;
   /** True while the cancel request is in flight. */
   cancelling?: boolean;
+  /** Auto-resume paused by the server's repeat-limit guard. */
+  paused?: boolean;
   /** Clock seam for tests / Playground (defaults to Date.now()). */
   now?: number;
 }
@@ -38,15 +43,18 @@ function formatMoment(ms: number, now: number): string {
   return `${date}, ${time}`;
 }
 
-export function AutoResumeBanner({ resetAt, fireAt, resetSource, onCancel, cancelling = false, now }: AutoResumeBannerProps) {
+export function AutoResumeBanner({ resetAt, fireAt, resetSource, onCancel, cancelling = false, paused = false, now }: AutoResumeBannerProps) {
   const reference = now ?? Date.now();
   const text = useMemo(() => {
+    if (paused) {
+      return "Лимит всё ещё активен — автопродолжение приостановлено. Напишите сообщение, когда лимит сбросится.";
+    }
     const fire = formatMoment(fireAt, reference);
     if (resetSource === "fallback") {
       return `Лимит исчерпан, время сброса неизвестно — автопродолжение в ${fire}`;
     }
     return `Лимит до ${formatMoment(resetAt, reference)} — автопродолжение в ${fire}`;
-  }, [resetAt, fireAt, resetSource, reference]);
+  }, [resetAt, fireAt, resetSource, reference, paused]);
 
   return (
     <div
@@ -69,7 +77,7 @@ export function AutoResumeBanner({ resetAt, fireAt, resetSource, onCancel, cance
         disabled={cancelling}
         className="text-xs text-cc-muted hover:text-cc-fg cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shrink-0"
       >
-        Отменить
+        {paused ? "Скрыть" : "Отменить"}
       </button>
     </div>
   );

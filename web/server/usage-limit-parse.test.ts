@@ -20,6 +20,7 @@ import {
   resolveCodexUsageLimit,
   parseClaudeRateLimitEvent,
   USAGE_LIMIT_FALLBACK_MS,
+  NO_ZONE_SAFE_FALLBACK_MS,
 } from "./usage-limit-parse.js";
 
 function loadFrames(name: string): Array<Record<string, unknown>> {
@@ -192,6 +193,46 @@ describe("resolveClaudeUsageLimit (real frames)", () => {
   });
 });
 
+// Review WARN1: a zoneless time is interpreted in the SERVER zone (the
+// adapters pass no defaultTimeZone). That path gets its own resetSource so the
+// guess is visible in logs, and a zoneless time that is already past or less
+// than 15 min away is not trusted (likely a zone mismatch) → safe fallback.
+describe("zoneless reset text (server-zone guess)", () => {
+  // Local-time anchors: the code under test resolves against the server zone,
+  // which is the zone `new Date(y, m, d, h)` uses in this process.
+  const localNow = new Date(2026, 9, 16, 10, 0).getTime();
+
+  it("Claude 'resets 3pm' without defaultTimeZone → server-zone 15:00, source text_no_zone", () => {
+    const out = resolveClaudeUsageLimit({ text: "You've hit your session limit · resets 3pm", apiErrorStatus: 429, lastRejected: null, now: localNow });
+    expect(out).toEqual({ resetAt: new Date(2026, 9, 16, 15, 0).getTime(), resetSource: "text_no_zone", limitType: null });
+  });
+
+  it("an explicit zone keeps source 'text'", () => {
+    const out = resolveClaudeUsageLimit({ text: "You've hit your session limit · resets 3pm (UTC)", apiErrorStatus: 429, lastRejected: null, now: Date.UTC(2026, 9, 16, 10, 0) });
+    expect(out?.resetSource).toBe("text");
+  });
+
+  it("an unrecognised zone label is treated as zoneless", () => {
+    const out = resolveClaudeUsageLimit({ text: "You've hit your session limit · resets 3pm (Mars/Olympus)", apiErrorStatus: 429, lastRejected: null, now: localNow });
+    expect(out?.resetSource).toBe("text_no_zone");
+  });
+
+  it("zoneless time less than 15 min ahead → safe fallback, not trusted", () => {
+    const out = resolveClaudeUsageLimit({ text: "You've hit your session limit · resets 10:10am", apiErrorStatus: 429, lastRejected: null, now: localNow });
+    expect(out).toEqual({ resetAt: localNow + NO_ZONE_SAFE_FALLBACK_MS, resetSource: "fallback", limitType: null });
+  });
+
+  it("zoneless time just past (within the 5-min 'now' tolerance) → safe fallback", () => {
+    const out = resolveClaudeUsageLimit({ text: "You've hit your session limit · resets 9:58am", apiErrorStatus: 429, lastRejected: null, now: localNow });
+    expect(out?.resetSource).toBe("fallback");
+  });
+
+  it("Codex 'Try again at 3:45 PM.' without snapshot → text_no_zone in server zone", () => {
+    const out = resolveCodexUsageLimit({ message: "You've hit your usage limit. Try again at 3:45 PM.", codexErrorInfo: "usageLimitExceeded", rateLimits: null, now: localNow });
+    expect(out).toEqual({ resetAt: new Date(2026, 9, 16, 15, 45).getTime(), resetSource: "text_no_zone", limitType: null });
+  });
+});
+
 describe("resolveCodexUsageLimit", () => {
   // Real account/rateLimits/updated shape from recordings (usedPercent raised
   // to 100 to model the exhausted window; resetsAt already ms-normalised by
@@ -240,7 +281,8 @@ describe("resolveCodexUsageLimit", () => {
       now: Date.UTC(2026, 9, 16, 10, 0),
       defaultTimeZone: "UTC",
     });
-    expect(out).toEqual({ resetAt: Date.UTC(2026, 9, 21, 15, 45), resetSource: "text", limitType: null });
+    // Zoneless (Codex formats in its own local zone) → flagged text_no_zone.
+    expect(out).toEqual({ resetAt: Date.UTC(2026, 9, 21, 15, 45), resetSource: "text_no_zone", limitType: null });
   });
 
   it("usage limit with no reset anywhere → fallback", () => {

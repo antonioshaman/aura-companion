@@ -33,6 +33,13 @@ export interface AutoResumeExecutorDeps {
   findGroup: (sessionId: string) => AutoResumeGroupRef | null;
   inject: (sessionId: string, content: string) => void;
   wakeObserver: (sessionGroupId: string) => void;
+  /**
+   * True when a person sent the session a message at/after `since` (epoch
+   * ms). Checked right before injecting to close the cancel/fire race: the
+   * schedule is gone once firing starts, so a message typed during the
+   * relaunch would otherwise get a stale "continue" stacked on top.
+   */
+  userMessagedSince?: (sessionId: string, since: number) => boolean;
 }
 
 export function createAutoResumeExecutor(deps: AutoResumeExecutorDeps) {
@@ -67,6 +74,9 @@ export function createAutoResumeExecutor(deps: AutoResumeExecutorDeps) {
       partnerRelaunched = partner.relaunched;
     }
 
+    if (deps.userMessagedSince?.(id, schedule.scheduledAt)) {
+      return { ok: true, outcome: "user_took_over", relaunched: self.relaunched, partnerRelaunched };
+    }
     deps.inject(id, AUTO_RESUME_PROMPT);
     return { ok: true, outcome: "injected", relaunched: self.relaunched, partnerRelaunched };
   };
