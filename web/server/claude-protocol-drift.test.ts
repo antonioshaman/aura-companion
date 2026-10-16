@@ -43,6 +43,8 @@ describe("Claude ws-bridge method drift vs upstream Agent SDK snapshot", () => {
     // - control_cancel_request: cancels a pending control_request (v2.1.81+, #613)
     // - streamlined_text / streamlined_tool_use_summary: simplified output mode (@internal, v2.1.81+, #613)
     // - prompt_suggestion: predicted next user prompts (v2.1.81+, #613)
+    // - command_lifecycle: queue lifecycle of uuid-stamped commands (v2.1.278+);
+    //   gates the init-probe interrupt so it never cancels a cron turn
     const localRawTransportTypes = new Set([
       "control_request",
       "keep_alive",
@@ -52,6 +54,7 @@ describe("Claude ws-bridge method drift vs upstream Agent SDK snapshot", () => {
       "streamlined_text",
       "streamlined_tool_use_summary",
       "prompt_suggestion",
+      "command_lifecycle",
     ]);
 
     for (const method of handledFromCLI) {

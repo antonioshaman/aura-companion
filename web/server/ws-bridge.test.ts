@@ -5570,8 +5570,10 @@ describe("sendInitializeKickoff", () => {
       expect(probeParsed.message.content).not.toMatch(/do not respond|don't respond|no response/i);
       expect(probeParsed.message.content).toMatch(/answer any user message that follows normally/);
 
-      // Interrupt fires 200ms after the probe (AURA_INIT_PROBE_INTERRUPT_DELAY_MS).
-      // Before advancing timers, no interrupt has been written yet.
+      // The interrupt is no longer a blind timer (it cancelled a cron turn the
+      // resumed CLI had started first — prod 40f03a1e 2026-10-15/16). With no
+      // CLI output yet, time alone writes no interrupt.
+      vi.advanceTimersByTime(5_000);
       const beforeInterrupt = cli.send.mock.calls.map(([arg]: [string]) => arg);
       const noInterruptYet = beforeInterrupt.find((s: string) => {
         try {
@@ -5581,6 +5583,9 @@ describe("sendInitializeKickoff", () => {
       });
       expect(noInterruptYet).toBeUndefined();
 
+      // Legacy CLI (no command_lifecycle frames): system.init is the trigger,
+      // then AURA_INIT_PROBE_INTERRUPT_DELAY_MS grace.
+      bridge.handleCLIMessage(cli, makeInitMsg() + "\n");
       vi.advanceTimersByTime(250);
       const afterInterrupt = cli.send.mock.calls.map(([arg]: [string]) => arg);
       const interruptMsg = afterInterrupt.find((s: string) => {

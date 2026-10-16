@@ -33,6 +33,7 @@ import { initServerLayerFlags, isDefaultLayerFlags } from "./layer-flags.js";
 import { SystemClock } from "./clock-source.js";
 import { writeAutoProceedTrace, appendAfkSummary } from "./auto-proceed-state.js";
 import { log as appLog } from "./logger.js";
+import { gateBootResumeOnCrashLoop, markCleanShutdown } from "./boot-crash-guard.js";
 import { migrateCronJobsToAgents } from "./agent-cron-migrator.js";
 import { migrateLinearCredentialsToAgents } from "./linear-credential-migration.js";
 import { authenticateManagedWebSocket, checkCliSocketUpgrade } from "./ws-auth.js";
@@ -244,6 +245,12 @@ launcher.setStdioCliOpener((sessionId, transport, opts) => wsBridge.handleCLIStd
 launcher.restoreFromDisk();
 wsBridge.restoreFromDisk();
 containerManager.restoreState(CONTAINER_STATE_PATH);
+
+// W2 crash-loop guard: boot resume relaunches every session alive before the
+// restart. After repeated NON-graceful deaths (OOM-kill under Restart=always)
+// that would re-spawn the whole fleet on each respawn — skip it then; sessions
+// come back when a browser opens them.
+gateBootResumeOnCrashLoop(sessionStore.directory, () => launcher.takeBootResumeCandidates());
 
 // ── Session orchestrator — centralizes lifecycle event wiring ────────────────
 orchestrator.initialize();
@@ -1072,6 +1079,14 @@ async function gracefulShutdown() {
       console.log(`[server] Flushed ${interruptedCount} interrupted stream(s) on shutdown`);
     }
     wsBridge.flushSessionStorePendingSync();
+    // W2: persist which sessions were alive BEFORE shutdownAllGroups kills
+    // the council pairs, so the next boot resumes them without a browser.
+    try {
+      const marked = orchestrator.markLiveSessionsForBootResume();
+      console.log(`[server] Marked ${marked} live session(s) for boot resume`);
+    } catch (err) {
+      console.error("[server] Boot-resume mark failed (continuing shutdown):", err);
+    }
     if (coordinator) {
       const { shutdownAllGroups } = await import("./group-shutdown.js");
       const groupIds = coordinator.listGroupIds();
@@ -1107,6 +1122,9 @@ async function gracefulShutdown() {
   } catch (err) {
     console.error("[server] Cleanup scheduler dispose error (continuing to container persist):", err);
   }
+  // W2: the next boot follows a graceful shutdown, not a crash — it does not
+  // count toward the boot-resume crash-loop guard.
+  markCleanShutdown(sessionStore.directory);
   console.log("[server] Persisting container state before shutdown...");
   containerManager.persistState(CONTAINER_STATE_PATH);
   cleanupTailscaleFunnel(port);

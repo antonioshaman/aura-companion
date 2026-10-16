@@ -241,3 +241,120 @@ describe("codex solo session (no init probe)", () => {
     expect(deliveryMetrics.getSnapshot().timeToFirstOutputMs.sum).toBe(2_000);
   });
 });
+
+// ─── W3: the probe interrupt must never cancel a turn the CLI started itself ──
+//
+// Prod 40f03a1e, 2026-10-15 20:31 and 2026-10-16 07:02 (CLI 2.1.283): a
+// `--resume`d CLI that owns a durable cron job dequeues the cron prompt on
+// startup, BEFORE it reads the init probe from stdin. The old bridge sent
+// `control_request{interrupt}` on a blind 200 ms timer, which landed on the
+// cron turn: jsonl `[Request interrupted by user]` under the cron prompt,
+// then the probe ran as a real turn ("No response requested."). The fixture is
+// the recorded sequence (see __fixtures__/init-probe-reconnect/README.md).
+
+interface CronFixture {
+  frames: { dtMs: number; dir: "out" | "in"; raw: Record<string, any> }[];
+}
+const cronFixture: CronFixture = JSON.parse(
+  readFileSync(join(__dirname, "__fixtures__/init-probe-reconnect/cron-turn-on-resume.json"), "utf-8"),
+);
+
+function isInterrupt(j: Record<string, any>): boolean {
+  return j.type === "control_request" && j.request?.subtype === "interrupt";
+}
+
+describe("init-probe reconnect replay — cron turn on resume (W3)", () => {
+  it("never interrupts the cron turn the resumed CLI started first; drops the queued probe instead", () => {
+    const sessionId = "s-cron";
+    const browser = mockSocket({ kind: "browser", sessionId });
+    bridge.handleBrowserOpen(browser, sessionId);
+    const cli = mockSocket({ kind: "cli", sessionId });
+    bridge.handleCLIOpen(cli, sessionId); // kickoff → probe frame
+    const probe = parseSent(cli).find((j) => j.type === "user")!;
+    expect(probe.message.content).toBe(AURA_INIT_PROBE_MARKER);
+    // The probe is uuid-stamped so the CLI reports it in command_lifecycle.
+    expect(typeof probe.uuid).toBe("string");
+
+    // Replay the CLI's first stdout burst at its recorded offset (7.5 s: the
+    // resumed CLI was still loading its transcript).
+    const inFrames = cronFixture.frames.filter((f) => f.dir === "in");
+    expect(inFrames[0].raw).toMatchObject({ type: "command_lifecycle", state: "started" });
+    expect(inFrames[0].raw.command_uuid).not.toBe(probe.uuid);
+    let clock = 0;
+    for (const f of inFrames) {
+      vi.advanceTimersByTime(f.dtMs - clock);
+      clock = f.dtMs;
+      bridge.handleCLIMessage(cli, JSON.stringify(f.raw) + "\n");
+    }
+    // The cron turn runs for a while (prod: tool calls over SSH).
+    vi.advanceTimersByTime(60_000);
+
+    const stdin = parseSent(cli);
+    expect(stdin.filter(isInterrupt)).toHaveLength(0);
+    const cancels = stdin.filter((j) => j.type === "control_request" && j.request?.subtype === "cancel_async_message");
+    expect(cancels).toHaveLength(1);
+    expect(cancels[0].request.message_uuid).toBe(probe.uuid);
+    // command_lifecycle is a known frame now — no "protocol drift" toast.
+    const errors = parseSent(browser).filter((j) => j.type === "error");
+    expect(errors.map((e) => e.message).join("\n")).not.toMatch(/protocol drift/i);
+  });
+
+  it("interrupts at once when the CLI reports the PROBE as the running turn (W1 reconnect, 15:03:38)", () => {
+    // Same CLI (2.1.283), no cron: the probe is the first command it runs.
+    const sessionId = "s-probe-first";
+    const cli = mockSocket({ kind: "cli", sessionId });
+    bridge.handleCLIOpen(cli, sessionId);
+    const probe = parseSent(cli).find((j) => j.type === "user")!;
+    const init = cronFixture.frames.find((f) => f.dir === "in" && f.raw.subtype === "init")!.raw;
+    vi.advanceTimersByTime(1_000);
+    expect(parseSent(cli).filter(isInterrupt)).toHaveLength(0);
+    bridge.handleCLIMessage(
+      cli,
+      JSON.stringify({ type: "command_lifecycle", command_uuid: probe.uuid, state: "started", uuid: "lc-1", session_id: init.session_id }) +
+        "\n" + JSON.stringify(init) + "\n",
+    );
+    expect(parseSent(cli).filter(isInterrupt)).toHaveLength(1);
+    // No extra interrupt from the legacy init path afterwards.
+    vi.advanceTimersByTime(5_000);
+    expect(parseSent(cli).filter(isInterrupt)).toHaveLength(1);
+  });
+
+  it("does not interrupt when a real prompt went to stdin before the probe started", () => {
+    // The user types right after the reconnect; the CLI may fold that prompt
+    // into the probe's turn — interrupting would cancel the user's message.
+    const sessionId = "s-user-first";
+    const browser = mockSocket({ kind: "browser", sessionId });
+    bridge.handleBrowserOpen(browser, sessionId);
+    const cli = mockSocket({ kind: "cli", sessionId });
+    bridge.handleCLIOpen(cli, sessionId);
+    const probe = parseSent(cli).find((j) => j.type === "user")!;
+    bridge.handleCLIMessage(cli, JSON.stringify({ type: "command_lifecycle", command_uuid: probe.uuid, state: "queued", uuid: "lc-q" }) + "\n");
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "продолжай" }));
+    // The CLI understands lifecycle → the still-queued probe is dropped.
+    const cancels = parseSent(cli).filter((j) => j.request?.subtype === "cancel_async_message");
+    expect(cancels.map((c) => c.request.message_uuid)).toEqual([probe.uuid]);
+    // Even if the probe had already been dequeued, its start must not interrupt.
+    bridge.handleCLIMessage(cli, JSON.stringify({ type: "command_lifecycle", command_uuid: probe.uuid, state: "started", uuid: "lc-s" }) + "\n");
+    vi.advanceTimersByTime(5_000);
+    expect(parseSent(cli).filter(isInterrupt)).toHaveLength(0);
+  });
+});
+
+describe("init-probe — CLI advertising msg_lifecycle_v1 (W3)", () => {
+  it("does not fall back to the legacy init-timer interrupt; waits for the probe's own lifecycle", () => {
+    // The recorded 2.1.283 init frame advertises `msg_lifecycle_v1`. If the
+    // CLI's first burst is init (e.g. a cron turn whose lifecycle frame came in
+    // an earlier chunk we never saw), the legacy timer must not interrupt.
+    const sessionId = "s-caps";
+    const cli = mockSocket({ kind: "cli", sessionId });
+    bridge.handleCLIOpen(cli, sessionId);
+    const probe = parseSent(cli).find((j) => j.type === "user")!;
+    const init = cronFixture.frames.find((f) => f.dir === "in" && f.raw.subtype === "init")!.raw;
+    expect(init.capabilities).toContain("msg_lifecycle_v1");
+    bridge.handleCLIMessage(cli, JSON.stringify(init) + "\n");
+    vi.advanceTimersByTime(10_000);
+    expect(parseSent(cli).filter(isInterrupt)).toHaveLength(0);
+    bridge.handleCLIMessage(cli, JSON.stringify({ type: "command_lifecycle", command_uuid: probe.uuid, state: "started", uuid: "lc-1" }) + "\n");
+    expect(parseSent(cli).filter(isInterrupt)).toHaveLength(1);
+  });
+});

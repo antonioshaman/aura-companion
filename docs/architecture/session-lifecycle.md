@@ -15,6 +15,28 @@ restart depends on the transport:
   record keeps `cliSessionId`, so the next message relaunches with `--resume` and the
   conversation continues where it stopped.
 
+**Boot resume (W2).** Sessions that were alive before the restart are relaunched with
+`--resume` at boot, without waiting for a browser (before, a browserless orchestrator,
+council pair or CLI-cron session stayed down until someone opened its tab). Graceful
+shutdown first marks every live session — plus crashed ones whose keepalive relaunch was
+still pending — with `resumeOnBoot` in `launcher.json`, BEFORE the council teardown kills
+both halves of each pair (which persists them as `exited`). On boot, `restoreFromDisk`
+collects the non-archived sessions that were non-`exited` or marked, came back `exited`,
+and have a `cliSessionId`; `SessionRecovery.scheduleBootResume` relaunches them
+`COMPANION_BOOT_RESUME_STAGGER_MS` (1.5 s) apart through `handleAutoRelaunch` — the same
+guarded path a returning browser uses (archived / user-stopped / intentional-kill skips,
+crash budget, single-flight with a concurrent browser relaunch). Sessions restored as
+`starting` (WS transport) stay with the reconnection watchdog. User-stopped sessions are
+never marked, so they stay down.
+
+**Crash-loop guard.** The auto-relaunch budget lives in memory and resets per boot, so after
+repeated non-graceful deaths (OOM-kill under `Restart=always`) boot resume would bring the
+whole fleet back on every respawn. `boot-crash-guard.ts` keeps `boot-history.json` in the
+sessions dir: graceful shutdown sets `cleanShutdown`; a boot without it is a crash boot.
+Once 3 crash boots land within 10 minutes, boot resume is skipped
+(`boot_resume.skipped_crash_loop`) and sessions come back when a browser opens them.
+Graceful restarts (deploys) never count. A missing or corrupt file fails open.
+
 **Process identity** (`process-identity.ts`) anchors on the `--sdk-url <sessionId>` argv
 token for WS sessions. stdio argv carries no sessionId at all, so the spawn-time sidecar's
 `argvSha256` is the equivalent anchor — without it a healthy stdio CLI reads as `mismatch`

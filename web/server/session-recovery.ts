@@ -11,6 +11,8 @@ import { nextModelInChain, computeSilenceRotation } from "./model-fallback-chain
 import {
   checkDrift,
   countUndeliveredAssistantRecords,
+  readUndeliveredAssistantRecords,
+  RECOVERY_LOOKBACK_MS,
   defaultSubagentActivitySince,
   defaultSubagentOpenToolCallSince,
   resolveCliSessionPaths,
@@ -202,6 +204,14 @@ export function pruneDriftRecoveries(history: readonly number[], now: number): n
 
 // Proactive keepalive: base delay before relaunching a crashed CLI (doubles per attempt)
 export const KEEPALIVE_BASE_DELAY_MS = 3_000;
+
+/**
+ * W2: spacing between the proactive boot resumes of sessions that were alive
+ * before a server restart, so N CLIs are not spawned in the same instant.
+ * Session i fires at `(i + 1) * BOOT_RESUME_STAGGER_MS`, then goes through
+ * {@link SessionRecovery.handleAutoRelaunch} (its own grace + guards).
+ */
+export const BOOT_RESUME_STAGGER_MS = Number(process.env.COMPANION_BOOT_RESUME_STAGGER_MS || "1500");
 
 export interface SessionRecoveryDeps {
   launcher: CliLauncher;
@@ -524,6 +534,22 @@ export class SessionRecovery {
   }
 
   /**
+   * W2: every session an automatic relaunch is still owed to — a pending
+   * keepalive / boot-resume timer, a `handleAutoRelaunch` inside its grace
+   * pause (the timer is already gone, state still `exited`), or a
+   * `relaunchOnce` in flight. Graceful shutdown marks all of them
+   * `resumeOnBoot`; otherwise a second restart landing in the grace pause
+   * would drop the session for good.
+   */
+  pendingRelaunchSessionIds(): string[] {
+    return Array.from(new Set([
+      ...this.keepaliveTimers.keys(),
+      ...this.relaunchingSet,
+      ...this.relaunchInFlight.keys(),
+    ]));
+  }
+
+  /**
    * Silent-stdio drift detector — recurring tick. Idempotent: a
    * second call while already armed is a no-op. Complements the
    * adapter-side `SilentStdioWatchdog` (arm-on-user-message, 300s):
@@ -703,7 +729,7 @@ export class SessionRecovery {
       // Fire-and-forget: the outer setInterval callback is sync — a
       // per-session recovery blocking further sessions would delay the
       // whole tick. `driftRecoveryInFlight` keeps the next tick off it.
-      void this.recoverFromDrift(info.sessionId);
+      void this.recoverFromDrift(info.sessionId, { jsonlPath, bunLastFrameMs });
     }
   }
 
@@ -721,13 +747,19 @@ export class SessionRecovery {
    * mark on it would lock it out of its own recovery. A failed relaunch falls
    * back to the budgeted keepalive path so the session is never left dead.
    */
-  private async recoverFromDrift(sessionId: string): Promise<void> {
+  private async recoverFromDrift(
+    sessionId: string,
+    stall?: { jsonlPath: string; bunLastFrameMs: number },
+  ): Promise<void> {
     this.driftRecoveryInFlight.add(sessionId);
     const ownsMark = this.intentionalKills.addTransient(sessionId);
     let outcome: RelaunchOutcome | null = null;
     try {
       await this.launcher.kill(sessionId);
       if (this.launcher.getSession(sessionId)?.archived) return;
+      // The killed CLI's jsonl is final now: deliver the reply it wrote but
+      // never put on stdout. The `--resume`d CLI will not re-emit it.
+      if (stall) this.deliverStalledReply(sessionId, stall);
       this.wsBridge.getSession(sessionId)?.stateMachine?.transition("starting", "relaunch_initiated");
       outcome = await this.relaunchOnce(sessionId, "drift_recovery");
     } catch (err) {
@@ -744,6 +776,37 @@ export class SessionRecovery {
       });
       if (outcome.error) this.wsBridge.broadcastToSession(sessionId, { type: "error", message: outcome.error });
       this.scheduleProactiveRelaunch(sessionId);
+    }
+  }
+
+  /**
+   * W1 (prod 40f03a1e, 2026-10-15 15:03): before this, recovery = kill +
+   * `--resume` only. The CLI had written tool call + answer + end_turn to its
+   * jsonl by 15:03:34, bun got zero frames after `system.init`, and the
+   * resumed CLI never replays past turns on stdout — so the answer reached
+   * nobody and the user had to type "продолжай". Read the records the CLI
+   * wrote after bun's last frame (minus {@link RECOVERY_LOOKBACK_MS}) and hand
+   * them to the bridge, which delivers each exactly once (history-deduped).
+   * Never throws: a failure here must not block the relaunch.
+   */
+  private deliverStalledReply(sessionId: string, stall: { jsonlPath: string; bunLastFrameMs: number }): void {
+    try {
+      const records = readUndeliveredAssistantRecords(stall.jsonlPath, stall.bunLastFrameMs - RECOVERY_LOOKBACK_MS);
+      if (records.length === 0) return;
+      const { delivered, alreadyDelivered } = this.wsBridge.deliverRecoveredAssistantRecords(sessionId, records);
+      log.warn("session-recovery", "silent-stdio drift: delivered the reply the CLI wrote only to its jsonl", {
+        event: "silent_stdio_drift.reply_recovered",
+        sessionId,
+        records: records.length,
+        delivered,
+        alreadyDelivered,
+      });
+    } catch (err) {
+      log.warn("session-recovery", "silent-stdio drift: could not deliver the stalled reply", {
+        event: "silent_stdio_drift.reply_recovery_failed",
+        sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 
@@ -851,6 +914,19 @@ export class SessionRecovery {
       return;
     }
     const freshInfo = this.launcher.getSession(sessionId);
+    // W2 review Q1: the guards at the top ran BEFORE the grace pause. A user
+    // stop or an archive that landed inside it must still win — else the
+    // pause spawns a CLI for a session the user just stopped. (A deleted
+    // session has no record and ends in `unknown_session` below.)
+    if (freshInfo?.archived || this.stoppedByUser.has(sessionId)) {
+      log.info("orchestrator", "auto-relaunch skipped: stopped or archived during grace", {
+        event: "session.relaunch.skipped_during_grace",
+        sessionId,
+        reason: freshInfo?.archived ? "archived" : "stopped_by_user",
+      });
+      this.relaunchingSet.delete(sessionId);
+      return;
+    }
     // Only check PID liveness if the session is NOT already "exited".
     // After idle-kill or explicit kill(), the PID field stays set but the
     // process is dead. If the kernel recycles the PID to a different process,
@@ -1020,6 +1096,58 @@ export class SessionRecovery {
     }, delay);
 
     this.keepaliveTimers.set(sessionId, timer);
+  }
+
+  /**
+   * W2: proactively relaunch (`--resume`) the sessions that were alive before
+   * the server restart, without waiting for a browser to open them. Before
+   * this, stdio Claude and host Codex sessions came back `exited` and stayed
+   * down until a browser connected (`session:relaunch-needed`) — browserless
+   * orchestrators, council pairs and CLI crons were dead for hours.
+   *
+   * Launches are staggered by {@link BOOT_RESUME_STAGGER_MS}. Each timer lives
+   * in `keepaliveTimers`, so archive / delete / user kill cancel it like a
+   * keepalive. When it fires, a session that is gone, archived, intentionally
+   * killed, stopped by user or no longer `exited` (a returning browser already
+   * relaunched it) is skipped; the rest go through `handleAutoRelaunch`, which
+   * shares `relaunchingSet` + `relaunchOnce` with the browser path (no double
+   * spawn) and enforces the crash budget.
+   */
+  scheduleBootResume(sessionIds: readonly string[]): void {
+    if (sessionIds.length === 0) return;
+    log.info("orchestrator", "Scheduling boot resume of sessions alive before restart", {
+      event: "session.boot_resume.scheduled",
+      count: sessionIds.length,
+      staggerMs: BOOT_RESUME_STAGGER_MS,
+      sessionIds,
+    });
+    sessionIds.forEach((sessionId, i) => {
+      this.cancelKeepaliveTimer(sessionId);
+      const timer = setTimeout(async () => {
+        if (this.keepaliveTimers.get(sessionId) === timer) this.keepaliveTimers.delete(sessionId);
+        const info = this.launcher.getSession(sessionId);
+        const skip = (reason: string) =>
+          log.info("orchestrator", "boot resume skipped", {
+            event: "session.boot_resume.skipped",
+            sessionId,
+            role: info?.sessionGroupRole,
+            reason,
+          });
+        if (!info) return skip("unknown_session");
+        if (info.archived) return skip("archived");
+        if (this.intentionalKills.has(sessionId)) return skip("intentional_kill");
+        if (this.stoppedByUser.has(sessionId)) return skip("stopped_by_user");
+        if (info.state !== "exited") return skip(`state_${info.state}`);
+        log.info("orchestrator", "Boot-resuming session alive before restart", {
+          event: "session.boot_resume.firing",
+          sessionId,
+          role: info.sessionGroupRole,
+          backendType: info.backendType,
+        });
+        await this.handleAutoRelaunch(sessionId);
+      }, (i + 1) * BOOT_RESUME_STAGGER_MS);
+      this.keepaliveTimers.set(sessionId, timer);
+    });
   }
 
   cancelKeepaliveTimer(sessionId: string): void {
