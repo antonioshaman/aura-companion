@@ -242,3 +242,60 @@ describe("observerAutohealBlockedReason", () => {
     expect(observerAutohealBlockedReason(group(), OBSERVER, none, (s) => s === OBSERVER)).toBe("intentional_kill");
   });
 });
+
+// ─── W14: heal a pair degraded by an unanswered wake ─────────────────────────
+//
+// Prod 2026-10-16: the codex observer was attached and "connected" — so the
+// old readiness short-circuit would have declared it healed without a
+// relaunch — yet its stream was deaf. And the pair was `degraded`, which the
+// blocked-reason check refused outright. The `wake_produced_no_review`
+// trigger must relaunch anyway and is allowed on a degraded pair.
+describe("ObserverAutoheal — wake_produced_no_review (W14)", () => {
+  it("relaunches even though the observer looks ready", async () => {
+    const h = makeHarness({ readyAfterRelaunch: 1 });
+    h.setReady(true); // attached + connected, but deaf
+    const result = await h.heal.heal(GROUP, OBSERVER, "wake_produced_no_review", "council-review-158");
+    expect(h.relaunch).toHaveBeenCalledTimes(1);
+    expect(result).toEqual({ kind: "healed", attempts: 1 });
+  });
+
+  it("keeps the self-recovered short-circuit for the adapter-missing triggers", async () => {
+    const h = makeHarness();
+    h.setReady(true);
+    const result = await h.heal.heal(GROUP, OBSERVER, "adapter_wait_timed_out", "chk_1");
+    expect(h.relaunch).not.toHaveBeenCalled();
+    expect(result).toEqual({ kind: "healed", attempts: 0 });
+  });
+
+  it("passes the trigger to blockedReason", async () => {
+    const seen: string[] = [];
+    const heal = new ObserverAutoheal({
+      relaunchObserver: async () => ({ ok: true }),
+      isObserverReadyForWake: () => true,
+      blockedReason: (_g, _o, trigger) => { seen.push(trigger); return null; },
+    });
+    await heal.heal(GROUP, OBSERVER, "wake_produced_no_review", "chk");
+    expect(seen.length).toBeGreaterThan(0);
+    expect(new Set(seen)).toEqual(new Set(["wake_produced_no_review"]));
+  });
+});
+
+describe("observerAutohealBlockedReason — allowDegraded (W14)", () => {
+  const group = (status: string): AutohealGroupView => ({
+    status, primary: { sessionId: PRIMARY }, observer: { sessionId: OBSERVER },
+  });
+  const never = () => false;
+
+  it("refuses a degraded pair by default (adapter-missing triggers)", () => {
+    expect(observerAutohealBlockedReason(group("degraded"), OBSERVER, never, never)).toBe("group_not_live");
+  });
+
+  it("allows a degraded pair when the trigger heals degraded pairs", () => {
+    expect(observerAutohealBlockedReason(group("degraded"), OBSERVER, never, never, { allowDegraded: true })).toBeNull();
+  });
+
+  it("never allows an archived pair, and still honours a user stop", () => {
+    expect(observerAutohealBlockedReason(group("archived"), OBSERVER, never, never, { allowDegraded: true })).toBe("group_not_live");
+    expect(observerAutohealBlockedReason(group("degraded"), OBSERVER, (s) => s === PRIMARY, never, { allowDegraded: true })).toBe("user_stopped");
+  });
+});
