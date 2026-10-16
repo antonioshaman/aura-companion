@@ -7,7 +7,9 @@
  * reached the host LATER is marked `duplicateOf: <earlier id>`; it is never
  * dropped (the log keeps it, folded), and never marked when it is MORE
  * severe than the earlier one — a STOP that the other reviewer only called
- * a WARN is a disagreement worth seeing, not a duplicate.
+ * a WARN is a disagreement worth seeing, not a duplicate. Severities are the
+ * FINAL grounded verdicts, and a blocking finding never folds into a
+ * non-blocking one (e.g. an earlier weak-evidence STOP).
  *
  * Deterministic and conservative: same normalised evidence file, line ranges
  * overlap (or either side cites the whole file), and the claims share most
@@ -24,6 +26,34 @@ export interface DedupFinding {
   claim: string;
   evidence_path: string;
   evidence_lines?: [number, number];
+  /**
+   * Final (grounded) verdict: this finding blocks — a live STOP that is not
+   * downgraded, weakly grounded or disputed. Absent = not known to block.
+   * Callers pass the EFFECTIVE severity (a grounding downgrade → NOTE).
+   */
+  blocking?: boolean;
+}
+
+/** Dedup view of a grounded finding: effective severity + whether it blocks. */
+export function dedupViewOf(f: {
+  id: string;
+  severity: DedupFinding["severity"];
+  claim: string;
+  evidence_path: string;
+  evidence_lines?: [number, number];
+  wasDowngraded?: boolean;
+  weakEvidence?: unknown;
+  disputed?: unknown;
+}): DedupFinding {
+  const severity = f.wasDowngraded ? "NOTE" : f.severity;
+  return {
+    id: f.id,
+    severity,
+    claim: f.claim,
+    evidence_path: f.evidence_path,
+    ...(f.evidence_lines ? { evidence_lines: f.evidence_lines } : {}),
+    blocking: severity === "STOP" && f.weakEvidence === undefined && f.disputed === undefined,
+  };
 }
 
 const SEVERITY_RANK: Record<DedupFinding["severity"], number> = { STOP: 3, WARN: 2, NOTE: 1, INFO: 0 };
@@ -54,6 +84,9 @@ function linesOverlap(a?: [number, number], b?: [number, number]): boolean {
 }
 
 export function isNearDuplicate(later: DedupFinding, earlier: DedupFinding): boolean {
+  // A blocker is never folded into a finding that does not block (a weak or
+  // downgraded earlier STOP): the stronger finding must stay visible.
+  if (later.blocking === true && earlier.blocking !== true) return false;
   if (SEVERITY_RANK[later.severity] > SEVERITY_RANK[earlier.severity]) return false;
   if (normPath(later.evidence_path) !== normPath(earlier.evidence_path)) return false;
   if (!linesOverlap(later.evidence_lines, earlier.evidence_lines)) return false;

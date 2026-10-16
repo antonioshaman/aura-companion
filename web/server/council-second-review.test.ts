@@ -28,6 +28,7 @@ import {
 } from "./review-watcher.js";
 import { ConvergenceTracker } from "./convergence-tracker.js";
 import { findCrossReviewerDuplicates, isNearDuplicate } from "./second-review-dedup.js";
+import { SecondReviewer, type HeadlessRunResult } from "./second-reviewer.js";
 import { isBlockingStopFinding } from "./council-auto-proceed-controller.js";
 import { collectCheckpointCoverageGaps } from "./checkpoint-coverage.js";
 import type { BrowserObserverFinding } from "./session-types.js";
@@ -231,6 +232,10 @@ describe("handleCouncilReview with a second-opinion review", () => {
     writeAtomicJson(observerFile, review({ findings: [observerFinding] }));
     const past = new Date(Date.now() - 60_000);
     utimesSync(observerFile, past, past);
+    // The observer's review was ingested first: its grounded verdict (a real
+    // blocking STOP) is frozen and is what the later claim is compared to.
+    h.pipeline.handleCouncilReview(GROUP, review({ findings: [observerFinding] }), past.getTime());
+    h.reviews.length = 0;
     const observerId = deterministicFindingId({
       sessionGroupId: GROUP, checkpointId: "chk_1", observerProvider: "codex", findingIndex: 0,
       evidencePath: "src/a.ts", claim: observerFinding.claim,
@@ -249,6 +254,36 @@ describe("handleCouncilReview with a second-opinion review", () => {
     expect(dup!.duplicateOf).toBe(observerId);
     expect(isBlockingStopFinding(dup!)).toBe(false);
     expect(distinct!.duplicateOf).toBeUndefined();
+  });
+
+  // Observer STOP1 on PR #372: dedupe must compare against the EARLIER
+  // finding's final (grounded) verdict, not its raw severity. An earlier STOP
+  // without cited lines is weak evidence and does not block; a later STOP
+  // with the same words and grounded lines must not be folded into it, or the
+  // only real blocker vanishes from the banner and the auto-proceed hold.
+  it("never folds a grounded blocking STOP into an earlier non-blocking (weak) STOP", () => {
+    const h = harness();
+    const dir = join(h.cwd, ".council", "reviews");
+    const weakObserver = review({
+      findings: [{ severity: "STOP", claim: "relaunch() loops forever without any backoff delay", evidence_path: "src/a.ts" }],
+    });
+    const observerFile = join(dir, buildObserverReviewFilename("council-implement", "codex", GROUP));
+    writeAtomicJson(observerFile, weakObserver);
+    const past = new Date(Date.now() - 60_000);
+    utimesSync(observerFile, past, past);
+    h.pipeline.handleCouncilReview(GROUP, weakObserver, past.getTime());
+    const earlier = h.reviews[0]!.findings[0]!;
+    expect(earlier.weakEvidence).toBe("no_cited_lines");
+    expect(isBlockingStopFinding(earlier)).toBe(false);
+
+    h.pipeline.handleCouncilReview(GROUP, review({
+      reviewer_role: "second",
+      observer_provider: "claude",
+      findings: [{ severity: "STOP", claim: "relaunch() loops forever without backoff delay", evidence_path: "src/a.ts", evidence_lines: [2, 2] }],
+    }), Date.now());
+    const later = h.reviews[1]!.findings[0]!;
+    expect(later.duplicateOf).toBeUndefined();
+    expect(isBlockingStopFinding(later)).toBe(true);
   });
 
   it("hands every accepted checkpoint to the second-review hook, after the observer's wake", () => {
@@ -281,6 +316,14 @@ describe("near-duplicate detection", () => {
     expect(isNearDuplicate({ ...base, id: "b", evidence_lines: [30, 40] }, base)).toBe(false);
     expect(isNearDuplicate({ ...base, id: "b", claim: "missing test for the logger" }, base)).toBe(false);
   });
+  // STOP1: a blocking later finding is never folded into a non-blocking one;
+  // a non-blocking later finding still folds into a blocking one.
+  it("a blocking later finding never folds into a non-blocking earlier one", () => {
+    expect(isNearDuplicate({ ...base, id: "b", blocking: true }, { ...base, blocking: false })).toBe(false);
+    expect(isNearDuplicate({ ...base, id: "b", blocking: false }, { ...base, blocking: true })).toBe(true);
+    expect(isNearDuplicate({ ...base, id: "b", blocking: true }, { ...base, blocking: true })).toBe(true);
+  });
+
   it("each earlier finding absorbs at most one later finding", () => {
     const out = findCrossReviewerDuplicates([{ ...base, id: "b" }, { ...base, id: "c" }], [base]);
     expect(out).toEqual(["a", undefined]);
@@ -360,6 +403,49 @@ describe("convergence: a checkpoint is clean only if both reviewers were clean",
     const { t } = tracker();
     clean("c1");
     expect(t.getState(GROUP)!.cleanCycleCount).toBe(1);
+  });
+
+  // Observer STOP2 on PR #372: a checkpoint QUEUED behind a running second
+  // review is already owed a second verdict. Scenario: A running → B queued →
+  // observer's clean review of B → B superseded by C. The streak must not grow.
+  it("a queued second review holds the observer's clean review; superseding it leaves it not counted", async () => {
+    const { t, events } = tracker();
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const cwd = workspace();
+    const reviewer = new SecondReviewer({
+      getConfig: () => ({ reviewer: "auto", scope: "all" }),
+      loadSystemPrompt: () => "<!-- observer-system-prompt v1 -->\nprompt",
+      resolveBinary: (n) => `/bin/${n}`,
+      buildEnv: () => ({}),
+      run: async (): Promise<HeadlessRunResult> => {
+        await gate;
+        return { exitCode: null, stdout: "", stderr: "", timedOut: true, aborted: false };
+      },
+      writeReview: () => {},
+      ingestReview: () => {},
+      isBackendLimited: () => false,
+      isGroupLive: () => true,
+      emit: (e) => companionBus.emit("group:second-review", e),
+      now: () => Date.now(),
+      makeScratchFile: () => ({ path: join(cwd, "s.txt"), cleanup: () => {} }),
+      readScratchFile: () => null,
+    });
+    const ctx = { cwd, observerBackend: "codex" as const, previous: null };
+    const a = reviewer.onCheckpoint(GROUP, checkpoint(1, "A"), ctx);
+    expect(a.kind).toBe("dispatched");
+    expect(reviewer.onCheckpoint(GROUP, checkpoint(2, "B"), ctx)).toEqual({ kind: "queued" });
+
+    clean("B");
+    expect(t.getState(GROUP)?.cleanCycleCount ?? 0).toBe(0);
+    expect(events.at(-1)).toMatchObject({ transition: "not-counted", notCountedReason: "awaiting_second_review" });
+
+    expect(reviewer.onCheckpoint(GROUP, checkpoint(3, "C"), ctx)).toEqual({ kind: "queued" });
+    expect(t.getState(GROUP)?.cleanCycleCount ?? 0).toBe(0);
+    expect(events.at(-1)).toMatchObject({ transition: "not-counted", notCountedReason: "second_review_missing" });
+    reviewer.forgetGroup(GROUP);
+    release();
+    await (a as { done: Promise<void> }).done;
   });
 
   it("an observer STOP still resets immediately while the second opinion is pending", () => {

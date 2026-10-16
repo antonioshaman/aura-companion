@@ -10,7 +10,10 @@ import {
   type SecondReviewBusEvent,
   type SecondReviewerDeps,
   buildSecondReviewInvocation,
+  buildSecondReviewEnv,
   parseSecondReviewOutput,
+  readCodexDefaultModel,
+  runHeadless,
 } from "./second-reviewer.js";
 import type { CheckpointPayload, ObserverReviewPayload } from "./council-types.js";
 import { parseObserverReviewPayload } from "./council-types.js";
@@ -160,6 +163,15 @@ describe("buildSecondReviewInvocation — read-only argv", () => {
 
   // codex: the read-only sandbox is the enforced boundary; never a
   // bypass flag, never a writable sandbox.
+  it("codex: network is explicitly off in the sandbox config", () => {
+    const inv = buildSecondReviewInvocation({
+      reviewer: { backend: "codex", model: "gpt-6.1-sol" },
+      binary: "/bin/codex", cwd: "/w", systemPrompt: "S", wakeText: "W", lastMessageFile: "/tmp/l",
+    });
+    expect(inv.cmd).toContain("sandbox_workspace_write.network_access=false");
+    expect(inv.cmd[inv.cmd.indexOf("--model") + 1]).toBe("gpt-6.1-sol");
+  });
+
   it("codex: read-only sandbox, no approvals, ephemeral, reply to the scratch file", () => {
     const inv = buildSecondReviewInvocation({
       reviewer: { backend: "codex" },
@@ -181,6 +193,85 @@ describe("buildSecondReviewInvocation — read-only argv", () => {
     expect(argv.join(" ")).not.toMatch(/danger|workspace-write|bypass/);
     // codex has no system-prompt flag: the prompt leads stdin.
     expect(inv.stdin.indexOf("SYS")).toBeLessThan(inv.stdin.indexOf("WAKE"));
+  });
+});
+
+// Sonnet review STOP (security) on PR #372: the second reviewer must never
+// inherit the server's whole environment (tokens, API keys, AURA_*/COMPANION_*).
+// codex keeps a shell inside its read-only, no-network sandbox, so anything in
+// its env is readable by a prompt-injected reviewer.
+describe("buildSecondReviewEnv — allowlisted environment", () => {
+  const serverEnv = {
+    PATH: "/usr/bin",
+    HOME: "/home/auracomp",
+    LANG: "C.UTF-8",
+    TERM: "xterm",
+    COMPANION_AUTH_TOKEN: "secret-companion",
+    AURA_INIT_FRAME_TIMEOUT_MS: "1",
+    OPENAI_API_KEY: "sk-openai",
+    ANTHROPIC_API_KEY: "sk-ant",
+    CLAUDE_CODE_OAUTH_TOKEN: "oauth",
+    GITHUB_TOKEN: "ghp",
+    CLAUDECODE: "1",
+  };
+  it("codex: only PATH/HOME/locale/TERM and CODEX_HOME — no API keys or server tokens", () => {
+    const env = buildSecondReviewEnv("codex", serverEnv, { path: "/opt/codex/bin:/usr/bin" });
+    expect(env).toEqual({
+      PATH: "/opt/codex/bin:/usr/bin",
+      HOME: "/home/auracomp",
+      LANG: "C.UTF-8",
+      TERM: "xterm",
+      CODEX_HOME: "/home/auracomp/.codex",
+    });
+  });
+  it("claude: the allowlist plus only Claude's own auth variables", () => {
+    const env = buildSecondReviewEnv("claude", serverEnv, { path: "/usr/bin" });
+    expect(env).toEqual({
+      PATH: "/usr/bin",
+      HOME: "/home/auracomp",
+      LANG: "C.UTF-8",
+      TERM: "xterm",
+      ANTHROPIC_API_KEY: "sk-ant",
+      CLAUDE_CODE_OAUTH_TOKEN: "oauth",
+    });
+  });
+  it("keeps an explicit CODEX_HOME", () => {
+    expect(buildSecondReviewEnv("codex", { ...serverEnv, CODEX_HOME: "/srv/codex" }, { path: "/usr/bin" }).CODEX_HOME).toBe("/srv/codex");
+  });
+});
+
+describe("readCodexDefaultModel", () => {
+  // The codex config default can be unlaunchable for a ChatGPT account
+  // (observed: `gpt-5.5` → 400). `auto` uses the first launchable slug from
+  // the CLI's own models cache instead.
+  it("returns the first slug of $CODEX_HOME/models_cache.json, or undefined", () => {
+    const dir = mkdtempSync(join(tmpdir(), "codex-home-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    expect(readCodexDefaultModel(dir)).toBeUndefined();
+    writeFileSync(join(dir, "models_cache.json"), JSON.stringify({ models: [{ slug: "gpt-6.1-sol" }, { slug: "gpt-6.1-mini" }] }));
+    expect(readCodexDefaultModel(dir)).toBe("gpt-6.1-sol");
+  });
+});
+
+// Sonnet review WARN1: a timeout must kill the whole process group (codex's
+// bwrap sandbox, shells, …), not only the direct child.
+describe("runHeadless", () => {
+  it("on timeout kills the child's whole process group, grandchildren included", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "run-headless-"));
+    cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+    const pidFile = join(dir, "grandchild.pid");
+    const res = await runHeadless(["/bin/sh", "-c", `sleep 30 & echo $! > ${pidFile}; wait`], {
+      cwd: dir,
+      env: { PATH: "/usr/bin:/bin" },
+      stdin: "",
+      timeoutMs: 300,
+      signal: new AbortController().signal,
+    });
+    expect(res.timedOut).toBe(true);
+    const pid = Number(readFileSync(pidFile, "utf-8").trim());
+    await vi.waitFor(() => {
+      expect(() => process.kill(pid, 0)).toThrow();
+    }, { timeout: 2000 });
   });
 });
 
@@ -343,6 +434,65 @@ describe("SecondReviewer dispatch", () => {
     await (first as { done: Promise<void> }).done;
     await vi.waitFor(() => expect(h.run).toHaveBeenCalledTimes(2));
     expect((h.run.mock.calls[1]![1] as HeadlessRunOptions).stdin).toContain('"checkpoint_id": "c3"');
+  });
+
+  // Observer STOP2 on PR #372: a queued checkpoint is announced as owed at
+  // enqueue time; if the drain then skips it (setting switched off meanwhile)
+  // the owed verdict is released as missing so the tracker never waits forever.
+  it("announces a queued checkpoint as owed and releases it if the drain skips it", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const h = harness({ run: async () => { await gate; return claudeResult("[]"); } });
+    const ctx = { cwd: h.cwd, observerBackend: "codex" as const, previous: null };
+    const first = h.reviewer.onCheckpoint(GROUP, checkpoint("c1"), ctx);
+    expect(h.reviewer.onCheckpoint(GROUP, checkpoint("c2", "council-review", 2), ctx)).toEqual({ kind: "queued" });
+    expect(h.events).toContainEqual({ sessionGroupId: GROUP, checkpointId: "c2", status: "queued", backend: "claude", model: "sonnet" });
+    h.setConfig({ reviewer: "off", scope: "all" });
+    release();
+    await (first as { done: Promise<void> }).done;
+    expect(h.events.at(-1)).toMatchObject({ checkpointId: "c2", status: "missing", reason: "disabled" });
+    expect(h.run).toHaveBeenCalledTimes(1);
+  });
+
+  // Sonnet review WARN2: a process-wide cap on concurrent second reviews
+  // (default 2). Other groups wait in their newest-wins slot and start as
+  // capacity frees up.
+  it("caps concurrent runs across groups and starts queued groups when a run ends", async () => {
+    const G2 = "grp_1111111111111111111111111111111a";
+    const G3 = "grp_2222222222222222222222222222222b";
+    const gates: Array<() => void> = [];
+    const h = harness({
+      run: () => new Promise((r) => { gates.push(() => r(claudeResult("[]"))); }),
+      deps: { maxConcurrency: 2 },
+    });
+    const ctx = { cwd: h.cwd, observerBackend: "codex" as const, previous: null };
+    const a = h.reviewer.onCheckpoint(GROUP, checkpoint("a1"), ctx);
+    const b = h.reviewer.onCheckpoint(G2, { ...checkpoint("b1"), session_group_id: G2 }, ctx);
+    expect(a.kind).toBe("dispatched");
+    expect(b.kind).toBe("dispatched");
+    expect(h.reviewer.onCheckpoint(G3, { ...checkpoint("c1"), session_group_id: G3 }, ctx)).toEqual({ kind: "queued" });
+    expect(h.run).toHaveBeenCalledTimes(2);
+    expect(h.events).toContainEqual(expect.objectContaining({ sessionGroupId: G3, checkpointId: "c1", status: "queued" }));
+    gates[0]!();
+    await (a as { done: Promise<void> }).done;
+    await vi.waitFor(() => expect(h.run).toHaveBeenCalledTimes(3));
+    expect((h.run.mock.calls[2]![1] as HeadlessRunOptions).stdin).toContain('"checkpoint_id": "c1"');
+    gates[1]!();
+    gates[2]!();
+  });
+
+  it("defaults the codex model to the CLI's first launchable model when none is set", async () => {
+    const h = harness({
+      run: async (cmd) => {
+        writeFileSync(cmd[cmd.indexOf("--output-last-message") + 1]!, "[]");
+        return { exitCode: 0, stdout: "", stderr: "", timedOut: false, aborted: false };
+      },
+      deps: { defaultModel: (b) => (b === "codex" ? "gpt-6.1-sol" : undefined) },
+    });
+    const out = h.reviewer.onCheckpoint(GROUP, checkpoint("c1"), { cwd: h.cwd, observerBackend: "claude", previous: null });
+    await (out as { done: Promise<void> }).done;
+    const cmd = h.run.mock.calls[0]![0] as string[];
+    expect(cmd[cmd.indexOf("--model") + 1]).toBe("gpt-6.1-sol");
   });
 
   // Restart / redelivery idempotency: a checkpoint already second-reviewed on

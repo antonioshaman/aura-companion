@@ -269,7 +269,7 @@ export class ConvergenceTracker {
       );
     });
     this.unsubscribeSecond = companionBus.on("group:second-review", (ev) => {
-      if (ev.status === "dispatched") this.noteSecondReviewDispatched(ev.sessionGroupId, ev.checkpointId);
+      if (ev.status === "dispatched" || ev.status === "queued") this.noteSecondReviewDispatched(ev.sessionGroupId, ev.checkpointId);
       else this.noteSecondReviewMissing(ev.sessionGroupId, ev.checkpointId);
     });
   }

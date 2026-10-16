@@ -36,7 +36,7 @@
 
 import { spawn as nodeSpawn } from "node:child_process";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   type CheckpointPayload,
@@ -49,6 +49,7 @@ import { buildObserverContextManifest, buildObserverWakePayload } from "./observ
 import type { ClaimLanguage } from "./observer-language.js";
 import { buildSecondReviewFilename, isSecondReviewFilename, OBSERVER_REVIEW_FILE_PATTERN } from "./review-watcher.js";
 import { isClaudeUsageLimitText, parseResetFromText } from "./usage-limit-parse.js";
+import { CLAUDE_AUTH_ENV_VARS } from "./provider-auth-env.js";
 import {
   type ResolvedSecondReviewer,
   type SecondReviewerBackend,
@@ -60,6 +61,8 @@ import { log } from "./logger.js";
 
 /** Hard ceiling on one second-review run (env `COMPANION_SECOND_REVIEW_TIMEOUT_MS`). */
 export const DEFAULT_SECOND_REVIEW_TIMEOUT_MS = 10 * 60_000;
+/** Process-wide concurrent second reviews (env `COMPANION_SECOND_REVIEW_MAX_CONCURRENCY`). */
+export const DEFAULT_SECOND_REVIEW_MAX_CONCURRENCY = 2;
 /** Cooldown after a usage-limit answer when the reset time cannot be parsed. */
 export const SECOND_REVIEW_LIMIT_COOLDOWN_MS = 60 * 60_000;
 /** Bytes of stdout/stderr kept from a run (the reply itself is small). */
@@ -138,6 +141,10 @@ export function buildSecondReviewInvocation(args: {
       "exec",
       "--sandbox", "read-only",
       "-c", 'approval_policy="never"',
+      // Belt and braces: the read-only sandbox already has no network
+      // (verified: `curl` → "Could not resolve host" inside it); this keeps it
+      // off even if the sandbox mode is ever widened.
+      "-c", "sandbox_workspace_write.network_access=false",
       "--skip-git-repo-check",
       "--ephemeral",
       "--color", "never",
@@ -243,6 +250,64 @@ export function parseSecondReviewOutput(
   return { ok: true, text: lastMessage, ...(model ? { model } : {}) };
 }
 
+// ── Pure: environment ───────────────────────────────────────────────────────
+
+/** Variables any CLI needs to run; nothing secret. */
+const BASE_ENV_ALLOWLIST = ["HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TZ", "TMPDIR"] as const;
+
+/**
+ * The second reviewer's environment, built from an ALLOWLIST — never the
+ * server's whole env (Sonnet review of PR #372, security STOP): codex keeps a
+ * shell inside its sandbox, so every variable it inherits is readable by a
+ * prompt-injected reviewer. Server tokens (COMPANION_*, AURA_*), provider API
+ * keys, GitHub tokens etc. are never passed.
+ *  - codex: authenticates from its home (`CODEX_HOME`, default `~/.codex`) —
+ *    no API key in the env.
+ *  - claude: has no shell (Read/Grep/Glob only); gets only Claude's own auth
+ *    variables (`CLAUDE_AUTH_ENV_VARS`), else its `~/.claude` credentials.
+ */
+export function buildSecondReviewEnv(
+  backend: SecondReviewerBackend,
+  source: Record<string, string | undefined>,
+  opts: { path: string },
+): Record<string, string> {
+  const env: Record<string, string> = { PATH: opts.path };
+  for (const k of BASE_ENV_ALLOWLIST) {
+    const v = source[k];
+    if (typeof v === "string" && v.length > 0) env[k] = v;
+  }
+  if (backend === "codex") {
+    const home = source.HOME && source.HOME.length > 0 ? source.HOME : homedir();
+    env.CODEX_HOME = source.CODEX_HOME && source.CODEX_HOME.length > 0 ? source.CODEX_HOME : join(home, ".codex");
+  } else {
+    for (const k of CLAUDE_AUTH_ENV_VARS) {
+      const v = source[k];
+      if (typeof v === "string" && v.trim().length > 0) env[k] = v;
+    }
+  }
+  return env;
+}
+
+/**
+ * First launchable model slug from the codex CLI's own models cache
+ * (`$CODEX_HOME/models_cache.json`). The config.toml default can be a model a
+ * ChatGPT account cannot launch (observed: `gpt-5.5` → HTTP 400), so `auto`
+ * and "codex, default model" pin this instead. `undefined` = unknown.
+ */
+export function readCodexDefaultModel(codexHome: string): string | undefined {
+  try {
+    const parsed = JSON.parse(readFileSync(join(codexHome, "models_cache.json"), "utf-8")) as { models?: unknown };
+    if (!Array.isArray(parsed.models)) return undefined;
+    for (const m of parsed.models) {
+      const slug = (m as { slug?: unknown })?.slug;
+      if (typeof slug === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(slug)) return slug;
+    }
+  } catch {
+    // no cache / unreadable
+  }
+  return undefined;
+}
+
 // ── Disk: is this checkpoint already second-reviewed? ───────────────────────
 
 /**
@@ -300,13 +365,14 @@ export interface HeadlessRunOptions {
   signal: AbortSignal;
 }
 
-/** Bus signal for the convergence tracker: `dispatched` = a second verdict is
- *  owed for this checkpoint; `missing` = it will not come (failed, timed out,
- *  limited, superseded). */
+/** Bus signal for the convergence tracker: `dispatched` / `queued` = a second
+ *  verdict is owed for this checkpoint (queued = waiting behind a running
+ *  review); `missing` = it will not come (failed, timed out, limited,
+ *  superseded, dropped from the queue). */
 export interface SecondReviewBusEvent {
   sessionGroupId: string;
   checkpointId: string;
-  status: "dispatched" | "missing";
+  status: "dispatched" | "queued" | "missing";
   backend: SecondReviewerBackend;
   model: string;
   reason?: string;
@@ -319,8 +385,12 @@ export interface SecondReviewerDeps {
   loadSystemPrompt(cwd: string): string;
   /** Absolute path of a CLI binary, or null when not installed. */
   resolveBinary(name: "claude" | "codex"): string | null;
-  /** Spawn env for the CLI (PATH enrichment etc.). */
-  buildEnv(binary: string): Record<string, string | undefined>;
+  /** Spawn env for the CLI — an allowlist ({@link buildSecondReviewEnv}), never the server's env. */
+  buildEnv(binary: string, backend: SecondReviewerBackend): Record<string, string | undefined>;
+  /** Model for a reviewer with none set (codex: {@link readCodexDefaultModel}). */
+  defaultModel?(backend: SecondReviewerBackend): string | undefined;
+  /** Process-wide cap on concurrent runs (default {@link DEFAULT_SECOND_REVIEW_MAX_CONCURRENCY}). */
+  maxConcurrency?: number;
   run(cmd: string[], opts: HeadlessRunOptions): Promise<HeadlessRunResult>;
   writeReview(path: string, payload: ObserverReviewPayload): void;
   /**
@@ -419,7 +489,7 @@ export class SecondReviewer {
       this.deps.emit({ ...this.busBase(base), status: "missing", reason: "usage_limited" });
       return { kind: "skipped", reason: "usage_limited" };
     }
-    if (run) {
+    if (run || this.running.size >= this.maxConcurrency()) {
       const prior = this.pending.get(sessionGroupId);
       if (prior) {
         this.logSkipped({ ...base, checkpointId: prior.payload.checkpoint_id, phase: prior.payload.phase }, "superseded", {
@@ -435,10 +505,14 @@ export class SecondReviewer {
         });
       }
       this.pending.set(sessionGroupId, { payload, ctx, reviewer });
+      // Owed from the moment it is queued: the observer's clean review of this
+      // checkpoint must wait for it (observer STOP2 on PR #372).
+      this.deps.emit({ ...this.busBase(base), status: "queued" });
       log.info("second-reviewer", "second review queued behind a running one", {
         event: "council.second_review.queued",
         ...base,
-        runningCheckpointId: run.checkpointId,
+        runningCheckpointId: run?.checkpointId ?? null,
+        runningGroups: this.running.size,
       });
       return { kind: "queued" };
     }
@@ -479,12 +553,27 @@ export class SecondReviewer {
     log.info("second-reviewer", "second review skipped", { event: "council.second_review.skipped", ...base, reason, ...extra });
   }
 
+  private maxConcurrency(): number {
+    const n = this.deps.maxConcurrency;
+    return typeof n === "number" && Number.isFinite(n) && n >= 1 ? Math.floor(n) : DEFAULT_SECOND_REVIEW_MAX_CONCURRENCY;
+  }
+
   private start(
     sessionGroupId: string,
     payload: CheckpointPayload,
     ctx: SecondReviewContext,
-    reviewer: ResolvedSecondReviewer,
+    resolved: ResolvedSecondReviewer,
   ): SecondReviewOutcome {
+    let reviewer = resolved;
+    if (!reviewer.model) {
+      let fallback: string | undefined;
+      try {
+        fallback = this.deps.defaultModel?.(reviewer.backend);
+      } catch {
+        fallback = undefined;
+      }
+      if (fallback) reviewer = { ...reviewer, model: fallback };
+    }
     const base = {
       sessionGroupId,
       checkpointId: payload.checkpoint_id,
@@ -537,18 +626,33 @@ export class SecondReviewer {
       .finally(() => {
         const cur = this.running.get(sessionGroupId);
         if (cur?.abort === abort) this.running.delete(sessionGroupId);
-        this.drain(sessionGroupId);
+        this.drain();
       });
     return { kind: "dispatched", done };
   }
 
-  private drain(sessionGroupId: string): void {
-    if (this.running.has(sessionGroupId)) return;
-    const next = this.pending.get(sessionGroupId);
-    if (!next) return;
-    this.pending.delete(sessionGroupId);
-    if (!this.deps.isGroupLive(sessionGroupId)) return;
-    this.onCheckpoint(sessionGroupId, next.payload, next.ctx);
+  /** Start queued checkpoints (oldest-queued group first) while capacity allows. */
+  private drain(): void {
+    for (const [sessionGroupId, next] of [...this.pending]) {
+      if (this.running.size >= this.maxConcurrency()) return;
+      if (this.running.has(sessionGroupId)) continue;
+      this.pending.delete(sessionGroupId);
+      if (!this.deps.isGroupLive(sessionGroupId)) continue;
+      const out = this.onCheckpoint(sessionGroupId, next.payload, next.ctx);
+      // The queued checkpoint was announced as owed. If it is now skipped
+      // without its own bus event (config switched off / out of scope, or
+      // already reviewed), release the owed verdict so nothing waits forever.
+      if (out.kind === "off" || (out.kind === "skipped" && (out.reason === "phase_out_of_scope" || out.reason === "already_reviewed" || out.reason === "in_flight"))) {
+        this.deps.emit({
+          sessionGroupId,
+          checkpointId: next.payload.checkpoint_id,
+          status: "missing",
+          backend: next.reviewer.backend,
+          model: modelLabel(next.reviewer),
+          reason: out.kind === "off" ? "disabled" : out.reason,
+        });
+      }
+    }
   }
 
   private fail(
@@ -591,7 +695,7 @@ export class SecondReviewer {
       });
       const res = await this.deps.run(inv.cmd, {
         cwd: ctx.cwd,
-        env: this.deps.buildEnv(binary),
+        env: this.deps.buildEnv(binary, reviewer.backend),
         stdin: inv.stdin,
         timeoutMs: this.deps.timeoutMs ?? DEFAULT_SECOND_REVIEW_TIMEOUT_MS,
         signal: abort.signal,
@@ -683,12 +787,19 @@ export function runHeadless(cmd: string[], opts: HeadlessRunOptions): Promise<He
     let timedOut = false;
     let aborted = false;
     let settled = false;
-    const child = nodeSpawn(cmd[0]!, cmd.slice(1), { cwd: opts.cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+    // Own process group (detached), so a timeout/abort kills the whole tree —
+    // codex's bwrap sandbox and its shells too, not only the direct child.
+    const child = nodeSpawn(cmd[0]!, cmd.slice(1), { cwd: opts.cwd, env, stdio: ["pipe", "pipe", "pipe"], detached: true });
     const kill = () => {
       try {
-        child.kill("SIGKILL");
+        if (child.pid !== undefined) process.kill(-child.pid, "SIGKILL");
+        else child.kill("SIGKILL");
       } catch {
-        // already gone
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // already gone
+        }
       }
     };
     const timer = setTimeout(() => {

@@ -18,7 +18,8 @@ import { companionBus } from "./event-bus.js";
 import { metricsCollector } from "./metrics-collector.js";
 import { log } from "./logger.js";
 import { findOwnReviewForCheckpointSync, findReviewForCheckpointSync, isSecondReviewFilename, OBSERVER_REVIEW_FILE_PATTERN } from "./review-watcher.js";
-import { findCrossReviewerDuplicates, type DedupFinding } from "./second-review-dedup.js";
+import { dedupViewOf, findCrossReviewerDuplicates, type DedupFinding } from "./second-review-dedup.js";
+import { readReviewVerdicts } from "./observer-review-verdicts.js";
 import { validateObserverFindings } from "./observer-grounding.js";
 import { applyDisputes, readDisputes } from "./observer-disputes.js";
 import type { CheckpointLineSnapshots } from "./observer-line-snapshots.js";
@@ -218,20 +219,42 @@ export function otherReviewerFindingsOnDisk(
       if ((other.reviewer_role === "second") !== wantSecond) continue;
       const mtime = statSync(join(dir, file)).mtimeMs;
       if (beforeMs !== undefined && (mtime > beforeMs || (mtime === beforeMs && wantSecond))) continue;
-      return other.findings.map((f, idx) => ({
-        id: deterministicFindingId({
+      // The earlier finding's FINAL verdict is the one frozen when it was
+      // grounded (`.council/state/<group>-review-verdicts.json`). Without a
+      // frozen verdict it is not known to block — so it can never absorb a
+      // blocking later finding (observer STOP1 on PR #372).
+      const frozen = readReviewVerdicts(cwd, sessionGroupId);
+      const verdicts = frozen.ok ? frozen.verdicts : new Map();
+      return other.findings.map((f, idx) => {
+        const id = deterministicFindingId({
           sessionGroupId,
           checkpointId: other.checkpoint_id,
           observerProvider: findingIdProvider(other),
           findingIndex: idx,
           evidencePath: f.evidence_path,
           claim: f.claim,
-        }),
-        severity: f.severity,
-        claim: f.claim,
-        evidence_path: f.evidence_path,
-        ...(f.evidence_lines ? { evidence_lines: f.evidence_lines } : {}),
-      }));
+        });
+        const v = verdicts.get(id);
+        if (!v) {
+          return {
+            id,
+            severity: f.severity === "STOP" ? "NOTE" as const : f.severity,
+            claim: f.claim,
+            evidence_path: f.evidence_path,
+            ...(f.evidence_lines ? { evidence_lines: f.evidence_lines } : {}),
+            blocking: false,
+          };
+        }
+        return dedupViewOf({
+          id,
+          severity: v.severity,
+          claim: f.claim,
+          evidence_path: f.evidence_path,
+          ...(f.evidence_lines ? { evidence_lines: f.evidence_lines } : {}),
+          ...(v.wasDowngraded ? { wasDowngraded: true } : {}),
+          ...(v.weakEvidence !== undefined ? { weakEvidence: v.weakEvidence } : {}),
+        });
+      });
     } catch {
       continue;
     }
@@ -1450,16 +1473,7 @@ export class CouncilCheckpointPipeline {
         };
         return out;
       });
-      // W15: fold near-identical claims the OTHER reviewer already raised on
-      // this checkpoint (the later finding points at the earlier one).
-      const earlier = otherReviewerFindingsOnDisk(entry.cwd, sessionGroupId, payload, reviewedAt);
-      if (earlier.length > 0) {
-        const dups = findCrossReviewerDuplicates(findings, earlier);
-        dups.forEach((dupOf, i) => {
-          const f = findings[i];
-          if (dupOf && f) findings[i] = { ...f, duplicateOf: dupOf };
-        });
-      }
+
       const downgrades: BrowserObserverDowngrade[] = result.downgrades.map((d) => {
         // Findings array is 1:1 with the input — `result.findings[d.index]`
         // is always defined here. Backend P2-6 (council review #6): drop
@@ -1516,6 +1530,19 @@ export class CouncilCheckpointPipeline {
       // B2b: a STOP that repeats a claim already dismissed in this group stays
       // a STOP in the log but never raises the banner again.
       this.markDisputedStops(sessionGroupId, entry.cwd, findings, { checkpointId: payload.checkpoint_id, log: true });
+
+      // W15: fold near-identical claims the OTHER reviewer already raised on
+      // this checkpoint (the later finding points at the earlier one). Both
+      // sides are compared on their FINAL verdicts (grounding, wake-echo
+      // downgrade and disputes applied above).
+      const earlier = otherReviewerFindingsOnDisk(entry.cwd, sessionGroupId, payload, reviewedAt);
+      if (earlier.length > 0) {
+        const dups = findCrossReviewerDuplicates(findings.map(dedupViewOf), earlier);
+        dups.forEach((dupOf, i) => {
+          const f = findings[i];
+          if (dupOf && f) findings[i] = { ...f, duplicateOf: dupOf };
+        });
+      }
 
       // Willison P1-4 item 3 (council review #2): emit the structured
       // invocation log entry so the forensic re-run guarantee

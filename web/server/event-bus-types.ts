@@ -409,7 +409,7 @@ export interface CompanionEventMap {
 
   /**
    * W15 multi-model review — second-opinion bookkeeping for the convergence
-   * tracker. `dispatched`: a second verdict is owed for this checkpoint;
+   * tracker. `dispatched` / `queued`: a second verdict is owed for this checkpoint;
    * `missing`: it will not come (failed, timed out, usage-limited, superseded,
    * CLI missing). The verdict itself arrives as a `group:review` with
    * `reviewerRole: "second"`.
@@ -417,7 +417,7 @@ export interface CompanionEventMap {
   "group:second-review": {
     sessionGroupId: string;
     checkpointId: string;
-    status: "dispatched" | "missing";
+    status: "dispatched" | "queued" | "missing";
     backend: "claude" | "codex";
     model: string;
     reason?: string;

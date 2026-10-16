@@ -28,7 +28,7 @@ import { deleteCouncilWakeSentinel } from "./council-wake-sentinel.js";
 import { collectCheckpointCoverageGaps, type CheckpointCoverageGap } from "./checkpoint-coverage.js";
 import { buildBrowserGroupRecord } from "./browser-group-record.js";
 import { deterministicFindingId, findingIdProvider, type CouncilWatcherEntry } from "./council-checkpoint-pipeline.js";
-import { findCrossReviewerDuplicates, type DedupFinding } from "./second-review-dedup.js";
+import { dedupViewOf, findCrossReviewerDuplicates, type DedupFinding } from "./second-review-dedup.js";
 import { applyFrozenVerdict, readReviewVerdicts, type FrozenVerdict } from "./observer-review-verdicts.js";
 import {
   OBSERVER_REVIEW_FILENAME_PATTERN,
@@ -1547,17 +1547,6 @@ export class CouncilLifecycle {
         modifiedFiles,
         lineFacts: this.deps.lineSnapshots.providerFor(sessionGroupId, payload.checkpoint_id, watcher.cwd),
       });
-      const ids = result.findings.map((f, idx) => deterministicFindingId({
-        sessionGroupId,
-        checkpointId: payload.checkpoint_id,
-        observerProvider: findingIdProvider(payload),
-        findingIndex: idx,
-        evidencePath: f.evidence_path,
-        claim: f.claim,
-      }));
-      const dups = earlier.length > 0
-        ? findCrossReviewerDuplicates(result.findings.map((f, idx) => ({ ...f, id: ids[idx]! })), earlier)
-        : [];
       result.findings.forEach((f, idx) => {
         const id = deterministicFindingId({
           sessionGroupId,
@@ -1582,18 +1571,12 @@ export class CouncilLifecycle {
           ...(isSecond
             ? { reviewer: { role: "second" as const, provider: payload.observer_provider, model: payload.observer_model } }
             : {}),
-          ...(dups[idx] ? { duplicateOf: dups[idx] } : {}),
         };
-        contributed.push({
-          id,
-          severity: f.severity,
-          claim: f.claim,
-          evidence_path: f.evidence_path,
-          ...(f.evidence_lines ? { evidence_lines: f.evidence_lines } : {}),
-        });
         const verdict = frozen.get(id);
         if (!verdict && payload.findings[idx]?.severity === "STOP" && !unfrozenRawStopIds.includes(id)) unfrozenRawStopIds.push(id);
         const out = verdict ? applyFrozenVerdict(regrounded, verdict) : regrounded;
+        // W15: dedupe on the FINAL verdict (frozen or re-grounded), never raw.
+        contributed.push(dedupViewOf(out));
         const seenAt = findingIndexById.get(id);
         if (seenAt === undefined) {
           findingIndexById.set(id, allFindings.length);
@@ -1607,6 +1590,12 @@ export class CouncilLifecycle {
           allDowngrades.push({ id, reason: out.downgradeReason });
         }
       });
+      if (earlier.length > 0) {
+        findCrossReviewerDuplicates(contributed, earlier).forEach((dupOf, i) => {
+          const at = dupOf ? findingIndexById.get(contributed[i]!.id) : undefined;
+          if (dupOf && at !== undefined) allFindings[at] = { ...allFindings[at]!, duplicateOf: dupOf };
+        });
+      }
       if (isSecond) roles.second = contributed;
       else roles.observer = contributed;
     }

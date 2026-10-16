@@ -45,7 +45,9 @@ import { ObserverReadLedger } from "./observer-read-ledger.js";
 import { ObserverProbeTracker } from "./observer-probe.js";
 import {
   SecondReviewer,
+  buildSecondReviewEnv,
   makeTmpScratchFile,
+  readCodexDefaultModel,
   prependBinaryDir,
   readScratchFile,
   runHeadless,
@@ -376,7 +378,15 @@ export class SessionOrchestrator {
     getConfig: (gid, cwd) => this.secondReviewerConfigFor(gid, cwd),
     loadSystemPrompt: (cwd) => resolveObserverPromptForSpawn({ cwd }).artifact.body,
     resolveBinary: (name) => resolveBinary(name),
-    buildEnv: (binary) => ({ ...process.env, CLAUDECODE: undefined, PATH: prependBinaryDir(binary, getEnrichedPath()) }),
+    // Allowlisted env only — never the server's own (tokens, API keys).
+    buildEnv: (binary, backend) => buildSecondReviewEnv(backend, process.env, { path: prependBinaryDir(binary, getEnrichedPath()) }),
+    defaultModel: (backend) =>
+      backend === "codex"
+        ? readCodexDefaultModel(buildSecondReviewEnv("codex", process.env, { path: "" }).CODEX_HOME!)
+        : undefined,
+    ...(Number(process.env.COMPANION_SECOND_REVIEW_MAX_CONCURRENCY) >= 1
+      ? { maxConcurrency: Number(process.env.COMPANION_SECOND_REVIEW_MAX_CONCURRENCY) }
+      : {}),
     run: runHeadless,
     writeReview: (path, payload) => writeAtomicJson(path, payload),
     ingestReview: (gid, payload, reviewedAt) => this.checkpointPipeline.handleCouncilReview(gid, payload, reviewedAt),
