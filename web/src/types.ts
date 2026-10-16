@@ -66,6 +66,13 @@ export interface ChatMessage {
    */
   streamStatus?: "complete" | "interrupted" | "errored";
   /**
+   * Turn boundary: set on the last user/assistant message in the feed when
+   * the turn's `result` frame arrives (live or replayed from
+   * message_history). The observer feed uses it to bind a liveness probe to
+   * its own turn (`utils/observer-probe.ts`).
+   */
+  turnEnd?: boolean;
+  /**
    * Rendering hint for system messages built from an errored result frame.
    * "error" — a real execution error (red). "resume-interrupted" — the
    * bookkeeping frame closing a turn cut off by a restart (`--resume`) or a

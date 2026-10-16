@@ -678,6 +678,23 @@ function mergeAssistantMessage(previous: ChatMessage, incoming: ChatMessage): Ch
   };
 }
 
+/**
+ * Flag the last user/assistant message as the end of a turn (the `result`
+ * frame closed it). System notices appended by the result handler itself are
+ * skipped. Returns the same array when there is nothing to mark.
+ */
+function markTurnEnd(messages: ChatMessage[]): ChatMessage[] {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role === "system" || m.isStreaming) continue;
+    if (m.turnEnd) return messages;
+    const next = [...messages];
+    next[i] = { ...m, turnEnd: true };
+    return next;
+  }
+  return messages;
+}
+
 function upsertAssistantMessage(sessionId: string, incoming: ChatMessage) {
   const store = useStore.getState();
   const existing = store.messages.get(sessionId) || [];
@@ -1132,6 +1149,12 @@ function handleParsedMessage(
       // Flush processed tool IDs at end of turn — deduplication only needed
       // within a single turn. Preserves memory in long-running sessions.
       processedToolUseIds.delete(sessionId);
+
+      {
+        const current = useStore.getState().messages.get(sessionId) || [];
+        const marked = markTurnEnd(current);
+        if (marked !== current) store.setMessages(sessionId, marked);
+      }
 
       const r = data.data;
 
@@ -1600,6 +1623,8 @@ function handleParsedMessage(
           }
         } else if (histMsg.type === "result") {
           const r = histMsg.data;
+          const marked = markTurnEnd(chatMessages);
+          if (marked !== chatMessages) chatMessages.splice(0, chatMessages.length, ...marked);
           const resultError = resultErrorMessage(r, `hist-error-${i}`, Date.now());
           if (resultError) {
             chatMessages.push(resultError);
