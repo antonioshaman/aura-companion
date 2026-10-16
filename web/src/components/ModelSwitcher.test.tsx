@@ -19,7 +19,7 @@ interface MockStoreState {
   sdkSessions: { sessionId: string; model?: string; backendType?: string; cwd: string }[];
   cliConnected: Map<string, boolean>;
   cliReconnecting: Map<string, boolean>;
-  sessions: Map<string, { model?: string; backend_type?: string }>;
+  sessions: Map<string, { model?: string; backend_type?: string; last_context_tokens?: number; last_turn_completed_at?: number }>;
   pendingCodexModelSwitches: Map<string, { requestedModel: string; requestedAt: number }>;
   // PLAN-aura-dynamic-model-list Task 11: ModelSwitcher subscribes to the
   // settings-slice cache. Empty default → fallback to static models (the
@@ -769,5 +769,37 @@ describe("ModelSwitcher", () => {
       const results = await axe(container);
       expect(results).toHaveNoViolations();
     });
+  });
+});
+
+// W7(b) — right before a model switch, the open picker tells the user the
+// switch rebuilds the prompt cache (≈ last known context). Informational only:
+// selecting a model still works exactly as before.
+describe("ModelSwitcher cache-rewrite hint", () => {
+  beforeEach(() => {
+    mockSendToSession.mockClear();
+  });
+
+  it("shows the rewrite estimate in the open dropdown for a large context, and selection still switches", () => {
+    resetStore({
+      sessions: new Map([["s1", { model: DEFAULT_MODEL.value, last_context_tokens: 90_000, last_turn_completed_at: Date.now() }]]),
+    });
+    render(<ModelSwitcher sessionId="s1" />);
+    expect(screen.queryByTestId("cache-rewrite-hint")).toBeNull(); // closed → no hint
+    fireEvent.click(screen.getByLabelText("Switch model"));
+    const hint = screen.getByTestId("cache-rewrite-hint");
+    expect(hint).toHaveTextContent("Смена модели сбросит кеш: ≈90.0k токенов будут записаны заново");
+    // The hint sits outside the listbox so screen readers don't iterate it as an option.
+    expect(within(screen.getByRole("listbox")).queryByTestId("cache-rewrite-hint")).toBeNull();
+    const other = CLAUDE_MODELS.find((m) => m.value !== DEFAULT_MODEL.value)!;
+    fireEvent.click(screen.getByText(other.label));
+    expect(mockSendToSession).toHaveBeenCalledWith("s1", { type: "set_model", model: other.value });
+  });
+
+  it("no hint for a small context", () => {
+    resetStore({ sessions: new Map([["s1", { model: DEFAULT_MODEL.value, last_context_tokens: 3_000 }]]) });
+    render(<ModelSwitcher sessionId="s1" />);
+    fireEvent.click(screen.getByLabelText("Switch model"));
+    expect(screen.queryByTestId("cache-rewrite-hint")).toBeNull();
   });
 });

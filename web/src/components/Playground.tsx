@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { PermissionBanner } from "./PermissionBanner.js";
 import { MessageBubble } from "./MessageBubble.js";
+import { CacheRewriteHint } from "./CacheRewriteHint.js";
 import {
   ToolBlock,
   getToolIcon,
@@ -2047,6 +2048,14 @@ export function Playground() {
           <div className="space-y-4">
             <Card label="Rate limits with token breakdown">
               <CodexPlaygroundDemo />
+            </Card>
+            {/* W7(b) — prompt-cache hint; reads last_context_tokens /
+                last_turn_completed_at seeded on the demo session above. */}
+            <Card label="Cache-rewrite hint — composing after a 95 min pause">
+              <CacheRewriteHint sessionId={CODEX_DEMO_SESSION} reason="idle" />
+            </Card>
+            <Card label="Cache-rewrite hint — inside the model picker">
+              <CacheRewriteHint sessionId={CODEX_DEMO_SESSION} reason="model-switch" className="border-t border-cc-separator pt-2" />
             </Card>
           </div>
         </Section>
@@ -4510,6 +4519,8 @@ function CodexPlaygroundDemo() {
         reasoningOutputTokens: 8_900,
         modelContextWindow: 200_000,
       },
+      last_context_tokens: 118_000,
+      last_turn_completed_at: Date.now() - 95 * 60_000,
     });
 
     return () => {

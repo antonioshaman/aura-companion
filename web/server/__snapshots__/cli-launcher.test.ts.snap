@@ -1,0 +1,57 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`prompt-cache prefix stability of the claude spawn argv > KB auto-prime opt-in (all layers on): the auto-prime directive is static and pinned 1`] = `
+[
+  "/usr/bin/claude",
+  "--print",
+  "--output-format",
+  "stream-json",
+  "--input-format",
+  "stream-json",
+  "--include-partial-messages",
+  "--verbose",
+  "--model",
+  "claude-opus-4-8",
+  "--permission-mode",
+  "acceptEdits",
+  "--append-system-prompt",
+  "<prompt sha256:08c52d152ab89fee len:261>",
+]
+`;
+
+exports[`prompt-cache prefix stability of the claude spawn argv > knowledge layer off + KB auto-prime: the appended directive is static and pinned 1`] = `
+[
+  "/usr/bin/claude",
+  "--print",
+  "--output-format",
+  "stream-json",
+  "--input-format",
+  "stream-json",
+  "--include-partial-messages",
+  "--verbose",
+  "--model",
+  "claude-opus-4-8",
+  "--permission-mode",
+  "acceptEdits",
+  "--append-system-prompt",
+  "<prompt sha256:9ece5dc1130cd897 len:244>",
+  "--disallowedTools",
+  "Read(./.agents/knowledge/**)",
+  "--disallowedTools",
+  "Edit(./.agents/knowledge/**)",
+  "--disallowedTools",
+  "Write(./.agents/knowledge/**)",
+  "--disallowedTools",
+  "Bash(bun run --cwd web kb:*)",
+  "--disallowedTools",
+  "Skill(prime)",
+  "--disallowedTools",
+  "Skill(learn)",
+  "--disallowedTools",
+  "Skill(self-reflect)",
+  "--disallowedTools",
+  "Skill(review-with-kb)",
+  "--disallowedTools",
+  "Skill(evolve)",
+]
+`;
