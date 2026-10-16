@@ -29,6 +29,14 @@ crash budget, single-flight with a concurrent browser relaunch). Sessions restor
 `starting` (WS transport) stay with the reconnection watchdog. User-stopped sessions are
 never marked, so they stay down.
 
+**Crash-loop guard.** The auto-relaunch budget lives in memory and resets per boot, so after
+repeated non-graceful deaths (OOM-kill under `Restart=always`) boot resume would bring the
+whole fleet back on every respawn. `boot-crash-guard.ts` keeps `boot-history.json` in the
+sessions dir: graceful shutdown sets `cleanShutdown`; a boot without it is a crash boot.
+Once 3 crash boots land within 10 minutes, boot resume is skipped
+(`boot_resume.skipped_crash_loop`) and sessions come back when a browser opens them.
+Graceful restarts (deploys) never count. A missing or corrupt file fails open.
+
 **Process identity** (`process-identity.ts`) anchors on the `--sdk-url <sessionId>` argv
 token for WS sessions. stdio argv carries no sessionId at all, so the spawn-time sidecar's
 `argvSha256` is the equivalent anchor — without it a healthy stdio CLI reads as `mismatch`

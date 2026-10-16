@@ -2356,6 +2356,86 @@ describe("SessionOrchestrator", () => {
       }
     });
 
+    it("invariant: a user kill cancels a pending boot resume and is never marked at shutdown", async () => {
+      // NOTE on #362 review: killSession must mark stoppedByUser AND cancel the
+      // pending keepalive / boot-resume timer BEFORE any persist, so the
+      // shutdown mark (markLiveForBootResume) can never resurrect it.
+      vi.useFakeTimers();
+      try {
+        const rec = { sessionId: "s1", state: "connected", cliSessionId: "c1", cwd: "/tmp", createdAt: 0 } as any;
+        deps.launcher.getSession.mockImplementation((id: string) => (id === "s1" ? rec : undefined));
+        deps.launcher.kill.mockImplementation(async () => {
+          rec.state = "exited";
+          return true;
+        });
+        const recovery = (orchestrator as any).recovery;
+        recovery.scheduleBootResume(["s1"]);
+        expect([...recovery.keepaliveSessionIds()]).toEqual(["s1"]);
+
+        await orchestrator.killSession("s1");
+        expect([...recovery.keepaliveSessionIds()]).toEqual([]);
+        expect(recovery.pendingRelaunchSessionIds()).not.toContain("s1");
+
+        orchestrator.markLiveSessionsForBootResume();
+        const [extra, exclude] = deps.launcher.markLiveForBootResume.mock.calls[0];
+        expect([...extra]).not.toContain("s1");
+        expect(exclude("s1")).toBe(true);
+
+        // And the cancelled boot timer never relaunches it.
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(deps.launcher.relaunch).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("both halves of a council pair resume 1.5 s apart and the group stays active (never degraded)", async () => {
+      // NOTE on #362 review (Q3): at boot the pair is reconciled `active` with
+      // both halves `exited`. Boot resume relaunches each half separately; the
+      // handshake of a resumed half on an active pair must not move the group.
+      const fs = await import("node:fs");
+      const os = await import("node:os");
+      const path = await import("node:path");
+      const ws = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "council-boot-resume-")));
+      vi.useFakeTimers();
+      try {
+        const recs: Record<string, any> = {
+          "orch-b": { sessionId: "orch-b", sessionGroupId: "grp_boot", sessionGroupRole: "orchestrator",
+            backendType: "claude", cwd: ws, archived: false, createdAt: 1, state: "exited", cliSessionId: "c1" },
+          "obs-b": { sessionId: "obs-b", sessionGroupId: "grp_boot", sessionGroupRole: "observer",
+            backendType: "codex", cwd: ws, archived: false, createdAt: 2, state: "exited", cliSessionId: "t1" },
+        };
+        deps.launcher.listSessions.mockReturnValue(Object.values(recs));
+        deps.launcher.getSession.mockImplementation((id: string) => recs[id]);
+        deps.launcher.takeBootResumeCandidates.mockReturnValue(["orch-b", "obs-b"]);
+        const relaunchedAt: Record<string, number> = {};
+        deps.launcher.relaunch.mockImplementation(async (id: string) => {
+          relaunchedAt[id] = Date.now();
+          recs[id].state = "starting";
+          companionBus.emit("session:cli-id-received", { sessionId: id, cliSessionId: `cli-${id}` });
+          recs[id].state = "connected";
+          return { ok: true };
+        });
+
+        orchestrator.initialize();
+        const coord = (orchestrator as any).coordinator;
+        expect(coord.get("grp_boot")?.status).toBe("active");
+
+        const statuses: string[] = [];
+        for (let i = 0; i < 30; i++) {
+          await vi.advanceTimersByTimeAsync(500);
+          statuses.push(coord.get("grp_boot")?.status);
+        }
+        expect(Object.keys(relaunchedAt).sort()).toEqual(["obs-b", "orch-b"]);
+        expect(relaunchedAt["obs-b"] - relaunchedAt["orch-b"]).toBe(1_500);
+        expect(new Set(statuses)).toEqual(new Set(["active"]));
+        (orchestrator as any).stopCouncilWatchers("grp_boot");
+      } finally {
+        vi.useRealTimers();
+        fs.rmSync(ws, { recursive: true, force: true });
+      }
+    });
+
     it("markLiveSessionsForBootResume passes pending keepalives and excludes user-stopped sessions", () => {
       // A crashed CLI whose keepalive timer is pending at shutdown dies with
       // the old process — it must be marked so the next boot resumes it. A
