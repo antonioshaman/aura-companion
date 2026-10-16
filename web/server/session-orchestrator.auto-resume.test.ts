@@ -199,6 +199,7 @@ function makeDeps(sessions: Map<string, FakeInfo>, alive: Set<string>, filePath:
     setModel: vi.fn(),
     markConnected: vi.fn(),
     getStartingSessions: vi.fn(() => []),
+    takeBootResumeCandidates: vi.fn(() => [] as string[]),
   } as any;
   const wsBridge = {
     closeSession: vi.fn(),
