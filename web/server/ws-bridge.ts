@@ -9,7 +9,7 @@ import type {
 } from "./session-types.js";
 import type { SessionStore } from "./session-store.js";
 import type { IBackendAdapter, ServerSyntheticSendOutcome } from "./backend-adapter.js";
-import { ClaudeAdapter } from "./claude-adapter.js";
+import { ClaudeAdapter, INIT_PROBE_LEGACY_GRACE_MS } from "./claude-adapter.js";
 import type { CliTransport } from "./cli-transport.js";
 import { WebSocketCliTransport } from "./cli-transport.js";
 import type { IdleTimerProbe } from "./idle-timer-manager.js";
@@ -142,13 +142,12 @@ export const AURA_INIT_PROBE_MARKER =
   "[Aura Companion init probe: technical reconnect marker, not a request. Ignore only this line; answer any user message that follows normally.]";
 
 /**
- * Milliseconds to wait after sending the probe `user` frame before
- * dispatching the interrupt. Empirically ~50-100 ms is enough on healthy
- * stdio for the CLI to read the frame and emit `system.init`; 200 ms is
- * chosen for headroom against slower boxes without giving the CLI enough
- * time to complete an API round-trip.
+ * Upper bound on the delay between the CLI's `system.init` and the probe
+ * interrupt on CLIs without `command_lifecycle` frames (the legacy trigger).
+ * On current CLIs the interrupt is sent the moment the CLI reports the probe
+ * turn as started. Kept as the exported name the replay tests pin against.
  */
-export const AURA_INIT_PROBE_INTERRUPT_DELAY_MS = 200;
+export const AURA_INIT_PROBE_INTERRUPT_DELAY_MS = INIT_PROBE_LEGACY_GRACE_MS;
 
 export class WsBridge {
   private static readonly PROCESSED_CLIENT_MSG_ID_LIMIT = 1000;
@@ -1918,7 +1917,9 @@ export class WsBridge {
    *      the system prompt but does not emit init in response).
    *   2. If `session.pendingMessages` is EMPTY (fresh session, no user
    *      turn queued): send a probe `user` frame carrying a distinctive
-   *      marker, immediately followed by `control_request{interrupt}`.
+   *      marker, then `control_request{interrupt}` — sent only once the
+   *      CLI reports the probe as the running turn, never while a cron /
+   *      real prompt it started first is running (ClaudeAdapter.sendInitProbe).
    *      The user frame is what CLI wants to see for init emit; the
    *      interrupt aborts before an API call generates a phantom reply.
    *      Trade-off: the probe adds one placeholder user turn to the
@@ -1971,41 +1972,15 @@ export class WsBridge {
   }
 
   /**
-   * Send a probe `user` frame + `control_request{interrupt}` on stdin to
-   * force the CLI to emit its `system.init` frame while suppressing any
-   * assistant reply. Extracted for readability + testability; see the
-   * rationale in {@link sendInitializeKickoff}.
-   *
-   * The interrupt delay is 200 ms — empirically enough for the CLI to
-   * read the user frame and emit `system.init` on healthy stdio
-   * (verified ~50-100 ms in probes), but before an API round-trip
-   * completes. A shorter delay risks the interrupt racing ahead of
-   * init emit; a longer delay lets more assistant tokens leak.
+   * Send the probe `user` frame; the adapter interrupts it once the CLI
+   * shows the running turn IS the probe (never a cron / real prompt the
+   * resumed CLI started first). See {@link ClaudeAdapter.sendInitProbe}.
    */
   private sendInitProbeAndInterrupt(sessionId: string): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;
     if (!(session.backendAdapter instanceof ClaudeAdapter)) return;
-    const { randomUUID } = require("node:crypto") as typeof import("node:crypto");
-    const probeMsg = JSON.stringify({
-      type: "user",
-      message: { role: "user", content: AURA_INIT_PROBE_MARKER },
-    });
-    session.backendAdapter.sendRawNDJSON(probeMsg);
-    // Delay the interrupt so CLI has time to read the probe frame and
-    // emit `system.init`. If the session is torn down before the timer
-    // fires, the guard below drops the interrupt harmlessly.
-    setTimeout(() => {
-      const s = this.sessions.get(sessionId);
-      if (!s) return;
-      if (!(s.backendAdapter instanceof ClaudeAdapter)) return;
-      const interruptMsg = JSON.stringify({
-        type: "control_request",
-        request_id: randomUUID(),
-        request: { subtype: "interrupt" },
-      });
-      s.backendAdapter.sendRawNDJSON(interruptMsg);
-    }, AURA_INIT_PROBE_INTERRUPT_DELAY_MS);
+    session.backendAdapter.sendInitProbe(AURA_INIT_PROBE_MARKER);
   }
 
   /** Send an initialize control request with context appended to the system prompt.

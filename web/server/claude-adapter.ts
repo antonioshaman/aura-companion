@@ -32,6 +32,7 @@ import type {
   CLIStreamlinedTextMessage,
   CLIStreamlinedToolUseSummaryMessage,
   CLIPromptSuggestionMessage,
+  CLICommandLifecycleMessage,
   CLICompactBoundaryMessage,
   CLITaskNotificationMessage,
   CLIFilesPersistedMessage,
@@ -57,6 +58,29 @@ import { isToolUseDeniedForSynthetic, denialMessageForSynthetic } from "./auto-p
 import { resolveModelAvailability } from "./model-availability.js";
 import { SilentStdioWatchdog } from "./silent-stdio-watchdog.js";
 import { classifyFallbackReason, nextModelInChain } from "./model-fallback-chain.js";
+
+/**
+ * Legacy-CLI grace between `system.init` and the probe interrupt (CLIs that
+ * emit no `command_lifecycle`). Short: the API round-trip the interrupt must
+ * beat takes seconds; healthy CLIs emit init within ~100 ms of the probe.
+ */
+export const INIT_PROBE_LEGACY_GRACE_MS = 200;
+/** A probe the CLI never reports on is forgotten after this long. */
+export const INIT_PROBE_EXPIRY_MS = 120_000;
+
+interface InitProbeState {
+  uuid: string;
+  /** The exact NDJSON written — lets sendRaw tell the probe from a real prompt. */
+  frame: string;
+  /** The CLI reported `command_lifecycle started` for the probe. */
+  started: boolean;
+  /** Another command is (or will be) running: never interrupt. */
+  foreignWork: boolean;
+  /** `cancel_async_message` for the probe already written. */
+  cancelSent: boolean;
+  legacyTimer: ReturnType<typeof setTimeout> | null;
+  expiry: ReturnType<typeof setTimeout>;
+}
 
 // --- Constants ----------------------------------------------------------------
 
@@ -355,6 +379,18 @@ export class ClaudeAdapter implements IBackendAdapter {
    */
   private lastCliFrameReceivedMs: number = 0;
   /**
+   * The init probe this process is still waiting to resolve — see
+   * {@link sendInitProbe}. `null` once it was interrupted, cancelled,
+   * finished, or the transport changed.
+   */
+  private initProbe: InitProbeState | null = null;
+  /**
+   * Whether the CURRENT CLI process emitted any `command_lifecycle` frame.
+   * CLIs older than 2.1.278 never do; for them the probe falls back to the
+   * init-frame trigger (see {@link onInitForProbe}). Reset per transport.
+   */
+  private lifecycleSeenThisProcess = false;
+  /**
    * Whether the NEXT / current spawn was launched with `--resume`. Set by the
    * bridge via {@link setResumeExpected} before `attachTransport`, from the
    * launcher's actual argv (`args.includes("--resume")`). Selects the longer
@@ -533,6 +569,9 @@ export class ClaudeAdapter implements IBackendAdapter {
     // a broken stdio pipe leaves it frozen while the CLI's own jsonl
     // continues to grow — that gap IS the drift the detector catches.
     this.lastCliFrameReceivedMs = Date.now();
+    // A probe belongs to the process it was written to.
+    this.clearInitProbe();
+    this.lifecycleSeenThisProcess = false;
     // Arm the init-frame health canary. On a working CLI the
     // `system.init` frame lands within a few seconds and
     // `handleSystemInit` clears this timer. On a regressed CLI (see
@@ -646,6 +685,7 @@ export class ClaudeAdapter implements IBackendAdapter {
    */
   handleTransportClose(): void {
     this.transport = null;
+    this.clearInitProbe();
     // The CLI's background tasks die with it.
     deliveryMetrics.clearRunningTasks(this.sessionId);
     this.observerTurnState = "idle";
@@ -1075,6 +1115,14 @@ export class ClaudeAdapter implements IBackendAdapter {
         this.handlePromptSuggestion(msg as CLIPromptSuggestionMessage);
         break;
 
+      case "command_lifecycle":
+        // Queue lifecycle of uuid-stamped commands (CLI 2.1.278+). No browser
+        // mapping; consumed by the init-probe gate. Previously unrouted, so
+        // every reconnect that met a CLI-scheduled (cron) prompt surfaced a
+        // spurious "protocol drift" error in the chat.
+        this.handleCommandLifecycle(msg as CLICommandLifecycleMessage);
+        break;
+
       default:
         reportProtocolDrift(
           this.protocolDriftSeen,
@@ -1218,6 +1266,7 @@ export class ClaudeAdapter implements IBackendAdapter {
     // anything else so a downstream throw doesn't leave the timer
     // to fire spuriously.
     this.disarmInitFrameCanary();
+    this.onInitForProbe();
 
     // Emit session metadata so the bridge can update session state
     this.sessionMetaCb?.({
@@ -1617,6 +1666,164 @@ export class ClaudeAdapter implements IBackendAdapter {
     this.sendToBackend(ndjson);
   }
 
+  // -- Init probe (reconnect kickoff) ------------------------------------------
+
+  /**
+   * Write the init-probe `user` frame and interrupt it — but only once the
+   * CLI shows that the turn it is running IS the probe. See
+   * `WsBridge.sendInitializeKickoff` for why the probe exists at all.
+   *
+   * The interrupt used to go out on a blind 200 ms timer. A `--resume`d CLI
+   * that owns a durable cron job dequeues that job's prompt on startup, BEFORE
+   * it reads our probe from stdin; the timer's interrupt then cancelled the
+   * cron turn and the probe ran as a real turn instead ("No response
+   * requested."). Prod 40f03a1e, 2026-10-15 20:31:16 and 2026-10-16 07:02:41:
+   * jsonl `queue-operation enqueue <cron prompt>` → probe enqueued → our
+   * interrupt → `[Request interrupted by user]` on the cron prompt.
+   *
+   * Now the probe carries a client `uuid`, so CLI 2.1.278+ reports it with
+   * `command_lifecycle` frames ({@link handleCommandLifecycle}):
+   *  - probe `started` while nothing else runs → interrupt (the old intent);
+   *  - another command queued/started first (cron, server prompt) → never
+   *    interrupt; drop the still-queued probe with `cancel_async_message`;
+   *  - a real prompt written to stdin after the probe → never interrupt.
+   * A CLI without lifecycle frames falls back to "interrupt after system.init"
+   * ({@link onInitForProbe}).
+   *
+   * @returns the probe's uuid.
+   */
+  sendInitProbe(markerText: string): string {
+    this.clearInitProbe();
+    const uuid = randomUUID();
+    const frame = JSON.stringify({
+      type: "user",
+      message: { role: "user", content: markerText },
+      uuid,
+    });
+    const expiry = setTimeout(() => this.clearInitProbe(), INIT_PROBE_EXPIRY_MS);
+    (expiry as { unref?: () => void }).unref?.();
+    this.initProbe = { uuid, frame, started: false, foreignWork: false, cancelSent: false, legacyTimer: null, expiry };
+    this.sendToBackend(frame);
+    return uuid;
+  }
+
+  /** Test/diagnostic view of the pending probe. */
+  getPendingInitProbeUuid(): string | null {
+    return this.initProbe?.uuid ?? null;
+  }
+
+  private clearInitProbe(): void {
+    const p = this.initProbe;
+    if (!p) return;
+    if (p.legacyTimer) clearTimeout(p.legacyTimer);
+    clearTimeout(p.expiry);
+    this.initProbe = null;
+  }
+
+  /** A real prompt (browser, auto-proceed, council wake) reached stdin. */
+  private noteRealPromptSent(): void {
+    const p = this.initProbe;
+    if (!p || p.foreignWork) return;
+    p.foreignWork = true;
+    // Probe not running yet: drop it from the CLI queue so it cannot run as
+    // its own turn ahead of / around the real prompt. Already running: leave
+    // it — the real prompt may be folded into the probe's turn, and the
+    // marker asks the model to answer what follows.
+    if (!p.started) this.cancelQueuedProbe(p);
+  }
+
+  /**
+   * `cancel_async_message` the probe — only on a CLI that has shown it speaks
+   * the lifecycle protocol (else the request is unknown to it). A CLI that
+   * reports the probe `queued` later gets the cancel then (handleCommandLifecycle).
+   */
+  private cancelQueuedProbe(p: InitProbeState): void {
+    if (p.cancelSent || !this.lifecycleSeenThisProcess) return;
+    p.cancelSent = true;
+    this.sendToBackend(JSON.stringify({
+      type: "control_request",
+      request_id: randomUUID(),
+      request: { subtype: "cancel_async_message", message_uuid: p.uuid },
+    }));
+  }
+
+  private interruptProbe(p: InitProbeState, trigger: "probe_started" | "init_legacy"): void {
+    log.info("claude-adapter", "init probe interrupted", {
+      event: "init_probe.interrupt",
+      sessionId: this.sessionId,
+      trigger,
+    });
+    this.sendToBackend(JSON.stringify({
+      type: "control_request",
+      request_id: randomUUID(),
+      request: { subtype: "interrupt" },
+    }));
+    this.clearInitProbe();
+  }
+
+  private handleCommandLifecycle(msg: CLICommandLifecycleMessage): void {
+    this.lifecycleSeenThisProcess = true;
+    const p = this.initProbe;
+    if (!p || typeof msg.command_uuid !== "string") return;
+    if (p.legacyTimer) {
+      clearTimeout(p.legacyTimer);
+      p.legacyTimer = null;
+    }
+    if (msg.command_uuid === p.uuid) {
+      if (msg.state === "started") {
+        p.started = true;
+        if (!p.foreignWork) {
+          this.interruptProbe(p, "probe_started");
+          return;
+        }
+        log.info("claude-adapter", "init probe left running — a real turn shares it", {
+          event: "init_probe.interrupt_skipped",
+          sessionId: this.sessionId,
+          reason: "foreign_work",
+        });
+        this.clearInitProbe();
+        return;
+      }
+      if (msg.state === "queued") {
+        if (p.foreignWork) this.cancelQueuedProbe(p);
+        return;
+      }
+      this.clearInitProbe(); // completed/cancelled/discarded/refused
+      return;
+    }
+    // Someone else's command (a CLI-scheduled cron prompt, another client).
+    if ((msg.state === "queued" || msg.state === "started") && !p.foreignWork) {
+      p.foreignWork = true;
+      log.info("claude-adapter", "init probe will not interrupt — CLI runs another command", {
+        event: "init_probe.interrupt_skipped",
+        sessionId: this.sessionId,
+        reason: "foreign_command",
+        commandState: msg.state,
+      });
+      if (!p.started) this.cancelQueuedProbe(p);
+    }
+  }
+
+  /**
+   * Legacy path: a CLI that emits no `command_lifecycle` frames (< 2.1.278)
+   * cannot tell us which command its turn runs. On its `system.init`, wait a
+   * short grace for a lifecycle frame (a modern CLI writes one ahead of init);
+   * none → interrupt as before, unless a real prompt went out meanwhile.
+   */
+  private onInitForProbe(): void {
+    const p = this.initProbe;
+    if (!p || p.started || p.legacyTimer || this.lifecycleSeenThisProcess) return;
+    p.legacyTimer = setTimeout(() => {
+      p.legacyTimer = null;
+      if (this.initProbe !== p || p.started || this.lifecycleSeenThisProcess) return;
+      if (p.foreignWork) {
+        this.clearInitProbe();
+        return;
+      }
+      this.interruptProbe(p, "init_legacy");
+    }, INIT_PROBE_LEGACY_GRACE_MS);
+  }
+
   /**
    * Council Mode auto-wake seam: synthesise a `user` NDJSON frame on the
    * server's own initiative and push it to the observer's CLI socket.
@@ -1721,6 +1928,7 @@ export class ClaudeAdapter implements IBackendAdapter {
         this.sessionId, "out", frame, "cli", "claude", "", "server:auto-proceed",
       );
       this.transport.send(frame + "\n");
+      this.noteRealPromptSent();
     } catch (err) {
       return {
         kind: "failed",
@@ -1800,6 +2008,7 @@ export class ClaudeAdapter implements IBackendAdapter {
         this.sessionId, "out", frame, "cli", "claude", "", "server:council-wake",
       );
       this.transport.send(frame + "\n");
+      this.noteRealPromptSent();
     } catch (err) {
       return {
         kind: "failed",
@@ -2107,6 +2316,9 @@ export class ClaudeAdapter implements IBackendAdapter {
    * Records the outgoing message. Assumes the transport is non-null.
    */
   private sendRaw(ndjson: string): void {
+    if (ndjson.startsWith('{"type":"user"') && !(this.initProbe && ndjson === this.initProbe.frame)) {
+      this.noteRealPromptSent();
+    }
     // Record raw outgoing CLI message
     this.recorder?.record(
       this.sessionId, "out", ndjson, "cli", "claude", "",
