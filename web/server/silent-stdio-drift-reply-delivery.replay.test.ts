@@ -243,4 +243,32 @@ describe("drift recovery delivers the reply the CLI wrote only to its jsonl (W1,
     );
     expect(history).toHaveLength(stalledReply.length);
   });
+
+  it("exactly once, other direction: a late stdout flush of a recovered record is not re-delivered (observer WARN, PR #366)", async () => {
+    // The killed CLI's stdout pipe may still drain after the recovery ran
+    // (or a reconnect replays it): the same assistant frame then arrives on
+    // the LIVE path. It must neither reach the browser again nor be appended
+    // to the history a second time.
+    const { browser, cli } = replayToDetection();
+    const { recovery } = makeRecovery();
+    recovery.driftDetectorTick();
+    await vi.advanceTimersByTimeAsync(1);
+    const replyIds = new Set(stalledReply.map((r) => r.message.id as string));
+    expect(assistantFramesTo(browser, replyIds)).toHaveLength(stalledReply.length);
+
+    browser.send.mockClear();
+    for (const r of stalledReply) {
+      bridge.handleCLIMessage(cli, JSON.stringify({ type: "assistant", message: r.message, parent_tool_use_id: null, session_id: CLI_SID, uuid: r.uuid }) + "\n");
+    }
+    expect(assistantFramesTo(browser, replyIds)).toHaveLength(0);
+    const history = bridge.getSession(SESSION_ID)!.messageHistory.filter(
+      (m) => m.type === "assistant" && replyIds.has((m as any).message.id),
+    );
+    expect(history).toHaveLength(stalledReply.length);
+
+    // A NEW frame after that still flows normally (the guard is not a mute).
+    const fresh = { ...stalledReply.at(-1)!.message, id: "msg_after_recovery", content: [{ type: "text", text: "next turn" }] };
+    bridge.handleCLIMessage(cli, JSON.stringify({ type: "assistant", message: fresh, parent_tool_use_id: null, session_id: CLI_SID, uuid: "u-fresh" }) + "\n");
+    expect(sentFrames(browser).filter((j) => j.type === "assistant" && j.message?.id === "msg_after_recovery")).toHaveLength(1);
+  });
 });

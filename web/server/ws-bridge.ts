@@ -903,6 +903,7 @@ export class WsBridge {
       session.browserSockets.clear();
     }
     this.sessions.delete(sessionId);
+    this.recoveredDeliveries.delete(sessionId);
     this.autoNamingAttempted.delete(sessionId);
     this.store?.remove(sessionId);
   }
@@ -978,6 +979,7 @@ export class WsBridge {
     session.browserSockets.clear();
 
     this.sessions.delete(sessionId);
+    this.recoveredDeliveries.delete(sessionId);
     this.autoNamingAttempted.delete(sessionId);
     this.store?.remove(sessionId);
   }
@@ -1018,6 +1020,16 @@ export class WsBridge {
 
     // ── onBrowserMessage — messages from backend → browsers ──────────────
     adapter.onBrowserMessage((msg) => {
+      // Drift recovery (W1) may already have delivered this exact frame from
+      // the CLI's jsonl; a late stdout flush of the killed CLI (or a replay)
+      // must not deliver it a second time. One-shot per recovered record.
+      if (msg.type === "assistant" && this.consumeRecoveredDelivery(session.id, msg.message as unknown as Record<string, unknown>)) {
+        log.info("ws-bridge", "dropped a live assistant frame the drift recovery already delivered", {
+          event: "silent_stdio_drift.late_frame_deduped",
+          sessionId: session.id,
+        });
+        return;
+      }
       // Task 11.7 — idle-kill clock split. Synthetic auto-proceed turns
       // do NOT advance the clock; only user-driven CLI activity does.
       this.noteCliActivity(session);
@@ -1998,6 +2010,40 @@ export class WsBridge {
   }
 
   /**
+   * Delivery keys ({@link assistantDeliveryKey}) of assistant records the
+   * drift recovery delivered from the jsonl, per session. The live path
+   * consumes a key when the same frame arrives late on stdout, so each record
+   * reaches the browser and the history exactly once in BOTH directions
+   * (live → recovery is covered by the history check in
+   * {@link deliverRecoveredAssistantRecords}). Bounded per session.
+   */
+  private readonly recoveredDeliveries = new Map<string, Set<string>>();
+  private static readonly RECOVERED_DELIVERY_LIMIT = 500;
+
+  private rememberRecoveredDelivery(sessionId: string, key: string): void {
+    let keys = this.recoveredDeliveries.get(sessionId);
+    if (!keys) {
+      keys = new Set();
+      this.recoveredDeliveries.set(sessionId, keys);
+    }
+    keys.add(key);
+    while (keys.size > WsBridge.RECOVERED_DELIVERY_LIMIT) {
+      const oldest = keys.values().next().value as string;
+      keys.delete(oldest);
+    }
+  }
+
+  /** True (and forgets the key) if the drift recovery already delivered this frame. */
+  private consumeRecoveredDelivery(sessionId: string, message: Record<string, unknown>): boolean {
+    const keys = this.recoveredDeliveries.get(sessionId);
+    if (!keys || keys.size === 0) return false;
+    const key = assistantDeliveryKey(message);
+    if (!keys.delete(key)) return false;
+    if (keys.size === 0) this.recoveredDeliveries.delete(sessionId);
+    return true;
+  }
+
+  /**
    * Silent-stdio drift recovery (W1, prod 40f03a1e 2026-10-15 15:03): the
    * CLI wrote its whole reply to its jsonl (tool call + answer + end_turn)
    * but none of it reached stdout; the recovery kills it and relaunches with
@@ -2032,6 +2078,7 @@ export class WsBridge {
         continue;
       }
       seen.add(key);
+      this.rememberRecoveredDelivery(session.id, key);
       const msg = {
         type: "assistant",
         message: rec.message,
