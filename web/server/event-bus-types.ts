@@ -346,6 +346,27 @@ export interface CompanionEventMap {
     sessionId: string;
     /** Best-effort transport / RPC failure string for logs and degraded copy. */
     error: string;
+    /**
+     * W14: why the wake failed. `silent` = the backend accepted the wake but
+     * then delivered no frame for {@link OBSERVER_WAKE_SILENCE_MS} (even after
+     * the codex fresh-thread retry). The orchestrator degrades the pair with
+     * `wake_produced_no_review` and auto-heals (relaunches) the observer.
+     * Absent = the send itself failed (`wake_send_failed`).
+     */
+    reason?: "send_failed" | "silent";
+  };
+
+  /**
+   * W14: the codex observer's wake turn went silent, so the adapter
+   * interrupted it and re-sent the SAME wake on a fresh thread. The
+   * orchestrator re-arms the wake→review deadline for the in-flight
+   * checkpoint so the retry gets a full review window.
+   */
+  "observer:wake-retried": {
+    sessionId: string;
+    reason: "silent";
+    previousThreadId: string | null;
+    threadId: string;
   };
 
   /**

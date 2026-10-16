@@ -27,6 +27,8 @@ import { log } from "./logger.js";
 import { companionBus } from "./event-bus.js";
 import { resolveCodexUsageLimit } from "./usage-limit-parse.js";
 import { CodexTurnUsageAccumulator } from "./codex-turn-usage.js";
+import { createObserverWakeSilenceWatchdog } from "./observer-wake-silence.js";
+import type { SilentStdioWatchdog } from "./silent-stdio-watchdog.js";
 
 // ─── Codex JSON-RPC Types ─────────────────────────────────────────────────────
 
@@ -482,6 +484,22 @@ export class CodexAdapter implements IBackendAdapter {
   /** Backstop timer that force-releases a stranded in-flight wake slot. */
   private observerWakeWatchdog: ReturnType<typeof setTimeout> | null = null;
   /**
+   * W14: fires when an in-flight wake turn delivers NO inbound frame for
+   * `OBSERVER_WAKE_SILENCE_MS` (see `observer-wake-silence.ts`). First
+   * verdict → interrupt + re-send the same wake on a fresh thread; second →
+   * release the slot and report `observer:wake-failed` (reason `silent`) so
+   * the orchestrator degrades + auto-heals the observer.
+   */
+  private readonly observerWakeSilence: SilentStdioWatchdog = createObserverWakeSilenceWatchdog(
+    ({ sinceMs }) => this.handleObserverWakeSilent(sinceMs),
+  );
+  /** W14: text of the in-flight wake, kept for the one fresh-thread retry. */
+  private observerWakeContent: string | null = null;
+  /** W14: the in-flight wake already used its fresh-thread retry. */
+  private observerWakeSilentRetried = false;
+  /** W14: bumped per wake so an async retry can tell its wake was replaced. */
+  private observerWakeGeneration = 0;
+  /**
    * #12: idle-kill activity hook, wired by the bridge at attach time.
    * `sendUserFrameFromServer` calls it unconditionally so a checkpoint-driven
    * wake counts as group liveness even when the send is gated `busy`
@@ -914,6 +932,19 @@ export class CodexAdapter implements IBackendAdapter {
     }
 
     this.observerTurnState = "in-flight";
+    this.observerWakeGeneration++;
+    this.observerWakeContent = content;
+    this.observerWakeSilentRetried = false;
+    this.sendObserverWakeTurn(content);
+    return { kind: "sent" };
+  }
+
+  /**
+   * Send (or, for the W14 silent retry, re-send) the in-flight wake as a
+   * `turn/start` on the CURRENT thread. Arms both the completion backstop
+   * and the silence watchdog.
+   */
+  private sendObserverWakeTurn(content: string): void {
     this.observerWakeTurnId = null;
     this.observerPendingCompletedTurnId = null;
     this.armObserverWakeWatchdog();
@@ -921,6 +952,8 @@ export class CodexAdapter implements IBackendAdapter {
     void this.startTurn(input, {
       origin: "server:council-wake",
       onSuccess: (turnId) => {
+        // The turn/start reply is itself an inbound frame.
+        this.observerWakeSilence.onFrame();
         this.currentTurnId = turnId;
         this.observerWakeTurnId = turnId;
         // Same-chunk race: a turn/completed for this id may already have been
@@ -941,7 +974,117 @@ export class CodexAdapter implements IBackendAdapter {
         error: err instanceof Error ? err.message : String(err),
       });
     });
-    return { kind: "sent" };
+  }
+
+  /**
+   * W14: the in-flight wake turn produced no inbound frame for
+   * `OBSERVER_WAKE_SILENCE_MS`. Prod 2026-10-16 12:01: turn/start replied
+   * `inProgress`, then nothing for 13 min although the app-server finished
+   * the turn in 27 s. First verdict per wake → {@link retryObserverWakeOnFreshThread};
+   * second (or no retry possible) → {@link failSilentObserverWake}.
+   */
+  private handleObserverWakeSilent(sinceMs: number): void {
+    if (this.observerTurnState !== "in-flight") return;
+    const retry = !this.observerWakeSilentRetried && this.observerWakeContent !== null;
+    log.warn("codex-adapter", "observer wake turn silent — no frame from codex", {
+      event: "council.observer_wake_silent",
+      sessionId: this.sessionId,
+      threadId: this.threadId,
+      turnId: this.observerWakeTurnId,
+      sinceMs,
+      action: retry ? "interrupt_and_retry_fresh_thread" : "give_up",
+    });
+    if (!retry) {
+      this.failSilentObserverWake(sinceMs, "silent after fresh-thread retry");
+      return;
+    }
+    this.observerWakeSilentRetried = true;
+    void this.retryObserverWakeOnFreshThread(this.observerWakeGeneration, this.observerWakeContent!, sinceMs);
+  }
+
+  /**
+   * W14 (a): interrupt the silent turn (best effort) and re-send the SAME wake
+   * on a FRESH thread — a long-lived resumed thread is the cheapest thing to
+   * discard. If the transport itself is deaf, `thread/start` times out and we
+   * fall through to {@link failSilentObserverWake}, whose degrade triggers the
+   * orchestrator's observer auto-heal (relaunch = fresh proxy + app-server).
+   */
+  private async retryObserverWakeOnFreshThread(generation: number, content: string, sinceMs: number): Promise<void> {
+    const stillOurs = () => this.observerTurnState === "in-flight" && this.observerWakeGeneration === generation;
+    const previousThreadId = this.threadId;
+    const silentTurnId = this.observerWakeTurnId ?? this.currentTurnId;
+    // The retry RPCs carry their own timeouts; pause the silence verdict.
+    this.observerWakeSilence.disarm();
+    // Detach the silent turn from the wake slot BEFORE interrupting it: its
+    // late `turn/completed` (status interrupted) must not resolve the slot
+    // and abort the retry. With the id cleared it is only stashed, and the
+    // retry's own turn/start reply never matches it.
+    this.observerWakeTurnId = null;
+    if (previousThreadId && silentTurnId) {
+      try {
+        await this.transport.call("turn/interrupt", { threadId: previousThreadId, turnId: silentTurnId });
+      } catch (err) {
+        log.warn("codex-adapter", "silent observer wake: turn/interrupt failed", {
+          event: "council.observer_wake_silent.interrupt_failed",
+          sessionId: this.sessionId,
+          threadId: previousThreadId,
+          turnId: silentTurnId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    if (!stillOurs()) return;
+    let freshThreadId: string;
+    try {
+      const fresh = await this.transport.call("thread/start", {
+        model: this.options.model,
+        cwd: this.getExecutionCwd(),
+        approvalPolicy: this.mapApprovalPolicy(this.currentPermissionMode),
+        sandbox: this.options.sandbox || this.mapSandboxPolicy(this.currentPermissionMode),
+        ...this.threadInstructionParams(),
+      }) as { thread: { id: string } };
+      freshThreadId = fresh.thread.id;
+    } catch (err) {
+      if (!stillOurs()) return;
+      this.failSilentObserverWake(
+        sinceMs,
+        `fresh thread/start failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return;
+    }
+    if (!stillOurs()) return;
+    this.threadId = freshThreadId;
+    // A later relaunch must resume the fresh thread, not the silent one.
+    this.options.threadId = freshThreadId;
+    this.sessionMetaCb?.({ cliSessionId: freshThreadId, model: this.options.model, cwd: this.options.cwd });
+    log.warn("codex-adapter", "silent observer wake re-sent on a fresh thread", {
+      event: "council.observer_wake_silent.retried",
+      sessionId: this.sessionId,
+      previousThreadId,
+      threadId: freshThreadId,
+    });
+    companionBus.emit("observer:wake-retried", {
+      sessionId: this.sessionId,
+      reason: "silent",
+      previousThreadId,
+      threadId: freshThreadId,
+    });
+    this.sendObserverWakeTurn(content);
+  }
+
+  /** Council observer turn-state (see `IBackendAdapter.getObserverTurnState`). */
+  getObserverTurnState(): "idle" | "in-flight" {
+    return this.observerTurnState;
+  }
+
+  /** W14: give up on a silent wake — release the slot and report it. */
+  private failSilentObserverWake(sinceMs: number, detail: string): void {
+    this.resolveObserverTurn({ emitDrain: false });
+    companionBus.emit("observer:wake-failed", {
+      sessionId: this.sessionId,
+      error: `observer wake silent for ${Math.round(sinceMs / 1000)}s (${detail})`,
+      reason: "silent",
+    });
   }
 
   /**
@@ -971,6 +1114,7 @@ export class CodexAdapter implements IBackendAdapter {
 
   private armObserverWakeWatchdog(): void {
     this.clearObserverWakeWatchdog();
+    this.observerWakeSilence.arm("observer_wake");
     const timer = setTimeout(() => {
       log.warn("codex-adapter", "observer wake turn never terminated — force-releasing slot", {
         event: "council.observer_wake_completion_watchdog",
@@ -984,6 +1128,7 @@ export class CodexAdapter implements IBackendAdapter {
   }
 
   private clearObserverWakeWatchdog(): void {
+    this.observerWakeSilence.disarm();
     if (this.observerWakeWatchdog) {
       clearTimeout(this.observerWakeWatchdog);
       this.observerWakeWatchdog = null;
@@ -1844,6 +1989,8 @@ export class CodexAdapter implements IBackendAdapter {
   // ── Incoming notification handlers ──────────────────────────────────────
 
   private handleNotification(method: string, params: Record<string, unknown>): void {
+    // W14: any inbound frame proves the wake turn's stream is alive.
+    this.observerWakeSilence.onFrame();
     // Debug: log all significant notifications to understand Codex event flow
     if (method.startsWith("item/") || method.startsWith("turn/") || method.startsWith("thread/")) {
       const item = params.item as { type?: string; id?: string } | undefined;
@@ -2097,6 +2244,7 @@ export class CodexAdapter implements IBackendAdapter {
   // ── Incoming request handlers (approval requests) ───────────────────────
 
   private handleRequest(method: string, id: number, params: Record<string, unknown>): void {
+    this.observerWakeSilence.onFrame();
     try {
       switch (method) {
         case "item/commandExecution/requestApproval":
