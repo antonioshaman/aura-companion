@@ -171,6 +171,15 @@ export class CouncilObserverScheduler {
    * forever. Cleared on group teardown so it never outlives the group.
    */
   private readonly catchupWakeTimeouts = new Map<string, number>();
+  /**
+   * W10b: `protocol.frame_dropped` dedup for the catch-up scan. The EC-13
+   * failsafe re-scans every 5 min, so a non-checkpoint JSON parked in
+   * `.council/checkpoints/` (e.g. a hand-written `council-review-final.json`
+   * summary) logged the same WARN forever. Keyed by absolute path → mtimeMs:
+   * a file is reported once per content version (EC-4 spirit — an edited
+   * file with a new mtime is a distinct payload and is reported again).
+   */
+  private readonly droppedFrameLogged = new Map<string, number>();
 
   /**
    * Council Mode restart-recovery scan (EC-12 — fs.watch is event-only,
@@ -266,6 +275,16 @@ export class CouncilObserverScheduler {
             parserField = field;
           });
           if (!payload) {
+            const droppedPath = join(checkpointsDir, file);
+            let droppedMtime = -1;
+            try {
+              droppedMtime = statSync(droppedPath).mtimeMs;
+            } catch {
+              /* vanished mid-scan — still report once */
+            }
+            if (this.droppedFrameLogged.get(droppedPath) === droppedMtime) continue;
+            if (this.droppedFrameLogged.size >= 1_000) this.droppedFrameLogged.clear();
+            this.droppedFrameLogged.set(droppedPath, droppedMtime);
             log.warn("session-orchestrator", "protocol.frame_dropped", {
               event: "protocol.frame_dropped",
               backend: "council",
@@ -274,6 +293,7 @@ export class CouncilObserverScheduler {
               field: parserField,
               file,
               context: "restart-catchup-scan",
+              note: "reported once per file version; later scans skip it silently",
             });
             continue;
           }
