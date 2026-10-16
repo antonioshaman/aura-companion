@@ -703,8 +703,8 @@ export type ModelRuntimeFailure = "retired" | "blocked" | "overloaded";
 
 /**
  * The chat line for an errored result frame, or null when the frame carries no
- * error text. The `--resume` bookkeeping frame for a turn a restart cut off
- * (`isResumeInterruptedResult`) becomes a muted "resume-interrupted" note
+ * error text. The bookkeeping frame closing a turn cut off by a restart or a
+ * user Stop (`isResumeInterruptedResult`) becomes a muted "resume-interrupted" note
  * instead of a red error; everything else stays a real "error". Shared by the
  * live and history-replay paths so both render a frame identically.
  */

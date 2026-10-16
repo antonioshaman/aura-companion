@@ -10,7 +10,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync, realpathSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   parseIsolationMode,
@@ -178,6 +178,20 @@ describe("systemd service detection", () => {
     // A real project dir under a home is NOT broad.
     expect(isBroadServiceDir("/home/alice/myrepo")).toBe(false);
     expect(isBroadServiceDir("/srv/app")).toBe(false);
+  });
+
+  it("isBroadServiceDir is platform-aware: macOS home roots and realpath aliases count as broad", () => {
+    // Regression for the macos-latest CI failure: on macOS `/home` is an
+    // autofs mount whose realpath is `/System/Volumes/Data/home`, so a
+    // realpath-only comparison returned false for the literal `/home`.
+    // Both the lexical and the resolved form must be recognised, and the
+    // macOS home layout (`/Users/<user>`) is as broad as `/home/<user>`.
+    expect(isBroadServiceDir("/System/Volumes/Data/home")).toBe(true);
+    expect(isBroadServiceDir("/Users")).toBe(true);
+    expect(isBroadServiceDir("/Users/alice")).toBe(true);
+    expect(isBroadServiceDir("/Users/alice/myrepo")).toBe(false);
+    // The running user's home is broad whatever the platform layout.
+    expect(isBroadServiceDir(homedir())).toBe(true);
   });
 });
 

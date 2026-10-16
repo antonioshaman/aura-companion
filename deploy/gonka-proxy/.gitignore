@@ -1,0 +1,5 @@
+# Never commit filled-in secret env files. Only .env.example is tracked.
+shim.env
+litellm.env
+*.env
+!.env.example
