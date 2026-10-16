@@ -1185,6 +1185,23 @@ describe("SessionRecovery.scheduleBootResume (W2)", () => {
     expect(launcher.relaunch).not.toHaveBeenCalled();
   });
 
+  it("a user stop or archive DURING the auto-relaunch grace pause wins — the session stays down", async () => {
+    // Q1 of the #362 review: the boot timer passes its guards, then
+    // handleAutoRelaunch waits RELAUNCH_GRACE_MS. A user kill (stoppedByUser)
+    // or an archive inside that pause must still prevent the spawn.
+    const sessions = new Map([
+      ["stopped-mid-grace", info("stopped-mid-grace", { cliSessionId: "c1" })],
+      ["archived-mid-grace", info("archived-mid-grace", { cliSessionId: "c2" })],
+    ]);
+    const { recovery, launcher } = makeRecovery(sessions);
+    recovery.scheduleBootResume(["stopped-mid-grace", "archived-mid-grace"]);
+    await vi.advanceTimersByTimeAsync(2 * BOOT_RESUME_STAGGER_MS + 1);
+    recovery.markStoppedByUser("stopped-mid-grace");
+    sessions.get("archived-mid-grace")!.archived = true;
+    await vi.advanceTimersByTimeAsync(RELAUNCH_GRACE_MS + RELAUNCH_COOLDOWN_MS);
+    expect(launcher.relaunch).not.toHaveBeenCalled();
+  });
+
   it("a session whose crash budget is spent is not relaunched again", async () => {
     const sessions = new Map([["s1", info("s1")]]);
     const { recovery, launcher } = makeRecovery(sessions);

@@ -532,6 +532,22 @@ export class SessionRecovery {
   }
 
   /**
+   * W2: every session an automatic relaunch is still owed to — a pending
+   * keepalive / boot-resume timer, a `handleAutoRelaunch` inside its grace
+   * pause (the timer is already gone, state still `exited`), or a
+   * `relaunchOnce` in flight. Graceful shutdown marks all of them
+   * `resumeOnBoot`; otherwise a second restart landing in the grace pause
+   * would drop the session for good.
+   */
+  pendingRelaunchSessionIds(): string[] {
+    return Array.from(new Set([
+      ...this.keepaliveTimers.keys(),
+      ...this.relaunchingSet,
+      ...this.relaunchInFlight.keys(),
+    ]));
+  }
+
+  /**
    * Silent-stdio drift detector — recurring tick. Idempotent: a
    * second call while already armed is a no-op. Complements the
    * adapter-side `SilentStdioWatchdog` (arm-on-user-message, 300s):
@@ -859,6 +875,19 @@ export class SessionRecovery {
       return;
     }
     const freshInfo = this.launcher.getSession(sessionId);
+    // W2 review Q1: the guards at the top ran BEFORE the grace pause. A user
+    // stop or an archive that landed inside it must still win — else the
+    // pause spawns a CLI for a session the user just stopped. (A deleted
+    // session has no record and ends in `unknown_session` below.)
+    if (freshInfo?.archived || this.stoppedByUser.has(sessionId)) {
+      log.info("orchestrator", "auto-relaunch skipped: stopped or archived during grace", {
+        event: "session.relaunch.skipped_during_grace",
+        sessionId,
+        reason: freshInfo?.archived ? "archived" : "stopped_by_user",
+      });
+      this.relaunchingSet.delete(sessionId);
+      return;
+    }
     // Only check PID liveness if the session is NOT already "exited".
     // After idle-kill or explicit kill(), the PID field stays set but the
     // process is dead. If the kernel recycles the PID to a different process,

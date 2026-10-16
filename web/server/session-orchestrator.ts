@@ -794,8 +794,9 @@ export class SessionOrchestrator {
   /**
    * W2: graceful-shutdown hook — run BEFORE the council teardown kills the
    * pairs. Persists a boot-resume mark on every live session plus every
-   * crashed one whose keepalive relaunch is still pending (that timer dies
-   * with this process). User-stopped sessions are excluded, so they stay
+   * one an automatic relaunch is still owed to — pending keepalive / boot
+   * resume timer, auto-relaunch grace pause, relaunch in flight (all of
+   * which die with this process). User-stopped sessions are excluded, so they stay
    * down after the restart; idle-killed / archived ones are already `exited`
    * with no keepalive pending (keepalive skips intentional kills), so they
    * are not marked either. `intentionalKills` itself is NOT consulted: its
@@ -804,7 +805,7 @@ export class SessionOrchestrator {
    */
   markLiveSessionsForBootResume(): number {
     return this.launcher.markLiveForBootResume(
-      Array.from(this.recovery.keepaliveSessionIds()),
+      this.recovery.pendingRelaunchSessionIds(),
       (id) => this.recovery.isStoppedByUser(id),
     );
   }

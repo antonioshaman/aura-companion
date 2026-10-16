@@ -2327,6 +2327,35 @@ describe("SessionOrchestrator", () => {
       }
     });
 
+    it("a second graceful restart during the boot-resume grace pause still marks the session (council STOP on #362)", async () => {
+      // Boot resume fired → timer left keepaliveTimers → handleAutoRelaunch
+      // sits in its RELAUNCH_GRACE_MS pause with the session still `exited`.
+      // A restart landing now must still mark it `resumeOnBoot`, or the next
+      // boot drops it for good. Same for a relaunch already in flight.
+      vi.useFakeTimers();
+      try {
+        deps.launcher.getSession.mockImplementation((id: string) => ({ sessionId: id, state: "exited", cliSessionId: "c", cwd: "/tmp", createdAt: 0 }));
+        let finishRelaunch: (r: { ok: boolean }) => void = () => {};
+        deps.launcher.relaunch.mockImplementation(() => new Promise((r) => { finishRelaunch = r; }));
+        const recovery = (orchestrator as any).recovery;
+
+        recovery.scheduleBootResume(["in-grace"]);
+        await vi.advanceTimersByTimeAsync(2_000); // past the 1.5 s stagger, inside the 10 s grace
+        expect([...recovery.keepaliveSessionIds()]).toEqual([]);
+        const inFlight = recovery.relaunchOnce("in-flight", "autoheal", {});
+
+        orchestrator.markLiveSessionsForBootResume();
+        const [extra] = deps.launcher.markLiveForBootResume.mock.calls[0];
+        expect([...extra].sort()).toEqual(["in-flight", "in-grace"]);
+
+        finishRelaunch({ ok: true });
+        await inFlight;
+        await vi.advanceTimersByTimeAsync(30_000);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it("markLiveSessionsForBootResume passes pending keepalives and excludes user-stopped sessions", () => {
       // A crashed CLI whose keepalive timer is pending at shutdown dies with
       // the old process — it must be marked so the next boot resumes it. A
