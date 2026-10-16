@@ -338,6 +338,39 @@ describe("ObserverPanel — state pills (5 explicit states)", () => {
     expect(await axe(container)).toHaveNoViolations();
   });
 
+  // Observer rigor (2026-10-16): a rubber-stamp `[]` (prod checkpoint 148)
+  // is "не проверено" and not counted; a never-reviewed checkpoint (prod
+  // grp_1af4cd plan-147) is listed as "без ревью".
+  it("lists unverified and never-reviewed checkpoints and the unverified not-counted note", async () => {
+    seedGroup();
+    act(() => {
+      useStore.getState().setCheckpointCoverage(GROUP.sessionGroupId, [
+        { checkpointId: "council-plan-147", phase: "council-plan", sequence: 147, kind: "unreviewed", reason: "degraded" },
+        { checkpointId: "council-review-148", phase: "council-review", sequence: 148, kind: "unverified" },
+      ]);
+      useStore.getState().applyConvergence({
+        sessionGroupId: GROUP.sessionGroupId,
+        cycleNumber: 0,
+        convergenceThreshold: 3,
+        convergenceState: "in-progress",
+        notCountedReason: "unverified_clean",
+      });
+    });
+    const { container } = render(<ObserverPanel sessionId={SESSION} />);
+    const section = screen.getByTestId("checkpoint-coverage");
+    expect(section).toHaveTextContent("без ревью");
+    expect(section).toHaveTextContent("не проверено");
+    expect(screen.getByTestId("convergence-not-counted")).toHaveTextContent("not counted: unverified clean review");
+    const { axe } = await import("vitest-axe");
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  it("shows no coverage section when every checkpoint is covered", () => {
+    seedGroup();
+    render(<ObserverPanel sessionId={SESSION} />);
+    expect(screen.queryByTestId("checkpoint-coverage")).toBeNull();
+  });
+
   it("shows 'no changed files' for an uncounted spawn/empty checkpoint review", () => {
     seedGroup();
     act(() => {

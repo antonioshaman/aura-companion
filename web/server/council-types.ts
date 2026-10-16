@@ -174,6 +174,15 @@ export interface ObserverReviewPayload {
    * and a stale prompt that still parses against the old one.
    */
   observer_wake_payload_version_echo?: number;
+  /**
+   * Observer rigor (2026-10-16): HOST verdict on an empty review whose turn
+   * never read or searched anything beyond the checkpoint's prose artifact
+   * (`observer-reply.ts`). "unverified" = no findings, but nothing was
+   * checked either — the UI says "не проверено", never "clean", and
+   * convergence does not count it. Absent = the host makes no claim.
+   * An observer-written file may carry it too: it can only weaken a review.
+   */
+  host_verification?: "unverified";
 }
 
 // ── Validators ───────────────────────────────────────────────────────────────
@@ -409,6 +418,12 @@ export function parseObserverReviewPayload(
     }
     wakeEcho = v;
   }
+  // Observer rigor: optional host verdict. Present-but-unknown is rejected
+  // (EC-5: a typo must not silently read as "verified").
+  if (parsed.host_verification !== undefined && parsed.host_verification !== "unverified") {
+    onDrop?.("invalid-field", "host_verification");
+    return null;
+  }
   return {
     schema_version: COUNCIL_SCHEMA_VERSION,
     checkpoint_id: parsed.checkpoint_id,
@@ -420,6 +435,7 @@ export function parseObserverReviewPayload(
     observer_cli_version: parsed.observer_cli_version,
     findings,
     ...(wakeEcho !== undefined ? { observer_wake_payload_version_echo: wakeEcho } : {}),
+    ...(parsed.host_verification === "unverified" ? { host_verification: "unverified" as const } : {}),
   };
 }
 

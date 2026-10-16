@@ -18,6 +18,7 @@
 import { readFileSync, statSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute, resolve as resolvePath, sep } from "node:path";
+import { CLAIM_LANGUAGE_NAMES, type ClaimLanguage } from "./observer-language.js";
 import {
   OBSERVER_WAKE_MAX_BYTES,
   OBSERVER_WAKE_MAX_PATHS_PER_SECTION,
@@ -620,8 +621,11 @@ export function buildObserverWakePayload(args: {
    *  per-wake directive stays transport-explicit by naming the reply
    *  channel instead (Willison Council 2026-06-13 P1). */
   observerProvider: string;
+  /** Language the observer must write `claim` text in (`observer-language.ts`).
+   *  Absent = the system prompt's default (English). */
+  claimLanguage?: ClaimLanguage;
 }): ObserverWakeBuildResult {
-  const { checkpoint, manifest, workspaceRoot, observerProvider } = args;
+  const { checkpoint, manifest, workspaceRoot, observerProvider, claimLanguage } = args;
 
   // Per-section length caps — bounded independently. Char-level
   // validation (CR/LF/NUL/fence-triplet) happens first; realpath
@@ -733,12 +737,18 @@ export function buildObserverWakePayload(args: {
   const textBody = [
     `# Council Checkpoint — ${checkpoint.phase}`,
     "",
-    "A new checkpoint has arrived. Read only the workspace-relative paths listed under `delta` and `carried` in the manifest below. Files listed under `dropped` are explicitly out of scope this cycle.",
+    "A new checkpoint has arrived. Review the workspace-relative paths listed under `delta` and `carried` in the manifest below. Files listed under `dropped` are explicitly out of scope this cycle. When a listed file says work is done, already implemented or verified, or cites code (`file:line`), open that code and check it before you reply `[]`.",
     "",
     "```json",
     jsonBlock,
     "```",
     "",
+    ...(claimLanguage
+      ? [
+        `Write every \`claim\` in ${CLAIM_LANGUAGE_NAMES[claimLanguage]} — the language the user works in. Keep file paths, identifiers, code, commands and the severity / confidence values verbatim.`,
+        "",
+      ]
+      : []),
     "Reply with your findings as a JSON array, as your final message and nothing else (no prose, no code fences) — `[]` when there is nothing to report. Do not write or edit any file: the server records, attributes and delivers your review. Begin.",
     "",
   ].join("\n");

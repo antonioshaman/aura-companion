@@ -536,6 +536,23 @@ describe("reviewNotCountedReason (CONV-HONEST)", () => {
   });
 });
 
+// Observer rigor (2026-10-16): prod checkpoint 148 — the observer read only
+// the prose closure note (which IS a changed file) and replied `[]`; that
+// rubber stamp advanced the streak. The host now stamps such a review
+// "unverified" and it never counts.
+describe("reviewNotCountedReason — unverified clean review (observer rigor)", () => {
+  it("an empty review the host marked unverified → unverified_clean", () => {
+    expect(reviewNotCountedReason(1, 1, [], "unverified")).toBe("unverified_clean");
+  });
+  it("without the host verdict the same review still counts", () => {
+    expect(reviewNotCountedReason(1, 1, [])).toBeNull();
+  });
+  it("more fundamental reasons win", () => {
+    expect(reviewNotCountedReason(0, 0, [], "unverified")).toBe("no_changed_files");
+    expect(reviewNotCountedReason(1, 0, [], "unverified")).toBe("no_files_read");
+  });
+});
+
 /** A STOP after grounding downgraded it — the shape council-checkpoint-pipeline emits. */
 function downgradedStop(): BrowserObserverFinding {
   return {

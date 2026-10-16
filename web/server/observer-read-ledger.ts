@@ -155,3 +155,85 @@ export class ObserverReadLedger {
     this.slots.delete(sessionId);
   }
 }
+
+// ── Rubber-stamp detection (observer rigor, 2026-10-16) ─────────────────────
+//
+// Observed live (grp_879b81b6, checkpoint 148 "Task A closure"): the artifact
+// was a prose closure note claiming every item was already implemented. The
+// codex observer ran ONE `cat` of that note and replied `[]` in 4 s — the
+// claim was false. Reading the artifact counted as "read a changed file", so
+// the empty review looked clean and even advanced convergence.
+//
+// A clean verdict on a prose artifact is only worth something when the
+// observer looked at something BESIDES the prose: the code it points at.
+// `touchesReachBeyondArtifacts` answers that from the host-observed tool calls.
+
+/** Prose / data artifacts: reading only these verifies nothing about code. */
+const DOCUMENT_ARTIFACT = /\.(?:md|markdown|mdx|txt|rst|json|jsonl|ya?ml|log|csv)$/i;
+/** Council protocol files are never evidence about the work under review. */
+const COUNCIL_PROTOCOL_PATH = /(?:^|\/)\.council\//;
+const CODE_SEARCH_COMMAND = /(?:^|[;&|(]\s*|\s)(?:rg|grep|egrep|ag|git\s+(?:-C\s+\S+\s+)?(?:diff|show|log|grep|blame))\b/;
+const FILE_EXT_TOKEN = /^[\w.@+-]*[\w@+-]\.[A-Za-z][A-Za-z0-9]{0,7}$/;
+
+function splitShellTokens(command: string): string[] {
+  return command.split(/[\s'"`;&|<>()]+/).filter((t) => t.length > 0);
+}
+
+/**
+ * A shell token that names a file or directory INSIDE the workspace (not a
+ * flag, number, sed range, the workspace root itself — `cd <root> && …` —
+ * or an absolute path outside it such as `/bin/bash`).
+ */
+function isWorkspacePathToken(token: string, workspaceRoot: string): boolean {
+  if (token.startsWith("-")) return false;
+  const bare = token.replace(/^\.\//, "").replace(/:\d+(?:[-:,]\d+)*$/, "");
+  if (bare.length === 0 || bare === "." || bare === "..") return false;
+  if (COUNCIL_PROTOCOL_PATH.test(bare) || bare.startsWith(".council")) return false;
+  if (isAbsolute(bare)) {
+    const abs = resolve(bare);
+    const root = resolve(workspaceRoot);
+    return abs !== root && abs.startsWith(`${root}/`);
+  }
+  return bare.includes("/") || FILE_EXT_TOKEN.test(bare);
+}
+
+/**
+ * `true` when the recorded touches read or searched anything other than the
+ * checkpoint's PROSE artifacts. A code artifact (`.ts`, `.py`, …) listed in the
+ * checkpoint IS code, so reading it counts. `artifactPaths` is
+ * workspace-relative. Pure — shared by the reply capture and its tests.
+ */
+export function touchesReachBeyondArtifacts(
+  touches: readonly ObserverToolTouch[],
+  artifactPaths: readonly string[],
+  workspaceRoot: string,
+): boolean {
+  const docAbs = new Set(
+    artifactPaths.filter((p) => DOCUMENT_ARTIFACT.test(p)).map((p) => resolve(workspaceRoot, p)),
+  );
+  const docRel = artifactPaths.filter((p) => DOCUMENT_ARTIFACT.test(p));
+  const isDocArtifact = (p: string): boolean => {
+    const abs = isAbsolute(p) ? resolve(p) : resolve(workspaceRoot, p);
+    return docAbs.has(abs);
+  };
+  for (const t of touches) {
+    if (t.name === "Grep") {
+      // A tree-wide grep (no path) or a grep over code is a verification step.
+      if (t.path === undefined || !isDocArtifact(t.path)) return true;
+      continue;
+    }
+    if (t.path !== undefined && FILE_READ_TOOLS.has(t.name)) {
+      if (!isDocArtifact(t.path) && !COUNCIL_PROTOCOL_PATH.test(t.path)) return true;
+      continue;
+    }
+    if (t.command !== undefined) {
+      if (CODE_SEARCH_COMMAND.test(t.command)) return true;
+      let rest = t.command;
+      for (const p of docRel) {
+        rest = rest.split(resolve(workspaceRoot, p)).join(" ").split(p).join(" ");
+      }
+      if (splitShellTokens(rest).some((tok) => isWorkspacePathToken(tok, workspaceRoot))) return true;
+    }
+  }
+  return false;
+}

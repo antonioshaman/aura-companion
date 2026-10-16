@@ -45,6 +45,8 @@ vi.mock("../store.js", () => ({
       chatTabReentryTickBySession:
         mockStoreValues.chatTabReentryTickBySession ?? new Map(),
       sdkSessions: mockStoreValues.sdkSessions ?? [],
+      groupBySessionId: mockStoreValues.groupBySessionId,
+      groups: mockStoreValues.groups,
     };
     return selector(state);
   },
@@ -793,5 +795,44 @@ describe("MessageFeed - subagent grouping", () => {
     expect(screen.getByText(/sender: thr_main/)).toBeTruthy();
     expect(screen.getByText("thr_sub_1")).toBeTruthy();
     expect(screen.getByText("thr_sub_2")).toBeTruthy();
+  });
+});
+
+
+// ─── Observer rigor (2026-10-16): liveness probes ───────────────────────────
+// Prod 2026-10-15: the observer's reply to "[liveness probe] …" ("Я Observer…")
+// appeared as prose between its findings. In the OBSERVER session's feed the
+// probe and its reply render as collapsed probe rows; elsewhere nothing changes.
+describe("MessageFeed - observer liveness probes", () => {
+  const probeMessages = () => [
+    makeMessage({ id: "p1", role: "user", content: "[liveness probe] Ответь одной строкой: кто ты?" }),
+    makeMessage({ id: "r1", role: "assistant", content: "Я Observer, независимый ревьюер Council." }),
+    makeMessage({ id: "u2", role: "user", content: "Обычный вопрос" }),
+    makeMessage({ id: "a2", role: "assistant", content: "Обычный ответ" }),
+  ];
+
+  it("renders the probe exchange as probe rows in the observer session", () => {
+    const sid = "obs-probe";
+    setStoreMessages(sid, probeMessages());
+    mockStoreValues.groupBySessionId = new Map([[sid, "grp_p"]]);
+    mockStoreValues.groups = new Map([["grp_p", { observerSessionId: sid }]]);
+    try {
+      render(<MessageFeed sessionId={sid} />);
+      const rows = screen.getAllByTestId("observer-probe-message");
+      expect(rows.map((r) => r.getAttribute("data-role"))).toEqual(["user", "assistant"]);
+      // Ordinary traffic after the probe is untouched.
+      expect(screen.getByText("Обычный ответ")).toBeTruthy();
+    } finally {
+      mockStoreValues.groupBySessionId = undefined;
+      mockStoreValues.groups = undefined;
+    }
+  });
+
+  it("leaves probe-looking messages alone outside an observer session", () => {
+    const sid = "not-observer";
+    setStoreMessages(sid, probeMessages());
+    render(<MessageFeed sessionId={sid} />);
+    expect(screen.queryByTestId("observer-probe-message")).toBeNull();
+    expect(screen.getByText("Я Observer, независимый ревьюер Council.")).toBeTruthy();
   });
 });

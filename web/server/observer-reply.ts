@@ -56,6 +56,12 @@ import {
   parseObserverReviewPayload,
 } from "./council-types.js";
 import { adoptedReviewAsideName, buildObserverReviewFilename } from "./review-watcher.js";
+import {
+  type ObserverToolTouch,
+  MAX_TOUCHES_PER_WAKE,
+  extractToolTouches,
+  touchesReachBeyondArtifacts,
+} from "./observer-read-ledger.js";
 
 /** Why a reply produced no review. `empty_reply` = the observer said nothing
  *  after its last tool call (or never answered); the rest = it answered, but
@@ -202,6 +208,9 @@ export interface HostReviewIdentity {
   cliVersion: string | undefined;
   /** Server clock at the moment the reply completed. */
   reviewedAt: Date;
+  /** Host verdict on an EMPTY review whose turn never looked past the prose
+   *  artifact (see {@link touchesReachBeyondArtifacts}). Absent = no claim. */
+  verification?: "unverified";
 }
 
 export type HostReviewBuild =
@@ -234,6 +243,7 @@ export function buildHostObserverReview(findings: unknown[], id: HostReviewIdent
     // asked to echo it. Without this stamp the pipeline's drift guard read the
     // absent echo as schema drift and downgraded every STOP/WARN to NOTE.
     observer_wake_payload_version_echo: OBSERVER_WAKE_PAYLOAD_VERSION,
+    ...(id.verification ? { host_verification: id.verification } : {}),
     findings,
   };
   let drop: { reason: CouncilParserDropReason; field?: string } | null = null;
@@ -259,6 +269,9 @@ export interface ObserverReplyExpectation {
   cwd: string;
   /** Spawn-time model, used only if no assistant frame carried one. */
   fallbackModel?: string;
+  /** The checkpoint's `artifact_paths` (workspace-relative). An empty review
+   *  whose turn read nothing beyond the PROSE among these is `unverified`. */
+  artifactPaths?: readonly string[];
 }
 
 export type ObserverReplyOutcome =
@@ -268,11 +281,18 @@ export type ObserverReplyOutcome =
       expectation: ObserverReplyExpectation;
       file: string;
       findingCount: number;
+      /** `[]` review whose turn read nothing beyond the prose artifact — the
+       *  host stamped `host_verification: "unverified"` (UI: "не проверено"). */
+      unverified?: boolean;
       /** A review file for this checkpoint was on disk but predated the wake
        *  dispatch (EC-13 redelivery) — it was ignored and overwritten. */
       staleExistingIgnored?: string;
     }
   | { kind: "skipped_existing"; expectation: ObserverReplyExpectation; file: string }
+  /** The wake's turn ended with a liveness probe's prose instead of a
+   *  findings list (probe injected mid-wake): no review, and — unlike a
+   *  rejection — it does not count toward the degrade threshold. */
+  | { kind: "probe_turn"; expectation: ObserverReplyExpectation }
   | {
       kind: "adopted";
       expectation: ObserverReplyExpectation;
@@ -330,6 +350,11 @@ interface CaptureSlot {
    *  A review file whose `reviewed_at` predates this answered a PREVIOUS
    *  delivery of the checkpoint, not this wake. */
   dispatchedAtMs: number;
+  /** Host-observed tool calls of this wake's turn (rubber-stamp detection). */
+  touches: ObserverToolTouch[];
+  /** Liveness probes injected while this wake was outstanding whose turn
+   *  has not ended yet ({@link ObserverReplyCapture.noteProbe}). */
+  probeTurnsPending: number;
 }
 
 type ContentBlock = { type?: unknown; text?: unknown };
@@ -366,7 +391,26 @@ export class ObserverReplyCapture {
       tail: [],
       model: undefined,
       dispatchedAtMs: this.deps.now().getTime(),
+      touches: [],
+      probeTurnsPending: 0,
     });
+  }
+
+  /**
+   * A liveness probe (`observer-probe.ts`) was injected into this observer
+   * session. Observed live 2026-10-15 (grp_879b81b6): the probe's prose reply
+   * ("Я Observer, независимый ревьюер Council…") landed on the findings
+   * channel. Wakes are not dispatched while a probe turn runs (pipeline
+   * gate); this covers the other order — a probe injected while a wake is
+   * outstanding. If that wake's turn then ends with prose instead of a
+   * findings list, it is recorded as a probe turn: no review, no rejection
+   * strike. Returns whether a wake was outstanding (for the log line).
+   */
+  noteProbe(sessionId: string): boolean {
+    const slot = this.slots.get(sessionId);
+    if (!slot) return false;
+    slot.probeTurnsPending++;
+    return true;
   }
 
   /** Cheap no-op for every session without an outstanding wake. */
@@ -378,6 +422,10 @@ export class ObserverReplyCapture {
     if (parts.model) {
       slot.model = parts.model;
       this.observedModels.set(sessionId, parts.model);
+    }
+    for (const t of extractToolTouches(message)) {
+      if (slot.touches.length >= MAX_TOUCHES_PER_WAKE) break;
+      slot.touches.push(t);
     }
     for (const b of parts.blocks) {
       if (b.type === "tool_use" || b.type === "tool_result") {
@@ -403,8 +451,13 @@ export class ObserverReplyCapture {
   finalize(sessionId: string): ObserverReplyOutcome {
     const slot = this.slots.get(sessionId);
     if (!slot) return { kind: "no_expectation" };
-    this.slots.delete(sessionId);
     const { expectation } = slot;
+    this.slots.delete(sessionId);
+    if (slot.probeTurnsPending > 0 && !extractObserverFindings(slot.tail.join("\n")).ok) {
+      // The probe's prose answered this turn — never a review, never a
+      // rejection strike. The checkpoint surfaces as "без ревью" instead.
+      return { kind: "probe_turn", expectation };
+    }
     const reviewsDir = join(expectation.cwd, ".council", "reviews");
 
     // Transition: a pre-B1 observer wrote the file itself during the turn.
@@ -434,6 +487,15 @@ export class ObserverReplyCapture {
     const extracted = extractObserverFindings(slot.tail.join("\n"));
     if (!extracted.ok) return this.reject(sessionId, expectation, extracted.reason);
 
+    // Rubber-stamp guard (grp_879b81b6 checkpoint 148): an EMPTY review of a
+    // checkpoint that has artifacts, from a turn that never read or searched
+    // anything beyond the prose artifact, is not "clean" — it is unverified.
+    const artifactPaths = expectation.artifactPaths ?? [];
+    const unverified =
+      extracted.findings.length === 0 &&
+      artifactPaths.length > 0 &&
+      !touchesReachBeyondArtifacts(slot.touches, artifactPaths, expectation.cwd);
+
     const built = buildHostObserverReview(extracted.findings, {
       sessionGroupId: expectation.sessionGroupId,
       checkpointId: expectation.checkpointId,
@@ -442,6 +504,7 @@ export class ObserverReplyCapture {
       model: slot.model ?? expectation.fallbackModel,
       cliVersion: this.deps.resolveCliVersion(sessionId),
       reviewedAt: this.deps.now(),
+      ...(unverified ? { verification: "unverified" as const } : {}),
     });
     if (!built.ok) return this.reject(sessionId, expectation, "invalid_findings", built.field ?? built.dropReason);
 
@@ -465,6 +528,7 @@ export class ObserverReplyCapture {
       expectation,
       file,
       findingCount: built.payload.findings.length,
+      ...(unverified ? { unverified: true } : {}),
       ...(staleExisting ? { staleExistingIgnored: staleExisting.file } : {}),
     };
   }
