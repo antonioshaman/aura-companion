@@ -299,3 +299,51 @@ describe("observerAutohealBlockedReason — allowDegraded (W14)", () => {
     expect(observerAutohealBlockedReason(group("degraded"), OBSERVER, (s) => s === PRIMARY, never, { allowDegraded: true })).toBe("user_stopped");
   });
 });
+
+// ─── W14 fix-pass (observer STOP on PR #371) ─────────────────────────────────
+//
+// A relaunch ATTEMPT is not a relaunch. The attempt counter is bumped before
+// relaunchObserver runs, so `attempts > 0` let a FAILED first relaunch
+// (ok:false or a throw) reach the self-recovered short-circuit on the next
+// iteration: the old, deaf adapter still reports ready → "healed" with no
+// working relaunch, the pair stays degraded and the re-queued checkpoint is
+// never redelivered. Only a confirmed ok:true relaunch may unlock it.
+describe("ObserverAutoheal — wake_produced_no_review after a failed relaunch (W14 fix-pass)", () => {
+  it("makes a second attempt when the first relaunch returns ok:false while the deaf adapter looks ready", async () => {
+    vi.useFakeTimers();
+    const h = makeHarness({ relaunchResults: [{ ok: false, error: "spawn failed" }, { ok: true }] });
+    h.setReady(true); // the deaf adapter is still attached
+    const p = h.heal.heal(GROUP, OBSERVER, "wake_produced_no_review", "council-review-158");
+    await vi.runAllTimersAsync();
+    expect(await p).toEqual({ kind: "healed", attempts: 2 });
+    expect(h.relaunch).toHaveBeenCalledTimes(2);
+  });
+
+  it("makes a second attempt when the first relaunch throws", async () => {
+    vi.useFakeTimers();
+    let n = 0;
+    const relaunch = vi.fn(async () => {
+      if (++n === 1) throw new Error("relaunch exploded");
+      return { ok: true };
+    });
+    const heal = new ObserverAutoheal({
+      relaunchObserver: relaunch,
+      isObserverReadyForWake: () => true,
+      blockedReason: () => null,
+    });
+    const p = heal.heal(GROUP, OBSERVER, "wake_produced_no_review", "council-review-158");
+    await vi.runAllTimersAsync();
+    expect(await p).toEqual({ kind: "healed", attempts: 2 });
+    expect(relaunch).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports exhausted (not healed) when every relaunch fails", async () => {
+    vi.useFakeTimers();
+    const h = makeHarness({ relaunchResults: [{ ok: false }, { ok: false }] });
+    h.setReady(true);
+    const p = h.heal.heal(GROUP, OBSERVER, "wake_produced_no_review", "council-review-158");
+    await vi.runAllTimersAsync();
+    expect((await p).kind).toBe("exhausted");
+    expect(h.relaunch).toHaveBeenCalledTimes(OBSERVER_AUTOHEAL_MAX_ATTEMPTS);
+  });
+});

@@ -122,6 +122,10 @@ export class ObserverAutoheal {
     if (this.inFlight.has(sessionGroupId)) return { kind: "skipped", reason: "in_flight" };
     this.inFlight.add(sessionGroupId);
     let attempts = 0;
+    /** A relaunch that returned ok:true happened in this episode. `attempts`
+     *  is bumped BEFORE relaunchObserver runs, so it counts tries, not
+     *  successes — a failed try must not unlock the self-recovered check. */
+    let relaunchedOk = false;
     let lastError: string | undefined;
     try {
       for (let i = 0; i < OBSERVER_AUTOHEAL_MAX_ATTEMPTS; i++) {
@@ -133,8 +137,10 @@ export class ObserverAutoheal {
           return { kind: "skipped", reason };
         }
         // A forced trigger's observer looks ready while it is deaf: only a
-        // completed relaunch counts as recovery for it.
-        const mayShortCircuit = !isForcedRelaunchTrigger(trigger) || attempts > 0;
+        // CONFIRMED successful relaunch (ok:true) counts as recovery for it —
+        // never a failed or thrown attempt, after which the old deaf adapter
+        // is still the one reporting ready.
+        const mayShortCircuit = !isForcedRelaunchTrigger(trigger) || relaunchedOk;
         if (mayShortCircuit && this.deps.isObserverReadyForWake(observerSessionId)) {
           // Recovered on its own during the backoff — no relaunch needed.
           log.info("session-orchestrator", "observer.autoheal.ok", { event: "observer.autoheal.ok", ...base, attempts, selfRecovered: true });
@@ -174,6 +180,7 @@ export class ObserverAutoheal {
           });
           continue;
         }
+        relaunchedOk = true;
         if (await this.waitForReady(sessionGroupId, observerSessionId, trigger)) {
           log.info("session-orchestrator", "observer.autoheal.ok", { event: "observer.autoheal.ok", ...base, attempts });
           return { kind: "healed", attempts };

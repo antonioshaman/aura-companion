@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ObserverWakeRecovery } from "./council-wake-recovery.js";
-import type { ObserverAutohealResult } from "./council-observer-autoheal.js";
+import { ObserverAutoheal, type ObserverAutohealResult } from "./council-observer-autoheal.js";
 
 /**
  * W14 (b): a pair degraded by an unanswered wake must heal itself. Prod
@@ -90,5 +90,41 @@ describe("ObserverWakeRecovery (W14)", () => {
     await h.finishHeal({ kind: "exhausted", attempts: 2, lastError: "adapter_wait_timed_out" });
     expect(h.drain).not.toHaveBeenCalled();
     expect(h.rec.isRecovering(GROUP)).toBe(false);
+  });
+});
+
+// W14 fix-pass: end-to-end with the REAL ObserverAutoheal — a failed first
+// relaunch while the deaf adapter looks ready must still lead to a working
+// relaunch and the re-queued checkpoint being redelivered.
+describe("ObserverWakeRecovery + ObserverAutoheal (W14 fix-pass)", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("redelivers the checkpoint after a failed first relaunch followed by a successful one", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    let status = "degraded";
+    const results = [{ ok: false, error: "spawn failed" }, { ok: true }];
+    const relaunch = vi.fn(async () => {
+      const r = results.shift()!;
+      if (r.ok) status = "active"; // the relaunch handshake flips the pair back
+      return r;
+    });
+    const autoheal = new ObserverAutoheal({
+      relaunchObserver: relaunch,
+      isObserverReadyForWake: () => true, // deaf adapter still "ready"
+      blockedReason: () => null,
+    });
+    const drain = vi.fn();
+    const rec = new ObserverWakeRecovery({
+      autoheal,
+      getGroupStatus: () => status,
+      isObserverTurnInFlight: () => false,
+      drainPendingObserverWake: drain,
+    });
+    rec.onWakeUnanswered(GROUP, OBS, CP);
+    await vi.runAllTimersAsync();
+    expect(relaunch).toHaveBeenCalledTimes(2);
+    expect(drain).toHaveBeenCalledWith(GROUP);
+    expect(rec.isRecovering(GROUP)).toBe(false);
   });
 });
