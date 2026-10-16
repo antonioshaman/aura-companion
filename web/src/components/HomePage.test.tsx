@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import "@testing-library/jest-dom";
 
 // Polyfill scrollIntoView for jsdom
@@ -463,6 +463,74 @@ describe("HomePage", () => {
   });
 
   // ─── Model dropdown interaction ─────────────────────────────────────────────
+
+  // ─── Saved model preference on first render (minor #4) ───────────────────
+
+  it("starts on the saved anthropicModel preference, not the static default", async () => {
+    // Before: the initial state used getDefaultModel() and the sticky
+    // preference only applied after toggling the backend. Now the first
+    // render already reflects the user's saved choice.
+    (mockStoreState as Record<string, unknown>).anthropicModel = "claude-sonnet-4-6";
+    mockStoreGetState.mockReturnValue(buildStoreMock({ anthropicModel: "claude-sonnet-4-6" }));
+    try {
+      render(<HomePage />);
+      await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
+      expect(screen.getByText(SECOND_MODEL_LABEL)).toBeInTheDocument();
+      expect(screen.queryByText(DEFAULT_MODEL_LABEL)).not.toBeInTheDocument();
+    } finally {
+      delete (mockStoreState as Record<string, unknown>).anthropicModel;
+    }
+  });
+
+  it("applies a preference that hydrates AFTER mount, unless the user already picked a model", async () => {
+    // Settings hydrate asynchronously: the preference can arrive after the
+    // first render. It must be applied then — but never override a model the
+    // user explicitly chose in the meantime.
+    const { rerender } = render(<HomePage />);
+    await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
+    expect(screen.getByText(DEFAULT_MODEL_LABEL)).toBeInTheDocument();
+
+    (mockStoreState as Record<string, unknown>).anthropicModel = "claude-sonnet-4-6";
+    try {
+      rerender(<HomePage />);
+      await waitFor(() => expect(screen.getByText(SECOND_MODEL_LABEL)).toBeInTheDocument());
+
+      // User picks Haiku; a later preference update must not clobber it.
+      fireEvent.click(screen.getByText(SECOND_MODEL_LABEL));
+      fireEvent.click(screen.getByText(THIRD_MODEL_LABEL));
+      (mockStoreState as Record<string, unknown>).anthropicModel = "claude-opus-4-8";
+      rerender(<HomePage />);
+      expect(screen.getByText(THIRD_MODEL_LABEL)).toBeInTheDocument();
+    } finally {
+      delete (mockStoreState as Record<string, unknown>).anthropicModel;
+    }
+  });
+
+  it("new-session model dropdown: disables retired/blocked models and hints untested ones", async () => {
+    // Same honesty as the in-session switcher: a model the server marks
+    // blocked (e.g. via the broken-model table) can't be picked for a new
+    // session, and registry-unknown models say "Untested".
+    mockStoreState.dynamicBackendModels = {
+      claude: [
+        { value: "claude-opus-5", label: "Opus 5", icon: "", untested: true },
+        { value: "claude-opus-4-8", label: "Opus 4.8", icon: "" },
+        { value: "claude-opus-4-7", label: "Opus 4.7", icon: "", status: "blocked", replacement: "claude-opus-4-8" },
+      ],
+    };
+    try {
+      render(<HomePage />);
+      await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
+      fireEvent.click(screen.getByText("Opus 4.8"));
+      const blocked = screen.getByRole("button", { name: /Opus 4\.7/ });
+      expect(blocked).toBeDisabled();
+      expect(blocked).toHaveAttribute("title", expect.stringMatching(/blocked/i));
+      const untested = screen.getByRole("button", { name: /Opus 5/ });
+      expect(within(untested).getByText("Untested")).toBeInTheDocument();
+      expect(untested).not.toBeDisabled();
+    } finally {
+      mockStoreState.dynamicBackendModels = {};
+    }
+  });
 
   it("opens and selects from the model dropdown", async () => {
     // Verifies users can open the model picker and change the selected model.

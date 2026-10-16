@@ -18,7 +18,8 @@ import { disconnectSession } from "../ws.js";
 import { generateUniqueSessionName } from "../utils/names.js";
 import { getRecentDirs, addRecentDir } from "../utils/recent-dirs.js";
 import { navigateToSession } from "../utils/routing.js";
-import { getModelsForBackend, getModesForBackend, getDefaultModel, getDefaultMode, pickSessionDefaultModel } from "../utils/backends.js";
+import { getModelsForBackend, getModesForBackend, getDefaultMode, pickSessionDefaultModel } from "../utils/backends.js";
+import type { ModelOption } from "../utils/backends.js";
 import type { BackendType } from "../types.js";
 import { EnvManager } from "./EnvManager.js";
 import { FolderPicker } from "./FolderPicker.js";
@@ -99,9 +100,26 @@ export function HomePage() {
     (localStorage.getItem("cc-backend") as BackendType) || "claude",
   );
   const [backends, setBackends] = useState<BackendInfo[]>([]);
-  const [model, setModel] = useState(() => getDefaultModel(
-    (localStorage.getItem("cc-backend") as BackendType) || "claude",
-  ));
+  // Seed from the SAME precedence switchBackend uses (saved preference >
+  // safe dynamic default > static default). Previously the first render used
+  // the static default and the saved preference only applied after toggling
+  // the backend.
+  const [model, setModel] = useState(() => {
+    const initialBackend = (localStorage.getItem("cc-backend") as BackendType) || "claude";
+    const snapshot = useStore.getState() as {
+      dynamicBackendModels?: Partial<Record<BackendType, ModelOption[]>>;
+      anthropicModel?: string | null;
+    };
+    return pickSessionDefaultModel(
+      initialBackend,
+      snapshot.dynamicBackendModels?.[initialBackend],
+      initialBackend === "claude" ? snapshot.anthropicModel : null,
+    );
+  });
+  // Set once the user explicitly picks a model, so a late-hydrating saved
+  // preference never overrides a deliberate choice.
+  const modelTouchedRef = useRef(false);
+  const savedAnthropicModel = useStore((s) => s.anthropicModel);
   const [mode, setMode] = useState(() => getDefaultMode(
     (localStorage.getItem("cc-backend") as BackendType) || "claude",
   ));
@@ -313,6 +331,15 @@ export function HomePage() {
     void loadBackendModels(backend);
   }, [backend, loadBackendModels]);
 
+  // Settings hydrate asynchronously: apply the saved Claude preference when it
+  // arrives after mount, unless the user already chose a model here.
+  useEffect(() => {
+    if (backend !== "claude" || modelTouchedRef.current) return;
+    if (typeof savedAnthropicModel === "string" && savedAnthropicModel.length > 0) {
+      setModel(savedAnthropicModel);
+    }
+  }, [backend, savedAnthropicModel]);
+
   useEffect(() => {
     if (backend !== "codex") return;
     if (!dynamicModelsForBackend || dynamicModelsForBackend.length === 0) return;
@@ -411,8 +438,10 @@ export function HomePage() {
     return () => { cancelled = true; };
   }, [cwd, gitRepoInfo]);
 
+  // A saved preference no longer in the list is still what will launch, so
+  // show it verbatim rather than mislabelling the button as MODELS[0].
   const selectedModel = MODELS.find((m) => m.value === model)
-    || (backend === "codex" && model
+    || (model
       ? { value: model, label: model, icon: "" }
       : MODELS[0]);
   const selectedMode = MODES.find((m) => m.value === mode) || MODES[0];
@@ -1061,18 +1090,42 @@ export function HomePage() {
               </button>
               {showModelDropdown && (
                 <div className="absolute left-0 bottom-full mb-1 w-48 bg-cc-card border border-cc-border rounded-[10px] shadow-lg z-10 py-1">
-                  {MODELS.map((m) => (
-                    <button
-                      key={m.value}
-                      onClick={() => { setModel(m.value); setShowModelDropdown(false); }}
-                      className={`w-full px-3 py-2 text-xs text-left hover:bg-cc-hover transition-colors cursor-pointer flex items-center gap-2 ${
-                        m.value === model ? "text-cc-primary font-medium" : "text-cc-fg"
-                      }`}
-                    >
-                      <span>{m.icon}</span>
-                      {m.label}
-                    </button>
-                  ))}
+                  {MODELS.map((m) => {
+                    // Same honesty as ModelSwitcher: retired/blocked (incl. the
+                    // broken-model table) can't start a session; registry-unknown
+                    // models carry a subtle "Untested" hint.
+                    const unavailable = m.status === "retired" || m.status === "blocked";
+                    const untested = m.untested === true && !unavailable;
+                    const title = unavailable
+                      ? m.replacement
+                        ? `${m.label} is ${m.status} — use ${m.replacement} instead`
+                        : `${m.label} is ${m.status} and can't be selected`
+                      : untested
+                        ? `${m.label} — not verified on this Aura install; it may fail on your plan`
+                        : undefined;
+                    return (
+                      <button
+                        key={m.value}
+                        disabled={unavailable}
+                        title={title}
+                        onClick={() => { modelTouchedRef.current = true; setModel(m.value); setShowModelDropdown(false); }}
+                        className={`w-full px-3 py-2 text-xs text-left transition-colors flex items-center gap-2 ${
+                          unavailable
+                            ? "opacity-60 cursor-not-allowed text-cc-muted"
+                            : `hover:bg-cc-hover cursor-pointer ${m.value === model ? "text-cc-primary font-medium" : "text-cc-fg"}`
+                        }`}
+                      >
+                        <span>{m.icon}</span>
+                        <span className="flex-1 truncate">{m.label}</span>
+                        {untested && <span className="shrink-0 text-[10px] italic text-cc-muted">Untested</span>}
+                        {unavailable && (
+                          <span className="shrink-0 text-[10px] uppercase tracking-wide text-cc-muted">
+                            {m.status === "retired" ? "Retired" : "Blocked"}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
                 </div>
               )}
             </div>
