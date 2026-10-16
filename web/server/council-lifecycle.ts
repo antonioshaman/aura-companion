@@ -25,6 +25,7 @@ import { buildObserverContextManifest } from "./observer-prompt.js";
 import type { ObserverReplyCapture } from "./observer-reply.js";
 import type { ObserverReadLedger } from "./observer-read-ledger.js";
 import { deleteCouncilWakeSentinel } from "./council-wake-sentinel.js";
+import { collectCheckpointCoverageGaps, type CheckpointCoverageGap } from "./checkpoint-coverage.js";
 import { buildBrowserGroupRecord } from "./browser-group-record.js";
 import { deterministicFindingId, type CouncilWatcherEntry } from "./council-checkpoint-pipeline.js";
 import { applyFrozenVerdict, readReviewVerdicts, type FrozenVerdict } from "./observer-review-verdicts.js";
@@ -728,7 +729,7 @@ export class CouncilLifecycle {
         timestamp: Date.now(),
       });
     });
-    companionBus.on("group:review", ({ sessionGroupId, checkpointId, phase, findings, downgrades, observerModel, observerProvider }) => {
+    companionBus.on("group:review", ({ sessionGroupId, checkpointId, phase, findings, downgrades, observerModel, observerProvider, verification }) => {
       // Task 9: drain superseded checkpoint ids accumulated since the
       // previous review into THIS review's payload so the panel sees
       // "checkpoint X was skipped (superseded)" inline. Cleared after
@@ -747,6 +748,7 @@ export class CouncilLifecycle {
         observerProvider,
         timestamp: Date.now(),
         ...(superseded.length > 0 ? { supersededCheckpointIds: superseded } : {}),
+        ...(verification ? { verification } : {}),
       });
     });
 
@@ -1339,10 +1341,14 @@ export class CouncilLifecycle {
     observerProvider?: string;
     observerModel?: string;
     autoProceedRestoreGaps?: RestoreGapView[];
+    checkpointCoverage: CheckpointCoverageGap[];
   } | null> {
     const collected = this.collectGroupReviews(sessionGroupId);
     if (!collected) return null;
-    const { gaps, gapFingerprints, unfrozenRawStopIds, ...rest } = collected;
+    const { gaps, gapFingerprints, unfrozenRawStopIds, ...reviews } = collected;
+    // Observer rigor: checkpoints with no review, or only an unverified one,
+    // are listed explicitly ("без ревью" / "не проверено") — never silence.
+    const rest = { ...reviews, checkpointCoverage: this.collectCoverageGaps(sessionGroupId) };
     // FIX-AP-4: an incomplete restore holds auto-proceed without any finding
     // to show; report why, so the panel can say so (and offer "ignore").
     const view = gaps.length > 0 && this.deps.autoProceedHoldApplies?.(sessionGroupId)
@@ -1380,6 +1386,25 @@ export class CouncilLifecycle {
     const collected = this.collectGroupReviews(sessionGroupId);
     if (!collected) return null;
     return { findings: collected.findings, unfrozenRawStopIds: collected.unfrozenRawStopIds, gaps: collected.gaps };
+  }
+
+  private collectCoverageGaps(sessionGroupId: string): CheckpointCoverageGap[] {
+    const watcher = this.deps.watchers.get(sessionGroupId);
+    if (!watcher) return [];
+    const inFlight = new Set<string>();
+    if (watcher.pendingReviewDeadline) inFlight.add(watcher.pendingReviewDeadline.checkpointId);
+    if (watcher.pendingCheckpoint) inFlight.add(watcher.pendingCheckpoint.checkpoint_id);
+    try {
+      return collectCheckpointCoverageGaps({
+        cwd: watcher.cwd,
+        sessionGroupId,
+        inFlightCheckpointIds: inFlight,
+        degraded: this.coordinator?.get(sessionGroupId)?.status === "degraded",
+        normalizeRaw: (raw, provider) => this.deps.normalizeObserverReviewRaw(sessionGroupId, raw, provider),
+      });
+    } catch {
+      return [];
+    }
   }
 
   private collectGroupReviews(sessionGroupId: string): {

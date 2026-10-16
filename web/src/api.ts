@@ -1,5 +1,5 @@
 import type { SdkSessionInfo, GroupRecord } from "./types.js";
-import type { ContentBlock, BrowserObserverFinding, BrowserObserverDowngrade, AutoProceedRestoreGap } from "./types.js";
+import type { ContentBlock, BrowserObserverFinding, BrowserObserverDowngrade, AutoProceedRestoreGap, BrowserCheckpointCoverageGap } from "./types.js";
 import { captureEvent, captureException } from "./analytics.js";
 
 const BASE = "/api";
@@ -1021,6 +1021,8 @@ export const api = {
       observerModel?: string;
       /** FIX-AP-4: set only when an incomplete restore pauses auto-proceed. */
       autoProceedRestoreGaps?: AutoProceedRestoreGap[];
+      /** Observer rigor: checkpoints without a (verified) review. */
+      checkpointCoverage?: BrowserCheckpointCoverageGap[];
     }>(`/groups/${encodeURIComponent(groupId)}/findings`),
 
   // Council Mode (meta-diet B2b) — persist a human dismissal of an observer

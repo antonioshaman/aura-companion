@@ -24,6 +24,7 @@ import { buildObserverContextManifest, buildObserverWakePayload } from "./observ
 import type { ObserverReplyCapture } from "./observer-reply.js";
 import { countArtifactsRead, type ObserverReadLedger } from "./observer-read-ledger.js";
 import { readCouncilWakeSentinel, writeCouncilWakeSentinel } from "./council-wake-sentinel.js";
+import type { ClaimLanguage } from "./observer-language.js";
 import { formatObserverInvocationLog } from "./observer-attribution.js";
 import { recordReviewVerdicts } from "./observer-review-verdicts.js";
 import type { BrowserObserverDowngrade, BrowserObserverFinding } from "./session-types.js";
@@ -135,7 +136,10 @@ export type WakeDispatchOutcome =
       | "observer_busy"
       | "build_error"
       | "api_limit_reached"
-      | "already_woken" }
+      | "already_woken"
+      | "already_reviewed"
+      | "wake_in_flight"
+      | "probe_in_flight" }
   | { kind: "failed"; error: string };
 
 /**
@@ -204,6 +208,60 @@ export interface CouncilCheckpointPipelineDeps {
    * observer if it never does.
    */
   onObserverAdapterMissing?: (sessionGroupId: string, payload: CheckpointPayload) => void;
+  /**
+   * Observer rigor: the language the observer must write its claims in for
+   * this group (`observer-language.ts`). Absent / null = prompt default.
+   */
+  resolveClaimLanguage?: (sessionGroupId: string, payload: CheckpointPayload, cwd: string) => ClaimLanguage | null;
+  /**
+   * Observer rigor (`observer-probe.ts`): a liveness-probe turn is running
+   * on the observer. The wake is queued and drained when it ends, so the
+   * probe's prose never lands in this wake's reply capture.
+   */
+  isObserverProbeInFlight?: (observerSessionId: string) => boolean;
+}
+
+/**
+ * Observer rigor (2026-10-16): the group's OWN review of `checkpoint` that is
+ * already on disk and postdates the checkpoint's emission, if any.
+ *
+ * Why: the wake sentinel is deleted whenever a group degrades or exits, and a
+ * server restart degrades/reconnects the pair — so after every restart the
+ * catch-up scan saw `lastWokenSequence=null` and re-woke the newest
+ * checkpoint even though its review was sitting on disk (prod 2026-10-13..16:
+ * checkpoint 146 reviewed 6×, 153 5×, each re-review also relaunching the
+ * codex observer through auto-heal). The review file itself is the durable
+ * proof of "answered"; the sentinel only proves "sent".
+ *
+ * Fresh = the file's mtime (host fact) is not older than the checkpoint's
+ * `emitted_at` minus {@link STALE_REVIEW_SLACK_MS}. An unreadable mtime or an
+ * unparseable `emitted_at` counts as fresh — the checkpoint id is unique per
+ * emission, so a review naming it answered it.
+ *
+ * A review made only of `OBSERVER-BLOCKED:` findings is NOT an answer: the
+ * observer could not read the work (prod 2026-10-15, grp_879b81b6 — a
+ * tooling refusal must not stop the redelivery that gets the real review).
+ */
+export function findFreshOwnReview(
+  cwd: string,
+  sessionGroupId: string,
+  checkpoint: Pick<CheckpointPayload, "checkpoint_id" | "emitted_at">,
+  normalizeRaw?: (raw: string, provider: "claude" | "codex") => string,
+): { file: string; reviewedAt?: number } | null {
+  const found = findOwnReviewForCheckpointSync({
+    directory: join(cwd, ".council", "reviews"),
+    checkpointId: checkpoint.checkpoint_id,
+    sessionGroupId,
+    ...(normalizeRaw ? { normalizeRaw } : {}),
+  });
+  if (!found) return null;
+  const findings = found.payload.findings;
+  if (findings.length > 0 && findings.every((f) => f.claim.trimStart().startsWith("OBSERVER-BLOCKED:"))) return null;
+  const emittedAt = Date.parse(checkpoint.emitted_at);
+  if (found.reviewedAt !== undefined && Number.isFinite(emittedAt) && found.reviewedAt < emittedAt - STALE_REVIEW_SLACK_MS) {
+    return null;
+  }
+  return { file: found.file, ...(found.reviewedAt !== undefined ? { reviewedAt: found.reviewedAt } : {}) };
 }
 
 export class CouncilCheckpointPipeline {
@@ -384,6 +442,49 @@ export class CouncilCheckpointPipeline {
       return outcome;
     }
 
+    // Gate 0a (observer rigor): a wake for THIS checkpoint is already out and
+    // its review is still owed. A second delivery (catch-up scan, failsafe
+    // tick or a re-arm racing the live watcher after the sentinel was
+    // cleared by a degrade) would make the observer review it twice in
+    // parallel (prod 2026-10-16 06:13).
+    if (entry.pendingReviewDeadline?.checkpointId === payload.checkpoint_id) {
+      const outcome: WakeDispatchOutcome = { kind: "skipped", reason: "wake_in_flight" };
+      log.info("session-orchestrator", "observer wake skipped (same checkpoint already in flight)", {
+        event: "group.observer_wake_skipped",
+        sessionGroupId,
+        observerSessionId,
+        checkpointId: payload.checkpoint_id,
+        sequence: payload.sequence,
+        reason: outcome.reason,
+      });
+      return outcome;
+    }
+
+    // Gate 0b (observer rigor): this checkpoint already has a fresh review
+    // of ours on disk — see {@link findFreshOwnReview}. Never-throws: a scan
+    // failure falls through to the normal dispatch.
+    let freshReview: ReturnType<typeof findFreshOwnReview> = null;
+    try {
+      freshReview = findFreshOwnReview(entry.cwd, sessionGroupId, payload, (raw, p) =>
+        this.normalizeObserverReviewRaw(sessionGroupId, raw, p));
+    } catch {
+      freshReview = null;
+    }
+    if (freshReview) {
+      const outcome: WakeDispatchOutcome = { kind: "skipped", reason: "already_reviewed" };
+      log.info("session-orchestrator", "observer wake skipped (fresh review already on disk)", {
+        event: "group.observer_wake_skipped",
+        sessionGroupId,
+        observerSessionId,
+        checkpointId: payload.checkpoint_id,
+        sequence: payload.sequence,
+        reason: outcome.reason,
+        file: freshReview.file,
+        reviewedAt: freshReview.reviewedAt,
+      });
+      return outcome;
+    }
+
     // Gate 1: group status must be `active`. AP-2 — the state machine is
     // the source of truth; never derive from session-level booleans.
     //
@@ -426,6 +527,21 @@ export class CouncilCheckpointPipeline {
       }
     }
 
+    if (this.deps.isObserverProbeInFlight?.(observerSessionId)) {
+      this.enqueuePendingCheckpoint(entry, sessionGroupId, observerSessionId, payload);
+      const outcome: WakeDispatchOutcome = { kind: "skipped", reason: "probe_in_flight" };
+      log.info("session-orchestrator", "observer wake queued behind a liveness probe", {
+        event: "group.observer_wake_skipped",
+        sessionGroupId,
+        observerSessionId,
+        checkpointId: payload.checkpoint_id,
+        sequence: payload.sequence,
+        reason: outcome.reason,
+        queued: true,
+      });
+      return outcome;
+    }
+
     if (this.deps.isApiLimitReached(observerSessionId)) {
       const outcome: WakeDispatchOutcome = { kind: "skipped", reason: "api_limit_reached" };
       log.warn("session-orchestrator", "observer wake skipped after API limit", {
@@ -450,6 +566,15 @@ export class CouncilCheckpointPipeline {
     // Build the wake body. The builder validates char-level + size + per-
     // section counts and runs the realpath containment check (Task 7);
     // a throw here is a producer bug or an adversarial-looking checkpoint.
+    // Observer rigor: claims in the user's language. Best-effort — a
+    // resolver failure never blocks the wake.
+    let claimLanguage: ClaimLanguage | null = null;
+    try {
+      claimLanguage = this.deps.resolveClaimLanguage?.(sessionGroupId, payload, entry.cwd) ?? null;
+    } catch {
+      claimLanguage = null;
+    }
+
     let built;
     try {
       built = buildObserverWakePayload({
@@ -457,6 +582,7 @@ export class CouncilCheckpointPipeline {
         manifest,
         workspaceRoot: entry.cwd,
         observerProvider: meta.pairing.split("+")[1] ?? "claude",
+        ...(claimLanguage ? { claimLanguage } : {}),
       });
     } catch (err) {
       const outcome: WakeDispatchOutcome = { kind: "skipped", reason: "build_error" };
@@ -542,6 +668,7 @@ export class CouncilCheckpointPipeline {
           provider: meta.pairing.split("+")[1] === "codex" ? "codex" : "claude",
           cwd: entry.cwd,
           fallbackModel: meta.observerModel,
+          artifactPaths: payload.artifact_paths,
         });
         const outcome: WakeDispatchOutcome = {
           kind: "dispatched",
@@ -558,6 +685,7 @@ export class CouncilCheckpointPipeline {
           sequence: payload.sequence,
           droppedPathCount: built.droppedPaths.length,
           wakeBodySha256: built.sha256,
+          ...(claimLanguage ? { claimLanguage } : {}),
         });
         return outcome;
       }
@@ -755,9 +883,29 @@ export class CouncilCheckpointPipeline {
           ...base,
           file: outcome.file,
           findingCount: outcome.findingCount,
+          ...(outcome.unverified ? { verification: "unverified" } : {}),
           ...(outcome.staleExistingIgnored ? { staleExistingIgnored: outcome.staleExistingIgnored } : {}),
         });
+        if (outcome.unverified) metricsCollector.recordError("council.observer_reply.unverified_clean");
         return;
+      case "probe_turn": {
+        // The observer answered (a probe) — it is alive, so the watchdog must
+        // not degrade the pair; the checkpoint stays without a review and the
+        // panel lists it as "без ревью".
+        const entry = this.deps.watchers.get(sessionGroupId);
+        const deadline = entry?.pendingReviewDeadline;
+        const disarm = deadline?.checkpointId === outcome.expectation.checkpointId;
+        if (disarm && entry && deadline) {
+          clearTimeout(deadline.timer);
+          entry.pendingReviewDeadline = null;
+        }
+        log.warn("session-orchestrator", "observer wake turn ended with probe prose — kept off the findings channel", {
+          event: "council.observer_reply.probe_turn",
+          ...base,
+          deadlineDisarmed: disarm,
+        });
+        return;
+      }
       case "skipped_existing":
         log.info("session-orchestrator", "observer wrote its own review file — host stands down", {
           event: "council.observer_reply.observer_wrote_file",
@@ -1293,6 +1441,7 @@ export class CouncilCheckpointPipeline {
           stopCountWeak: findings.filter((f) => f.severity === "STOP" && f.weakEvidence !== undefined).length,
           stopCountDisputed: findings.filter((f) => f.severity === "STOP" && f.disputed !== undefined).length,
           artifactsChanged: modifiedFiles.size,
+          ...(payload.host_verification ? { verification: payload.host_verification } : {}),
         });
       }
 
@@ -1346,6 +1495,7 @@ export class CouncilCheckpointPipeline {
         observerProvider: payload.observer_provider,
         artifactsChanged: modifiedFiles.size,
         artifactsRead,
+        ...(payload.host_verification ? { verification: payload.host_verification } : {}),
       });
     } catch (err) {
       log.error("session-orchestrator", "handleCouncilReview failed", {

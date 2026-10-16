@@ -4,6 +4,7 @@ import {
   ObserverReadLedger,
   countArtifactsRead,
   extractToolTouches,
+  touchesReachBeyondArtifacts,
   type ObserverToolTouch,
 } from "./observer-read-ledger.js";
 
@@ -137,5 +138,56 @@ describe("ObserverReadLedger", () => {
       ledger.onAssistant("obs", assistant(toolUse("Bash", { command: `echo ${i}` })));
     }
     expect(ledger.touchesFor("obs", "chk_1")).toHaveLength(MAX_TOUCHES_PER_WAKE);
+  });
+});
+
+// Observer rigor (2026-10-16): prod checkpoint 148 — the observer `cat`-ed the
+// prose closure note and replied `[]`; reading the note counted as "read a
+// changed file". `touchesReachBeyondArtifacts` asks the stricter question: did
+// the turn look at anything BESIDES the prose artifact (the code it cites)?
+describe("touchesReachBeyondArtifacts (rubber-stamp detection)", () => {
+  const ROOT = "/root/aura-companion";
+  const NOTE = ".council/review-input/task-a-model-rotation-closure.md";
+  const PLAN = "docs/plan.md";
+  const bash = (command: string) => ({ name: "Bash", command });
+
+  it("the recorded checkpoint-148 command (bash -lc 'cat <note>') does not reach beyond", () => {
+    expect(touchesReachBeyondArtifacts([bash(`/bin/bash -lc 'cat ${NOTE}'`)], [NOTE], ROOT)).toBe(false);
+  });
+
+  it("reading only prose artifacts (relative, absolute, cd-prefixed, sed ranges) does not reach beyond", () => {
+    expect(touchesReachBeyondArtifacts([
+      { name: "Read", path: `${ROOT}/${PLAN}` },
+      bash(`cd ${ROOT} && sed -n '1,200p' ${PLAN}`),
+      bash(`nl -ba ./${PLAN} | head -c 4000`),
+    ], [PLAN], ROOT)).toBe(false);
+  });
+
+  it("no tool calls at all does not reach beyond", () => {
+    expect(touchesReachBeyondArtifacts([], [PLAN], ROOT)).toBe(false);
+  });
+
+  it("opening a code file the note cites reaches beyond (Read or shell)", () => {
+    expect(touchesReachBeyondArtifacts([{ name: "Read", path: "web/server/ws-bridge.ts" }], [PLAN], ROOT)).toBe(true);
+    expect(touchesReachBeyondArtifacts([bash("sed -n 300,340p web/server/session-orchestrator.ts")], [PLAN], ROOT)).toBe(true);
+    expect(touchesReachBeyondArtifacts([bash(`cat ${ROOT}/web/server/a.ts:12`)], [PLAN], ROOT)).toBe(true);
+  });
+
+  it("searching the code (rg / grep / git diff / Grep tool) reaches beyond", () => {
+    expect(touchesReachBeyondArtifacts([bash("rg -n persistModel")], [PLAN], ROOT)).toBe(true);
+    expect(touchesReachBeyondArtifacts([bash("git -C /root/aura-companion show HEAD")], [PLAN], ROOT)).toBe(true);
+    expect(touchesReachBeyondArtifacts([{ name: "Grep" }], [PLAN], ROOT)).toBe(true);
+  });
+
+  it("a CODE artifact listed in the checkpoint is code: reading it counts", () => {
+    expect(touchesReachBeyondArtifacts([{ name: "Read", path: "web/server/a.ts" }], ["web/server/a.ts"], ROOT)).toBe(true);
+  });
+
+  it("council protocol files and paths outside the workspace never count", () => {
+    expect(touchesReachBeyondArtifacts([
+      { name: "Read", path: ".council/checkpoints/council-review-grp_x.json" },
+      bash("cat /etc/hosts"),
+      bash("ls -la"),
+    ], [PLAN], ROOT)).toBe(false);
   });
 });

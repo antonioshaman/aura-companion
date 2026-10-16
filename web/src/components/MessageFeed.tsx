@@ -16,6 +16,8 @@ import { ToolTurnSummary } from "./ToolTurnSummary.js";
 import { EmptyChatState } from "./chat/EmptyChatState.js";
 import { AssistantAvatar } from "./chat/AssistantAvatar.js";
 import { ResumeIndicator } from "./chat/ResumeIndicator.js";
+import { ObserverProbeMessage } from "./council/ObserverProbeMessage.js";
+import { probeMessageIds } from "../utils/observer-probe.js";
 
 const FEED_PAGE_SIZE = 100;
 const RESUME_HISTORY_PAGE_SIZE = 40;
@@ -371,7 +373,7 @@ function ToolMessageGroup({ group }: { group: ToolMsgGroup }) {
   );
 }
 
-function FeedEntries({ entries, toolActivity, isObserverSession = false }: { entries: FeedEntry[]; toolActivity?: ToolActivityEntry[]; isObserverSession?: boolean }) {
+function FeedEntries({ entries, toolActivity, isObserverSession = false, probeIds }: { entries: FeedEntry[]; toolActivity?: ToolActivityEntry[]; isObserverSession?: boolean; probeIds?: ReadonlySet<string> }) {
   return (
     <>
       {entries.map((entry, i) => {
@@ -382,6 +384,11 @@ function FeedEntries({ entries, toolActivity, isObserverSession = false }: { ent
           return <SubagentContainer key={entry.taskToolUseId} group={entry} />;
         }
         const msg = entry.msg;
+        // Observer rigor: a liveness probe and the observer's reply are probe
+        // traffic — a collapsed row, never prose between the findings cards.
+        if (probeIds?.has(msg.id) && (msg.role === "user" || msg.role === "assistant")) {
+          return <ObserverProbeMessage key={msg.id} role={msg.role} text={msg.content} />;
+        }
         const toolUseIds = getToolUseIdsFromMessage(msg);
         const matchingActivity = toolActivity && toolUseIds.length > 0
           ? toolActivity.filter((a) => toolUseIds.includes(a.toolUseId))
@@ -638,6 +645,10 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
   const grouped = useMemo(
     () => groupMessages(mergedMessages),
     [mergedMessages],
+  );
+  const probeIds = useMemo(
+    () => (isObserverSession ? probeMessageIds(mergedMessages) : undefined),
+    [isObserverSession, mergedMessages],
   );
 
   // Reset paging/transcript state when switching sessions.
@@ -900,7 +911,7 @@ export function MessageFeed({ sessionId }: { sessionId: string }) {
               </button>
             </div>
           )}
-          <FeedEntries entries={visibleEntries} toolActivity={toolActivity} isObserverSession={isObserverSession} />
+          <FeedEntries entries={visibleEntries} toolActivity={toolActivity} isObserverSession={isObserverSession} probeIds={probeIds} />
 
           {/* Tool progress indicator */}
           {toolProgress && toolProgress.size > 0 && !hasStreamingAssistant && (

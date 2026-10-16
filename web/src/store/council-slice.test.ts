@@ -1064,3 +1064,50 @@ describe("autoProceedRestoreGaps (FIX-AP-4)", () => {
     expect(useStore.getState().autoProceedRestoreGaps.has("grp_abc")).toBe(false);
   });
 });
+
+// ── Observer rigor (2026-10-16): checkpoint coverage ────────────────────────
+// A checkpoint without a review (superseded, pair degraded mid-review) or
+// with only an unverified empty review is kept in `checkpointCoverage` so the
+// panel can say "без ревью" / "не проверено" instead of staying silent.
+describe("checkpointCoverage (observer rigor)", () => {
+  const review = (overrides: Record<string, unknown> = {}) => ({
+    sessionGroupId: "grp_abc", checkpointId: "chk_2", phase: "council-review", findings: [], downgrades: [],
+    observerModel: "m", observerProvider: "codex", timestamp: 2_000, ...overrides,
+  });
+
+  it("an unverified empty review adds a 'не проверено' row; a later real review of it removes it", () => {
+    useStore.getState().upsertGroup(group());
+    useStore.getState().appendObserverReview(review({ verification: "unverified" }));
+    expect(useStore.getState().groups.get("grp_abc")?.checkpointCoverage).toEqual([
+      { checkpointId: "chk_2", phase: "council-review", kind: "unverified" },
+    ]);
+    useStore.getState().appendObserverReview(review());
+    expect(useStore.getState().groups.get("grp_abc")?.checkpointCoverage).toEqual([]);
+  });
+
+  it("superseded checkpoint ids become 'без ревью' rows", () => {
+    useStore.getState().upsertGroup(group());
+    useStore.getState().appendObserverReview(review({ supersededCheckpointIds: ["chk_1"] }));
+    expect(useStore.getState().groups.get("grp_abc")?.checkpointCoverage).toEqual([
+      { checkpointId: "chk_1", phase: "", kind: "unreviewed", reason: "superseded" },
+    ]);
+  });
+
+  it("degrading while the observer reviews records the checkpoint as unreviewed (degraded)", () => {
+    useStore.getState().upsertGroup(group());
+    useStore.getState().recordCheckpoint({ sessionGroupId: "grp_abc", checkpointId: "plan-147", phase: "council-plan", sequence: 147, timestamp: 1 });
+    useStore.getState().setGroupStatus("grp_abc", "degraded", { deadRole: "observer", reason: "wake_produced_no_review" });
+    const g = useStore.getState().groups.get("grp_abc");
+    expect(g?.checkpointCoverage).toEqual([
+      { checkpointId: "plan-147", phase: "council-plan", sequence: 147, kind: "unreviewed", reason: "degraded" },
+    ]);
+    expect(g?.observerReviewing).toBe(false);
+  });
+
+  it("the REST bootstrap envelope does not touch coverage; setCheckpointCoverage replaces it", () => {
+    useStore.getState().upsertGroup(group());
+    useStore.getState().setCheckpointCoverage("grp_abc", [{ checkpointId: "x", phase: "p", kind: "unreviewed", reason: "no_review" }]);
+    useStore.getState().appendObserverReview(review({ checkpointId: "rest-bootstrap", phase: "rest-bootstrap" }));
+    expect(useStore.getState().groups.get("grp_abc")?.checkpointCoverage).toHaveLength(1);
+  });
+});

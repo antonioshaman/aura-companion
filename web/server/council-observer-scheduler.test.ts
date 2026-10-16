@@ -399,3 +399,44 @@ describe("CouncilObserverScheduler (DI seam)", () => {
     expect(autoheal.forgetGroup).toHaveBeenCalledWith(GROUP);
   });
 });
+
+
+// Observer rigor (2026-10-16): prod 2026-10-13..16 — the wake sentinel is
+// cleared on every degrade/exit, so each restart's init scan saw
+// `lastWokenSequence=null` and re-woke checkpoints 146 (×6) / 153 (×5),
+// each time through a 30 s poll and an observer auto-heal relaunch, although
+// their reviews were already on disk.
+describe("CouncilObserverScheduler — no re-wake for a checkpoint already reviewed", () => {
+  function writeReview(cwd: string, cp: CheckpointPayload, findings: unknown[] = []) {
+    const dir = join(cwd, ".council", "reviews");
+    mkdirSync(dir, { recursive: true });
+    writeAtomicJson(join(dir, `${cp.phase}-${GROUP}-codex-observer.md`), {
+      schema_version: COUNCIL_SCHEMA_VERSION, checkpoint_id: cp.checkpoint_id, phase: cp.phase,
+      session_group_id: GROUP, reviewed_at: new Date().toISOString(), observer_provider: "codex",
+      observer_model: "gpt-6.1-sol", observer_cli_version: "1", findings,
+    });
+  }
+
+  it("init scan skips the newest checkpoint when its fresh review is on disk (no sentinel)", async () => {
+    const h = makeHarness();
+    h.setCoordinator(coordinatorWithStatus("active"));
+    h.setReady(true);
+    const cp = checkpoint(146);
+    writeCheckpoint(h.cwd, cp);
+    writeReview(h.cwd, cp);
+    h.scheduler.scanForMissedObserverWakes("init");
+    await new Promise((r) => setTimeout(r, 20));
+    expect(h.dispatchWake).not.toHaveBeenCalled();
+  });
+
+  it("a tooling-refusal review (OBSERVER-BLOCKED only) does not count — the checkpoint is re-woken", async () => {
+    const h = makeHarness();
+    h.setCoordinator(coordinatorWithStatus("active"));
+    h.setReady(true);
+    const cp = checkpoint(153);
+    writeCheckpoint(h.cwd, cp);
+    writeReview(h.cwd, cp, [{ severity: "INFO", claim: "OBSERVER-BLOCKED: bwrap: Operation not permitted", evidence_path: "a.ts" }]);
+    h.scheduler.scanForMissedObserverWakes("init");
+    await vi.waitFor(() => expect(h.dispatchWake).toHaveBeenCalledTimes(1));
+  });
+});

@@ -557,6 +557,12 @@ export type BrowserIncomingMessageBase =
      * were dropped — keeps the on-wire payload minimal in the happy path.
      */
     supersededCheckpointIds?: string[];
+    /**
+     * Observer rigor (2026-10-16): "unverified" = the observer returned no
+     * findings but the host saw it read nothing beyond the prose artifact.
+     * The panel shows "не проверено", never a clean review. Omitted = no claim.
+     */
+    verification?: "unverified";
   }
   | {
     /**
@@ -582,7 +588,7 @@ export type BrowserIncomingMessageBase =
     cycleNumber: number;
     convergenceThreshold: number;
     convergenceState: "in-progress" | "converged" | "revoked";
-    notCountedReason?: "no_changed_files" | "no_files_read" | "downgraded_stop";
+    notCountedReason?: "no_changed_files" | "no_files_read" | "downgraded_stop" | "unverified_clean";
     /** Wallclock (ms) the server processed the transition. */
     timestamp: number;
   };
@@ -593,6 +599,23 @@ export type BrowserIncomingMessageBase =
  * envelope the browser consumes — adds `id` (server-assigned, stable for
  * React reconciliation) and grounding-related fields.
  */
+/**
+ * Observer rigor (2026-10-16): a checkpoint NOT covered by a real review —
+ * `unreviewed` (no review at all: superseded, degraded, probe reply…) or
+ * `unverified` (an empty review whose observer read nothing beyond the prose
+ * artifact). Rendered in the observer panel as "без ревью" / "не проверено".
+ * Built server-side by `checkpoint-coverage.ts` (REST bootstrap) and
+ * browser-side from live frames (`src/utils/checkpoint-coverage.ts`).
+ */
+export interface BrowserCheckpointCoverageGap {
+  checkpointId: string;
+  /** Phase name; empty when only the id is known (a superseded queue entry). */
+  phase: string;
+  sequence?: number;
+  kind: "unreviewed" | "unverified";
+  reason?: "superseded" | "degraded" | "no_review" | "probe_reply";
+}
+
 export interface BrowserObserverFinding {
   id: string;
   severity: "STOP" | "WARN" | "NOTE" | "INFO";

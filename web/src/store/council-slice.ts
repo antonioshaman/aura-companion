@@ -2,6 +2,7 @@ import type { StateCreator } from "zustand";
 import type { AppState } from "./index.js";
 import type {
   AutoProceedRestoreGap,
+  BrowserCheckpointCoverageGap,
   BrowserObserverDowngrade,
   BrowserObserverFinding,
   ConvergenceNotCountedReason,
@@ -12,6 +13,7 @@ import type {
 } from "../types.js";
 import { clearAnnouncerScope } from "../components/council/FindingsLog.js";
 import { api } from "../api.js";
+import { removeCoverageGap, upsertCoverageGap } from "../utils/checkpoint-coverage.js";
 
 // ── Persistence keys & bounds ───────────────────────────────────────────────
 
@@ -215,7 +217,11 @@ export interface CouncilSlice {
     /** Task 9/11: server-reported checkpoint ids dropped by the mid-turn
      *  newest-wins queue between the previous review and this one. */
     supersededCheckpointIds?: string[];
+    /** Observer rigor: host verdict "unverified" on an empty review. */
+    verification?: "unverified";
   }) => void;
+  /** Observer rigor: replace a group's coverage list (REST bootstrap). */
+  setCheckpointCoverage: (sessionGroupId: string, gaps: BrowserCheckpointCoverageGap[]) => void;
 
   /**
    * Bidirectional pipeline Story 4.1 — server-published convergence
@@ -364,6 +370,18 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
       if (!existing) return {};
       const groups = new Map(s.groups);
       const next: GroupRecord = { ...existing, status };
+      // Observer rigor: the pair degraded while the observer was reviewing —
+      // that checkpoint will get no review; say so instead of going silent.
+      if (status === "degraded" && existing.status !== "degraded" && existing.observerReviewing && existing.lastCheckpointId) {
+        next.checkpointCoverage = upsertCoverageGap(existing.checkpointCoverage, {
+          checkpointId: existing.lastCheckpointId,
+          phase: existing.lastPhase ?? "",
+          ...(existing.lastCheckpointSeq !== undefined ? { sequence: existing.lastCheckpointSeq } : {}),
+          kind: "unreviewed",
+          reason: "degraded",
+        });
+        next.observerReviewing = false;
+      }
       if (status === "degraded" && opts?.deadRole) {
         next.deadRole = opts.deadRole;
         next.degradedReason = opts.reason;
@@ -375,7 +393,7 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
       return { groups };
     }),
 
-  recordCheckpoint: ({ sessionGroupId, phase, sequence, timestamp }) =>
+  recordCheckpoint: ({ sessionGroupId, checkpointId, phase, sequence, timestamp }) =>
     set((s) => {
       const existing = s.groups.get(sessionGroupId);
       if (!existing) return {};
@@ -390,12 +408,13 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
         lastCheckpointAt: timestamp,
         lastCheckpointSeq: sequence,
         lastPhase: phase,
+        lastCheckpointId: checkpointId,
         observerReviewing: true,
       });
       return { groups };
     }),
 
-  appendObserverReview: ({ sessionGroupId, checkpointId, phase, findings: wireFindings, downgrades, observerModel, observerProvider, timestamp, supersededCheckpointIds }) =>
+  appendObserverReview: ({ sessionGroupId, checkpointId, phase, findings: wireFindings, downgrades, observerModel, observerProvider, timestamp, supersededCheckpointIds, verification }) =>
     set((s) => {
       const existing = s.groups.get(sessionGroupId);
       if (!existing) return {};
@@ -410,6 +429,18 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
           ? { recentlySupersededCheckpointIds: supersededCheckpointIds }
           : { recentlySupersededCheckpointIds: [] }),
       };
+      // Observer rigor: keep the coverage list honest. The REST bootstrap
+      // envelope ("rest-bootstrap") is not a checkpoint and changes nothing.
+      if (checkpointId !== "rest-bootstrap") {
+        let coverage = removeCoverageGap(existing.checkpointCoverage, checkpointId);
+        if (verification === "unverified" && wireFindings.length === 0) {
+          coverage = upsertCoverageGap(coverage, { checkpointId, phase, kind: "unverified" });
+        }
+        for (const dropped of supersededCheckpointIds ?? []) {
+          coverage = upsertCoverageGap(coverage, { checkpointId: dropped, phase: "", kind: "unreviewed", reason: "superseded" });
+        }
+        next.checkpointCoverage = coverage;
+      }
       groups.set(sessionGroupId, next);
       const findings = new Map(s.findings);
       const prior = findings.get(sessionGroupId) ?? [];
@@ -482,6 +513,15 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
         return { groups, findings, groundingDowngrades, dismissedStopIds };
       }
       return { groups, findings, groundingDowngrades };
+    }),
+
+  setCheckpointCoverage: (sessionGroupId, gaps) =>
+    set((s) => {
+      const existing = s.groups.get(sessionGroupId);
+      if (!existing) return {};
+      const groups = new Map(s.groups);
+      groups.set(sessionGroupId, { ...existing, checkpointCoverage: [...gaps] });
+      return { groups };
     }),
 
   applyConvergence: ({ sessionGroupId, cycleNumber, convergenceThreshold, convergenceState, notCountedReason }) =>

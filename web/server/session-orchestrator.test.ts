@@ -6857,6 +6857,8 @@ describe("SessionOrchestrator", () => {
           findings: [],
           downgrades: [],
           reviewCount: 0,
+          // Observer rigor: no checkpoints on disk → no coverage gaps.
+          checkpointCoverage: [],
         });
       } finally {
         rmSync(workspace, { recursive: true, force: true });

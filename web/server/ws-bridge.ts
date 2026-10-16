@@ -58,6 +58,7 @@ import {
 import { validatePermission } from "./ai-validator.js";
 import { getEffectiveAiValidation } from "./ai-validation-settings.js";
 import { companionBus } from "./event-bus.js";
+import { isObserverProbeText } from "./observer-probe.js";
 import { SessionStateMachine } from "./session-state-machine.js";
 import { metricsCollector } from "./metrics-collector.js";
 import { deliveryMetrics } from "./delivery-metrics.js";
@@ -2370,6 +2371,11 @@ export class WsBridge {
         id: msg.client_msg_id || `user-${ts}-${this.userMsgCounter++}`,
       };
       this.appendHistory(session, userMessage);
+      // Observer rigor: a liveness probe to a council observer is not review
+      // traffic — the orchestrator keeps its turn off the findings channel.
+      if (session.state.sessionGroupRole === "observer" && isObserverProbeText(msg.content)) {
+        companionBus.emit("observer:probe-injected", { sessionId: session.id });
+      }
       const transitioned = session.stateMachine.transition("streaming", "user_message");
       if (!transitioned) {
         // Session not ready yet (e.g. still initializing). Log a warning so
