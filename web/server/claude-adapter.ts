@@ -1266,7 +1266,7 @@ export class ClaudeAdapter implements IBackendAdapter {
     // anything else so a downstream throw doesn't leave the timer
     // to fire spuriously.
     this.disarmInitFrameCanary();
-    this.onInitForProbe();
+    this.onInitForProbe(msg);
 
     // Emit session metadata so the bridge can update session state
     this.sessionMetaCb?.({
@@ -1810,7 +1810,11 @@ export class ClaudeAdapter implements IBackendAdapter {
    * short grace for a lifecycle frame (a modern CLI writes one ahead of init);
    * none → interrupt as before, unless a real prompt went out meanwhile.
    */
-  private onInitForProbe(): void {
+  private onInitForProbe(msg: CLISystemInitMessage): void {
+    const caps = (msg as { capabilities?: unknown }).capabilities;
+    // CLI 2.1.283 advertises `msg_lifecycle_v1` in init: its lifecycle frames
+    // will decide, never the legacy timer.
+    if (Array.isArray(caps) && caps.includes("msg_lifecycle_v1")) this.lifecycleSeenThisProcess = true;
     const p = this.initProbe;
     if (!p || p.started || p.legacyTimer || this.lifecycleSeenThisProcess) return;
     p.legacyTimer = setTimeout(() => {

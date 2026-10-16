@@ -339,3 +339,22 @@ describe("init-probe reconnect replay — cron turn on resume (W3)", () => {
     expect(parseSent(cli).filter(isInterrupt)).toHaveLength(0);
   });
 });
+
+describe("init-probe — CLI advertising msg_lifecycle_v1 (W3)", () => {
+  it("does not fall back to the legacy init-timer interrupt; waits for the probe's own lifecycle", () => {
+    // The recorded 2.1.283 init frame advertises `msg_lifecycle_v1`. If the
+    // CLI's first burst is init (e.g. a cron turn whose lifecycle frame came in
+    // an earlier chunk we never saw), the legacy timer must not interrupt.
+    const sessionId = "s-caps";
+    const cli = mockSocket({ kind: "cli", sessionId });
+    bridge.handleCLIOpen(cli, sessionId);
+    const probe = parseSent(cli).find((j) => j.type === "user")!;
+    const init = cronFixture.frames.find((f) => f.dir === "in" && f.raw.subtype === "init")!.raw;
+    expect(init.capabilities).toContain("msg_lifecycle_v1");
+    bridge.handleCLIMessage(cli, JSON.stringify(init) + "\n");
+    vi.advanceTimersByTime(10_000);
+    expect(parseSent(cli).filter(isInterrupt)).toHaveLength(0);
+    bridge.handleCLIMessage(cli, JSON.stringify({ type: "command_lifecycle", command_uuid: probe.uuid, state: "started", uuid: "lc-1" }) + "\n");
+    expect(parseSent(cli).filter(isInterrupt)).toHaveLength(1);
+  });
+});
