@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -108,6 +108,38 @@ function writeCheckpoint(cwd: string, payload: CheckpointPayload): void {
 }
 
 describe("CouncilObserverScheduler (DI seam)", () => {
+  it("a non-checkpoint JSON in checkpoints/ is reported once, not on every failsafe scan (W10b)", async () => {
+    // Prod noise: `.council/checkpoints/council-review-final.json` (a review
+    // summary, no schema_version) produced a protocol.frame_dropped WARN on
+    // every 5-min failsafe scan. It must be reported once per file version,
+    // re-reported only if the file changes (new mtime), and must never block
+    // the valid checkpoint beside it from being woken.
+    const loggerModule = await import("./logger.js");
+    const warnSpy = vi.spyOn(loggerModule.log, "warn").mockImplementation(() => undefined);
+    cleanups.push(() => warnSpy.mockRestore());
+    const h = makeHarness();
+    h.setCoordinator(coordinatorWithStatus("active"));
+    h.setReady(true);
+    writeCheckpoint(h.cwd, checkpoint(1));
+    const bogus = join(h.cwd, ".council", "checkpoints", "council-review-final.json");
+    writeFileSync(bogus, JSON.stringify({ phase: "council-review-final", findings_count: 3 }));
+    const dropped = () =>
+      warnSpy.mock.calls.filter((c: unknown[]) => (c[2] as { event?: string } | undefined)?.event === "protocol.frame_dropped");
+
+    h.scheduler.scanForMissedObserverWakes("failsafe");
+    h.scheduler.scanForMissedObserverWakes("failsafe");
+    h.scheduler.scanForMissedObserverWakes("failsafe");
+    expect(dropped()).toHaveLength(1);
+    expect(dropped()[0][2]).toMatchObject({ file: "council-review-final.json", context: "restart-catchup-scan" });
+    await vi.waitFor(() => expect(h.dispatchWake).toHaveBeenCalled());
+
+    // A new version of the file (different mtime) is a distinct payload → reported again.
+    const later = new Date(Date.now() + 60_000);
+    utimesSync(bogus, later, later);
+    h.scheduler.scanForMissedObserverWakes("failsafe");
+    expect(dropped()).toHaveLength(2);
+  });
+
   it("scan dispatches the highest unwoken checkpoint through the injected dispatchWake", async () => {
     // Two checkpoints on disk, sentinel says seq 1 was woken → only seq 2
     // (the highest) must be dispatched, once the injected readiness gate

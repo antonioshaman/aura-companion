@@ -1,0 +1,9 @@
+# Pinned exactly (Hashimoto D4: verify-then-pin, no caret/tilde).
+# gonka-openai 0.2.6 verified on PyPI 2026-09-12; it pulls openai>=1.0.0,
+# secp256k1 (needs libsecp256k1-dev + build tools), ecdsa, bech32, protobuf.
+gonka-openai==0.2.6
+
+# HTTP shim. Verify these resolve on your index and regenerate a lockfile
+# (pip-compile / uv lock) before production; pins below are known-good baselines.
+fastapi==0.115.6
+uvicorn[standard]==0.34.0

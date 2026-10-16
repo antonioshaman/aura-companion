@@ -1,0 +1,40 @@
+# /etc/systemd/system/gonka-shim.service
+# Gonka signing shim (localhost OpenAI-compatible endpoint).
+# SEPARATE from aura-companion.service — do NOT add KillMode=process here.
+#
+# Install (bare-metal / VPS):
+#   sudo useradd -r -s /usr/sbin/nologin gonka-proxy
+#   sudo install -d -o gonka-proxy -g gonka-proxy /opt/gonka-proxy
+#   # copy shim/ to /opt/gonka-proxy/shim, create venv, pip install -r requirements.txt
+#   sudo install -d -o gonka-proxy -g gonka-proxy -m 700 /etc/gonka-proxy
+#   sudo install -o gonka-proxy -g gonka-proxy -m 600 shim.env /etc/gonka-proxy/shim.env
+#   sudo systemctl enable --now gonka-shim
+
+[Unit]
+Description=Gonka signing shim (localhost OpenAI-compatible)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gonka-proxy
+Group=gonka-proxy
+WorkingDirectory=/opt/gonka-proxy/shim
+# Secrets at rest: file mode 600, owned by gonka-proxy (verify: sudo -u gonka-proxy test -r ...).
+EnvironmentFile=/etc/gonka-proxy/shim.env
+ExecStart=/opt/gonka-proxy/venv/bin/uvicorn gonka_shim:app --host 127.0.0.1 --port 8080
+Restart=on-failure
+RestartSec=5
+StartLimitBurst=5
+StartLimitIntervalSec=60
+TimeoutStopSec=15
+# Newly written files default to 600 (keeps any accidental spill private).
+UMask=0077
+# Hardening.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
