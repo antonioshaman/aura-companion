@@ -443,7 +443,7 @@ const MSG_SYSTEM_ERROR: ChatMessage = {
   systemVariant: "error",
 };
 
-// Result frame --resume emits for a turn a restart cut off (muted, collapsed)
+// Result frame closing a turn cut off by a restart or a user Stop (muted, collapsed)
 const MSG_SYSTEM_RESUME_INTERRUPTED: ChatMessage = {
   id: "msg-6-resume",
   role: "system",
