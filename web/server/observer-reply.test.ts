@@ -623,3 +623,99 @@ describe("group-less observer review files (BENCH-H)", () => {
     expect(capture.observedModel("obs_a")).toBeUndefined();
   });
 });
+
+// ── Observer rigor (2026-10-16) ──────────────────────────────────────────────
+//
+// Rubber stamp: prod checkpoint 148 ("Task A closure", grp_879b81b6) — the
+// codex observer ran ONE `cat` of the prose closure note and replied `[]` in
+// 4 s; the closure's claims were false. Such a `[]` must be written as an
+// UNVERIFIED review (`host_verification: "unverified"`), never as clean.
+// Probes: a liveness probe answered mid-wake must never become (or reject)
+// the review.
+describe("ObserverReplyCapture — rubber-stamp detection and probes (observer rigor)", () => {
+  let cwd: string;
+  let capture: ObserverReplyCapture;
+  const CLOSURE = ".council/review-input/task-a-model-rotation-closure.md";
+  const expectation = (artifactPaths: string[]): ObserverReplyExpectation => ({
+    sessionGroupId: "grp_rig",
+    checkpointId: "council-review-148-taska-closure-rereview",
+    phase: "council-review",
+    provider: "codex",
+    cwd,
+    artifactPaths,
+  });
+  const FILE = "council-review-grp_rig-codex-observer.md";
+
+  beforeEach(() => {
+    cwd = mkdtempSync(join(tmpdir(), "obs-rigor-"));
+    capture = new ObserverReplyCapture({
+      now: () => new Date("2026-10-15T15:07:00Z"),
+      writeReview: (path, payload) => writeAtomicJson(path, payload),
+      findExistingReview: (directory, checkpointId, sessionGroupId) =>
+        findOwnReviewForCheckpointSync({ directory, checkpointId, sessionGroupId }),
+      moveAside: (directory, file, asideName) => renameSync(join(directory, file), join(directory, asideName)),
+      resolveCliVersion: () => "0.130.0",
+    });
+  });
+  afterEach(() => rmSync(cwd, { recursive: true, force: true }));
+
+  const readReview = () => parseObserverReviewPayload(readFileSync(join(cwd, ".council", "reviews", FILE), "utf-8"));
+
+  it("EC-6 replay: the recorded checkpoint-148 turn (cat closure note → []) is written as unverified", () => {
+    capture.expect("obs", expectation([CLOSURE]));
+    const frames = readFileSync(join(__dirname, "__fixtures__", "observer-reply", "codex-rubber-stamp-turn.jsonl"), "utf-8")
+      .trim().split("\n").map((l) => JSON.parse(l));
+    for (const f of frames) capture.onAssistant("obs", f);
+    const out = capture.finalize("obs");
+    expect(out).toMatchObject({ kind: "written", file: FILE, findingCount: 0, unverified: true });
+    expect(readReview()).toMatchObject({ findings: [], host_verification: "unverified" });
+  });
+
+  it("an empty review after opening the cited code is NOT marked unverified", () => {
+    capture.expect("obs", expectation([CLOSURE]));
+    capture.onAssistant("obs", assistant([{ type: "tool_use", id: "t1", name: "Bash", input: { command: `cat ${CLOSURE}` } }], "gpt-6.1-sol"));
+    capture.onAssistant("obs", assistant([{ type: "tool_use", id: "t2", name: "Bash", input: { command: "sed -n 300,340p web/server/session-orchestrator.ts" } }], "gpt-6.1-sol"));
+    capture.onAssistant("obs", assistant([{ type: "text", text: "[]" }], "gpt-6.1-sol"));
+    const out = capture.finalize("obs");
+    expect(out).toMatchObject({ kind: "written", findingCount: 0 });
+    expect(out).not.toHaveProperty("unverified");
+    expect(readReview()).not.toHaveProperty("host_verification");
+  });
+
+  it("a review WITH findings is never marked unverified, even without reads", () => {
+    capture.expect("obs", expectation([CLOSURE]));
+    capture.onAssistant("obs", assistant([{ type: "text", text: JSON.stringify([STOP]) }]));
+    expect(capture.finalize("obs")).not.toHaveProperty("unverified");
+    expect(readReview()).not.toHaveProperty("host_verification");
+  });
+
+  it("a checkpoint with no artifacts (spawn) is never marked unverified", () => {
+    capture.expect("obs", expectation([]));
+    capture.onAssistant("obs", assistant([{ type: "text", text: "[]" }]));
+    expect(capture.finalize("obs")).not.toHaveProperty("unverified");
+  });
+
+  it("a probe answered mid-wake becomes a probe_turn: no review, no rejection strike", () => {
+    capture.expect("obs", expectation([CLOSURE]));
+    expect(capture.noteProbe("obs")).toBe(true);
+    // The wake turn ends with the probe's prose (prod 2026-10-15 reply).
+    capture.onAssistant("obs", assistant([{ type: "text", text: "Я Observer, независимый ревьюер Council; содержимое .council/ после перезапуска ещё не видел." }]));
+    expect(capture.finalize("obs")).toMatchObject({ kind: "probe_turn" });
+    expect(existsSync(join(cwd, ".council", "reviews", FILE))).toBe(false);
+    // The next unusable reply is the FIRST rejection, not the second.
+    capture.expect("obs", expectation([CLOSURE]));
+    capture.onAssistant("obs", assistant([{ type: "text", text: "no json here" }]));
+    expect(capture.finalize("obs")).toMatchObject({ kind: "rejected", consecutive: 1 });
+  });
+
+  it("a probe noted mid-wake does not swallow a real findings reply", () => {
+    capture.expect("obs", expectation([CLOSURE]));
+    capture.noteProbe("obs");
+    capture.onAssistant("obs", assistant([{ type: "text", text: JSON.stringify([STOP]) }]));
+    expect(capture.finalize("obs")).toMatchObject({ kind: "written", findingCount: 1 });
+  });
+
+  it("noteProbe without an outstanding wake reports false", () => {
+    expect(capture.noteProbe("obs")).toBe(false);
+  });
+});

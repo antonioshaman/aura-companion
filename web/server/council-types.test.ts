@@ -262,6 +262,20 @@ describe("parseObserverReviewPayload", () => {
     p.observer_provider = "claude code";
     expect(parseObserverReviewPayload(JSON.stringify(p))).toBeNull();
   });
+
+  // Observer rigor (2026-10-16): the host stamps an empty review whose turn
+  // read nothing beyond the prose artifact `host_verification: "unverified"`.
+  // EC-5: the known value round-trips, an unknown one is rejected (a typo
+  // must never read as "verified"), absent stays absent.
+  it("host_verification: accepts \"unverified\", rejects other values, absent stays absent", () => {
+    const ok = { ...validReview(), host_verification: "unverified" };
+    expect(parseObserverReviewPayload(JSON.stringify(ok))?.host_verification).toBe("unverified");
+    const bad = { ...validReview(), host_verification: "verified" };
+    const drops: Array<[string, string | undefined]> = [];
+    expect(parseObserverReviewPayload(JSON.stringify(bad), (r, f) => drops.push([r, f]))).toBeNull();
+    expect(drops).toEqual([["invalid-field", "host_verification"]]);
+    expect(parseObserverReviewPayload(JSON.stringify(validReview()))).not.toHaveProperty("host_verification");
+  });
 });
 
 // ── normalizeCodexObserverReviewRaw (Fix #2, 2026-06-14) ────────────────────

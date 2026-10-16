@@ -44,7 +44,7 @@ export interface ConvergenceGroupState {
 }
 
 /** Why a STOP-free review was not folded as a clean cycle. */
-export type ConvergenceNotCountedReason = "no_changed_files" | "no_files_read" | "downgraded_stop";
+export type ConvergenceNotCountedReason = "no_changed_files" | "no_files_read" | "downgraded_stop" | "unverified_clean";
 
 export interface ConvergenceTransitionResult {
   next: ConvergenceGroupState;
@@ -166,10 +166,14 @@ export function reviewNotCountedReason(
   artifactsChanged: number,
   artifactsRead: number,
   findings: readonly BrowserObserverFinding[] = [],
+  verification?: "unverified",
 ): ConvergenceNotCountedReason | null {
   if (!(artifactsChanged > 0)) return "no_changed_files";
   if (!(artifactsRead > 0)) return "no_files_read";
   if (findings.some((f) => f.wasDowngraded === true)) return "downgraded_stop";
+  // Observer rigor: an empty review whose turn read only the prose artifact
+  // (rubber stamp, grp_879b81b6 checkpoint 148) is not a clean cycle.
+  if (verification === "unverified" && findings.length === 0) return "unverified_clean";
   return null;
 }
 
@@ -221,6 +225,7 @@ export class ConvergenceTracker {
         payload.findings,
         payload.artifactsChanged,
         payload.artifactsRead,
+        payload.verification,
       );
     });
   }
@@ -250,6 +255,7 @@ export class ConvergenceTracker {
     findings: readonly BrowserObserverFinding[],
     artifactsChanged: number,
     artifactsRead: number,
+    verification?: "unverified",
   ): void {
     const frozen = this.isFrozen(sessionGroupId);
     const hasStop = reviewHasStop(findings);
@@ -258,7 +264,7 @@ export class ConvergenceTracker {
     // does NOT consume the got-045 dedup slot either — the counter is
     // untouched, so a later review of the same checkpoint that did read the
     // changes may still count (once).
-    const notCounted = hasStop ? null : reviewNotCountedReason(artifactsChanged, artifactsRead, findings);
+    const notCounted = hasStop ? null : reviewNotCountedReason(artifactsChanged, artifactsRead, findings, verification);
     if (!frozen && notCounted) {
       const prev = this.states.get(sessionGroupId)
         ?? initialConvergenceState(this.getThreshold(sessionGroupId));
