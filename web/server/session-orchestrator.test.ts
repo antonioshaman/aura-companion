@@ -3379,6 +3379,40 @@ describe("SessionOrchestrator", () => {
       }
     });
 
+    // Regression (prod 2026-10-14..16): host-captured observer replies are
+    // wrapped by `buildHostObserverReview`. The envelope lacked the wake echo,
+    // so this handler treated every such review as schema drift and
+    // downgraded all STOP/WARN findings to NOTE ("wake_version_mismatch").
+    // The real host builder's output must reach the pipeline undowngraded.
+    it("keeps STOP severity for a review built by the host reply capture (no wake_version_mismatch)", async () => {
+      const { buildHostObserverReview } = await import("./observer-reply.js");
+      const { mkdtempSync, writeFileSync, mkdirSync, rmSync, realpathSync } = require("node:fs") as typeof import("node:fs");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      const workspace = realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-orch-echo-")));
+      try {
+        mkdirSync(pathJoin(workspace, "src"), { recursive: true });
+        writeFileSync(pathJoin(workspace, "src/a.ts"), "// in-scope\n");
+        seedGroup("grp_echo", { cwd: workspace, artifactPaths: ["src/a.ts"] });
+        const built = buildHostObserverReview(
+          [{ severity: "STOP", claim: "real defect", evidence_path: "src/a.ts" }],
+          { sessionGroupId: "grp_echo", checkpointId: "chk_a", phase: "council-plan", provider: "codex", model: "gpt-6.1-sol", cliVersion: "0.150.0", reviewedAt: new Date() },
+        );
+        expect(built.ok).toBe(true);
+        if (!built.ok) return;
+        const emitted: Array<{ findings: Array<{ severity: string; wasDowngraded?: boolean; downgradeReason?: string }> }> = [];
+        companionBus.on("group:review", (e: unknown) => { emitted.push(e as (typeof emitted)[number]); });
+        const handle = (orchestrator as unknown as { handleCouncilReview: (g: string, p: unknown) => void }).handleCouncilReview;
+        handle.call(orchestrator, "grp_echo", built.payload);
+        expect(emitted).toHaveLength(1);
+        const f = emitted[0]!.findings[0]!;
+        expect(f.downgradeReason).not.toBe("wake_version_mismatch");
+        expect(f.severity).toBe("STOP");
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
     // B2 (meta-diet) wiring: the orchestrator snapshots a checkpoint's
     // artifact files on arrival and grounds the answering review against
     // THOSE lines. Covers the three live outcomes end-to-end through the real

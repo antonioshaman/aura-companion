@@ -148,6 +148,9 @@ describe("buildHostObserverReview", () => {
       observer_provider: "codex",
       observer_model: "gpt-5.5",
       observer_cli_version: "0.142.5",
+      // Host-owned: without it the pipeline downgrades every STOP/WARN to
+      // NOTE as "wake_version_mismatch" (prod 2026-10-14..16, 8 reviews).
+      observer_wake_payload_version_echo: 1,
       findings: [STOP],
     });
     // Round-trip: what the host writes is exactly what every consumer parses.

@@ -49,6 +49,7 @@ import {
   type CouncilParserDropReason,
   type ObserverReviewPayload,
   COUNCIL_SCHEMA_VERSION,
+  OBSERVER_WAKE_PAYLOAD_VERSION,
   STALE_REVIEW_SLACK_MS,
   isBoundedToken,
   normalizeObserverFindingShapeRaw,
@@ -228,6 +229,11 @@ export function buildHostObserverReview(findings: unknown[], id: HostReviewIdent
     observer_provider: id.provider,
     observer_model: auditToken(id.model, 128),
     observer_cli_version: auditToken(id.cliVersion, 64),
+    // The host dispatched this wake, so the wake-payload version is a host
+    // fact — the observer now replies with a bare findings array and is never
+    // asked to echo it. Without this stamp the pipeline's drift guard read the
+    // absent echo as schema drift and downgraded every STOP/WARN to NOTE.
+    observer_wake_payload_version_echo: OBSERVER_WAKE_PAYLOAD_VERSION,
     findings,
   };
   let drop: { reason: CouncilParserDropReason; field?: string } | null = null;
