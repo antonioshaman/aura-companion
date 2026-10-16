@@ -15,6 +15,8 @@ User=gonka-proxy
 Group=gonka-proxy
 WorkingDirectory=/opt/gonka-proxy
 EnvironmentFile=/etc/gonka-proxy/litellm.env
+# Same host as gonka-shim.service: loopback is correct here.
+Environment=SHIM_API_BASE=http://127.0.0.1:8080/v1
 # Assumes litellm installed in the same venv (pip install 'litellm[proxy]'==<pin>).
 ExecStart=/opt/gonka-proxy/venv/bin/litellm --config /opt/gonka-proxy/litellm/config.yaml --host 127.0.0.1 --port 4000
 Restart=on-failure

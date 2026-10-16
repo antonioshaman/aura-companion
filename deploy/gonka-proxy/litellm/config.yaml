@@ -14,7 +14,11 @@ model_list:
     litellm_params:
       # `openai/<id>` routes through LiteLLM's OpenAI-compatible path to the shim.
       model: openai/Qwen/Qwen3-235B-A22B-Instruct-2507-FP8
-      api_base: http://127.0.0.1:8080/v1
+      # Shim URL differs per runtime: systemd (same host) uses loopback,
+      # docker compose must use the shim's service name (127.0.0.1 inside the
+      # litellm container is the litellm container itself). Set by the unit /
+      # compose file; see SHIM_API_BASE there.
+      api_base: os.environ/SHIM_API_BASE
       # Shared secret with the shim (shim checks it as a bearer token).
       api_key: os.environ/SHIM_API_KEY
 
@@ -22,7 +26,7 @@ model_list:
   # - model_name: gonka-deepseek
   #   litellm_params:
   #     model: openai/deepseek-ai/DeepSeek-V4-Flash
-  #     api_base: http://127.0.0.1:8080/v1
+  #     api_base: os.environ/SHIM_API_BASE
   #     api_key: os.environ/SHIM_API_KEY
 
 litellm_settings:

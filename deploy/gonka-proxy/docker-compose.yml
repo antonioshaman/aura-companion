@@ -29,6 +29,9 @@ services:
       gonka-shim:
         condition: service_healthy
     env_file: [litellm.env]
+    environment:
+      # Container-to-container: reach the shim by service name, not loopback.
+      SHIM_API_BASE: http://gonka-shim:8080/v1
     volumes:
       - ./litellm/config.yaml:/app/config.yaml:ro
     command: ["--config", "/app/config.yaml", "--host", "0.0.0.0", "--port", "4000"]
