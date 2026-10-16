@@ -16,3 +16,12 @@ sanitized (session ids, cwd, tool list and the user's text replaced):
 3. `goodReply` — a normal answer.
 
 Used by `server/init-probe-reconnect.replay.test.ts`.
+
+`cron-turn-on-resume.json` — W3 (2026-10-16): prod recording
+2026-10-16T07:02:40Z, session 40f03a1e, CLI 2.1.283, sanitized (cli session
+id, cwd, tool list). A `--resume`d CLI that owns a durable cron job dequeued
+the cron prompt on startup, before reading the init probe from stdin. bun's
+blind 200 ms interrupt (it went out 7.5 s late — the CLI was still loading)
+then cancelled the cron turn. `in` frames: `command_lifecycle started` for
+the cron's uuid, `system.init`, `status` — the CLI's first stdout burst.
+Used by `server/init-probe-reconnect.replay.test.ts` ("cron turn").

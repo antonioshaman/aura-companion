@@ -234,6 +234,15 @@ export interface SdkSessionInfo {
    */
   resumeImmediateFailures?: number;
   archived?: boolean;
+  /**
+   * W2 boot-resume marker. Set by {@link CliLauncher.markLiveForBootResume}
+   * during graceful shutdown on every session whose CLI was alive (or awaiting
+   * a keepalive relaunch) BEFORE the shutdown itself killed it — the council
+   * group teardown kills both halves, which persists them as `exited` and
+   * would otherwise make them indistinguishable from a session that was
+   * really down. Consumed (deleted) by `restoreFromDisk`.
+   */
+  resumeOnBoot?: boolean;
   /** User-facing session name */
   name?: string;
   /** Which backend this session uses */
@@ -406,6 +415,13 @@ export interface LaunchOptions {
  */
 export class CliLauncher {
   private sessions = new Map<string, SdkSessionInfo>();
+  /**
+   * W2: sessions that were alive before the server restart but that
+   * `restoreFromDisk` had to leave `exited` (stdio pipes and the Codex proxy
+   * die with the old server). The orchestrator drains this once at boot and
+   * relaunches them with `--resume` without waiting for a browser.
+   */
+  private bootResumeCandidates: string[] = [];
   private processes = new Map<string, Subprocess>();
   /** Sidecar Node proxy processes used by Codex WebSocket transport. */
   private codexWsProxies = new Map<string, Subprocess>();
@@ -795,8 +811,16 @@ export class CliLauncher {
     if (!data || !Array.isArray(data)) return 0;
 
     let recovered = 0;
+    // W2: every non-archived session the previous server considered alive —
+    // its persisted state was not `exited` (a crash/SIGKILL leaves it that
+    // way) or the graceful shutdown marked it before killing it.
+    const liveBeforeRestart: string[] = [];
     for (const info of data) {
       if (this.sessions.has(info.sessionId)) continue;
+      if (!info.archived && (info.state !== "exited" || info.resumeOnBoot === true)) {
+        liveBeforeRestart.push(info.sessionId);
+      }
+      delete info.resumeOnBoot;
       if (info.backendType === "codex" && Array.isArray(info.rejectedCodexModels)) {
         this.syncRejectedCodexModels(info.sessionId, new Set(info.rejectedCodexModels));
       }
@@ -984,7 +1008,46 @@ export class CliLauncher {
     if (recovered > 0) {
       console.log(`[cli-launcher] Recovered ${recovered} live session(s) from disk`);
     }
+    // Only sessions restore left `exited` need a boot resume: a `starting`
+    // one (WS transport, live container) is the reconnection watchdog's job.
+    // No `cliSessionId` = no conversation to resume; leave it for a browser.
+    this.bootResumeCandidates = liveBeforeRestart.filter((id) => {
+      const s = this.sessions.get(id);
+      return !!s && !s.archived && s.state === "exited" && !!s.cliSessionId;
+    });
     return recovered;
+  }
+
+  /**
+   * W2: returns (and clears) the sessions that were alive before the restart
+   * and need a proactive `--resume` relaunch. One-shot: a second call returns
+   * an empty list, so the boot resume is scheduled at most once per boot.
+   */
+  takeBootResumeCandidates(): string[] {
+    const out = this.bootResumeCandidates;
+    this.bootResumeCandidates = [];
+    return out;
+  }
+
+  /**
+   * W2: called from graceful shutdown BEFORE the council teardown kills the
+   * pairs. Marks every non-archived session that is alive (state not
+   * `exited`) or listed in `extraIds` (a crashed CLI whose keepalive relaunch
+   * was still pending) — minus `exclude` (user-stopped / intentionally
+   * killed) — and persists synchronously, so the next boot resumes them.
+   * Returns the number of marked sessions.
+   */
+  markLiveForBootResume(extraIds: Iterable<string> = [], exclude: (sessionId: string) => boolean = () => false): number {
+    const extra = new Set(extraIds);
+    let marked = 0;
+    for (const info of this.sessions.values()) {
+      if (info.archived || exclude(info.sessionId)) continue;
+      if (info.state === "exited" && !extra.has(info.sessionId)) continue;
+      info.resumeOnBoot = true;
+      marked++;
+    }
+    this.persistState();
+    return marked;
   }
 
   /**
