@@ -1184,3 +1184,27 @@ describe("Composer cli-failed gate (Phase G)", () => {
     await waitFor(() => expect(onTextChange).toHaveBeenLastCalledWith("draft text"));
   });
 });
+
+// W7(b) — the prompt-cache hint shows while composing in a session whose
+// last turn ended >60 min ago with a large context; it never blocks sending.
+describe("Composer cache-rewrite hint", () => {
+  it("appears once the user starts typing after a long pause, and send still works", () => {
+    setupMockStore({ session: { last_context_tokens: 150_000, last_turn_completed_at: Date.now() - 3 * 3_600_000 } });
+    render(<Composer sessionId="s1" />);
+    // Not composing yet → no hint (avoid noise on a merely opened session).
+    expect(screen.queryByTestId("cache-rewrite-hint")).toBeNull();
+    const textarea = screen.getByPlaceholderText(/Type a message/i);
+    fireEvent.change(textarea, { target: { value: "continue" } });
+    expect(screen.getByTestId("cache-rewrite-hint").textContent).toContain("≈150.0k токенов будут записаны заново");
+    // Non-blocking: Enter still sends.
+    fireEvent.keyDown(textarea, { key: "Enter" });
+    expect(mockSendToSession).toHaveBeenCalled();
+  });
+
+  it("stays hidden for a recent turn", () => {
+    setupMockStore({ session: { last_context_tokens: 150_000, last_turn_completed_at: Date.now() - 5 * 60_000 } });
+    render(<Composer sessionId="s1" />);
+    fireEvent.change(screen.getByPlaceholderText(/Type a message/i), { target: { value: "continue" } });
+    expect(screen.queryByTestId("cache-rewrite-hint")).toBeNull();
+  });
+});
