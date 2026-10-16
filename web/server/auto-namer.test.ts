@@ -40,6 +40,7 @@ beforeEach(() => {
     telemetryEnabled: false,
     defaultSessionMode: "solo" as const,
     kbAutoPrime: false,
+    autoResumeAfterLimit: true,
     updatedAt: 0,
   });
 });
@@ -86,6 +87,7 @@ describe("generateSessionTitle", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 0,
     });
 
@@ -139,6 +141,7 @@ describe("generateSessionTitle", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 0,
     });
     mockFetch.mockResolvedValueOnce({
@@ -221,6 +224,7 @@ describe("generateSessionTitle", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 0,
     });
     mockFetch.mockResolvedValueOnce({

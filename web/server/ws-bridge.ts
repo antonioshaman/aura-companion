@@ -1825,7 +1825,7 @@ export class WsBridge {
   injectUserMessage(
     sessionId: string,
     content: string,
-    origin?: "server:cron" | "server:agent" | "server:rest" | "council:peer",
+    origin?: "server:cron" | "server:agent" | "server:rest" | "server:auto-resume" | "council:peer",
   ): void {
     const session = this.sessions.get(sessionId);
     if (!session) {
@@ -1833,6 +1833,22 @@ export class WsBridge {
       return;
     }
     this.routeBrowserMessage(session, { type: "user_message", content }, undefined, origin);
+  }
+
+  /**
+   * Publish the pending usage-limit auto-resume for a session (or clear it
+   * with `null`): stored on `session.state.auto_resume` so a reconnecting
+   * browser gets it in `session_init`, and broadcast as `session_update` for
+   * the live banner. No-op for an unknown session.
+   */
+  setAutoResumeState(sessionId: string, state: SessionState["auto_resume"]): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    const next = state ?? null;
+    if (session.state.auto_resume === undefined && next === null) return;
+    session.state.auto_resume = next;
+    this.persistSession(session);
+    this.broadcastToBrowsers(session, { type: "session_update", session: { auto_resume: next } });
   }
 
   /** Configure MCP servers on a session programmatically (no browser required).
@@ -2379,7 +2395,7 @@ export class WsBridge {
     session: Session,
     msg: BrowserOutgoingMessage,
     ws?: ServerWebSocket<SocketData>,
-    origin?: "server:cron" | "server:agent" | "server:rest" | "council:peer",
+    origin?: "server:cron" | "server:agent" | "server:rest" | "server:auto-resume" | "council:peer",
   ) {
     // Bridge-level message types — never forwarded to backend
     if (msg.type === "session_subscribe") {
@@ -2548,6 +2564,8 @@ export class WsBridge {
         content: msg.content,
         timestamp: ts,
         id: msg.client_msg_id || `user-${ts}-${this.userMsgCounter++}`,
+        // Rendered in chat as an automatic resume, not as the user's words.
+        ...(origin === "server:auto-resume" ? { origin: "auto_resume" as const } : {}),
       };
       this.appendHistory(session, userMessage);
       // Observer rigor: a liveness probe to a council observer is not review

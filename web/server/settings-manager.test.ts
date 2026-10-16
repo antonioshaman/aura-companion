@@ -51,8 +51,21 @@ describe("settings-manager", () => {
       telemetryEnabled: true,
       defaultSessionMode: "solo",
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 0,
     });
+  });
+
+  // Usage-limit auto-resume is ON by default; an explicit opt-out persists
+  // and garbage values fall back to the default (on).
+  it("autoResumeAfterLimit defaults on, persists an opt-out, and rejects garbage", () => {
+    expect(getSettings().autoResumeAfterLimit).toBe(true);
+    updateSettings({ autoResumeAfterLimit: false });
+    _resetForTest(settingsPath);
+    expect(getSettings().autoResumeAfterLimit).toBe(false);
+    writeFileSync(settingsPath, JSON.stringify({ autoResumeAfterLimit: "no" }));
+    _resetForTest(settingsPath);
+    expect(getSettings().autoResumeAfterLimit).toBe(true);
   });
 
   // aura-diet 2026-10: new sessions are solo and the KB is not auto-loaded
@@ -125,6 +138,7 @@ describe("settings-manager", () => {
       telemetryEnabled: true,
       defaultSessionMode: "solo",
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 123,
     });
   });
@@ -207,6 +221,7 @@ describe("settings-manager", () => {
       telemetryEnabled: true,
       defaultSessionMode: "solo",
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 0,
     });
   });

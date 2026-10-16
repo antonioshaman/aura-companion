@@ -138,6 +138,7 @@ describe("attachCodexAdapterHandlers", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 0,
     });
   });
@@ -1140,6 +1141,7 @@ describe("attachCodexAdapterHandlers", () => {
         telemetryEnabled: false,
         defaultSessionMode: "solo" as const,
         kbAutoPrime: false,
+        autoResumeAfterLimit: true,
         updatedAt: 0,
       });
     }
@@ -1319,6 +1321,7 @@ describe("attachCodexAdapterHandlers", () => {
         telemetryEnabled: false,
         defaultSessionMode: "solo" as const,
         kbAutoPrime: false,
+        autoResumeAfterLimit: true,
         updatedAt: 0,
       });
 
@@ -1368,6 +1371,7 @@ describe("attachCodexAdapterHandlers", () => {
         telemetryEnabled: false,
         defaultSessionMode: "solo" as const,
         kbAutoPrime: false,
+        autoResumeAfterLimit: true,
         updatedAt: 0,
       });
 
@@ -1482,6 +1486,7 @@ describe("attachCodexAdapterHandlers", () => {
         telemetryEnabled: false,
         defaultSessionMode: "solo" as const,
         kbAutoPrime: false,
+        autoResumeAfterLimit: true,
         updatedAt: 0,
       });
 
@@ -1615,6 +1620,7 @@ describe("attachCodexAdapterHandlers", () => {
         telemetryEnabled: false,
         defaultSessionMode: "solo" as const,
         kbAutoPrime: false,
+        autoResumeAfterLimit: true,
         updatedAt: 0,
       });
 

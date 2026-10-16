@@ -440,7 +440,14 @@ export type BrowserIncomingMessageBase =
   // `CliFailedFrame` from `ws-bridge-types.ts` for the Phase G
   // frontend bridge.
   | import("./cli-failed-frame.js").CliFailedFrame
-  | { type: "user_message"; content: string; timestamp: number; id?: string }
+  | {
+      type: "user_message";
+      content: string;
+      timestamp: number;
+      id?: string;
+      /** Set when the server (not a person) sent this message — currently only the usage-limit auto-resume. */
+      origin?: "auto_resume";
+    }
   | { type: "message_history"; messages: BrowserIncomingMessage[] }
   | { type: "event_replay"; events: BufferedBrowserEvent[] }
   | { type: "session_name_update"; name: string }
@@ -806,6 +813,24 @@ export interface SessionState {
     primary: { usedPercent: number; windowDurationMins: number; resetsAt: number } | null;
     secondary: { usedPercent: number; windowDurationMins: number; resetsAt: number } | null;
   };
+  /**
+   * Pending auto-resume after a usage limit (see `auto-resume-scheduler.ts`).
+   * Present while a one-shot resume is scheduled; `null`/absent otherwise.
+   * Drives the in-session "Лимит до HH:MM — автопродолжение в HH:MM" banner.
+   */
+  auto_resume?: {
+    /** Epoch ms when the usage limit resets. */
+    resetAt: number;
+    /** Epoch ms when the continuation prompt will be sent. */
+    fireAt: number;
+    resetSource: "rate_limit_event" | "codex_rate_limits" | "resets_in_seconds" | "text" | "text_no_zone" | "fallback";
+    /**
+     * Auto-resume paused: the last two resumes immediately re-hit a limit, so
+     * Aura stopped injecting until the user acts (banner: "лимит всё ещё
+     * активен — автопродолжение приостановлено").
+     */
+    paused?: boolean;
+  } | null;
   /** If this session was spawned by a cron job */
   cronJobId?: string;
   /** Human-readable name of the cron job that spawned this session */

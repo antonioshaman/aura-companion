@@ -511,6 +511,8 @@ export interface AppSettings {
   defaultSessionMode?: "solo" | "council";
   /** Opt-in: ask new sessions to load the knowledge base at start. Default off. */
   kbAutoPrime?: boolean;
+  /** Auto-continue a session after its usage limit resets. Default on. */
+  autoResumeAfterLimit?: boolean;
 }
 
 export interface LinearOAuthConnectionSummary {
@@ -1079,6 +1081,10 @@ export const api = {
   deleteSession: (sessionId: string) =>
     del(`/sessions/${encodeURIComponent(sessionId)}`),
 
+  /** Cancel the pending usage-limit auto-resume of a session. */
+  cancelAutoResume: (sessionId: string) =>
+    del<{ ok: boolean; cancelled: boolean }>(`/sessions/${encodeURIComponent(sessionId)}/auto-resume`),
+
   relaunchSession: (sessionId: string, opts?: RelaunchSessionOpts) =>
     post(`/sessions/${encodeURIComponent(sessionId)}/relaunch`, opts),
 
@@ -1193,6 +1199,7 @@ export const api = {
     telemetryEnabled?: boolean;
     defaultSessionMode?: "solo" | "council";
     kbAutoPrime?: boolean;
+    autoResumeAfterLimit?: boolean;
   }) => put<AppSettings>("/settings", data),
   verifyAnthropicKey: (apiKey: string) =>
     post<{ valid: boolean; error?: string }>("/settings/anthropic/verify", { apiKey }),

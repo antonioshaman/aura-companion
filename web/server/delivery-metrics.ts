@@ -138,7 +138,7 @@ export function isFirstOutputFrame(frame: BackendFrame): boolean {
 
 // ── Collector ─────────────────────────────────────────────────────────────
 
-export type UserMessageOrigin = "server:cron" | "server:agent" | "server:rest" | "council:peer" | undefined;
+export type UserMessageOrigin = "server:cron" | "server:agent" | "server:rest" | "server:auto-resume" | "council:peer" | undefined;
 
 interface SessionState extends Omit<SessionDeliveryStats, "runningTasks"> {
   /** A user message's turn is open (cleared by the result that ends it). */

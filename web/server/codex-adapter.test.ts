@@ -4628,6 +4628,103 @@ describe("CodexAdapter with ICodexTransport", () => {
     errorSpy.mockRestore();
   });
 
+  // ─── Auto-resume: usage-limit detection (session:usage-limit) ─────────────
+  // Shapes: the account/rateLimits/updated params are the REAL recorded frame
+  // shape (usedPercent raised to 100 to model the exhausted window); the
+  // error notification is the real v2 shape with codexErrorInfo
+  // "usageLimitExceeded" + the message string from the installed codex binary.
+  it("usage-limit error → session:usage-limit with the exhausted rateLimits window reset, once per turn", async () => {
+    const { mock } = await initAdapter({ model: "gpt-6.1-sol" });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const events: Array<Record<string, unknown>> = [];
+    const off = companionBus.on("session:usage-limit", (e) => {
+      events.push(e as unknown as Record<string, unknown>);
+    });
+    const resetSec = Math.floor(Date.now() / 1000) + 3600;
+    mock.pushNotification("account/rateLimits/updated", {
+      rateLimits: {
+        limitId: "codex", limitName: null,
+        primary: { usedPercent: 100, windowDurationMins: 300, resetsAt: resetSec },
+        secondary: { usedPercent: 40, windowDurationMins: 10080, resetsAt: resetSec + 86400 },
+        credits: { hasCredits: false, unlimited: false, balance: "0" },
+        individualLimit: null, planType: "plus", rateLimitReachedType: null,
+      },
+    });
+    mock.pushNotification("error", {
+      error: { message: "You've hit your usage limit. Upgrade to Plus to continue using Codex (https://chatgpt.com/explore/plus), or try again at 3:45 PM.", codexErrorInfo: "usageLimitExceeded", additionalDetails: null },
+      willRetry: false,
+      threadId: "thr_1",
+      turnId: "turn_9",
+    });
+    // The failed turn/completed for the same turn must not double-emit.
+    mock.pushNotification("turn/completed", {
+      threadId: "thr_1",
+      turn: { id: "turn_9", status: "failed", error: { message: "You've hit your usage limit.", codexErrorInfo: "usageLimitExceeded" } },
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      sessionId: "test-session-transport",
+      backend: "codex",
+      model: "gpt-6.1-sol",
+      resetAt: resetSec * 1000,
+      resetSource: "codex_rate_limits",
+      limitType: "primary",
+    });
+    off();
+    errorSpy.mockRestore();
+  });
+
+  // Review WARN1: real adapter path (no defaultTimeZone, no rateLimits
+  // snapshot) — Codex formats "Try again at" in its own local zone, read here
+  // in the server zone and flagged text_no_zone.
+  it("zoneless 'Try again at h:mm PM' via the real adapter path → server-zone reset, source text_no_zone", async () => {
+    const { mock } = await initAdapter({ model: "gpt-6.1-sol" });
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const events: Array<Record<string, unknown>> = [];
+    const off = companionBus.on("session:usage-limit", (e) => {
+      events.push(e as unknown as Record<string, unknown>);
+    });
+    // Pin the clock to local 10:00 (Date only — real timers keep the
+    // adapter's async plumbing working) so +2h never crosses midnight.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(2026, 9, 16, 10, 0));
+    const target = new Date(2026, 9, 16, 12, 0);
+    const h12 = target.getHours() % 12 === 0 ? 12 : target.getHours() % 12;
+    const clock = `${h12}:${String(target.getMinutes()).padStart(2, "0")} ${target.getHours() < 12 ? "AM" : "PM"}`;
+    mock.pushNotification("error", {
+      error: { message: `You've hit your usage limit. Try again at ${clock}.`, codexErrorInfo: "usageLimitExceeded", additionalDetails: null },
+      willRetry: false,
+      threadId: "thr_1",
+      turnId: "turn_tz",
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ resetAt: target.getTime(), resetSource: "text_no_zone" });
+    vi.useRealTimers();
+    off();
+    errorSpy.mockRestore();
+  });
+
+  it("a non-limit Codex error (real model-not-supported frame) does not emit session:usage-limit", async () => {
+    const { mock } = await initAdapter();
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const events: unknown[] = [];
+    const off = companionBus.on("session:usage-limit", (e) => {
+      events.push(e);
+    });
+    mock.pushNotification("error", {
+      error: { message: "{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account.\"}}", codexErrorInfo: "other", additionalDetails: null },
+      willRetry: false,
+      threadId: "thr_1",
+      turnId: "turn_1",
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(events).toHaveLength(0);
+    off();
+    errorSpy.mockRestore();
+  });
+
   it("v2 'error' notification tolerates missing message and signals retry", async () => {
     // Edge cases: (a) malformed frame without error.message still emits a
     // visible error (never silently dropped); (b) willRetry=true is conveyed

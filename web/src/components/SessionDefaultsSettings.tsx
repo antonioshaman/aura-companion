@@ -7,6 +7,8 @@
  *    form; this setting only picks where that toggle STARTS.
  *  - The knowledge base is consulted on demand. "Load at session start"
  *    (the old /prime-first behaviour) is opt-in and off by default.
+ *  - "Автопродолжение после лимита" (default on): when a session stops on a
+ *    usage limit, Aura sends a continuation prompt shortly after the reset.
  *
  * Controlled component: SettingsPage owns the values and the API calls.
  * Works the same for Claude Code and Codex sessions (the KB directive is sent
@@ -22,6 +24,9 @@ export interface SessionDefaultsSettingsProps {
   kbAutoPrime: boolean;
   onModeChange: (mode: DefaultSessionMode) => void;
   onKbAutoPrimeChange: (enabled: boolean) => void;
+  /** Auto-continue after a usage limit resets. Optional so older callers keep compiling; hidden when absent. */
+  autoResumeAfterLimit?: boolean;
+  onAutoResumeAfterLimitChange?: (enabled: boolean) => void;
   /** Disable the controls (e.g. while settings are loading). */
   disabled?: boolean;
 }
@@ -44,6 +49,8 @@ export function SessionDefaultsSettings({
   kbAutoPrime,
   onModeChange,
   onKbAutoPrimeChange,
+  autoResumeAfterLimit,
+  onAutoResumeAfterLimitChange,
   disabled = false,
 }: SessionDefaultsSettingsProps) {
   return (
@@ -101,6 +108,31 @@ export function SessionDefaultsSettings({
         sessions are told to load relevant entries (/prime) before starting. Applies to Claude Code and
         Codex; ignored when the knowledge layer is disabled on the server.
       </p>
+
+      {autoResumeAfterLimit !== undefined && onAutoResumeAfterLimitChange && (
+        <>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={autoResumeAfterLimit}
+            aria-label="Автопродолжение после лимита"
+            aria-describedby="auto-resume-help"
+            disabled={disabled}
+            onClick={() => onAutoResumeAfterLimitChange(!autoResumeAfterLimit)}
+            className="w-full flex items-center justify-between px-3 py-3 min-h-[44px] rounded-lg text-sm bg-cc-hover text-cc-fg hover:bg-cc-active transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <span>Автопродолжение после лимита</span>
+            <span className={`text-xs font-medium ${autoResumeAfterLimit ? "text-cc-success" : "text-cc-muted"}`}>
+              {autoResumeAfterLimit ? "On" : "Off"}
+            </span>
+          </button>
+          <p id="auto-resume-help" className="text-xs text-cc-muted px-1">
+            When a session stops on a usage limit (Claude session/weekly limit, Codex usage limit), Aura
+            sends a continuation prompt 1–2 minutes after the reset, relaunching the session if needed.
+            Works for Claude Code and Codex, solo and Council sessions. Cancel per session from its banner.
+          </p>
+        </>
+      )}
     </div>
   );
 }

@@ -163,6 +163,28 @@ describe("MessageBubble - user messages", () => {
     expect(images[0].getAttribute("alt")).toBe("attachment");
   });
 
+  // Usage-limit auto-resume: the server-sent continuation prompt is labelled
+  // so it is not mistaken for something the user typed; normal messages are not.
+  it("labels an auto-resume user message with the automatic caption", () => {
+    render(<MessageBubble message={makeMessage({ role: "user", content: "Лимит сброшен", origin: "auto_resume" })} />);
+    expect(screen.getByTestId("auto-resume-caption").textContent).toBe("Автопродолжение после лимита");
+  });
+
+  it("does not label a normal user message", () => {
+    render(<MessageBubble message={makeMessage({ role: "user", content: "typed" })} />);
+    expect(screen.queryByTestId("auto-resume-caption")).toBeNull();
+  });
+
+  it("passes axe for the auto-resume user message", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(<MessageBubble message={makeMessage({ role: "user", content: "Лимит сброшен", origin: "auto_resume" })} />);
+    // `listitem` is disabled because this file's react-markdown mock renders a
+    // bare demo <li> for every message body — an artifact of the mock, not of
+    // the caption under test.
+    const results = await axe(container, { rules: { listitem: { enabled: false } } });
+    expect(results.violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.html).join(" | ")}`)).toEqual([]);
+  });
+
   it("does not render images section when images array is empty", () => {
     const msg = makeMessage({ role: "user", content: "No images", images: [] });
     const { container } = render(<MessageBubble message={msg} />);

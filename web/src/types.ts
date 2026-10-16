@@ -74,6 +74,12 @@ export interface ChatMessage {
    * (see `utils/resume-interrupted.ts`). Absent → the plain muted divider.
    */
   systemVariant?: "error" | "resume-interrupted";
+  /**
+   * Set on a user-role message the server sent on the user's behalf —
+   * currently only the usage-limit auto-resume continuation prompt. The
+   * bubble shows an "Автопродолжение после лимита" caption.
+   */
+  origin?: "auto_resume";
 }
 
 export interface TaskItem {

@@ -140,6 +140,7 @@ vi.mock("./settings-manager.js", () => ({
     telemetryEnabled: false,
     defaultSessionMode: "solo" as const,
     kbAutoPrime: false,
+    autoResumeAfterLimit: true,
     updatedAt: 0,
   })),
   updateSettings: vi.fn((patch) => ({
@@ -166,6 +167,7 @@ vi.mock("./settings-manager.js", () => ({
     telemetryEnabled: patch.telemetryEnabled ?? true,
     defaultSessionMode: patch.defaultSessionMode ?? "solo",
     kbAutoPrime: patch.kbAutoPrime ?? false,
+    autoResumeAfterLimit: patch.autoResumeAfterLimit ?? true,
     updatedAt: Date.now(),
   })),
 }));
@@ -1661,6 +1663,7 @@ describe("GET /api/sessions/:id/archive-info", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 0,
     });
     const res = await app.request("/api/sessions/s1/archive-info", { method: "GET" });
@@ -2034,6 +2037,7 @@ describe("GET /api/settings", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 123,
     });
 
@@ -2065,6 +2069,7 @@ describe("GET /api/settings", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
     });
   });
 
@@ -2096,6 +2101,7 @@ describe("GET /api/settings", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 123,
     });
 
@@ -2127,6 +2133,7 @@ describe("GET /api/settings", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
     });
   });
 
@@ -2159,6 +2166,7 @@ describe("GET /api/settings", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 100,
     });
 
@@ -2199,6 +2207,7 @@ describe("PUT /api/settings", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 456,
     });
 
@@ -2252,6 +2261,7 @@ describe("PUT /api/settings", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
     });
   });
 
@@ -2283,6 +2293,7 @@ describe("PUT /api/settings", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 789,
     });
 
@@ -2326,9 +2337,32 @@ describe("PUT /api/settings", () => {
     expect(json.kbAutoPrime).toBe(true);
   });
 
+  // Usage-limit auto-resume toggle: accepted, echoed, and announced on the
+  // bus so the orchestrator can drop pending resumes when switched off.
+  it("accepts autoResumeAfterLimit, echoes it and emits settings:auto-resume-changed", async () => {
+    const { companionBus } = await import("./event-bus.js");
+    const seen: boolean[] = [];
+    const off = companionBus.on("settings:auto-resume-changed", ({ enabled }) => {
+      seen.push(enabled);
+    });
+    const base = settingsManager.getSettings();
+    vi.mocked(settingsManager.updateSettings).mockReturnValueOnce({ ...base, autoResumeAfterLimit: false });
+    const res = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ autoResumeAfterLimit: false }),
+    });
+    expect(res.status).toBe(200);
+    expect(settingsManager.updateSettings).toHaveBeenCalledWith(expect.objectContaining({ autoResumeAfterLimit: false }));
+    expect((await res.json()).autoResumeAfterLimit).toBe(false);
+    expect(seen).toEqual([false]);
+    off();
+  });
+
   it.each([
     [{ defaultSessionMode: "pair" }, "defaultSessionMode must be 'solo' or 'council'"],
     [{ kbAutoPrime: "yes" }, "kbAutoPrime must be a boolean"],
+    [{ autoResumeAfterLimit: "yes" }, "autoResumeAfterLimit must be a boolean"],
   ])("rejects invalid session defaults %j with 400", async (body, error) => {
     const res = await app.request("/api/settings", {
       method: "PUT",
@@ -2368,6 +2402,7 @@ describe("PUT /api/settings", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 999,
     });
 
@@ -2467,6 +2502,7 @@ describe("PUT /api/settings", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 500,
     });
 
@@ -2696,6 +2732,7 @@ describe("GET /api/linear/issues", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -2734,6 +2771,7 @@ describe("GET /api/linear/issues", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 0,
     });
 
@@ -2825,6 +2863,7 @@ describe("GET /api/linear/issues", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 0,
     });
 
@@ -2923,6 +2962,7 @@ describe("GET /api/linear/issues", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 0,
     });
 
@@ -2986,6 +3026,7 @@ describe("GET /api/linear/connection", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -3024,6 +3065,7 @@ describe("GET /api/linear/connection", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 0,
     });
 
@@ -3084,6 +3126,7 @@ describe("POST /api/linear/issues/:id/transition", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 0,
     });
 
@@ -3126,6 +3169,7 @@ describe("POST /api/linear/issues/:id/transition", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 0,
     });
 
@@ -3167,6 +3211,7 @@ describe("POST /api/linear/issues/:id/transition", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -3210,6 +3255,7 @@ describe("POST /api/linear/issues/:id/transition", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 0,
     });
 
@@ -3287,6 +3333,7 @@ describe("POST /api/linear/issues/:id/transition", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 0,
     });
 
@@ -3343,6 +3390,7 @@ describe("GET /api/linear/projects", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -3381,6 +3429,7 @@ describe("GET /api/linear/projects", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 0,
     });
 
@@ -3449,6 +3498,7 @@ describe("GET /api/linear/project-issues", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -3487,6 +3537,7 @@ describe("GET /api/linear/project-issues", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 0,
     });
 
@@ -3570,6 +3621,7 @@ describe("GET /api/linear/project-issues", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 0,
     });
 

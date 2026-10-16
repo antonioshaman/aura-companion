@@ -27,6 +27,7 @@ import type {
 import { AiValidationBadge } from "./AiValidationBadge.js";
 import { AiValidationToggle } from "./AiValidationToggle.js";
 import { ModelFallbackBanner } from "./ModelFallbackBanner.js";
+import { AutoResumeBanner } from "./AutoResumeBanner.js";
 import { UpdateAvailableBanner } from "./UpdateAvailableBanner.js";
 import {
   AutoProceedRestoreNotice,
@@ -308,6 +309,15 @@ const MSG_USER: ChatMessage = {
   content:
     "Can you help me refactor the authentication module to use JWT tokens?",
   timestamp: Date.now() - 60000,
+};
+
+// Usage-limit auto-resume: the continuation prompt Aura sends after the reset.
+const MSG_USER_AUTO_RESUME: ChatMessage = {
+  id: "msg-auto-resume",
+  role: "user",
+  content: "Лимит сброшен — продолжай с того места, где остановился.",
+  origin: "auto_resume",
+  timestamp: Date.now() - 50000,
 };
 
 const MSG_USER_IMAGE: ChatMessage = {
@@ -1136,6 +1146,9 @@ export function Playground() {
             </Card>
             <Card label="User message with image">
               <MessageBubble message={MSG_USER_IMAGE} />
+            </Card>
+            <Card label="User message — automatic resume after usage limit">
+              <MessageBubble message={MSG_USER_AUTO_RESUME} />
             </Card>
             <Card label="Assistant message (markdown)">
               <MessageBubble message={MSG_ASSISTANT} />
@@ -3326,6 +3339,18 @@ function CouncilModeSection() {
         </Card>
         <Card label="ModelFallbackBanner — temporarily overloaded">
           <ModelFallbackBanner fromModel="Opus 4.8" toModel="Sonnet 4.6" reason="overloaded" />
+        </Card>
+        <Card label="AutoResumeBanner — usage limit, auto-resume scheduled">
+          <AutoResumeBanner resetAt={Date.now() + 2 * 3_600_000} fireAt={Date.now() + 2 * 3_600_000 + 90_000} resetSource="rate_limit_event" onCancel={() => {}} />
+        </Card>
+        <Card label="AutoResumeBanner — weekly limit (other day)">
+          <AutoResumeBanner resetAt={Date.now() + 3 * 86_400_000} fireAt={Date.now() + 3 * 86_400_000 + 75_000} resetSource="rate_limit_event" onCancel={() => {}} />
+        </Card>
+        <Card label="AutoResumeBanner — paused (limit still active after two resumes)">
+          <AutoResumeBanner resetAt={Date.now() + 3_600_000} fireAt={Date.now() + 3_600_000} resetSource="fallback" paused onCancel={() => {}} />
+        </Card>
+        <Card label="AutoResumeBanner — reset time unknown (fallback), cancelling">
+          <AutoResumeBanner resetAt={Date.now() + 5 * 3_600_000} fireAt={Date.now() + 5 * 3_600_000 + 60_000} resetSource="fallback" onCancel={() => {}} cancelling />
         </Card>
         {/* Task A.2 — server-recorded fallbacks (persistent across reloads). */}
         <Card label="ModelFallbackBanner — overloaded, with Switch back">

@@ -58,6 +58,11 @@ import { isToolUseDeniedForSynthetic, denialMessageForSynthetic } from "./auto-p
 import { resolveModelAvailability } from "./model-availability.js";
 import { SilentStdioWatchdog } from "./silent-stdio-watchdog.js";
 import { classifyFallbackReason, nextModelInChain } from "./model-fallback-chain.js";
+import {
+  parseClaudeRateLimitEvent,
+  resolveClaudeUsageLimit,
+  type ClaudeRateLimitInfo,
+} from "./usage-limit-parse.js";
 import { resolveModelSubstitution } from "./broken-model-substitution.js";
 
 /**
@@ -352,6 +357,12 @@ export class ClaudeAdapter implements IBackendAdapter {
    * definition a fresh classification opportunity.
    */
   private modelFallbackFiredForThisSpawn = false;
+
+  /**
+   * Last `rate_limit_event` with `status: "rejected"` (auto-resume). Cleared
+   * by any non-rejected event and by a successful `result`.
+   */
+  private lastRejectedRateLimit: ClaudeRateLimitInfo | null = null;
 
   /**
    * Init-frame health canary timer handle. Armed in
@@ -1110,8 +1121,12 @@ export class ClaudeAdapter implements IBackendAdapter {
         break;
 
       case "rate_limit_event":
-        // Rate-limit status from Claude API (allowed/throttled). Silently
-        // consumed — no user-facing action needed.
+        // Rate-limit status from Claude API (allowed / allowed_warning /
+        // rejected). Not user-facing, but a `rejected` event carries the
+        // authoritative `resetsAt` (epoch s) for the limit that is about to
+        // terminate the turn — remembered for the usage-limit emit on the
+        // `result` frame (auto-resume). Any non-rejected status clears it.
+        this.noteRateLimitEvent(msg as { rate_limit_info?: Record<string, unknown> });
         break;
 
       case "control_cancel_request":
@@ -1419,7 +1434,44 @@ export class ClaudeAdapter implements IBackendAdapter {
     });
   }
 
+  private noteRateLimitEvent(msg: { rate_limit_info?: Record<string, unknown> }): void {
+    const parsed = parseClaudeRateLimitEvent(msg.rate_limit_info);
+    this.lastRejectedRateLimit = parsed.rejected ? parsed : null;
+  }
+
+  /**
+   * Auto-resume detection: an error `result` whose text / status is a usage
+   * limit ("You've hit your session limit · resets 1:40am (UTC)", 429 after a
+   * `rejected` rate_limit_event) → `session:usage-limit` with the resolved
+   * reset time. Fires per limit-terminated turn; the scheduler dedups.
+   */
+  private maybeEmitUsageLimit(msg: CLIResultMessage): void {
+    if (!msg.is_error) {
+      this.lastRejectedRateLimit = null;
+      return;
+    }
+    const text = typeof msg.result === "string" ? msg.result : "";
+    const resolved = resolveClaudeUsageLimit({
+      text,
+      apiErrorStatus: typeof msg.api_error_status === "number" ? msg.api_error_status : null,
+      lastRejected: this.lastRejectedRateLimit,
+      now: Date.now(),
+    });
+    if (!resolved) return;
+    const modelUsage = (msg as { modelUsage?: Record<string, unknown> }).modelUsage;
+    const model = modelUsage && typeof modelUsage === "object" ? Object.keys(modelUsage)[0] ?? null : null;
+    companionBus.emit("session:usage-limit", {
+      sessionId: this.sessionId,
+      backend: "claude",
+      model,
+      resetAt: resolved.resetAt,
+      resetSource: resolved.resetSource,
+      limitType: resolved.limitType,
+    });
+  }
+
   private handleResultMessage(msg: CLIResultMessage): void {
+    this.maybeEmitUsageLimit(msg);
     // Council Mode auto-wake: `result` is the documented per-turn
     // terminator in the Claude Code NDJSON protocol. When we see one
     // and the observer was mid-flight from an auto-wake, flip back to

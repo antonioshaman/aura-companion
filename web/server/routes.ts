@@ -1658,6 +1658,18 @@ export function createRoutes(
     return c.json({ ok: true });
   });
 
+  // Usage-limit auto-resume: inspect / cancel the pending one-shot resume
+  // (the in-session banner's "Отменить" button).
+  api.get("/sessions/:id/auto-resume", (c) => {
+    const schedule = orchestrator.getAutoResume(c.req.param("id"));
+    return c.json({ autoResume: schedule ?? null });
+  });
+
+  api.delete("/sessions/:id/auto-resume", (c) => {
+    const cancelled = orchestrator.cancelAutoResume(c.req.param("id"), "user_cancel");
+    return c.json({ ok: true, cancelled });
+  });
+
   api.post("/sessions/:id/relaunch", async (c) => {
     const id = c.req.param("id");
     const body = await c.req.json().catch(() => ({})) as { model?: unknown };

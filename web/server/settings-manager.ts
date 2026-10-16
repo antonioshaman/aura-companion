@@ -62,6 +62,12 @@ export interface CompanionSettings {
    * `developerInstructions`). Default off — the KB is consulted on demand.
    */
   kbAutoPrime: boolean;
+  /**
+   * When a session stops on a usage limit (Claude session/weekly limit,
+   * Codex usage limit), automatically send a continuation prompt shortly
+   * after the limit resets. Default ON. See `auto-resume-scheduler.ts`.
+   */
+  autoResumeAfterLimit: boolean;
   updatedAt: number;
 }
 
@@ -96,6 +102,7 @@ let settings: CompanionSettings = {
   telemetryEnabled: true,
   defaultSessionMode: "solo",
   kbAutoPrime: false,
+  autoResumeAfterLimit: true,
   updatedAt: 0,
 };
 
@@ -130,6 +137,7 @@ function normalize(raw: Partial<CompanionSettings> | null | undefined): Companio
     telemetryEnabled: typeof raw?.telemetryEnabled === "boolean" ? raw.telemetryEnabled : true,
     defaultSessionMode: raw?.defaultSessionMode === "council" ? "council" : "solo",
     kbAutoPrime: typeof raw?.kbAutoPrime === "boolean" ? raw.kbAutoPrime : false,
+    autoResumeAfterLimit: typeof raw?.autoResumeAfterLimit === "boolean" ? raw.autoResumeAfterLimit : true,
     updatedAt: typeof raw?.updatedAt === "number" ? raw.updatedAt : 0,
   };
 }
@@ -160,7 +168,7 @@ export function getSettings(): CompanionSettings {
 }
 
 export function updateSettings(
-  patch: Partial<Pick<CompanionSettings, "anthropicApiKey" | "anthropicModel" | "claudeCodeOAuthToken" | "openaiApiKey" | "onboardingCompleted" | "linearApiKey" | "linearAutoTransition" | "linearAutoTransitionStateId" | "linearAutoTransitionStateName" | "linearArchiveTransition" | "linearArchiveTransitionStateId" | "linearArchiveTransitionStateName" | "linearOAuthClientId" | "linearOAuthClientSecret" | "linearOAuthWebhookSecret" | "linearOAuthAccessToken" | "linearOAuthRefreshToken" | "aiValidationEnabled" | "aiValidationAutoApprove" | "aiValidationAutoDeny" | "publicUrl" | "updateChannel" | "dockerAutoUpdate" | "telemetryEnabled" | "defaultSessionMode" | "kbAutoPrime">>,
+  patch: Partial<Pick<CompanionSettings, "anthropicApiKey" | "anthropicModel" | "claudeCodeOAuthToken" | "openaiApiKey" | "onboardingCompleted" | "linearApiKey" | "linearAutoTransition" | "linearAutoTransitionStateId" | "linearAutoTransitionStateName" | "linearArchiveTransition" | "linearArchiveTransitionStateId" | "linearArchiveTransitionStateName" | "linearOAuthClientId" | "linearOAuthClientSecret" | "linearOAuthWebhookSecret" | "linearOAuthAccessToken" | "linearOAuthRefreshToken" | "aiValidationEnabled" | "aiValidationAutoApprove" | "aiValidationAutoDeny" | "publicUrl" | "updateChannel" | "dockerAutoUpdate" | "telemetryEnabled" | "defaultSessionMode" | "kbAutoPrime" | "autoResumeAfterLimit">>,
 ): CompanionSettings {
   ensureLoaded();
   settings = normalize({
@@ -190,6 +198,7 @@ export function updateSettings(
     telemetryEnabled: patch.telemetryEnabled ?? settings.telemetryEnabled,
     defaultSessionMode: patch.defaultSessionMode ?? settings.defaultSessionMode,
     kbAutoPrime: patch.kbAutoPrime ?? settings.kbAutoPrime,
+    autoResumeAfterLimit: patch.autoResumeAfterLimit ?? settings.autoResumeAfterLimit,
     updatedAt: Date.now(),
   });
   persist();

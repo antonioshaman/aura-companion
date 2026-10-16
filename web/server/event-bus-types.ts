@@ -147,6 +147,26 @@ export interface CompanionEventMap {
   };
 
   /**
+   * The session's turn stopped because the account hit a usage limit
+   * (Claude 5-hour / weekly / extra-usage window, Codex usage limit).
+   * Emitted by the adapters on every limit-terminated turn with the reset
+   * time already resolved (structured fields preferred over text, fallback
+   * cap when unknown — see `usage-limit-parse.ts`). The orchestrator feeds
+   * it to the auto-resume scheduler, which dedups repeats of the same limit.
+   */
+  /** The global "auto-resume after usage limit" setting was changed via the settings API. */
+  "settings:auto-resume-changed": { enabled: boolean };
+
+  "session:usage-limit": {
+    sessionId: string;
+    backend: "claude" | "codex";
+    model: string | null;
+    resetAt: number;
+    resetSource: import("./usage-limit-parse.js").UsageLimitResetSource;
+    limitType: string | null;
+  };
+
+  /**
    * The session's ACTIVE model changed after spawn — the user ran `/model`
    * inside the CLI or picked a new model in the composer, and the MAIN
    * assistant frame (`parent_tool_use_id === null`) now reports a different

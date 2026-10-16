@@ -1261,7 +1261,7 @@ export class SessionRecovery {
         type: "error",
         message:
           reason === "rate_limit"
-            ? "Model hit a rate/session limit. Automatic fallback and AFK auto-proceed are paused; send a message manually after the reset."
+            ? "Model hit a rate/session limit. Automatic fallback and AFK auto-proceed are paused until the reset; with \"Автопродолжение после лимита\" on, Aura continues the session automatically after it (otherwise send a message manually)."
             : "Account credits are exhausted. Automatic fallback and AFK auto-proceed are paused until billing/credits recover.",
       });
       log.warn("orchestrator", "Model fallback paused for API limit", {

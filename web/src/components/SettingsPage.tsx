@@ -57,6 +57,7 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
   // aura-diet defaults: solo sessions, KB consulted on demand.
   const [defaultSessionMode, setDefaultSessionMode] = useState<DefaultSessionMode>("solo");
   const [kbAutoPrime, setKbAutoPrime] = useState(false);
+  const [autoResumeAfterLimit, setAutoResumeAfterLimit] = useState(true);
   const [aiValidationEnabled, setAiValidationEnabled] = useState(false);
   const [aiValidationAutoApprove, setAiValidationAutoApprove] = useState(true);
   const [aiValidationAutoDeny, setAiValidationAutoDeny] = useState(false);
@@ -196,6 +197,7 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
         if (typeof s.telemetryEnabled === "boolean") setUsageCounterEnabled(s.telemetryEnabled);
         if (s.defaultSessionMode === "solo" || s.defaultSessionMode === "council") setDefaultSessionMode(s.defaultSessionMode);
         if (typeof s.kbAutoPrime === "boolean") setKbAutoPrime(s.kbAutoPrime);
+        if (typeof s.autoResumeAfterLimit === "boolean") setAutoResumeAfterLimit(s.autoResumeAfterLimit);
         if (typeof s.aiValidationEnabled === "boolean") setAiValidationEnabled(s.aiValidationEnabled);
         if (typeof s.aiValidationAutoApprove === "boolean") setAiValidationAutoApprove(s.aiValidationAutoApprove);
         if (typeof s.aiValidationAutoDeny === "boolean") setAiValidationAutoDeny(s.aiValidationAutoDeny);
@@ -499,6 +501,7 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
               <SessionDefaultsSettings
                 mode={defaultSessionMode}
                 kbAutoPrime={kbAutoPrime}
+                autoResumeAfterLimit={autoResumeAfterLimit}
                 disabled={loading}
                 onModeChange={async (next) => {
                   const prev = defaultSessionMode;
@@ -516,6 +519,15 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                     await api.updateSettings({ kbAutoPrime: next });
                   } catch (e: unknown) {
                     setKbAutoPrime(!next);
+                    setError(e instanceof Error ? e.message : String(e));
+                  }
+                }}
+                onAutoResumeAfterLimitChange={async (next) => {
+                  setAutoResumeAfterLimit(next);
+                  try {
+                    await api.updateSettings({ autoResumeAfterLimit: next });
+                  } catch (e: unknown) {
+                    setAutoResumeAfterLimit(!next);
                     setError(e instanceof Error ? e.message : String(e));
                   }
                 }}
