@@ -3362,6 +3362,14 @@ function CouncilModeSection() {
           <ObserverProbeMessage role="user" text="[liveness probe] Это проверка связи после перезапуска на новой модели. Ответь одной короткой строкой: кто ты (роль) и что видел последним в .council/." />
           <ObserverProbeMessage role="assistant" text="Я Observer, независимый ревьюер Council; содержимое .council/ после перезапуска ещё не видел." />
         </Card>
+        {/* Prod 2026-10-16: a later review after a probe (wakes are never user
+            messages in the feed) must still render as findings cards, not as
+            a third probe row. */}
+        <Card label="Observer feed — probe exchange, then a later review (findings cards)">
+          <ObserverProbeMessage role="user" text="[liveness probe] Ответь одной строкой: кто ты?" />
+          <ObserverProbeMessage role="assistant" text="Я Observer, независимый ревьюер Council." />
+          <MessageBubble message={MSG_OBSERVER_FINDINGS} isObserverSession />
+        </Card>
 
         {/* PLAN-aura-model-registry Task 8 — model fallback notice. Warning
             channel (reuses the DegradedBanner recipe), one card per reason. */}
