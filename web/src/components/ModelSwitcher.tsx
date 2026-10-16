@@ -437,12 +437,22 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
                 ? `${model.label} is ${model.status} — use ${model.replacement} instead`
                 : `${model.label} is ${model.status} and can't be selected`
               : null;
+            // Honest status for catalogue models the registry never verified
+            // (most of the API-key /v1/models list). Subtle muted text, not a
+            // warning tag — the model stays selectable — and it coexists with
+            // "Latest". A registry status (e.g. Blocked) already says more.
+            const showUntested = model.untested === true && !statusLabel;
             return (
               <div
                 key={model.value}
                 id={`${idPrefix}-option-${index}`}
                 onClick={() => handleSelect(model.value)}
-                title={unavailableReason ?? model.label}
+                title={
+                  unavailableReason ??
+                  (showUntested
+                    ? `${model.label} — not verified on this Aura install; it may fail on your plan`
+                    : model.label)
+                }
                 // Task 10 (a11y P5): fold the suppression reason into the
                 // accessible NAME of the disabled option — `title` alone is only
                 // an accessible *description* and many SRs skip it. `aria-label`
@@ -468,6 +478,9 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
                   </span>
                 )}
                 <span className="flex-1 text-left truncate">{model.label}</span>
+                {showUntested && (
+                  <span className="shrink-0 text-[10px] italic text-cc-muted">Untested</span>
+                )}
                 {statusLabel ? (
                   <span className="shrink-0 text-[10px] uppercase tracking-wide text-cc-muted px-1.5 py-0.5 rounded border border-cc-separator">
                     {statusLabel}

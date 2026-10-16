@@ -761,6 +761,46 @@ describe("ModelSwitcher", () => {
       );
     });
 
+    it("shows a subtle 'Untested' hint on models the registry never verified, still selectable", () => {
+      // The served catalogue flags registry-unknown models `untested`. The
+      // hint is honest metadata (muted text, not a warning) — the model stays
+      // selectable and can coexist with the 'Latest' badge.
+      resetStore({
+        dynamicBackendModels: {
+          claude: [
+            { value: "claude-opus-5", label: "Opus 5", icon: "", untested: true },
+            { value: "claude-opus-4-8", label: "Opus 4.8", icon: "" },
+          ],
+        },
+      });
+      render(<ModelSwitcher sessionId="s1" />);
+      fireEvent.click(screen.getByLabelText("Switch model"));
+      const opus5 = screen.getByRole("option", { name: /Opus 5/ });
+      expect(within(opus5).getByText("Untested")).toBeInTheDocument();
+      expect(within(opus5).getByText("Latest")).toBeInTheDocument();
+      expect(opus5).toHaveAttribute("title", expect.stringMatching(/not verified/i));
+      // A verified (registry-known) model carries no hint.
+      const opus48 = screen.getByRole("option", { name: /Opus 4\.8/ });
+      expect(within(opus48).queryByText("Untested")).not.toBeInTheDocument();
+      fireEvent.click(opus5);
+      expect(mockSendToSession).toHaveBeenCalledWith("s1", { type: "set_model", model: "claude-opus-5" });
+    });
+
+    it("passes axe checks with untested hints rendered", async () => {
+      resetStore({
+        dynamicBackendModels: {
+          claude: [
+            { value: "claude-opus-5", label: "Opus 5", icon: "", untested: true },
+            { value: "claude-opus-4-8", label: "Opus 4.8", icon: "" },
+          ],
+        },
+      });
+      const { axe } = await import("vitest-axe");
+      const { container } = render(<ModelSwitcher sessionId="s1" />);
+      fireEvent.click(screen.getByLabelText("Switch model"));
+      expect(await axe(container)).toHaveNoViolations();
+    });
+
     it("passes axe checks with status-annotated options rendered", async () => {
       resetStore({ dynamicBackendModels: { claude: annotatedClaude } });
       const { axe } = await import("vitest-axe");

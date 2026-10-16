@@ -273,6 +273,8 @@ export interface BackendModelInfo {
    */
   status?: "active" | "degraded" | "retired" | "blocked";
   replacement?: string | null;
+  /** Not in the registry — offered by the catalogue but never verified here. */
+  untested?: true;
 }
 
 /**
