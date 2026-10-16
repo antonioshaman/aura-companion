@@ -646,3 +646,102 @@ describe("CouncilCheckpointPipeline — observer rigor", () => {
     expect(reviews).toEqual([expect.objectContaining({ verification: "unverified" })]);
   });
 });
+
+// ─── W14: unanswered wake → redelivery + auto-heal hand-off ──────────────────
+//
+// Prod 2026-10-16 (grp_879b81b6): checkpoint 158's wake was accepted but never
+// answered; at the review deadline the pair degraded and NOTHING re-queued
+// 158 or asked for a relaunch. Checkpoint 159 then arrived while degraded and
+// was dropped (`group_not_active`). These tests pin the pipeline side of the
+// fix: the owed checkpoint is re-queued, the orchestrator is told to heal, a
+// checkpoint arriving while degraded is kept, and a silent-wake report from
+// the adapter converges on the same path.
+describe("W14 unanswered observer wake", () => {
+  const CP158 = "council-review-158-pr366-drift-reply-delivery";
+  const CP159 = "council-review-159-pr366-drift-reply-delivery-retry";
+
+  function dispatched(onUnanswered = vi.fn()) {
+    const h = makeHarness({ pipelineDeps: { onObserverWakeUnanswered: onUnanswered } });
+    const coord = activeCoordinator();
+    h.setCoordinator(coord);
+    h.pipeline.handleCouncilCheckpoint(GROUP, checkpoint(158, CP158));
+    expect(h.watchers.get(GROUP)!.pendingReviewDeadline?.checkpointId).toBe(CP158);
+    return { h, coord, onUnanswered };
+  }
+
+  // (b) deadline expiry with no review on disk: degrade as before, PLUS the
+  // owed checkpoint goes back into the pending slot and the orchestrator is
+  // asked to auto-heal the observer.
+  it("re-queues the owed checkpoint and requests auto-heal when the review deadline expires", () => {
+    const { h, coord, onUnanswered } = dispatched();
+    h.pipeline.handleReviewDeadlineExpired(GROUP, CP158);
+    expect(coord.applyEvent).toHaveBeenCalledWith(GROUP, { type: "half_died", role: "observer", reason: "wake_produced_no_review" });
+    expect(h.watchers.get(GROUP)!.pendingCheckpoint?.checkpoint_id).toBe(CP158);
+    // Same-id re-queue is not a supersede.
+    expect(h.watchers.get(GROUP)!.supersededCheckpointIds).toEqual([]);
+    expect(onUnanswered).toHaveBeenCalledWith(GROUP, OBSERVER, CP158);
+  });
+
+  // (a)/(b) the adapter reported the wake turn silent: degrade with the
+  // honest reason now (not `wake_send_failed`), disarm the deadline so it
+  // cannot fire a second verdict, re-queue and request auto-heal.
+  it("routes an adapter silent-wake report to wake_produced_no_review + redelivery", () => {
+    const { h, coord, onUnanswered } = dispatched();
+    h.pipeline.degradeObserverWakeFailure(GROUP, OBSERVER, "observer wake silent for 120s", "async", "silent");
+    expect(coord.applyEvent).toHaveBeenCalledWith(GROUP, { type: "half_died", role: "observer", reason: "wake_produced_no_review" });
+    expect(h.watchers.get(GROUP)!.pendingReviewDeadline).toBeNull();
+    expect(h.watchers.get(GROUP)!.pendingCheckpoint?.checkpoint_id).toBe(CP158);
+    expect(onUnanswered).toHaveBeenCalledWith(GROUP, OBSERVER, CP158);
+  });
+
+  // A plain send failure keeps its old meaning and does NOT trigger the
+  // unanswered-wake recovery (the transport-close path owns that case).
+  it("keeps wake_send_failed semantics for a send failure", () => {
+    const { h, coord, onUnanswered } = dispatched();
+    h.pipeline.degradeObserverWakeFailure(GROUP, OBSERVER, "Transport closed", "async");
+    expect(coord.applyEvent).toHaveBeenCalledWith(GROUP, { type: "half_died", role: "observer", reason: "wake_send_failed" });
+    expect(onUnanswered).not.toHaveBeenCalled();
+  });
+
+  // (c) prod 12:09:55 — checkpoint 159 arrived while the pair was degraded and
+  // was dropped. Now it is kept (newest-wins) for the recovery drain.
+  it("queues a checkpoint that arrives while the pair is degraded instead of dropping it", () => {
+    const h = makeHarness();
+    h.setCoordinator(activeCoordinator("degraded"));
+    const out = h.pipeline.handleCouncilCheckpoint(GROUP, checkpoint(159, CP159));
+    void out;
+    expect(h.send).not.toHaveBeenCalled();
+    expect(h.watchers.get(GROUP)!.pendingCheckpoint?.checkpoint_id).toBe(CP159);
+    // Recovery: the pair is active again → the drain delivers 159.
+    h.setCoordinator(activeCoordinator("active"));
+    h.pipeline.drainPendingObserverWake(GROUP);
+    expect(h.send).toHaveBeenCalledTimes(1);
+    expect(h.watchers.get(GROUP)!.pendingCheckpoint).toBeNull();
+  });
+
+  // Archived pairs are gone for good — still dropped.
+  it("still drops a checkpoint for an archived pair", () => {
+    const h = makeHarness();
+    h.setCoordinator(activeCoordinator("archived"));
+    h.pipeline.dispatchObserverWake(GROUP, checkpoint(159, CP159));
+    expect(h.watchers.get(GROUP)!.pendingCheckpoint).toBeNull();
+  });
+
+  // (a) the codex fresh-thread retry gets a full review window: the deadline
+  // for the same checkpoint restarts instead of degrading mid-retry.
+  it("re-arms the review deadline for a wake retry", () => {
+    vi.useFakeTimers();
+    try {
+      const { h, coord } = dispatched();
+      vi.advanceTimersByTime(200_000);
+      h.pipeline.rearmReviewDeadlineForRetry(GROUP);
+      vi.advanceTimersByTime(200_000); // 400s after the first delivery
+      expect(coord.applyEvent).not.toHaveBeenCalled();
+      expect(h.watchers.get(GROUP)!.pendingReviewDeadline?.checkpointId).toBe(CP158);
+      vi.advanceTimersByTime(101_000); // >300s after the retry
+      expect(coord.applyEvent).toHaveBeenCalledWith(GROUP, { type: "half_died", role: "observer", reason: "wake_produced_no_review" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

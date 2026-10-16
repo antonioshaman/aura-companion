@@ -57,6 +57,7 @@ import { deliveryMetrics } from "./delivery-metrics.js";
 import { isToolUseDeniedForSynthetic, denialMessageForSynthetic } from "./auto-proceed-permissions.js";
 import { resolveModelAvailability } from "./model-availability.js";
 import { SilentStdioWatchdog } from "./silent-stdio-watchdog.js";
+import { createObserverWakeSilenceWatchdog } from "./observer-wake-silence.js";
 import { classifyFallbackReason, nextModelInChain } from "./model-fallback-chain.js";
 import {
   parseClaudeRateLimitEvent,
@@ -439,6 +440,20 @@ export class ClaudeAdapter implements IBackendAdapter {
    * {@link OBSERVER_WAKE_COMPLETION_WATCHDOG_MS} for the strand it guards.
    */
   private observerWakeWatchdog: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * W14 parity with the Codex adapter: an observer wake turn that delivers
+   * NO stdout frame at all within `OBSERVER_WAKE_SILENCE_MS` of the send is
+   * reported as
+   * `observer:wake-failed` (reason `silent`) so the orchestrator degrades the
+   * pair and auto-heals (relaunches) the observer, then redelivers the
+   * checkpoint. Claude has no in-process "fresh thread", so there is no
+   * interrupt-and-retry step here — a fresh `--resume` process IS the retry.
+   * Separate from {@link silenceWatchdog}, which is armed only for browser
+   * user messages and routes to the generic kill / model-rotation path.
+   */
+  private readonly observerWakeSilence: SilentStdioWatchdog = createObserverWakeSilenceWatchdog(
+    ({ sinceMs }) => this.handleObserverWakeSilent(sinceMs),
+  );
 
   /**
    * Orchestrator-half per-turn state. Mirrors `observerTurnState` but
@@ -731,6 +746,11 @@ export class ClaudeAdapter implements IBackendAdapter {
       // the line later fails protocol parsing. Without this, malformed
       // but arriving output can let the silent watchdog kill a live turn.
       this.silenceWatchdog.onFrame();
+      // W14: the Claude observer verdict is "accepted but ZERO output" — the
+      // first line after a wake proves the stream alive, so the watchdog is
+      // done for this wake. A turn that produced output and then lost its
+      // `result` frame stays with the 360s completion backstop (P2-3).
+      this.observerWakeSilence.disarm();
       // Slide the drift-detector freshness signal. Doing this at the
       // parse-lines seam (not at the record() seam above) keeps the
       // signal aligned with the watchdog's own liveness definition —
@@ -2098,6 +2118,28 @@ export class ClaudeAdapter implements IBackendAdapter {
   }
 
   /**
+   * W14: the wake turn went silent. Release the slot WITHOUT a drain (the
+   * pair is about to degrade; the orchestrator re-queues the checkpoint and
+   * delivers it after the auto-heal relaunch) and report the failure.
+   */
+  private handleObserverWakeSilent(sinceMs: number): void {
+    if (this.observerTurnState !== "in-flight") return;
+    log.warn("claude-adapter", "observer wake turn silent — no frame from CLI", {
+      event: "council.observer_wake_silent",
+      sessionId: this.sessionId,
+      sinceMs,
+      action: "give_up",
+    });
+    this.observerTurnState = "idle";
+    this.clearObserverWakeWatchdog();
+    companionBus.emit("observer:wake-failed", {
+      sessionId: this.sessionId,
+      error: `observer wake silent for ${Math.round(sinceMs / 1000)}s`,
+      reason: "silent",
+    });
+  }
+
+  /**
    * Council Mode test hook + restart-reconcile helper. Returns the current
    * observer turn-state. Callers must NOT use this for gating — the
    * gating decision lives inside {@link sendUserFrameFromServer} so the
@@ -2121,8 +2163,10 @@ export class ClaudeAdapter implements IBackendAdapter {
    */
   private armObserverWakeWatchdog(): void {
     this.clearObserverWakeWatchdog();
+    this.observerWakeSilence.arm("observer_wake");
     const timer = setTimeout(() => {
       this.observerWakeWatchdog = null;
+      this.observerWakeSilence.disarm();
       if (this.observerTurnState !== "in-flight") return;
       log.warn("claude-adapter", "observer wake turn never terminated — force-releasing slot", {
         event: "council.observer_wake_completion_watchdog",
@@ -2137,6 +2181,7 @@ export class ClaudeAdapter implements IBackendAdapter {
   }
 
   private clearObserverWakeWatchdog(): void {
+    this.observerWakeSilence.disarm();
     if (this.observerWakeWatchdog) {
       clearTimeout(this.observerWakeWatchdog);
       this.observerWakeWatchdog = null;

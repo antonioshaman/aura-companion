@@ -51,7 +51,21 @@ export const OBSERVER_AUTOHEAL_READY_WAIT_MS = 60_000;
 const READY_POLL_INTERVAL_MS = 250;
 const HOUR_MS = 3_600_000;
 
-export type ObserverAutohealTrigger = "adapter_missing" | "adapter_wait_timed_out";
+/**
+ * `wake_produced_no_review` (W14): the pair is `degraded` because a wake was
+ * accepted but never answered (review deadline expired, or the adapter saw
+ * the wake turn go silent). Unlike the adapter-missing triggers the observer
+ * still LOOKS ready (adapter attached, transport "connected") — prod
+ * 2026-10-16 its stream was deaf — so this trigger always relaunches (no
+ * self-recovered short-circuit before the first relaunch) and is allowed on a
+ * `degraded` group.
+ */
+export type ObserverAutohealTrigger = "adapter_missing" | "adapter_wait_timed_out" | "wake_produced_no_review";
+
+/** Triggers that heal a pair already `degraded` and must relaunch even when the observer looks ready. */
+export function isForcedRelaunchTrigger(trigger: ObserverAutohealTrigger): boolean {
+  return trigger === "wake_produced_no_review";
+}
 
 export type ObserverAutohealResult =
   | { kind: "healed"; attempts: number }
@@ -67,7 +81,7 @@ export interface ObserverAutohealDeps {
    * Why healing must NOT happen right now, or null to proceed. Checked before
    * every attempt: user stop of either half, group torn down / not live.
    */
-  blockedReason: (sessionGroupId: string, observerSessionId: string) => string | null;
+  blockedReason: (sessionGroupId: string, observerSessionId: string, trigger: ObserverAutohealTrigger) => string | null;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -100,7 +114,7 @@ export class ObserverAutoheal {
     checkpointId: string,
   ): Promise<ObserverAutohealResult> {
     const base = { sessionGroupId, sessionId: observerSessionId, role: "observer", trigger, checkpointId };
-    const blocked = this.deps.blockedReason(sessionGroupId, observerSessionId);
+    const blocked = this.deps.blockedReason(sessionGroupId, observerSessionId, trigger);
     if (blocked) {
       log.info("session-orchestrator", "observer.autoheal.skipped", { event: "observer.autoheal.skipped", ...base, reason: blocked });
       return { kind: "skipped", reason: blocked };
@@ -108,17 +122,26 @@ export class ObserverAutoheal {
     if (this.inFlight.has(sessionGroupId)) return { kind: "skipped", reason: "in_flight" };
     this.inFlight.add(sessionGroupId);
     let attempts = 0;
+    /** A relaunch that returned ok:true happened in this episode. `attempts`
+     *  is bumped BEFORE relaunchObserver runs, so it counts tries, not
+     *  successes — a failed try must not unlock the self-recovered check. */
+    let relaunchedOk = false;
     let lastError: string | undefined;
     try {
       for (let i = 0; i < OBSERVER_AUTOHEAL_MAX_ATTEMPTS; i++) {
         const backoff = OBSERVER_AUTOHEAL_BACKOFF_MS[i] ?? 0;
         if (backoff > 0) await this.sleep(backoff);
-        const reason = this.deps.blockedReason(sessionGroupId, observerSessionId);
+        const reason = this.deps.blockedReason(sessionGroupId, observerSessionId, trigger);
         if (reason) {
           log.info("session-orchestrator", "observer.autoheal.skipped", { event: "observer.autoheal.skipped", ...base, reason, attempts });
           return { kind: "skipped", reason };
         }
-        if (this.deps.isObserverReadyForWake(observerSessionId)) {
+        // A forced trigger's observer looks ready while it is deaf: only a
+        // CONFIRMED successful relaunch (ok:true) counts as recovery for it —
+        // never a failed or thrown attempt, after which the old deaf adapter
+        // is still the one reporting ready.
+        const mayShortCircuit = !isForcedRelaunchTrigger(trigger) || relaunchedOk;
+        if (mayShortCircuit && this.deps.isObserverReadyForWake(observerSessionId)) {
           // Recovered on its own during the backoff — no relaunch needed.
           log.info("session-orchestrator", "observer.autoheal.ok", { event: "observer.autoheal.ok", ...base, attempts, selfRecovered: true });
           return { kind: "healed", attempts };
@@ -157,7 +180,8 @@ export class ObserverAutoheal {
           });
           continue;
         }
-        if (await this.waitForReady(sessionGroupId, observerSessionId)) {
+        relaunchedOk = true;
+        if (await this.waitForReady(sessionGroupId, observerSessionId, trigger)) {
           log.info("session-orchestrator", "observer.autoheal.ok", { event: "observer.autoheal.ok", ...base, attempts });
           return { kind: "healed", attempts };
         }
@@ -187,10 +211,14 @@ export class ObserverAutoheal {
     return true;
   }
 
-  private async waitForReady(sessionGroupId: string, observerSessionId: string): Promise<boolean> {
+  private async waitForReady(
+    sessionGroupId: string,
+    observerSessionId: string,
+    trigger: ObserverAutohealTrigger,
+  ): Promise<boolean> {
     const deadline = this.now() + OBSERVER_AUTOHEAL_READY_WAIT_MS;
     while (this.now() < deadline) {
-      if (this.deps.blockedReason(sessionGroupId, observerSessionId)) return false;
+      if (this.deps.blockedReason(sessionGroupId, observerSessionId, trigger)) return false;
       if (this.deps.isObserverReadyForWake(observerSessionId)) return true;
       await this.sleep(READY_POLL_INTERVAL_MS);
     }
@@ -217,10 +245,13 @@ export function observerAutohealBlockedReason(
   observerSessionId: string,
   isStoppedByUser: (sessionId: string) => boolean,
   isIntentionalKill: (sessionId: string) => boolean,
+  opts?: { allowDegraded?: boolean },
 ): string | null {
   if (!group) return "group_gone";
   if (group.observer.sessionId !== observerSessionId) return "observer_changed";
-  if (group.status !== "active" && group.status !== "reconnecting") return "group_not_live";
+  const live = group.status === "active" || group.status === "reconnecting" ||
+    (opts?.allowDegraded === true && group.status === "degraded");
+  if (!live) return "group_not_live";
   if (isStoppedByUser(group.observer.sessionId) || isStoppedByUser(group.primary.sessionId)) {
     return "user_stopped";
   }

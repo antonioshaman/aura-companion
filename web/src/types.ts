@@ -71,9 +71,16 @@ export interface ChatMessage {
    * bookkeeping frame closing a turn cut off by a restart (`--resume`) or a
    * user Stop mid-tool-call (indistinguishable from the frame); shown as
    * a muted, collapsed note with `content` as the expandable diagnostic
-   * (see `utils/resume-interrupted.ts`). Absent → the plain muted divider.
+   * (see `utils/resume-interrupted.ts`). "drift-recovery" — the silent-stdio
+   * drift-recovery notice ("Backend transcript …s behind CLI's jsonl —
+   * relaunching to recover.", see `server/session-recovery.ts` and
+   * `utils/drift-recovery-message.ts`); muted, same divider as the plain
+   * variant. Absent → the plain muted divider. "resume-interrupted" and
+   * "drift-recovery" are also the two variants `MessageFeed.tsx` collapses
+   * into a single expandable row when 2+ of them land back to back with no
+   * other content between them.
    */
-  systemVariant?: "error" | "resume-interrupted";
+  systemVariant?: "error" | "resume-interrupted" | "drift-recovery";
   /**
    * Set on a user-role message the server sent on the user's behalf —
    * currently only the usage-limit auto-resume continuation prompt. The

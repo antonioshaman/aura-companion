@@ -86,6 +86,12 @@ export interface IBackendAdapter {
    * socket-readyState gate already coincides with isConnected()).
    */
   isReadyForServerFrame?(): boolean;
+  /**
+   * Council observer turn-state: `in-flight` while a server-sent wake turn has
+   * not terminated yet. W14: the orchestrator defers an auto-heal relaunch
+   * until a still-streaming wake turn ends.
+   */
+  getObserverTurnState?(): "idle" | "in-flight";
 
   /** Send a server-synthesized user turn to the orchestrator half. */
   sendOrchestratorSyntheticFrame?(content: string): ServerSyntheticSendOutcome;

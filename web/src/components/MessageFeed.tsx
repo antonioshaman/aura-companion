@@ -16,6 +16,7 @@ import { ToolTurnSummary } from "./ToolTurnSummary.js";
 import { EmptyChatState } from "./chat/EmptyChatState.js";
 import { AssistantAvatar } from "./chat/AssistantAvatar.js";
 import { ResumeIndicator } from "./chat/ResumeIndicator.js";
+import { CollapsedSystemMarkers } from "./chat/CollapsedSystemMarkers.js";
 import { ObserverProbeMessage } from "./council/ObserverProbeMessage.js";
 import { probeMessageIds } from "../utils/observer-probe.js";
 
@@ -55,10 +56,35 @@ interface SubagentGroup {
   children: FeedEntry[];
 }
 
+/**
+ * A run of consecutive restart/drift-recovery system markers (see
+ * `chat/CollapsedSystemMarkers.tsx`). `groupToolMessages` only ever builds
+ * one of these for 2+ adjacent markers — a lone marker stays a plain
+ * `{ kind: "message" }` entry so it renders unchanged via `MessageBubble`.
+ */
+interface SystemMarkerGroup {
+  kind: "system_marker_group";
+  items: ChatMessage[];
+  firstId: string;
+}
+
 type FeedEntry =
   | { kind: "message"; msg: ChatMessage }
   | ToolMsgGroup
-  | SubagentGroup;
+  | SubagentGroup
+  | SystemMarkerGroup;
+
+/**
+ * Restart (`resume-interrupted`) and drift-recovery (`drift-recovery`)
+ * system messages are the two variants `MessageFeed` folds into one
+ * collapsed row when 2+ land back to back — see `chat/CollapsedSystemMarkers.tsx`.
+ */
+function isCollapsibleSystemMarker(msg: ChatMessage): boolean {
+  return (
+    msg.role === "system" &&
+    (msg.systemVariant === "resume-interrupted" || msg.systemVariant === "drift-recovery")
+  );
+}
 
 /**
  * Get the dominant tool name if this message is "tool-only"
@@ -121,6 +147,16 @@ function groupToolMessages(messages: ChatMessage[]): FeedEntry[] {
   const entries: FeedEntry[] = [];
 
   for (const msg of messages) {
+    if (isCollapsibleSystemMarker(msg)) {
+      const last = entries[entries.length - 1];
+      if (last?.kind === "system_marker_group") {
+        last.items.push(msg);
+        continue;
+      }
+      entries.push({ kind: "system_marker_group", items: [msg], firstId: msg.id });
+      continue;
+    }
+
     const toolName = getToolOnlyName(msg);
 
     if (toolName) {
@@ -382,6 +418,29 @@ function FeedEntries({ entries, toolActivity, isObserverSession = false, probeId
         }
         if (entry.kind === "subagent") {
           return <SubagentContainer key={entry.taskToolUseId} group={entry} />;
+        }
+        if (entry.kind === "system_marker_group") {
+          // A run of exactly one marker renders unchanged, same as any
+          // other single system message — only 2+ adjacent markers collapse.
+          if (entry.items.length === 1) {
+            const only = entry.items[0];
+            return (
+              <div key={only.id}>
+                <MessageBubble message={only} isObserverSession={isObserverSession} />
+              </div>
+            );
+          }
+          return (
+            <CollapsedSystemMarkers
+              key={entry.firstId}
+              items={entry.items.map((m) => ({
+                id: m.id,
+                content: m.content,
+                timestamp: m.timestamp,
+                systemVariant: m.systemVariant as "resume-interrupted" | "drift-recovery",
+              }))}
+            />
+          );
         }
         const msg = entry.msg;
         // Observer rigor: a liveness probe and the observer's reply are probe

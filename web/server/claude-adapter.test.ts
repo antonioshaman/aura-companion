@@ -64,6 +64,7 @@ vi.mock("./broken-model-substitution.js", async (importOriginal) => {
 import { ClaudeAdapter, resolveSilentStdioTimeoutMs, resolveInitFrameTimeoutMs } from "./claude-adapter.js";
 import { log } from "./logger.js";
 import { companionBus } from "./event-bus.js";
+import { OBSERVER_WAKE_SILENCE_MS } from "./observer-wake-silence.js";
 
 // ─── Mock socket factory ────────────────────────────────────────────────────
 
@@ -1711,6 +1712,10 @@ describe("observer wake completion backstop (P2-3)", () => {
     adapter.attachWebSocket(ws);
     expect(adapter.sendUserFrameFromServer("# Council Checkpoint stranded").kind).toBe("sent");
     expect(adapter.getObserverTurnState()).toBe("in-flight");
+    // The turn DID produce output — only its `result` frame was lost (the P2-3
+    // scenario). W14: without any output the earlier observer-wake silence
+    // verdict (OBSERVER_WAKE_SILENCE_MS) would own the turn instead.
+    adapter.handleRawMessage(`${JSON.stringify({ type: "stream_event", event: { type: "message_start" } })}\n`);
 
     const drained: unknown[] = [];
     const off = companionBus.on("observer:turn-done", (e) => { drained.push(e); });
@@ -2648,5 +2653,70 @@ describe("resolveInitFrameTimeoutMs — env override parsing", () => {
     expect(resolveInitFrameTimeoutMs("30000.5", 30_000, "AURA_INIT_FRAME_TIMEOUT_MS", warn)).toBe(30_000);
     expect(resolveInitFrameTimeoutMs("30000abc", 30_000, "AURA_INIT_FRAME_TIMEOUT_MS", warn)).toBe(30_000);
     expect(warns.length).toBe(4);
+  });
+});
+
+// ─── W14: observer wake silence — Claude parity ──────────────────────────────
+//
+// Prod 2026-10-16 (codex observer): a wake was accepted and then not one frame
+// reached the adapter. The Claude observer has the same exposure (2026-09-09:
+// stream-json output silently stopped reaching bun) but its session-level
+// silence watchdog is armed only for browser user messages. A wake with ZERO
+// output for OBSERVER_WAKE_SILENCE_MS is now reported as observer:wake-failed
+// (reason `silent`) so the orchestrator degrades + auto-heals (relaunches) the
+// observer and redelivers the checkpoint. Claude has no in-process fresh
+// thread, so there is no retry step — the relaunch is the retry.
+describe("observer wake silence (W14, Claude parity)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("reports a wake with zero output as observer:wake-failed (silent) and frees the slot", () => {
+    const adapter = new ClaudeAdapter("sess-w14-silent");
+    adapter.attachWebSocket(createMockSocket("sess-w14-silent"));
+    const failed: Array<{ reason?: string }> = [];
+    const drained: unknown[] = [];
+    const off1 = companionBus.on("observer:wake-failed", (e) => { failed.push(e); });
+    const off2 = companionBus.on("observer:turn-done", (e) => { drained.push(e); });
+    expect(adapter.sendUserFrameFromServer("# Council Checkpoint silent").kind).toBe("sent");
+
+    vi.advanceTimersByTime(OBSERVER_WAKE_SILENCE_MS - 1_000);
+    expect(failed).toHaveLength(0);
+    vi.advanceTimersByTime(2_000);
+    expect(failed).toEqual([expect.objectContaining({ sessionId: "sess-w14-silent", reason: "silent" })]);
+    // No drain: the pair is about to degrade; the orchestrator re-queues.
+    expect(drained).toHaveLength(0);
+    expect(adapter.getObserverTurnState()).toBe("idle");
+    off1();
+    off2();
+  });
+
+  it("does not fire once the wake produced any output", () => {
+    const adapter = new ClaudeAdapter("sess-w14-live");
+    adapter.attachWebSocket(createMockSocket("sess-w14-live"));
+    const failed: unknown[] = [];
+    const off = companionBus.on("observer:wake-failed", (e) => { failed.push(e); });
+    adapter.sendUserFrameFromServer("# Council Checkpoint live");
+    vi.advanceTimersByTime(5_000);
+    adapter.handleRawMessage(`${JSON.stringify({ type: "stream_event", event: { type: "message_start" } })}\n`);
+    vi.advanceTimersByTime(OBSERVER_WAKE_SILENCE_MS * 2);
+    expect(failed).toHaveLength(0);
+    expect(adapter.getObserverTurnState()).toBe("in-flight");
+    off();
+  });
+
+  it("is disarmed by a normal result frame", () => {
+    const adapter = new ClaudeAdapter("sess-w14-done");
+    adapter.attachWebSocket(createMockSocket("sess-w14-done"));
+    const failed: unknown[] = [];
+    const off = companionBus.on("observer:wake-failed", (e) => { failed.push(e); });
+    adapter.sendUserFrameFromServer("# Council Checkpoint done");
+    adapter.handleRawMessage(makeResultMsg({ session_id: "cli-w14" }));
+    vi.advanceTimersByTime(OBSERVER_WAKE_SILENCE_MS * 2);
+    expect(failed).toHaveLength(0);
+    off();
   });
 });

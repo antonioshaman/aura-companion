@@ -325,6 +325,14 @@ export interface CouncilCheckpointPipelineDeps {
     payload: CheckpointPayload,
     ctx: { cwd: string; previous: CheckpointPayload | null },
   ) => void;
+  /**
+   * W14 (b): the pair was just degraded because a dispatched wake produced
+   * nothing (review deadline expired, or the adapter reported the wake turn
+   * silent). The checkpoint the observer owes is already re-queued in the
+   * group's pending slot; the orchestrator auto-heals (relaunches) the
+   * observer, after which the recovery handshake drains the slot.
+   */
+  onObserverWakeUnanswered?: (sessionGroupId: string, observerSessionId: string, checkpointId: string) => void;
 }
 
 /**
@@ -390,7 +398,9 @@ export class CouncilCheckpointPipeline {
     payload: CheckpointPayload,
   ): void {
     const prior = entry.pendingCheckpoint;
-    if (prior) {
+    // Re-queueing the SAME checkpoint (a W14 redelivery, or a degraded-gate
+    // re-queue on drain) is not a supersede — nothing was skipped.
+    if (prior && prior.checkpoint_id !== payload.checkpoint_id) {
       log.info("session-orchestrator", "queued checkpoint superseded", {
         event: "council.checkpoint.superseded",
         sessionGroupId,
@@ -633,8 +643,16 @@ export class CouncilCheckpointPipeline {
         return outcome;
       }
       if (!groupRecord || groupRecord.status !== "active") {
+        // W14 (c): a `degraded` pair is recoverable (observer auto-heal, or a
+        // manual relaunch) and its recovery handshake drains the pending slot
+        // (`half_respawned` / `reconnect_ok`). Keep the checkpoint there
+        // (newest-wins) instead of dropping it — prod 2026-10-16 12:09 the
+        // checkpoint that arrived while degraded was simply lost. Archived /
+        // pairing groups still drop.
+        const queued = groupRecord?.status === "degraded";
+        if (queued) this.enqueuePendingCheckpoint(entry, sessionGroupId, observerSessionId, payload);
         const outcome: WakeDispatchOutcome = { kind: "skipped", reason: "group_not_active" };
-        log.info("session-orchestrator", "observer wake skipped", {
+        log.info("session-orchestrator", queued ? "observer wake queued until the pair recovers" : "observer wake skipped", {
           event: "group.observer_wake_skipped",
           sessionGroupId,
           observerSessionId,
@@ -642,6 +660,7 @@ export class CouncilCheckpointPipeline {
           sequence: payload.sequence,
           reason: outcome.reason,
           groupStatus: groupRecord?.status ?? "unknown",
+          ...(queued ? { queued: true } : {}),
         });
         return outcome;
       }
@@ -1257,6 +1276,11 @@ export class CouncilCheckpointPipeline {
         checkpointId,
         timeoutMs: OBSERVER_WAKE_TIMEOUT_MS,
       });
+      // W14 (b): genuine silence is recoverable — re-queue + auto-heal. A
+      // foreign-group collision is not (a respawn would not fix it).
+      if (degradeReason === "wake_produced_no_review") {
+        this.queueUnansweredWake(sessionGroupId, meta.observerSessionId, entry, checkpointId);
+      }
     } catch (err) {
       log.warn("session-orchestrator", "review-deadline handler crashed", {
         event: "group.observer_wake_produced_no_review_handler_error",
@@ -1281,7 +1305,19 @@ export class CouncilCheckpointPipeline {
     observerSessionId: string,
     error: string,
     source: "sync" | "async",
+    failure: "send_failed" | "silent" = "send_failed",
   ): void {
+    // W14: a SILENT wake (accepted, then no frame at all) is the same
+    // non-participation as an expired review deadline — degrade with that
+    // reason now instead of waiting out the deadline, and disarm the
+    // deadline so it cannot fire a second, stale verdict later.
+    const reason: GroupDegradeReason = failure === "silent" ? "wake_produced_no_review" : "wake_send_failed";
+    const entry = this.deps.watchers.get(sessionGroupId);
+    const owedCheckpointId = entry?.pendingReviewDeadline?.checkpointId ?? entry?.lastCheckpoint?.checkpoint_id ?? null;
+    if (failure === "silent" && entry?.pendingReviewDeadline) {
+      clearTimeout(entry.pendingReviewDeadline.timer);
+      entry.pendingReviewDeadline = null;
+    }
     // Council Review 2026-06-13 P2 #8: reason rides the event, not a pre-set
     // map write. The `group:degraded` listener persists it from the bus
     // payload only when the transition emits — no orphan reason on a no-op.
@@ -1290,13 +1326,13 @@ export class CouncilCheckpointPipeline {
       coordinator.applyEvent(sessionGroupId, {
         type: "half_died",
         role: "observer",
-        reason: "wake_send_failed",
+        reason,
       });
     } else {
       companionBus.emit("group:degraded", {
         sessionGroupId,
         deadRole: "observer",
-        reason: "wake_send_failed",
+        reason,
       });
     }
     log.warn("session-orchestrator", "observer wake failed — degrading group", {
@@ -1305,6 +1341,54 @@ export class CouncilCheckpointPipeline {
       observerSessionId,
       error,
       source,
+      failure,
+    });
+    if (failure === "silent" && entry && owedCheckpointId) {
+      this.queueUnansweredWake(sessionGroupId, observerSessionId, entry, owedCheckpointId);
+    }
+  }
+
+  /**
+   * W14 (b)+(c): after a degrade for an unanswered wake, put the newest
+   * checkpoint the observer owes back into the pending slot (the
+   * `group:degraded` listener just emptied it, and also deleted the wake
+   * sentinel, so the redelivery is not deduped as `already_woken`), then
+   * hand the group to the orchestrator's auto-heal.
+   */
+  private queueUnansweredWake(
+    sessionGroupId: string,
+    observerSessionId: string,
+    entry: CouncilWatcherEntry,
+    checkpointId: string,
+  ): void {
+    const newest = entry.lastCheckpoint;
+    if (newest) this.enqueuePendingCheckpoint(entry, sessionGroupId, observerSessionId, newest);
+    log.info("session-orchestrator", "unanswered observer wake queued for redelivery", {
+      event: "council.wake.redelivery_queued",
+      sessionGroupId,
+      observerSessionId,
+      unansweredCheckpointId: checkpointId,
+      queuedCheckpointId: newest?.checkpoint_id ?? null,
+    });
+    this.deps.onObserverWakeUnanswered?.(sessionGroupId, observerSessionId, checkpointId);
+  }
+
+  /**
+   * W14 (a): the codex adapter re-sent the in-flight wake on a fresh thread
+   * (`observer:wake-retried`). Give the retry a full review window — the
+   * deadline armed for the silent first delivery would otherwise degrade the
+   * pair while the retry is still working.
+   */
+  rearmReviewDeadlineForRetry(sessionGroupId: string): void {
+    const entry = this.deps.watchers.get(sessionGroupId);
+    const pending = entry?.pendingReviewDeadline;
+    if (!entry || !pending) return;
+    this.armReviewDeadline(sessionGroupId, entry, pending.checkpointId);
+    log.info("session-orchestrator", "review deadline re-armed for the observer wake retry", {
+      event: "council.wake.deadline_rearmed",
+      sessionGroupId,
+      checkpointId: pending.checkpointId,
+      timeoutMs: OBSERVER_WAKE_TIMEOUT_MS,
     });
   }
 

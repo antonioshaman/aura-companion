@@ -71,7 +71,8 @@ export {
   type WakeDispatchOutcome,
 } from "./council-checkpoint-pipeline.js";
 import { CouncilObserverScheduler } from "./council-observer-scheduler.js";
-import { ObserverAutoheal, observerAutohealBlockedReason } from "./council-observer-autoheal.js";
+import { ObserverAutoheal, isForcedRelaunchTrigger, observerAutohealBlockedReason } from "./council-observer-autoheal.js";
+import { ObserverWakeRecovery } from "./council-wake-recovery.js";
 export {
   OBSERVER_CATCHUP_TIMEOUT_ESCALATION_THRESHOLD,
   OBSERVER_FAILSAFE_FALLBACK_MS,
@@ -367,6 +368,8 @@ export class SessionOrchestrator {
     onObserverAdapterMissing: (gid, payload) => this.observerScheduler.requestCatchupWake(gid, payload),
     resolveClaimLanguage: (gid, payload, cwd) => this.resolveObserverClaimLanguage(gid, payload, cwd),
     isObserverProbeInFlight: (observerSessionId) => this.observerProbes.inFlight(observerSessionId),
+    onObserverWakeUnanswered: (gid, observerSessionId, checkpointId) =>
+      this.observerWakeRecovery.onWakeUnanswered(gid, observerSessionId, checkpointId),
     onCheckpointAccepted: (gid, payload, ctx) => this.requestSecondReview(gid, payload, ctx),
   });
   /**
@@ -409,9 +412,18 @@ export class SessionOrchestrator {
   private observerAutoheal = new ObserverAutoheal({
     relaunchObserver: (id) => this.relaunchObserverForAutoheal(id),
     isObserverReadyForWake: (id) => this.observerReadyForWake(id),
-    blockedReason: (gid, id) =>
+    blockedReason: (gid, id, trigger) =>
       observerAutohealBlockedReason(this.coordinator?.get(gid), id,
-        (s) => this.recovery.isStoppedByUser(s), (s) => this.intentionalKills.has(s)),
+        (s) => this.recovery.isStoppedByUser(s), (s) => this.intentionalKills.has(s),
+        { allowDegraded: isForcedRelaunchTrigger(trigger) }),
+  });
+  /** W14: auto-heal + redelivery for a pair degraded by an unanswered wake. */
+  private observerWakeRecovery = new ObserverWakeRecovery({
+    autoheal: this.observerAutoheal,
+    getGroupStatus: (gid) => this.coordinator?.get(gid)?.status,
+    isObserverTurnInFlight: (id) =>
+      this.wsBridge.getSession(id)?.backendAdapter?.getObserverTurnState?.() === "in-flight",
+    drainPendingObserverWake: (gid) => this.drainPendingObserverWake(gid),
   });
   /**
    * P4/C1b: observer wake scheduling outside the live watcher (missed-
@@ -651,6 +663,8 @@ export class SessionOrchestrator {
           });
         }
         this.drainPendingObserverWake(groupId);
+        // W14: a recovery deferred behind a still-running wake turn starts now.
+        this.observerWakeRecovery.onObserverTurnDone(groupId);
       } catch (err) {
         log.warn("session-orchestrator", "observer turn-done drain failed", {
           event: "council.wake.drain_handler_error",
@@ -659,16 +673,34 @@ export class SessionOrchestrator {
         });
       }
     });
-    companionBus.on("observer:wake-failed", ({ sessionId, error }) => {
+    companionBus.on("observer:wake-failed", ({ sessionId, error, reason }) => {
       try {
         const groupId = this.councilGroupBySessionId.get(sessionId);
         if (!groupId) return;
         const meta = this.councilGroupMeta.get(groupId);
         if (!meta || meta.observerSessionId !== sessionId) return;
-        this.checkpointPipeline.degradeObserverWakeFailure(groupId, sessionId, error, "async");
+        this.checkpointPipeline.degradeObserverWakeFailure(
+          groupId, sessionId, error, "async", reason === "silent" ? "silent" : "send_failed",
+        );
       } catch (err) {
         log.warn("session-orchestrator", "observer wake-failed handler crashed", {
           event: "group.observer_wake_failed_handler_error",
+          sessionId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+
+    // W14 (a): the codex adapter re-sent a silent wake on a fresh thread —
+    // give the retry a full review window.
+    companionBus.on("observer:wake-retried", ({ sessionId }) => {
+      try {
+        const groupId = this.councilGroupBySessionId.get(sessionId);
+        if (!groupId || this.councilGroupMeta.get(groupId)?.observerSessionId !== sessionId) return;
+        this.checkpointPipeline.rearmReviewDeadlineForRetry(groupId);
+      } catch (err) {
+        log.warn("session-orchestrator", "observer wake-retried handler crashed", {
+          event: "council.wake.retry_handler_error",
           sessionId,
           error: err instanceof Error ? err.message : String(err),
         });

@@ -3,6 +3,7 @@ import type { BrowserIncomingMessage, BrowserOutgoingMessage, ContentBlock, Chat
 import { generateUniqueSessionName } from "./utils/names.js";
 import { playNotificationSound } from "./utils/notification-sound.js";
 import { isResumeInterruptedResult } from "./utils/resume-interrupted.js";
+import { isDriftRecoveryMessage } from "./utils/drift-recovery-message.js";
 import { getPreview } from "./components/ToolBlock.js";
 import type { ToolActivityEntry } from "./store/tasks-slice.js";
 import { api } from "./api.js";
@@ -1392,6 +1393,10 @@ function handleParsedMessage(
         role: "system",
         content: data.message,
         timestamp: Date.now(),
+        // Tags the drift-recovery notice so MessageFeed can fold a run of
+        // them (and the --resume bookkeeping note) into one collapsed row
+        // instead of one muted line per recovery (W16).
+        systemVariant: isDriftRecoveryMessage(data.message) ? "drift-recovery" : undefined,
       });
       break;
     }
