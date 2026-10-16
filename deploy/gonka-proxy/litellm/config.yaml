@@ -1,0 +1,35 @@
+# LiteLLM: translate the Claude CLI's Anthropic Messages calls into OpenAI
+# chat/completions and forward them to the local Gonka signing shim.
+#
+# Run:  litellm --config config.yaml --host 127.0.0.1 --port 4000
+# (127.0.0.1 ONLY — never 0.0.0.0. See systemd unit / compose.)
+#
+# The Claude CLI (spawned by Aura with the provider profile) points at this:
+#   ANTHROPIC_BASE_URL=http://127.0.0.1:4000
+#   ANTHROPIC_AUTH_TOKEN=$LITELLM_MASTER_KEY
+#   --model gonka-qwen         (must equal a model_name below)
+
+model_list:
+  - model_name: gonka-qwen
+    litellm_params:
+      # `openai/<id>` routes through LiteLLM's OpenAI-compatible path to the shim.
+      model: openai/Qwen/Qwen3-235B-A22B-Instruct-2507-FP8
+      api_base: http://127.0.0.1:8080/v1
+      # Shared secret with the shim (shim checks it as a bearer token).
+      api_key: os.environ/SHIM_API_KEY
+
+  # Add more Gonka-served models by adding entries (e.g. DeepSeek V4 Flash, Kimi).
+  # - model_name: gonka-deepseek
+  #   litellm_params:
+  #     model: openai/deepseek-ai/DeepSeek-V4-Flash
+  #     api_base: http://127.0.0.1:8080/v1
+  #     api_key: os.environ/SHIM_API_KEY
+
+litellm_settings:
+  # Open models reject some Anthropic-origin params; drop unsupported ones rather than 400.
+  drop_params: true
+
+general_settings:
+  # Aura sends this as ANTHROPIC_AUTH_TOKEN; keep it sk- prefixed so Aura's
+  # recorder value-net catches it as a second line of defense (Hashimoto D1).
+  master_key: os.environ/LITELLM_MASTER_KEY

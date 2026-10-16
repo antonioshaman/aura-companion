@@ -1,0 +1,44 @@
+# Operator companion stack for Option D. Both services bind to 127.0.0.1 on the
+# HOST only — the Gonka signing wallet must never be reachable off-box.
+#
+#   cp .env.example shim.env && cp .env.example litellm.env   # fill + chmod 600
+#   docker compose up -d
+#
+# This stack is intentionally separate from aura-companion; do not fold it into
+# Aura's container or its systemd KillMode=process unit.
+
+services:
+  gonka-shim:
+    build: ./shim
+    env_file: [shim.env]
+    # Host-loopback only. Do NOT change to 0.0.0.0.
+    ports:
+      - "127.0.0.1:8080:8080"
+    restart: on-failure
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8080/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    stop_grace_period: 15s
+
+  litellm:
+    # Pin to a digest before production (docker pull ... && use @sha256:...).
+    image: ghcr.io/berriai/litellm:main-stable
+    depends_on:
+      gonka-shim:
+        condition: service_healthy
+    env_file: [litellm.env]
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--host", "0.0.0.0", "--port", "4000"]
+    # Host-loopback only.
+    ports:
+      - "127.0.0.1:4000:4000"
+    restart: on-failure
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:4000/health/liveliness').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    stop_grace_period: 15s
