@@ -675,6 +675,17 @@ if (isRunningAsService()) {
   console.log("[server] Running as background service");
 }
 
+// ── Claude model list warm-up (fire-and-forget) ─────────────────────────────
+// Moves the cold Anthropic /v1/models fetch off the first New Session open
+// and seeds the disk tier used as stale fallback on later upstream failures.
+// Deferred a tick so it never competes with synchronous boot wiring.
+setTimeout(() => {
+  // warmAnthropicModelsCache never throws; the catch guards getSettings().
+  try {
+    void warmAnthropicModelsCache(getSettings().anthropicApiKey);
+  } catch { /* best-effort: the GET route fetches on demand */ }
+}, 1_000);
+
 // ── Bootstrap finished — /ready may now flip green (Deploy expert D5) ──────
 // All synchronous wiring is done above this point. Tailscale restoration is
 // best-effort (fire-and-forget) and not part of the readiness contract.
@@ -682,6 +693,8 @@ isReady = true;
 
 // ── Runtime diagnostics ──────────────────────────────────────────────────────
 import { log } from "./logger.js";
+import { warmAnthropicModelsCache } from "./anthropic-models-cache.js";
+import { getSettings } from "./settings-manager.js";
 import { installEventLoopLagMonitor, formatTopOperations, trackSync } from "./event-loop-lag-monitor.js";
 import { metricsCollector } from "./metrics-collector.js";
 // AURA-LOCAL: cleanup-subsystem diagnostic surfaces. PLAN T6 (Phase C).

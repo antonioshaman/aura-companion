@@ -1348,3 +1348,36 @@ export async function getAnthropicModels(
   inflightFetches.set(fingerprint, promise);
   return promise;
 }
+
+/**
+ * Boot-time, fire-and-forget warm-up of the Claude model list.
+ *
+ * Why: the first browser to open New Session after a restart used to pay
+ * the cold upstream fetch (observed 3-4s on prod, against a 5s timeout,
+ * while the boot event loop was busiest). A timeout there left the
+ * dropdown on the static fallback. Warming here moves that cold fetch off
+ * the user's critical path and populates both cache tiers, so later
+ * upstream failures can serve stale-from-disk instead of a 502.
+ *
+ * Never throws, never blocks: resolves to the outcome kind (for tests and
+ * the log line), or `"error"` if the orchestrator itself threw.
+ */
+export async function warmAnthropicModelsCache(
+  apiKey: string,
+  deps?: GetModelsDeps,
+): Promise<AnthropicModelsResult["kind"] | "error"> {
+  try {
+    const result = await getAnthropicModels(apiKey, deps);
+    log.info("anthropic-models-cache", "warmup", {
+      event: "anthropic-models.warmup",
+      outcome: result.kind,
+    });
+    return result.kind;
+  } catch (err: unknown) {
+    log.warn("anthropic-models-cache", "warmup.failed", {
+      event: "anthropic-models.warmup.failed",
+      error_name: err instanceof Error ? err.name : "unknown",
+    });
+    return "error";
+  }
+}

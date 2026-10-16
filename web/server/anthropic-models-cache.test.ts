@@ -15,9 +15,29 @@
  *    upstream-unavailable with no cache.
  *  - Fixture replay against `web/server/fixtures/anthropic-models-response.json`.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+
+// Isolate COMPANION_HOME BEFORE the module under test (and `paths.ts`) is
+// evaluated. Without this the suite wrote to — and `__deleteDiskCacheForTests`
+// DELETED — the real `~/.companion/anthropic_models_cache.json`. On the prod
+// box tests run as the service user, so every test run wiped prod's disk
+// tier: the "serve stale on upstream timeout" fallback never had a file to
+// serve, and a slow /v1/models fetch went straight to 502 → the New Session
+// dropdown fell back to the static list (owner bug 2026-10-16).
+const { isolatedCompanionHome } = await vi.hoisted(async () => {
+  const os = await import("node:os");
+  const fs = await import("node:fs");
+  const path = await import("node:path");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "amc-test-home-"));
+  process.env.COMPANION_HOME = dir;
+  return { isolatedCompanionHome: dir };
+});
+afterAll(async () => {
+  const fs = await import("node:fs");
+  fs.rmSync(isolatedCompanionHome, { recursive: true, force: true });
+});
 import {
   parseAnthropicModelsResponse,
   sortAnthropicModels,
@@ -26,6 +46,7 @@ import {
   isCacheRecordValid,
   fetchAnthropicModelsRaw,
   getAnthropicModels,
+  warmAnthropicModelsCache,
   readAnthropicCacheFileMeta,
   readMemoryCache,
   writeMemoryCache,
@@ -1317,5 +1338,64 @@ describe("Fixture replay — hostile-input reject coverage (Council P3 #15)", ()
     expect(ids.every((id) => id.length <= 128)).toBe(true);
     // At least 5 distinct reject branches exercised.
     expect(parsed.droppedItems).toBeGreaterThanOrEqual(5);
+  });
+});
+
+describe("test isolation — never touches the real ~/.companion", () => {
+  // Regression guard for the prod-cache wipe: the disk tier used by this
+  // suite must live under the per-run temp COMPANION_HOME, never under the
+  // invoking user's real home directory.
+  it("resolves ANTHROPIC_MODELS_CACHE_PATH under the isolated temp home", async () => {
+    const os = await import("node:os");
+    expect(ANTHROPIC_MODELS_CACHE_PATH.startsWith(isolatedCompanionHome)).toBe(true);
+    expect(ANTHROPIC_MODELS_CACHE_PATH.startsWith(join(os.homedir(), ".companion"))).toBe(false);
+  });
+});
+
+describe("warmAnthropicModelsCache — boot warm-up", () => {
+  beforeEach(() => {
+    __resetMemoryCacheForTests();
+    __resetInflightForTests();
+    __deleteDiskCacheForTests();
+  });
+
+  // Warm-up populates the memory tier so the first browser request after a
+  // restart is a zero-IO hit instead of a cold upstream fetch.
+  it("fetches once and seeds the cache so the next call is a memory hit", async () => {
+    const fixture = JSON.parse(
+      readFileSync(join(__dirname, "fixtures", "anthropic-models-response.json"), "utf8"),
+    );
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(fixture), { status: 200 }));
+    const outcome = await warmAnthropicModelsCache("sk-ant-warm-test-key", {
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    expect(outcome).toBe("ok");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const second = await getAnthropicModels("sk-ant-warm-test-key", {
+      fetch: fetchMock as unknown as typeof fetch,
+    });
+    expect(second.kind).toBe("ok");
+    if (second.kind === "ok") expect(second.source).toBe("memory");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  // No key configured → nothing to warm; must not throw.
+  it("resolves 'no-key' without fetching when no key is configured", async () => {
+    const fetchMock = vi.fn();
+    await expect(
+      warmAnthropicModelsCache("", { fetch: fetchMock as unknown as typeof fetch }),
+    ).resolves.toBe("no-key");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  // Upstream down + empty cache → reports the failure, never throws (it runs
+  // fire-and-forget at boot).
+  it("resolves 'upstream-unavailable' without throwing when upstream fails", async () => {
+    const fetchMock = vi.fn(async () => new Response("down", { status: 503 }));
+    await expect(
+      warmAnthropicModelsCache("sk-ant-warm-test-key", {
+        fetch: fetchMock as unknown as typeof fetch,
+      }),
+    ).resolves.toBe("upstream-unavailable");
   });
 });
