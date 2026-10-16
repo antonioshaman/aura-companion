@@ -2126,3 +2126,57 @@ describe("diagnostic getters", () => {
     expect(result).toEqual(body);
   });
 });
+
+// ===========================================================================
+// Council group API (W15 second-opinion reviewer + group actions)
+// ===========================================================================
+describe("council group API", () => {
+  // W15: the pair's second-opinion setting is read and written per group,
+  // with the group id URL-encoded.
+  it("getGroupSecondReviewer GETs the pair's effective setting", async () => {
+    const body = { reviewer: "auto", scope: "review-implement", source: "global" };
+    mockFetch.mockResolvedValueOnce(mockResponse(body));
+    expect(await api.getGroupSecondReviewer("grp/1")).toEqual(body);
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/groups/grp%2F1/second-reviewer");
+    expect(opts.method ?? "GET").toBe("GET");
+  });
+
+  it("setGroupSecondReviewer PUTs the new setting", async () => {
+    const config = { reviewer: { backend: "claude" as const, model: "sonnet" }, scope: "all" as const };
+    mockFetch.mockResolvedValueOnce(mockResponse({ ...config, source: "group" }));
+    expect(await api.setGroupSecondReviewer("grp_1", config)).toEqual({ ...config, source: "group" });
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/groups/grp_1/second-reviewer");
+    expect(opts.method).toBe("PUT");
+    expect(JSON.parse(opts.body)).toEqual(config);
+  });
+
+  // A rejected setting surfaces the server's error message (the panel shows it).
+  it("setGroupSecondReviewer throws the server error on 400", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ error: "secondReviewer.backend must be \"claude\" or \"codex\"" }, 400));
+    await expect(api.setGroupSecondReviewer("grp_1", { reviewer: "auto", scope: "all" })).rejects.toThrow(/secondReviewer.backend/);
+  });
+
+  // A network failure (fetch rejects) propagates and is tracked as a PUT failure.
+  it("setGroupSecondReviewer propagates a network failure", async () => {
+    mockFetch.mockRejectedValueOnce(new Error("offline"));
+    await expect(api.setGroupSecondReviewer("grp_1", { reviewer: "off", scope: "all" })).rejects.toThrow("offline");
+  });
+
+  it("disputeObserverFinding and ignoreAutoProceedRestoreGap POST to the group", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ ok: true, added: true }));
+    await api.disputeObserverFinding("grp_1", { finding_id: "f", claim: "c", evidence_path: "a.ts" });
+    expect(mockFetch.mock.calls[0][0]).toBe("/api/groups/grp_1/disputes");
+    mockFetch.mockResolvedValueOnce(mockResponse({ ok: true, added: true }));
+    await api.ignoreAutoProceedRestoreGap("grp_1", { file: "x.md", fingerprint: "fp" });
+    expect(mockFetch.mock.calls[1][0]).toBe("/api/groups/grp_1/restore-gaps/ignore");
+    expect(JSON.parse(mockFetch.mock.calls[1][1].body)).toEqual({ file: "x.md", fingerprint: "fp" });
+  });
+
+  it("fetchGroups GETs /groups", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ groups: [] }));
+    expect(await api.fetchGroups()).toEqual({ groups: [] });
+    expect(mockFetch.mock.calls[0][0]).toBe("/api/groups");
+  });
+});

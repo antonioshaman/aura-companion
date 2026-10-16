@@ -225,6 +225,14 @@ export function otherReviewerFindingsOnDisk(
       // blocking later finding (observer STOP1 on PR #372).
       const frozen = readReviewVerdicts(cwd, sessionGroupId);
       const verdicts = frozen.ok ? frozen.verdicts : new Map();
+      // Disputes are part of the final verdict too: a STOP the human disputed
+      // does not block, so it must never absorb a later blocker. Unreadable
+      // disputes → none applied (the earlier finding keeps its verdict).
+      const disputes = readDisputes(cwd, sessionGroupId);
+      const disputeRecords = disputes.ok ? disputes.records : [];
+      const isDisputed = (claim: string, evidencePath: string, severity: string): boolean =>
+        severity === "STOP" &&
+        applyDisputes([{ id: "x", severity: "STOP", claim, evidence_path: evidencePath }], disputeRecords).applied.length > 0;
       return other.findings.map((f, idx) => {
         const id = deterministicFindingId({
           sessionGroupId,
@@ -253,6 +261,7 @@ export function otherReviewerFindingsOnDisk(
           ...(f.evidence_lines ? { evidence_lines: f.evidence_lines } : {}),
           ...(v.wasDowngraded ? { wasDowngraded: true } : {}),
           ...(v.weakEvidence !== undefined ? { weakEvidence: v.weakEvidence } : {}),
+          ...(!v.wasDowngraded && isDisputed(f.claim, f.evidence_path, v.severity) ? { disputed: true } : {}),
         });
       });
     } catch {

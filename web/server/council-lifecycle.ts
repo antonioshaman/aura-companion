@@ -19,7 +19,7 @@ import { watchCheckpoints } from "./checkpoint-watcher.js";
 import { watchReviews } from "./review-watcher.js";
 import { DEFAULT_REARM_DELAY_MS, runResilientWatch } from "./resilient-watch.js";
 import { validateObserverFindings } from "./observer-grounding.js";
-import { addDispute } from "./observer-disputes.js";
+import { addDispute, applyDisputes, readDisputes } from "./observer-disputes.js";
 import type { CheckpointLineSnapshots } from "./observer-line-snapshots.js";
 import { buildObserverContextManifest } from "./observer-prompt.js";
 import type { ObserverReplyCapture } from "./observer-reply.js";
@@ -1481,6 +1481,8 @@ export class CouncilLifecycle {
     // (oldest file first) — the later reviewer's near-duplicates fold into them,
     // same rule as the live path (`otherReviewerFindingsOnDisk`).
     const byCheckpointRole = new Map<string, { observer: DedupFinding[]; second: DedupFinding[] }>();
+    const disputesRead = readDisputes(watcher.cwd, sessionGroupId);
+    const disputeRecords = disputesRead.ok ? disputesRead.records : [];
     for (const file of entries) {
       const filePath = join(reviewsDir, file);
       let raw: string;
@@ -1575,8 +1577,9 @@ export class CouncilLifecycle {
         const verdict = frozen.get(id);
         if (!verdict && payload.findings[idx]?.severity === "STOP" && !unfrozenRawStopIds.includes(id)) unfrozenRawStopIds.push(id);
         const out = verdict ? applyFrozenVerdict(regrounded, verdict) : regrounded;
-        // W15: dedupe on the FINAL verdict (frozen or re-grounded), never raw.
-        contributed.push(dedupViewOf(out));
+        // W15: dedupe on the FINAL verdict (frozen or re-grounded, disputes
+        // applied), never raw — a disputed STOP must not absorb a blocker.
+        contributed.push(dedupViewOf(applyDisputes([out], disputeRecords).findings[0]!));
         const seenAt = findingIndexById.get(id);
         if (seenAt === undefined) {
           findingIndexById.set(id, allFindings.length);

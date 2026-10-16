@@ -29,6 +29,7 @@ import {
 import { ConvergenceTracker } from "./convergence-tracker.js";
 import { findCrossReviewerDuplicates, isNearDuplicate } from "./second-review-dedup.js";
 import { SecondReviewer, type HeadlessRunResult } from "./second-reviewer.js";
+import { addDispute } from "./observer-disputes.js";
 import { isBlockingStopFinding } from "./council-auto-proceed-controller.js";
 import { collectCheckpointCoverageGaps } from "./checkpoint-coverage.js";
 import type { BrowserObserverFinding } from "./session-types.js";
@@ -282,6 +283,37 @@ describe("handleCouncilReview with a second-opinion review", () => {
       findings: [{ severity: "STOP", claim: "relaunch() loops forever without backoff delay", evidence_path: "src/a.ts", evidence_lines: [2, 2] }],
     }), Date.now());
     const later = h.reviews[1]!.findings[0]!;
+    expect(later.duplicateOf).toBeUndefined();
+    expect(isBlockingStopFinding(later)).toBe(true);
+  });
+
+  // Observer re-review STOP on 5e38b8a8: the earlier finding's DISPUTED state
+  // is part of its final verdict. A STOP the user disputed does not block, so
+  // it must not swallow a later grounded STOP that does not itself match the
+  // dispute (similar words, no shared backtick anchor).
+  it("never folds a blocking STOP into an earlier STOP the user disputed", () => {
+    const h = harness();
+    const dir = join(h.cwd, ".council", "reviews");
+    const earlierClaim = "relaunch loops forever without any backoff delay at all";
+    const observerPayload = review({
+      findings: [{ severity: "STOP", claim: earlierClaim, evidence_path: "src/a.ts", evidence_lines: [2, 2] }],
+    });
+    const observerFile = join(dir, buildObserverReviewFilename("council-implement", "codex", GROUP));
+    writeAtomicJson(observerFile, observerPayload);
+    const past = new Date(Date.now() - 60_000);
+    utimesSync(observerFile, past, past);
+    h.pipeline.handleCouncilReview(GROUP, observerPayload, past.getTime());
+    expect(isBlockingStopFinding(h.reviews[0]!.findings[0]!)).toBe(true);
+    // The human disputes the observer's STOP afterwards.
+    expect(addDispute(h.cwd, GROUP, { claim: earlierClaim, evidencePath: "src/a.ts", source: "browser_dispute" }).ok).toBe(true);
+
+    h.pipeline.handleCouncilReview(GROUP, review({
+      reviewer_role: "second",
+      observer_provider: "claude",
+      findings: [{ severity: "STOP", claim: "relaunch loops forever without backoff delay", evidence_path: "src/a.ts", evidence_lines: [2, 2] }],
+    }), Date.now());
+    const later = h.reviews[1]!.findings[0]!;
+    expect(later.disputed).toBeUndefined();
     expect(later.duplicateOf).toBeUndefined();
     expect(isBlockingStopFinding(later)).toBe(true);
   });

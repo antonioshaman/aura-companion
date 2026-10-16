@@ -12,9 +12,13 @@ import {
   buildSecondReviewInvocation,
   buildSecondReviewEnv,
   parseSecondReviewOutput,
+  makeTmpScratchFile,
+  prependBinaryDir,
   readCodexDefaultModel,
+  readScratchFile,
   runHeadless,
 } from "./second-reviewer.js";
+import { existsSync } from "node:fs";
 import type { CheckpointPayload, ObserverReviewPayload } from "./council-types.js";
 import { parseObserverReviewPayload } from "./council-types.js";
 import type { SecondReviewerConfig } from "./second-reviewer-config.js";
@@ -275,6 +279,55 @@ describe("runHeadless", () => {
   });
 });
 
+// Error paths of the real spawner (coverage gate): a CLI that is not there,
+// an abort before/while running, and normal stdin → stdout capture.
+describe("runHeadless — spawn failure, abort and capture", () => {
+  const opts = (signal = new AbortController().signal) => ({ cwd: tmpdir(), env: { PATH: "/usr/bin:/bin" }, stdin: "hello", timeoutMs: 5_000, signal });
+
+  it("a missing binary resolves with a spawn error instead of throwing", async () => {
+    const res = await runHeadless(["/nonexistent/aura-second-review-cli"], opts());
+    expect(res.exitCode).toBeNull();
+    expect(res.stderr).toMatch(/spawn error/);
+    expect(res.timedOut).toBe(false);
+  });
+
+  it("feeds stdin and captures stdout and the exit code", async () => {
+    const res = await runHeadless(["/bin/sh", "-c", "cat; echo err >&2; exit 3"], opts());
+    expect(res).toMatchObject({ exitCode: 3, stdout: "hello", aborted: false, timedOut: false });
+    expect(res.stderr).toContain("err");
+  });
+
+  it("an already-aborted signal kills the run at once", async () => {
+    const ac = new AbortController();
+    ac.abort();
+    const res = await runHeadless(["/bin/sh", "-c", "sleep 30"], opts(ac.signal));
+    expect(res.aborted).toBe(true);
+  });
+
+  it("aborting mid-run kills it", async () => {
+    const ac = new AbortController();
+    const p = runHeadless(["/bin/sh", "-c", "sleep 30"], opts(ac.signal));
+    setTimeout(() => ac.abort(), 50);
+    expect((await p).aborted).toBe(true);
+  });
+});
+
+describe("scratch file and PATH helpers", () => {
+  it("makeTmpScratchFile gives a writable path that cleanup removes; readScratchFile tolerates absence", () => {
+    const scratch = makeTmpScratchFile();
+    expect(readScratchFile(scratch.path)).toBeNull();
+    writeFileSync(scratch.path, "[]");
+    expect(readScratchFile(scratch.path)).toBe("[]");
+    scratch.cleanup();
+    expect(existsSync(scratch.path)).toBe(false);
+    scratch.cleanup(); // idempotent
+  });
+
+  it("prependBinaryDir puts the CLI's own directory first", () => {
+    expect(prependBinaryDir("/opt/codex/bin/codex", "/usr/bin:/bin")).toBe("/opt/codex/bin:/usr/bin:/bin");
+  });
+});
+
 describe("parseSecondReviewOutput", () => {
   it("claude: returns the reply and the model that produced most output (host fact)", () => {
     expect(parseSecondReviewOutput("claude", { ...claudeResult("[]"), lastMessage: null })).toEqual({
@@ -504,6 +557,45 @@ describe("SecondReviewer dispatch", () => {
     expect(h.reviewer.onCheckpoint(GROUP, checkpoint("c1"), { cwd: h.cwd, observerBackend: "codex", previous: null }))
       .toEqual({ kind: "skipped", reason: "already_reviewed" });
     expect(h.run).toHaveBeenCalledTimes(1);
+  });
+
+  // A broken prompt artifact (or an invalid manifest) fails the wake build:
+  // logged skip + the owed verdict is released, nothing spawned.
+  it("a wake build failure is a logged skip with a missing verdict", () => {
+    const h = harness({ deps: { loadSystemPrompt: () => { throw new Error("malformed prompt"); } } });
+    const warn = vi.spyOn(log, "warn");
+    expect(h.reviewer.onCheckpoint(GROUP, checkpoint("c1"), { cwd: h.cwd, observerBackend: "codex", previous: null }))
+      .toEqual({ kind: "skipped", reason: "build_error" });
+    expect(h.run).not.toHaveBeenCalled();
+    expect(h.events.at(-1)).toMatchObject({ status: "missing", reason: "build_error" });
+    expect(warn).toHaveBeenCalledWith("second-reviewer", expect.any(String), expect.objectContaining({ reason: "build_error", error: "malformed prompt" }));
+  });
+
+  it("a reply whose findings fail validation is a failed run, not a review", async () => {
+    const h = harness({ run: async () => claudeResult(JSON.stringify([{ severity: "STOP", claim: "x", evidence_path: "/etc/passwd" }])) });
+    const out = h.reviewer.onCheckpoint(GROUP, checkpoint("c1"), { cwd: h.cwd, observerBackend: "codex", previous: null });
+    await (out as { done: Promise<void> }).done;
+    expect(h.events.at(-1)).toMatchObject({ status: "missing", reason: "invalid_findings" });
+    expect(h.ingest).not.toHaveBeenCalled();
+  });
+
+  it("a review that lands after the pair is gone is discarded", async () => {
+    let live = true;
+    const h = harness({ run: async () => { live = false; return claudeResult("[]"); }, deps: { isGroupLive: () => live } });
+    const out = h.reviewer.onCheckpoint(GROUP, checkpoint("c1"), { cwd: h.cwd, observerBackend: "codex", previous: null });
+    await (out as { done: Promise<void> }).done;
+    expect(secondReviewFiles(h.cwd)).toEqual([]);
+    expect(h.ingest).not.toHaveBeenCalled();
+  });
+
+  // An unexpected throw (e.g. the review write fails) is caught, logged as
+  // failed and frees the pair's slot for the next checkpoint.
+  it("an internal error is a failed run and frees the slot", async () => {
+    const h = harness({ deps: { writeReview: () => { throw new Error("EACCES"); } } });
+    const out = h.reviewer.onCheckpoint(GROUP, checkpoint("c1"), { cwd: h.cwd, observerBackend: "codex", previous: null });
+    await (out as { done: Promise<void> }).done;
+    expect(h.events.at(-1)).toMatchObject({ status: "missing", reason: "internal_error" });
+    expect(h.reviewer.isRunning(GROUP)).toBe(false);
   });
 
   it("a missing CLI binary is a logged skip, not a crash", () => {
