@@ -11,6 +11,8 @@ import { nextModelInChain, computeSilenceRotation } from "./model-fallback-chain
 import {
   checkDrift,
   countUndeliveredAssistantRecords,
+  readUndeliveredAssistantRecords,
+  RECOVERY_LOOKBACK_MS,
   defaultSubagentActivitySince,
   defaultSubagentOpenToolCallSince,
   resolveCliSessionPaths,
@@ -703,7 +705,7 @@ export class SessionRecovery {
       // Fire-and-forget: the outer setInterval callback is sync — a
       // per-session recovery blocking further sessions would delay the
       // whole tick. `driftRecoveryInFlight` keeps the next tick off it.
-      void this.recoverFromDrift(info.sessionId);
+      void this.recoverFromDrift(info.sessionId, { jsonlPath, bunLastFrameMs });
     }
   }
 
@@ -721,13 +723,19 @@ export class SessionRecovery {
    * mark on it would lock it out of its own recovery. A failed relaunch falls
    * back to the budgeted keepalive path so the session is never left dead.
    */
-  private async recoverFromDrift(sessionId: string): Promise<void> {
+  private async recoverFromDrift(
+    sessionId: string,
+    stall?: { jsonlPath: string; bunLastFrameMs: number },
+  ): Promise<void> {
     this.driftRecoveryInFlight.add(sessionId);
     const ownsMark = this.intentionalKills.addTransient(sessionId);
     let outcome: RelaunchOutcome | null = null;
     try {
       await this.launcher.kill(sessionId);
       if (this.launcher.getSession(sessionId)?.archived) return;
+      // The killed CLI's jsonl is final now: deliver the reply it wrote but
+      // never put on stdout. The `--resume`d CLI will not re-emit it.
+      if (stall) this.deliverStalledReply(sessionId, stall);
       this.wsBridge.getSession(sessionId)?.stateMachine?.transition("starting", "relaunch_initiated");
       outcome = await this.relaunchOnce(sessionId, "drift_recovery");
     } catch (err) {
@@ -744,6 +752,37 @@ export class SessionRecovery {
       });
       if (outcome.error) this.wsBridge.broadcastToSession(sessionId, { type: "error", message: outcome.error });
       this.scheduleProactiveRelaunch(sessionId);
+    }
+  }
+
+  /**
+   * W1 (prod 40f03a1e, 2026-10-15 15:03): before this, recovery = kill +
+   * `--resume` only. The CLI had written tool call + answer + end_turn to its
+   * jsonl by 15:03:34, bun got zero frames after `system.init`, and the
+   * resumed CLI never replays past turns on stdout — so the answer reached
+   * nobody and the user had to type "продолжай". Read the records the CLI
+   * wrote after bun's last frame (minus {@link RECOVERY_LOOKBACK_MS}) and hand
+   * them to the bridge, which delivers each exactly once (history-deduped).
+   * Never throws: a failure here must not block the relaunch.
+   */
+  private deliverStalledReply(sessionId: string, stall: { jsonlPath: string; bunLastFrameMs: number }): void {
+    try {
+      const records = readUndeliveredAssistantRecords(stall.jsonlPath, stall.bunLastFrameMs - RECOVERY_LOOKBACK_MS);
+      if (records.length === 0) return;
+      const { delivered, alreadyDelivered } = this.wsBridge.deliverRecoveredAssistantRecords(sessionId, records);
+      log.warn("session-recovery", "silent-stdio drift: delivered the reply the CLI wrote only to its jsonl", {
+        event: "silent_stdio_drift.reply_recovered",
+        sessionId,
+        records: records.length,
+        delivered,
+        alreadyDelivered,
+      });
+    } catch (err) {
+      log.warn("session-recovery", "silent-stdio drift: could not deliver the stalled reply", {
+        event: "silent_stdio_drift.reply_recovery_failed",
+        sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 

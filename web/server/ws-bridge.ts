@@ -10,6 +10,7 @@ import type {
 import type { SessionStore } from "./session-store.js";
 import type { IBackendAdapter, ServerSyntheticSendOutcome } from "./backend-adapter.js";
 import { ClaudeAdapter, INIT_PROBE_LEGACY_GRACE_MS } from "./claude-adapter.js";
+import { assistantDeliveryKey } from "./ws-bridge-cli-ingest.js";
 import type { CliTransport } from "./cli-transport.js";
 import { WebSocketCliTransport } from "./cli-transport.js";
 import type { IdleTimerProbe } from "./idle-timer-manager.js";
@@ -1098,59 +1099,7 @@ export class WsBridge {
 
       // -- assistant: append to history, notify listeners ------------------
       if (msg.type === "assistant") {
-        // PLAN Task 12 — stamp `streamStatus: "complete"` on the persisted
-        // form. The consolidated assistant frame IS the completion signal:
-        // by reaching this branch we have a whole turn from the CLI. If a
-        // streaming tracker is still set for this id, clear it so the
-        // disconnect-time interrupted flush doesn't emit a duplicate.
-        if (session.streamingAssistant?.id === msg.message.id) {
-          session.streamingAssistant = null;
-        }
-        const assistantMsg = { ...msg, timestamp: msg.timestamp || Date.now(), streamStatus: "complete" as const };
-        this.appendHistory(session, assistantMsg);
-        this.persistSession(session);
-        companionBus.emit("message:assistant", { sessionId: session.id, message: assistantMsg });
-
-        // Keep the session's model in sync with the model the MAIN session is
-        // actually running. `parent_tool_use_id === null` means this is the
-        // main turn, not a Task subagent frame (a subagent may run a different
-        // model, and must never overwrite the session's model). This is the
-        // authoritative signal after a `/model` switch or a composer set_model
-        // — more reliable than aggregating result.modelUsage by token count.
-        // It drives BOTH the UI label (fixes the stale/alarming wrong-model
-        // label) AND the model persisted for relaunch: on change we emit
-        // `session:model-active-changed`, which the orchestrator turns into
-        // launcher.setModel so a `--resume` relaunch spawns on THIS model
-        // rather than the frozen spawn-time `--model`. The `<synthetic>`
-        // sentinel (stamped when a model is unavailable) is skipped, and
-        // observers are skipped for persistence — their model is fixed at
-        // spawn (EC-1) and must not be mutated by a transient frame.
-        //
-        // Persistence compares against `launcherModel` (the model this
-        // process was spawned with, or the last confirmed switch), NOT
-        // `state.model`: the CLI re-emits an init frame carrying the new
-        // model right after a set_model, which moved `state.model` first and
-        // silently defeated the old `!== state.model` check — a session kept
-        // relaunching on its creation-time model for days (8b26ccb7,
-        // 2026-10-12..15).
-        const mainModel = msg.message?.model;
-        if (
-          msg.parent_tool_use_id === null
-          && typeof mainModel === "string"
-          && mainModel.length > 0
-          && mainModel !== "<synthetic>"
-        ) {
-          const persistedBaseline = session.launcherModel ?? session.state.model;
-          session.state.model = mainModel;
-          session.launcherModel = mainModel;
-          if (mainModel !== persistedBaseline && session.state.sessionGroupRole !== "observer") {
-            companionBus.emit("session:model-active-changed", {
-              sessionId: session.id,
-              model: mainModel,
-              source: "assistant",
-            });
-          }
-        }
+        this.ingestAssistantFrame(session, msg);
       }
 
       if (msg.type === "stream_event") {
@@ -1981,6 +1930,121 @@ export class WsBridge {
     if (!session) return;
     if (!(session.backendAdapter instanceof ClaudeAdapter)) return;
     session.backendAdapter.sendInitProbe(AURA_INIT_PROBE_MARKER);
+  }
+
+  /**
+   * The `assistant` branch of the backend → browser pipeline: stamp, append
+   * to history, persist, notify, and keep the session's model in sync.
+   * Shared by the live adapter path and {@link deliverRecoveredAssistantRecords}.
+   * The caller broadcasts.
+   */
+  private ingestAssistantFrame(
+    session: Session,
+    msg: Extract<BrowserIncomingMessage, { type: "assistant" }>,
+  ): void {
+    // PLAN Task 12 — stamp `streamStatus: "complete"` on the persisted
+    // form. The consolidated assistant frame IS the completion signal:
+    // by reaching this branch we have a whole turn from the CLI. If a
+    // streaming tracker is still set for this id, clear it so the
+    // disconnect-time interrupted flush doesn't emit a duplicate.
+    if (session.streamingAssistant?.id === msg.message.id) {
+      session.streamingAssistant = null;
+    }
+    const assistantMsg = { ...msg, timestamp: msg.timestamp || Date.now(), streamStatus: "complete" as const };
+    this.appendHistory(session, assistantMsg);
+    this.persistSession(session);
+    companionBus.emit("message:assistant", { sessionId: session.id, message: assistantMsg });
+
+    // Keep the session's model in sync with the model the MAIN session is
+    // actually running. `parent_tool_use_id === null` means this is the
+    // main turn, not a Task subagent frame (a subagent may run a different
+    // model, and must never overwrite the session's model). This is the
+    // authoritative signal after a `/model` switch or a composer set_model
+    // — more reliable than aggregating result.modelUsage by token count.
+    // It drives BOTH the UI label (fixes the stale/alarming wrong-model
+    // label) AND the model persisted for relaunch: on change we emit
+    // `session:model-active-changed`, which the orchestrator turns into
+    // launcher.setModel so a `--resume` relaunch spawns on THIS model
+    // rather than the frozen spawn-time `--model`. The `<synthetic>`
+    // sentinel (stamped when a model is unavailable) is skipped, and
+    // observers are skipped for persistence — their model is fixed at
+    // spawn (EC-1) and must not be mutated by a transient frame.
+    //
+    // Persistence compares against `launcherModel` (the model this
+    // process was spawned with, or the last confirmed switch), NOT
+    // `state.model`: the CLI re-emits an init frame carrying the new
+    // model right after a set_model, which moved `state.model` first and
+    // silently defeated the old `!== state.model` check — a session kept
+    // relaunching on its creation-time model for days (8b26ccb7,
+    // 2026-10-12..15).
+    const mainModel = msg.message?.model;
+    if (
+      msg.parent_tool_use_id === null
+      && typeof mainModel === "string"
+      && mainModel.length > 0
+      && mainModel !== "<synthetic>"
+    ) {
+      const persistedBaseline = session.launcherModel ?? session.state.model;
+      session.state.model = mainModel;
+      session.launcherModel = mainModel;
+      if (mainModel !== persistedBaseline && session.state.sessionGroupRole !== "observer") {
+        companionBus.emit("session:model-active-changed", {
+          sessionId: session.id,
+          model: mainModel,
+          source: "assistant",
+        });
+      }
+    }
+  }
+
+  /**
+   * Silent-stdio drift recovery (W1, prod 40f03a1e 2026-10-15 15:03): the
+   * CLI wrote its whole reply to its jsonl (tool call + answer + end_turn)
+   * but none of it reached stdout; the recovery kills it and relaunches with
+   * `--resume`, and a resumed CLI does NOT re-emit past turns on stdout. So
+   * the reply existed only in the CLI's jsonl and the user saw a hang.
+   *
+   * The recovery hands us the main-chain `assistant` records it read from
+   * the jsonl after the kill; each is fed through the same pipeline as a live
+   * `assistant` frame (history + persist + broadcast). Exactly once: a record
+   * whose `message.id` + content already sits in the history (it did reach
+   * bun before the stall) is skipped — the jsonl record is byte-identical to
+   * the stdout frame.
+   *
+   * @returns how many records were delivered / skipped as already delivered.
+   */
+  deliverRecoveredAssistantRecords(
+    sessionId: string,
+    records: readonly { message: Record<string, unknown>; timestampMs: number }[],
+  ): { delivered: number; alreadyDelivered: number } {
+    const session = this.sessions.get(sessionId);
+    if (!session) return { delivered: 0, alreadyDelivered: 0 };
+    const seen = new Set<string>();
+    for (const entry of session.messageHistory) {
+      if (entry.type === "assistant") seen.add(assistantDeliveryKey(entry.message as unknown as Record<string, unknown>));
+    }
+    let delivered = 0;
+    let alreadyDelivered = 0;
+    for (const rec of records) {
+      const key = assistantDeliveryKey(rec.message);
+      if (seen.has(key)) {
+        alreadyDelivered++;
+        continue;
+      }
+      seen.add(key);
+      const msg = {
+        type: "assistant",
+        message: rec.message,
+        parent_tool_use_id: null,
+        timestamp: rec.timestampMs,
+      } as unknown as Extract<BrowserIncomingMessage, { type: "assistant" }>;
+      this.noteCliActivity(session);
+      deliveryMetrics.recordBackendFrame(session.id, msg);
+      this.ingestAssistantFrame(session, msg);
+      this.broadcastToBrowsers(session, msg);
+      delivered++;
+    }
+    return { delivered, alreadyDelivered };
   }
 
   /** Send an initialize control request with context appended to the system prompt.
