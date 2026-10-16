@@ -203,6 +203,14 @@ export function pruneDriftRecoveries(history: readonly number[], now: number): n
 // Proactive keepalive: base delay before relaunching a crashed CLI (doubles per attempt)
 export const KEEPALIVE_BASE_DELAY_MS = 3_000;
 
+/**
+ * W2: spacing between the proactive boot resumes of sessions that were alive
+ * before a server restart, so N CLIs are not spawned in the same instant.
+ * Session i fires at `(i + 1) * BOOT_RESUME_STAGGER_MS`, then goes through
+ * {@link SessionRecovery.handleAutoRelaunch} (its own grace + guards).
+ */
+export const BOOT_RESUME_STAGGER_MS = Number(process.env.COMPANION_BOOT_RESUME_STAGGER_MS || "1500");
+
 export interface SessionRecoveryDeps {
   launcher: CliLauncher;
   wsBridge: WsBridge;
@@ -1020,6 +1028,58 @@ export class SessionRecovery {
     }, delay);
 
     this.keepaliveTimers.set(sessionId, timer);
+  }
+
+  /**
+   * W2: proactively relaunch (`--resume`) the sessions that were alive before
+   * the server restart, without waiting for a browser to open them. Before
+   * this, stdio Claude and host Codex sessions came back `exited` and stayed
+   * down until a browser connected (`session:relaunch-needed`) — browserless
+   * orchestrators, council pairs and CLI crons were dead for hours.
+   *
+   * Launches are staggered by {@link BOOT_RESUME_STAGGER_MS}. Each timer lives
+   * in `keepaliveTimers`, so archive / delete / user kill cancel it like a
+   * keepalive. When it fires, a session that is gone, archived, intentionally
+   * killed, stopped by user or no longer `exited` (a returning browser already
+   * relaunched it) is skipped; the rest go through `handleAutoRelaunch`, which
+   * shares `relaunchingSet` + `relaunchOnce` with the browser path (no double
+   * spawn) and enforces the crash budget.
+   */
+  scheduleBootResume(sessionIds: readonly string[]): void {
+    if (sessionIds.length === 0) return;
+    log.info("orchestrator", "Scheduling boot resume of sessions alive before restart", {
+      event: "session.boot_resume.scheduled",
+      count: sessionIds.length,
+      staggerMs: BOOT_RESUME_STAGGER_MS,
+      sessionIds,
+    });
+    sessionIds.forEach((sessionId, i) => {
+      this.cancelKeepaliveTimer(sessionId);
+      const timer = setTimeout(async () => {
+        if (this.keepaliveTimers.get(sessionId) === timer) this.keepaliveTimers.delete(sessionId);
+        const info = this.launcher.getSession(sessionId);
+        const skip = (reason: string) =>
+          log.info("orchestrator", "boot resume skipped", {
+            event: "session.boot_resume.skipped",
+            sessionId,
+            role: info?.sessionGroupRole,
+            reason,
+          });
+        if (!info) return skip("unknown_session");
+        if (info.archived) return skip("archived");
+        if (this.intentionalKills.has(sessionId)) return skip("intentional_kill");
+        if (this.stoppedByUser.has(sessionId)) return skip("stopped_by_user");
+        if (info.state !== "exited") return skip(`state_${info.state}`);
+        log.info("orchestrator", "Boot-resuming session alive before restart", {
+          event: "session.boot_resume.firing",
+          sessionId,
+          role: info.sessionGroupRole,
+          backendType: info.backendType,
+        });
+        await this.handleAutoRelaunch(sessionId);
+      }, (i + 1) * BOOT_RESUME_STAGGER_MS);
+      this.keepaliveTimers.set(sessionId, timer);
+    });
   }
 
   cancelKeepaliveTimer(sessionId: string): void {

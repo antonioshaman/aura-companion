@@ -1070,6 +1070,14 @@ async function gracefulShutdown() {
       console.log(`[server] Flushed ${interruptedCount} interrupted stream(s) on shutdown`);
     }
     wsBridge.flushSessionStorePendingSync();
+    // W2: persist which sessions were alive BEFORE shutdownAllGroups kills
+    // the council pairs, so the next boot resumes them without a browser.
+    try {
+      const marked = orchestrator.markLiveSessionsForBootResume();
+      console.log(`[server] Marked ${marked} live session(s) for boot resume`);
+    } catch (err) {
+      console.error("[server] Boot-resume mark failed (continuing shutdown):", err);
+    }
     if (coordinator) {
       const { shutdownAllGroups } = await import("./group-shutdown.js");
       const groupIds = coordinator.listGroupIds();

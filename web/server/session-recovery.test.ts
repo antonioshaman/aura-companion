@@ -11,6 +11,7 @@ import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
+  BOOT_RESUME_STAGGER_MS,
   decideDriftAction,
   decideDriftKill,
   DRIFT_RECOVERY_RATE_MAX,
@@ -1089,5 +1090,113 @@ describe("SessionRecovery.driftDetectorTick — liveness, guards and EC-52 recov
     recovery.driftDetectorTick(); // no_undelivered_output
     const reasons = events(infoSpy, "silent_stdio_drift.suppressed").map((c) => (c[2] as { reason: string }).reason);
     expect(reasons).toEqual(["live_subagent_activity", "no_undelivered_output"]);
+  });
+});
+
+// W2 (prod 2026-10-15 17:15 / 2026-10-16 06:13): after a server restart the
+// sessions that were alive came back `exited` and were relaunched only when a
+// browser opened them (07:02, ~50 min later; om_event_bot 2 h later) — a
+// Rapesha CLI cron missed its 06:30 run. `scheduleBootResume` relaunches them
+// at boot with no browser, staggered, through the same guarded auto-relaunch
+// path a returning browser uses.
+describe("SessionRecovery.scheduleBootResume (W2)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.spyOn(log, "info").mockImplementation(() => undefined);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    companionBus.clear();
+  });
+
+  it("resumes every candidate with NO browser, one CLI at a time, staggered", async () => {
+    // Both halves of a council pair (claude orchestrator + codex observer) and
+    // a solo cron session. No browser ever connects in this test.
+    const sessions = new Map([
+      ["orch", info("orch", { sessionGroupRole: "orchestrator", cliSessionId: "c1" } as Partial<SdkSessionInfo>)],
+      ["obs", info("obs", { sessionGroupRole: "observer", backendType: "codex", cliSessionId: "t1" } as Partial<SdkSessionInfo>)],
+      ["cron", info("cron", { cliSessionId: "c2" })],
+    ]);
+    const { recovery, launcher, onRelaunchSucceeded } = makeRecovery(sessions);
+    launcher.relaunch.mockImplementation(async (id: string) => {
+      sessions.get(id)!.state = "starting";
+      return { ok: true };
+    });
+
+    recovery.scheduleBootResume(["orch", "obs", "cron"]);
+    // Pending timers are visible to sweep-orphans / cancellable like keepalive.
+    expect([...recovery.keepaliveSessionIds()].sort()).toEqual(["cron", "obs", "orch"]);
+
+    await vi.advanceTimersByTimeAsync(BOOT_RESUME_STAGGER_MS + RELAUNCH_GRACE_MS);
+    expect(launcher.relaunch.mock.calls.map((c) => c[0])).toEqual(["orch"]);
+    await vi.advanceTimersByTimeAsync(BOOT_RESUME_STAGGER_MS);
+    expect(launcher.relaunch.mock.calls.map((c) => c[0])).toEqual(["orch", "obs"]);
+    await vi.advanceTimersByTimeAsync(BOOT_RESUME_STAGGER_MS);
+    expect(launcher.relaunch.mock.calls.map((c) => c[0])).toEqual(["orch", "obs", "cron"]);
+    expect(onRelaunchSucceeded.mock.calls.map((c) => c[0])).toEqual(["orch", "obs", "cron"]);
+    expect([...recovery.keepaliveSessionIds()]).toEqual([]);
+  });
+
+  it("a browser connecting concurrently does not cause a double relaunch", async () => {
+    const sessions = new Map([["s1", info("s1", { cliSessionId: "c1" })]]);
+    const { recovery, launcher } = makeRecovery(sessions);
+    launcher.relaunch.mockImplementation(async (id: string) => {
+      sessions.get(id)!.state = "starting";
+      return { ok: true };
+    });
+
+    recovery.scheduleBootResume(["s1"]);
+    // Browser opens the session before the boot timer fires.
+    const browser = recovery.handleAutoRelaunch("s1");
+    await vi.advanceTimersByTimeAsync(BOOT_RESUME_STAGGER_MS + RELAUNCH_GRACE_MS + RELAUNCH_COOLDOWN_MS);
+    await browser;
+    expect(launcher.relaunch).toHaveBeenCalledTimes(1);
+
+    // And the other order: boot timer first, browser arrives during its grace.
+    sessions.set("s2", info("s2", { cliSessionId: "c2" }));
+    recovery.scheduleBootResume(["s2"]);
+    await vi.advanceTimersByTimeAsync(BOOT_RESUME_STAGGER_MS + 1);
+    const late = recovery.handleAutoRelaunch("s2");
+    await vi.advanceTimersByTimeAsync(RELAUNCH_GRACE_MS + RELAUNCH_COOLDOWN_MS);
+    await late;
+    expect(launcher.relaunch.mock.calls.filter((c) => c[0] === "s2")).toHaveLength(1);
+  });
+
+  it("respects archived, user-stopped, intentional kills, cancellation and already-alive sessions", async () => {
+    const sessions = new Map([
+      ["archived", info("archived", { archived: true })],
+      ["stopped", info("stopped")],
+      ["killed", info("killed")],
+      ["cancelled", info("cancelled")],
+      ["alive", info("alive", { state: "connected" })],
+      ["gone-from-store", info("gone-from-store")],
+    ]);
+    const { recovery, launcher, intentionalKills } = makeRecovery(sessions);
+    recovery.markStoppedByUser("stopped");
+    intentionalKills.add("killed");
+    sessions.delete("gone-from-store");
+
+    recovery.scheduleBootResume(["archived", "stopped", "killed", "cancelled", "alive", "gone-from-store"]);
+    // Archive / delete / user kill of the session cancels its pending timer.
+    recovery.cancelKeepaliveTimer("cancelled");
+    await vi.advanceTimersByTimeAsync(10 * BOOT_RESUME_STAGGER_MS + RELAUNCH_GRACE_MS + RELAUNCH_COOLDOWN_MS);
+
+    expect(launcher.relaunch).not.toHaveBeenCalled();
+  });
+
+  it("a session whose crash budget is spent is not relaunched again", async () => {
+    const sessions = new Map([["s1", info("s1")]]);
+    const { recovery, launcher } = makeRecovery(sessions);
+    recovery.relaunchExhaustedNotified.add("s1");
+    recovery.scheduleBootResume(["s1"]);
+    await vi.advanceTimersByTimeAsync(BOOT_RESUME_STAGGER_MS + RELAUNCH_GRACE_MS);
+    expect(launcher.relaunch).not.toHaveBeenCalled();
+  });
+
+  it("an empty candidate list schedules nothing", () => {
+    const { recovery } = makeRecovery(new Map());
+    recovery.scheduleBootResume([]);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

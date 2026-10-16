@@ -784,6 +784,29 @@ export class SessionOrchestrator {
 
     // Reconnection watchdog for stale sessions after server restart
     this.recovery.startReconnectionWatchdog();
+
+    // W2: sessions alive before the restart that restore had to leave
+    // `exited` (stdio Claude, host Codex, both halves of council pairs) are
+    // resumed now — not when a browser happens to open them hours later.
+    this.recovery.scheduleBootResume(this.launcher.takeBootResumeCandidates());
+  }
+
+  /**
+   * W2: graceful-shutdown hook — run BEFORE the council teardown kills the
+   * pairs. Persists a boot-resume mark on every live session plus every
+   * crashed one whose keepalive relaunch is still pending (that timer dies
+   * with this process). User-stopped sessions are excluded, so they stay
+   * down after the restart; idle-killed / archived ones are already `exited`
+   * with no keepalive pending (keepalive skips intentional kills), so they
+   * are not marked either. `intentionalKills` itself is NOT consulted: its
+   * marks are sticky, and a session idle-killed and later revived by a
+   * browser still carries one while alive.
+   */
+  markLiveSessionsForBootResume(): number {
+    return this.launcher.markLiveForBootResume(
+      Array.from(this.recovery.keepaliveSessionIds()),
+      (id) => this.recovery.isStoppedByUser(id),
+    );
   }
 
   /**

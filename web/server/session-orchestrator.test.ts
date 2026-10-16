@@ -189,6 +189,8 @@ function createMockLauncher() {
     setModel: vi.fn(),
     markConnected: vi.fn(),
     getStartingSessions: vi.fn(() => []),
+    takeBootResumeCandidates: vi.fn(() => [] as string[]),
+    markLiveForBootResume: vi.fn(() => 0),
   } as any;
 }
 
@@ -2292,6 +2294,56 @@ describe("SessionOrchestrator", () => {
 
         // Should NOT relaunch archived session
         expect(deps.launcher.relaunch).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  // ── W2: boot resume of sessions alive before the restart ─────────────────
+
+  describe("boot resume (via initialize) — W2", () => {
+    // Prod 2026-10-16 06:13: restored stdio/Codex sessions sat `exited` until a
+    // browser connected at 07:02. initialize() must resume them on its own.
+    it("relaunches the launcher's boot-resume candidates with no browser connected", async () => {
+      vi.useFakeTimers();
+      try {
+        const rec = { sessionId: "orch", state: "exited", cliSessionId: "c1", cwd: "/tmp", createdAt: 0 };
+        deps.launcher.takeBootResumeCandidates.mockReturnValue(["orch"]);
+        deps.launcher.getSession.mockImplementation((id: string) => (id === "orch" ? rec : undefined));
+        deps.launcher.relaunch.mockImplementation(async () => {
+          rec.state = "starting";
+          return { ok: true };
+        });
+
+        orchestrator.initialize();
+        expect(deps.launcher.takeBootResumeCandidates).toHaveBeenCalledTimes(1);
+        await vi.advanceTimersByTimeAsync(15_000);
+
+        expect(deps.launcher.relaunch).toHaveBeenCalledWith("orch");
+        expect(deps.launcher.relaunch).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("markLiveSessionsForBootResume passes pending keepalives and excludes user-stopped sessions", () => {
+      // A crashed CLI whose keepalive timer is pending at shutdown dies with
+      // the old process — it must be marked so the next boot resumes it. A
+      // user-stopped session must stay down.
+      vi.useFakeTimers();
+      try {
+        deps.launcher.getSession.mockImplementation((id: string) => ({ sessionId: id, state: "exited", cwd: "/tmp", createdAt: 0 }));
+        const recovery = (orchestrator as any).recovery;
+        recovery.scheduleProactiveRelaunch("crashed");
+        recovery.markStoppedByUser("stopped");
+
+        orchestrator.markLiveSessionsForBootResume();
+        const [extra, exclude] = deps.launcher.markLiveForBootResume.mock.calls[0];
+        expect(extra).toEqual(["crashed"]);
+        expect(exclude("stopped")).toBe(true);
+        expect(exclude("crashed")).toBe(false);
+        recovery.cancelKeepaliveTimer("crashed");
       } finally {
         vi.useRealTimers();
       }
