@@ -5579,6 +5579,39 @@ describe("SessionOrchestrator", () => {
       expect(reasonFor("grp_wf_guard")).toBeUndefined();
     });
 
+    // W14 end-to-end wiring (prod 2026-10-16 grp_879b81b6): the adapter's
+    // silent-wake report degrades with the honest reason, re-queues the owed
+    // checkpoint and starts the observer auto-heal — previously the pair sat
+    // degraded until a manual relaunch.
+    it("routes a silent wake to wake_produced_no_review, re-queues the checkpoint and auto-heals", () => {
+      const { applyEvent } = seedListenerGroup("grp_w14", "sess_orch_w14", "sess_obs_w14");
+      const ws = orchestrator as unknown as {
+        coordinator: { applyEvent: unknown; get?: unknown };
+        councilWatchers: Map<string, unknown>;
+        observerAutoheal: { heal: (...a: unknown[]) => Promise<unknown> };
+      };
+      ws.coordinator.get = vi.fn(() => ({ status: "degraded" }));
+      const owed = {
+        schema_version: 1, checkpoint_id: "council-review-158-pr366-drift-reply-delivery", phase: "council-review",
+        sequence: 158, session_group_id: "grp_w14", emitted_at: "2026-10-16T09:01:03Z", artifact_paths: [],
+      };
+      ws.councilWatchers.set("grp_w14", {
+        cwd: "/tmp", abort: new AbortController(), lastCheckpoint: owed, previousCheckpoint: null,
+        pendingCheckpoint: null, supersededCheckpointIds: [], pendingReviewDeadline: null,
+      });
+      const heal = vi.spyOn(ws.observerAutoheal, "heal").mockResolvedValue({ kind: "skipped", reason: "test" });
+      companionBus.emit("observer:wake-failed", {
+        sessionId: "sess_obs_w14",
+        error: "observer wake silent for 120s (silent after fresh-thread retry)",
+        reason: "silent",
+      });
+      expect(applyEvent).toHaveBeenCalledWith("grp_w14", { type: "half_died", role: "observer", reason: "wake_produced_no_review" });
+      expect((ws.councilWatchers.get("grp_w14") as { pendingCheckpoint: { checkpoint_id: string } }).pendingCheckpoint.checkpoint_id)
+        .toBe("council-review-158-pr366-drift-reply-delivery");
+      expect(heal).toHaveBeenCalledWith("grp_w14", "sess_obs_w14", "wake_produced_no_review", "council-review-158-pr366-drift-reply-delivery");
+      ws.councilWatchers.delete("grp_w14");
+    });
+
     // Unknown session id (absent from the reverse index) is a silent no-op —
     // covers the early `if (!groupId) return` guard.
     it("ignores observer:wake-failed for a session id not in any group", () => {
