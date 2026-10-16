@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CodexAdapter, type ICodexTransport } from "./codex-adapter.js";
 import { companionBus } from "./event-bus.js";
 import { OBSERVER_WAKE_SILENCE_MS } from "./observer-wake-silence.js";
+import { HELD_TIMEOUT_MULTIPLIER } from "./silent-stdio-watchdog.js";
 
 /**
  * W14 — codex observer wake that is accepted and then goes silent.
@@ -266,5 +267,51 @@ describe("codex observer wake silence (W14)", () => {
     // Disarmed on completion: no late verdict.
     await vi.advanceTimersByTimeAsync(OBSERVER_WAKE_SILENCE_MS * 2);
     expect(t.count("turn/interrupt")).toBe(0);
+  });
+
+  // Review WARN on PR #371: a command the observer runs (rg over a big tree, a
+  // buffered test run) emits `item/started` and then NOTHING until
+  // `item/completed` — `outputDelta` only arrives when there is output. That
+  // quiet stretch is work, not a lost stream: while a commandExecution item is
+  // open the deadline widens to HELD_TIMEOUT_MULTIPLIER x, like the Claude
+  // session watchdog does for an outstanding tool_use. A genuine hang inside
+  // the command is still caught at the widened deadline.
+  it("does not treat a quiet 130s command as silence, but still catches a hang past the widened deadline", async () => {
+    const { t, adapter } = await initObserver();
+    adapter.sendUserFrameFromServer(WAKE);
+    await flush();
+    t.resolve("turn/start", { turn: { id: "turn_cmd", status: "inProgress" } });
+    await flush();
+    t.push("item/started", {
+      threadId: SILENT_THREAD, turnId: "turn_cmd",
+      item: { type: "commandExecution", id: "exec-1", command: "/bin/bash -lc 'rg -n foo .'" },
+    });
+    await vi.advanceTimersByTimeAsync(130_000);
+    expect(t.count("turn/interrupt")).toBe(0);
+    t.push("item/completed", {
+      threadId: SILENT_THREAD, turnId: "turn_cmd",
+      item: { type: "commandExecution", id: "exec-1", status: "completed" },
+    });
+    // Command done → back to the normal window.
+    await vi.advanceTimersByTimeAsync(OBSERVER_WAKE_SILENCE_MS - 1_000);
+    expect(t.count("turn/interrupt")).toBe(0);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(t.count("turn/interrupt")).toBe(1);
+  });
+
+  it("fires inside a command that hangs past the widened deadline", async () => {
+    const { t, adapter } = await initObserver();
+    adapter.sendUserFrameFromServer(WAKE);
+    await flush();
+    t.resolve("turn/start", { turn: { id: "turn_hang", status: "inProgress" } });
+    await flush();
+    t.push("item/started", {
+      threadId: SILENT_THREAD, turnId: "turn_hang",
+      item: { type: "commandExecution", id: "exec-hang", command: "/bin/bash -lc 'sleep 9999'" },
+    });
+    await vi.advanceTimersByTimeAsync(OBSERVER_WAKE_SILENCE_MS * HELD_TIMEOUT_MULTIPLIER - 1_000);
+    expect(t.count("turn/interrupt")).toBe(0);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(t.count("turn/interrupt")).toBe(1);
   });
 });

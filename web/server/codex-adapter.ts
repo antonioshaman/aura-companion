@@ -500,6 +500,15 @@ export class CodexAdapter implements IBackendAdapter {
   /** W14: bumped per wake so an async retry can tell its wake was replaced. */
   private observerWakeGeneration = 0;
   /**
+   * W14 (review WARN): commandExecution items open in the current wake turn.
+   * A command (rg over a big tree, a buffered test run) emits `item/started`
+   * and then nothing until `item/completed` — `outputDelta` only arrives when
+   * there is output. While any is open the silence deadline is held open at
+   * HELD_TIMEOUT_MULTIPLIER x, mirroring the Claude session watchdog's
+   * tool_use hold.
+   */
+  private readonly observerOpenCommandIds = new Set<string>();
+  /**
    * #12: idle-kill activity hook, wired by the bridge at attach time.
    * `sendUserFrameFromServer` calls it unconditionally so a checkpoint-driven
    * wake counts as group liveness even when the send is gated `busy`
@@ -1072,6 +1081,16 @@ export class CodexAdapter implements IBackendAdapter {
     this.sendObserverWakeTurn(content);
   }
 
+  /** W14: hold the wake silence deadline open while a command item runs. */
+  private trackObserverCommandHold(method: string, params: Record<string, unknown>): void {
+    if (method !== "item/started" && method !== "item/completed") return;
+    const item = params.item as { type?: string; id?: string } | undefined;
+    if (item?.type !== "commandExecution" || typeof item.id !== "string") return;
+    if (method === "item/started") this.observerOpenCommandIds.add(item.id);
+    else this.observerOpenCommandIds.delete(item.id);
+    this.observerWakeSilence.setHeld(this.observerOpenCommandIds.size > 0);
+  }
+
   /** Council observer turn-state (see `IBackendAdapter.getObserverTurnState`). */
   getObserverTurnState(): "idle" | "in-flight" {
     return this.observerTurnState;
@@ -1114,6 +1133,8 @@ export class CodexAdapter implements IBackendAdapter {
 
   private armObserverWakeWatchdog(): void {
     this.clearObserverWakeWatchdog();
+    // arm() resets the hold; start the new delivery with no open commands.
+    this.observerOpenCommandIds.clear();
     this.observerWakeSilence.arm("observer_wake");
     const timer = setTimeout(() => {
       log.warn("codex-adapter", "observer wake turn never terminated — force-releasing slot", {
@@ -1129,6 +1150,7 @@ export class CodexAdapter implements IBackendAdapter {
 
   private clearObserverWakeWatchdog(): void {
     this.observerWakeSilence.disarm();
+    this.observerOpenCommandIds.clear();
     if (this.observerWakeWatchdog) {
       clearTimeout(this.observerWakeWatchdog);
       this.observerWakeWatchdog = null;
@@ -1991,6 +2013,7 @@ export class CodexAdapter implements IBackendAdapter {
   private handleNotification(method: string, params: Record<string, unknown>): void {
     // W14: any inbound frame proves the wake turn's stream is alive.
     this.observerWakeSilence.onFrame();
+    this.trackObserverCommandHold(method, params);
     // Debug: log all significant notifications to understand Codex event flow
     if (method.startsWith("item/") || method.startsWith("turn/") || method.startsWith("thread/")) {
       const item = params.item as { type?: string; id?: string } | undefined;
