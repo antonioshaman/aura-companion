@@ -72,6 +72,7 @@ import {
 import { recordCleanupEvent } from "./cleanup/cleanup-events.js";
 import type { CliFailedReason } from "./cli-failed-frame.js";
 import type { RelaunchExhaustedReason } from "./event-bus-types.js";
+import { buildTurnUsageLogLine, describeCachePrefixChange, promptTokensOf } from "./turn-usage-telemetry.js";
 
 // ─── Bridge ───────────────────────────────────────────────────────────────────
 
@@ -1134,6 +1135,14 @@ export class WsBridge {
         // silently defeated the old `!== state.model` check — a session kept
         // relaunching on its creation-time model for days (8b26ccb7,
         // 2026-10-12..15).
+        // W7: the main thread's full prompt (cached + uncached + cache write)
+        // is what a cold cache would have to write again — feeds the
+        // cache-rewrite hint. Subagent frames run a different context.
+        if (msg.parent_tool_use_id === null && msg.message?.usage) {
+          const prompt = promptTokensOf(msg.message.usage);
+          if (prompt > 0) session.state.last_context_tokens = prompt;
+        }
+
         const mainModel = msg.message?.model;
         if (
           msg.parent_tool_use_id === null
@@ -1191,22 +1200,45 @@ export class WsBridge {
             }
           }
         }
-        // WS-3 A-2 (prompt-cache audit C-6): per-turn cache telemetry as a
-        // structured line — the fields were already proxied to the UI but no
-        // ratio was observable anywhere. Counters only, никакого контента.
-        if (resultData.usage) {
-          const u = resultData.usage;
-          console.log(JSON.stringify({
-            event: "llm.turn_usage",
+        // WS-3 A-2 (prompt-cache audit C-6) + W6/W7: per-turn cache telemetry
+        // as a structured line. Counters only, никакого контента. Error and
+        // zero-usage frames are logged but flagged `countable: false` so they
+        // don't drag hit-rate aggregates; only a frame that actually reached
+        // the model (prompt tokens > 0) advances the idle clock.
+        let cacheClockAdvanced = false;
+        {
+          const now = Date.now();
+          const line = buildTurnUsageLogLine({
             sessionId: session.id,
-            input_tokens: u.input_tokens ?? null,
-            output_tokens: u.output_tokens ?? null,
-            cache_read_input_tokens: u.cache_read_input_tokens ?? null,
-            cache_creation_input_tokens: u.cache_creation_input_tokens ?? null,
-            num_turns: resultData.num_turns ?? null,
-          }));
+            backend: session.backendType,
+            model: session.state.model,
+            result: resultData,
+            turnStartedAt: session.turnStartedAt ?? now,
+            previousTurnCompletedAt: session.state.last_turn_completed_at,
+            prefixChanges: session.pendingCachePrefixChanges ?? [],
+          });
+          console.log(JSON.stringify(line));
+          session.turnStartedAt = undefined;
+          if (line.prompt_tokens !== null && line.prompt_tokens > 0) {
+            session.pendingCachePrefixChanges = [];
+            session.state.last_turn_completed_at = now;
+            cacheClockAdvanced = true;
+          }
         }
         this.refreshGitInfo(session, { broadcastUpdate: true, notifyPoller: true });
+        if (cacheClockAdvanced) {
+          // After the git refresh so its (conditional) session_update keeps
+          // its place; carries only the two cache-hint fields.
+          this.broadcastToBrowsers(session, {
+            type: "session_update",
+            session: {
+              last_turn_completed_at: session.state.last_turn_completed_at,
+              ...(session.state.last_context_tokens !== undefined
+                ? { last_context_tokens: session.state.last_context_tokens }
+                : {}),
+            },
+          });
+        }
         this.appendHistory(session, msg);
         session.stateMachine.transition("ready", "turn_completed");
         if (session.pendingMessages.length > 0 && adapter.isConnected()) {
@@ -2303,6 +2335,22 @@ export class WsBridge {
       // fall through to existing adapter delivery
     }
 
+    // -- W7: prefix-changing control requests ------------------------------
+    // A model switch or an MCP tool-set change rewrites the cached prompt
+    // prefix; the next turn pays cache_creation for the whole context. Log a
+    // structured event now and attribute it on the next llm.turn_usage line.
+    const prefixChange = describeCachePrefixChange(msg, session.state.model);
+    if (prefixChange) {
+      console.log(JSON.stringify({
+        event: "cache.prefix_change",
+        sessionId: session.id,
+        backend: session.backendType,
+        ...prefixChange,
+        lastContextTokens: session.state.last_context_tokens ?? null,
+      }));
+      (session.pendingCachePrefixChanges ??= []).push(prefixChange.reason);
+    }
+
     // -- set_ai_validation: bridge-level, not forwarded to backend --------
     if (msg.type === "set_ai_validation") {
       handleSetAiValidation(session, msg);
@@ -2321,6 +2369,7 @@ export class WsBridge {
     // -- user_message: store in history before delegating to adapter ------
     if (msg.type === "user_message") {
       metricsCollector.recordTurnStarted(session.id);
+      session.turnStartedAt ??= Date.now();
       deliveryMetrics.recordUserMessage(session.id, {
         text: typeof msg.content === "string" ? msg.content : "",
         backend: session.backendType,

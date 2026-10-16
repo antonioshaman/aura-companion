@@ -6413,3 +6413,107 @@ describe("session model sync from the main assistant frame", () => {
     }
   });
 });
+
+// W6/W7 — prompt-cache telemetry at the bridge chokepoint (both backends).
+// `llm.turn_usage` gains backend/model/subtype/idle-gap/countable, and a
+// prefix-changing control request (set_model, mcp_toggle, mcp_set_servers)
+// emits `cache.prefix_change` and is attributed on the NEXT turn's line so a
+// cache_creation spike can be explained. Lines are read back from the spied
+// console.log (the bridge writes them as JSON strings).
+describe("prompt-cache telemetry (W6/W7)", () => {
+  function loggedEvents(name: string): Array<Record<string, unknown>> {
+    const calls = (console.log as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    const out: Array<Record<string, unknown>> = [];
+    for (const [arg] of calls) {
+      if (typeof arg !== "string" || !arg.startsWith("{")) continue;
+      try {
+        const parsed = JSON.parse(arg) as Record<string, unknown>;
+        if (parsed.event === name) out.push(parsed);
+      } catch { /* not JSON */ }
+    }
+    return out;
+  }
+  function resultFrame(sessionId: string, usage: Record<string, number>, extra: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      type: "result", subtype: "success", is_error: false,
+      duration_ms: 1, duration_api_ms: 1, num_turns: 1, total_cost_usd: 0,
+      stop_reason: "end_turn", session_id: sessionId, uuid: `r-${Math.random()}`,
+      usage, ...extra,
+    });
+  }
+  const USAGE = { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 2000, cache_read_input_tokens: 30000 };
+
+  it("llm.turn_usage carries backend, model, subtype, countable and the idle gap since the previous real turn", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.parse("2026-10-16T09:00:00Z"));
+      const cli = makeCliSocket("tu1");
+      bridge.handleCLIOpen(cli, "tu1");
+      await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "tu1", model: "claude-opus-4-8" }));
+      await bridge.handleCLIMessage(cli, resultFrame("tu1", USAGE));
+      // 90 minutes later the next turn completes.
+      vi.setSystemTime(Date.parse("2026-10-16T10:30:00Z"));
+      await bridge.handleCLIMessage(cli, resultFrame("tu1", USAGE));
+
+      const lines = loggedEvents("llm.turn_usage");
+      expect(lines).toHaveLength(2);
+      expect(lines[0]).toMatchObject({ backend: "claude", model: "claude-opus-4-8", subtype: "success", countable: true, minutesSinceLastTurn: null });
+      expect(lines[1]).toMatchObject({ minutesSinceLastTurn: 90, prompt_tokens: 32010 });
+      // The completion time is stored on state so the browser can estimate cache expiry.
+      expect(bridge.getSession("tu1")!.state.last_turn_completed_at).toBe(Date.parse("2026-10-16T10:30:00Z"));
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a zero-usage frame is flagged non-countable and does NOT reset the idle clock", async () => {
+    const cli = makeCliSocket("tu2");
+    bridge.handleCLIOpen(cli, "tu2");
+    await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "tu2" }));
+    await bridge.handleCLIMessage(cli, resultFrame("tu2", USAGE));
+    const completedAt = bridge.getSession("tu2")!.state.last_turn_completed_at;
+    await bridge.handleCLIMessage(cli, resultFrame("tu2", { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 }));
+    const lines = loggedEvents("llm.turn_usage");
+    expect(lines[1]).toMatchObject({ usageStatus: "zero", countable: false });
+    expect(bridge.getSession("tu2")!.state.last_turn_completed_at).toBe(completedAt);
+  });
+
+  it("set_model / mcp_toggle emit cache.prefix_change and are attributed on the next turn only", async () => {
+    const cli = makeCliSocket("tu3");
+    bridge.handleCLIOpen(cli, "tu3");
+    await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "tu3", model: "claude-opus-4-8" }));
+    const browser = makeBrowserSocket("tu3");
+    bridge.handleBrowserOpen(browser, "tu3");
+
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "set_model", model: "claude-sonnet-4-6" }));
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "mcp_toggle", serverName: "linear", enabled: false }));
+    // Re-selecting the model the session is already on is not a prefix change.
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "set_model", model: "claude-opus-4-8" }));
+
+    const changes = loggedEvents("cache.prefix_change");
+    expect(changes.map((c) => c.reason)).toEqual(["set_model", "mcp_toggle"]);
+    expect(changes[0]).toMatchObject({ sessionId: "tu3", backend: "claude", from: "claude-opus-4-8", to: "claude-sonnet-4-6" });
+    // Counters only: no MCP server config bodies in the event.
+    expect(changes[1]).toMatchObject({ serverName: "linear", enabled: false });
+
+    await bridge.handleCLIMessage(cli, resultFrame("tu3", USAGE));
+    await bridge.handleCLIMessage(cli, resultFrame("tu3", USAGE));
+    const lines = loggedEvents("llm.turn_usage");
+    expect(lines[0].prefixChanges).toEqual(["set_model", "mcp_toggle"]);
+    expect(lines[1].prefixChanges).toEqual([]);
+  });
+
+  it("tracks the main assistant frame's full prompt as last_context_tokens (subagent frames ignored)", async () => {
+    const cli = makeCliSocket("tu4");
+    bridge.handleCLIOpen(cli, "tu4");
+    await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "tu4" }));
+    const frame = (parent: string | null, usage: Record<string, number>, id: string) => JSON.stringify({
+      type: "assistant",
+      message: { id, type: "message", role: "assistant", model: "claude-sonnet-4-6", content: [{ type: "text", text: "x" }], stop_reason: "end_turn", usage },
+      parent_tool_use_id: parent, uuid: id, session_id: "tu4",
+    });
+    await bridge.handleCLIMessage(cli, frame(null, { input_tokens: 5, output_tokens: 1, cache_creation_input_tokens: 1000, cache_read_input_tokens: 80000 }, "m1"));
+    await bridge.handleCLIMessage(cli, frame("toolu_sub", { input_tokens: 5, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 3000 }, "m2"));
+    expect(bridge.getSession("tu4")!.state.last_context_tokens).toBe(81005);
+  });
+});
