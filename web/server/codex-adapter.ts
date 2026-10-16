@@ -26,6 +26,7 @@ import { reportProtocolDrift } from "./protocol-monitor.js";
 import { log } from "./logger.js";
 import { companionBus } from "./event-bus.js";
 import { resolveCodexUsageLimit } from "./usage-limit-parse.js";
+import { CodexTurnUsageAccumulator } from "./codex-turn-usage.js";
 
 // ─── Codex JSON-RPC Types ─────────────────────────────────────────────────────
 
@@ -468,6 +469,10 @@ export class CodexAdapter implements IBackendAdapter {
   // State
   private threadId: string | null = null;
   private currentTurnId: string | null = null;
+  /** W6: per-turn usage accumulated from thread/tokenUsage/updated. */
+  private readonly turnUsage = new CodexTurnUsageAccumulator();
+  /** Set once a v2 thread/tokenUsage/updated arrives; legacy token_count is then ignored. */
+  private sawV2TokenUsage = false;
   private observerTurnState: "idle" | "in-flight" = "idle";
   private observerWakeTurnId: string | null = null;
   /** Same-chunk race buffer: a `turn/completed` whose id arrived BEFORE the
@@ -2991,6 +2996,16 @@ export class CodexAdapter implements IBackendAdapter {
     }
 
     // Synthesize a CLIResultMessage-like structure
+    // W6: real per-turn usage from the turn's thread/tokenUsage/updated
+    // notifications, normalised to Claude's shape (codex-turn-usage.ts). A
+    // turn with no notification (interrupted pre-request, duplicate
+    // completion) keeps zeros — ws-bridge flags those as non-countable.
+    // Only the MAIN thread's usage belongs to this result; collab subagent
+    // threads keep their own buckets in the (thread-keyed) accumulator.
+    const completedThreadId = typeof params.threadId === "string" ? params.threadId : undefined;
+    const turnUsage = this.isMainThread(completedThreadId)
+      ? this.turnUsage.takeForTurn(completedTurnId, completedThreadId)
+      : null;
     const result: CLIResultMessage = {
       type: "result",
       subtype: turn?.status === "completed" ? "success" : "error_during_execution",
@@ -3001,7 +3016,7 @@ export class CodexAdapter implements IBackendAdapter {
       num_turns: 1,
       total_cost_usd: 0,
       stop_reason: turn?.status || "end_turn",
-      usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      usage: turnUsage ?? { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
       uuid: randomUUID(),
       session_id: this.sessionId,
     };
@@ -3070,7 +3085,30 @@ export class CodexAdapter implements IBackendAdapter {
     // `last` is the most recent turn — its inputTokens reflects what's actually in context.
     const tokenUsage = params.tokenUsage as Record<string, unknown> | undefined;
     if (!tokenUsage) return;
+    this.sawV2TokenUsage = true;
+    // Per-thread accounting (main + collab subagents) for the turn result.
+    this.turnUsage.onTokenUsage(params);
+    // Session-level context state describes the MAIN conversation only: a
+    // subagent thread's prompt/totals must not move the meter, the cache
+    // hint's last_context_tokens, or codex_token_details.
+    const threadId = typeof params.threadId === "string" ? params.threadId : undefined;
+    if (!this.isMainThread(threadId)) return;
+    this.applyMainThreadTokenUsage(tokenUsage);
+  }
 
+  /**
+   * True when `threadId` is the session's main conversation thread. A frame
+   * without a threadId is treated as main (older app-server shapes). Before
+   * the main thread id is known, anything not registered as a collab
+   * subagent thread counts as main.
+   */
+  private isMainThread(threadId: string | undefined): boolean {
+    if (threadId === undefined) return true;
+    if (this.threadId) return threadId === this.threadId;
+    return !this.parentToolUseByThreadId.has(threadId);
+  }
+
+  private applyMainThreadTokenUsage(tokenUsage: Record<string, unknown>): void {
     const total = tokenUsage.total as Record<string, number> | undefined;
     const last = tokenUsage.last as Record<string, number> | undefined;
     const contextWindow = tokenUsage.modelContextWindow as number | undefined;
@@ -3082,6 +3120,12 @@ export class CodexAdapter implements IBackendAdapter {
       const usedInContext = (last.inputTokens || 0) + (last.outputTokens || 0);
       const pct = Math.round((usedInContext / contextWindow) * 100);
       updates.context_used_percent = Math.max(0, Math.min(pct, 100));
+    }
+
+    // Full prompt of the last model request (cached included) — what a cold
+    // cache would have to write again; drives the cache-rewrite UI hint.
+    if (last && typeof last.inputTokens === "number" && last.inputTokens > 0) {
+      updates.last_context_tokens = last.inputTokens;
     }
 
     // Forward cumulative token breakdown for display in the UI
@@ -3109,6 +3153,11 @@ export class CodexAdapter implements IBackendAdapter {
     const msg = this.asRecord(params.msg);
     const info = this.asRecord(msg?.info);
     if (!info) return;
+    // Legacy frames carry no threadId/turnId, so they can't be attributed to
+    // a thread or turn: they never touch the per-turn accumulator (its
+    // duplicate detector is per thread). When v2 notifications are flowing
+    // they are authoritative and legacy frames are ignored entirely.
+    if (this.sawV2TokenUsage) return;
 
     const toUsage = (raw: unknown): Record<string, number> => {
       const usage = this.asRecord(raw);
@@ -3124,12 +3173,10 @@ export class CodexAdapter implements IBackendAdapter {
       };
     };
 
-    this.handleTokenUsageUpdated({
-      tokenUsage: {
-        total: toUsage(info.total_token_usage),
-        last: toUsage(info.last_token_usage),
-        modelContextWindow: Number(info.model_context_window || 0),
-      },
+    this.applyMainThreadTokenUsage({
+      total: toUsage(info.total_token_usage),
+      last: toUsage(info.last_token_usage),
+      modelContextWindow: Number(info.model_context_window || 0),
     });
   }
 

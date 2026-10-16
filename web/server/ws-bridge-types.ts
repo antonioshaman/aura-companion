@@ -8,6 +8,7 @@ import type {
 } from "./session-types.js";
 import type { IBackendAdapter } from "./backend-adapter.js";
 import type { SessionStateMachine } from "./session-state-machine.js";
+import type { CachePrefixChangeReason } from "./turn-usage-telemetry.js";
 import { getSettings } from "./settings-manager.js";
 
 // PLAN T10 (Phase F) - re-export the wire frame so the Phase G
@@ -130,6 +131,15 @@ export interface Session {
    * later second initialize.
    */
   pendingSystemPromptInjection?: string | null;
+  /**
+   * Prompt-cache telemetry (W6/W7), in-memory only. When the message that
+   * opened the current turn was routed — the idle gap for `llm.turn_usage`
+   * is measured from the previous turn's completion to THIS, since the cache
+   * TTL runs until the next request, not until the next result.
+   */
+  turnStartedAt?: number;
+  /** Prefix-changing control requests since the last turn_usage line. */
+  pendingCachePrefixChanges?: CachePrefixChangeReason[];
 }
 
 export type GitSessionKey =

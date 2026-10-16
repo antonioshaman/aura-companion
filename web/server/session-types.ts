@@ -796,6 +796,15 @@ export interface SessionState {
     reasoningOutputTokens: number;
     modelContextWindow: number;
   };
+  /**
+   * Prompt-cache telemetry (W7). Full prompt size (cached + uncached + cache
+   * write) of the session's most recent main-thread model request — what a
+   * cold cache would have to write again. Claude: from the main assistant
+   * frame's usage; Codex: `tokenUsage.last.inputTokens`.
+   */
+  last_context_tokens?: number;
+  /** Epoch ms of the last turn whose result carried real (non-zero) usage. */
+  last_turn_completed_at?: number;
   // Codex-specific rate limits (forwarded from account/rateLimits/updated)
   codex_rate_limits?: {
     primary: { usedPercent: number; windowDurationMins: number; resetsAt: number } | null;
