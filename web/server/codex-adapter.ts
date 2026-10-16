@@ -25,6 +25,7 @@ import type { RecorderManager, RecordingOrigin } from "./recorder.js";
 import { reportProtocolDrift } from "./protocol-monitor.js";
 import { log } from "./logger.js";
 import { companionBus } from "./event-bus.js";
+import { CodexTurnUsageAccumulator } from "./codex-turn-usage.js";
 
 // ─── Codex JSON-RPC Types ─────────────────────────────────────────────────────
 
@@ -467,6 +468,8 @@ export class CodexAdapter implements IBackendAdapter {
   // State
   private threadId: string | null = null;
   private currentTurnId: string | null = null;
+  /** W6: per-turn usage accumulated from thread/tokenUsage/updated. */
+  private readonly turnUsage = new CodexTurnUsageAccumulator();
   private observerTurnState: "idle" | "in-flight" = "idle";
   private observerWakeTurnId: string | null = null;
   /** Same-chunk race buffer: a `turn/completed` whose id arrived BEFORE the
@@ -2953,6 +2956,11 @@ export class CodexAdapter implements IBackendAdapter {
     const completedTurnId = typeof turn?.id === "string" ? turn.id : null;
 
     // Synthesize a CLIResultMessage-like structure
+    // W6: real per-turn usage from the turn's thread/tokenUsage/updated
+    // notifications, normalised to Claude's shape (codex-turn-usage.ts). A
+    // turn with no notification (interrupted pre-request, duplicate
+    // completion) keeps zeros — ws-bridge flags those as non-countable.
+    const turnUsage = this.turnUsage.takeForTurn(completedTurnId);
     const result: CLIResultMessage = {
       type: "result",
       subtype: turn?.status === "completed" ? "success" : "error_during_execution",
@@ -2963,7 +2971,7 @@ export class CodexAdapter implements IBackendAdapter {
       num_turns: 1,
       total_cost_usd: 0,
       stop_reason: turn?.status || "end_turn",
-      usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      usage: turnUsage ?? { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
       uuid: randomUUID(),
       session_id: this.sessionId,
     };
@@ -3032,6 +3040,7 @@ export class CodexAdapter implements IBackendAdapter {
     // `last` is the most recent turn — its inputTokens reflects what's actually in context.
     const tokenUsage = params.tokenUsage as Record<string, unknown> | undefined;
     if (!tokenUsage) return;
+    this.turnUsage.onTokenUsage(params);
 
     const total = tokenUsage.total as Record<string, number> | undefined;
     const last = tokenUsage.last as Record<string, number> | undefined;
@@ -3044,6 +3053,12 @@ export class CodexAdapter implements IBackendAdapter {
       const usedInContext = (last.inputTokens || 0) + (last.outputTokens || 0);
       const pct = Math.round((usedInContext / contextWindow) * 100);
       updates.context_used_percent = Math.max(0, Math.min(pct, 100));
+    }
+
+    // Full prompt of the last model request (cached included) — what a cold
+    // cache would have to write again; drives the cache-rewrite UI hint.
+    if (last && typeof last.inputTokens === "number" && last.inputTokens > 0) {
+      updates.last_context_tokens = last.inputTokens;
     }
 
     // Forward cumulative token breakdown for display in the UI

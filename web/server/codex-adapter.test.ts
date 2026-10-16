@@ -2727,6 +2727,53 @@ describe("CodexAdapter", () => {
     expect(lastUpdate.session.codex_token_details?.cachedInputTokens).toBe(930_000);
   });
 
+  it("W6: turn/completed result carries the turn's real usage (normalised), not zeros", async () => {
+    // Regression: the synthesized result frame used to hard-code usage
+    // {0,0,0,0}, so every Codex turn logged zero `llm.turn_usage`. Usage now
+    // comes from the turn's thread/tokenUsage/updated notifications, with
+    // Codex's cached-inclusive inputTokens split into input + cache_read
+    // (see codex-turn-usage.ts for the formula). A duplicate notification
+    // (identical cumulative total, as seen on real recordings) is not counted.
+    const messages: BrowserIncomingMessage[] = [];
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini" });
+    adapter.onBrowserMessage((msg) => messages.push(msg));
+
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 20));
+    stdout.push(JSON.stringify({ id: 2, result: { thread: { id: "thr_123" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const usageFrame = (total: number, last: Record<string, number>) => JSON.stringify({
+      method: "thread/tokenUsage/updated",
+      params: {
+        threadId: "thr_123",
+        turnId: "turn_w6",
+        tokenUsage: { total: { totalTokens: total }, last, modelContextWindow: 258_400 },
+      },
+    }) + "\n";
+    stdout.push(usageFrame(1000, { inputTokens: 900, cachedInputTokens: 600, outputTokens: 100 }));
+    stdout.push(usageFrame(1000, { inputTokens: 900, cachedInputTokens: 600, outputTokens: 100 })); // dup
+    stdout.push(usageFrame(2100, { inputTokens: 1050, cachedInputTokens: 900, cacheWriteInputTokens: 100, outputTokens: 50 }));
+    stdout.push(JSON.stringify({
+      method: "turn/completed",
+      params: { threadId: "thr_123", turn: { id: "turn_w6", status: "completed", items: [] } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const result = messages.find((m) => m.type === "result") as Extract<BrowserIncomingMessage, { type: "result" }> | undefined;
+    expect(result).toBeDefined();
+    expect(result!.data.usage).toEqual({
+      input_tokens: (900 - 600) + (1050 - 900 - 100),
+      cache_read_input_tokens: 600 + 900,
+      cache_creation_input_tokens: 100,
+      output_tokens: 150,
+    });
+    // The last request's full prompt is surfaced for the cache-rewrite hint.
+    const updates = messages.filter((m) => m.type === "session_update") as Array<{ session: { last_context_tokens?: number } }>;
+    expect(updates.some((u) => u.session.last_context_tokens === 1050)).toBe(true);
+  });
+
   // ─── ExitPlanMode ───────────────────────────────────────────────────────────
 
   it("routes item/tool/call ExitPlanMode to permission_request with bare tool name", async () => {
