@@ -1751,6 +1751,7 @@ export class ClaudeAdapter implements IBackendAdapter {
     log.info("claude-adapter", "init probe interrupted", {
       event: "init_probe.interrupt",
       sessionId: this.sessionId,
+      probeUuid: p.uuid,
       trigger,
     });
     this.sendToBackend(JSON.stringify({
