@@ -589,6 +589,9 @@ export type BrowserIncomingMessageBase =
      * The panel shows "не проверено", never a clean review. Omitted = no claim.
      */
     verification?: "unverified";
+    /** W15: "second" = the host-run second-opinion review; the panel does not
+     *  treat it as the observer's answer (coverage, reviewing state). */
+    reviewerRole?: "second";
   }
   | {
     /**
@@ -614,7 +617,7 @@ export type BrowserIncomingMessageBase =
     cycleNumber: number;
     convergenceThreshold: number;
     convergenceState: "in-progress" | "converged" | "revoked";
-    notCountedReason?: "no_changed_files" | "no_files_read" | "downgraded_stop" | "unverified_clean";
+    notCountedReason?: "no_changed_files" | "no_files_read" | "downgraded_stop" | "unverified_clean" | "awaiting_second_review" | "second_review_blocked" | "second_review_missing";
     /** Wallclock (ms) the server processed the transition. */
     timestamp: number;
   };
@@ -644,6 +647,20 @@ export interface BrowserCheckpointCoverageGap {
 
 export interface BrowserObserverFinding {
   id: string;
+  /**
+   * W15 multi-model review: set on findings of the host-run SECOND-OPINION
+   * reviewer (`second-reviewer.ts`). Carries that reviewer's provider/model
+   * per finding, so attribution survives the REST bootstrap (which reports a
+   * single observer provider/model for the whole backlog).
+   */
+  reviewer?: { role: "second"; provider: string; model: string };
+  /**
+   * W15: id of an earlier finding (from the OTHER reviewer, same checkpoint)
+   * that this one near-duplicates (same evidence file, overlapping lines,
+   * near-identical claim) at no higher severity. The browser folds it into
+   * that finding ("also flagged by …") and never raises it as its own blocker.
+   */
+  duplicateOf?: string;
   severity: "STOP" | "WARN" | "NOTE" | "INFO";
   claim: string;
   evidence_path: string;

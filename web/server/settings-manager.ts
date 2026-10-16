@@ -5,6 +5,11 @@ import {
 import { join } from "node:path";
 import { COMPANION_HOME } from "./paths.js";
 import { tightenFileMode, writeAtomicJson } from "./atomic-write.js";
+import {
+  type SecondReviewerConfig,
+  DEFAULT_SECOND_REVIEWER_CONFIG,
+  normalizeSecondReviewerConfig,
+} from "./second-reviewer-config.js";
 
 export const DEFAULT_ANTHROPIC_MODEL = "claude-sonnet-4-6";
 
@@ -68,6 +73,13 @@ export interface CompanionSettings {
    * after the limit resets. Default ON. See `auto-resume-scheduler.ts`.
    */
   autoResumeAfterLimit: boolean;
+  /**
+   * W15 multi-model review: global default for the Council "second opinion"
+   * reviewer (another backend/model reviewing each in-scope checkpoint next to
+   * the observer). A pair's own setting (`.council/state/<group>-second-reviewer.json`)
+   * wins. Default off. See `second-reviewer-config.ts`.
+   */
+  councilSecondReviewer: SecondReviewerConfig;
   updatedAt: number;
 }
 
@@ -103,6 +115,7 @@ let settings: CompanionSettings = {
   defaultSessionMode: "solo",
   kbAutoPrime: false,
   autoResumeAfterLimit: true,
+  councilSecondReviewer: { ...DEFAULT_SECOND_REVIEWER_CONFIG },
   updatedAt: 0,
 };
 
@@ -138,6 +151,7 @@ function normalize(raw: Partial<CompanionSettings> | null | undefined): Companio
     defaultSessionMode: raw?.defaultSessionMode === "council" ? "council" : "solo",
     kbAutoPrime: typeof raw?.kbAutoPrime === "boolean" ? raw.kbAutoPrime : false,
     autoResumeAfterLimit: typeof raw?.autoResumeAfterLimit === "boolean" ? raw.autoResumeAfterLimit : true,
+    councilSecondReviewer: normalizeSecondReviewerConfig(raw?.councilSecondReviewer),
     updatedAt: typeof raw?.updatedAt === "number" ? raw.updatedAt : 0,
   };
 }
@@ -168,7 +182,7 @@ export function getSettings(): CompanionSettings {
 }
 
 export function updateSettings(
-  patch: Partial<Pick<CompanionSettings, "anthropicApiKey" | "anthropicModel" | "claudeCodeOAuthToken" | "openaiApiKey" | "onboardingCompleted" | "linearApiKey" | "linearAutoTransition" | "linearAutoTransitionStateId" | "linearAutoTransitionStateName" | "linearArchiveTransition" | "linearArchiveTransitionStateId" | "linearArchiveTransitionStateName" | "linearOAuthClientId" | "linearOAuthClientSecret" | "linearOAuthWebhookSecret" | "linearOAuthAccessToken" | "linearOAuthRefreshToken" | "aiValidationEnabled" | "aiValidationAutoApprove" | "aiValidationAutoDeny" | "publicUrl" | "updateChannel" | "dockerAutoUpdate" | "telemetryEnabled" | "defaultSessionMode" | "kbAutoPrime" | "autoResumeAfterLimit">>,
+  patch: Partial<Pick<CompanionSettings, "anthropicApiKey" | "anthropicModel" | "claudeCodeOAuthToken" | "openaiApiKey" | "onboardingCompleted" | "linearApiKey" | "linearAutoTransition" | "linearAutoTransitionStateId" | "linearAutoTransitionStateName" | "linearArchiveTransition" | "linearArchiveTransitionStateId" | "linearArchiveTransitionStateName" | "linearOAuthClientId" | "linearOAuthClientSecret" | "linearOAuthWebhookSecret" | "linearOAuthAccessToken" | "linearOAuthRefreshToken" | "aiValidationEnabled" | "aiValidationAutoApprove" | "aiValidationAutoDeny" | "publicUrl" | "updateChannel" | "dockerAutoUpdate" | "telemetryEnabled" | "defaultSessionMode" | "kbAutoPrime" | "autoResumeAfterLimit" | "councilSecondReviewer">>,
 ): CompanionSettings {
   ensureLoaded();
   settings = normalize({
@@ -199,6 +213,7 @@ export function updateSettings(
     defaultSessionMode: patch.defaultSessionMode ?? settings.defaultSessionMode,
     kbAutoPrime: patch.kbAutoPrime ?? settings.kbAutoPrime,
     autoResumeAfterLimit: patch.autoResumeAfterLimit ?? settings.autoResumeAfterLimit,
+    councilSecondReviewer: patch.councilSecondReviewer ?? settings.councilSecondReviewer,
     updatedAt: Date.now(),
   });
   persist();

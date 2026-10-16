@@ -210,6 +210,72 @@ function DisputedChip({ via }: { via: NonNullable<ObserverFinding["disputed"]> }
   );
 }
 
+/**
+ * W15 multi-model review: split findings into the rows to show and, per row,
+ * the other reviewer's near-duplicates folded into it. A duplicate whose
+ * target is not in the list (e.g. evicted) stays a row of its own.
+ */
+export function foldDuplicateFindings(findings: readonly ObserverFinding[]): {
+  rows: ObserverFinding[];
+  alsoFlaggedBy: Map<string, ObserverFinding[]>;
+} {
+  const ids = new Set(findings.map((f) => f.id));
+  const alsoFlaggedBy = new Map<string, ObserverFinding[]>();
+  const rows: ObserverFinding[] = [];
+  for (const f of findings) {
+    if (f.duplicateOf !== undefined && ids.has(f.duplicateOf)) {
+      const list = alsoFlaggedBy.get(f.duplicateOf) ?? [];
+      list.push(f);
+      alsoFlaggedBy.set(f.duplicateOf, list);
+      continue;
+    }
+    rows.push(f);
+  }
+  return { rows, alsoFlaggedBy };
+}
+
+/** Short reviewer label: the model id, or the provider when no model is known. */
+export function reviewerLabel(f: Pick<ObserverFinding, "observerModel" | "observerProvider">): string {
+  return f.observerModel || f.observerProvider || "observer";
+}
+
+/** W15: which model raised this finding (shown once a second opinion exists). */
+function ReviewerBadge({ finding }: { finding: ObserverFinding }) {
+  const label = reviewerLabel(finding);
+  const who = finding.secondOpinion ? "Second opinion" : "Observer";
+  return (
+    <span
+      data-testid={`finding-reviewer-${finding.id}`}
+      className={`ml-1 inline-flex items-center gap-1 text-[9px] font-mono-code px-1.5 py-0.5 rounded border shrink-0 max-w-[9rem] truncate ${
+        finding.secondOpinion
+          ? "bg-cc-primary/10 text-cc-primary border-cc-primary/25"
+          : "bg-cc-muted/10 text-cc-muted border-cc-border"
+      }`}
+      title={`${who}: ${label}`}
+      aria-label={`${who}: ${label}`}
+    >
+      {finding.secondOpinion ? "2nd · " : ""}
+      {label}
+    </span>
+  );
+}
+
+/** W15: the other reviewer raised the same claim — folded into this row. */
+function AlsoFlaggedChip({ by }: { by: readonly ObserverFinding[] }) {
+  const labels = [...new Set(by.map(reviewerLabel))].join(", ");
+  return (
+    <span
+      data-testid="finding-also-flagged-chip"
+      className="ml-1 inline-flex items-center gap-1 text-[9px] uppercase tracking-wide font-mono-code px-1.5 py-0.5 rounded bg-cc-success/10 text-cc-success border border-cc-success/25 shrink-0"
+      title={`Also flagged by ${labels}`}
+      aria-label={`Also flagged by ${labels}`}
+    >
+      also flagged
+      <span className="opacity-70 normal-case font-normal tracking-normal">· {labels}</span>
+    </span>
+  );
+}
+
 /** FIX-AP-3: this finding holds the pair's auto-proceed until a human releases it. */
 function HoldsAutoProceedChip() {
   return (
@@ -243,12 +309,18 @@ function FindingRow({
   onSelect,
   onDismissStop,
   isDismissed,
+  showReviewer = false,
+  alsoFlaggedBy,
 }: {
   finding: ObserverFinding;
   nowMs: number;
   onSelect?: (finding: ObserverFinding) => void;
   onDismissStop?: (findingId: string) => void;
   isDismissed: boolean;
+  /** W15: show which model raised the finding (a second opinion is present). */
+  showReviewer?: boolean;
+  /** W15: the other reviewer's near-duplicates folded into this row. */
+  alsoFlaggedBy?: readonly ObserverFinding[];
 }) {
   const cls = severityClass(finding.wasDowngraded ? "NOTE" : finding.severity);
   const canDismiss = onDismissStop && !isDismissed
@@ -262,6 +334,7 @@ function FindingRow({
       data-weak-evidence={finding.weakEvidence ? "true" : "false"}
       data-disputed={finding.disputed ? "true" : "false"}
       data-holds-auto-proceed={finding.holdsAutoProceed ? "true" : "false"}
+      data-second-opinion={finding.secondOpinion ? "true" : "false"}
       className={`group flex items-center gap-2 px-3 py-2 border-b border-cc-border last:border-b-0 hover:bg-cc-hover transition-colors ${rowClass}`}
     >
       <SeverityDot finding={finding} />
@@ -282,6 +355,8 @@ function FindingRow({
       {!finding.wasDowngraded && finding.disputed && <DisputedChip via={finding.disputed} />}
       {finding.holdsAutoProceed && !isDismissed && <HoldsAutoProceedChip />}
       {isDismissed && <DismissedChip />}
+      {alsoFlaggedBy && alsoFlaggedBy.length > 0 && <AlsoFlaggedChip by={alsoFlaggedBy} />}
+      {showReviewer && <ReviewerBadge finding={finding} />}
       <span className="text-[10px] text-cc-muted shrink-0 font-mono-code">
         {formatRelativeTime(finding.receivedAt, nowMs)}
       </span>
@@ -354,9 +429,12 @@ export function FindingsLog({
   const [announcement, setAnnouncement] = useState<string>("");
   useEffect(() => {
     const seen = ANNOUNCED_FINDING_IDS_BY_SCOPE.get(scope) ?? new Set<string>();
-    const newOnes = findings.filter((f) => !seen.has(f.id));
+    const fresh = findings.filter((f) => !seen.has(f.id));
+    if (fresh.length === 0) return;
+    for (const f of fresh) seen.add(f.id);
+    // W15: a folded duplicate is not a new finding for the listener.
+    const newOnes = fresh.filter((f) => f.duplicateOf === undefined);
     if (newOnes.length === 0) return;
-    for (const f of newOnes) seen.add(f.id);
     ANNOUNCED_FINDING_IDS_BY_SCOPE.set(scope, seen);
     const summary = buildFindingsReviewSummary({
       newBlockers: newOnes.filter((f) => f.severity === "STOP" && f.wasDowngraded !== true).length,
@@ -402,7 +480,10 @@ export function FindingsLog({
   // which after a bootstrap was readdir order — a 115-day-old review sat
   // between two fresh STOPs. Display-only: the announcer effect above still
   // reads the original array (order-independent, keyed by a Set of ids).
-  const orderedFindings = orderFindingsForDisplay(findings, dismissedStopIds ?? EMPTY_DISMISSED);
+  // W15: near-duplicates from the other reviewer fold into the earlier row.
+  const { rows, alsoFlaggedBy } = foldDuplicateFindings(findings);
+  const showReviewer = findings.some((f) => f.secondOpinion === true);
+  const orderedFindings = orderFindingsForDisplay(rows, dismissedStopIds ?? EMPTY_DISMISSED);
   // role="log" must live on a generic container (axe aria-allowed-role —
   // role=log on <ul> is rejected). Wrap the list in a div that owns the
   // log semantics; the inner <ul> retains its native list semantics.
@@ -422,6 +503,8 @@ export function FindingsLog({
               onSelect={onSelect}
               onDismissStop={onDismissStop}
               isDismissed={f.dismissed === true || (dismissedStopIds?.has(f.id) ?? false)}
+              showReviewer={showReviewer}
+              alsoFlaggedBy={alsoFlaggedBy.get(f.id)}
             />
           ))}
         </ul>

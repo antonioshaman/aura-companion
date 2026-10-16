@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { WsBridge, BridgeObserverWakeOutcome } from "./ws-bridge.js";
 import type { SessionGroupCoordinator } from "./session-group-coordinator.js";
@@ -11,11 +12,14 @@ import {
   normalizeCodexObserverReviewRaw,
   isBoundedToken,
   normalizeObserverFindingShapeRaw,
+  parseObserverReviewPayload,
 } from "./council-types.js";
 import { companionBus } from "./event-bus.js";
 import { metricsCollector } from "./metrics-collector.js";
 import { log } from "./logger.js";
-import { findOwnReviewForCheckpointSync, findReviewForCheckpointSync } from "./review-watcher.js";
+import { findOwnReviewForCheckpointSync, findReviewForCheckpointSync, isSecondReviewFilename, OBSERVER_REVIEW_FILE_PATTERN } from "./review-watcher.js";
+import { dedupViewOf, findCrossReviewerDuplicates, type DedupFinding } from "./second-review-dedup.js";
+import { readReviewVerdicts } from "./observer-review-verdicts.js";
 import { validateObserverFindings } from "./observer-grounding.js";
 import { applyDisputes, readDisputes } from "./observer-disputes.js";
 import type { CheckpointLineSnapshots } from "./observer-line-snapshots.js";
@@ -176,6 +180,97 @@ export function deterministicFindingId(input: {
   return `fnd_${hash.digest("hex").slice(0, 16)}`;
 }
 
+/**
+ * W15: the provider token mixed into {@link deterministicFindingId}. A
+ * second-opinion review gets its own namespace (`<provider>#second`) so a
+ * same-provider second opinion (claude observer + claude second reviewer)
+ * never collides with the observer's ids; observer ids are unchanged.
+ */
+export function findingIdProvider(payload: Pick<ObserverReviewPayload, "observer_provider" | "reviewer_role">): string {
+  return payload.reviewer_role === "second" ? `${payload.observer_provider}#second` : payload.observer_provider;
+}
+
+/**
+ * W15: the OTHER reviewer's review of the same checkpoint on disk (observer ↔
+ * second opinion), with the finding ids the pipeline gave it — the "earlier"
+ * side for {@link findCrossReviewerDuplicates}. Only a review whose file
+ * landed strictly before `beforeMs` counts as earlier (on a tie the observer's
+ * review is the earlier one), so two near-simultaneous reviews can never mark
+ * each other duplicates. Never throws.
+ */
+export function otherReviewerFindingsOnDisk(
+  cwd: string,
+  sessionGroupId: string,
+  payload: Pick<ObserverReviewPayload, "checkpoint_id" | "reviewer_role">,
+  beforeMs: number | undefined,
+): DedupFinding[] {
+  const wantSecond = payload.reviewer_role !== "second";
+  const dir = join(cwd, ".council", "reviews");
+  let entries: string[];
+  try {
+    entries = readdirSync(dir).filter((f) => OBSERVER_REVIEW_FILE_PATTERN.test(f) && (!wantSecond || isSecondReviewFilename(f, sessionGroupId)));
+  } catch {
+    return [];
+  }
+  for (const file of entries) {
+    try {
+      const other = parseObserverReviewPayload(normalizeObserverFindingShapeRaw(readFileSync(join(dir, file), "utf-8")));
+      if (!other || other.session_group_id !== sessionGroupId || other.checkpoint_id !== payload.checkpoint_id) continue;
+      if ((other.reviewer_role === "second") !== wantSecond) continue;
+      const mtime = statSync(join(dir, file)).mtimeMs;
+      if (beforeMs !== undefined && (mtime > beforeMs || (mtime === beforeMs && wantSecond))) continue;
+      // The earlier finding's FINAL verdict is the one frozen when it was
+      // grounded (`.council/state/<group>-review-verdicts.json`). Without a
+      // frozen verdict it is not known to block — so it can never absorb a
+      // blocking later finding (observer STOP1 on PR #372).
+      const frozen = readReviewVerdicts(cwd, sessionGroupId);
+      const verdicts = frozen.ok ? frozen.verdicts : new Map();
+      // Disputes are part of the final verdict too: a STOP the human disputed
+      // does not block, so it must never absorb a later blocker. Unreadable
+      // disputes → none applied (the earlier finding keeps its verdict).
+      const disputes = readDisputes(cwd, sessionGroupId);
+      const disputeRecords = disputes.ok ? disputes.records : [];
+      const isDisputed = (claim: string, evidencePath: string, severity: string): boolean =>
+        severity === "STOP" &&
+        applyDisputes([{ id: "x", severity: "STOP", claim, evidence_path: evidencePath }], disputeRecords).applied.length > 0;
+      return other.findings.map((f, idx) => {
+        const id = deterministicFindingId({
+          sessionGroupId,
+          checkpointId: other.checkpoint_id,
+          observerProvider: findingIdProvider(other),
+          findingIndex: idx,
+          evidencePath: f.evidence_path,
+          claim: f.claim,
+        });
+        const v = verdicts.get(id);
+        if (!v) {
+          return {
+            id,
+            severity: f.severity === "STOP" ? "NOTE" as const : f.severity,
+            claim: f.claim,
+            evidence_path: f.evidence_path,
+            ...(f.evidence_lines ? { evidence_lines: f.evidence_lines } : {}),
+            blocking: false,
+          };
+        }
+        return dedupViewOf({
+          id,
+          severity: v.severity,
+          claim: f.claim,
+          evidence_path: f.evidence_path,
+          ...(f.evidence_lines ? { evidence_lines: f.evidence_lines } : {}),
+          ...(v.wasDowngraded ? { wasDowngraded: true } : {}),
+          ...(v.weakEvidence !== undefined ? { weakEvidence: v.weakEvidence } : {}),
+          ...(!v.wasDowngraded && isDisputed(f.claim, f.evidence_path, v.severity) ? { disputed: true } : {}),
+        });
+      });
+    } catch {
+      continue;
+    }
+  }
+  return [];
+}
+
 /** The slice of the orchestrator's per-group meta this pipeline reads and writes. */
 export interface CheckpointPipelineGroupMeta {
   primarySessionId: string;
@@ -219,6 +314,17 @@ export interface CouncilCheckpointPipelineDeps {
    * probe's prose never lands in this wake's reply capture.
    */
   isObserverProbeInFlight?: (observerSessionId: string) => boolean;
+  /**
+   * W15 multi-model review: a live checkpoint was accepted (after the
+   * observer's wake dispatch). The orchestrator hands it to the second-opinion
+   * reviewer (`second-reviewer.ts`), which decides scope / limits / dedup on
+   * its own. Must never throw into the pipeline; guarded anyway.
+   */
+  onCheckpointAccepted?: (
+    sessionGroupId: string,
+    payload: CheckpointPayload,
+    ctx: { cwd: string; previous: CheckpointPayload | null },
+  ) => void;
   /**
    * W14 (b): the pair was just degraded because a dispatched wake produced
    * nothing (review deadline expired, or the adapter reported the wake turn
@@ -363,6 +469,20 @@ export class CouncilCheckpointPipeline {
     // dispatcher itself; the handler stays a clean two-step (capture
     // + emit + dispatch).
     this.dispatchObserverWake(sessionGroupId, payload);
+
+    // W15: second opinion on another backend/model — independent of the
+    // observer's wake queue (a busy observer does not delay it).
+    try {
+      this.deps.onCheckpointAccepted?.(sessionGroupId, payload, { cwd: entry.cwd, previous: entry.previousCheckpoint });
+    } catch (err) {
+      log.warn("second-reviewer", "second review hook threw", {
+        event: "council.second_review.failed",
+        sessionGroupId,
+        checkpointId: payload.checkpoint_id,
+        reason: "hook_error",
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   /**
@@ -1335,7 +1455,12 @@ export class CouncilCheckpointPipeline {
       // `gpt-5-codex` while the session ran `gpt-5.5`). The host fact is the
       // model the observer session's OWN frames carried; with none observed
       // (e.g. review recovered after a restart) the file's value stands.
-      payload = this.stampHostObserverModel(sessionGroupId, payload);
+      // W15: a second-opinion review is host-built from the second reviewer's
+      // own output — its model is already the host fact, and it is not the
+      // observer's answer: it must not touch the observer's wake watchdog,
+      // read ledger, `lastReviewedCheckpointId` or invocation log.
+      const isSecond = payload.reviewer_role === "second";
+      if (!isSecond) payload = this.stampHostObserverModel(sessionGroupId, payload);
 
       // Observer review 2026-10-15 (checkpoint 149, STOP): freshness guard
       // BEFORE any mutation. A delayed/replayed watcher callback can carry
@@ -1347,6 +1472,7 @@ export class CouncilCheckpointPipeline {
       // legacy accept (late findings beat lost findings). `reviewedAt`
       // undefined (stat failure) also keeps the legacy accept.
       if (
+        !isSecond &&
         entry.pendingReviewDeadline &&
         entry.pendingReviewDeadline.checkpointId === payload.checkpoint_id &&
         reviewedAt !== undefined &&
@@ -1368,6 +1494,7 @@ export class CouncilCheckpointPipeline {
       // for an older checkpoint than the armed one leaves the watchdog
       // intact (the newest dispatched wake is still owed its review).
       if (
+        !isSecond &&
         entry.pendingReviewDeadline &&
         entry.pendingReviewDeadline.checkpointId === payload.checkpoint_id
       ) {
@@ -1392,7 +1519,7 @@ export class CouncilCheckpointPipeline {
       // read while answering this checkpoint's wake. A clean review with 0
       // is not counted toward convergence (convergence-tracker.ts).
       const meta = this.deps.groupMeta.get(sessionGroupId);
-      const artifactsRead = meta
+      const artifactsRead = meta && !isSecond
         ? countArtifactsRead(
           this.deps.readLedger.touchesFor(meta.observerSessionId, payload.checkpoint_id),
           modifiedFiles,
@@ -1412,7 +1539,7 @@ export class CouncilCheckpointPipeline {
         const id = deterministicFindingId({
           sessionGroupId,
           checkpointId: payload.checkpoint_id,
-          observerProvider: payload.observer_provider,
+          observerProvider: findingIdProvider(payload),
           findingIndex: idx,
           evidencePath: f.evidence_path,
           claim: f.claim,
@@ -1433,9 +1560,13 @@ export class CouncilCheckpointPipeline {
           // the browser's per-batch ingestion clock. Falls back to now() if the
           // watcher couldn't stat the file.
           reviewedAt: reviewedAt ?? Date.now(),
+          ...(isSecond
+            ? { reviewer: { role: "second" as const, provider: payload.observer_provider, model: payload.observer_model } }
+            : {}),
         };
         return out;
       });
+
       const downgrades: BrowserObserverDowngrade[] = result.downgrades.map((d) => {
         // Findings array is 1:1 with the input — `result.findings[d.index]`
         // is always defined here. Backend P2-6 (council review #6): drop
@@ -1493,12 +1624,38 @@ export class CouncilCheckpointPipeline {
       // a STOP in the log but never raises the banner again.
       this.markDisputedStops(sessionGroupId, entry.cwd, findings, { checkpointId: payload.checkpoint_id, log: true });
 
+      // W15: fold near-identical claims the OTHER reviewer already raised on
+      // this checkpoint (the later finding points at the earlier one). Both
+      // sides are compared on their FINAL verdicts (grounding, wake-echo
+      // downgrade and disputes applied above).
+      const earlier = otherReviewerFindingsOnDisk(entry.cwd, sessionGroupId, payload, reviewedAt);
+      if (earlier.length > 0) {
+        const dups = findCrossReviewerDuplicates(findings.map(dedupViewOf), earlier);
+        dups.forEach((dupOf, i) => {
+          const f = findings[i];
+          if (dupOf && f) findings[i] = { ...f, duplicateOf: dupOf };
+        });
+      }
+
       // Willison P1-4 item 3 (council review #2): emit the structured
       // invocation log entry so the forensic re-run guarantee
       // (`observerPromptSha256` captured per invocation) survives review
       // completion. EC-9 group-lifecycle structured log requirement also
       // honoured.
-      if (meta) {
+      if (meta && isSecond) {
+        log.info("second-reviewer", "second review ingested", {
+          event: "council.second_review.ingested",
+          sessionGroupId,
+          checkpointId: payload.checkpoint_id,
+          phase: payload.phase,
+          backend: payload.observer_provider,
+          model: payload.observer_model,
+          findingsCount: findings.length,
+          stopCountGrounded: findings.filter((f) => f.severity === "STOP" && f.wasDowngraded !== true).length,
+          duplicateCount: findings.filter((f) => f.duplicateOf !== undefined).length,
+        });
+      }
+      if (meta && !isSecond) {
         const stopCountRaw = payload.findings.filter((f) => f.severity === "STOP").length;
         const stopCountGrounded = findings.filter((f) => f.severity === "STOP" && f.wasDowngraded !== true).length;
         log.info("observer-invocation", "observer.invocation.completed", {
@@ -1534,7 +1691,7 @@ export class CouncilCheckpointPipeline {
       // skipped checkpoints (orchestrator emitted while observer was
       // offline) and surface a structured catchup log rather than
       // silently under-reviewing.
-      if (meta) {
+      if (meta && !isSecond) {
         meta.lastReviewedCheckpointId = payload.checkpoint_id;
       }
 
@@ -1542,7 +1699,7 @@ export class CouncilCheckpointPipeline {
       // into `.council/eval/<checkpoint>.json` for post-hoc recall scoring and
       // a hermetic grounding rerun. Self-contained error handling — a sidecar
       // failure can never break the live review fanout below.
-      maybeEmitEvalSidecar({
+      if (!isSecond) maybeEmitEvalSidecar({
         workspaceRoot: entry.cwd,
         sessionGroupId,
         payload,
@@ -1580,6 +1737,7 @@ export class CouncilCheckpointPipeline {
         artifactsChanged: modifiedFiles.size,
         artifactsRead,
         ...(payload.host_verification ? { verification: payload.host_verification } : {}),
+        ...(isSecond ? { reviewerRole: "second" as const } : {}),
       });
     } catch (err) {
       log.error("session-orchestrator", "handleCouncilReview failed", {

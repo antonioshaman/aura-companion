@@ -143,6 +143,7 @@ vi.mock("./container-manager.js", () => ({
 
 // ── Imports (after mocks) ───────────────────────────────────────────────────
 
+import { addDispute as addDisputeForW15 } from "./observer-disputes.js";
 import {
   SessionOrchestrator,
   deterministicFindingId,
@@ -3771,6 +3772,101 @@ describe("SessionOrchestrator", () => {
     //   handleCouncilReview (A, grounded STOP) → verdicts frozen on disk →
     //   checkpoint B no longer touches the file and its lines shift →
     //   initialize() + turn-done → restore via getGroupStopHoldView.
+    // W15 multi-model review: after a page reload the REST bootstrap must
+    // keep each second-opinion finding attributed to ITS model (the group-level
+    // provider/model is the observer's), and fold a near-identical claim the
+    // other reviewer raised earlier into that finding — same as the live path.
+    it("W15: bootstrap attributes second-opinion findings per finding and folds near-duplicates", async () => {
+      const { mkdtempSync, writeFileSync, mkdirSync, rmSync, realpathSync, utimesSync } = require("node:fs") as typeof import("node:fs");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      const workspace = realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-orch-w15-")));
+      const groupId = "grp_0123456789abcdef0123456789abcdef";
+      const base = {
+        schema_version: 1,
+        observer_wake_payload_version_echo: 1,
+        checkpoint_id: "chk_a",
+        phase: "council-implement",
+        session_group_id: groupId,
+        reviewed_at: "2026-01-01T00:00:00Z",
+        observer_cli_version: "1.0.0",
+      };
+      try {
+        mkdirSync(pathJoin(workspace, "src"), { recursive: true });
+        writeFileSync(pathJoin(workspace, "src/a.ts"), "export function alpha() { relaunch(); }\n");
+        const reviews = pathJoin(workspace, ".council", "reviews");
+        mkdirSync(reviews, { recursive: true });
+        const obsFile = pathJoin(reviews, `council-implement-${groupId}-codex-observer.md`);
+        writeFileSync(obsFile, JSON.stringify({
+          ...base, observer_provider: "codex", observer_model: "gpt-6.1-sol",
+          findings: [{ severity: "WARN", claim: "alpha relaunch loops without any backoff", evidence_path: "src/a.ts", evidence_lines: [1, 1] }],
+        }));
+        const old = new Date(Date.now() - 60_000);
+        utimesSync(obsFile, old, old);
+        writeFileSync(pathJoin(reviews, `council-implement-${groupId}-second-claude-observer.md`), JSON.stringify({
+          ...base, observer_provider: "claude", observer_model: "claude-sonnet-5", reviewer_role: "second",
+          findings: [
+            { severity: "NOTE", claim: "alpha relaunch loops without backoff", evidence_path: "src/a.ts", evidence_lines: [1, 1] },
+            { severity: "STOP", claim: "`relaunch()` crash-loop storm", evidence_path: "src/a.ts", evidence_lines: [1, 1] },
+          ],
+        }));
+        seedGroup(groupId, { cwd: workspace, artifactPaths: ["src/a.ts"] });
+        const view = await orchestrator.getGroupReviewsForBootstrap(groupId);
+        expect(view!.observerProvider).toBe("codex");
+        expect(view!.observerModel).toBe("gpt-6.1-sol");
+        const [obs, dup, stop] = view!.findings;
+        expect(obs!.reviewer).toBeUndefined();
+        expect(dup!.reviewer).toEqual({ role: "second", provider: "claude", model: "claude-sonnet-5" });
+        expect(dup!.duplicateOf).toBe(obs!.id);
+        expect(stop!.duplicateOf).toBeUndefined();
+        expect(stop!.severity).toBe("STOP");
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
+    // Observer re-review STOP on 5e38b8a8 (bootstrap path): disputes are part
+    // of the earlier finding's final verdict and must be applied BEFORE the
+    // dedupe, or a disputed STOP swallows a later grounded STOP after reload.
+    it("W15: bootstrap never folds a blocking STOP into an earlier disputed STOP", async () => {
+      const { mkdtempSync, writeFileSync, mkdirSync, rmSync, realpathSync, utimesSync } = require("node:fs") as typeof import("node:fs");
+      const { tmpdir } = require("node:os") as typeof import("node:os");
+      const { join: pathJoin } = require("node:path") as typeof import("node:path");
+      const workspace = realpathSync(mkdtempSync(pathJoin(tmpdir(), "council-orch-w15d-")));
+      const groupId = "grp_0123456789abcdef0123456789abcdef";
+      const base = {
+        schema_version: 1, observer_wake_payload_version_echo: 1, checkpoint_id: "chk_a", phase: "council-implement",
+        session_group_id: groupId, reviewed_at: "2026-01-01T00:00:00Z", observer_cli_version: "1.0.0",
+      };
+      const earlierClaim = "alpha relaunch loops forever without any backoff delay at all";
+      try {
+        mkdirSync(pathJoin(workspace, "src"), { recursive: true });
+        writeFileSync(pathJoin(workspace, "src/a.ts"), "export function alpha() { relaunch(); }\n");
+        const reviews = pathJoin(workspace, ".council", "reviews");
+        mkdirSync(reviews, { recursive: true });
+        const obsFile = pathJoin(reviews, `council-implement-${groupId}-codex-observer.md`);
+        writeFileSync(obsFile, JSON.stringify({
+          ...base, observer_provider: "codex", observer_model: "gpt-6.1-sol",
+          findings: [{ severity: "STOP", claim: earlierClaim, evidence_path: "src/a.ts", evidence_lines: [1, 1] }],
+        }));
+        const old = new Date(Date.now() - 60_000);
+        utimesSync(obsFile, old, old);
+        writeFileSync(pathJoin(reviews, `council-implement-${groupId}-second-claude-observer.md`), JSON.stringify({
+          ...base, observer_provider: "claude", observer_model: "claude-sonnet-5", reviewer_role: "second",
+          findings: [{ severity: "STOP", claim: "alpha relaunch loops forever without backoff delay", evidence_path: "src/a.ts", evidence_lines: [1, 1] }],
+        }));
+        expect(addDisputeForW15(workspace, groupId, { claim: earlierClaim, evidencePath: "src/a.ts", source: "browser_dispute" }).ok).toBe(true);
+        seedGroup(groupId, { cwd: workspace, artifactPaths: ["src/a.ts"] });
+        const view = await orchestrator.getGroupReviewsForBootstrap(groupId);
+        const [obs, later] = view!.findings;
+        expect(obs!.disputed).toBe("same_claim");
+        expect(later!.disputed).toBeUndefined();
+        expect(later!.duplicateOf).toBeUndefined();
+      } finally {
+        rmSync(workspace, { recursive: true, force: true });
+      }
+    });
+
     it("FIX-AP-2: a STOP from checkpoint A still holds after a restart when B no longer touches its file", async () => {
       const { mkdtempSync, writeFileSync, mkdirSync, rmSync, realpathSync, existsSync, renameSync } = require("node:fs") as typeof import("node:fs");
       const { tmpdir } = require("node:os") as typeof import("node:os");

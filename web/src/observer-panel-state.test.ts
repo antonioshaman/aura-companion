@@ -77,6 +77,18 @@ describe("findUnresolvedStops", () => {
     expect(out.map((f) => f.id)).toEqual(["f1"]);
   });
 
+  // W15: a STOP from either reviewer is a blocker (second opinion included),
+  // but a near-duplicate folded into the other reviewer's STOP is not raised
+  // twice — the banner and unread count show the original once.
+  it("counts a second-opinion STOP but not a folded duplicate", () => {
+    const all = [
+      finding({ id: "obs", severity: "STOP" }),
+      finding({ id: "dup", severity: "STOP", secondOpinion: true, duplicateOf: "obs" }),
+      finding({ id: "own", severity: "STOP", secondOpinion: true }),
+    ];
+    expect(findUnresolvedStops(all, new Set()).map((f) => f.id)).toEqual(["obs", "own"]);
+  });
+
   // B2: a weak-evidence STOP (path-only / claim not on cited lines) is not a
   // blocker — it must not drive the banner, the blocker-found panel state, or
   // the unread count. The same STOP without the mark still is.

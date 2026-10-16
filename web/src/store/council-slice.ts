@@ -137,8 +137,13 @@ export function hydrateObserverFinding(
     ...(wire.disputed !== undefined ? { disputed: wire.disputed } : {}),
     ...(wire.holdsAutoProceed === true ? { holdsAutoProceed: true as const } : {}),
     ...(wire.dismissed === true ? { dismissed: true as const } : {}),
-    observerModel: context.observerModel,
-    observerProvider: context.observerProvider,
+    // W15: a second-opinion finding carries its own reviewer attribution —
+    // it wins over the batch context (the REST bootstrap reports one
+    // observer provider/model for the whole backlog).
+    observerModel: wire.reviewer?.model ?? context.observerModel,
+    observerProvider: wire.reviewer?.provider ?? context.observerProvider,
+    ...(wire.reviewer?.role === "second" ? { secondOpinion: true as const } : {}),
+    ...(wire.duplicateOf !== undefined ? { duplicateOf: wire.duplicateOf } : {}),
   };
 }
 
@@ -219,6 +224,8 @@ export interface CouncilSlice {
     supersededCheckpointIds?: string[];
     /** Observer rigor: host verdict "unverified" on an empty review. */
     verification?: "unverified";
+    /** W15: "second" = the second-opinion review, not the observer's answer. */
+    reviewerRole?: "second";
   }) => void;
   /** Observer rigor: replace a group's coverage list (REST bootstrap). */
   setCheckpointCoverage: (sessionGroupId: string, gaps: BrowserCheckpointCoverageGap[]) => void;
@@ -414,24 +421,30 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
       return { groups };
     }),
 
-  appendObserverReview: ({ sessionGroupId, checkpointId, phase, findings: wireFindings, downgrades, observerModel, observerProvider, timestamp, supersededCheckpointIds, verification }) =>
+  appendObserverReview: ({ sessionGroupId, checkpointId, phase, findings: wireFindings, downgrades, observerModel, observerProvider, timestamp, supersededCheckpointIds, verification, reviewerRole }) =>
     set((s) => {
       const existing = s.groups.get(sessionGroupId);
       if (!existing) return {};
       const groups = new Map(s.groups);
+      // W15: a second-opinion review is not the observer's answer — it must
+      // not end the observer's "reviewing" state, drain the superseded list,
+      // or mark the checkpoint covered.
+      const isSecond = reviewerRole === "second";
       // Task 11: update recentlySupersededCheckpointIds from this review.
       // Non-empty = the panel shows `queued-dropped` until the next review.
       // Omitted/empty = clear; the deriver falls through to sleeping.
-      const next: GroupRecord = {
-        ...existing,
-        observerReviewing: false,
-        ...(Array.isArray(supersededCheckpointIds) && supersededCheckpointIds.length > 0
-          ? { recentlySupersededCheckpointIds: supersededCheckpointIds }
-          : { recentlySupersededCheckpointIds: [] }),
-      };
+      const next: GroupRecord = isSecond
+        ? { ...existing }
+        : {
+          ...existing,
+          observerReviewing: false,
+          ...(Array.isArray(supersededCheckpointIds) && supersededCheckpointIds.length > 0
+            ? { recentlySupersededCheckpointIds: supersededCheckpointIds }
+            : { recentlySupersededCheckpointIds: [] }),
+        };
       // Observer rigor: keep the coverage list honest. The REST bootstrap
       // envelope ("rest-bootstrap") is not a checkpoint and changes nothing.
-      if (checkpointId !== "rest-bootstrap") {
+      if (checkpointId !== "rest-bootstrap" && !isSecond) {
         let coverage = removeCoverageGap(existing.checkpointCoverage, checkpointId);
         if (verification === "unverified" && wireFindings.length === 0) {
           coverage = upsertCoverageGap(coverage, { checkpointId, phase, kind: "unverified" });

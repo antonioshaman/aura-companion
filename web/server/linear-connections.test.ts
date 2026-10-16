@@ -69,6 +69,7 @@ beforeEach(() => {
     defaultSessionMode: "solo" as const,
     kbAutoPrime: false,
     autoResumeAfterLimit: true,
+    councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
     updatedAt: 0,
   });
 });
@@ -221,6 +222,7 @@ describe("linear-connections", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       updatedAt: 0,
     });
     // Need to reset so migration runs with updated mock
@@ -266,6 +268,7 @@ describe("linear-connections", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       updatedAt: 0,
     });
     _resetForTest(join(tempDir, "linear-connections-migrate.json"));
@@ -330,6 +333,7 @@ describe("linear-connections", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       updatedAt: 0,
     });
 

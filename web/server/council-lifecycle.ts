@@ -19,7 +19,7 @@ import { watchCheckpoints } from "./checkpoint-watcher.js";
 import { watchReviews } from "./review-watcher.js";
 import { DEFAULT_REARM_DELAY_MS, runResilientWatch } from "./resilient-watch.js";
 import { validateObserverFindings } from "./observer-grounding.js";
-import { addDispute } from "./observer-disputes.js";
+import { addDispute, applyDisputes, readDisputes } from "./observer-disputes.js";
 import type { CheckpointLineSnapshots } from "./observer-line-snapshots.js";
 import { buildObserverContextManifest } from "./observer-prompt.js";
 import type { ObserverReplyCapture } from "./observer-reply.js";
@@ -27,7 +27,8 @@ import type { ObserverReadLedger } from "./observer-read-ledger.js";
 import { deleteCouncilWakeSentinel } from "./council-wake-sentinel.js";
 import { collectCheckpointCoverageGaps, type CheckpointCoverageGap } from "./checkpoint-coverage.js";
 import { buildBrowserGroupRecord } from "./browser-group-record.js";
-import { deterministicFindingId, type CouncilWatcherEntry } from "./council-checkpoint-pipeline.js";
+import { deterministicFindingId, findingIdProvider, type CouncilWatcherEntry } from "./council-checkpoint-pipeline.js";
+import { dedupViewOf, findCrossReviewerDuplicates, type DedupFinding } from "./second-review-dedup.js";
 import { applyFrozenVerdict, readReviewVerdicts, type FrozenVerdict } from "./observer-review-verdicts.js";
 import {
   OBSERVER_REVIEW_FILENAME_PATTERN,
@@ -729,14 +730,16 @@ export class CouncilLifecycle {
         timestamp: Date.now(),
       });
     });
-    companionBus.on("group:review", ({ sessionGroupId, checkpointId, phase, findings, downgrades, observerModel, observerProvider, verification }) => {
+    companionBus.on("group:review", ({ sessionGroupId, checkpointId, phase, findings, downgrades, observerModel, observerProvider, verification, reviewerRole }) => {
       // Task 9: drain superseded checkpoint ids accumulated since the
       // previous review into THIS review's payload so the panel sees
       // "checkpoint X was skipped (superseded)" inline. Cleared after
       // emit so the next review starts fresh.
+      // W15: the superseded list belongs to the observer's wake queue — only
+      // the observer's review drains it.
       const entry = this.deps.watchers.get(sessionGroupId);
-      const superseded = entry?.supersededCheckpointIds ?? [];
-      if (entry) entry.supersededCheckpointIds = [];
+      const superseded = reviewerRole === "second" ? [] : (entry?.supersededCheckpointIds ?? []);
+      if (entry && reviewerRole !== "second") entry.supersededCheckpointIds = [];
       this.wsBridge.broadcastToGroup(this.getGroupMemberIds(sessionGroupId), {
         type: "observer_review",
         sessionGroupId,
@@ -749,6 +752,7 @@ export class CouncilLifecycle {
         timestamp: Date.now(),
         ...(superseded.length > 0 ? { supersededCheckpointIds: superseded } : {}),
         ...(verification ? { verification } : {}),
+        ...(reviewerRole ? { reviewerRole } : {}),
       });
     });
 
@@ -1473,6 +1477,12 @@ export class CouncilLifecycle {
     // React multiplies rows under duplicate keys. One entry per id; a later
     // file replaces the earlier copy, so the newest review's view wins.
     const findingIndexById = new Map<string, number>();
+    // W15: per checkpoint, the findings each reviewer role already contributed
+    // (oldest file first) — the later reviewer's near-duplicates fold into them,
+    // same rule as the live path (`otherReviewerFindingsOnDisk`).
+    const byCheckpointRole = new Map<string, { observer: DedupFinding[]; second: DedupFinding[] }>();
+    const disputesRead = readDisputes(watcher.cwd, sessionGroupId);
+    const disputeRecords = disputesRead.ok ? disputesRead.records : [];
     for (const file of entries) {
       const filePath = join(reviewsDir, file);
       let raw: string;
@@ -1509,8 +1519,20 @@ export class CouncilLifecycle {
       } catch {
         reviewedAt = Date.now();
       }
-      observerProvider = observerProvider ?? payload.observer_provider;
-      observerModel = observerModel ?? payload.observer_model;
+      const isSecond = payload.reviewer_role === "second";
+      // The group-level attribution is the OBSERVER's; second-opinion findings
+      // carry their own per-finding `reviewer` (W15).
+      if (!isSecond) {
+        observerProvider = observerProvider ?? payload.observer_provider;
+        observerModel = observerModel ?? payload.observer_model;
+      }
+      let roles = byCheckpointRole.get(payload.checkpoint_id);
+      if (!roles) {
+        roles = { observer: [], second: [] };
+        byCheckpointRole.set(payload.checkpoint_id, roles);
+      }
+      const earlier = isSecond ? roles.observer : roles.second;
+      const contributed: DedupFinding[] = [];
       // Apply same grounding validation as the WS path so REST-bootstrapped
       // findings match WS-arrived findings byte-for-byte after deterministic
       // ID dedup. Re-use `validateObserverFindings` from observer-grounding.
@@ -1531,7 +1553,7 @@ export class CouncilLifecycle {
         const id = deterministicFindingId({
           sessionGroupId,
           checkpointId: payload.checkpoint_id,
-          observerProvider: payload.observer_provider,
+          observerProvider: findingIdProvider(payload),
           findingIndex: idx,
           evidencePath: f.evidence_path,
           claim: f.claim,
@@ -1548,10 +1570,16 @@ export class CouncilLifecycle {
           ...(downgrade ? { wasDowngraded: true, downgradeReason: downgrade.reason } : {}),
           ...(weak ? { weakEvidence: weak.reason } : {}),
           reviewedAt,
+          ...(isSecond
+            ? { reviewer: { role: "second" as const, provider: payload.observer_provider, model: payload.observer_model } }
+            : {}),
         };
         const verdict = frozen.get(id);
         if (!verdict && payload.findings[idx]?.severity === "STOP" && !unfrozenRawStopIds.includes(id)) unfrozenRawStopIds.push(id);
         const out = verdict ? applyFrozenVerdict(regrounded, verdict) : regrounded;
+        // W15: dedupe on the FINAL verdict (frozen or re-grounded, disputes
+        // applied), never raw — a disputed STOP must not absorb a blocker.
+        contributed.push(dedupViewOf(applyDisputes([out], disputeRecords).findings[0]!));
         const seenAt = findingIndexById.get(id);
         if (seenAt === undefined) {
           findingIndexById.set(id, allFindings.length);
@@ -1565,6 +1593,14 @@ export class CouncilLifecycle {
           allDowngrades.push({ id, reason: out.downgradeReason });
         }
       });
+      if (earlier.length > 0) {
+        findCrossReviewerDuplicates(contributed, earlier).forEach((dupOf, i) => {
+          const at = dupOf ? findingIndexById.get(contributed[i]!.id) : undefined;
+          if (dupOf && at !== undefined) allFindings[at] = { ...allFindings[at]!, duplicateOf: dupOf };
+        });
+      }
+      if (isSecond) roles.second = contributed;
+      else roles.observer = contributed;
     }
     this.deps.markDisputedStops(sessionGroupId, watcher.cwd, allFindings, { log: false });
     return {

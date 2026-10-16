@@ -141,6 +141,7 @@ vi.mock("./settings-manager.js", () => ({
     defaultSessionMode: "solo" as const,
     kbAutoPrime: false,
     autoResumeAfterLimit: true,
+    councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
     updatedAt: 0,
   })),
   updateSettings: vi.fn((patch) => ({
@@ -168,6 +169,7 @@ vi.mock("./settings-manager.js", () => ({
     defaultSessionMode: patch.defaultSessionMode ?? "solo",
     kbAutoPrime: patch.kbAutoPrime ?? false,
     autoResumeAfterLimit: patch.autoResumeAfterLimit ?? true,
+    councilSecondReviewer: patch.councilSecondReviewer ?? { reviewer: "off" as const, scope: "review-implement" as const },
     updatedAt: Date.now(),
   })),
 }));
@@ -390,6 +392,8 @@ function createMockOrchestrator() {
     getSession: vi.fn(),
     getCouncilGroupBySessionId: vi.fn(() => null),
     getAllGroupsForBootstrap: vi.fn(() => [] as Array<{ sessionGroupId: string }>),
+    getGroupSecondReviewer: vi.fn(),
+    setGroupSecondReviewer: vi.fn(() => ({ ok: true })),
     // Sweep orphans (Tasks 5/6)
     listOrphanTimers: vi.fn(() => []),
     clearOrphanTimer: vi.fn(),
@@ -887,6 +891,93 @@ describe("POST /api/groups/:groupId/disputes", () => {
     expect((await post({ claim: "", evidence_path: "a" })).status).toBe(400);
     orchestrator.disputeObserverFinding = vi.fn(() => ({ ok: false, reason: "persist_failed" }));
     expect((await post({ claim: "c", evidence_path: "a" })).status).toBe(500);
+  });
+});
+
+// W15 multi-model review: the pair's second-opinion setting over REST, and the
+// create-time choice. The routes validate strictly (a malformed choice is a
+// 400, never silently "off") and map orchestrator outcomes to HTTP; the
+// persistence itself is covered in second-reviewer-config.test.ts.
+describe("council second-opinion reviewer routes", () => {
+  const put = (body: unknown, groupId = "grp_x") =>
+    app.request(`/api/groups/${groupId}/second-reviewer`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    });
+
+  it("PUT validates and stores the pair's setting", async () => {
+    orchestrator.setGroupSecondReviewer = vi.fn(() => ({ ok: true }));
+    const res = await put({ reviewer: { backend: "claude", model: "sonnet" }, scope: "all" });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ reviewer: { backend: "claude", model: "sonnet" }, scope: "all", source: "group" });
+    expect(orchestrator.setGroupSecondReviewer).toHaveBeenCalledWith("grp_x", { reviewer: { backend: "claude", model: "sonnet" }, scope: "all" });
+  });
+
+  it("PUT rejects malformed choices with 400 and maps unknown group to 404", async () => {
+    orchestrator.setGroupSecondReviewer = vi.fn(() => ({ ok: true }));
+    expect((await put({ reviewer: "maybe" })).status).toBe(400);
+    expect((await put({ reviewer: { backend: "gemini" } })).status).toBe(400);
+    expect((await put({ scope: "all" })).status).toBe(400);
+    expect((await put({ reviewer: "auto", scope: "plans" })).status).toBe(400);
+    expect(orchestrator.setGroupSecondReviewer).not.toHaveBeenCalled();
+    orchestrator.setGroupSecondReviewer = vi.fn(() => ({ ok: false, reason: "unknown_group" }));
+    expect((await put({ reviewer: "off" })).status).toBe(404);
+  });
+
+  it("GET returns the effective setting and its source", async () => {
+    orchestrator.getGroupSecondReviewer = vi.fn(() => ({ ok: true, config: { reviewer: "auto", scope: "review-implement" }, source: "global" }));
+    const res = await app.request("/api/groups/grp_x/second-reviewer");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ reviewer: "auto", scope: "review-implement", source: "global" });
+    orchestrator.getGroupSecondReviewer = vi.fn(() => ({ ok: false, reason: "unknown_group" }));
+    expect((await app.request("/api/groups/grp_x/second-reviewer")).status).toBe(404);
+  });
+
+  // The create-time choice is stripped from the spawn body and persisted for
+  // the new pair; a malformed one fails the create before anything spawns.
+  it("council create forwards secondReviewer to the pair, never into the spawn body", async () => {
+    orchestrator.setGroupSecondReviewer = vi.fn(() => ({ ok: true }));
+    const res = await app.request("/api/sessions/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: "/work/repo", councilMode: "council", councilPairing: "claude+codex", secondReviewer: "auto" }),
+    });
+    expect(res.status).toBe(200);
+    const callArg = orchestrator.createCouncilGroup.mock.calls.at(-1)![0]!;
+    expect(callArg.base).not.toHaveProperty("secondReviewer");
+    expect(orchestrator.setGroupSecondReviewer).toHaveBeenCalledWith("grp_test_council", { reviewer: "auto", scope: "review-implement" });
+
+    orchestrator.createCouncilGroup.mockClear();
+    const bad = await app.request("/api/sessions/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd: "/work/repo", councilMode: "council", councilPairing: "claude+codex", secondReviewer: { backend: "x" } }),
+    });
+    expect(bad.status).toBe(400);
+    expect(orchestrator.createCouncilGroup).not.toHaveBeenCalled();
+  });
+
+  it("PUT /api/settings validates councilSecondReviewer strictly", async () => {
+    const bad = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ councilSecondReviewer: { reviewer: "sometimes" } }),
+    });
+    expect(bad.status).toBe(400);
+    vi.mocked(settingsManager.updateSettings).mockImplementationOnce((patch) => ({
+      ...settingsManager.getSettings(),
+      claudeCodeOAuthToken: "",
+      openaiApiKey: "",
+      ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)),
+    }) as never);
+    const ok = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ councilSecondReviewer: { reviewer: "auto", scope: "all" } }),
+    });
+    expect(ok.status).toBe(200);
+    expect((await ok.json()).councilSecondReviewer).toEqual({ reviewer: "auto", scope: "all" });
   });
 });
 
@@ -1664,6 +1755,7 @@ describe("GET /api/sessions/:id/archive-info", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       updatedAt: 0,
     });
     const res = await app.request("/api/sessions/s1/archive-info", { method: "GET" });
@@ -2038,6 +2130,7 @@ describe("GET /api/settings", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       updatedAt: 123,
     });
 
@@ -2070,6 +2163,7 @@ describe("GET /api/settings", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
     });
   });
 
@@ -2102,6 +2196,7 @@ describe("GET /api/settings", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       updatedAt: 123,
     });
 
@@ -2134,6 +2229,7 @@ describe("GET /api/settings", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
     });
   });
 
@@ -2167,6 +2263,7 @@ describe("GET /api/settings", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       updatedAt: 100,
     });
 
@@ -2208,6 +2305,7 @@ describe("PUT /api/settings", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       updatedAt: 456,
     });
 
@@ -2262,6 +2360,7 @@ describe("PUT /api/settings", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
     });
   });
 
@@ -2294,6 +2393,7 @@ describe("PUT /api/settings", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       updatedAt: 789,
     });
 
@@ -2403,6 +2503,7 @@ describe("PUT /api/settings", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       updatedAt: 999,
     });
 
@@ -2503,6 +2604,7 @@ describe("PUT /api/settings", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       updatedAt: 500,
     });
 
@@ -2733,6 +2835,7 @@ describe("GET /api/linear/issues", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -2772,6 +2875,7 @@ describe("GET /api/linear/issues", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       updatedAt: 0,
     });
 
@@ -2864,6 +2968,7 @@ describe("GET /api/linear/issues", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       updatedAt: 0,
     });
 
@@ -2963,6 +3068,7 @@ describe("GET /api/linear/issues", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       updatedAt: 0,
     });
 
@@ -3027,6 +3133,7 @@ describe("GET /api/linear/connection", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -3066,6 +3173,7 @@ describe("GET /api/linear/connection", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       updatedAt: 0,
     });
 
@@ -3127,6 +3235,7 @@ describe("POST /api/linear/issues/:id/transition", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       updatedAt: 0,
     });
 
@@ -3170,6 +3279,7 @@ describe("POST /api/linear/issues/:id/transition", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       updatedAt: 0,
     });
 
@@ -3212,6 +3322,7 @@ describe("POST /api/linear/issues/:id/transition", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -3256,6 +3367,7 @@ describe("POST /api/linear/issues/:id/transition", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       updatedAt: 0,
     });
 
@@ -3334,6 +3446,7 @@ describe("POST /api/linear/issues/:id/transition", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       updatedAt: 0,
     });
 
@@ -3391,6 +3504,7 @@ describe("GET /api/linear/projects", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -3430,6 +3544,7 @@ describe("GET /api/linear/projects", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       updatedAt: 0,
     });
 
@@ -3499,6 +3614,7 @@ describe("GET /api/linear/project-issues", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -3538,6 +3654,7 @@ describe("GET /api/linear/project-issues", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       updatedAt: 0,
     });
 
@@ -3622,6 +3739,7 @@ describe("GET /api/linear/project-issues", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       updatedAt: 0,
     });
 

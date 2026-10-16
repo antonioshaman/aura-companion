@@ -235,6 +235,8 @@ export function isUnresolvedStop(f: ObserverFinding, dismissedStopIds: ReadonlyS
   if (f.weakEvidence !== undefined) return false;
   // B2b: a re-raised claim a human already dismissed in this group.
   if (f.disputed !== undefined) return false;
+  // W15: folded into the other reviewer's finding — that one is the blocker.
+  if (f.duplicateOf !== undefined) return false;
   return true;
 }
 

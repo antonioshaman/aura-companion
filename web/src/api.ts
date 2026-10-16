@@ -513,6 +513,8 @@ export interface AppSettings {
   kbAutoPrime?: boolean;
   /** Auto-continue a session after its usage limit resets. Default on. */
   autoResumeAfterLimit?: boolean;
+  /** W15: global default for the Council second-opinion reviewer. */
+  councilSecondReviewer?: import("../server/second-reviewer-config.js").SecondReviewerConfig;
 }
 
 export interface LinearOAuthConnectionSummary {
@@ -1031,6 +1033,16 @@ export const api = {
 
   // Council Mode (meta-diet B2b) — persist a human dismissal of an observer
   // STOP so a re-raised copy of the claim no longer raises the blocker banner.
+  /** W15: the pair's second-opinion reviewer setting (own, else the global default). */
+  getGroupSecondReviewer: (groupId: string) =>
+    get<import("../server/second-reviewer-config.js").SecondReviewerConfig & { source: "group" | "global" }>(
+      `/groups/${encodeURIComponent(groupId)}/second-reviewer`,
+    ),
+  setGroupSecondReviewer: (groupId: string, config: import("../server/second-reviewer-config.js").SecondReviewerConfig) =>
+    put<import("../server/second-reviewer-config.js").SecondReviewerConfig & { source: "group" | "global" }>(
+      `/groups/${encodeURIComponent(groupId)}/second-reviewer`,
+      config,
+    ),
   disputeObserverFinding: (groupId: string, finding: { finding_id: string; claim: string; evidence_path: string }) =>
     post<{ ok: true; added: boolean }>(`/groups/${encodeURIComponent(groupId)}/disputes`, finding),
 
@@ -1200,6 +1212,7 @@ export const api = {
     defaultSessionMode?: "solo" | "council";
     kbAutoPrime?: boolean;
     autoResumeAfterLimit?: boolean;
+    councilSecondReviewer?: import("../server/second-reviewer-config.js").SecondReviewerConfig;
   }) => put<AppSettings>("/settings", data),
   verifyAnthropicKey: (apiKey: string) =>
     post<{ valid: boolean; error?: string }>("/settings/anthropic/verify", { apiKey }),

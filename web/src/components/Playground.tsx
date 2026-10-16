@@ -43,6 +43,7 @@ import {
   type CouncilPairing,
 } from "./council/index.js";
 import type { ConvergenceNotCountedReason, GroupRecord, ObserverFinding } from "../types.js";
+import { SecondReviewerSettings, type SecondReviewerConfig } from "./council/SecondReviewerSettings.js";
 import { ToolExecutionBar } from "./ToolExecutionBar.js";
 import { ToolTurnSummary } from "./ToolTurnSummary.js";
 import type { ToolActivityEntry } from "../store/tasks-slice.js";
@@ -3302,6 +3303,22 @@ function CouncilModeSection() {
           />
         </Card>
 
+        <Card label="BlockerBanner — STOP raised by the second-opinion reviewer (W15)">
+          <BlockerBanner
+            finding={{
+              ...liveBlockerFinding,
+              id: "fnd_second",
+              claim: "relaunch() has no backoff — a crash loop restarts the CLI hundreds of times a minute",
+              observerProvider: "claude",
+              observerModel: "claude-sonnet-5",
+              secondOpinion: true,
+            }}
+            nowMs={Date.now()}
+            onDismiss={() => { /* noop in playground */ }}
+            onDispute={() => { /* noop in playground */ }}
+          />
+        </Card>
+
         <Card label="BlockerBanner — holding auto-proceed (unfrozen STOP re-checked as NOTE, FIX-AP-3)">
           <BlockerBanner
             finding={{
@@ -3520,6 +3537,21 @@ function CouncilModeSection() {
             nowMs={Date.now()}
           />
         </Card>
+        <Card label="FindingsLog — observer + second opinion (model badges, near-duplicate folded, W15)">
+          <FindingsLog
+            findings={[
+              mockFinding({ id: "w15-obs", severity: "STOP", claim: "cancel() races the turn-done handler and drops the reply", receivedAt: Date.now() - 120_000, observerProvider: "codex", observerModel: "gpt-6.1-sol" }),
+              mockFinding({ id: "w15-dup", severity: "STOP", claim: "cancel races turn-done; the reply is dropped", receivedAt: Date.now() - 60_000, observerProvider: "claude", observerModel: "claude-sonnet-5", secondOpinion: true, duplicateOf: "w15-obs" }),
+              mockFinding({ id: "w15-sec", severity: "WARN", claim: "Crash-loop storm: relaunch has no backoff", receivedAt: Date.now() - 50_000, observerProvider: "claude", observerModel: "claude-sonnet-5", secondOpinion: true }),
+              mockFinding({ id: "w15-note", severity: "NOTE", claim: "Log line lacks sessionGroupId", receivedAt: Date.now() - 100_000, observerProvider: "codex", observerModel: "gpt-6.1-sol" }),
+            ]}
+            onDismissStop={() => {}}
+            nowMs={Date.now()}
+          />
+        </Card>
+        <Card label="SecondReviewerSettings — Council second opinion picker (W15)">
+          <SecondReviewerPlaygroundDemo />
+        </Card>
         <Card label="FindingsLog — old backlog after a reload (sorted, fresh STOPs on top, a repeated id shown once)">
           <FindingsLog
             // Arrival order mimics the pre-fix readdir-ordered bootstrap:
@@ -3571,6 +3603,11 @@ function CouncilModeSection() {
         <Card label="ObserverPanel — latest review not counted: unverified clean review (observer rigor)">
           <div className="h-[460px] bg-cc-bg rounded-md overflow-hidden">
             <CouncilNotCountedPanelDemo reason="unverified_clean" />
+          </div>
+        </Card>
+        <Card label="ObserverPanel — latest review not counted: waiting for the second opinion (W15)">
+          <div className="h-[460px] bg-cc-bg rounded-md overflow-hidden">
+            <CouncilNotCountedPanelDemo reason="awaiting_second_review" />
           </div>
         </Card>
         {/* Worst-case header stack in a SHORT column — layout-stability spec rec 3.
@@ -4937,4 +4974,10 @@ function PlaygroundAiValidationToggle({ enabled }: { enabled: boolean }) {
       <span className="text-xs text-cc-muted">Click to toggle</span>
     </div>
   );
+}
+
+/** W15: interactive second-opinion picker (controlled, local state only). */
+function SecondReviewerPlaygroundDemo() {
+  const [value, setValue] = useState<SecondReviewerConfig>({ reviewer: "auto", scope: "review-implement" });
+  return <SecondReviewerSettings value={value} onChange={setValue} />;
 }

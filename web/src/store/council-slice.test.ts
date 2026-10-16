@@ -542,6 +542,31 @@ describe("appendObserverReview", () => {
     expect(s.groundingDowngrades.get("grp_abc")).toEqual([{ id: "f3", reason: "evidence_missing_on_disk" }]);
   });
 
+  // W15 multi-model review: a second-opinion review is not the observer's
+  // answer — the panel keeps showing the observer as reviewing, and each
+  // finding carries the second reviewer's own provider/model (the per-finding
+  // `reviewer` wins over the batch context, which on a REST bootstrap is the
+  // observer's) plus its duplicate link.
+  it("a second-opinion review keeps the observer reviewing and attributes findings to their model", () => {
+    useStore.getState().upsertGroup(group());
+    useStore.getState().recordCheckpoint({ sessionGroupId: "grp_abc", checkpointId: "chk_1", phase: "council-review", sequence: 1, timestamp: 1_000 });
+    useStore.getState().appendObserverReview({
+      sessionGroupId: "grp_abc",
+      checkpointId: "chk_1",
+      phase: "council-review",
+      findings: [wireFinding({ id: "s1", reviewer: { role: "second", provider: "claude", model: "claude-sonnet-5" }, duplicateOf: "o1" })],
+      downgrades: [],
+      observerModel: "gpt-6.1-sol",
+      observerProvider: "codex",
+      timestamp: 1_500,
+      reviewerRole: "second",
+    });
+    const s = useStore.getState();
+    expect(s.groups.get("grp_abc")?.observerReviewing).toBe(true);
+    const f = s.findings.get("grp_abc")![0]!;
+    expect(f).toMatchObject({ observerProvider: "claude", observerModel: "claude-sonnet-5", secondOpinion: true, duplicateOf: "o1" });
+  });
+
   // Server may re-emit reviews on reconnect; client must dedup by id so
   // findings aren't duplicated in the panel after a transient drop.
   it("dedups findings by id on re-emission", () => {

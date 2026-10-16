@@ -43,6 +43,22 @@ import { CheckpointLineSnapshots } from "./observer-line-snapshots.js";
 import { ObserverReplyCapture } from "./observer-reply.js";
 import { ObserverReadLedger } from "./observer-read-ledger.js";
 import { ObserverProbeTracker } from "./observer-probe.js";
+import {
+  SecondReviewer,
+  buildSecondReviewEnv,
+  makeTmpScratchFile,
+  readCodexDefaultModel,
+  prependBinaryDir,
+  readScratchFile,
+  runHeadless,
+} from "./second-reviewer.js";
+import {
+  type SecondReviewerConfig,
+  effectiveSecondReviewerConfig,
+  writeGroupSecondReviewer,
+} from "./second-reviewer-config.js";
+import { resolveObserverPromptForSpawn } from "./observer-prompt-spawn.js";
+import { getEnrichedPath, resolveBinary } from "./path-resolver.js";
 import { readProseArtifactSamples, recentUserTexts, resolveClaimLanguage, type ClaimLanguage } from "./observer-language.js";
 import {
   CouncilCheckpointPipeline,
@@ -354,6 +370,41 @@ export class SessionOrchestrator {
     isObserverProbeInFlight: (observerSessionId) => this.observerProbes.inFlight(observerSessionId),
     onObserverWakeUnanswered: (gid, observerSessionId, checkpointId) =>
       this.observerWakeRecovery.onWakeUnanswered(gid, observerSessionId, checkpointId),
+    onCheckpointAccepted: (gid, payload, ctx) => this.requestSecondReview(gid, payload, ctx),
+  });
+  /**
+   * W15 multi-model review: one-shot read-only second-opinion reviewer on
+   * another backend/model (`second-reviewer.ts`). Its review lands in
+   * `.council/reviews/` and flows through the same watcher → pipeline.
+   */
+  private secondReviewer = new SecondReviewer({
+    getConfig: (gid, cwd) => this.secondReviewerConfigFor(gid, cwd),
+    loadSystemPrompt: (cwd) => resolveObserverPromptForSpawn({ cwd }).artifact.body,
+    resolveBinary: (name) => resolveBinary(name),
+    // Allowlisted env only — never the server's own (tokens, API keys).
+    buildEnv: (binary, backend) => buildSecondReviewEnv(backend, process.env, { path: prependBinaryDir(binary, getEnrichedPath()) }),
+    defaultModel: (backend) =>
+      backend === "codex"
+        ? readCodexDefaultModel(buildSecondReviewEnv("codex", process.env, { path: "" }).CODEX_HOME!)
+        : undefined,
+    ...(Number(process.env.COMPANION_SECOND_REVIEW_MAX_CONCURRENCY) >= 1
+      ? { maxConcurrency: Number(process.env.COMPANION_SECOND_REVIEW_MAX_CONCURRENCY) }
+      : {}),
+    run: runHeadless,
+    writeReview: (path, payload) => writeAtomicJson(path, payload),
+    ingestReview: (gid, payload, reviewedAt) => this.checkpointPipeline.handleCouncilReview(gid, payload, reviewedAt),
+    isBackendLimited: (backend) => {
+      const now = Date.now();
+      return (this.autoResume?.list() ?? []).some((s) => s.backend === backend && s.resetAt > now);
+    },
+    isGroupLive: (gid) => this.councilGroupMeta.has(gid),
+    emit: (ev) => companionBus.emit("group:second-review", ev),
+    now: () => Date.now(),
+    makeScratchFile: makeTmpScratchFile,
+    readScratchFile,
+    ...(Number(process.env.COMPANION_SECOND_REVIEW_TIMEOUT_MS) > 0
+      ? { timeoutMs: Number(process.env.COMPANION_SECOND_REVIEW_TIMEOUT_MS) }
+      : {}),
   });
   /** Observer rigor: liveness-probe turns per observer session (`observer-probe.ts`). */
   private observerProbes = new ObserverProbeTracker();
@@ -840,6 +891,11 @@ export class SessionOrchestrator {
       },
     });
     this.convergenceTracker.attach();
+    // W15: a torn-down pair's second-opinion run is killed, its queue dropped.
+    companionBus.on("group:exited", ({ sessionGroupId }) => {
+      this.secondReviewer.forgetGroup(sessionGroupId);
+      this.convergenceTracker?.forgetGroup(sessionGroupId);
+    });
 
     // Council Mode group reconciliation. Pairs created in a previous server
     // uptime are restored from launcher state (which itself hydrates from
@@ -1127,6 +1183,78 @@ export class SessionOrchestrator {
       conversation: recentUserTexts(history),
       artifactTexts: () => readProseArtifactSamples(cwd, payload.artifact_paths),
     });
+  }
+
+  /** W15: effective second-opinion config — the pair's own file, else Settings. */
+  private secondReviewerConfigFor(sessionGroupId: string, cwd: string): SecondReviewerConfig {
+    const eff = effectiveSecondReviewerConfig(cwd, sessionGroupId, getSettings().councilSecondReviewer);
+    if (eff.readError) {
+      log.warn("second-reviewer", "group second-reviewer setting unreadable — using the global default", {
+        event: "council.second_review.config_unreadable",
+        sessionGroupId,
+        reason: eff.readError,
+      });
+    }
+    return eff.config;
+  }
+
+  /** W15: hand an accepted checkpoint to the second-opinion reviewer. */
+  private requestSecondReview(
+    sessionGroupId: string,
+    payload: CheckpointPayload,
+    ctx: { cwd: string; previous: CheckpointPayload | null },
+  ): void {
+    const meta = this.councilGroupMeta.get(sessionGroupId);
+    if (!meta) return;
+    const observerBackend = meta.pairing.split("+")[1] === "codex" ? "codex" : "claude";
+    let claimLanguage: ClaimLanguage | null = null;
+    try {
+      claimLanguage = this.resolveObserverClaimLanguage(sessionGroupId, payload, ctx.cwd);
+    } catch {
+      claimLanguage = null;
+    }
+    this.secondReviewer.onCheckpoint(sessionGroupId, payload, {
+      cwd: ctx.cwd,
+      observerBackend,
+      previous: ctx.previous,
+      claimLanguage,
+    });
+  }
+
+  /** W15: the pair's second-opinion setting (own file, else the global default). */
+  getGroupSecondReviewer(
+    sessionGroupId: string,
+  ): { ok: true; config: SecondReviewerConfig; source: "group" | "global" } | { ok: false; reason: "unknown_group" } {
+    const watcher = this.councilWatchers.get(sessionGroupId);
+    if (!watcher || !this.councilGroupMeta.has(sessionGroupId)) return { ok: false, reason: "unknown_group" };
+    const eff = effectiveSecondReviewerConfig(watcher.cwd, sessionGroupId, getSettings().councilSecondReviewer);
+    return { ok: true, config: eff.config, source: eff.source };
+  }
+
+  /** W15: set the pair's own second-opinion setting (server-written, `.council/state/`). */
+  setGroupSecondReviewer(
+    sessionGroupId: string,
+    config: SecondReviewerConfig,
+  ): { ok: true } | { ok: false; reason: "unknown_group" | "persist_failed" } {
+    const watcher = this.councilWatchers.get(sessionGroupId);
+    if (!watcher || !this.councilGroupMeta.has(sessionGroupId)) return { ok: false, reason: "unknown_group" };
+    const res = writeGroupSecondReviewer(watcher.cwd, sessionGroupId, config);
+    if (!res.ok) {
+      log.warn("second-reviewer", "group second-reviewer setting not persisted", {
+        event: "council.second_review.config_persist_failed",
+        sessionGroupId,
+        reason: res.reason,
+        ...(res.detail ? { detail: res.detail } : {}),
+      });
+      return { ok: false, reason: "persist_failed" };
+    }
+    log.info("second-reviewer", "group second-reviewer setting changed", {
+      event: "council.second_review.config_changed",
+      sessionGroupId,
+      reviewer: typeof config.reviewer === "string" ? config.reviewer : `${config.reviewer.backend}:${config.reviewer.model ?? "default"}`,
+      scope: config.scope,
+    });
+    return { ok: true };
   }
 
   private finalizeObserverReply(sessionGroupId: string, observerSessionId: string): void {

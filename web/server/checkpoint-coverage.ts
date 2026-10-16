@@ -78,6 +78,9 @@ export function collectCheckpointCoverageGaps(opts: {
     }
     const payload = raw === null ? null : parseObserverReviewPayload(raw);
     if (!payload || payload.session_group_id !== sessionGroupId) continue;
+    // W15: coverage is the OBSERVER's coverage; a second opinion alone does
+    // not make a checkpoint "reviewed".
+    if (payload.reviewer_role === "second") continue;
     const prior = reviewed.get(payload.checkpoint_id);
     // Any verified review of the checkpoint outranks an unverified one.
     const unverified = payload.host_verification === "unverified" && (prior?.unverified ?? true);

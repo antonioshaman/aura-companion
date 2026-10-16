@@ -408,3 +408,59 @@ describe("FindingsLog", () => {
     expect(results).toHaveNoViolations();
   });
 });
+
+// W15 multi-model review: findings from the observer AND the second-opinion
+// reviewer share one log. Each row then names the model that raised it, and a
+// near-identical claim from the other reviewer folds into the earlier row as
+// "also flagged by <model>" instead of a second row.
+describe("FindingsLog — second opinion", () => {
+  const observer = finding({ id: "obs", severity: "STOP", claim: "cancel races turn-done", observerModel: "gpt-6.1-sol", observerProvider: "codex" });
+  const second = finding({
+    id: "sec",
+    severity: "WARN",
+    claim: "crash-loop storm on relaunch",
+    observerModel: "claude-sonnet-5",
+    observerProvider: "claude",
+    secondOpinion: true,
+  });
+  const dup = finding({
+    id: "dup",
+    severity: "STOP",
+    claim: "cancel races the turn-done handler",
+    observerModel: "claude-sonnet-5",
+    observerProvider: "claude",
+    secondOpinion: true,
+    duplicateOf: "obs",
+  });
+
+  it("shows a model badge on every row once a second-opinion finding exists", () => {
+    render(<FindingsLog findings={[observer, second]} />);
+    expect(screen.getByTestId("finding-reviewer-obs")).toHaveTextContent("gpt-6.1-sol");
+    expect(screen.getByTestId("finding-reviewer-sec")).toHaveTextContent("2nd · claude-sonnet-5");
+    expect(screen.getByTestId("finding-row-sec")).toHaveAttribute("data-second-opinion", "true");
+  });
+
+  it("shows no reviewer badge for an observer-only log (unchanged UI)", () => {
+    render(<FindingsLog findings={[observer]} />);
+    expect(screen.queryByTestId("finding-reviewer-obs")).not.toBeInTheDocument();
+  });
+
+  it("folds a near-duplicate into the earlier finding with an 'also flagged' chip", () => {
+    render(<FindingsLog findings={[observer, dup, second]} />);
+    expect(screen.queryByTestId("finding-row-dup")).not.toBeInTheDocument();
+    const chip = screen.getByTestId("finding-also-flagged-chip");
+    expect(chip).toHaveAccessibleName("Also flagged by claude-sonnet-5");
+    expect(screen.getByTestId("finding-row-obs")).toContainElement(chip);
+  });
+
+  it("keeps a duplicate as its own row when its target is not in the log", () => {
+    render(<FindingsLog findings={[dup]} />);
+    expect(screen.getByTestId("finding-row-dup")).toBeInTheDocument();
+  });
+
+  it("passes accessibility scan with badges and a folded duplicate", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(<FindingsLog findings={[observer, dup, second]} onDismissStop={() => {}} />);
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});

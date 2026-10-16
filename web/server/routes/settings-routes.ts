@@ -9,6 +9,7 @@ import { hasContainerCodexAuth } from "../codex-container-auth.js";
 import { COMPANION_HOME } from "../paths.js";
 import { companionBus } from "../event-bus.js";
 import { getAnthropicModels, readAnthropicCacheFileMeta } from "../anthropic-models-cache.js";
+import { parseSecondReviewerSetting, parseSecondReviewScope, type SecondReviewerConfig } from "../second-reviewer-config.js";
 
 /** Path to the Codex CLI's own model cache — mirrors routes.ts:/backends/:id/models. */
 function codexModelsCachePath(): string {
@@ -44,6 +45,7 @@ export function registerSettingsRoutes(api: Hono): void {
       defaultSessionMode: settings.defaultSessionMode,
       kbAutoPrime: settings.kbAutoPrime,
       autoResumeAfterLimit: settings.autoResumeAfterLimit,
+      councilSecondReviewer: settings.councilSecondReviewer,
     });
   });
 
@@ -130,6 +132,21 @@ export function registerSettingsRoutes(api: Hono): void {
     if (body.autoResumeAfterLimit !== undefined && typeof body.autoResumeAfterLimit !== "boolean") {
       return c.json({ error: "autoResumeAfterLimit must be a boolean" }, 400);
     }
+    // W15: `councilSecondReviewer: { reviewer, scope? }` — strict (EC-5): a
+    // malformed value is a 400, never silently "off".
+    let councilSecondReviewer: SecondReviewerConfig | undefined;
+    if (body.councilSecondReviewer !== undefined) {
+      const raw = body.councilSecondReviewer;
+      if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+        return c.json({ error: "councilSecondReviewer must be an object { reviewer, scope? }" }, 400);
+      }
+      const reviewer = parseSecondReviewerSetting((raw as Record<string, unknown>).reviewer);
+      if (!reviewer.ok) return c.json({ error: reviewer.error }, 400);
+      const rawScope = (raw as Record<string, unknown>).scope;
+      const scope = rawScope === undefined ? { ok: true as const, value: getSettings().councilSecondReviewer.scope } : parseSecondReviewScope(rawScope);
+      if (!scope.ok) return c.json({ error: scope.error }, 400);
+      councilSecondReviewer = { reviewer: reviewer.value, scope: scope.value };
+    }
     const hasAnyField = body.anthropicApiKey !== undefined || body.anthropicModel !== undefined
       || body.claudeCodeOAuthToken !== undefined || body.openaiApiKey !== undefined
       || body.onboardingCompleted !== undefined
@@ -147,7 +164,8 @@ export function registerSettingsRoutes(api: Hono): void {
       || body.telemetryEnabled !== undefined
       || body.defaultSessionMode !== undefined
       || body.kbAutoPrime !== undefined
-      || body.autoResumeAfterLimit !== undefined;
+      || body.autoResumeAfterLimit !== undefined
+      || councilSecondReviewer !== undefined;
     if (!hasAnyField) {
       return c.json({ error: "At least one settings field is required" }, 400);
     }
@@ -257,6 +275,7 @@ export function registerSettingsRoutes(api: Hono): void {
         typeof body.autoResumeAfterLimit === "boolean"
           ? body.autoResumeAfterLimit
           : undefined,
+      councilSecondReviewer,
     });
     if (typeof body.autoResumeAfterLimit === "boolean") {
       // Lets the orchestrator drop pending auto-resumes the moment the user
@@ -290,6 +309,7 @@ export function registerSettingsRoutes(api: Hono): void {
       defaultSessionMode: settings.defaultSessionMode,
       kbAutoPrime: settings.kbAutoPrime,
       autoResumeAfterLimit: settings.autoResumeAfterLimit,
+      councilSecondReviewer: settings.councilSecondReviewer,
     });
   });
 

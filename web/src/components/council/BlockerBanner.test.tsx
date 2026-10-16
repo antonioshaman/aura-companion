@@ -37,6 +37,15 @@ describe("BlockerBanner", () => {
     expect(screen.getByText("council-implement")).toBeInTheDocument();
   });
 
+  // W15: a STOP raised by the second-opinion reviewer says so, with its own
+  // provider/model, so the user knows which model is blocking.
+  it("labels a second-opinion STOP as such with its own model", () => {
+    render(<BlockerBanner finding={finding({ secondOpinion: true, observerProvider: "claude", observerModel: "claude-sonnet-5" })} onDismiss={() => {}} />);
+    expect(screen.getByText(/Second opinion:/)).toBeInTheDocument();
+    expect(screen.getByText("claude-sonnet-5")).toBeInTheDocument();
+    expect(screen.queryByText(/^Observer:/)).not.toBeInTheDocument();
+  });
+
   it("formats evidence as just the path when no line range is present", () => {
     const f = finding();
     delete f.evidence_lines;

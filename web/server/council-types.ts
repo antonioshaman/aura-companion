@@ -183,6 +183,15 @@ export interface ObserverReviewPayload {
    * An observer-written file may carry it too: it can only weaken a review.
    */
   host_verification?: "unverified";
+  /**
+   * W15 multi-model review: "second" = this review was produced by the
+   * host-run one-shot SECOND-OPINION reviewer (`second-reviewer.ts`, a
+   * different backend/model than the observer), not by the observer
+   * session. Absent = the observer's review. Host-stamped only; every
+   * reader that means "the observer answered this checkpoint" (reply
+   * capture, Gate 0b, watchdog rescan, coverage) ignores second reviews.
+   */
+  reviewer_role?: "second";
 }
 
 // ── Validators ───────────────────────────────────────────────────────────────
@@ -424,6 +433,11 @@ export function parseObserverReviewPayload(
     onDrop?.("invalid-field", "host_verification");
     return null;
   }
+  // W15: optional reviewer role. Present-but-unknown is rejected (EC-5).
+  if (parsed.reviewer_role !== undefined && parsed.reviewer_role !== "second") {
+    onDrop?.("invalid-field", "reviewer_role");
+    return null;
+  }
   return {
     schema_version: COUNCIL_SCHEMA_VERSION,
     checkpoint_id: parsed.checkpoint_id,
@@ -436,6 +450,7 @@ export function parseObserverReviewPayload(
     findings,
     ...(wakeEcho !== undefined ? { observer_wake_payload_version_echo: wakeEcho } : {}),
     ...(parsed.host_verification === "unverified" ? { host_verification: "unverified" as const } : {}),
+    ...(parsed.reviewer_role === "second" ? { reviewer_role: "second" as const } : {}),
   };
 }
 

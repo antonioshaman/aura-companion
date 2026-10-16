@@ -1857,6 +1857,7 @@ function handleParsedMessage(
           ? { supersededCheckpointIds: data.supersededCheckpointIds }
           : {}),
         ...(data.verification === "unverified" ? { verification: "unverified" as const } : {}),
+        ...(data.reviewerRole === "second" ? { reviewerRole: "second" as const } : {}),
       });
       break;
     }

@@ -211,6 +211,8 @@ export interface HostReviewIdentity {
   /** Host verdict on an EMPTY review whose turn never looked past the prose
    *  artifact (see {@link touchesReachBeyondArtifacts}). Absent = no claim. */
   verification?: "unverified";
+  /** W15: stamp the review as the host-run second opinion (`second-reviewer.ts`). */
+  reviewerRole?: "second";
 }
 
 export type HostReviewBuild =
@@ -244,6 +246,7 @@ export function buildHostObserverReview(findings: unknown[], id: HostReviewIdent
     // absent echo as schema drift and downgraded every STOP/WARN to NOTE.
     observer_wake_payload_version_echo: OBSERVER_WAKE_PAYLOAD_VERSION,
     ...(id.verification ? { host_verification: id.verification } : {}),
+    ...(id.reviewerRole ? { reviewer_role: id.reviewerRole } : {}),
     findings,
   };
   let drop: { reason: CouncilParserDropReason; field?: string } | null = null;
