@@ -19,6 +19,7 @@ import { generateUniqueSessionName } from "../utils/names.js";
 import { getRecentDirs, addRecentDir } from "../utils/recent-dirs.js";
 import { navigateToSession } from "../utils/routing.js";
 import { getModelsForBackend, getModesForBackend, getDefaultMode, pickSessionDefaultModel } from "../utils/backends.js";
+import { ModelListFallbackHint, useModelListAutoRefresh } from "./ModelListFallbackHint.js";
 import type { ModelOption } from "../utils/backends.js";
 import type { BackendType } from "../types.js";
 import { EnvManager } from "./EnvManager.js";
@@ -330,6 +331,9 @@ export function HomePage() {
   useEffect(() => {
     void loadBackendModels(backend);
   }, [backend, loadBackendModels]);
+  // A failed fetch is retried with backoff by the slice; on top of that,
+  // coming back to the tab re-fetches while the list is still on fallback.
+  useModelListAutoRefresh(backend);
 
   // Settings hydrate asynchronously: apply the saved Claude preference when it
   // arrives after mount, unless the user already chose a model here.
@@ -1409,6 +1413,7 @@ export function HomePage() {
                 : "No verified Codex models are available yet. Run codex once or refresh the account, then try again."}
             </div>
           )}
+          <ModelListFallbackHint backend={backend} className="px-4 pb-3" />
         </div>
 
         {/* ── Below-card controls ── */}

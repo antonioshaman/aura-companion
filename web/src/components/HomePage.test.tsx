@@ -532,6 +532,36 @@ describe("HomePage", () => {
     }
   });
 
+  it("Claude fetch rejected: static fallback offers Opus 5.5 and a retry hint re-fetches", async () => {
+    // Owner bug 2026-10-16: a failed /v1/models fetch left the dropdown on a
+    // stale static list topping out at Opus 4.8 with no way to recover.
+    // Now the fallback lists the fresh models (marked Untested) and a hint
+    // under the card offers a manual retry.
+    mockStoreState.dynamicBackendModelsStatus = { claude: "rejected", codex: "idle" };
+    try {
+      render(<HomePage />);
+      await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
+      expect(screen.getByText("Список моделей не загрузился — показан базовый.")).toBeInTheDocument();
+
+      fireEvent.click(screen.getByText("Opus 4.8"));
+      const opus55 = screen.getByRole("button", { name: /Opus 5\.5/ });
+      expect(opus55).not.toBeDisabled();
+      expect(within(opus55).getByText("Untested")).toBeInTheDocument();
+
+      mockStoreState.loadBackendModels.mockClear();
+      fireEvent.click(screen.getByRole("button", { name: "Обновить" }));
+      expect(mockStoreState.loadBackendModels).toHaveBeenCalledWith("claude");
+    } finally {
+      mockStoreState.dynamicBackendModelsStatus = { claude: "idle", codex: "idle" };
+    }
+  });
+
+  it("no fallback hint while the Claude model list loads normally", async () => {
+    render(<HomePage />);
+    await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
+    expect(screen.queryByText("Список моделей не загрузился — показан базовый.")).not.toBeInTheDocument();
+  });
+
   it("opens and selects from the model dropdown", async () => {
     // Verifies users can open the model picker and change the selected model.
     render(<HomePage />);

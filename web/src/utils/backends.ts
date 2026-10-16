@@ -74,10 +74,24 @@ export function toModelOptions(models: BackendModelInfo[]): ModelOption[] {
 // matters: [0] is the default model picked by `pickSessionDefaultModel`.
 // Hand-maintained — bump these literals when Anthropic ships a new model.
 // Source of truth: https://docs.anthropic.com/en/docs/about-claude/models/overview
+//
+// Two groups:
+//  - registry-verified (no `untested`) — mirrors the server's
+//    `model-registry.ts` active set; these anchor the no-preference default.
+//  - `untested: true` — launchable on the prod CLI (2.1.283, 2026-10-16) and
+//    present in /v1/models, but not in the server registry. Flagged exactly
+//    like the dynamic path's `enrichModelsWithRegistry` does, so the dropdown
+//    renders the same "Untested" hint whichever source fed it. Without these
+//    the dropdown topped out at Opus 4.8 whenever the dynamic fetch failed.
 export const CLAUDE_MODELS: ModelOption[] = [
   { value: "claude-opus-4-8", label: "Opus 4.8", icon: "" },
   { value: "claude-sonnet-4-6", label: "Sonnet 4.6", icon: "" },
   { value: "claude-haiku-4-5-20251001", label: "Haiku 4.5", icon: "" },
+  { value: "claude-opus-5-5", label: "Opus 5.5", icon: "", untested: true },
+  { value: "claude-opus-5", label: "Opus 5", icon: "", untested: true },
+  { value: "claude-fable-5-1", label: "Fable 5.1", icon: "", untested: true },
+  { value: "claude-fable-5", label: "Fable 5", icon: "", untested: true },
+  { value: "claude-sonnet-5", label: "Sonnet 5", icon: "", untested: true },
 ];
 
 export const CODEX_MODELS: ModelOption[] = [
@@ -229,7 +243,11 @@ export function pickSessionDefaultModel(
     // hand-verified static list; fall back to the static default rather than
     // a guaranteed-unknown dynamic[0]. Codex's dynamic[0] stays authoritative.
     if (backend !== "codex") {
-      const known = new Set(CLAUDE_MODELS.map((m) => m.value));
+      // Only registry-verified static entries anchor the default — the
+      // `untested` fallback entries are offered, never auto-picked.
+      const known = new Set(
+        CLAUDE_MODELS.filter((m) => m.untested !== true).map((m) => m.value),
+      );
       const safe = dynamic.find((m) => known.has(m.value));
       return safe ? safe.value : getDefaultModel(backend);
     }

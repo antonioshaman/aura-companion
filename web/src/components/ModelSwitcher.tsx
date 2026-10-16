@@ -4,6 +4,7 @@ import { sendToSession } from "../ws.js";
 import { api } from "../api.js";
 import { getModelsForBackend } from "../utils/backends.js";
 import { CacheRewriteHint } from "./CacheRewriteHint.js";
+import { ModelListFallbackHint, useModelListAutoRefresh } from "./ModelListFallbackHint.js";
 import type { ModelOption } from "../utils/backends.js";
 
 interface ModelSwitcherProps {
@@ -100,6 +101,7 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
   useEffect(() => {
     void loadBackendModels(backendType);
   }, [backendType, loadBackendModels]);
+  useModelListAutoRefresh(backendType);
 
   // Friedman R3: per-key-status. Distinguish "no key configured" (show
   // footnote nudging Settings) from "key set but fetch failed" (silent —
@@ -523,6 +525,12 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
            the dropdown. `onClick` closes the dropdown so the navigation
            is clean. Sits as a SIBLING of the listbox div (not a child) so
            SR doesn't iterate it as a phantom option. */}
+        {/* Key configured but the fetch failed → the list above is the
+           static fallback; say so and offer a manual retry. */}
+        <ModelListFallbackHint
+          backend={backendType}
+          className="px-3 py-2 border-t-2 border-cc-separator"
+        />
         {showNoKeyHint && (
           // PR #91 burndown Task 9 + Task 13 (Council Review 2026-06-04-1826
           // P2 #8 + P3 #14):

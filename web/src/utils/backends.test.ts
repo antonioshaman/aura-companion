@@ -445,3 +445,55 @@ describe("toModelOptions — Claude entries are icon-less (Task 13)", () => {
     expect(options[0].icon).not.toBe("");
   });
 });
+
+// ── Owner bug 2026-10-16: static fallback topped out at Opus 4.8 ───────────
+describe("CLAUDE_MODELS static fallback — fresh models", () => {
+  // When the dynamic fetch fails, the dropdown renders this list; the
+  // owner's daily model and the other launchable fresh models must be in it.
+  it("includes the fresh launchable models (opus-5-5, opus-5, fable-5-1, fable-5, sonnet-5)", () => {
+    const values = CLAUDE_MODELS.map((m) => m.value);
+    for (const id of [
+      "claude-opus-5-5",
+      "claude-opus-5",
+      "claude-fable-5-1",
+      "claude-fable-5",
+      "claude-sonnet-5",
+    ]) {
+      expect(values).toContain(id);
+    }
+  });
+
+  // The default stays on the registry-verified model.
+  it("keeps [0] = claude-opus-4-8 (the default)", () => {
+    expect(CLAUDE_MODELS[0]!.value).toBe("claude-opus-4-8");
+    expect(CLAUDE_MODELS[0]!.untested).toBeUndefined();
+  });
+
+  // Non-registry entries carry the same `untested` flag the server's
+  // enrichModelsWithRegistry adds on the dynamic path, so the dropdown shows
+  // the same "Untested" hint regardless of which list fed it.
+  it("marks the non-registry fresh models untested, keeps the registry ones unflagged", () => {
+    const byId = new Map(CLAUDE_MODELS.map((m) => [m.value, m]));
+    expect(byId.get("claude-opus-5-5")?.untested).toBe(true);
+    expect(byId.get("claude-fable-5")?.untested).toBe(true);
+    expect(byId.get("claude-sonnet-4-6")?.untested).toBeUndefined();
+    expect(byId.get("claude-haiku-4-5-20251001")?.untested).toBeUndefined();
+  });
+
+  it("has no duplicate model ids", () => {
+    const values = CLAUDE_MODELS.map((m) => m.value);
+    expect(new Set(values).size).toBe(values.length);
+  });
+
+  // Adding fresh models to the fallback must NOT change the auto-picked
+  // default: a dynamic list leading with opus-5-5 still anchors to the
+  // newest registry-verified model, never an untested one.
+  it("pickSessionDefaultModel still skips untested fallback entries for the default", () => {
+    const dynamic = [
+      { value: "claude-opus-5-5", label: "Opus 5.5", icon: "" },
+      { value: "claude-fable-5-1", label: "Fable 5.1", icon: "" },
+      { value: "claude-opus-4-8", label: "Opus 4.8", icon: "" },
+    ];
+    expect(pickSessionDefaultModel("claude", dynamic)).toBe("claude-opus-4-8");
+  });
+});
