@@ -17,6 +17,7 @@ import { ChatView } from "./ChatView.js";
 import { EmptyChatState } from "./chat/EmptyChatState.js";
 import { AssistantAvatar } from "./chat/AssistantAvatar.js";
 import { ResumeIndicator } from "./chat/ResumeIndicator.js";
+import { CollapsedSystemMarkers } from "./chat/CollapsedSystemMarkers.js";
 import { api } from "../api.js";
 import type {
   PermissionRequest,
@@ -463,6 +464,36 @@ const MSG_SYSTEM_RESUME_INTERRUPTED: ChatMessage = {
   timestamp: Date.now() - 28000,
   systemVariant: "resume-interrupted",
 };
+
+// W16: a run of these two adjacent in the feed is what MessageFeed collapses
+// into one "Interrupted ×N" row (chat/CollapsedSystemMarkers.tsx) — a
+// long-lived session could otherwise show 15+ of these in a row.
+const COLLAPSED_SYSTEM_MARKERS_ITEMS = [
+  {
+    id: "coll-1",
+    content: "Error: [ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null",
+    timestamp: Date.now() - 27000,
+    systemVariant: "resume-interrupted" as const,
+  },
+  {
+    id: "coll-2",
+    content: "Backend transcript 1813s behind CLI's jsonl — relaunching to recover.",
+    timestamp: Date.now() - 26000,
+    systemVariant: "drift-recovery" as const,
+  },
+  {
+    id: "coll-3",
+    content: "Error: [ede_diagnostic] result_type=user last_content_type=n/a stop_reason=tool_use",
+    timestamp: Date.now() - 25000,
+    systemVariant: "resume-interrupted" as const,
+  },
+  {
+    id: "coll-4",
+    content: "Error: [ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null",
+    timestamp: Date.now() - 24000,
+    systemVariant: "resume-interrupted" as const,
+  },
+];
 
 // Tool result with error
 const MSG_TOOL_ERROR: ChatMessage = {
@@ -1188,6 +1219,9 @@ export function Playground() {
             </Card>
             <Card label="System message (previous turn interrupted by restart)">
               <MessageBubble message={MSG_SYSTEM_RESUME_INTERRUPTED} />
+            </Card>
+            <Card label="Collapsed system markers — run of 4 restart/drift-recovery notes (W16)">
+              <CollapsedSystemMarkers items={COLLAPSED_SYSTEM_MARKERS_ITEMS} />
             </Card>
           </div>
         </Section>
