@@ -40,6 +40,12 @@ export function MessageBubble({ message, isObserverSession = false }: { message:
     return (
       <div className="flex justify-end animate-[userSlideIn_0.3s_ease-out]">
         <div className="max-w-[85%] sm:max-w-[80%] px-3.5 sm:px-4 py-2.5 rounded-[16px] rounded-br-[6px] user-bubble-gradient text-cc-fg shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+          {message.origin === "auto_resume" && (
+            // Sent by Aura after a usage limit reset, not typed by the user.
+            <div className="text-[11px] text-cc-muted mb-1" data-testid="auto-resume-caption">
+              Автопродолжение после лимита
+            </div>
+          )}
           {message.images && message.images.length > 0 && (
             <div className="flex gap-2 flex-wrap mb-2">
               {message.images.map((img, i) => (

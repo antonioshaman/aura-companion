@@ -101,6 +101,8 @@ const linearAgentBridge = new LinearAgentBridge(agentExecutor, wsBridge);
 const orchestrator = new SessionOrchestrator({
   launcher, wsBridge, sessionStore, worktreeTracker,
   prPoller, agentExecutor,
+  // Usage-limit auto-resume schedules survive restarts in this file.
+  autoResume: { filePath: join(COMPANION_HOME, "auto-resume.json") },
 });
 
 const idleTimerManager = new IdleTimerManager({

@@ -10,6 +10,7 @@ import { BlockerBanner } from "./council/index.js";
 import { SectionErrorBoundary } from "./SectionErrorBoundary.js";
 import { CliFailedBanner } from "./CliFailedBanner.js";
 import { ModelFallbackBanner } from "./ModelFallbackBanner.js";
+import { AutoResumeBanner } from "./AutoResumeBanner.js";
 import { ModelSubstitutionDialog } from "./ModelSubstitutionDialog.js";
 import { ModelAvailabilityAnnouncer } from "./ModelAvailabilityAnnouncer.js";
 import { navigateHome } from "../utils/routing.js";
@@ -57,6 +58,22 @@ export function ChatView({ sessionId }: { sessionId: string }) {
       errorTimerRef.current = setTimeout(() => setReconnectError(null), 4000);
     }
   }, [sessionId, setCliReconnecting]);
+
+  // Usage-limit auto-resume: server publishes the pending one-shot resume on
+  // session state (`auto_resume`); "Отменить" cancels it server-side, which
+  // clears the field via session_update.
+  const autoResume = useStore((s) => s.sessions.get(sessionId)?.auto_resume);
+  const [cancellingAutoResume, setCancellingAutoResume] = useState(false);
+  useEffect(() => setCancellingAutoResume(false), [sessionId, autoResume?.fireAt]);
+  const handleCancelAutoResume = useCallback(async () => {
+    setCancellingAutoResume(true);
+    try {
+      await api.cancelAutoResume(sessionId);
+    } catch (err) {
+      captureException(err);
+      setCancellingAutoResume(false);
+    }
+  }, [sessionId]);
 
   const perms = useMemo(
     () => (sessionPerms ? Array.from(sessionPerms.values()) : []),
@@ -278,6 +295,21 @@ export function ChatView({ sessionId }: { sessionId: string }) {
           </SectionErrorBoundary>
         </div>
       ) : null}
+
+      {/* Usage-limit auto-resume notice — additive info banner (own slot,
+          like the model-fallback notice below): the session will continue by
+          itself after the reset unless the user cancels. */}
+      {autoResume && (
+        <div className="shrink-0 border-t border-cc-border bg-cc-card">
+          <AutoResumeBanner
+            resetAt={autoResume.resetAt}
+            fireAt={autoResume.fireAt}
+            resetSource={autoResume.resetSource}
+            onCancel={handleCancelAutoResume}
+            cancelling={cancellingAutoResume}
+          />
+        </div>
+      )}
 
       {/* Model Registry Task 9 — proactive same-tier substitution notice. A
           calm, additive warning banner (NOT priority-gated like the slot above):

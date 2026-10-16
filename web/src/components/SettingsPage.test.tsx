@@ -199,6 +199,30 @@ describe("SettingsPage", () => {
       await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledWith({ kbAutoPrime: true }));
     });
 
+    // Usage-limit auto-resume: default on (older server omits the field),
+    // hydrates an opt-out, and persists a toggle via updateSettings.
+    it("shows auto-resume on by default and persists switching it off", async () => {
+      render(<SettingsPage />);
+      const sw = await screen.findByRole("switch", { name: "Автопродолжение после лимита" });
+      await waitFor(() => expect(sw).not.toBeDisabled());
+      expect(sw).toHaveAttribute("aria-checked", "true");
+      fireEvent.click(sw);
+      await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledWith({ autoResumeAfterLimit: false }));
+      expect(sw).toHaveAttribute("aria-checked", "false");
+    });
+
+    it("hydrates auto-resume off from the server", async () => {
+      mockApi.getSettings.mockResolvedValueOnce({
+        anthropicApiKeyConfigured: true,
+        anthropicModel: "claude-sonnet-4-6",
+        autoResumeAfterLimit: false,
+      });
+      render(<SettingsPage />);
+      await waitFor(() =>
+        expect(screen.getByRole("switch", { name: "Автопродолжение после лимита" })).toHaveAttribute("aria-checked", "false"),
+      );
+    });
+
     it("reverts the KB toggle and shows the error when saving fails", async () => {
       mockApi.updateSettings.mockRejectedValueOnce(new Error("save failed"));
       render(<SettingsPage />);

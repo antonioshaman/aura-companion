@@ -26,9 +26,11 @@ vi.mock("../store.js", () => {
   return { useStore };
 });
 
+const mockCancelAutoResume = vi.fn(async (..._args: unknown[]) => ({ ok: true, cancelled: true }));
 vi.mock("../api.js", () => ({
   api: {
     relaunchSession: (...args: unknown[]) => mockRelaunchSession(...args),
+    cancelAutoResume: (...args: unknown[]) => mockCancelAutoResume(...args),
   },
 }));
 
@@ -134,6 +136,7 @@ function setupStore(overrides: {
   cliFailureReason?: "relaunch_exhausted" | "container_missing" | "container_stopped" | "binary_missing" | "browser_closed_no_reconnect";
   substitutionNotice?: { requested: string; applied: string; reason: "retired" | "blocked" | "overloaded" };
   crossTierSwitch?: { requested: string; replacement: string; previousModel: string };
+  autoResume?: { resetAt: number; fireAt: number; resetSource: string };
 } = {}) {
   const {
     connectionStatus = "connected",
@@ -145,6 +148,7 @@ function setupStore(overrides: {
     cliFailureReason,
     substitutionNotice,
     crossTierSwitch,
+    autoResume,
   } = overrides;
 
   const connMap = new Map<string, string>();
@@ -170,8 +174,11 @@ function setupStore(overrides: {
 
   // Sessions map — ChatView reads `sessions.get(sessionId)?.sessionGroupRole`
   // to decide whether to mount Composer (observer half: NO composer).
-  const sessionsMap = new Map<string, { sessionGroupRole?: "orchestrator" | "observer" }>();
-  sessionsMap.set("s1", sessionGroupRole !== undefined ? { sessionGroupRole } : {});
+  const sessionsMap = new Map<string, { sessionGroupRole?: "orchestrator" | "observer"; auto_resume?: unknown }>();
+  sessionsMap.set("s1", {
+    ...(sessionGroupRole !== undefined ? { sessionGroupRole } : {}),
+    ...(autoResume ? { auto_resume: autoResume } : {}),
+  });
 
   mockStoreState = {
     connectionStatus: connMap,
@@ -237,6 +244,23 @@ afterEach(() => {
 });
 
 describe("ChatView", () => {
+  // Usage-limit auto-resume banner: mounted only while the server publishes
+  // a pending resume on session state; "Отменить" calls the cancel API.
+  it("shows the auto-resume banner when a resume is scheduled and cancels it", () => {
+    const resetAt = new Date(2026, 9, 16, 15, 0).getTime();
+    const fireAt = new Date(2026, 9, 16, 15, 1).getTime();
+    setupStore({ autoResume: { resetAt, fireAt, resetSource: "rate_limit_event" } });
+    render(<ChatView sessionId="s1" />);
+    expect(screen.getByTestId("auto-resume-banner").textContent).toContain("автопродолжение в 15:01");
+    fireEvent.click(screen.getByRole("button", { name: "Отменить" }));
+    expect(mockCancelAutoResume).toHaveBeenCalledWith("s1");
+  });
+
+  it("does not show the auto-resume banner without a scheduled resume", () => {
+    render(<ChatView sessionId="s1" />);
+    expect(screen.queryByTestId("auto-resume-banner")).toBeNull();
+  });
+
   // Renders core children (MessageFeed + Composer)
   it("renders MessageFeed and Composer", () => {
     render(<ChatView sessionId="s1" />);

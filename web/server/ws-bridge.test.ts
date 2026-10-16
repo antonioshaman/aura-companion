@@ -3602,6 +3602,46 @@ describe("onUserFrameObserved (Task 11.6)", () => {
     expect(userMessages.length).toBe(3);
   });
 
+  // Usage-limit auto-resume: the continuation prompt is a server injection
+  // (must not count as user activity, or it would cancel itself / advance
+  // auto-proceed) and is tagged in history so the chat renders it as an
+  // automatic resume rather than as the user's own words.
+  it("server:auto-resume injection skips user-frame observers and is tagged origin=auto_resume in history", () => {
+    const cli = makeCliSocket("s-auto-resume-1");
+    const browser = makeBrowserSocket("s-auto-resume-1");
+    bridge.handleCLIOpen(cli, "s-auto-resume-1");
+    bridge.handleBrowserOpen(browser, "s-auto-resume-1");
+
+    const observed: string[] = [];
+    bridge.onUserFrameObserved((sid) => observed.push(sid));
+    bridge.injectUserMessage("s-auto-resume-1", "Лимит сброшен — продолжай", "server:auto-resume");
+
+    expect(observed).toEqual([]);
+    const session = bridge.getSession("s-auto-resume-1")!;
+    const msg = session.messageHistory.find((m) => m.type === "user_message");
+    expect(msg).toMatchObject({ type: "user_message", origin: "auto_resume" });
+    const sent = (browser.send as ReturnType<typeof vi.fn>).mock.calls.map((c: unknown[]) => JSON.parse(c[0] as string));
+    expect(sent.some((m: { type: string; origin?: string }) => m.type === "user_message" && m.origin === "auto_resume")).toBe(true);
+  });
+
+  it("setAutoResumeState stores the banner state on the session and broadcasts session_update; null clears it", () => {
+    const browser = makeBrowserSocket("s-auto-resume-2");
+    bridge.handleBrowserOpen(browser, "s-auto-resume-2");
+    const state = { resetAt: 1_000, fireAt: 2_000, resetSource: "rate_limit_event" as const };
+
+    bridge.setAutoResumeState("s-auto-resume-2", state);
+    expect(bridge.getSession("s-auto-resume-2")!.state.auto_resume).toEqual(state);
+    bridge.setAutoResumeState("s-auto-resume-2", null);
+    expect(bridge.getSession("s-auto-resume-2")!.state.auto_resume).toBeNull();
+
+    const updates = (browser.send as ReturnType<typeof vi.fn>).mock.calls
+      .map((c: unknown[]) => JSON.parse(c[0] as string))
+      .filter((m: { type: string; session?: Record<string, unknown> }) => m.type === "session_update" && m.session && "auto_resume" in m.session);
+    expect(updates.map((u: { session: { auto_resume: unknown } }) => u.session.auto_resume)).toEqual([state, null]);
+    // Unknown session: no throw.
+    expect(() => bridge.setAutoResumeState("nope", state)).not.toThrow();
+  });
+
   it("DOES fire observers when injectUserMessage has no origin (legacy / browser-equivalent path)", () => {
     const cli = makeCliSocket("s-uf-server-2");
     const browser = makeBrowserSocket("s-uf-server-2");

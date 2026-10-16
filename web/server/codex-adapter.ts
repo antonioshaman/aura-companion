@@ -25,6 +25,7 @@ import type { RecorderManager, RecordingOrigin } from "./recorder.js";
 import { reportProtocolDrift } from "./protocol-monitor.js";
 import { log } from "./logger.js";
 import { companionBus } from "./event-bus.js";
+import { resolveCodexUsageLimit } from "./usage-limit-parse.js";
 
 // ─── Codex JSON-RPC Types ─────────────────────────────────────────────────────
 
@@ -556,6 +557,8 @@ export class CodexAdapter implements IBackendAdapter {
     timeout: ReturnType<typeof setTimeout>;
   }>(); // request_id -> pending dynamic tool call metadata
 
+  /** Dedup key (turn id) of the last `session:usage-limit` emit. */
+  private usageLimitEmittedKey: string | null = null;
   // Codex account rate limits (fetched after init, updated via notification)
   private _rateLimits: {
     primary: { usedPercent: number; windowDurationMins: number; resetsAt: number } | null;
@@ -2052,6 +2055,38 @@ export class CodexAdapter implements IBackendAdapter {
 
     console.error(`[codex-adapter] Codex error notification: ${message}`);
     this.emit({ type: "error", message });
+    if (!willRetry) {
+      this.maybeEmitUsageLimit(baseMessage, error?.codexErrorInfo, typeof params.turnId === "string" ? params.turnId : null);
+    }
+  }
+
+  /**
+   * Auto-resume detection: a terminal Codex error that is a usage limit
+   * (`codexErrorInfo: "usageLimitExceeded"`, "You've hit your usage limit…",
+   * legacy `usage_limit_reached`) → `session:usage-limit` with the reset from
+   * the latest `account/rateLimits` snapshot (preferred), the error body, or
+   * the "Try again at …" text. The v2 `error` notification and the failed
+   * `turn/completed` both describe the same failure — emitted once per turn.
+   */
+  private maybeEmitUsageLimit(message: string, codexErrorInfo: unknown, turnId: string | null): void {
+    const resolved = resolveCodexUsageLimit({
+      message,
+      codexErrorInfo,
+      rateLimits: this._rateLimits,
+      now: Date.now(),
+    });
+    if (!resolved) return;
+    const key = turnId ?? `reset:${resolved.resetAt}`;
+    if (this.usageLimitEmittedKey === key) return;
+    this.usageLimitEmittedKey = key;
+    companionBus.emit("session:usage-limit", {
+      sessionId: this.sessionId,
+      backend: "codex",
+      model: this.options.model || null,
+      resetAt: resolved.resetAt,
+      resetSource: resolved.resetSource,
+      limitType: resolved.limitType,
+    });
   }
 
   // ── Incoming request handlers (approval requests) ───────────────────────
@@ -2949,8 +2984,11 @@ export class CodexAdapter implements IBackendAdapter {
   }
 
   private handleTurnCompleted(params: Record<string, unknown>): void {
-    const turn = params.turn as { id: string; status: string; error?: { message: string } } | undefined;
+    const turn = params.turn as { id: string; status: string; error?: { message: string; codexErrorInfo?: unknown } } | undefined;
     const completedTurnId = typeof turn?.id === "string" ? turn.id : null;
+    if (turn && turn.status !== "completed" && turn.error && typeof turn.error.message === "string") {
+      this.maybeEmitUsageLimit(turn.error.message, turn.error.codexErrorInfo, completedTurnId);
+    }
 
     // Synthesize a CLIResultMessage-like structure
     const result: CLIResultMessage = {

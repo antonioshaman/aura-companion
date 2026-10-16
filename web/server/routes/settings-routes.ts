@@ -7,6 +7,7 @@ import { linearCache } from "../linear-cache.js";
 import { listConnections } from "../linear-connections.js";
 import { hasContainerCodexAuth } from "../codex-container-auth.js";
 import { COMPANION_HOME } from "../paths.js";
+import { companionBus } from "../event-bus.js";
 import { getAnthropicModels, readAnthropicCacheFileMeta } from "../anthropic-models-cache.js";
 
 /** Path to the Codex CLI's own model cache — mirrors routes.ts:/backends/:id/models. */
@@ -42,6 +43,7 @@ export function registerSettingsRoutes(api: Hono): void {
       telemetryEnabled: settings.telemetryEnabled,
       defaultSessionMode: settings.defaultSessionMode,
       kbAutoPrime: settings.kbAutoPrime,
+      autoResumeAfterLimit: settings.autoResumeAfterLimit,
     });
   });
 
@@ -125,6 +127,9 @@ export function registerSettingsRoutes(api: Hono): void {
     if (body.kbAutoPrime !== undefined && typeof body.kbAutoPrime !== "boolean") {
       return c.json({ error: "kbAutoPrime must be a boolean" }, 400);
     }
+    if (body.autoResumeAfterLimit !== undefined && typeof body.autoResumeAfterLimit !== "boolean") {
+      return c.json({ error: "autoResumeAfterLimit must be a boolean" }, 400);
+    }
     const hasAnyField = body.anthropicApiKey !== undefined || body.anthropicModel !== undefined
       || body.claudeCodeOAuthToken !== undefined || body.openaiApiKey !== undefined
       || body.onboardingCompleted !== undefined
@@ -141,7 +146,8 @@ export function registerSettingsRoutes(api: Hono): void {
       || body.dockerAutoUpdate !== undefined
       || body.telemetryEnabled !== undefined
       || body.defaultSessionMode !== undefined
-      || body.kbAutoPrime !== undefined;
+      || body.kbAutoPrime !== undefined
+      || body.autoResumeAfterLimit !== undefined;
     if (!hasAnyField) {
       return c.json({ error: "At least one settings field is required" }, 400);
     }
@@ -247,7 +253,16 @@ export function registerSettingsRoutes(api: Hono): void {
         typeof body.kbAutoPrime === "boolean"
           ? body.kbAutoPrime
           : undefined,
+      autoResumeAfterLimit:
+        typeof body.autoResumeAfterLimit === "boolean"
+          ? body.autoResumeAfterLimit
+          : undefined,
     });
+    if (typeof body.autoResumeAfterLimit === "boolean") {
+      // Lets the orchestrator drop pending auto-resumes the moment the user
+      // switches the feature off (otherwise banners linger until fire time).
+      companionBus.emit("settings:auto-resume-changed", { enabled: settings.autoResumeAfterLimit });
+    }
 
     const connectionsAfterUpdate = listConnections();
     return c.json({
@@ -274,6 +289,7 @@ export function registerSettingsRoutes(api: Hono): void {
       telemetryEnabled: settings.telemetryEnabled,
       defaultSessionMode: settings.defaultSessionMode,
       kbAutoPrime: settings.kbAutoPrime,
+      autoResumeAfterLimit: settings.autoResumeAfterLimit,
     });
   });
 

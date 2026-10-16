@@ -27,6 +27,8 @@ import { generateSessionTitle } from "./auto-namer.js";
 import { companionBus } from "./event-bus.js";
 import { metricsCollector } from "./metrics-collector.js";
 import { log } from "./logger.js";
+import { AutoResumeScheduler, type AutoResumeCancelReason, type AutoResumeSchedule } from "./auto-resume-scheduler.js";
+import { createAutoResumeExecutor } from "./auto-resume-executor.js";
 import type { SessionGroupCoordinator } from "./session-group-coordinator.js";
 import type { IdleTimerManager } from "./idle-timer-manager.js";
 import { CouncilAutoProceedController, type IgnoreRestoreGapResult, type ResolveStopResult } from "./council-auto-proceed-controller.js";
@@ -102,6 +104,12 @@ export interface SessionOrchestratorDeps {
    * ladder.
    */
   idleTimerManager?: IdleTimerManager;
+  /**
+   * Usage-limit auto-resume (see `auto-resume-scheduler.ts`). Production
+   * passes the persistence path (`~/.companion/auto-resume.json`); absent →
+   * the feature is not wired (tests that don't exercise it).
+   */
+  autoResume?: { filePath: string };
 }
 
 export interface CreateSessionRequest {
@@ -270,6 +278,10 @@ export class SessionOrchestrator {
   // Idempotency guard for initialize()
   private _initialized = false;
 
+  /** Usage-limit auto-resume scheduler; null when not configured. */
+  private autoResume: AutoResumeScheduler | null = null;
+  private readonly autoResumeConfig: { filePath: string } | undefined;
+
   // Council Mode — per-group watcher state. Each entry owns an
   // AbortController for the checkpoint + review watchers and the most
   // recent checkpoint payload (used to ground observer findings against
@@ -395,6 +407,7 @@ export class SessionOrchestrator {
     this.worktreeTracker = deps.worktreeTracker;
     this.prPoller = deps.prPoller;
     this.agentExecutor = deps.agentExecutor;
+    this.autoResumeConfig = deps.autoResume;
     this.autoProceed = new CouncilAutoProceedController({
       manager: deps.idleTimerManager,
       groupMeta: this.councilGroupMeta,
@@ -508,6 +521,9 @@ export class SessionOrchestrator {
         this.wsBridge.onUserFrameObserved((sessionId) => {
           cb(sessionId);
           this.resumeOnUserMessage(sessionId);
+          // The user took over — a pending usage-limit auto-resume would
+          // inject a stale "continue" on top of their own message.
+          this.autoResume?.cancel(sessionId, "user_message");
         }),
       onSessionExited: (cb) => companionBus.on("session:exited", ({ sessionId }) => cb(sessionId)),
       onOrchestratorTurnDone: (cb) =>
@@ -782,8 +798,99 @@ export class SessionOrchestrator {
     // the same in-memory state.
     this.autoProceed.rehydrateTraces();
 
+    // Usage-limit auto-resume: re-arm persisted schedules (after council
+    // reconcile so group roles resolve) — overdue ones fire after a grace
+    // that outlasts the reconnection watchdog below.
+    this.wireAutoResume();
+
     // Reconnection watchdog for stale sessions after server restart
     this.recovery.startReconnectionWatchdog();
+  }
+
+  // ── Usage-limit auto-resume ────────────────────────────────────────────────
+
+  private wireAutoResume(): void {
+    const cfg = this.autoResumeConfig;
+    if (!cfg || this.autoResume) return;
+    const resume = createAutoResumeExecutor({
+      getSession: (id) => this.launcher.getSession(id),
+      isAlive: (id) => this.launcher.isAlive(id),
+      relaunch: (id) => this.relaunchSession(id),
+      findGroup: (id) => {
+        const group = this.coordinator?.findBySessionId(id);
+        return group
+          ? {
+            sessionGroupId: group.sessionGroupId,
+            orchestratorSessionId: group.primary.sessionId,
+            observerSessionId: group.observer.sessionId,
+          }
+          : null;
+      },
+      inject: (id, content) => this.wsBridge.injectUserMessage(id, content, "server:auto-resume"),
+      wakeObserver: (sessionGroupId) => {
+        this.drainPendingObserverWake(sessionGroupId);
+        this.scanForMissedObserverWakes("failsafe");
+      },
+    });
+    this.autoResume = new AutoResumeScheduler({
+      filePath: cfg.filePath,
+      isEnabled: () => getSettings().autoResumeAfterLimit !== false,
+      isSessionResumable: (id) => {
+        const info = this.launcher.getSession(id);
+        return !!info && !info.archived;
+      },
+      resume,
+      publish: (id, state) => this.wsBridge.setAutoResumeState(id, state),
+    });
+    companionBus.on("session:usage-limit", (event) => {
+      this.handleUsageLimit(event);
+    });
+    companionBus.on("settings:auto-resume-changed", ({ enabled }) => {
+      if (!enabled) this.autoResume?.cancelAll("disabled");
+    });
+    this.autoResume.restore();
+    // Banners persisted on session state whose schedule no longer exists
+    // (fired/cancelled while the server was down, file lost) are stale.
+    for (const state of this.wsBridge.getAllSessions()) {
+      if (state.auto_resume && !this.autoResume.get(state.session_id)) {
+        this.wsBridge.setAutoResumeState(state.session_id, null);
+      }
+    }
+  }
+
+  /** `session:usage-limit` → schedule the one-shot auto-resume. */
+  private handleUsageLimit(event: {
+    sessionId: string;
+    backend: "claude" | "codex";
+    model: string | null;
+    resetAt: number;
+    resetSource: AutoResumeSchedule["resetSource"];
+    limitType: string | null;
+  }): void {
+    if (!this.autoResume) return;
+    const info = this.launcher.getSession(event.sessionId);
+    if (!info || info.archived) return;
+    const group = this.coordinator?.findBySessionId(event.sessionId);
+    this.autoResume.schedule({
+      sessionId: event.sessionId,
+      backend: event.backend,
+      model: info.model || event.model || null,
+      resetAt: event.resetAt,
+      resetSource: event.resetSource,
+      limitType: event.limitType,
+      role: group ? (group.observer.sessionId === event.sessionId ? "observer" : "orchestrator") : "solo",
+      sessionGroupId: group?.sessionGroupId ?? null,
+    });
+  }
+
+  /** Pending auto-resume for a session (REST + tests). */
+  getAutoResume(sessionId: string): AutoResumeSchedule | undefined {
+    return this.autoResume?.get(sessionId);
+  }
+
+  /** Cancel a pending auto-resume (the banner's "Отменить", stop/archive/delete). */
+  cancelAutoResume(sessionId: string, reason: AutoResumeCancelReason): boolean {
+    return this.autoResume?.cancel(sessionId, reason) ?? false;
   }
 
   /**
@@ -1443,6 +1550,7 @@ export class SessionOrchestrator {
     const ids = this.stopScope(sessionId);
     const group = this.coordinator?.findBySessionId(sessionId);
     for (const id of ids) {
+      this.autoResume?.cancel(id, "user_stop");
       this.intentionalKills.add(id);
       this.recovery.markStoppedByUser(id);
       this.recovery.cancelKeepaliveTimer(id);
@@ -1628,6 +1736,13 @@ export class SessionOrchestrator {
   }
 
   async archiveSession(sessionId: string, options?: ArchiveSessionOptions): Promise<ArchiveSessionResult> {
+    // An archived session (and its council partner) must never be resumed.
+    this.autoResume?.cancel(sessionId, "archived");
+    const archivedGroup = this.coordinator?.findBySessionId(sessionId);
+    if (archivedGroup) {
+      this.autoResume?.cancel(archivedGroup.primary.sessionId, "archived");
+      this.autoResume?.cancel(archivedGroup.observer.sessionId, "archived");
+    }
     // EC-2: when the clicked session is part of an active council group,
     // route the kill through `coordinator.archiveGroup` so BOTH halves'
     // ids land in `intentionalKills` BEFORE either `launcher.kill` runs
@@ -1723,6 +1838,7 @@ export class SessionOrchestrator {
   // ── Delete ─────────────────────────────────────────────────────────────────
 
   async deleteSession(sessionId: string): Promise<DeleteSessionResult> {
+    this.autoResume?.cancel(sessionId, "deleted");
     this.intentionalKills.add(sessionId);
     this.recovery.cancelKeepaliveTimer(sessionId);
     this.wsBridge.cancelDisconnectTimer(sessionId);
@@ -1881,6 +1997,8 @@ export class SessionOrchestrator {
     // don't leak a live interval across cases).
     this.observerScheduler.stopFailsafe();
     this.recovery.stopDriftDetector();
+    // Timers only — persisted schedules are re-armed on the next boot.
+    this.autoResume?.dispose();
   }
 
   // ── Private: Session recovery delegates (P4/C1d) ───────────────────────────

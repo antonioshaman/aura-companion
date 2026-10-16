@@ -69,6 +69,30 @@ describe("SessionDefaultsSettings", () => {
     expect(props.onKbAutoPrimeChange).toHaveBeenLastCalledWith(false);
   });
 
+  // Usage-limit auto-resume switch: shown only when wired, reflects the
+  // value, and toggles via the controlled callback.
+  it("renders the 'Автопродолжение после лимита' switch on by default and toggles it", () => {
+    const onAutoResumeAfterLimitChange = vi.fn();
+    const { rerender, props } = setup({ autoResumeAfterLimit: true, onAutoResumeAfterLimitChange });
+    const sw = screen.getByRole("switch", { name: "Автопродолжение после лимита" });
+    expect(sw).toHaveAttribute("aria-checked", "true");
+    fireEvent.click(sw);
+    expect(onAutoResumeAfterLimitChange).toHaveBeenCalledWith(false);
+    rerender(<SessionDefaultsSettings {...props} autoResumeAfterLimit={false} onAutoResumeAfterLimitChange={onAutoResumeAfterLimitChange} />);
+    fireEvent.click(screen.getByRole("switch", { name: "Автопродолжение после лимита" }));
+    expect(onAutoResumeAfterLimitChange).toHaveBeenLastCalledWith(true);
+  });
+
+  it("hides the auto-resume switch when the callback is not wired", () => {
+    setup();
+    expect(screen.queryByRole("switch", { name: "Автопродолжение после лимита" })).toBeNull();
+  });
+
+  it("passes accessibility scan (auto-resume switch shown)", async () => {
+    const { container } = setup({ autoResumeAfterLimit: true, onAutoResumeAfterLimitChange: vi.fn() });
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
   it("disables all controls while loading", () => {
     // `disabled` must stop both inputs so a click during load can't race
     // the initial settings fetch.

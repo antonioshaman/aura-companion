@@ -1318,6 +1318,7 @@ function handleParsedMessage(
         role: "user",
         content: data.content,
         timestamp: data.timestamp || Date.now(),
+        ...(data.origin === "auto_resume" ? { origin: "auto_resume" as const } : {}),
       });
       store.clearPromptSuggestions(sessionId);
       break;
@@ -1518,6 +1519,7 @@ function handleParsedMessage(
             role: "user",
             content: histMsg.content,
             timestamp: histMsg.timestamp,
+            ...(histMsg.origin === "auto_resume" ? { origin: "auto_resume" as const } : {}),
           });
         } else if (histMsg.type === "assistant") {
           const msg = histMsg.message;

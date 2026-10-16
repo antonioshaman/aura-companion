@@ -68,6 +68,7 @@ beforeEach(() => {
     telemetryEnabled: false,
     defaultSessionMode: "solo" as const,
     kbAutoPrime: false,
+    autoResumeAfterLimit: true,
     updatedAt: 0,
   });
 });
@@ -219,6 +220,7 @@ describe("linear-connections", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 0,
     });
     // Need to reset so migration runs with updated mock
@@ -263,6 +265,7 @@ describe("linear-connections", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 0,
     });
     _resetForTest(join(tempDir, "linear-connections-migrate.json"));
@@ -326,6 +329,7 @@ describe("linear-connections", () => {
       telemetryEnabled: false,
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
+      autoResumeAfterLimit: true,
       updatedAt: 0,
     });
 

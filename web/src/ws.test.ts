@@ -2276,6 +2276,22 @@ describe("handleMessage: pendingCodexModelSwitch lifecycle", () => {
 // handleMessage: message_history
 // ===========================================================================
 describe("handleMessage: message_history", () => {
+  // Usage-limit auto-resume: the server tags its continuation prompt with
+  // origin "auto_resume" — both the live frame and the history replay must
+  // carry it to the ChatMessage so the bubble shows the automatic caption.
+  it("carries origin=auto_resume from live and replayed user_message frames", () => {
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+    fireMessage({
+      type: "message_history",
+      messages: [{ type: "user_message", content: "Лимит сброшен", timestamp: 1000, origin: "auto_resume" }],
+    });
+    fireMessage({ type: "user_message", content: "again", timestamp: 2000, id: "u-live", origin: "auto_resume" });
+    fireMessage({ type: "user_message", content: "typed", timestamp: 3000, id: "u-typed" });
+    const msgs = useStore.getState().messages.get("s1")!;
+    expect(msgs.map((m) => m.origin)).toEqual(["auto_resume", "auto_resume", undefined]);
+  });
+
   it("reconstructs chat messages from history", () => {
     wsModule.connectSession("s1");
     fireMessage({ type: "session_init", session: makeSession("s1") });
