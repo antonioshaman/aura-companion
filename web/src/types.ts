@@ -62,7 +62,8 @@ export interface ChatMessage {
   /**
    * Rendering hint for system messages built from an errored result frame.
    * "error" — a real execution error (red). "resume-interrupted" — the
-   * bookkeeping frame `--resume` emits for a turn a restart cut off; shown as
+   * bookkeeping frame closing a turn cut off by a restart (`--resume`) or a
+   * user Stop mid-tool-call (indistinguishable from the frame); shown as
    * a muted, collapsed note with `content` as the expandable diagnostic
    * (see `utils/resume-interrupted.ts`). Absent → the plain muted divider.
    */
