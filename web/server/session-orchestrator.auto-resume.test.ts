@@ -370,6 +370,49 @@ describe("SessionOrchestrator — usage-limit auto-resume", () => {
     h.orchestrator.shutdown();
   });
 
+  // Council STOP: user presses Stop while the resume's relaunch is in flight
+  // → no "продолжай" is injected into the stopped session.
+  it("a user Stop during the resume's relaunch aborts the injection", async () => {
+    alive.delete("solo");
+    const h = boot();
+    let stopDuringRelaunch: Promise<unknown> | null = null;
+    h.launcher.relaunch.mockImplementation(async (id: string) => {
+      alive.add(id);
+      stopDuringRelaunch = h.orchestrator.killSession(id);
+      return { ok: true };
+    });
+    companionBus.emit("session:usage-limit", limitEvent("solo", NOW + 60_000));
+    await vi.advanceTimersByTimeAsync(60_000 + 121_000);
+    await stopDuringRelaunch;
+    expect(h.launcher.relaunch).toHaveBeenCalled();
+    expect(h.wsBridge.injectUserMessage).not.toHaveBeenCalled();
+    h.orchestrator.shutdown();
+  });
+
+  // Council WARN1: a PAUSED banner restored on boot must not be wiped by the
+  // stale-banner sweep (paused records are not in the schedule map).
+  it("restart keeps the restored paused banner", async () => {
+    const first = boot();
+    const fallback = () => ({ ...limitEvent("solo", Date.now() + 5 * 3_600_000), resetSource: "fallback" as const, limitType: null });
+    companionBus.emit("session:usage-limit", fallback());
+    for (let i = 0; i < 2; i++) {
+      await vi.advanceTimersByTimeAsync(5 * 3_600_000 + 121_000);
+      companionBus.emit("session:usage-limit", fallback());
+    }
+    first.orchestrator.shutdown();
+    companionBus.clear();
+
+    const h = makeDeps(sessions, alive, filePath);
+    h.wsBridge.getAllSessions.mockReturnValue([
+      { session_id: "solo", auto_resume: { resetAt: 1, fireAt: 1, resetSource: "fallback", paused: true } },
+    ]);
+    const second = new SessionOrchestrator(h.deps);
+    second.initialize();
+    expect(h.wsBridge.setAutoResumeState).toHaveBeenCalledWith("solo", expect.objectContaining({ paused: true }));
+    expect(h.wsBridge.setAutoResumeState).not.toHaveBeenCalledWith("solo", null);
+    second.shutdown();
+  });
+
   it("council pair: the orchestrator is resumed and a dead observer is relaunched too", async () => {
     alive.delete("obs");
     const { orchestrator, launcher, wsBridge } = boot();

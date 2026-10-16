@@ -227,6 +227,19 @@ describe("zoneless reset text (server-zone guess)", () => {
     expect(out?.resetSource).toBe("fallback");
   });
 
+  // Council WARN2: a zoneless time already past TODAY must not be silently
+  // rolled to tomorrow (23h wait on a likely zone mismatch) → safe fallback.
+  it("zoneless time earlier today ('resets 3pm' at 16:00) → safe fallback, not tomorrow", () => {
+    const at16 = new Date(2026, 9, 16, 16, 0).getTime();
+    const out = resolveClaudeUsageLimit({ text: "You've hit your session limit · resets 3pm", apiErrorStatus: 429, lastRejected: null, now: at16 });
+    expect(out).toEqual({ resetAt: at16 + NO_ZONE_SAFE_FALLBACK_MS, resetSource: "fallback", limitType: null });
+  });
+
+  it("an EXPLICIT zone still rolls to tomorrow ('resets 1:40am (UTC)' late evening)", () => {
+    const out = resolveClaudeUsageLimit({ text: "You've hit your session limit · resets 1:40am (UTC)", apiErrorStatus: 429, lastRejected: null, now: 1792021068884 });
+    expect(out).toEqual({ resetAt: 1792028400 * 1000, resetSource: "text", limitType: null });
+  });
+
   it("Codex 'Try again at 3:45 PM.' without snapshot → text_no_zone in server zone", () => {
     const out = resolveCodexUsageLimit({ message: "You've hit your usage limit. Try again at 3:45 PM.", codexErrorInfo: "usageLimitExceeded", rateLimits: null, now: localNow });
     expect(out).toEqual({ resetAt: new Date(2026, 9, 16, 15, 45).getTime(), resetSource: "text_no_zone", limitType: null });

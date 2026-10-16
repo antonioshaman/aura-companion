@@ -4554,8 +4554,11 @@ describe("CodexAdapter with ICodexTransport", () => {
     const off = companionBus.on("session:usage-limit", (e) => {
       events.push(e as unknown as Record<string, unknown>);
     });
-    const target = new Date(Date.now() + 2 * 3_600_000);
-    target.setSeconds(0, 0);
+    // Pin the clock to local 10:00 (Date only — real timers keep the
+    // adapter's async plumbing working) so +2h never crosses midnight.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(2026, 9, 16, 10, 0));
+    const target = new Date(2026, 9, 16, 12, 0);
     const h12 = target.getHours() % 12 === 0 ? 12 : target.getHours() % 12;
     const clock = `${h12}:${String(target.getMinutes()).padStart(2, "0")} ${target.getHours() < 12 ? "AM" : "PM"}`;
     mock.pushNotification("error", {
@@ -4567,6 +4570,7 @@ describe("CodexAdapter with ICodexTransport", () => {
     await new Promise((r) => setTimeout(r, 20));
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ resetAt: target.getTime(), resetSource: "text_no_zone" });
+    vi.useRealTimers();
     off();
     errorSpy.mockRestore();
   });

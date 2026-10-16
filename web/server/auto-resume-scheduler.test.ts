@@ -344,4 +344,42 @@ describe("AutoResumeScheduler", () => {
       expect(restarted.isPaused("s1")).toBe(true);
     });
   });
+
+  // Council STOP: fire() deletes the schedule before resume runs; a cancel
+  // arriving while resume is in flight must still reach it (abort signal)
+  // and report that something was cancelled.
+  it("cancel during an in-flight resume aborts it via the signal", async () => {
+    let seen: { aborted: boolean } | null = null;
+    let release!: () => void;
+    resume.mockImplementation(async (_s: unknown, signal: { aborted: boolean }) => {
+      seen = signal;
+      await new Promise<void>((r) => {
+        release = r;
+      });
+      return { ok: !signal.aborted, outcome: signal.aborted ? "aborted" : "injected" };
+    });
+    const s = make();
+    s.schedule(hit());
+    await vi.advanceTimersByTimeAsync(3_690_000);
+    expect(seen).not.toBeNull();
+    expect(seen!.aborted).toBe(false);
+    expect(s.cancel("s1", "user_stop")).toBe(true);
+    expect(seen!.aborted).toBe(true);
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+  });
+
+  it("cancelAll (setting switched off) aborts an in-flight resume", async () => {
+    let seen: { aborted: boolean } | null = null;
+    resume.mockImplementation(async (_s: unknown, signal: { aborted: boolean }) => {
+      seen = signal;
+      await new Promise(() => {}); // never settles
+      return { ok: true, outcome: "injected" };
+    });
+    const s = make();
+    s.schedule(hit());
+    await vi.advanceTimersByTimeAsync(3_690_000);
+    s.cancelAll("disabled");
+    expect(seen!.aborted).toBe(true);
+  });
 });

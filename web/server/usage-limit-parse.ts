@@ -23,8 +23,9 @@
  * Zoneless text ("resets 3pm", Codex "Try again at 3:45 PM.") is read in the
  * SERVER zone — correct for Codex (it formats in its own local zone, same
  * host) and a guess for Claude. Such resets are tagged `text_no_zone` so the
- * guess is visible in logs, and a zoneless time that is already past or less
- * than {@link NO_ZONE_MIN_LEAD_MS} away is not trusted (a zone mismatch is
+ * guess is visible in logs, and a zoneless time that is already past today
+ * (checked BEFORE the roll to tomorrow) or less than
+ * {@link NO_ZONE_MIN_LEAD_MS} away is not trusted (a zone mismatch is
  * the likely cause) → `now + NO_ZONE_SAFE_FALLBACK_MS` with source `fallback`.
  */
 
@@ -128,6 +129,8 @@ interface ParsedReset {
   at: number;
   /** False when the time was read in the fallback zone (no / unknown zone label). */
   zoneExplicit: boolean;
+  /** True when the wall time was already past today and was moved to a later day/year. */
+  rolled: boolean;
 }
 
 function parseResetDetailed(text: string, now: number, defaultTimeZone?: string): ParsedReset | null {
@@ -144,7 +147,7 @@ function parseResetDetailed(text: string, now: number, defaultTimeZone?: string)
       const unit = UNIT_MS[mm[2].toLowerCase()];
       if (unit) total += Number(mm[1]) * unit;
     }
-    if (total > 0) return { at: now + total, zoneExplicit: true };
+    if (total > 0) return { at: now + total, zoneExplicit: true, rolled: false };
   }
 
   const re = new RegExp(
@@ -175,18 +178,22 @@ function parseResetDetailed(text: string, now: number, defaultTimeZone?: string)
     const day = Number(dayStr);
     let year = yearStr ? Number(yearStr) : today.y;
     let at = zonedToEpoch(year, month, day, hour, minute, tz);
+    let rolled = false;
     if (!yearStr && at < now - 86_400_000) {
       year += 1;
       at = zonedToEpoch(year, month, day, hour, minute, tz);
+      rolled = true;
     }
-    return { at, zoneExplicit };
+    return { at, zoneExplicit, rolled };
   }
 
   let at = zonedToEpoch(today.y, today.m, today.d, hour, minute, tz);
+  let rolled = false;
   if (at < now - 5 * 60_000) {
     at = zonedToEpoch(today.y, today.m, today.d + 1, hour, minute, tz);
+    rolled = true;
   }
-  return { at, zoneExplicit };
+  return { at, zoneExplicit, rolled };
 }
 
 /** Text → resolved reset, applying the zoneless trust rule (see module doc). */
@@ -196,7 +203,9 @@ function resolveFromText(text: string, now: number, defaultTimeZone?: string): R
   if (parsed.zoneExplicit) {
     return parsed.at > now - 5 * 60_000 ? { resetAt: parsed.at, resetSource: "text", limitType: null } : null;
   }
-  if (parsed.at - now < NO_ZONE_MIN_LEAD_MS) {
+  // Zoneless: a time already past today (rolled to tomorrow / next year) or
+  // too close is most likely a zone mismatch — don't wait ~a day on it.
+  if (parsed.rolled || parsed.at - now < NO_ZONE_MIN_LEAD_MS) {
     return { resetAt: now + NO_ZONE_SAFE_FALLBACK_MS, resetSource: "fallback", limitType: null };
   }
   return { resetAt: parsed.at, resetSource: "text_no_zone", limitType: null };

@@ -13,6 +13,11 @@
  *    "continue" user prompt — it is revived if dead and its pending/missed
  *    checkpoint wake is re-dispatched.
  *
+ * Abort: the scheduler deletes the schedule before calling resume, so a
+ * Stop / archive / delete / setting-off that lands mid-resume cannot find it.
+ * It flips the `signal` instead; the executor re-checks it after every await
+ * and right before inject / wake, so a stopped session never gets "продолжай".
+ *
  * The group role is resolved LIVE at fire time (not from the persisted
  * schedule) so a pair re-formed across a restart is handled correctly.
  */
@@ -42,6 +47,10 @@ export interface AutoResumeExecutorDeps {
   userMessagedSince?: (sessionId: string, since: number) => boolean;
 }
 
+export interface AutoResumeSignal {
+  readonly aborted: boolean;
+}
+
 export function createAutoResumeExecutor(deps: AutoResumeExecutorDeps) {
   const usable = (id: string): boolean => {
     const info = deps.getSession(id);
@@ -55,13 +64,17 @@ export function createAutoResumeExecutor(deps: AutoResumeExecutorDeps) {
     return { ok: result.ok, relaunched: result.ok, error: result.error };
   };
 
-  return async function resume(schedule: AutoResumeSchedule): Promise<AutoResumeOutcome> {
+  return async function resume(schedule: AutoResumeSchedule, signal: AutoResumeSignal = { aborted: false }): Promise<AutoResumeOutcome> {
     const id = schedule.sessionId;
+    const aborted = (extra: Partial<AutoResumeOutcome> = {}): AutoResumeOutcome => ({ ok: false, outcome: "aborted", ...extra });
+    if (signal.aborted) return aborted();
     if (!usable(id)) return { ok: false, outcome: "session_gone" };
 
     const group = deps.findGroup(id);
     const self = await ensureAlive(id);
+    if (signal.aborted) return aborted({ relaunched: self.relaunched });
     if (!self.ok) return { ok: false, outcome: "relaunch_failed", error: self.error, relaunched: false };
+    if (!usable(id)) return { ok: false, outcome: "session_gone", relaunched: self.relaunched };
 
     if (group && group.observerSessionId === id) {
       deps.wakeObserver(group.sessionGroupId);
@@ -72,11 +85,13 @@ export function createAutoResumeExecutor(deps: AutoResumeExecutorDeps) {
     if (group && group.observerSessionId !== id && usable(group.observerSessionId)) {
       const partner = await ensureAlive(group.observerSessionId);
       partnerRelaunched = partner.relaunched;
+      if (signal.aborted) return aborted({ relaunched: self.relaunched, partnerRelaunched });
     }
 
     if (deps.userMessagedSince?.(id, schedule.scheduledAt)) {
       return { ok: true, outcome: "user_took_over", relaunched: self.relaunched, partnerRelaunched };
     }
+    if (signal.aborted || !usable(id)) return aborted({ relaunched: self.relaunched, partnerRelaunched });
     deps.inject(id, AUTO_RESUME_PROMPT);
     return { ok: true, outcome: "injected", relaunched: self.relaunched, partnerRelaunched };
   };

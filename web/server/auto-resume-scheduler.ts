@@ -101,7 +101,11 @@ export interface AutoResumeSchedulerDeps {
   isEnabled: () => boolean;
   /** Session exists and is not archived. */
   isSessionResumable: (sessionId: string) => boolean;
-  resume: (schedule: AutoResumeSchedule) => Promise<AutoResumeOutcome>;
+  /**
+   * Run the resume. `signal.aborted` flips when the session is cancelled
+   * while the resume is in flight (the schedule itself is already gone).
+   */
+  resume: (schedule: AutoResumeSchedule, signal: { readonly aborted: boolean }) => Promise<AutoResumeOutcome>;
   publish: (sessionId: string, state: AutoResumePublicState | null) => void;
   now?: () => number;
   random?: () => number;
@@ -143,6 +147,8 @@ export class AutoResumeScheduler {
   private timers = new Map<string, ReturnType<typeof setTimeout>>();
   private attempts = new Map<string, AttemptRecord>();
   private paused = new Map<string, PausedRecord>();
+  /** Resumes currently running (fired, not yet settled) → their abort flag. */
+  private inFlight = new Map<string, { aborted: boolean }>();
   private readonly now: () => number;
   private readonly random: () => number;
   private readonly bootGraceMs: number;
@@ -232,9 +238,19 @@ export class AutoResumeScheduler {
   cancel(sessionId: string, reason: AutoResumeCancelReason): boolean {
     const schedule = this.schedules.get(sessionId) ?? this.paused.get(sessionId);
     const hadAttempts = this.attempts.delete(sessionId);
+    const running = this.inFlight.get(sessionId);
+    if (running && !running.aborted) {
+      running.aborted = true;
+      log.info("auto-resume", "in-flight auto-resume aborted", {
+        event: "usage_limit.auto_resume.cancelled",
+        reason,
+        sessionId,
+        inFlight: true,
+      });
+    }
     if (!schedule) {
       if (hadAttempts) this.persist();
-      return false;
+      return running !== undefined;
     }
     this.clearTimer(sessionId);
     this.schedules.delete(sessionId);
@@ -250,7 +266,7 @@ export class AutoResumeScheduler {
   }
 
   cancelAll(reason: AutoResumeCancelReason): void {
-    for (const id of new Set([...this.schedules.keys(), ...this.paused.keys()])) this.cancel(id, reason);
+    for (const id of new Set([...this.schedules.keys(), ...this.paused.keys(), ...this.inFlight.keys()])) this.cancel(id, reason);
   }
 
   /**
@@ -328,11 +344,15 @@ export class AutoResumeScheduler {
       return;
     }
 
+    const signal = { aborted: false };
+    this.inFlight.set(sessionId, signal);
     let outcome: AutoResumeOutcome;
     try {
-      outcome = await this.deps.resume(schedule);
+      outcome = await this.deps.resume(schedule, signal);
     } catch (err) {
       outcome = { ok: false, outcome: "error", error: err instanceof Error ? err.message : String(err) };
+    } finally {
+      if (this.inFlight.get(sessionId) === signal) this.inFlight.delete(sessionId);
     }
     log.info("auto-resume", "auto-resume fired", {
       event: "usage_limit.auto_resume.fired",

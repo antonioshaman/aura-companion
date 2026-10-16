@@ -883,7 +883,7 @@ export class SessionOrchestrator {
     // Banners persisted on session state whose schedule no longer exists
     // (fired/cancelled while the server was down, file lost) are stale.
     for (const state of this.wsBridge.getAllSessions()) {
-      if (state.auto_resume && !this.autoResume.get(state.session_id)) {
+      if (state.auto_resume && !this.autoResume.get(state.session_id) && !this.autoResume.isPaused(state.session_id)) {
         this.wsBridge.setAutoResumeState(state.session_id, null);
       }
     }

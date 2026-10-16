@@ -129,4 +129,40 @@ describe("createAutoResumeExecutor", () => {
     expect(calls).toEqual(["relaunch:orch"]);
     expect(out).toMatchObject({ ok: true, outcome: "user_took_over" });
   });
+
+  // Council STOP: a Stop/archive/delete/setting-off that lands while the
+  // resume is mid-flight (e.g. during the relaunch await) must abort it — the
+  // scheduler flips the signal; the executor re-checks after every await and
+  // right before inject / wake.
+  it("aborts before injecting when the signal is flipped during the relaunch", async () => {
+    const signal = { aborted: false };
+    const { d, calls } = deps({ alive: { orch: false } });
+    (d.relaunch as ReturnType<typeof vi.fn>).mockImplementation(async (id: string) => {
+      calls.push(`relaunch:${id}`);
+      signal.aborted = true; // user pressed Stop while the CLI was spawning
+      return { ok: true };
+    });
+    const out = await createAutoResumeExecutor(d)(schedule(), signal);
+    expect(calls).toEqual(["relaunch:orch"]);
+    expect(out).toMatchObject({ ok: false, outcome: "aborted" });
+  });
+
+  it("aborts before waking an observer when the signal is flipped", async () => {
+    const signal = { aborted: false };
+    const { d, calls } = deps({ alive: { obs: false }, group: GROUP });
+    (d.relaunch as ReturnType<typeof vi.fn>).mockImplementation(async () => {
+      signal.aborted = true;
+      return { ok: true };
+    });
+    const out = await createAutoResumeExecutor(d)(schedule({ sessionId: "obs", role: "observer" }), signal);
+    expect(calls).not.toContain("wake:grp_1");
+    expect(out.outcome).toBe("aborted");
+  });
+
+  it("an already-aborted signal does nothing at all", async () => {
+    const { d, calls } = deps({ alive: { orch: false } });
+    const out = await createAutoResumeExecutor(d)(schedule(), { aborted: true });
+    expect(calls).toEqual([]);
+    expect(out.outcome).toBe("aborted");
+  });
 });
