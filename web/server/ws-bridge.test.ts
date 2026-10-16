@@ -6217,6 +6217,51 @@ describe("session model sync from the main assistant frame", () => {
     });
   }
 
+  // Review STOP (PR #367): a model_fallback record must not outlive the
+  // fallback. Once the main session CONFIRMS a model other than fallback.to
+  // (user picked another model / switched back), the record is cleared,
+  // persisted and the clear is broadcast, so every device drops the banner.
+  it("clears model_fallback when the confirmed main model moves away from fallback.to", async () => {
+    const cli = makeCliSocket("fb1");
+    bridge.handleCLIOpen(cli, "fb1");
+    const browser = makeBrowserSocket("fb1");
+    bridge.handleBrowserOpen(browser, "fb1");
+    await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "fb1", model: "claude-opus-4-7" }));
+    bridge.recordModelFallback("fb1", { from: "claude-opus-4-8", to: "claude-opus-4-7", reason: "unresponsive" });
+
+    // Still on the fallback model → record stays.
+    await bridge.handleCLIMessage(cli, assistantFrame("fb1", "claude-opus-4-7", null, "f1"));
+    expect(bridge.getSession("fb1")!.state.model_fallback?.to).toBe("claude-opus-4-7");
+    // A subagent on another model is NOT a session model change.
+    await bridge.handleCLIMessage(cli, assistantFrame("fb1", "claude-haiku-4-5", "tool-1", "f2"));
+    expect(bridge.getSession("fb1")!.state.model_fallback).toBeTruthy();
+
+    browser.send.mockClear();
+    await bridge.handleCLIMessage(cli, assistantFrame("fb1", "claude-sonnet-4-6", null, "f3"));
+    expect(bridge.getSession("fb1")!.state.model_fallback).toBeNull();
+    const frames = browser.send.mock.calls.map((c: unknown[]) => JSON.parse(c[0] as string));
+    expect(frames).toContainEqual(expect.objectContaining({ type: "session_update", session: { model_fallback: null } }));
+  });
+
+  it("dismiss_model_fallback clears the record server-side only for the matching event", async () => {
+    // Dismissal used to live only in one browser's localStorage, so another
+    // device brought the banner back. Now it clears the shared state — but a
+    // stale dismiss (older `at`) never clears a NEWER fallback.
+    const browser = makeBrowserSocket("fb2");
+    bridge.handleBrowserOpen(browser, "fb2");
+    bridge.recordModelFallback("fb2", { from: "a", to: "b", reason: "rejected" });
+    const at = bridge.getSession("fb2")!.state.model_fallback!.at;
+
+    await bridge.handleBrowserMessage(browser, JSON.stringify({ type: "dismiss_model_fallback", at: at - 1 }));
+    expect(bridge.getSession("fb2")!.state.model_fallback).toBeTruthy();
+
+    browser.send.mockClear();
+    await bridge.handleBrowserMessage(browser, JSON.stringify({ type: "dismiss_model_fallback", at }));
+    expect(bridge.getSession("fb2")!.state.model_fallback).toBeNull();
+    const frames = browser.send.mock.calls.map((c: unknown[]) => JSON.parse(c[0] as string));
+    expect(frames).toContainEqual(expect.objectContaining({ type: "session_update", session: { model_fallback: null } }));
+  });
+
   it("updates session.state.model to the MAIN assistant frame's model", async () => {
     const cli = makeCliSocket("sm1");
     bridge.handleCLIOpen(cli, "sm1");

@@ -15,8 +15,10 @@
  * wall (the gate re-substitutes, the account re-rejects), so the banner just
  * states the cause and the user picks another model in the selector.
  *
- * Dismissal of a server record is remembered per fallback event (`at`) in
- * localStorage, so it stays hidden after a reload but a NEW fallback shows.
+ * Dismissing a server record clears it server-side (`dismiss_model_fallback`,
+ * all devices) and is also remembered per event (`at`) in localStorage so it
+ * stays hidden even before the server's clear round-trips. The server also
+ * clears the record itself once the session confirms a different model.
  */
 
 import { useCallback, useState } from "react";
@@ -58,10 +60,14 @@ export function ModelFallbackNotice({ sessionId }: { sessionId: string }) {
   const catalog = dynamicModels ?? getModelsForBackend(backendType);
   const [dismissedAt, setDismissedAt] = useState<number | null>(() => readDismissedAt(sessionId));
 
-  const notice = clientNotice
+  // Show whichever event is NEWER: a client notice (firedAt) or the server
+  // record (at). An older in-tab notice must not hide a fresh server fallback.
+  const liveServer = serverFallback && serverFallback.at !== dismissedAt ? serverFallback : null;
+  const useClient = clientNotice && (!liveServer || clientNotice.firedAt >= liveServer.at);
+  const notice = useClient
     ? { from: clientNotice.requested, to: clientNotice.applied, reason: clientNotice.reason, detail: undefined as string | undefined }
-    : serverFallback && serverFallback.at !== dismissedAt
-      ? { from: serverFallback.from, to: serverFallback.to, reason: serverFallback.reason, detail: serverFallback.detail }
+    : liveServer
+      ? { from: liveServer.from, to: liveServer.to, reason: liveServer.reason, detail: liveServer.detail }
       : null;
 
   const label = useCallback(
@@ -78,6 +84,8 @@ export function ModelFallbackNotice({ sessionId }: { sessionId: string }) {
         /* storage unavailable — dismissal lasts for this mount only */
       }
       setDismissedAt(serverFallback.at);
+      // Clear the shared record so other devices/tabs drop the banner too.
+      sendToSession(sessionId, { type: "dismiss_model_fallback", at: serverFallback.at });
     }
   }, [clientNotice, serverFallback, sessionId]);
 

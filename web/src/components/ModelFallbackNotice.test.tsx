@@ -101,14 +101,40 @@ describe("ModelFallbackNotice", () => {
     expect(screen.getByText("went silent")).toBeInTheDocument();
   });
 
-  it("a client notice wins over the server record (most recent, in-tab decision)", () => {
+  it("a NEWER client notice wins over an older server record", () => {
+    setup({
+      clientNotice: { requested: "claude-opus-5", applied: "claude-opus-4-8", reason: "overloaded" },
+      serverFallback: { from: "claude-opus-4-8", to: "claude-opus-4-7", reason: "unresponsive", at: 0 },
+    });
+    render(<ModelFallbackNotice sessionId="s1" />);
+    expect(screen.getByText(/Opus 5 is temporarily overloaded/)).toBeInTheDocument();
+    expect(screen.queryByText(/stopped responding/)).not.toBeInTheDocument();
+  });
+
+  it("a NEWER server fallback wins over an older client notice (review WARN)", () => {
+    // Client notice fired at t=1 (see setup); the server recorded a fresh
+    // fallback at t=100 — the user must see the newest event, not the old one.
     setup({
       clientNotice: { requested: "claude-opus-5", applied: "claude-opus-4-8", reason: "overloaded" },
       serverFallback: { from: "claude-opus-4-8", to: "claude-opus-4-7", reason: "unresponsive", at: 100 },
     });
     render(<ModelFallbackNotice sessionId="s1" />);
-    expect(screen.getByText(/Opus 5 is temporarily overloaded/)).toBeInTheDocument();
-    expect(screen.queryByText(/stopped responding/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Opus 4\.8 stopped responding/)).toBeInTheDocument();
+    expect(screen.queryByText(/temporarily overloaded/)).not.toBeInTheDocument();
+  });
+
+  it("dismissing a server fallback also clears it server-side (all devices)", () => {
+    setup({ serverFallback: { from: "claude-opus-5", to: "claude-opus-4-8", reason: "rejected", at: 100 } });
+    render(<ModelFallbackNotice sessionId="s1" />);
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(mockSendToSession).toHaveBeenCalledWith("s1", { type: "dismiss_model_fallback", at: 100 });
+  });
+
+  it("a cleared (null) server record renders nothing", () => {
+    setup();
+    (mockState.sessions as Map<string, Record<string, unknown>>).get("s1")!.model_fallback = null;
+    const { container } = render(<ModelFallbackNotice sessionId="s1" />);
+    expect(container).toBeEmptyDOMElement();
   });
 
   it("Switch back (Claude) re-runs the optimistic set_model path toward the original model and hides the notice", () => {

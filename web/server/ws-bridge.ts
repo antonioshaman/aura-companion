@@ -39,6 +39,7 @@ import {
   persistSession as persistSessionFn,
   serializeForStore,
   trimArchivedSessionState,
+  clearStaleModelFallback,
 } from "./ws-bridge-persist.js";
 import {
   broadcastToBrowsers as broadcastToBrowsersFn,
@@ -1165,6 +1166,10 @@ export class WsBridge {
           const persistedBaseline = session.launcherModel ?? session.state.model;
           session.state.model = mainModel;
           session.launcherModel = mainModel;
+          if (clearStaleModelFallback(session, mainModel)) {
+            this.persistSession(session);
+            this.broadcastToBrowsers(session, { type: "session_update", session: { model_fallback: null } });
+          }
           if (mainModel !== persistedBaseline && session.state.sessionGroupRole !== "observer") {
             companionBus.emit("session:model-active-changed", {
               sessionId: session.id,
@@ -2322,6 +2327,16 @@ export class WsBridge {
         backend: session.backendType,
       });
       // fall through to existing adapter delivery
+    }
+
+    // -- dismiss_model_fallback: bridge-level, clears the shared record ---
+    if (msg.type === "dismiss_model_fallback") {
+      if (session.state.model_fallback && session.state.model_fallback.at === msg.at) {
+        session.state.model_fallback = null;
+        this.persistSession(session);
+        this.broadcastToBrowsers(session, { type: "session_update", session: { model_fallback: null } });
+      }
+      return;
     }
 
     // -- set_ai_validation: bridge-level, not forwarded to backend --------

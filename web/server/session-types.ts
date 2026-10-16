@@ -334,6 +334,9 @@ export type BrowserOutgoingMessage =
   | { type: "mcp_toggle"; serverName: string; enabled: boolean; client_msg_id?: string }
   | { type: "mcp_reconnect"; serverName: string; client_msg_id?: string }
   | { type: "mcp_set_servers"; servers: Record<string, McpServerConfig>; client_msg_id?: string }
+  // Dismiss the server-recorded model fallback notice for EVERY device. `at`
+  // must match the current record so a stale dismiss never hides a newer one.
+  | { type: "dismiss_model_fallback"; at: number }
   | { type: "set_ai_validation"; aiValidationEnabled?: boolean | null; aiValidationAutoApprove?: boolean | null; aiValidationAutoDeny?: boolean | null; client_msg_id?: string }
   | { type: "end_session"; reason?: string; client_msg_id?: string }
   | { type: "stop_task"; task_id: string; client_msg_id?: string }
@@ -783,7 +786,7 @@ export interface SessionState {
    * fallback model" notice — even after a reload — instead of an ephemeral
    * toast. Absent = the session runs on the model the user picked.
    */
-  model_fallback?: ModelFallbackRecord;
+  model_fallback?: ModelFallbackRecord | null;
 }
 
 /**
