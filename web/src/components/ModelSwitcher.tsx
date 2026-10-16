@@ -3,6 +3,7 @@ import { useStore } from "../store.js";
 import { sendToSession } from "../ws.js";
 import { api } from "../api.js";
 import { getModelsForBackend } from "../utils/backends.js";
+import { CacheRewriteHint } from "./CacheRewriteHint.js";
 import type { ModelOption } from "../utils/backends.js";
 
 interface ModelSwitcherProps {
@@ -504,6 +505,13 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
             );
           })}
         </div>
+        {/* W7(b): a switch rebuilds the prompt cache — say how much, right
+           before the choice. Sibling of the listbox (not an option). */}
+        <CacheRewriteHint
+          sessionId={sessionId}
+          reason="model-switch"
+          className="px-3 py-2 border-t border-cc-separator"
+        />
         {/* PLAN Task 14 / Friedman R3 — discoverability footnote when
            the rendered list IS the static fallback AND the user has no
            API key. Connects the gated capability ("more models") to the

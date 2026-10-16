@@ -4119,6 +4119,121 @@ describe("claudeTransportMode", () => {
   });
 });
 
+// Prompt-cache prefix stability (audit-prompt-caching methodology, W8/CI).
+// Everything Aura puts on the Claude spawn argv — model, permission mode,
+// tool gates and, above all, the `--append-system-prompt` body — lands in the
+// CACHED prompt prefix. Any per-launch volatile byte (a timestamp, the session
+// id, a temp path, a random nonce) would make every spawn/relaunch a full
+// cache miss. These tests render the argv for fixed session configs and fail
+// if (a) it differs between two launches at different wall-clock times and
+// cwds, (b) it contains volatile-looking content, or (c) it drifts from the
+// pinned snapshot. A deliberate change to the appended directive updates the
+// snapshot (`vitest -u`) and is reviewed as a cache-prefix change.
+describe("prompt-cache prefix stability of the claude spawn argv", () => {
+  const ALL_ON = { knowledge: true, observer: true, council: true, autoProceed: true } as const;
+
+  /** Replace prompt bodies with a short content hash so the snapshot stays readable. */
+  async function render(argv: string[]): Promise<string[]> {
+    const { createHash } = await import("node:crypto");
+    return argv.map((a, i) =>
+      argv[i - 1] === "--append-system-prompt"
+        ? `<prompt sha256:${createHash("sha256").update(a, "utf8").digest("hex").slice(0, 16)} len:${a.length}>`
+        : a,
+    );
+  }
+
+  /** Launch the same config twice — different cwd, different wall-clock — and return both argvs. */
+  function launchTwice(opts: Record<string, unknown>): [string[], string[]] {
+    // Real directories: the observer path resolves (realpath) its cwd.
+    const cwdA = join(tempDir, "project-a");
+    const cwdB = join(tempDir, "project-b");
+    mkdirSync(cwdA, { recursive: true });
+    mkdirSync(cwdB, { recursive: true });
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.parse("2026-01-01T00:00:00Z"));
+      launcher.launch({ cwd: cwdA, ...opts });
+      mockSpawn.mockReturnValueOnce(createMockProc(22346));
+      vi.setSystemTime(Date.parse("2026-10-16T13:37:42Z"));
+      launcher.launch({ cwd: cwdB, ...opts });
+    } finally {
+      vi.useRealTimers();
+    }
+    return [mockSpawn.mock.calls[0][0] as string[], mockSpawn.mock.calls[1][0] as string[]];
+  }
+
+  /** Patterns that must never appear in the cached prefix. */
+  const VOLATILE = [
+    /\b20\d\d-\d\d-\d\dT\d\d:\d\d/, // ISO timestamps
+    /\b1[6-9]\d{11}\b/, // epoch ms
+    /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i, // UUIDs
+    /test-session-id/, // the (mocked) Aura session id
+    /project-[ab]/, // the cwd
+    /launcher-test-/, // the per-run temp root
+  ];
+
+  function assertNoVolatile(argv: string[]): void {
+    for (const a of argv) {
+      for (const re of VOLATILE) expect(a, `volatile ${re} in argv element`).not.toMatch(re);
+    }
+  }
+
+  it("the volatile-content guard actually trips (self-test)", () => {
+    // Guards the guard: an appended prompt with a timestamp must fail.
+    expect(() => assertNoVolatile(["--append-system-prompt", "Now: 2026-10-16T13:37:42Z"])).toThrow();
+  });
+
+  it("solo session (defaults): argv is time/cwd-independent and pinned", async () => {
+    const [a, b] = launchTwice({ model: "claude-opus-4-8", permissionMode: "acceptEdits", layers: ALL_ON });
+    expect(b).toEqual(a);
+    assertNoVolatile(a);
+    expect(await render(a)).toMatchInlineSnapshot(`
+      [
+        "/usr/bin/claude",
+        "--print",
+        "--output-format",
+        "stream-json",
+        "--input-format",
+        "stream-json",
+        "--include-partial-messages",
+        "--verbose",
+        "--model",
+        "claude-opus-4-8",
+        "--permission-mode",
+        "acceptEdits",
+      ]
+    `);
+  });
+
+  it("knowledge layer off + KB auto-prime: the appended directive is static and pinned", async () => {
+    const [a, b] = launchTwice({
+      model: "claude-opus-4-8",
+      permissionMode: "acceptEdits",
+      layers: { ...ALL_ON, knowledge: false },
+      kbAutoPrime: true,
+    });
+    expect(b).toEqual(a);
+    assertNoVolatile(a);
+    expect(await render(a)).toMatchSnapshot();
+  });
+
+  it("KB auto-prime opt-in (all layers on): the auto-prime directive is static and pinned", async () => {
+    const [a, b] = launchTwice({ model: "claude-opus-4-8", permissionMode: "acceptEdits", layers: ALL_ON, kbAutoPrime: true });
+    expect(b).toEqual(a);
+    assertNoVolatile(a);
+    expect(await render(a)).toMatchSnapshot();
+  });
+
+  it("council observer: the bundled observer prompt carries no volatile bytes", async () => {
+    // cwd without .council/ → bundled prompt. The body itself is pinned by its
+    // own sha in observer-prompt tests; here we only require determinism.
+    const [a, b] = launchTwice({ model: "claude-opus-4-8", sessionGroupRole: "observer", sessionGroupId: "grp_prefix" });
+    expect(b).toEqual(a);
+    assertNoVolatile(a);
+    expect(a.filter((x) => x === "--append-system-prompt")).toHaveLength(1);
+  });
+});
+
 // ─── W2: boot resume of sessions alive before a restart ─────────────────────
 // Prod 2026-10-15/16: after `systemctl restart aura-companion`, stdio Claude and
 // host Codex sessions came back `exited` (their pipes / proxy died with the old
