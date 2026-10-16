@@ -52,6 +52,7 @@ describe("settings-manager", () => {
       defaultSessionMode: "solo",
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off", scope: "review-implement" },
       updatedAt: 0,
     });
   });
@@ -66,6 +67,19 @@ describe("settings-manager", () => {
     writeFileSync(settingsPath, JSON.stringify({ autoResumeAfterLimit: "no" }));
     _resetForTest(settingsPath);
     expect(getSettings().autoResumeAfterLimit).toBe(true);
+  });
+
+  // W15 multi-model review: the Council second-opinion default is OFF (cost
+  // opt-in), a valid choice persists, and a garbage persisted value falls
+  // back to the default instead of enabling a reviewer.
+  it("councilSecondReviewer defaults off, persists a choice, and rejects garbage", () => {
+    expect(getSettings().councilSecondReviewer).toEqual({ reviewer: "off", scope: "review-implement" });
+    updateSettings({ councilSecondReviewer: { reviewer: { backend: "claude", model: "sonnet" }, scope: "all" } });
+    _resetForTest(settingsPath);
+    expect(getSettings().councilSecondReviewer).toEqual({ reviewer: { backend: "claude", model: "sonnet" }, scope: "all" });
+    writeFileSync(settingsPath, JSON.stringify({ councilSecondReviewer: { reviewer: { backend: "gemini" }, scope: "x" } }));
+    _resetForTest(settingsPath);
+    expect(getSettings().councilSecondReviewer).toEqual({ reviewer: "off", scope: "review-implement" });
   });
 
   // aura-diet 2026-10: new sessions are solo and the KB is not auto-loaded
@@ -139,6 +153,7 @@ describe("settings-manager", () => {
       defaultSessionMode: "solo",
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off", scope: "review-implement" },
       updatedAt: 123,
     });
   });
@@ -222,6 +237,7 @@ describe("settings-manager", () => {
       defaultSessionMode: "solo",
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off", scope: "review-implement" },
       updatedAt: 0,
     });
   });

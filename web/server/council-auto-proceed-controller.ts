@@ -31,7 +31,9 @@ export interface AutoProceedOnIdleConfig {
  * NOTE by severity.
  */
 export function isBlockingStopFinding(finding: BrowserObserverFinding): boolean {
-  return finding.severity === "STOP" && !finding.weakEvidence && !finding.disputed;
+  // W15: a near-duplicate of the other reviewer's finding is folded into it;
+  // that finding holds (once), the duplicate never does.
+  return finding.severity === "STOP" && !finding.weakEvidence && !finding.disputed && !finding.duplicateOf;
 }
 
 /**
@@ -40,7 +42,7 @@ export function isBlockingStopFinding(finding: BrowserObserverFinding): boolean 
  * verdict was never frozen and no human disputed it.
  */
 function holdsOnRestore(finding: BrowserObserverFinding, unfrozenRawStopIds: ReadonlySet<string>): boolean {
-  return isBlockingStopFinding(finding) || (unfrozenRawStopIds.has(finding.id) && !finding.disputed);
+  return isBlockingStopFinding(finding) || (unfrozenRawStopIds.has(finding.id) && !finding.disputed && !finding.duplicateOf);
 }
 
 /**

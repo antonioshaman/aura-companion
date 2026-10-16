@@ -59,6 +59,7 @@ import { registerLinearConnectionRoutes } from "./routes/linear-connection-route
 import { getConnection, resolveApiKey } from "./linear-connections.js";
 import { registerLinearOAuthConnectionRoutes } from "./routes/linear-oauth-connection-routes.js";
 import { getSettings } from "./settings-manager.js";
+import { parseSecondReviewerSetting, parseSecondReviewScope, type SecondReviewerConfig } from "./second-reviewer-config.js";
 import { getAnthropicModels, type BackendModelInfo } from "./anthropic-models-cache.js";
 import { lookupModel } from "./model-registry.js";
 import { discoverClaudeSessions } from "./claude-session-discovery.js";
@@ -494,6 +495,35 @@ export function createRoutes(
     return { ok: false, error: `Invalid observerModel: ${JSON.stringify(raw)}` };
   }
 
+  /**
+   * W15: council create's optional `secondReviewer` ("off" | "auto" |
+   * {backend, model}) and `secondReviewScope`. Absent → the pair follows the
+   * global Settings default. Malformed → 400 (a silently dropped choice would
+   * run the pair without the second opinion the user asked for).
+   */
+  function parseCreateSecondReviewer(
+    rawReviewer: unknown,
+    rawScope: unknown,
+  ): { ok: true; value?: SecondReviewerConfig } | { ok: false; error: string } {
+    if (rawReviewer === undefined || rawReviewer === null) {
+      if (rawScope !== undefined && rawScope !== null) return { ok: false, error: "secondReviewScope requires secondReviewer" };
+      return { ok: true };
+    }
+    const reviewer = parseSecondReviewerSetting(rawReviewer);
+    if (!reviewer.ok) return { ok: false, error: reviewer.error };
+    const scope = rawScope === undefined || rawScope === null
+      ? { ok: true as const, value: getSettings().councilSecondReviewer.scope }
+      : parseSecondReviewScope(rawScope);
+    if (!scope.ok) return { ok: false, error: scope.error };
+    return { ok: true, value: { reviewer: reviewer.value, scope: scope.value } };
+  }
+
+  /** W15: persist the create-time choice; a failure is logged, the pair stays up. */
+  function applyCreateSecondReviewer(sessionGroupId: string, config: SecondReviewerConfig | undefined): void {
+    if (!config) return;
+    orchestrator.setGroupSecondReviewer(sessionGroupId, config);
+  }
+
   api.post("/sessions/create", async (c) => {
     const rawBody = await c.req.json().catch(() => ({}));
     const norm = normaliseCreateSessionBody(rawBody);
@@ -510,10 +540,21 @@ export function createRoutes(
       if (pairing !== "claude+claude" && pairing !== "claude+codex") {
         return c.json({ error: `Invalid pairing: ${String(body.councilPairing)}` }, 400 as any);
       }
-      const { councilMode: _cm, councilPairing: _cp, observerModel: rawObserverModel, ...rest } = body;
+      const {
+        councilMode: _cm,
+        councilPairing: _cp,
+        observerModel: rawObserverModel,
+        secondReviewer: rawSecondReviewer,
+        secondReviewScope: rawSecondReviewScope,
+        ...rest
+      } = body;
       const observerModel = parseObserverModel(rawObserverModel);
       if (!observerModel.ok) {
         return c.json({ error: observerModel.error }, 400 as any);
+      }
+      const secondReviewer = parseCreateSecondReviewer(rawSecondReviewer, rawSecondReviewScope);
+      if (!secondReviewer.ok) {
+        return c.json({ error: secondReviewer.error }, 400 as any);
       }
       const result = await orchestrator.createCouncilGroup({
         pairing,
@@ -523,6 +564,7 @@ export function createRoutes(
       if (!result.ok) {
         return c.json({ error: result.error }, result.status as any);
       }
+      applyCreateSecondReviewer(result.sessionGroupId, secondReviewer.value);
       return c.json({
         sessionGroupId: result.sessionGroupId,
         primary: result.primary,
@@ -564,10 +606,22 @@ export function createRoutes(
           event: "progress",
           data: JSON.stringify({ step: "launching_cli", label: "Spawning Council pair…", status: "in_progress" }),
         });
-        const { councilMode: _cm, councilPairing: _cp, observerModel: rawObserverModel, ...rest } = body;
+        const {
+          councilMode: _cm,
+          councilPairing: _cp,
+          observerModel: rawObserverModel,
+          secondReviewer: rawSecondReviewer,
+          secondReviewScope: rawSecondReviewScope,
+          ...rest
+        } = body;
         const observerModel = parseObserverModel(rawObserverModel);
         if (!observerModel.ok) {
           await stream.writeSSE({ event: "error", data: JSON.stringify({ error: observerModel.error }) });
+          return;
+        }
+        const secondReviewer = parseCreateSecondReviewer(rawSecondReviewer, rawSecondReviewScope);
+        if (!secondReviewer.ok) {
+          await stream.writeSSE({ event: "error", data: JSON.stringify({ error: secondReviewer.error }) });
           return;
         }
         const result = await orchestrator.createCouncilGroup({
@@ -582,6 +636,7 @@ export function createRoutes(
           });
           return;
         }
+        applyCreateSecondReviewer(result.sessionGroupId, secondReviewer.value);
         await stream.writeSSE({
           event: "progress",
           data: JSON.stringify({ step: "launching_cli", label: "Council pair ready", status: "done" }),
@@ -975,6 +1030,42 @@ export function createRoutes(
       return respondError(c, 500, "internal_error", { module: "council.disputes", detail: { groupId } });
     }
     return c.json({ ok: true, added: result.added });
+  });
+
+  // ─── Council Mode — second-opinion reviewer per pair (W15) ──────────────────
+  //
+  // GET: the pair's effective setting (`source: "group" | "global"`).
+  // PUT { reviewer, scope? }: the pair's own setting, written by the server to
+  // `.council/state/<group>-second-reviewer.json` (the observer cannot write
+  // there). Takes effect from the next checkpoint.
+  api.get("/groups/:groupId/second-reviewer", (c) => {
+    const groupId = c.req.param("groupId");
+    const result = orchestrator.getGroupSecondReviewer(groupId);
+    if (!result.ok) return respondError(c, 404, "not_found", { module: "council.second_reviewer", detail: { groupId } });
+    return c.json({ reviewer: result.config.reviewer, scope: result.config.scope, source: result.source });
+  });
+
+  api.put("/groups/:groupId/second-reviewer", async (c) => {
+    const groupId = c.req.param("groupId");
+    const body = (await c.req.json().catch(() => null)) as { reviewer?: unknown; scope?: unknown } | null;
+    if (!body || typeof body !== "object") {
+      return respondError(c, 400, "bad_request", { module: "council.second_reviewer", detail: { reason: "JSON body { reviewer, scope? } required" } });
+    }
+    const parsed = parseCreateSecondReviewer(body.reviewer, body.scope);
+    if (!parsed.ok || !parsed.value) {
+      return respondError(c, 400, "bad_request", {
+        module: "council.second_reviewer",
+        detail: { reason: parsed.ok ? "reviewer required" : parsed.error },
+      });
+    }
+    const result = orchestrator.setGroupSecondReviewer(groupId, parsed.value);
+    if (!result.ok) {
+      if (result.reason === "unknown_group") {
+        return respondError(c, 404, "not_found", { module: "council.second_reviewer", detail: { groupId } });
+      }
+      return respondError(c, 500, "internal_error", { module: "council.second_reviewer", detail: { groupId } });
+    }
+    return c.json({ reviewer: parsed.value.reviewer, scope: parsed.value.scope, source: "group" });
   });
 
   // ─── Council Mode — release an observer STOP's auto-proceed hold (FIX-AP-1) ─

@@ -402,6 +402,25 @@ export interface CompanionEventMap {
     /** Observer rigor: host verdict on an empty review whose turn looked at
      *  nothing beyond the prose artifact. Absent = no claim. */
     verification?: "unverified";
+    /** W15: "second" = the host-run second-opinion review (`second-reviewer.ts`),
+     *  not the observer's. Absent = the observer's review. */
+    reviewerRole?: "second";
+  };
+
+  /**
+   * W15 multi-model review — second-opinion bookkeeping for the convergence
+   * tracker. `dispatched`: a second verdict is owed for this checkpoint;
+   * `missing`: it will not come (failed, timed out, usage-limited, superseded,
+   * CLI missing). The verdict itself arrives as a `group:review` with
+   * `reviewerRole: "second"`.
+   */
+  "group:second-review": {
+    sessionGroupId: string;
+    checkpointId: string;
+    status: "dispatched" | "missing";
+    backend: "claude" | "codex";
+    model: string;
+    reason?: string;
   };
 
   /**
@@ -426,6 +445,6 @@ export interface CompanionEventMap {
     convergenceThreshold: number;
     convergenceState: "in-progress" | "converged" | "revoked";
     /** Set on `not-counted` only. */
-    notCountedReason?: "no_changed_files" | "no_files_read" | "downgraded_stop" | "unverified_clean";
+    notCountedReason?: import("./convergence-tracker.js").ConvergenceNotCountedReason;
   };
 }

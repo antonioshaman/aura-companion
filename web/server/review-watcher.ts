@@ -109,6 +109,38 @@ function fitPhaseBesideGroup(phase: string, sessionGroupId: string): string {
   return `${phase.slice(0, headLen)}.${hash}`;
 }
 
+/** Token appended to the group id in a second-opinion review's file name. */
+export const SECOND_REVIEW_NAME_TOKEN = "second";
+
+/**
+ * W15 multi-model review: canonical file name of the host-run SECOND-OPINION
+ * review (`second-reviewer.ts`) of a checkpoint:
+ * `<phase>-<group>-second-<provider>-observer.md`.
+ *
+ * Distinct from the observer's `<phase>-<group>-<provider>-observer.md` even
+ * when both reviewers run on the same provider (claude observer + claude
+ * second opinion), so neither overwrites the other. It still matches
+ * {@link OBSERVER_REVIEW_FILE_PATTERN}, so the REST bootstrap and the
+ * auto-proceed hold restore read it like any other review of the group.
+ */
+export function buildSecondReviewFilename(
+  phase: string,
+  provider: "claude" | "codex",
+  sessionGroupId: string,
+): string {
+  if (typeof sessionGroupId !== "string" || sessionGroupId.length === 0) {
+    throw new RangeError("buildSecondReviewFilename: sessionGroupId is required");
+  }
+  return buildObserverReviewFilename(phase, provider, `${sessionGroupId}-${SECOND_REVIEW_NAME_TOKEN}`);
+}
+
+/** True when `file` is the group's second-opinion review name ({@link buildSecondReviewFilename}). */
+export function isSecondReviewFilename(file: string, sessionGroupId: string): boolean {
+  if (!OBSERVER_REVIEW_FILE_PATTERN.test(file)) return false;
+  const scope = `${sessionGroupId}-${SECOND_REVIEW_NAME_TOKEN}`;
+  return file.endsWith(`-${scope}-claude-observer.md`) || file.endsWith(`-${scope}-codex-observer.md`);
+}
+
 /**
  * Synchronously scan a reviews directory for a review answering `checkpointId`.
  *
@@ -158,6 +190,8 @@ export function findReviewForCheckpointSync(opts: {
     }
     const payload = parseObserverReviewPayload(raw);
     if (!payload || payload.checkpoint_id !== opts.checkpointId) continue;
+    // W15: a second-opinion review is never the OBSERVER's answer.
+    if (payload.reviewer_role === "second") continue;
     let reviewedAt: number | undefined;
     try {
       reviewedAt = statSync(path).mtimeMs;
@@ -231,6 +265,10 @@ export function findOwnReviewForCheckpointSync(opts: {
     const payload = parseObserverReviewPayload(raw);
     if (!payload || payload.checkpoint_id !== opts.checkpointId) continue;
     if (payload.session_group_id !== opts.sessionGroupId) continue;
+    // W15: a second-opinion review is never the OBSERVER's answer — without
+    // this, a fast second review would make the reply capture stand down
+    // (`skipped_existing`) and Gate 0b skip the observer's wake.
+    if (payload.reviewer_role === "second") continue;
     let reviewedAt: number | undefined;
     try {
       reviewedAt = statSync(path).mtimeMs;
@@ -344,6 +382,10 @@ export async function watchReviews(opts: ReviewWatcherOptions): Promise<void> {
         onDropped("invalid-filename", file);
         continue;
       }
+      // A second-opinion file (`<phase>-<group>-second-<provider>-observer.md`)
+      // is not group-scoped here on purpose: the host that wrote it ingests it
+      // directly (`second-reviewer.ts` → `ingestReview`), so the watcher never
+      // delivers it a second time.
       if (opts.sessionGroupId !== undefined && !isGroupScopedReviewFilename(file, opts.sessionGroupId)) continue;
 
       // Capture the current mtime as the key for THIS debounce window. If
@@ -458,9 +500,10 @@ async function readAndEmit(
     onDropped("invalid-schema", file);
     return;
   }
-  // Dedup by (checkpoint_id, observer_provider) — two reviews for the
-  // same checkpoint from different providers should both surface.
-  const dedupKey = `${payload.checkpoint_id}::${payload.observer_provider}`;
+  // Dedup by (checkpoint_id, observer_provider, reviewer role) — two reviews
+  // for the same checkpoint from different providers should both surface, and
+  // so should the observer's review and a same-provider second opinion (W15).
+  const dedupKey = `${payload.checkpoint_id}::${payload.observer_provider}${payload.reviewer_role === "second" ? "::second" : ""}`;
   if (seen.has(dedupKey)) {
     onDropped("duplicate-review", file, dedupKey);
     return;

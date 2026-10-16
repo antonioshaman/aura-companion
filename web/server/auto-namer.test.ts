@@ -41,6 +41,7 @@ beforeEach(() => {
     defaultSessionMode: "solo" as const,
     kbAutoPrime: false,
     autoResumeAfterLimit: true,
+    councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
     updatedAt: 0,
   });
 });
@@ -88,6 +89,7 @@ describe("generateSessionTitle", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       updatedAt: 0,
     });
 
@@ -142,6 +144,7 @@ describe("generateSessionTitle", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       updatedAt: 0,
     });
     mockFetch.mockResolvedValueOnce({
@@ -225,6 +228,7 @@ describe("generateSessionTitle", () => {
       defaultSessionMode: "solo" as const,
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
+      councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
       updatedAt: 0,
     });
     mockFetch.mockResolvedValueOnce({
