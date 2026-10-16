@@ -6,6 +6,7 @@ import { getTelemetryPreferenceEnabled, setTelemetryPreferenceEnabled } from "..
 import { navigateToSession, navigateHome } from "../utils/routing.js";
 import type { SdkSessionInfo } from "../types.js";
 import { SessionDefaultsSettings, type DefaultSessionMode } from "./SessionDefaultsSettings.js";
+import { SecondReviewerSettings, type SecondReviewerConfig } from "./council/SecondReviewerSettings.js";
 
 interface SettingsPageProps {
   embedded?: boolean;
@@ -57,6 +58,7 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
   // aura-diet defaults: solo sessions, KB consulted on demand.
   const [defaultSessionMode, setDefaultSessionMode] = useState<DefaultSessionMode>("solo");
   const [kbAutoPrime, setKbAutoPrime] = useState(false);
+  const [secondReviewer, setSecondReviewer] = useState<SecondReviewerConfig>({ reviewer: "off", scope: "review-implement" });
   const [autoResumeAfterLimit, setAutoResumeAfterLimit] = useState(true);
   const [aiValidationEnabled, setAiValidationEnabled] = useState(false);
   const [aiValidationAutoApprove, setAiValidationAutoApprove] = useState(true);
@@ -197,6 +199,7 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
         if (typeof s.telemetryEnabled === "boolean") setUsageCounterEnabled(s.telemetryEnabled);
         if (s.defaultSessionMode === "solo" || s.defaultSessionMode === "council") setDefaultSessionMode(s.defaultSessionMode);
         if (typeof s.kbAutoPrime === "boolean") setKbAutoPrime(s.kbAutoPrime);
+        if (s.councilSecondReviewer) setSecondReviewer(s.councilSecondReviewer);
         if (typeof s.autoResumeAfterLimit === "boolean") setAutoResumeAfterLimit(s.autoResumeAfterLimit);
         if (typeof s.aiValidationEnabled === "boolean") setAiValidationEnabled(s.aiValidationEnabled);
         if (typeof s.aiValidationAutoApprove === "boolean") setAiValidationAutoApprove(s.aiValidationAutoApprove);
@@ -532,6 +535,23 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                   }
                 }}
               />
+              <div className="mt-4">
+                <SecondReviewerSettings
+                  value={secondReviewer}
+                  disabled={loading}
+                  onChange={async (next) => {
+                    const prev = secondReviewer;
+                    setSecondReviewer(next);
+                    try {
+                      const saved = await api.updateSettings({ councilSecondReviewer: next });
+                      if (saved.councilSecondReviewer) setSecondReviewer(saved.councilSecondReviewer);
+                    } catch (e: unknown) {
+                      setSecondReviewer(prev);
+                      setError(e instanceof Error ? e.message : String(e));
+                    }
+                  }}
+                />
+              </div>
             </section>
 
             {/* Webhooks */}

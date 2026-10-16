@@ -104,7 +104,7 @@ export function BlockerBanner({
               Evidence: <span data-testid="blocker-evidence" className="text-cc-fg">{formatEvidenceLine(finding)}</span>
             </div>
             <div className="text-[10px] text-cc-muted">
-              Observer: <span className="font-mono-code">{finding.observerProvider}</span>
+              {finding.secondOpinion ? "Second opinion" : "Observer"}: <span className="font-mono-code">{finding.observerProvider}</span>
               <span> · model </span>
               <span className="font-mono-code">{finding.observerModel}</span>
               <span> · phase </span>

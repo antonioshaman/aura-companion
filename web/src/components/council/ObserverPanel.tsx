@@ -39,6 +39,7 @@ import { DegradedBanner } from "./DegradedBanner.js";
 import { AutoProceedRestoreNotice } from "./AutoProceedRestoreNotice.js";
 import { ProviderBadges } from "./ProviderBadges.js";
 import { CheckpointCoverageList } from "./CheckpointCoverageList.js";
+import { GroupSecondReviewerControl } from "./GroupSecondReviewerControl.js";
 
 export interface ObserverPanelProps {
   /**
@@ -435,6 +436,9 @@ export function ObserverPanel({
       {/* Observer rigor: checkpoints with no review ("без ревью") or only an
           unverified empty one ("не проверено") are listed, never silent. */}
       <CheckpointCoverageList gaps={group.checkpointCoverage ?? []} />
+
+      {/* W15: per-pair second-opinion reviewer (another model). */}
+      <GroupSecondReviewerControl sessionGroupId={group.sessionGroupId} />
 
       {/* Degraded banner — lives in the header, NOT in the composer slot. */}
       {state.name === "degraded" && onRespawnHalf && (

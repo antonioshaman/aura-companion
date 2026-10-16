@@ -213,7 +213,17 @@ export interface GroupRecord {
 }
 
 /** P3/CONV-HONEST: why a STOP-free review did not advance the counter. */
-export type ConvergenceNotCountedReason = "no_changed_files" | "no_files_read" | "downgraded_stop" | "unverified_clean";
+export type ConvergenceNotCountedReason =
+  | "no_changed_files"
+  | "no_files_read"
+  | "downgraded_stop"
+  | "unverified_clean"
+  /** W15: observer clean, second opinion still running. */
+  | "awaiting_second_review"
+  /** W15: the second opinion raised a STOP on the checkpoint. */
+  | "second_review_blocked"
+  /** W15: the owed second opinion failed / timed out / was limited. */
+  | "second_review_missing";
 
 /** User-facing copy for {@link ConvergenceNotCountedReason}. */
 export const CONVERGENCE_NOT_COUNTED_COPY: Record<ConvergenceNotCountedReason, string> = {
@@ -221,6 +231,9 @@ export const CONVERGENCE_NOT_COUNTED_COPY: Record<ConvergenceNotCountedReason, s
   no_files_read: "Not counted: no files read",
   downgraded_stop: "Not counted: downgraded STOP",
   unverified_clean: "Not counted: unverified clean review",
+  awaiting_second_review: "Not counted yet: waiting for the second opinion",
+  second_review_blocked: "Not counted: second opinion raised a STOP",
+  second_review_missing: "Not counted: second opinion missing",
 };
 
 /** Inline form of {@link CONVERGENCE_NOT_COUNTED_COPY} ("…: downgraded STOP"
@@ -284,6 +297,12 @@ export interface ObserverFinding {
   dismissed?: true;
   observerModel: string;
   observerProvider: string;
+  /** W15: true on a finding of the host-run second-opinion reviewer (its own
+   *  provider/model are in `observerProvider` / `observerModel`). */
+  secondOpinion?: true;
+  /** W15: id of the other reviewer's earlier finding this one near-duplicates;
+   *  folded into that row ("also flagged by …"), never its own blocker. */
+  duplicateOf?: string;
 }
 
 /**
