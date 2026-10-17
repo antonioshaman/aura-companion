@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.6.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.5.0...aura-companion-v2.6.0) (2026-10-17)
+
+
+### Features
+
+* **landing:** answer "why not just Claude Code/Codex" and add English page ([#376](https://github.com/antonioshaman/aura-companion/issues/376)) ([ea515df](https://github.com/antonioshaman/aura-companion/commit/ea515dfe9fb75d47c14a8f599cf298b74de61b64))
+* **sessions:** offer one-click handoff to a new session when context overflows ([#381](https://github.com/antonioshaman/aura-companion/issues/381)) ([4c72e0a](https://github.com/antonioshaman/aura-companion/commit/4c72e0a5493c19386c45376294d006ed477d764f))
+
+
+### Bug Fixes
+
+* **models:** stop labelling verified models "Untested" ([#379](https://github.com/antonioshaman/aura-companion/issues/379)) ([9730490](https://github.com/antonioshaman/aura-companion/commit/9730490cf19277b030fe69eb9c98c75b3ba9a79f))
+
 ## [2.5.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.4.0...aura-companion-v2.5.0) (2026-10-16)
 
 
