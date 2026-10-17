@@ -19,6 +19,8 @@ export interface ModelOption {
    * nobody verified it on this install. Rendered as a subtle "Untested" hint.
    */
   untested?: true;
+  /** Not in the registry, but observed working in a session on this install. */
+  verifiedBy?: "observed";
 }
 
 export interface ModeOption {
@@ -64,6 +66,7 @@ export function toModelOptions(models: BackendModelInfo[]): ModelOption[] {
     ...(m.status !== undefined ? { status: m.status } : {}),
     ...(m.replacement !== undefined ? { replacement: m.replacement } : {}),
     ...(m.untested === true ? { untested: true as const } : {}),
+    ...(m.verifiedBy === "observed" ? { verifiedBy: "observed" as const } : {}),
   }));
 }
 
@@ -77,22 +80,38 @@ export function toModelOptions(models: BackendModelInfo[]): ModelOption[] {
 //
 // Two groups:
 //  - registry-verified (no `untested`) — mirrors the server's
-//    `model-registry.ts` active set; these anchor the no-preference default.
-//  - `untested: true` — launchable on the prod CLI (2.1.283, 2026-10-16) and
-//    present in /v1/models, but not in the server registry. Flagged exactly
-//    like the dynamic path's `enrichModelsWithRegistry` does, so the dropdown
-//    renders the same "Untested" hint whichever source fed it. Without these
-//    the dropdown topped out at Opus 4.8 whenever the dynamic fetch failed.
+//    `model-registry.ts` active set (verified on the prod CLI 2.1.283,
+//    2026-10-16).
+//  - `untested: true` — present in /v1/models but not in the server
+//    registry. Flagged exactly like the dynamic path's
+//    `enrichModelsWithRegistry` does, so the dropdown renders the same
+//    "Untested" hint whichever source fed it.
+// Only `CLAUDE_DEFAULT_ANCHOR_MODELS` (below) anchor the no-preference
+// default — verifying a newer model must not silently move every new
+// session onto it.
 export const CLAUDE_MODELS: ModelOption[] = [
   { value: "claude-opus-4-8", label: "Opus 4.8", icon: "" },
   { value: "claude-sonnet-4-6", label: "Sonnet 4.6", icon: "" },
   { value: "claude-haiku-4-5-20251001", label: "Haiku 4.5", icon: "" },
-  { value: "claude-opus-5-5", label: "Opus 5.5", icon: "", untested: true },
-  { value: "claude-opus-5", label: "Opus 5", icon: "", untested: true },
-  { value: "claude-fable-5-1", label: "Fable 5.1", icon: "", untested: true },
-  { value: "claude-fable-5", label: "Fable 5", icon: "", untested: true },
+  { value: "claude-opus-5-5", label: "Opus 5.5", icon: "" },
+  { value: "claude-opus-5", label: "Opus 5", icon: "" },
+  { value: "claude-fable-5-1", label: "Fable 5.1", icon: "" },
+  { value: "claude-fable-5", label: "Fable 5", icon: "" },
   { value: "claude-sonnet-5", label: "Sonnet 5", icon: "", untested: true },
 ];
+
+/**
+ * Models that may anchor a no-preference Claude session default (see
+ * `pickSessionDefaultModel`). Deliberately the pre-2026-10-17 verified set:
+ * marking Opus 5.5 / Fable verified fixed the misleading "Untested" label but
+ * must NOT change which model a fresh session silently starts on (the
+ * dynamic list sorts newest-opus first, so Opus 5.5 would otherwise win).
+ */
+export const CLAUDE_DEFAULT_ANCHOR_MODELS: readonly string[] = Object.freeze([
+  "claude-opus-4-8",
+  "claude-sonnet-4-6",
+  "claude-haiku-4-5-20251001",
+]);
 
 export const CODEX_MODELS: ModelOption[] = [
   { value: "gpt-5.3-codex", label: "GPT-5.3 Codex", icon: "\u2733" },
@@ -243,11 +262,9 @@ export function pickSessionDefaultModel(
     // hand-verified static list; fall back to the static default rather than
     // a guaranteed-unknown dynamic[0]. Codex's dynamic[0] stays authoritative.
     if (backend !== "codex") {
-      // Only registry-verified static entries anchor the default — the
-      // `untested` fallback entries are offered, never auto-picked.
-      const known = new Set(
-        CLAUDE_MODELS.filter((m) => m.untested !== true).map((m) => m.value),
-      );
+      // Only the explicit anchor set picks the default — newer verified
+      // models and `untested` entries are offered, never auto-picked.
+      const known = new Set(CLAUDE_DEFAULT_ANCHOR_MODELS);
       const safe = dynamic.find((m) => known.has(m.value));
       return safe ? safe.value : getDefaultModel(backend);
     }

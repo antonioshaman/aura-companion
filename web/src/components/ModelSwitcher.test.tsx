@@ -779,12 +779,30 @@ describe("ModelSwitcher", () => {
       const opus5 = screen.getByRole("option", { name: /Opus 5/ });
       expect(within(opus5).getByText("Untested")).toBeInTheDocument();
       expect(within(opus5).getByText("Latest")).toBeInTheDocument();
-      expect(opus5).toHaveAttribute("title", expect.stringMatching(/not verified/i));
+      expect(opus5).toHaveAttribute("title", expect.stringMatching(/no session has run/i));
       // A verified (registry-known) model carries no hint.
       const opus48 = screen.getByRole("option", { name: /Opus 4\.8/ });
       expect(within(opus48).queryByText("Untested")).not.toBeInTheDocument();
       fireEvent.click(opus5);
       expect(mockSendToSession).toHaveBeenCalledWith("s1", { type: "set_model", model: "claude-opus-5" });
+    });
+
+    it("a model observed working (verifiedBy=observed) shows no 'Untested' hint and says why in its title", () => {
+      // Self-maintaining verification: a registry-unknown model a session
+      // already ran successfully is verified — no hint, explanatory tooltip.
+      resetStore({
+        dynamicBackendModels: {
+          claude: [
+            { value: "claude-sonnet-5", label: "Sonnet 5", icon: "", verifiedBy: "observed" },
+            { value: "claude-opus-4-8", label: "Opus 4.8", icon: "" },
+          ],
+        },
+      });
+      render(<ModelSwitcher sessionId="s1" />);
+      fireEvent.click(screen.getByLabelText("Switch model"));
+      const sonnet5 = screen.getByRole("option", { name: /Sonnet 5/ });
+      expect(within(sonnet5).queryByText("Untested")).not.toBeInTheDocument();
+      expect(sonnet5).toHaveAttribute("title", expect.stringMatching(/ran it successfully/i));
     });
 
     it("passes axe checks with untested hints rendered", async () => {
