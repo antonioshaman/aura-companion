@@ -10,6 +10,7 @@ import { writeAtomicJson } from "./atomic-write.js";
 import { buildCheckpointFilename } from "./checkpoint-watcher.js";
 import { parseCheckpointPayload } from "./council-types.js";
 import { extractHandoff, buildPickupDraft } from "./handoff-extractor.js";
+import { buildHandoffFilename, pruneHandoffFiles } from "./handoff-files.js";
 import { writeFileSync, appendFileSync, statSync, renameSync } from "node:fs";
 import {
   computeSweepCandidates,
@@ -1240,17 +1241,30 @@ export function createRoutes(
       contextBytes,
     });
 
-    // Filename uses dot-prefix so it's hidden from casual `ls` and most
-    // editors' file pickers; timestamp ensures multiple recoveries in the
-    // same workspace don't collide.
-    const ts = new Date().toISOString().replace(/[:.]/g, "-").replace("T", "T").slice(0, 19);
-    const filename = `.aura-handoff-${ts}.md`;
-    const handoffPath = join(cwd, filename);
-    try {
-      writeFileSync(handoffPath, markdown, { encoding: "utf8", mode: 0o644 });
-    } catch (err) {
-      log.error("routes", "Failed to write handoff file", { sessionId: id, cwd, err: String(err) });
-      return c.json({ error: `Cannot write handoff file: ${String(err)}` }, 500);
+    // Filename comes from the ONE contract in handoff-files.ts (dot-prefix:
+    // hidden from casual `ls`; second-resolution timestamp). The timestamp
+    // alone does NOT prevent a collision — two handoffs in the same second
+    // (double-click, two tabs) would silently overwrite each other — so the
+    // write is exclusive (`wx`) and on EEXIST retries with the next second.
+    let filename = "";
+    let handoffPath = "";
+    let written = false;
+    let lastErr: unknown;
+    for (let attempt = 0; attempt < 3 && !written; attempt++) {
+      filename = buildHandoffFilename(new Date(Date.now() + attempt * 1000));
+      handoffPath = join(cwd, filename);
+      try {
+        writeFileSync(handoffPath, markdown, { encoding: "utf8", mode: 0o644, flag: "wx" });
+        written = true;
+      } catch (err) {
+        lastErr = err;
+        if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") break;
+      }
+    }
+    if (!written) {
+      // Detail (absolute path, errno) goes to the log, not to the browser.
+      log.error("routes", "Failed to write handoff file", { sessionId: id, cwd, err: String(lastErr) });
+      return c.json({ error: "Cannot write the handoff file into the session workspace" }, 500);
     }
 
     // Always spawn a SOLO session in the same cwd. If the source was a
@@ -1266,6 +1280,22 @@ export function createRoutes(
     } as Parameters<typeof orchestrator.createSession>[0]);
     if (!createResult.ok) {
       return c.json({ error: `Handoff written but session create failed: ${createResult.error}` }, createResult.status as any);
+    }
+
+    // Housekeeping AFTER the spawn succeeded (a failed handoff deletes
+    // nothing) and outside the response path: pruneHandoffFiles never throws
+    // and only ever touches endpoint-format regular files directly in cwd,
+    // keeping the newest 3 and anything younger than 7 days (see
+    // handoff-files.ts for the exact allow-list and policy).
+    try {
+      pruneHandoffFiles({ cwd, sessionId: id, keep: filename });
+    } catch (err) {
+      log.warn("routes", "handoff prune threw unexpectedly", {
+        event: "handoff.prune_failed",
+        sessionId: id,
+        cwd,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
 
     return c.json({
