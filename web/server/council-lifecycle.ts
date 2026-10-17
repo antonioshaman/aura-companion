@@ -1047,6 +1047,20 @@ export class CouncilLifecycle {
           directory: checkpointsDir,
           signal: abort.signal,
           onCheckpoint: (payload) => this.deps.handleCouncilCheckpoint(sessionGroupId, payload),
+          // EC-4 + EC-9: a dropped checkpoint (incl. `superseded` — a second
+          // distinct write inside the debounce window overwrote the first)
+          // must be attributable to its pair. The watcher's default logger
+          // has no sessionGroupId; `detail` carries mtimes/errors, never the
+          // payload.
+          onDropped: (reason, file, detail) =>
+            log.warn("session-orchestrator", "council checkpoint watcher dropped an event", {
+              event: "council.watcher.dropped",
+              sessionGroupId,
+              kind: "checkpoint",
+              file,
+              reason,
+              detail,
+            }),
         }),
       onDeath: scheduleCatchupAfterRearm,
     });
@@ -1065,6 +1079,15 @@ export class CouncilLifecycle {
           sessionGroupId,
           onReview: (payload, reviewedAt) => this.deps.handleCouncilReview(sessionGroupId, payload, reviewedAt),
           normalizeRaw: (raw, provider) => this.deps.normalizeObserverReviewRaw(sessionGroupId, raw, provider),
+          onDropped: (reason, file, detail) =>
+            log.warn("session-orchestrator", "council review watcher dropped an event", {
+              event: "council.watcher.dropped",
+              sessionGroupId,
+              kind: "review",
+              file,
+              reason,
+              detail,
+            }),
         }),
       // A dead review watcher can only be recovered by re-waking the observer
       // (it re-writes its review on the next wake), which the checkpoint

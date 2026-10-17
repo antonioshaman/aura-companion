@@ -42,7 +42,17 @@ export type CheckpointDropReason =
    *  phase → same inode) landed on the same path within the debounce window;
    *  the earlier rename's bytes were overwritten on disk before the watcher
    *  could read them. Honours EC-4's "never silently coalesce" rule — the loss
-   *  is visible, not absorbed. Mirror of review-watcher's `superseded`. */
+   *  is visible, not absorbed. Mirror of review-watcher's `superseded`.
+   *
+   *  Two honest limits of the mtime key (W17 council plan, ritchie B-8):
+   *  1. The key is captured by an `await stat()` AFTER the fs event. Two
+   *     renames closer together than that stat latency both observe the
+   *     second write's mtime and still coalesce silently — this catches the
+   *     common race, not every race. The complete cure is a unique filename
+   *     per checkpoint (writer-side change, own spec).
+   *  2. Equality is on `mtimeNs`, so it assumes sub-second mtime resolution
+   *     (ext4 / APFS / tmpfs / xfs). On HFS+ (1 s) or FAT (2 s) two writes in
+   *     one tick are indistinguishable and coalesce. */
   | "superseded";
 
 export interface CheckpointWatcherOptions {
