@@ -6,8 +6,13 @@
 <title>Aura Companion — Claude Code и Codex с телефона, без VPN</title>
 <meta name="description" content="Aura Companion даёт каждому простой доступ к мощи Claude Code и Codex — без сложных настроек, без иностранных карт, без знания английского.">
 <meta property="og:type" content="website">
-<meta property="og:url" content="https://auraco.space">
+<link rel="canonical" href="https://auraco.space/">
+<link rel="alternate" hreflang="ru" href="https://auraco.space/">
+<link rel="alternate" hreflang="en" href="https://auraco.space/en/">
+<link rel="alternate" hreflang="x-default" href="https://auraco.space/">
+<meta property="og:url" content="https://auraco.space/">
 <meta property="og:locale" content="ru_RU">
+<meta property="og:locale:alternate" content="en_US">
 <meta property="og:site_name" content="Aura Companion">
 <meta property="og:title" content="Aura Companion — Claude Code и Codex с телефона, без VPN">
 <meta property="og:description" content="Aura Companion даёт каждому простой доступ к мощи Claude Code и Codex — без сложных настроек, без иностранных карт, без знания английского.">
@@ -141,6 +146,9 @@
   .lang-switch { display: flex; gap: 4px; padding: 4px; background: var(--surface); border: 1px solid var(--border); border-radius: 999px; font-size: 12px; }
   .lang-switch button { background: none; border: none; color: var(--text-mute); padding: 4px 10px; border-radius: 999px; cursor: pointer; font-weight: 600; font-family: inherit; }
   .lang-switch button.on { background: var(--amber); color: var(--bg-0); }
+  .lang-switch a { color: var(--text-mute); padding: 4px 10px; border-radius: 999px; font-weight: 600; text-decoration: none; line-height: 1.6; }
+  .lang-switch a:hover { color: var(--amber); }
+  .lang-switch a.on { background: var(--amber); color: var(--bg-0); }
   .nav-cta { background: linear-gradient(135deg, var(--amber), var(--ember)); color: #fff; padding: 10px 20px; border-radius: 999px; text-decoration: none; font-weight: 600; font-size: 14px; transition: transform 0.2s, box-shadow 0.2s; box-shadow: 0 4px 20px rgba(232, 93, 44, 0.35); }
   .nav-cta:hover { transform: translateY(-1px); box-shadow: 0 6px 24px rgba(232, 93, 44, 0.5); }
   @media (max-width: 980px) {
@@ -422,6 +430,50 @@
   .step h4 { font-family: 'Cormorant Garamond', serif; font-size: 22px; font-weight: 600; margin-bottom: 8px; }
   .step p { color: var(--text-mute); font-size: 14px; }
 
+  /* Why (objections) */
+  .why-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; }
+  .why-grid + .why-subtitle, .why-scenarios + .why-grid { margin-top: 40px; }
+  .why-card { background: var(--surface); border: 1px solid var(--border); border-radius: 20px; padding: 28px; min-width: 0; }
+  .why-card h3 { font-size: 20px; font-weight: 700; color: var(--text); margin-bottom: 14px; }
+  .why-card p { color: var(--text-mute); font-size: 14px; line-height: 1.7; margin-bottom: 12px; }
+  .why-card p:last-child { margin-bottom: 0; }
+  .why-card a { color: var(--amber); text-decoration: none; }
+  .why-card code, .why-scenario code { color: var(--gold); font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 12px; background: rgba(157, 255, 92, 0.08); padding: 2px 6px; border-radius: 4px; word-break: break-word; }
+  .why-card-muted { border-style: dashed; }
+  .why-card-cta { border-color: var(--border-hi); }
+  .why-list { list-style: none; }
+  .why-list li { position: relative; padding: 8px 0 8px 22px; color: var(--text-mute); font-size: 14px; line-height: 1.6; border-bottom: 1px solid var(--border); }
+  .why-list li:last-child { border-bottom: none; }
+  .why-list li::before { content: '✓'; position: absolute; left: 0; color: var(--amber); font-weight: 700; }
+  .why-list-no li::before { content: '✗'; color: var(--text-dim); }
+  .why-list strong { color: var(--text); font-weight: 600; }
+  .why-subtitle { font-size: 18px; font-weight: 700; color: var(--amber); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 18px; }
+  .why-scenarios { display: grid; gap: 14px; }
+  .why-scenario { display: grid; grid-template-columns: 56px 1fr 1fr; gap: 8px 24px; background: var(--surface); border: 1px solid var(--border); border-radius: 20px; padding: 24px 28px; }
+  .why-num { grid-row: span 2; font-size: 32px; font-weight: 800; color: var(--amber); text-shadow: 0 0 6px rgba(0, 255, 110, 0.35); line-height: 1; }
+  .why-pain, .why-fix { font-size: 14px; line-height: 1.6; color: var(--text-mute); }
+  .why-fix { color: var(--text); }
+  .why-tag { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.1em; color: var(--text-dim); margin-bottom: 6px; font-weight: 600; }
+  .why-tag-on { color: var(--amber); }
+  .why-proof { grid-column: 2 / -1; font-size: 13px; color: var(--text-dim); border-top: 1px solid var(--border); padding-top: 10px; margin-top: 6px; line-height: 1.6; }
+  .why-proof a { color: var(--amber); text-decoration: none; }
+  .why-cmd { background: #060403; border: 1px solid var(--border-hi); border-radius: 12px; padding: 14px 16px; margin: 4px 0 14px; font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 14px; color: var(--text); line-height: 1.7; overflow-x: auto; white-space: pre; }
+  .why-cmd .prompt { color: var(--amber); }
+  .why-cmd .ok { color: #6bce8a; }
+  .why-video { margin-top: 20px; border: 1px dashed var(--border-hi); border-radius: 20px; padding: 22px 28px; display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap; }
+  .why-video-badge { flex-shrink: 0; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; color: var(--bg-0); background: var(--text-dim); padding: 4px 10px; border-radius: 999px; }
+  .why-video-body { flex: 1; min-width: 220px; color: var(--text-mute); font-size: 14px; line-height: 1.6; }
+  .why-video-body strong { color: var(--text); }
+  .why-video-body ol { margin: 8px 0 0 20px; }
+  .start-note { margin-top: 24px; text-align: center; color: var(--text-mute); font-size: 14px; line-height: 1.7; }
+  .start-note code { color: var(--gold); font-family: 'JetBrains Mono', ui-monospace, monospace; background: rgba(157, 255, 92, 0.08); padding: 2px 6px; border-radius: 4px; }
+  @media (max-width: 880px) {
+    .why-grid { grid-template-columns: 1fr; }
+    .why-scenario { grid-template-columns: 1fr; padding: 22px; }
+    .why-num { grid-row: auto; font-size: 26px; }
+    .why-proof { grid-column: auto; }
+  }
+
   /* FAQ */
   .faq-list { max-width: 800px; }
   .faq-item { border-bottom: 1px solid var(--border); padding: 24px 0; }
@@ -429,8 +481,9 @@
   .faq-q::after { content: '+'; font-size: 28px; color: var(--amber); font-weight: 300; transition: transform 0.3s; flex-shrink: 0; }
   .faq-item.open .faq-q::after { transform: rotate(45deg); }
   .faq-a { max-height: 0; overflow: hidden; transition: max-height 0.4s ease, margin-top 0.4s ease; color: var(--text-mute); font-size: 15px; line-height: 1.7; }
-  .faq-item.open .faq-a { max-height: 400px; margin-top: 14px; }
+  .faq-item.open .faq-a { max-height: 640px; margin-top: 14px; }
   .faq-a a { color: var(--amber); text-decoration: none; }
+  .faq-a code { color: var(--gold); font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 13px; background: rgba(157, 255, 92, 0.08); padding: 1px 5px; border-radius: 4px; }
 
   /* Footer */
   footer { border-top: 1px solid var(--border); padding: 60px 0 30px; position: relative; }
@@ -479,7 +532,7 @@
   .preview-glyph { background: linear-gradient(135deg, #00c853, #00ff70) !important; color: #001a06 !important; }
   .nav-cta { background: linear-gradient(135deg, #00c853, #00ff70) !important; color: #001206 !important; box-shadow: 0 4px 20px rgba(0, 255, 110, 0.35) !important; }
   .os-btn-primary { background: linear-gradient(135deg, #00c853, #00ff70) !important; color: #001206 !important; }
-  .lang-switch button.on { background: var(--amber) !important; color: #001206 !important; }
+  .lang-switch button.on, .lang-switch a.on { background: var(--amber) !important; color: #001206 !important; }
   /* CRT scanlines overlay */
   body::after {
     content: ''; position: fixed; inset: 0; pointer-events: none; z-index: 3;
@@ -527,6 +580,7 @@
       </span>
     </a>
     <nav class="nav-links">
+      <a href="#why">Зачем</a>
       <a href="#paths">Как работает</a>
       <a href="#cases">Кейсы</a>
       <a href="#skills">Навыки</a>
@@ -539,9 +593,9 @@
         <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
         <span>MIT</span>
       </a>
-      <div class="lang-switch">
-        <button class="on" onclick="setLang('ru', this)">RU</button>
-        <button onclick="setLang('en', this)">EN</button>
+      <div class="lang-switch" role="navigation" aria-label="Язык / Language">
+        <a class="on" href="/" hreflang="ru" aria-current="page">RU</a>
+        <a href="/en/" hreflang="en" lang="en">EN</a>
       </div>
       <a href="#opensource" class="nav-cta">Открыть код</a>
     </div>
@@ -553,7 +607,7 @@
     <div class="wrap">
       <div class="hero-eyebrow"><span class="dot"></span> Доступно из России, Беларуси, Казахстана и СНГ — без VPN</div>
       <h1>Сложные ИИ-системы.<br><span class="accent">С телефона.</span> Без VPN.</h1>
-      <p class="hero-sub">Aura Companion даёт каждому простой доступ к мощи Claude Code и Codex — без сложных настроек, без иностранных карт, без знания английского. Программируйте, советуйтесь, создавайте — по-русски, прямо из браузера телефона. Полностью бесплатный благотворительный проект с открытым кодом под MIT.</p>
+      <p class="hero-sub">Веб-интерфейс для официальных Claude Code и Codex: ваши агенты продолжают работу после лимита, проверяют друг друга и не теряют ответы при рестарте. Программируйте, советуйтесь, создавайте — по-русски, прямо из браузера телефона. Полностью бесплатный благотворительный проект с открытым кодом под MIT. <a href="#why" style="color:var(--amber);text-decoration:none;white-space:nowrap;">Зачем, если есть Claude Code? →</a></p>
 
       <div class="paths" id="paths">
         <a href="#cases" class="path">
@@ -592,8 +646,84 @@
               <div class="label">Вы</div>
               Ещё чтобы напоминал мужу про продукты по средам
             </div>
-            </div>
           </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="why">
+    <div class="wrap">
+      <div class="section-eyebrow">Честно о главном вопросе</div>
+      <h2 class="section-title">Зачем, если есть <em>Claude Code и Codex?</em></h2>
+      <p class="section-sub">Коротко: Aura их не заменяет и не делает модель умнее. Она убирает трение вокруг агента — лимиты, зависания, рестарты, работу с телефона — и добавляет второе мнение от другой модели.</p>
+
+      <div class="why-grid">
+        <div class="why-card">
+          <h3>Aura их не заменяет</h3>
+          <ul class="why-list">
+            <li>Запускает <strong>официальный</strong> CLI <code>claude</code> / <code>codex</code> без изменений: ваши CLAUDE.md, навыки, MCP и выбранная модель работают как есть.</li>
+            <li>По умолчанию не подмешивает скрытых промптов — база знаний подключается только по запросу.</li>
+            <li>Не переписывает начало промпта: аудит prompt-cache — 97,5% попаданий в кэш.</li>
+            <li>Закрыли вкладку — это тот же Claude, что в терминале. Без привязки: удалите Aura, и ваш Claude Code останется как был.</li>
+          </ul>
+        </div>
+        <div class="why-card why-card-muted">
+          <h3>Чего Aura не делает</h3>
+          <ul class="why-list why-list-no">
+            <li>Не делает модель умнее. Тот же Claude, тот же Codex.</li>
+            <li>Не даёт подписку — работает на вашей подписке Claude или Codex.</li>
+            <li>Не волшебная кнопка. Это интерфейс и страховка вокруг агента, а не новый агент.</li>
+          </ul>
+        </div>
+      </div>
+
+      <h3 class="why-subtitle">Три конкретные задачи</h3>
+      <div class="why-scenarios">
+        <div class="why-scenario">
+          <div class="why-num">01</div>
+          <div class="why-pain"><span class="why-tag">В голом терминале</span>Ночью упёрлись в 5-часовой лимит — агент стоит до утра, пока вы не напишете «продолжай».</div>
+          <div class="why-fix"><span class="why-tag why-tag-on">С Aura</span>Сама продолжает работу примерно через 1–2 минуты после сброса лимита.</div>
+          <div class="why-proof">Реальный лог прода, 16.10.2026: лимит в 20:57, авто-продолжение в 22:01 — без участия человека.</div>
+        </div>
+        <div class="why-scenario">
+          <div class="why-num">02</div>
+          <div class="why-pain"><span class="why-tag">В голом терминале</span>Агент уверенно пишет баг — и сам же его не замечает. Ловить его будете вы.</div>
+          <div class="why-fix"><span class="why-tag why-tag-on">С Aura</span>Вторая модель проверяет каждый шаг (<a href="#council" style="color:var(--amber);text-decoration:none;">Council Mode</a>): Codex ревьюит Claude и наоборот.</div>
+          <div class="why-proof">За один день на нашем собственном коде две разные модели нашли 12 реальных багов, включая путь утечки токена. И нашли <strong>разные</strong> баги.</div>
+        </div>
+        <div class="why-scenario">
+          <div class="why-num">03</div>
+          <div class="why-pain"><span class="why-tag">В голом терминале</span>Несколько проектов в разных окнах терминала; рестарт сервера или зависание — и ответ потерян; отошли от ноутбука — работа встала.</div>
+          <div class="why-fix"><span class="why-tag why-tag-on">С Aura</span>Все сессии в одном окне, в том числе с телефона. После рестарта сервера сессии поднимаются сами, ответы больше не теряются при зависаниях.</div>
+          <div class="why-proof">Как это устроено — открыто: <a href="https://github.com/antonioshaman/aura-companion/blob/main/docs/architecture/session-lifecycle.md" target="_blank" rel="noopener">session-lifecycle.md на GitHub →</a></div>
+        </div>
+      </div>
+
+      <div class="why-video">
+        <span class="why-video-badge">Скоро</span>
+        <div class="why-video-body">
+          <strong>Видео «3 задачи под кофе», 2–3 минуты.</strong> Ещё не снято — честно. Покажем ровно три сценария выше, на живом проекте:
+          <ol>
+            <li>лимит ночью → утром работа уже продолжена;</li>
+            <li>Codex ловит баг Claude до коммита;</li>
+            <li>рестарт сервера → сессии на месте, всё видно с телефона.</li>
+          </ol>
+        </div>
+      </div>
+
+      <div class="why-grid">
+        <div class="why-card">
+          <h3>«Проще собрать своё?»</h3>
+          <p>Честно — да, можно. Aura и есть то, что вы бы собрали месяца за три. Мы уже прошли эти грабли: потерянные ответы, зависания, лимиты, рестарты.</p>
+          <p>Код под MIT — берите методологию (навыки, Council, базу знаний) или всё целиком. <a href="#opensource">Открыть код →</a></p>
+        </div>
+        <div class="why-card why-card-cta">
+          <h3>Попробовать — без регистрации</h3>
+          <p>Без аккаунта и без анкет. Нужны <a href="https://bun.sh" target="_blank" rel="noopener">Bun</a> и залогиненный <code>claude</code> или <code>codex</code>:</p>
+          <pre class="why-cmd"><span class="prompt">$</span> bunx aura-companion
+<span class="ok">→ http://localhost:3456</span></pre>
+          <p>Работает на вашей подписке Claude / Codex. Ничего не ставится глобально; данные лежат в <code>~/.companion</code> и удаляются одной командой: <code>rm -rf ~/.companion</code>.</p>
         </div>
       </div>
     </div>
@@ -888,7 +1018,7 @@
     </div>
   </section>
 
-  <section>
+  <section id="start">
     <div class="wrap">
       <div class="section-eyebrow">Как начать</div>
       <h2 class="section-title">За <em>60 секунд</em></h2>
@@ -911,6 +1041,7 @@
           <p>Расскажите своими словами, по-русски. Aura уточнит детали, поймёт и сделает.</p>
         </div>
       </div>
+      <p class="start-note">Без регистрации и без аккаунта: <code>bunx aura-companion</code> → <code>localhost:3456</code>, на вашей подписке Claude / Codex. Удаляется одной командой. <a href="#why" style="color:var(--amber);text-decoration:none;">Подробнее →</a></p>
     </div>
   </section>
 
@@ -920,6 +1051,22 @@
       <h2 class="section-title">Что обычно <em>спрашивают</em></h2>
 
       <div class="faq-list">
+        <div class="faq-item">
+          <div class="faq-q" onclick="toggleFaq(this)">Зачем надстройка, если можно просто пользоваться Claude Code и Codex?</div>
+          <div class="faq-a">Если вам хватает терминала — пользуйтесь терминалом, это честный ответ. Aura нужна, когда мешает трение вокруг агента: работа встала на лимите ночью, ответ потерялся при зависании, сервер перезапустился, вы отошли от ноутбука, а хочется, чтобы код проверила вторая модель. Внутри при этом тот же официальный CLI. <a href="#why">Три конкретные задачи →</a></div>
+        </div>
+        <div class="faq-item">
+          <div class="faq-q" onclick="toggleFaq(this)">Обёртки и чужие фреймворки ухудшают агента. Aura не такая же?</div>
+          <div class="faq-a">Опасение справедливое — многие обёртки переписывают системный промпт и ломают поведение модели. Aura запускает официальные <code>claude</code> и <code>codex</code> без изменений: ваши CLAUDE.md, навыки, MCP и модель остаются как есть. Скрытых промптов по умолчанию нет — база знаний подключается только по запросу. Аудит prompt-cache показывает 97,5% попаданий в кэш, то есть начало промпта мы не трогаем. Практики Anthropic и OpenAI работают так же, как в терминале.</div>
+        </div>
+        <div class="faq-item">
+          <div class="faq-q" onclick="toggleFaq(this)">Выглядит слишком сказочно. Где подвох? Нужна регистрация?</div>
+          <div class="faq-a">Регистрации нет. Запуск у себя: <code>bunx aura-companion</code> → <code>localhost:3456</code>, работает на вашей подписке Claude или Codex, удаляется одной командой. Подвоха нет, но и чудес тоже: Aura не делает модель умнее и не даёт подписку. Она продолжает работу после лимита, даёт второе мнение от другой модели и не теряет работу при рестартах. Весь код открыт под MIT — проверить можно самому.</div>
+        </div>
+        <div class="faq-item">
+          <div class="faq-q" onclick="toggleFaq(this)">Не проще ли настроить Claude под себя самому?</div>
+          <div class="faq-a">Возможно, и проще — если у вас есть время. Aura — это то, что получилось бы у вас месяца за три: мы уже наступили на грабли с потерянными ответами, зависаниями, лимитами и рестартами. Код под MIT: можно взять только методологию (навыки, Council Mode, базу знаний) и встроить в свою настройку, а можно — всё целиком.</div>
+        </div>
         <div class="faq-item">
           <div class="faq-q" onclick="toggleFaq(this)">Нужен ли VPN для работы?</div>
           <div class="faq-a">Нет. Сайт работает напрямую из России, Беларуси, Казахстана и других стран СНГ. Мы держим инфраструктуру так, чтобы доступ был стабильным без обходных путей.</div>
@@ -1129,15 +1276,6 @@
     el.parentElement.classList.toggle('open');
   }
 
-  function setLang(lang, btn) {
-    document.querySelectorAll('.lang-switch button').forEach(b => b.classList.remove('on'));
-    btn.classList.add('on');
-    if (lang === 'en') {
-      alert('English version coming soon — пока работает только русская версия.');
-      document.querySelectorAll('.lang-switch button')[0].classList.add('on');
-      document.querySelectorAll('.lang-switch button')[1].classList.remove('on');
-    }
-  }
 </script>
 <script>
 (function(){
