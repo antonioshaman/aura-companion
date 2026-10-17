@@ -3174,7 +3174,8 @@ export class CodexAdapter implements IBackendAdapter {
     // Only the MAIN thread's usage belongs to this result; collab subagent
     // threads keep their own buckets in the (thread-keyed) accumulator.
     const completedThreadId = typeof params.threadId === "string" ? params.threadId : undefined;
-    const turnUsage = this.isMainThread(completedThreadId)
+    const isMainTurn = this.isMainThread(completedThreadId);
+    const turnUsage = isMainTurn
       ? this.turnUsage.takeForTurn(completedTurnId, completedThreadId)
       : null;
     const result: CLIResultMessage = {
@@ -3188,6 +3189,9 @@ export class CodexAdapter implements IBackendAdapter {
       total_cost_usd: 0,
       stop_reason: turn?.status || "end_turn",
       usage: turnUsage ?? { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      // A child (collab subagent) thread's completion is not the main turn's
+      // outcome — flag it so main-turn consumers can skip it.
+      ...(isMainTurn ? {} : { subagent_turn: true as const }),
       uuid: randomUUID(),
       session_id: this.sessionId,
     };

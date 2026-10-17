@@ -1164,8 +1164,10 @@ export class WsBridge {
         // answered on a real model is runtime proof the model works on this
         // install → the dropdown stops flagging it "Untested". Failed turns,
         // `<synthetic>` (model-unavailable) frames and subagent-only turns
-        // never set `turnObservedModel`, so they record nothing.
-        {
+        // never set `turnObservedModel`, so they record nothing. A Codex
+        // SUBAGENT thread's result (`subagent_turn`) is not the main turn's
+        // outcome: it neither records nor clears the pending observation.
+        if (!resultData.subagent_turn) {
           const observed = session.turnObservedModel;
           session.turnObservedModel = undefined;
           if (observed && resultData.subtype === "success" && !resultData.is_error) {

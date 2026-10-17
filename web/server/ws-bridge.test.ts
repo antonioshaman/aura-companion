@@ -6430,6 +6430,55 @@ describe("session model sync from the main assistant frame", () => {
       expect(store.size()).toBe(0);
     });
 
+    // PR #379 review (council observer WARN): CodexAdapter emits a `result`
+    // for child (subagent) threads too. Observation must follow the MAIN
+    // turn's result only: a subagent result must neither record nor clear it.
+    function attachCodex(sessionId: string): (msg: any) => void {
+      let cb: ((msg: any) => void) | undefined;
+      bridge.attachBackendAdapter(sessionId, {
+        isConnected: () => true,
+        send: vi.fn(() => true),
+        disconnect: async () => {},
+        onBrowserMessage: (fn: (msg: any) => void) => { cb = fn; },
+        onSessionMeta: () => {},
+        onDisconnect: () => {},
+        onInitError: () => {},
+      } as any, "codex");
+      return (msg) => cb!(msg);
+    }
+    function codexAssistant(model: string) {
+      return {
+        type: "assistant",
+        message: {
+          id: `cx-${Math.random()}`, type: "message", role: "assistant", model,
+          content: [{ type: "text", text: "ok" }], stop_reason: "end_turn",
+          usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        },
+        parent_tool_use_id: null,
+        timestamp: Date.now(),
+      };
+    }
+    function codexResult(sessionId: string, ok: boolean, subagent: boolean) {
+      const data = JSON.parse(resultFrame(sessionId, ok));
+      return { type: "result", data: subagent ? { ...data, subagent_turn: true } : data };
+    }
+
+    it("codex: main assistant X → subagent SUCCESS → main ERROR does NOT record X", () => {
+      const emit = attachCodex("vm-cx-a");
+      emit(codexAssistant("gpt-6-sol"));
+      emit(codexResult("vm-cx-a", true, true)); // child thread completed fine
+      emit(codexResult("vm-cx-a", false, false)); // the MAIN turn failed
+      expect(store.size()).toBe(0);
+    });
+
+    it("codex: main assistant X → subagent ERROR → main SUCCESS records X", () => {
+      const emit = attachCodex("vm-cx-b");
+      emit(codexAssistant("gpt-6-sol"));
+      emit(codexResult("vm-cx-b", false, true)); // child failure must not clear the observation
+      emit(codexResult("vm-cx-b", true, false));
+      expect(store.has("codex", "gpt-6-sol")).toBe(true);
+    });
+
     it("codex: a successful turn records under the codex backend", () => {
       let onBrowserMessage: ((msg: any) => void) | undefined;
       const adapter = {
