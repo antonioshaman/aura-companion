@@ -155,6 +155,8 @@
     .nav-links { display: none; }
     .gh-badge span { display: none; }
   }
+  .nav-cta { white-space: nowrap; }
+  @media (max-width: 520px) { .nav-cta { display: none; } }
 
   /* Hero */
   .hero { padding: 80px 0 60px; position: relative; }
@@ -488,6 +490,26 @@
     .shot-frame { border-radius: 10px; }
   }
 
+  /* Screenshot carousel */
+  .carousel { position: relative; z-index: 1; max-width: 1100px; margin: 0 0 48px; }
+  .carousel:focus-visible { outline: 2px solid var(--amber); outline-offset: 6px; border-radius: 14px; }
+  .carousel-viewport { overflow: hidden; border: 1px solid var(--border-hi); border-radius: 14px; background: #060403; box-shadow: 0 0 0 1px rgba(0, 255, 110, 0.06) inset, 0 0 28px rgba(0, 255, 110, 0.14), 0 20px 60px -20px rgba(0, 0, 0, 0.9); touch-action: pan-y; }
+  .carousel-track { display: flex; transition: transform 0.5s ease; will-change: transform; }
+  .carousel-slide { flex: 0 0 100%; min-width: 0; margin: 0; }
+  .carousel-slide .carousel-img { aspect-ratio: 1400 / 853; background: #1e1e1e; }
+  .carousel-slide img { display: block; width: 100%; height: 100%; object-fit: contain; }
+  .carousel-caption { margin: 0; padding: 12px 16px; min-height: 4.4em; font-size: 13px; color: var(--text-dim); text-align: center; line-height: 1.6; }
+  .carousel-controls { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 8px; flex-wrap: wrap; }
+  .carousel-btn { background: var(--surface); border: 1px solid var(--border-hi); color: var(--amber); width: 36px; height: 36px; border-radius: 999px; cursor: pointer; font-family: inherit; font-size: 16px; line-height: 1; display: inline-flex; align-items: center; justify-content: center; transition: background 0.2s, border-color 0.2s; }
+  .carousel-btn:hover, .carousel-btn:focus-visible { background: var(--surface-hi); border-color: var(--amber); outline: none; }
+  .carousel-dots { display: flex; gap: 6px; }
+  .carousel-dot { width: 24px; height: 24px; padding: 0; border: none; background: none; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+  .carousel-dot::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); transition: background 0.2s, box-shadow 0.2s; }
+  .carousel-dot[aria-current="true"]::before { background: var(--amber); box-shadow: 0 0 8px var(--amber); }
+  .carousel-dot:focus-visible { outline: 2px solid var(--amber); border-radius: 50%; }
+  @media (max-width: 880px) { .carousel { margin-bottom: 36px; } .carousel-viewport { border-radius: 10px; } }
+  @media (prefers-reduced-motion: reduce) { .carousel-track { transition: none; } }
+
   /* FAQ */
   .faq-list { max-width: 800px; }
   .faq-item { border-bottom: 1px solid var(--border); padding: 24px 0; }
@@ -623,7 +645,24 @@
       <h1>Claude Code &amp; Codex.<br><span class="accent">From your phone.</span> No babysitting.</h1>
       <p class="hero-sub">A web UI for the official Claude Code and Codex CLIs: your agents keep working after a usage limit, review each other, and don't lose replies when the server restarts. Run several projects in one window, from any browser — including your phone. Free, open source under MIT. Also works from Russia, Belarus, Kazakhstan and the rest of the CIS without a VPN. <a href="#why" style="color:var(--amber);text-decoration:none;white-space:nowrap;">Why not just use Claude Code? →</a></p>
 
-      <figure class="shot hero-shot"><div class="shot-frame"><img src="/img/aura-hero.webp" width="1400" height="853" alt="Aura Companion new-session screen: project sessions in the sidebar, a task box, a Claude Code / Codex switch and the Council Mode toggle" fetchpriority="high" decoding="async"></div><figcaption>This is Aura: sessions on the left, Claude Code or Codex, and a Council Mode switch — in the browser, phone included</figcaption></figure>
+      <div class="carousel" id="shots" role="region" aria-roledescription="carousel" aria-label="Aura Companion screenshots" tabindex="0" data-pause="Pause auto-rotation" data-play="Start auto-rotation">
+        <div class="carousel-viewport">
+          <div class="carousel-track" aria-live="off">
+            <figure class="carousel-slide" role="group" aria-roledescription="slide" aria-label="1 of 6"><div class="carousel-img"><img src="/img/aura-hero.webp" width="1400" height="853" alt="Aura Companion new-session screen: session list, task box, Claude Code / Codex switch and the Council Mode toggle" fetchpriority="high" decoding="async"></div><figcaption class="carousel-caption">New session: pick Claude Code or Codex and switch on Council Mode — in the browser, phone included</figcaption></figure>
+            <figure class="carousel-slide" role="group" aria-roledescription="slide" aria-label="2 of 6" aria-hidden="true"><div class="carousel-img"><img data-src="/img/shot-fresh.webp" width="1400" height="853" alt="Left: the model list, with not-yet-verified models (Opus 5.5, Fable 5.1 and others) marked Untested; right: a banner &quot;limit until 08:02 — auto-resume at 08:04&quot;, the automatic &quot;limit reset, continue where you left off&quot; message, and a collapsed &quot;Interrupted ×4&quot; row" decoding="async"></div><figcaption class="carousel-caption">New: unverified models are marked "Untested"; a usage limit triggers a timed auto-resume; a run of restarts collapses into one row (demo data)</figcaption></figure>
+            <figure class="carousel-slide" role="group" aria-roledescription="slide" aria-label="3 of 6" aria-hidden="true"><div class="carousel-img"><img data-src="/img/shot-findings.webp" width="1400" height="853" alt="Observer feed: a liveness probe, then findings as cards — STOP, WARN and INFO with confidence and a file and line reference" decoding="async"></div><figcaption class="carousel-caption">The observer's findings arrive as cards: severity, confidence, file and lines (demo data)</figcaption></figure>
+            <figure class="carousel-slide" role="group" aria-roledescription="slide" aria-label="4 of 6" aria-hidden="true"><div class="carousel-img"><img data-src="/img/council-overview.webp" width="1400" height="853" alt="Council Mode: the main agent chat on the left, the observer panel on the right with NOTE and INFO findings from a second model" decoding="async"></div><figcaption class="carousel-caption">Council Mode: on the right, a second model that checks every step</figcaption></figure>
+            <figure class="carousel-slide" role="group" aria-roledescription="slide" aria-label="5 of 6" aria-hidden="true"><div class="carousel-img"><img data-src="/img/shot-permissions.webp" width="1400" height="853" alt="Permission requests: a Bash command and file edits shown as diffs, with Allow, Allow for session, Allow always and Deny buttons" decoding="async"></div><figcaption class="carousel-caption">Every agent action stays under your control: allow once, for the session or always; edits are shown as a diff first (demo data)</figcaption></figure>
+            <figure class="carousel-slide" role="group" aria-roledescription="slide" aria-label="6 of 6" aria-hidden="true"><div class="carousel-img"><img data-src="/img/council-anatomy.webp" width="1400" height="853" alt="Council Mode components: an observer STOP banner with evidence, &quot;observer offline&quot; banners and a STOP / WARN / NOTE / INFO findings log" decoding="async"></div><figcaption class="carousel-caption">A STOP banner with evidence, observer states and the findings log (demo data)</figcaption></figure>
+          </div>
+        </div>
+        <div class="carousel-controls">
+          <button type="button" class="carousel-btn" data-dir="-1" aria-label="Previous slide">&#8592;</button>
+          <div class="carousel-dots" role="group" aria-label="Choose slide"><button type="button" class="carousel-dot" data-i="0" aria-label="Slide 1 of 6" aria-current="true"></button><button type="button" class="carousel-dot" data-i="1" aria-label="Slide 2 of 6"></button><button type="button" class="carousel-dot" data-i="2" aria-label="Slide 3 of 6"></button><button type="button" class="carousel-dot" data-i="3" aria-label="Slide 4 of 6"></button><button type="button" class="carousel-dot" data-i="4" aria-label="Slide 5 of 6"></button><button type="button" class="carousel-dot" data-i="5" aria-label="Slide 6 of 6"></button></div>
+          <button type="button" class="carousel-btn" data-dir="1" aria-label="Next slide">&#8594;</button>
+          <button type="button" class="carousel-btn carousel-toggle" aria-label="Pause auto-rotation">&#10074;&#10074;</button>
+        </div>
+      </div>
 
       <div class="paths" id="paths">
         <a href="#cases" class="path">
@@ -644,26 +683,6 @@
           <p>MIT-licensed — take it and host it yourself. Or hand the repo link to Claude and let it set everything up for you.</p>
           <div class="path-cta">Open on GitHub</div>
         </a>
-      </div>
-
-      <div class="hero-visual">
-        <div class="phone">
-          <div class="phone-notch"></div>
-          <div class="phone-screen">
-            <div class="chat-msg user">
-              <div class="label">You</div>
-              Build me an expense tracker — I want to snap photos of receipts and have it add everything up
-            </div>
-            <div class="chat-msg ai">
-              <div class="label">Aura</div>
-              Got it. Creating a "Family Budget" mini-app: receipt recognition, categories and a monthly report. Two minutes.
-            </div>
-            <div class="chat-msg user">
-              <div class="label">You</div>
-              Also remind my husband about groceries every Wednesday
-            </div>
-          </div>
-        </div>
       </div>
     </div>
   </section>
@@ -1247,6 +1266,58 @@
         if (b) b.textContent = v;
       }).catch(function(){});
   } catch (e) {}
+})();
+</script>
+<script>
+(function(){
+  var root = document.getElementById('shots'); if (!root) return;
+  var track = root.querySelector('.carousel-track');
+  var slides = root.querySelectorAll('.carousel-slide');
+  var dots = root.querySelectorAll('.carousel-dot');
+  var toggle = root.querySelector('.carousel-toggle');
+  var n = slides.length, cur = 0, timer = null, DELAY = 5000;
+  var reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var stopped = reduced, hovered = false, focused = false;
+  function load(i){ var img = slides[(i + n) % n].querySelector('img[data-src]'); if (img) { img.src = img.getAttribute('data-src'); img.removeAttribute('data-src'); } }
+  function show(i){
+    cur = (i + n) % n;
+    track.style.transform = 'translateX(' + (-100 * cur) + '%)';
+    for (var k = 0; k < n; k++) {
+      if (k === cur) { slides[k].removeAttribute('aria-hidden'); dots[k].setAttribute('aria-current', 'true'); }
+      else { slides[k].setAttribute('aria-hidden', 'true'); dots[k].removeAttribute('aria-current'); }
+    }
+    load(cur); load(cur + 1);
+  }
+  function running(){ return !stopped && !hovered && !focused && !document.hidden; }
+  function sync(){
+    clearInterval(timer); timer = null;
+    if (running()) timer = setInterval(function(){ show(cur + 1); }, DELAY);
+    track.setAttribute('aria-live', stopped ? 'polite' : 'off');
+    toggle.setAttribute('aria-label', root.getAttribute(stopped ? 'data-play' : 'data-pause'));
+    toggle.innerHTML = stopped ? '&#9654;' : '&#10074;&#10074;';
+  }
+  function user(i){ stopped = true; show(i); sync(); }
+  root.querySelectorAll('[data-dir]').forEach(function(b){ b.addEventListener('click', function(){ user(cur + Number(b.getAttribute('data-dir'))); }); });
+  dots.forEach(function(d){ d.addEventListener('click', function(){ user(Number(d.getAttribute('data-i'))); }); });
+  toggle.addEventListener('click', function(){ stopped = !stopped; sync(); });
+  root.addEventListener('keydown', function(e){
+    if (e.key === 'ArrowLeft') { e.preventDefault(); user(cur - 1); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); user(cur + 1); }
+  });
+  root.addEventListener('mouseenter', function(){ hovered = true; sync(); });
+  root.addEventListener('mouseleave', function(){ hovered = false; sync(); });
+  root.addEventListener('focusin', function(){ focused = true; sync(); });
+  root.addEventListener('focusout', function(e){ if (!root.contains(e.relatedTarget)) { focused = false; sync(); } });
+  document.addEventListener('visibilitychange', sync);
+  var x0 = null, y0 = null;
+  root.addEventListener('touchstart', function(e){ x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; }, {passive: true});
+  root.addEventListener('touchend', function(e){
+    if (x0 === null) return;
+    var dx = e.changedTouches[0].clientX - x0, dy = e.changedTouches[0].clientY - y0; x0 = null;
+    if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) user(cur + (dx < 0 ? 1 : -1));
+  }, {passive: true});
+  window.addEventListener('load', function(){ load(1); });
+  show(0); sync();
 })();
 </script>
 </body>
