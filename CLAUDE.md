@@ -111,6 +111,10 @@ The knowledge base in `.agents/knowledge/*.jsonl` (patterns, gotchas, decisions,
 
 Aura does not inject the KB into sessions by default; Settings → Session defaults → "Load knowledge base at session start" (`kbAutoPrime`) opts back in. Entry schema, protocol, and lifecycle (`kb:health`, `kb:prune`): [docs/conventions/self-learning.md](docs/conventions/self-learning.md).
 
+## RU-facing hosting (auraco.space)
+
+Anything users in Russia open (the auraco.space landing, any future site/Mini App/API) is served ONLY from the RU Timeweb host `91.222.236.11` — no Cloudflare orange-cloud, no geo-split foreign leg (TSPU freezes RU→foreign connections after ~16KB). Landing deploy: `landing-legacy/deploy-timeweb.sh` (DNS gate + checksum verify). Details: `specs/ru-origin-tspu-hosting-v1.md`.
+
 ## Production deployment
 
 Run under systemd with `KillMode=process`, and set `COMPANION_ALLOWED_ORIGIN` to every non-localhost origin the browser uses (else the WS upgrade is rejected → `Connection timeout` after `Session started`). Details: [docs/architecture/production-deployment.md](docs/architecture/production-deployment.md).
