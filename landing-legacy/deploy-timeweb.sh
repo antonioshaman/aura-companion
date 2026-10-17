@@ -42,6 +42,18 @@ if [[ "${DRY_RUN:-0}" == "1" ]]; then
 fi
 rsync -a --delete "$SITE_DIR/" "$HOST_ALIAS:$REMOTE_DIR/"
 
+# 2b. Fresh release badge data. The page reads same-origin /release.json (a
+#     browser fetch to api.github.com would hit the TSPU freeze in Russia);
+#     the server side here can reach GitHub, so stamp the latest release.
+if rel="$(gh api repos/antonioshaman/aura-companion/releases/latest \
+      --jq '{tag: .tag_name, version: (.tag_name | sub("^aura-companion-v"; "")), url: .html_url, published_at: .published_at}' 2>/dev/null)" \
+   && [[ "$rel" == *'"version"'* ]]; then
+  printf '%s\n' "$rel" | ssh "$HOST_ALIAS" "cat > '$REMOTE_DIR/release.json'"
+  echo "release.json: $rel"
+else
+  echo "release.json: GitHub unreachable, keeping the committed copy" >&2
+fi
+
 # 3. Verify the live origin serves exactly what we shipped.
 want="$(sha256sum "$SITE_DIR/index.html" | cut -d' ' -f1)"
 have="$(curl -fsS --resolve "auraco.space:443:$RU_IP" https://auraco.space/ | sha256sum | cut -d' ' -f1)"
