@@ -14,7 +14,9 @@ set -euo pipefail
 
 HOST_ALIAS="${HOST_ALIAS:-rapesha-timeweb}"   # ssh alias for the Timeweb box
 RU_IP="91.222.236.11"
-DOMAINS=(auraco.space www.auraco.space)
+# Every RU-facing hostname of the project: the landing AND the app entry
+# point (Timeweb reverse proxy -> Aura app over Tailscale).
+DOMAINS=(auraco.space www.auraco.space app.auraco.space)
 REMOTE_DIR="/var/www/auraco.space"
 SITE_DIR="$(cd "$(dirname "$0")" && pwd)/site"
 
