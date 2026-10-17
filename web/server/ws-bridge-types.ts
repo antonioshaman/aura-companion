@@ -140,6 +140,14 @@ export interface Session {
   turnStartedAt?: number;
   /** Prefix-changing control requests since the last turn_usage line. */
   pendingCachePrefixChanges?: CachePrefixChangeReason[];
+  /**
+   * Real (non-`<synthetic>`) model of the current turn's MAIN-thread assistant
+   * frame, in-memory only. Consumed — and cleared — by the next `result`: a
+   * successful result records it in the observed-working model store
+   * (`verified-models.ts`). Cleared on every result so a later turn without a
+   * main assistant frame never reuses a stale model as evidence.
+   */
+  turnObservedModel?: string;
 }
 
 export type GitSessionKey =

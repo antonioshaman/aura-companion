@@ -111,6 +111,12 @@ vi.mock("./model-registry.js", () => ({
   lookupModel: vi.fn(() => null),
 }));
 
+// Observed-working model store: mocked so routes never read the operator's
+// real ~/.companion/verified-models.json. Default = no store wired (null).
+vi.mock("./verified-models.js", () => ({
+  getVerifiedModelStore: vi.fn(() => null),
+}));
+
 vi.mock("./settings-manager.js", () => ({
   DEFAULT_ANTHROPIC_MODEL: "claude-sonnet-4-6",
   getSettings: vi.fn(() => ({
@@ -311,6 +317,7 @@ import * as sessionNames from "./session-names.js";
 import * as settingsManager from "./settings-manager.js";
 import * as anthropicModelsCache from "./anthropic-models-cache.js";
 import * as modelRegistry from "./model-registry.js";
+import * as verifiedModels from "./verified-models.js";
 import * as linearProjectManager from "./linear-project-manager.js";
 import { resolveApiKey } from "./linear-connections.js";
 import { containerManager } from "./container-manager.js";
@@ -4557,6 +4564,51 @@ describe("GET /api/backends/:id/models", () => {
       { value: "gpt-5.2-codex", label: "gpt-5.2-codex", description: "Frontier model", untested: true },
     ]);
     expect(json[0]).not.toHaveProperty("status");
+  });
+
+  it("a registry-bundled model (opus-5-5) is NOT flagged untested", async () => {
+    // The operator's daily model was labelled "Untested" because the bundled
+    // registry was stale. A registry entry means verified: no `untested`.
+    vi.mocked(anthropicModelsCache.getAnthropicModels).mockResolvedValueOnce({
+      kind: "ok",
+      source: "network",
+      fetched_at: 1_000_000_000_000,
+      models: [{ value: "claude-opus-5-5", label: "Opus 5.5", description: "Claude Opus 5.5" }],
+    });
+    vi.mocked(modelRegistry.lookupModel).mockReturnValueOnce({
+      id: "claude-opus-5-5", backend: "claude", status: "active", replacement: null, tier: "max",
+    });
+
+    const res = await app.request("/api/backends/claude/models", { method: "GET" });
+    const json = await res.json();
+    expect(json).toEqual([
+      { value: "claude-opus-5-5", label: "Opus 5.5", description: "Claude Opus 5.5", status: "active", replacement: null },
+    ]);
+    expect(json[0]).not.toHaveProperty("untested");
+  });
+
+  it("a model observed working in a session is verifiedBy=observed, not untested", async () => {
+    // Not in the registry, but a session completed a successful turn on it.
+    const cacheContent = JSON.stringify({
+      models: [
+        { slug: "gpt-6-sol", display_name: "gpt-6-sol", description: "Observed", visibility: "list", priority: 0 },
+        { slug: "gpt-5.6-luna", display_name: "gpt-5.6-luna", description: "Never run", visibility: "list", priority: 1 },
+      ],
+    });
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue(cacheContent);
+    const has = vi.fn((backend: string, id: string) => backend === "codex" && id === "gpt-6-sol");
+    vi.mocked(verifiedModels.getVerifiedModelStore).mockReturnValue({ has } as any);
+    try {
+      const res = await app.request("/api/backends/codex/models", { method: "GET" });
+      const json = await res.json();
+      expect(json).toEqual([
+        { value: "gpt-6-sol", label: "gpt-6-sol", description: "Observed", verifiedBy: "observed" },
+        { value: "gpt-5.6-luna", label: "gpt-5.6-luna", description: "Never run", untested: true },
+      ]);
+    } finally {
+      vi.mocked(verifiedModels.getVerifiedModelStore).mockReturnValue(null);
+    }
   });
 
   it("overlays registry annotations onto claude models (claude branch)", async () => {

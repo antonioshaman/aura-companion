@@ -197,6 +197,13 @@ export interface BackendModelInfo {
    * renders a subtle "Untested" hint.
    */
   untested?: true;
+  /**
+   * `"observed"` when the model is NOT in the registry but a session on this
+   * install completed a successful main-thread turn on it
+   * (`verified-models.ts`). Mutually exclusive with `untested`. Registry
+   * entries omit it (they are verified by the registry itself).
+   */
+  verifiedBy?: "observed";
 }
 
 // ── Per-request result discriminated union (Backend R1 + Fowler R1) ─────────

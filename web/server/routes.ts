@@ -62,6 +62,7 @@ import { getSettings } from "./settings-manager.js";
 import { parseSecondReviewerSetting, parseSecondReviewScope, type SecondReviewerConfig } from "./second-reviewer-config.js";
 import { getAnthropicModels, type BackendModelInfo } from "./anthropic-models-cache.js";
 import { lookupModel } from "./model-registry.js";
+import { getVerifiedModelStore } from "./verified-models.js";
 import { discoverClaudeSessions } from "./claude-session-discovery.js";
 import { getClaudeSessionHistoryPage } from "./claude-session-history.js";
 import { verifyToken, getToken, regenerateToken, getAllAddresses, isDirectLocalRequest } from "./auth-manager.js";
@@ -258,7 +259,9 @@ function shellEscapeArg(value: string): string {
  * whether a model is `status`/`replacement`-annotated so it can render a tag.
  *
  * Additive merge (Task 3): a model absent from the registry passes through
- * with only an additive `untested: true` flag, so an old frontend still
+ * with only an additive `untested: true` flag (or `verifiedBy: "observed"`
+ * when a session on this install already ran a successful turn on it), so
+ * an old frontend still
  * parses the payload. Hunt REC-4: only
  * `status` and `replacement` cross the wire — `riskFlags`, `tier`, and the
  * on-disk file path stay operator-internal.
@@ -273,7 +276,12 @@ function enrichModelsWithRegistry(
     // Claude list is the API-key /v1/models catalogue, which can include
     // models the subscription can't use). Say so honestly; no lifecycle
     // `status` is invented.
-    if (entry === null) return { ...m, untested: true };
+    // Not in the registry, but a session on this install completed a
+    // successful turn on it (verified-models.ts) → runtime-verified.
+    if (entry === null) {
+      if (getVerifiedModelStore()?.has(backend, m.value)) return { ...m, verifiedBy: "observed" as const };
+      return { ...m, untested: true };
+    }
     return { ...m, status: entry.status, replacement: entry.replacement };
   });
 }

@@ -275,6 +275,8 @@ export interface BackendModelInfo {
   replacement?: string | null;
   /** Not in the registry — offered by the catalogue but never verified here. */
   untested?: true;
+  /** Not in the registry, but a session on this install ran a successful turn on it. */
+  verifiedBy?: "observed";
 }
 
 /**
