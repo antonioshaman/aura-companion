@@ -175,6 +175,14 @@ export interface CLIResultMessage {
   }>;
   total_lines_added?: number;
   total_lines_removed?: number;
+  /**
+   * Codex only: `true` when this result closes a collab SUBAGENT thread's
+   * turn, not the main thread's (the adapter emits a result for both).
+   * Absent = main-thread turn (and always absent on Claude, whose CLI emits
+   * one result per main turn). Consumers judging the MAIN turn's outcome —
+   * e.g. the observed-working model store — must skip flagged results.
+   */
+  subagent_turn?: true;
   uuid: string;
   session_id: string;
 }

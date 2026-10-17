@@ -2774,6 +2774,36 @@ describe("CodexAdapter", () => {
     expect(updates.some((u) => u.session.last_context_tokens === 1050)).toBe(true);
   });
 
+  it("marks a child-thread turn/completed result as subagent_turn; the main thread's result is unmarked", async () => {
+    // PR #379 review: handleTurnCompleted emits a `result` for collab
+    // subagent threads too. Consumers that care about the MAIN turn's outcome
+    // (observed-working model store) must be able to tell them apart.
+    const messages: BrowserIncomingMessage[] = [];
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini" });
+    adapter.onBrowserMessage((msg) => messages.push(msg));
+
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 20));
+    stdout.push(JSON.stringify({ id: 2, result: { thread: { id: "thr_main" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    stdout.push(JSON.stringify({
+      method: "turn/completed",
+      params: { threadId: "thr_sub", turn: { id: "turn_s", status: "completed", items: [] } },
+    }) + "\n");
+    stdout.push(JSON.stringify({
+      method: "turn/completed",
+      params: { threadId: "thr_main", turn: { id: "turn_m", status: "completed", items: [] } },
+    }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const results = messages.filter((m) => m.type === "result") as Array<Extract<BrowserIncomingMessage, { type: "result" }>>;
+    expect(results).toHaveLength(2);
+    expect(results[0]!.data.subagent_turn).toBe(true);
+    expect(results[1]!.data).not.toHaveProperty("subagent_turn");
+  });
+
   it("W6 review: subagent-thread tokenUsage neither leaks into the main turn result nor overwrites session context state", async () => {
     // A collab subagent runs on its own thread and reports its own cumulative
     // totals. Interleaved with the main thread (and duplicated, as real

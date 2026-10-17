@@ -1105,7 +1105,7 @@ export function HomePage() {
                         ? `${m.label} is ${m.status} — use ${m.replacement} instead`
                         : `${m.label} is ${m.status} and can't be selected`
                       : untested
-                        ? `${m.label} — not verified on this Aura install; it may fail on your plan`
+                        ? `${m.label} — no session has run on this model on this Aura install yet; it may fail on your plan`
                         : undefined;
                     return (
                       <button

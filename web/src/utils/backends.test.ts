@@ -30,6 +30,18 @@ describe("toModelOptions", () => {
     expect(options[1]).not.toHaveProperty("untested");
   });
 
+  it("carries the server's verifiedBy=observed flag through", () => {
+    // A registry-unknown model a session already ran successfully arrives as
+    // `verifiedBy: "observed"` (never together with `untested`).
+    const options = toModelOptions([
+      { value: "gpt-6-sol", label: "gpt-6-sol", description: "", verifiedBy: "observed" },
+      { value: "gpt-5.2", label: "gpt-5.2", description: "" },
+    ]);
+    expect(options[0].verifiedBy).toBe("observed");
+    expect(options[0]).not.toHaveProperty("untested");
+    expect(options[1]).not.toHaveProperty("verifiedBy");
+  });
+
   it("converts server model info to frontend ModelOption with icons", () => {
     const models = [
       { value: "gpt-5.2-codex", label: "gpt-5.2-codex", description: "Frontier" },
@@ -472,10 +484,16 @@ describe("CLAUDE_MODELS static fallback — fresh models", () => {
   // Non-registry entries carry the same `untested` flag the server's
   // enrichModelsWithRegistry adds on the dynamic path, so the dropdown shows
   // the same "Untested" hint regardless of which list fed it.
+  // 2026-10-17: opus-5-5 / opus-5 / fable-5 / fable-5-1 joined the server
+  // registry (verified on CLI 2.1.283), so they lose the flag here too;
+  // sonnet-5 is still registry-unknown and keeps it.
   it("marks the non-registry fresh models untested, keeps the registry ones unflagged", () => {
     const byId = new Map(CLAUDE_MODELS.map((m) => [m.value, m]));
-    expect(byId.get("claude-opus-5-5")?.untested).toBe(true);
-    expect(byId.get("claude-fable-5")?.untested).toBe(true);
+    expect(byId.get("claude-sonnet-5")?.untested).toBe(true);
+    expect(byId.get("claude-opus-5-5")?.untested).toBeUndefined();
+    expect(byId.get("claude-opus-5")?.untested).toBeUndefined();
+    expect(byId.get("claude-fable-5")?.untested).toBeUndefined();
+    expect(byId.get("claude-fable-5-1")?.untested).toBeUndefined();
     expect(byId.get("claude-sonnet-4-6")?.untested).toBeUndefined();
     expect(byId.get("claude-haiku-4-5-20251001")?.untested).toBeUndefined();
   });

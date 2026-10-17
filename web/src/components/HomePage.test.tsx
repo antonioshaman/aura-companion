@@ -535,7 +535,7 @@ describe("HomePage", () => {
   it("Claude fetch rejected: static fallback offers Opus 5.5 and a retry hint re-fetches", async () => {
     // Owner bug 2026-10-16: a failed /v1/models fetch left the dropdown on a
     // stale static list topping out at Opus 4.8 with no way to recover.
-    // Now the fallback lists the fresh models (marked Untested) and a hint
+    // Now the fallback lists the fresh models and a hint
     // under the card offers a manual retry.
     mockStoreState.dynamicBackendModelsStatus = { claude: "rejected", codex: "idle" };
     try {
@@ -546,7 +546,11 @@ describe("HomePage", () => {
       fireEvent.click(screen.getByText("Opus 4.8"));
       const opus55 = screen.getByRole("button", { name: /Opus 5\.5/ });
       expect(opus55).not.toBeDisabled();
-      expect(within(opus55).getByText("Untested")).toBeInTheDocument();
+      // 2026-10-17: Opus 5.5 is registry-verified now — no "Untested" hint;
+      // the still-unverified Sonnet 5 keeps it.
+      expect(within(opus55).queryByText("Untested")).not.toBeInTheDocument();
+      const sonnet5 = screen.getByRole("button", { name: /Sonnet 5/ });
+      expect(within(sonnet5).getByText("Untested")).toBeInTheDocument();
 
       mockStoreState.loadBackendModels.mockClear();
       fireEvent.click(screen.getByRole("button", { name: "Обновить" }));

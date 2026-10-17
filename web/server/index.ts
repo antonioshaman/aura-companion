@@ -3,6 +3,7 @@ process.env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS = "1";
 // Enrich process PATH at startup so binary resolution and `which` calls can find
 // binaries installed via version managers (nvm, volta, fnm, etc.).
 // Critical when running as a launchd/systemd service with a restricted PATH.
+import { VerifiedModelStore, VERIFIED_MODELS_PATH, getVerifiedModelStore, setVerifiedModelStore } from "./verified-models.js";
 import { getEnrichedPath } from "./path-resolver.js";
 process.env.PATH = getEnrichedPath();
 
@@ -71,6 +72,9 @@ if (!process.env.COMPANION_SESSION_DIR) {
   migrateLegacyTmpdirSessions();
 }
 const sessionStore = new SessionStore(process.env.COMPANION_SESSION_DIR);
+// Observed-working models (verified-models.ts): wired here, and only here,
+// so unit tests never touch the operator's real ~/.companion file.
+setVerifiedModelStore(new VerifiedModelStore({ path: VERIFIED_MODELS_PATH }));
 const wsBridge = new WsBridge();
 const launcher = new CliLauncher(port);
 const worktreeTracker = new WorktreeTracker();
@@ -1092,6 +1096,7 @@ async function gracefulShutdown() {
       console.log(`[server] Flushed ${interruptedCount} interrupted stream(s) on shutdown`);
     }
     wsBridge.flushSessionStorePendingSync();
+    getVerifiedModelStore()?.flush();
     // W2: persist which sessions were alive BEFORE shutdownAllGroups kills
     // the council pairs, so the next boot resumes them without a browser.
     try {

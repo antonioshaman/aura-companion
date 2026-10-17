@@ -453,8 +453,10 @@ export function ModelSwitcher({ sessionId }: ModelSwitcherProps) {
                 title={
                   unavailableReason ??
                   (showUntested
-                    ? `${model.label} — not verified on this Aura install; it may fail on your plan`
-                    : model.label)
+                    ? `${model.label} — no session has run on this model on this Aura install yet; it may fail on your plan`
+                    : model.verifiedBy === "observed"
+                      ? `${model.label} — verified: a session on this install ran it successfully`
+                      : model.label)
                 }
                 // Task 10 (a11y P5): fold the suppression reason into the
                 // accessible NAME of the disabled option — `title` alone is only

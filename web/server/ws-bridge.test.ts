@@ -45,6 +45,7 @@ import { WsBridge, type SocketData } from "./ws-bridge.js";
 import { SessionStore } from "./session-store.js";
 import { containerManager } from "./container-manager.js";
 import { companionBus } from "./event-bus.js";
+import { VerifiedModelStore, setVerifiedModelStore } from "./verified-models.js";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -6352,6 +6353,158 @@ describe("session model sync from the main assistant frame", () => {
     const s = bridge.getSession("sm4")!;
     expect(s.state.model).toBe("claude-opus-4-8");
     expect(s.state.context_used_percent).toBeGreaterThan(0);
+  });
+
+  // ── Observed-working models (verified-models.ts) ──────────────────────
+  // A successful MAIN-thread turn on model X marks (backend, X) verified so
+  // the dropdown stops calling the operator's daily model "Untested". Each
+  // test wires a store on a tmp path — never the real ~/.companion file.
+  describe("records observed-working models", () => {
+    let vmDir: string;
+    let store: VerifiedModelStore;
+    beforeEach(() => {
+      vmDir = mkdtempSync(join(tmpdir(), "ws-bridge-verified-"));
+      store = new VerifiedModelStore({ path: join(vmDir, "verified-models.json"), debounceMs: 0 });
+      setVerifiedModelStore(store);
+    });
+    afterEach(() => {
+      setVerifiedModelStore(null);
+      rmSync(vmDir, { recursive: true, force: true });
+    });
+
+    function resultFrame(sessionId: string, ok: boolean): string {
+      return JSON.stringify({
+        type: "result", subtype: ok ? "success" : "error_during_execution", is_error: !ok,
+        duration_ms: 1, duration_api_ms: 1, num_turns: 1, total_cost_usd: 0,
+        stop_reason: "end_turn", session_id: sessionId, uuid: `r-${sessionId}`,
+        usage: { input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      });
+    }
+
+    it("claude: a successful main-thread turn on an unknown model marks it verified", async () => {
+      const cli = makeCliSocket("vm1");
+      bridge.handleCLIOpen(cli, "vm1");
+      await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "vm1", model: "claude-sonnet-5" }));
+      await bridge.handleCLIMessage(cli, assistantFrame("vm1", "claude-sonnet-5", null, "va1"));
+      expect(store.has("claude", "claude-sonnet-5")).toBe(false); // not until the turn succeeds
+      await bridge.handleCLIMessage(cli, resultFrame("vm1", true));
+      expect(store.has("claude", "claude-sonnet-5")).toBe(true);
+    });
+
+    it("claude: a failed turn does NOT mark the model verified", async () => {
+      const cli = makeCliSocket("vm2");
+      bridge.handleCLIOpen(cli, "vm2");
+      await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "vm2", model: "claude-sonnet-5" }));
+      await bridge.handleCLIMessage(cli, assistantFrame("vm2", "claude-sonnet-5", null, "va2"));
+      await bridge.handleCLIMessage(cli, resultFrame("vm2", false));
+      expect(store.size()).toBe(0);
+    });
+
+    it("claude: a <synthetic> turn (model unavailable) does NOT mark anything verified", async () => {
+      const cli = makeCliSocket("vm3");
+      bridge.handleCLIOpen(cli, "vm3");
+      await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "vm3", model: "claude-opus-9" }));
+      await bridge.handleCLIMessage(cli, assistantFrame("vm3", "<synthetic>", null, "va3"));
+      await bridge.handleCLIMessage(cli, resultFrame("vm3", true));
+      // The init/spawn model alone is not evidence the model works.
+      expect(store.size()).toBe(0);
+    });
+
+    it("claude: a subagent-only turn does not verify the subagent's model", async () => {
+      const cli = makeCliSocket("vm4");
+      bridge.handleCLIOpen(cli, "vm4");
+      await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "vm4", model: "claude-opus-4-8" }));
+      await bridge.handleCLIMessage(cli, assistantFrame("vm4", "claude-haiku-9", "toolu_sub", "va4"));
+      await bridge.handleCLIMessage(cli, resultFrame("vm4", true));
+      expect(store.has("claude", "claude-haiku-9")).toBe(false);
+    });
+
+    it("claude: the observation is per-turn — a later failed turn records nothing new", async () => {
+      const cli = makeCliSocket("vm5");
+      bridge.handleCLIOpen(cli, "vm5");
+      await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "vm5", model: "claude-opus-4-8" }));
+      await bridge.handleCLIMessage(cli, assistantFrame("vm5", "claude-sonnet-5", null, "va5"));
+      await bridge.handleCLIMessage(cli, resultFrame("vm5", false));
+      // Next turn: result with no assistant frame — must not reuse the stale turn model.
+      await bridge.handleCLIMessage(cli, resultFrame("vm5", true));
+      expect(store.size()).toBe(0);
+    });
+
+    // PR #379 review (council observer WARN): CodexAdapter emits a `result`
+    // for child (subagent) threads too. Observation must follow the MAIN
+    // turn's result only: a subagent result must neither record nor clear it.
+    function attachCodex(sessionId: string): (msg: any) => void {
+      let cb: ((msg: any) => void) | undefined;
+      bridge.attachBackendAdapter(sessionId, {
+        isConnected: () => true,
+        send: vi.fn(() => true),
+        disconnect: async () => {},
+        onBrowserMessage: (fn: (msg: any) => void) => { cb = fn; },
+        onSessionMeta: () => {},
+        onDisconnect: () => {},
+        onInitError: () => {},
+      } as any, "codex");
+      return (msg) => cb!(msg);
+    }
+    function codexAssistant(model: string) {
+      return {
+        type: "assistant",
+        message: {
+          id: `cx-${Math.random()}`, type: "message", role: "assistant", model,
+          content: [{ type: "text", text: "ok" }], stop_reason: "end_turn",
+          usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        },
+        parent_tool_use_id: null,
+        timestamp: Date.now(),
+      };
+    }
+    function codexResult(sessionId: string, ok: boolean, subagent: boolean) {
+      const data = JSON.parse(resultFrame(sessionId, ok));
+      return { type: "result", data: subagent ? { ...data, subagent_turn: true } : data };
+    }
+
+    it("codex: main assistant X → subagent SUCCESS → main ERROR does NOT record X", () => {
+      const emit = attachCodex("vm-cx-a");
+      emit(codexAssistant("gpt-6-sol"));
+      emit(codexResult("vm-cx-a", true, true)); // child thread completed fine
+      emit(codexResult("vm-cx-a", false, false)); // the MAIN turn failed
+      expect(store.size()).toBe(0);
+    });
+
+    it("codex: main assistant X → subagent ERROR → main SUCCESS records X", () => {
+      const emit = attachCodex("vm-cx-b");
+      emit(codexAssistant("gpt-6-sol"));
+      emit(codexResult("vm-cx-b", false, true)); // child failure must not clear the observation
+      emit(codexResult("vm-cx-b", true, false));
+      expect(store.has("codex", "gpt-6-sol")).toBe(true);
+    });
+
+    it("codex: a successful turn records under the codex backend", () => {
+      let onBrowserMessage: ((msg: any) => void) | undefined;
+      const adapter = {
+        isConnected: () => true,
+        send: vi.fn(() => true),
+        disconnect: async () => {},
+        onBrowserMessage: (cb: (msg: any) => void) => { onBrowserMessage = cb; },
+        onSessionMeta: () => {},
+        onDisconnect: () => {},
+        onInitError: () => {},
+      };
+      bridge.attachBackendAdapter("vm-codex", adapter as any, "codex");
+      onBrowserMessage!({
+        type: "assistant",
+        message: {
+          id: "cx1", type: "message", role: "assistant", model: "gpt-6-sol",
+          content: [{ type: "text", text: "ok" }], stop_reason: "end_turn",
+          usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        },
+        parent_tool_use_id: null,
+        timestamp: Date.now(),
+      });
+      onBrowserMessage!({ type: "result", data: JSON.parse(resultFrame("vm-codex", true)) });
+      expect(store.has("codex", "gpt-6-sol")).toBe(true);
+      expect(store.has("claude", "gpt-6-sol")).toBe(false);
+    });
   });
 
   // The model change must be PERSISTED for relaunch, not just reflected in the

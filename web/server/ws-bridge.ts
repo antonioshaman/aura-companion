@@ -1,3 +1,4 @@
+import { getVerifiedModelStore } from "./verified-models.js";
 import type { ServerWebSocket } from "bun";
 import type {
   BrowserOutgoingMessage,
@@ -1159,6 +1160,20 @@ export class WsBridge {
       // -- result: update session cost/turns, refresh git, notify listeners
       if (msg.type === "result") {
         const resultData = msg.data;
+        // Observed-working models: a successful turn whose MAIN thread
+        // answered on a real model is runtime proof the model works on this
+        // install → the dropdown stops flagging it "Untested". Failed turns,
+        // `<synthetic>` (model-unavailable) frames and subagent-only turns
+        // never set `turnObservedModel`, so they record nothing. A Codex
+        // SUBAGENT thread's result (`subagent_turn`) is not the main turn's
+        // outcome: it neither records nor clears the pending observation.
+        if (!resultData.subagent_turn) {
+          const observed = session.turnObservedModel;
+          session.turnObservedModel = undefined;
+          if (observed && resultData.subtype === "success" && !resultData.is_error) {
+            getVerifiedModelStore()?.recordSuccess(session.backendType, observed);
+          }
+        }
         session.state.total_cost_usd = resultData.total_cost_usd;
         session.state.num_turns = resultData.num_turns;
         if (typeof resultData.total_lines_added === "number") {
@@ -2075,6 +2090,7 @@ export class WsBridge {
       && mainModel.length > 0
       && mainModel !== "<synthetic>"
     ) {
+      session.turnObservedModel = mainModel;
       const persistedBaseline = session.launcherModel ?? session.state.model;
       session.state.model = mainModel;
       session.launcherModel = mainModel;
