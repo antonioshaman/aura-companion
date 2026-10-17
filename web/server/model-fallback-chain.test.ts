@@ -187,3 +187,46 @@ describe("BROKEN_MODEL_SUBSTITUTIONS content sanity — regression guard", () =>
     expect(entry).toBeUndefined();
   });
 });
+
+/**
+ * Pins the auto-fallback chain for the models the operator actually runs
+ * (2026-10-17). These were captured BEFORE the registry gained the newer
+ * verified models (opus-5-5, fable-5/5-1, opus-5, opus-4-7) and must stay
+ * identical after: the chain is a hand-ordered constant, independent of the
+ * registry and its `tier`, so "verifying" a model must never pull it into a
+ * failover path or make an older model fail UP to a newer/pricier one.
+ */
+describe("fallback chain pins (registry verification must not move them)", () => {
+  it("opus-5-5 has no auto-fallback (not in the closed chain)", () => {
+    expect(nextModelInChain("claude-opus-5-5")).toBeNull();
+  });
+
+  it("opus-4-8 falls back DOWN to opus-4-7, never up to a 5.x / fable model", () => {
+    expect(nextModelInChain("claude-opus-4-8")).toBe("claude-opus-4-7");
+  });
+
+  it("fable-5 and fable-5-1 have no auto-fallback", () => {
+    expect(nextModelInChain("claude-fable-5")).toBeNull();
+    expect(nextModelInChain("claude-fable-5-1")).toBeNull();
+  });
+
+  it("sonnet-4-6 falls back to haiku-4-5", () => {
+    expect(nextModelInChain("claude-sonnet-4-6")).toBe("claude-haiku-4-5");
+  });
+
+  it("the whole chain is unchanged and contains no fable / opus-5-5 entry", () => {
+    expect([...CLAUDE_MODEL_FALLBACK_CHAIN]).toEqual([
+      "claude-opus-5",
+      "claude-opus-4-8",
+      "claude-opus-4-7",
+      "claude-opus-4-6",
+      "claude-sonnet-4-6",
+      "claude-haiku-4-5",
+    ]);
+  });
+
+  it("silence rotation off opus-5-5 / fable-5 never rotates (no successor)", () => {
+    expect(computeSilenceRotation({ count: 5, lastSilentModel: "claude-opus-5-5" }, "claude-opus-5-5", 2).rotateTo).toBeNull();
+    expect(computeSilenceRotation({ count: 5, lastSilentModel: "claude-fable-5" }, "claude-fable-5", 2).rotateTo).toBeNull();
+  });
+});
