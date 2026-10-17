@@ -1,5 +1,5 @@
 import { trackSync } from "./event-loop-lag-monitor.js";
-import type { CliLauncher } from "./cli-launcher.js";
+import type { CliLauncher, SdkSessionInfo } from "./cli-launcher.js";
 import type { WsBridge } from "./ws-bridge.js";
 import { ClaudeAdapter } from "./claude-adapter.js";
 import { containerManager } from "./container-manager.js";
@@ -20,7 +20,13 @@ import {
   SUBAGENT_LAYOUT_VERIFIED_CLI_VERSION,
   type DriftVerdict,
 } from "./silent-stdio-drift-detector.js";
-import { nextCompactionMilestone } from "./context-size-suggester.js";
+import {
+  CODEX_CONTEXT_PERCENT_LADDER,
+  TRANSCRIPT_BYTES_LADDER,
+  nextContextMilestone,
+  type ContextLadder,
+} from "./context-size-suggester.js";
+import type { ContextAdvisoryRecord } from "./session-types.js";
 import { homedir } from "node:os";
 import { statSync } from "node:fs";
 import { summarizeWaitChannels } from "./process-wait-channels.js";
@@ -328,7 +334,9 @@ export class SessionRecovery {
    * user has been told. See `context-size-suggester.ts` for milestone
    * tiers and rationale.
    */
-  private compactionAdvisoryFired = new Map<string, number>();
+  private contextAdvisoryFired = new Map<string, number>();
+  /** Sessions already warned once about an advisory that could not be recorded (no bridge session). */
+  private readonly contextAdvisoryUnrecordedLogged = new Set<string>();
 
   constructor(deps: SessionRecoveryDeps) {
     this.launcher = deps.launcher;
@@ -569,6 +577,16 @@ export class SessionRecovery {
           error: err instanceof Error ? err.message : String(err),
         });
       }
+      // Sibling pass on the same cadence: the context-size advisory has its
+      // own gates (only `archived`), so it must not ride the drift pass.
+      try {
+        trackSync("context-advisory.tick", () => this.contextAdvisoryTick());
+      } catch (err) {
+        log.warn("session-orchestrator", "context advisory tick failed", {
+          event: "context_advisory.tick_failed",
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }, DRIFT_DETECTOR_TICK_MS);
     timer.unref?.();
     this.driftDetectorTimer = timer;
@@ -626,8 +644,6 @@ export class SessionRecovery {
         jsonlMtimeMs: verdict.jsonlMtimeMs,
         bunLastFrameMs: verdict.bunLastFrameMs,
       });
-      this.maybeFireCompactionAdvisory(info.sessionId, jsonlPath);
-
       const cliVersion = bridgeSession?.state?.claude_code_version || null;
       const action = decideDriftAction(verdict, {
         pendingMessages:
@@ -829,59 +845,138 @@ export class SessionRecovery {
   }
 
   /**
-   * Compaction-advisory piggyback: cheap stat on the same jsonl the drift
-   * tick tracks. If size crossed a new milestone since last advisory, surface
-   * a browser advisory suggesting `/compact` (1.5/3 MB) or a one-click
-   * "Continue in a new session" handoff (5/10 MB). Prevents silent-stdio flares before
-   * they happen (empirical pattern: sessions >1.5 MB start flaring, >3 MB
-   * flare hourly). Fires at most once per milestone per session lifetime.
+   * Context-size advisory pass (council plan 2026-10-17). Runs on the drift
+   * detector's interval but with its OWN gate — only `archived` sessions are
+   * skipped — so a session whose CLI is exited/idle-killed still gets the
+   * one-click "Continue in a new session" offer (the handoff route works from
+   * persisted history alone), and Codex sessions get it too.
+   *
+   * Per backend the pass measures ONE number and hands it to the pure ladder:
+   *   - Claude → `statSync` of the CLI transcript jsonl (bytes ladder; one
+   *     stat per session per tick, skipped once the ceiling tier has fired);
+   *   - Codex → `state.context_used_percent` the adapter already persists
+   *     from `thread/tokenUsage/updated` (percent ladder; no I/O). Codex
+   *     rollouts on disk are tiny, so bytes would never fire.
+   * Each milestone fires at most once per session lifetime; the seed comes
+   * from the in-memory map AND the persisted record (same signal only), so a
+   * restart never resurrects a banner the user already saw.
    */
-  private maybeFireCompactionAdvisory(sessionId: string, jsonlPath: string): void {
-    try {
-      const jsonlSize = statSync(jsonlPath).size;
-      // Seed from the persisted record too: the in-memory map is empty after
-      // a server restart, and re-firing the same handoff tier would bump the
-      // record's timestamp and resurrect a banner the user already saw.
-      const persisted = this.wsBridge.getSession(sessionId)?.state?.context_advisory?.milestoneBytes ?? 0;
-      const lastFired = Math.max(this.compactionAdvisoryFired.get(sessionId) ?? 0, persisted);
-      const advisory = nextCompactionMilestone(jsonlSize, lastFired);
-      if (advisory) {
-        this.compactionAdvisoryFired.set(sessionId, advisory.milestoneBytes);
-        log.warn(
-          "session-orchestrator",
-          "compaction advisory fired — session context large",
-          {
-            event: "context_size.compaction_advisory",
-            sessionId,
-            jsonlSize,
-            milestoneBytes: advisory.milestoneBytes,
-            action: advisory.action,
-          },
-        );
-        // Handoff tier (>= 5 MB): record on the session state FIRST so the
-        // banner survives a reload and reaches tabs that open later.
-        if (advisory.action === "continue_in_new") {
-          this.wsBridge.recordContextAdvisory(sessionId, {
-            milestoneBytes: advisory.milestoneBytes,
-            message: advisory.message,
-            action: "continue_in_new",
-          });
-        }
-        // Legacy text frame + structured payload: old browsers render the
-        // text line, current ones render the banner / a plain line by action.
-        this.wsBridge.broadcastToSession(sessionId, {
-          type: "error",
-          message: advisory.message,
-          advisory: {
-            kind: "context_advisory",
-            milestoneBytes: advisory.milestoneBytes,
-            action: advisory.action,
-          },
+  contextAdvisoryTick(): void {
+    const sessions = this.launcher.listSessions();
+    const listed = new Set(sessions.map((s) => s.sessionId));
+    for (const id of this.contextAdvisoryFired.keys()) if (!listed.has(id)) this.contextAdvisoryFired.delete(id);
+    for (const id of this.contextAdvisoryUnrecordedLogged) if (!listed.has(id)) this.contextAdvisoryUnrecordedLogged.delete(id);
+    for (const info of sessions) {
+      if (info.archived) continue;
+      try {
+        this.maybeFireContextAdvisory(info);
+      } catch (err) {
+        // One bad session must not starve the rest of the list this tick.
+        log.warn("session-orchestrator", "context advisory pass failed for a session", {
+          event: "context_advisory.tick_session_failed",
+          sessionId: info.sessionId,
+          error: err instanceof Error ? err.message : String(err),
         });
       }
-    } catch {
-      // jsonl stat failed (file gone between checkDrift and here,
-      // or permission changed) — skip silently. Next tick retries.
+    }
+  }
+
+  /** Highest milestone already advised for `sessionId` on `ladder`'s signal: in-memory ∪ persisted record. */
+  private seededLastFired(sessionId: string, persisted: ContextAdvisoryRecord | null | undefined, ladder: ContextLadder): number {
+    // Records persisted before the `signal` field existed were all bytes.
+    const persistedSignal = persisted ? (persisted.signal ?? "transcript_bytes") : null;
+    const persistedValue =
+      persisted && persistedSignal === ladder.signal ? (persisted.milestone ?? persisted.milestoneBytes ?? 0) : 0;
+    return Math.max(this.contextAdvisoryFired.get(sessionId) ?? 0, persistedValue);
+  }
+
+  private maybeFireContextAdvisory(info: SdkSessionInfo): void {
+    const sessionId = info.sessionId;
+    const bridgeSession = this.wsBridge.getSession(sessionId);
+    const persisted = bridgeSession?.state?.context_advisory;
+    let ladder: ContextLadder;
+    let measured: number;
+    if (info.backendType === "codex") {
+      const pct = bridgeSession?.state?.context_used_percent;
+      // The adapter resets this to 0 at init and after a compaction; with a
+      // monotonic seed the same tier never fires twice, so a reset is safe.
+      if (typeof pct !== "number" || !Number.isFinite(pct)) return;
+      ladder = CODEX_CONTEXT_PERCENT_LADDER;
+      measured = pct;
+    } else {
+      const paths = resolveCliSessionPaths(`${homedir()}/.claude`, info.cwd, info.cliSessionId);
+      if (!paths) return;
+      ladder = TRANSCRIPT_BYTES_LADDER;
+      // Ceiling already advised → nothing left to say; skip the stat. These
+      // are exactly the dead, huge transcripts this pass newly covers.
+      const ceiling = ladder.milestones[ladder.milestones.length - 1] ?? 0;
+      if (this.seededLastFired(sessionId, persisted, ladder) >= ceiling) return;
+      try {
+        measured = statSync(paths.jsonlPath).size;
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException)?.code;
+        // Transcript not (yet / any more) readable: operational, next tick retries.
+        if (code === "ENOENT" || code === "EACCES" || code === "ENOTDIR") return;
+        throw err;
+      }
+    }
+    const lastFired = this.seededLastFired(sessionId, persisted, ladder);
+    const advisory = nextContextMilestone(measured, lastFired, ladder);
+    if (!advisory) return;
+    log.warn("session-orchestrator", "context advisory fired — session context large", {
+      event: "context_size.compaction_advisory",
+      sessionId,
+      backendType: info.backendType,
+      signal: advisory.signal,
+      measured,
+      milestone: advisory.milestone,
+      action: advisory.action,
+    });
+    const isBytes = advisory.signal === "transcript_bytes";
+    if (advisory.action === "continue_in_new") {
+      // Handoff tier: record on the session state FIRST so the banner
+      // survives a reload and reaches tabs that open later. Mark the tier as
+      // fired only once the record committed — a session without a bridge
+      // twin (restored launcher row, mid-restart race) retries next tick
+      // instead of silently never showing the banner for the process lifetime.
+      const recorded = this.wsBridge.recordContextAdvisory(sessionId, {
+        signal: advisory.signal,
+        milestone: advisory.milestone,
+        ...(isBytes ? { milestoneBytes: advisory.milestone } : {}),
+        message: advisory.message,
+        action: "continue_in_new",
+      });
+      if (!recorded) {
+        if (!this.contextAdvisoryUnrecordedLogged.has(sessionId)) {
+          this.contextAdvisoryUnrecordedLogged.add(sessionId);
+          log.warn("session-orchestrator", "context advisory could not be recorded — no bridge session; will retry", {
+            event: "context_advisory.record_skipped",
+            sessionId,
+            signal: advisory.signal,
+            milestone: advisory.milestone,
+            reason: "bridge_session_missing",
+          });
+        }
+        return;
+      }
+    }
+    this.contextAdvisoryFired.set(sessionId, advisory.milestone);
+    // Legacy text frame + structured payload, bytes ladder only: the browser's
+    // frame handler compares `milestoneBytes`, so a percent payload would be
+    // swallowed. For Codex the `session_update` from recordContextAdvisory is
+    // the authoritative (and only) path.
+    if (isBytes) {
+      this.wsBridge.broadcastToSession(sessionId, {
+        type: "error",
+        message: advisory.message,
+        advisory: {
+          kind: "context_advisory",
+          signal: advisory.signal,
+          milestone: advisory.milestone,
+          milestoneBytes: advisory.milestone,
+          action: advisory.action,
+        },
+      });
     }
   }
 

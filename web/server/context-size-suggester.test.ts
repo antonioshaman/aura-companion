@@ -1,10 +1,13 @@
 import { describe, it, expect } from "vitest";
 import {
+  CODEX_CONTEXT_PERCENT_LADDER,
   COMPACTION_MILESTONE_BYTES,
   HANDOFF_MILESTONE_MIN_BYTES,
   MILESTONE_MESSAGE,
+  TRANSCRIPT_BYTES_LADDER,
   advisoryActionFor,
   nextCompactionMilestone,
+  nextContextMilestone,
 } from "./context-size-suggester.js";
 
 describe("nextCompactionMilestone", () => {
@@ -113,5 +116,47 @@ describe("advisoryActionFor / structured advisory action", () => {
     // flow keeps the session and hands the task over to a fresh one.
     expect(MILESTONE_MESSAGE[10_000_000]).toMatch(/continue in a new session/i);
     expect(MILESTONE_MESSAGE[5_000_000]).toMatch(/continue in a new session/i);
+  });
+});
+
+// ── Ladder-generic decision (council plan 2026-10-17, AC1) ───────────────────
+// Claude and Codex share one pure decision path; only the ladder differs. The
+// function never learns where the number came from.
+describe("nextContextMilestone + ladders", () => {
+  it("the bytes ladder reproduces nextCompactionMilestone exactly", () => {
+    for (const [size, last] of [[0, 0], [1_500_000, 0], [3_200_000, 1_500_000], [5_000_000, 3_000_000], [10_500_000, 5_000_000], [10_500_000, 10_000_000]] as const) {
+      const legacy = nextCompactionMilestone(size, last);
+      const generic = nextContextMilestone(size, last, TRANSCRIPT_BYTES_LADDER);
+      if (legacy === null) expect(generic).toBeNull();
+      else expect(generic).toMatchObject({ signal: "transcript_bytes", milestone: legacy.milestoneBytes, message: legacy.message, action: legacy.action });
+    }
+  });
+
+  it("Codex percent ladder: one rung at 90% → continue_in_new, nothing below, never twice", () => {
+    expect(nextContextMilestone(0, 0, CODEX_CONTEXT_PERCENT_LADDER)).toBeNull();
+    expect(nextContextMilestone(89, 0, CODEX_CONTEXT_PERCENT_LADDER)).toBeNull();
+    const fired = nextContextMilestone(90, 0, CODEX_CONTEXT_PERCENT_LADDER);
+    expect(fired).toMatchObject({ signal: "context_percent", milestone: 90, action: "continue_in_new" });
+    expect(fired?.message).toMatch(/90%/);
+    expect(fired?.message).toMatch(/continue in a new session/i);
+    expect(nextContextMilestone(100, 90, CODEX_CONTEXT_PERCENT_LADDER)).toBeNull();
+  });
+
+  it("the percent ladder's handoff floor is its own, not the 5 MB byte floor", () => {
+    // A mutant that keeps comparing against HANDOFF_MILESTONE_MIN_BYTES would
+    // label 90 (< 5_000_000) as "compact".
+    expect(advisoryActionFor(90, CODEX_CONTEXT_PERCENT_LADDER.handoffMin)).toBe("continue_in_new");
+    expect(advisoryActionFor(90)).toBe("compact");
+  });
+
+  it("every ladder rung has copy and rungs are ascending", () => {
+    for (const ladder of [TRANSCRIPT_BYTES_LADDER, CODEX_CONTEXT_PERCENT_LADDER]) {
+      for (let i = 0; i < ladder.milestones.length; i++) {
+        const m = ladder.milestones[i]!;
+        expect(typeof ladder.messages[m]).toBe("string");
+        if (i > 0) expect(m).toBeGreaterThan(ladder.milestones[i - 1]!);
+      }
+      expect(ladder.milestones).toContain(ladder.handoffMin);
+    }
   });
 });
