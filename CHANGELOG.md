@@ -1,5 +1,41 @@
 # Changelog
 
+## [2.5.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.4.0...aura-companion-v2.5.0) (2026-10-16)
+
+
+### Features
+
+* **council:** built-in second-opinion review on another model ([#372](https://github.com/antonioshaman/aura-companion/issues/372)) ([3474220](https://github.com/antonioshaman/aura-companion/commit/347422088409396136eade6a634bef4f7e3c9c9e))
+* **council:** observer rigor — RU claims, no re-review of answered checkpoints, unverified rubber stamps, probe isolation, unreviewed checkpoints ([#368](https://github.com/antonioshaman/aura-companion/issues/368)) ([8a56a8d](https://github.com/antonioshaman/aura-companion/commit/8a56a8d36a88e28e30730f04d89157228e029d28))
+* **session:** auto-resume sessions after a usage limit resets ([#369](https://github.com/antonioshaman/aura-companion/issues/369)) ([8de9cf5](https://github.com/antonioshaman/aura-companion/commit/8de9cf587e993ad45ba99129938fd32253f17a55))
+* **telemetry:** real Codex turn usage, enriched cache telemetry, cache-rewrite hints ([#365](https://github.com/antonioshaman/aura-companion/issues/365)) ([cf703dc](https://github.com/antonioshaman/aura-companion/commit/cf703dcc4b62447bd78a5f67828ea2dd93336300))
+
+
+### Bug Fixes
+
+* **chat:** collapse repeated restart/drift-recovery markers in the feed ([#370](https://github.com/antonioshaman/aura-companion/issues/370)) ([7ceb6e3](https://github.com/antonioshaman/aura-companion/commit/7ceb6e372f079bfaa81dda71dcc8a2a4da86afc2))
+* **council:** drift-liveness kill guards, silent-stdio discriminator, archived-restore bounce (prod sync) ([#354](https://github.com/antonioshaman/aura-companion/issues/354)) ([fefa8c0](https://github.com/antonioshaman/aura-companion/commit/fefa8c0f6f56da7ba37cc15eea9deecf8858c491))
+* **council:** enforce read-only sandbox for codex observer; tolerate codex 'warning' notification ([#355](https://github.com/antonioshaman/aura-companion/issues/355)) ([46fae23](https://github.com/antonioshaman/aura-companion/commit/46fae234679b009fbc7c8d503791110f356afb24))
+* **council:** host-built observer reviews carry the wake echo so STOP/WARN are not blanket-downgraded to NOTE ([#361](https://github.com/antonioshaman/aura-companion/issues/361)) ([2b4f586](https://github.com/antonioshaman/aura-companion/commit/2b4f586a69e7bb107be3ba6b8f085a92e0f1cacc))
+* **council:** observer findings render as cards after a liveness probe ([#374](https://github.com/antonioshaman/aura-companion/issues/374)) ([1ef1848](https://github.com/antonioshaman/aura-companion/commit/1ef18489b82b255fe8d2e8b388f1e0118f4b56c4))
+* **council:** recover a codex observer whose wake goes silent ([#371](https://github.com/antonioshaman/aura-companion/issues/371)) ([4adb655](https://github.com/antonioshaman/aura-companion/commit/4adb655ed94f914cc32076e2e1461c3639364f8a))
+* **council:** stale review never answers a fresh wake; render observer findings as cards; codex web_search flag ([#358](https://github.com/antonioshaman/aura-companion/issues/358)) ([c933db9](https://github.com/antonioshaman/aura-companion/commit/c933db91c7639e6f1677a6ff3156dbda8fa5b0c1))
+* **council:** start a fresh codex thread on observer prompt drift; tooling failure is not a finding ([#357](https://github.com/antonioshaman/aura-companion/issues/357)) ([790e90f](https://github.com/antonioshaman/aura-companion/commit/790e90f6fe0a467cc33ca0e6e748082efcb7d4c0))
+* **drift:** an open subagent tool call keeps a quiet tree alive (15 min ceiling) ([#356](https://github.com/antonioshaman/aura-companion/issues/356)) ([2d5110a](https://github.com/antonioshaman/aura-companion/commit/2d5110a77a51b65bb8c0184705ad796eba89ddf5))
+* macOS CI, orphan reaper SIGKILL escalation, council log noise, interrupted-turn label, repo hygiene ([#363](https://github.com/antonioshaman/aura-companion/issues/363)) ([fe937ff](https://github.com/antonioshaman/aura-companion/commit/fe937ff48bbee4c0f6bd9c68cdbf86aca2f6e9de))
+* **models:** honest model dropdown and persistent fallback notice ([#367](https://github.com/antonioshaman/aura-companion/issues/367)) ([f080dc8](https://github.com/antonioshaman/aura-companion/commit/f080dc871011da4074d0ba4b14dc7091a816b76b))
+* **models:** show fresh Claude models when the model list fails to load ([#375](https://github.com/antonioshaman/aura-companion/issues/375)) ([9fa0971](https://github.com/antonioshaman/aura-companion/commit/9fa0971a1d846f083ae6e2c06070035bfbf1c8bc))
+* **session:** a model switch actually persists across relaunch ([#360](https://github.com/antonioshaman/aura-companion/issues/360)) ([a9c8972](https://github.com/antonioshaman/aura-companion/commit/a9c897263c8e8f1eb4bb33e8b4459dcc358d41ee))
+* **session:** drift recovery delivers the stalled reply; init probe never interrupts real work ([#366](https://github.com/antonioshaman/aura-companion/issues/366)) ([78d7c22](https://github.com/antonioshaman/aura-companion/commit/78d7c2228d4e7c2e7aad1f35f37650aa18547e62))
+* **session:** resume sessions that were alive before a server restart without waiting for a browser ([#362](https://github.com/antonioshaman/aura-companion/issues/362)) ([78e5f80](https://github.com/antonioshaman/aura-companion/commit/78e5f80f14770b38439271bbaa846669626044e9))
+* **ui:** render aborted_tools resume bookkeeping as the restart marker, not a red error ([#359](https://github.com/antonioshaman/aura-companion/issues/359)) ([abdcdee](https://github.com/antonioshaman/aura-companion/commit/abdcdee8b9e89647bb5d0167b0a3391574cfc19f))
+* **ws:** auto-restore the dialog after a server restart via a heartbeat watchdog ([#352](https://github.com/antonioshaman/aura-companion/issues/352)) ([f18fe31](https://github.com/antonioshaman/aura-companion/commit/f18fe31b39afe99ff1810db34e894878e8051d85))
+
+
+### Performance Improvements
+
+* **server:** gate secret-redaction rules so session saves stop blocking the event loop ([#364](https://github.com/antonioshaman/aura-companion/issues/364)) ([30ea99f](https://github.com/antonioshaman/aura-companion/commit/30ea99fb204b83c630d9a284f408a3b40e8f418a))
+
 ## [2.4.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.3.0...aura-companion-v2.4.0) (2026-10-14)
 
 
