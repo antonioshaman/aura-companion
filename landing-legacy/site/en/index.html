@@ -24,10 +24,21 @@
 <meta name="twitter:title" content="Aura Companion — Claude Code and Codex in your browser, from your phone">
 <meta name="twitter:description" content="A web UI for the official Claude Code and Codex CLIs: your agents keep working after a usage limit, review each other, and don't lose replies when the server restarts.">
 <meta name="twitter:image" content="https://auraco.space/logo.png">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,700;0,800;1,400;1,500&display=swap" rel="stylesheet">
+<link rel="preload" href="/fonts/jetbrains-mono-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="/fonts/jetbrains-mono-cyrillic.woff2" as="font" type="font/woff2" crossorigin>
 <style>
+  /* JetBrains Mono (SIL OFL 1.1, see /fonts/OFL.txt), self-hosted: one
+     variable file per subset covers weights 400–800; no foreign requests. */
+  @font-face {
+    font-family: 'JetBrains Mono'; font-style: normal; font-weight: 400 800; font-display: swap;
+    src: url(/fonts/jetbrains-mono-cyrillic.woff2) format('woff2');
+    unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+  }
+  @font-face {
+    font-family: 'JetBrains Mono'; font-style: normal; font-weight: 400 800; font-display: swap;
+    src: url(/fonts/jetbrains-mono-latin.woff2) format('woff2');
+    unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+  }
   :root {
     --bg-0: #000300;
     --bg-1: #010a02;
@@ -998,7 +1009,7 @@
               <a href="https://github.com/antonioshaman/aura-companion/blob/main/LICENSE" target="_blank" rel="noopener" class="os-btn os-btn-ghost">MIT license</a>
             </div>
             <div class="os-stats">
-              <div class="os-stat"><div class="os-stat-val" id="release-version">2.3.0</div><div class="os-stat-lbl">latest release</div></div>
+              <div class="os-stat"><div class="os-stat-val" id="release-version">2.5.0</div><div class="os-stat-lbl">latest release</div></div>
               <div class="os-stat"><div class="os-stat-val">29</div><div class="os-stat-lbl">skills</div></div>
               <div class="os-stat"><div class="os-stat-val">14</div><div class="os-stat-lbl">experts</div></div>
               <div class="os-stat"><div class="os-stat-val">MIT</div><div class="os-stat-lbl">license</div></div>
@@ -1008,7 +1019,7 @@
           <div class="os-terminal">
             <div class="os-terminal-bar">
               <div class="dots"><span></span><span></span><span></span></div>
-              <div class="title">~/projects · zsh · aura v<span id="release-version-term">2.3.0</span></div>
+              <div class="title">~/projects · zsh · aura v<span id="release-version-term">2.5.0</span></div>
             </div>
             <div class="os-terminal-body">
               <div><span class="comment"># Clone and run in a minute</span></div>
@@ -1249,17 +1260,16 @@
 </script>
 <script>
 (function(){
-  // Keep the release number current: fetch latest from GitHub Releases.
-  // Falls back to the baked-in number; any error is silently ignored.
+  // Release number from same-origin /release.json (written by the deploy
+  // script) — no request to a foreign host. Baked-in number is the fallback.
   try {
     var ctrl = new AbortController();
     setTimeout(function(){ ctrl.abort(); }, 4000);
-    fetch('https://api.github.com/repos/antonioshaman/aura-companion/releases/latest',
-          {signal: ctrl.signal, headers: {'Accept': 'application/vnd.github+json'}})
+    fetch('/release.json', {signal: ctrl.signal, cache: 'no-cache'})
       .then(function(r){ return r.ok ? r.json() : null; })
       .then(function(j){
-        if (!j || !j.tag_name) return;
-        var m = String(j.tag_name).match(/(\d+\.\d+\.\d+)/);
+        if (!j || !(j.version || j.tag)) return;
+        var m = String(j.version || j.tag).match(/(\d+\.\d+\.\d+)/);
         if (!m) return;
         var v = m[1];
         var a = document.getElementById('release-version');
