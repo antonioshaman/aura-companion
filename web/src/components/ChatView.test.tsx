@@ -247,8 +247,12 @@ describe("ChatView", () => {
   // Usage-limit auto-resume banner: mounted only while the server publishes
   // a pending resume on session state; "Отменить" calls the cancel API.
   it("shows the auto-resume banner when a resume is scheduled and cancels it", () => {
-    const resetAt = new Date(2026, 9, 16, 15, 0).getTime();
-    const fireAt = new Date(2026, 9, 16, 15, 1).getTime();
+    // Same-day reset relative to NOW: the banner prints only HH:MM for today and
+    // prefixes the date for another day, so a fixed calendar date in the fixture
+    // made this test fail the day after it was written (2026-10-17 on main).
+    const today = new Date();
+    const resetAt = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 15, 0).getTime();
+    const fireAt = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 15, 1).getTime();
     setupStore({ autoResume: { resetAt, fireAt, resetSource: "rate_limit_event" } });
     render(<ChatView sessionId="s1" />);
     expect(screen.getByTestId("auto-resume-banner").textContent).toContain("автопродолжение в 15:01");
