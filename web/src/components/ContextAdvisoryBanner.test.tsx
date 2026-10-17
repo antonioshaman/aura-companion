@@ -61,6 +61,28 @@ describe("ContextAdvisoryBanner (presentational)", () => {
     expect(screen.queryByRole("button", { name: "Dismiss" })).not.toBeInTheDocument();
   });
 
+  // Codex sessions are measured by context-window percent, not transcript
+  // bytes (council plan 2026-10-17, AC1): the header must say so and never
+  // format a percent as megabytes.
+  it("renders the percent headline for a Codex context_percent advisory", () => {
+    render(<ContextAdvisoryBanner signal="context_percent" milestone={90} message="codex advice" onContinue={() => {}} />);
+    expect(screen.getByText("Context window is 90% full")).toBeInTheDocument();
+    expect(screen.queryByText(/MB/)).not.toBeInTheDocument();
+  });
+
+  it("legacy callers that only pass milestoneBytes still get the MB headline", () => {
+    render(<ContextAdvisoryBanner milestoneBytes={10_000_000} message="advice" onContinue={() => {}} />);
+    expect(screen.getByText("Session context is over 10 MB")).toBeInTheDocument();
+  });
+
+  it("passes axe accessibility checks for the percent variant", async () => {
+    const { container } = render(
+      <ContextAdvisoryBanner signal="context_percent" milestone={90} message="codex advice" onContinue={() => {}} onDismiss={() => {}} />,
+    );
+    const { axe } = await import("vitest-axe");
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
   it("passes axe accessibility checks (incl. the error state)", async () => {
     const { container } = render(
       <ContextAdvisoryBanner milestoneBytes={10_000_000} message="advice" onContinue={() => {}} onDismiss={() => {}} error="boom" />,
@@ -101,6 +123,19 @@ describe("ContextAdvisoryNotice (wired)", () => {
     expect(mockNavigate).not.toHaveBeenCalled();
     // Button is re-enabled for a retry.
     expect(screen.getByRole("button", { name: "Continue in a new session" })).toBeEnabled();
+  });
+
+  it("a persisted Codex percent record renders the percent banner and dismisses by `milestone`", () => {
+    seed({ signal: "context_percent", milestone: 90, message: "codex advice", action: "continue_in_new", at: 1 });
+    const { unmount } = render(<ContextAdvisoryNotice sessionId="s1" />);
+    expect(screen.getByText("Context window is 90% full")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByTestId("context-advisory-banner")).not.toBeInTheDocument();
+    expect(localStorage.getItem("cc-context-advisory-dismissed:s1")).toBe("90");
+    unmount();
+    // Remembered across mounts.
+    render(<ContextAdvisoryNotice sessionId="s1" />);
+    expect(screen.queryByTestId("context-advisory-banner")).not.toBeInTheDocument();
   });
 
   it("dismiss hides this milestone (remembered) but a higher milestone shows again", () => {

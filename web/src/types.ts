@@ -15,6 +15,7 @@ import type {
   ModelFallbackRecord,
   ContextAdvisoryRecord,
   ContextAdvisoryPayload,
+  ContextAdvisorySignal,
   BrowserCheckpointCoverageGap,
 } from "../server/session-types.js";
 
@@ -35,6 +36,7 @@ export type {
   ModelFallbackRecord,
   ContextAdvisoryRecord,
   ContextAdvisoryPayload,
+  ContextAdvisorySignal,
   BrowserCheckpointCoverageGap,
 };
 export type { SessionPhase } from "../server/session-state-machine.js";

@@ -1417,10 +1417,17 @@ function handleParsedMessage(
       // session state (session_update / session_init); seed it here too in
       // case this frame wins the race or the update was missed.
       if (data.advisory?.kind === "context_advisory" && data.advisory.action === "continue_in_new") {
+        // The frame is only sent for the bytes ladder (Claude); a Codex
+        // percent advisory arrives solely via session_update. Legacy frames
+        // carry `milestoneBytes` only; newer ones also `milestone` + `signal`.
+        const incoming = data.advisory.milestone ?? data.advisory.milestoneBytes ?? 0;
         const current = store.sessions.get(sessionId)?.context_advisory;
-        if (!current || current.milestoneBytes < data.advisory.milestoneBytes) {
+        const currentMilestone = current ? (current.milestone ?? current.milestoneBytes ?? 0) : -1;
+        if (!current || currentMilestone < incoming) {
           store.updateSession(sessionId, {
             context_advisory: {
+              signal: data.advisory.signal ?? "transcript_bytes",
+              milestone: incoming,
               milestoneBytes: data.advisory.milestoneBytes,
               message: data.message,
               action: "continue_in_new",

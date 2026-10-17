@@ -3398,6 +3398,15 @@ function CouncilModeSection() {
             onDismiss={() => {}}
           />
         </Card>
+        <Card label="ContextAdvisoryBanner — Codex, context window 90% full">
+          <ContextAdvisoryBanner
+            signal="context_percent"
+            milestone={90}
+            message="Codex context window is 90% full. Continue in a new session with a handoff of the current task — the thread is close to its limit."
+            onContinue={() => {}}
+            onDismiss={() => {}}
+          />
+        </Card>
         <Card label="ContextAdvisoryBanner — preparing handoff">
           <ContextAdvisoryBanner milestoneBytes={5_000_000} message="Session context is ~5 MB." onContinue={() => {}} pending />
         </Card>
