@@ -474,6 +474,20 @@
     .why-proof { grid-column: auto; }
   }
 
+  /* Product screenshots */
+  .shot { margin: 0; position: relative; z-index: 1; }
+  .shot-frame { border: 1px solid var(--border-hi); border-radius: 14px; overflow: hidden; background: #060403; box-shadow: 0 0 0 1px rgba(0, 255, 110, 0.06) inset, 0 0 28px rgba(0, 255, 110, 0.14), 0 20px 60px -20px rgba(0, 0, 0, 0.9); }
+  .shot img { display: block; width: 100%; height: auto; }
+  .shot figcaption { margin-top: 10px; font-size: 13px; color: var(--text-dim); text-align: center; line-height: 1.5; }
+  .hero-shot { max-width: 1100px; margin: 0 0 48px; }
+  .why-shot { grid-column: 2 / -1; margin-top: 10px; }
+  .council-shot { margin-top: 28px; }
+  @media (max-width: 880px) {
+    .hero-shot { margin-bottom: 36px; }
+    .why-shot { grid-column: auto; }
+    .shot-frame { border-radius: 10px; }
+  }
+
   /* FAQ */
   .faq-list { max-width: 800px; }
   .faq-item { border-bottom: 1px solid var(--border); padding: 24px 0; }
@@ -609,6 +623,8 @@
       <h1>Claude Code &amp; Codex.<br><span class="accent">From your phone.</span> No babysitting.</h1>
       <p class="hero-sub">A web UI for the official Claude Code and Codex CLIs: your agents keep working after a usage limit, review each other, and don't lose replies when the server restarts. Run several projects in one window, from any browser — including your phone. Free, open source under MIT. Also works from Russia, Belarus, Kazakhstan and the rest of the CIS without a VPN. <a href="#why" style="color:var(--amber);text-decoration:none;white-space:nowrap;">Why not just use Claude Code? →</a></p>
 
+      <figure class="shot hero-shot"><div class="shot-frame"><img src="/img/aura-hero.webp" width="1400" height="853" alt="Aura Companion new-session screen: project sessions in the sidebar, a task box, a Claude Code / Codex switch and the Council Mode toggle" fetchpriority="high" decoding="async"></div><figcaption>This is Aura: sessions on the left, Claude Code or Codex, and a Council Mode switch — in the browser, phone included</figcaption></figure>
+
       <div class="paths" id="paths">
         <a href="#cases" class="path">
           <div class="path-icon">💬</div>
@@ -691,6 +707,7 @@
           <div class="why-pain"><span class="why-tag">In a bare terminal</span>The agent confidently writes a bug and doesn't notice. Catching it is your job.</div>
           <div class="why-fix"><span class="why-tag why-tag-on">With Aura</span>A second model reviews every step (<a href="#council" style="color:var(--amber);text-decoration:none;">Council Mode</a>): Codex reviews Claude, and vice versa.</div>
           <div class="why-proof">In a single day on our own codebase, two different models found 12 real bugs, including a token-leak path. And they found <strong>different</strong> bugs.</div>
+          <figure class="shot why-shot"><div class="shot-frame"><img src="/img/council-overview.webp" width="1200" height="731" alt="Council Mode: the main agent chat on the left, the observer panel on the right with NOTE and INFO findings from a second model" loading="lazy" decoding="async"></div><figcaption>Council Mode: on the right, a second model that checks every step (this screenshot shows a Claude + Claude pair; Claude + Codex works too)</figcaption></figure>
         </div>
         <div class="why-scenario">
           <div class="why-num">03</div>
@@ -854,6 +871,8 @@
           <span class="stop-tag">STOP</span>
           <span>Vulnerability found in token handling — recommend holding the deploy until it's fixed</span>
         </div>
+
+        <figure class="shot council-shot"><div class="shot-frame"><img src="/img/council-anatomy.webp" width="1200" height="731" alt="Council Mode components: an observer STOP banner with evidence and actions, "observer offline" banners, and a STOP / WARN / NOTE / INFO findings log" loading="lazy" decoding="async"></div><figcaption>What it looks like in the UI: a STOP banner with evidence, observer states and the findings log (from Aura's UI component catalog)</figcaption></figure>
 
         <div class="council-extras">
           <div class="council-extra">
