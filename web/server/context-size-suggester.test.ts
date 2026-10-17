@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
   COMPACTION_MILESTONE_BYTES,
+  HANDOFF_MILESTONE_MIN_BYTES,
   MILESTONE_MESSAGE,
+  advisoryActionFor,
   nextCompactionMilestone,
 } from "./context-size-suggester.js";
 
@@ -86,5 +88,30 @@ describe("nextCompactionMilestone", () => {
     const custom = [1000];
     const messages: Record<number, string> = {}; // no message for 1000
     expect(nextCompactionMilestone(1500, 0, custom, messages)).toBeNull();
+  });
+});
+
+// The structured advisory (context-overflow handoff): from 5 MB up the
+// browser offers a one-click "Continue in a new session" instead of a plain
+// text line. 1.5/3 MB keep suggesting /compact.
+describe("advisoryActionFor / structured advisory action", () => {
+  it("1.5 MB and 3 MB milestones suggest /compact only", () => {
+    expect(advisoryActionFor(1_500_000)).toBe("compact");
+    expect(advisoryActionFor(3_000_000)).toBe("compact");
+    expect(nextCompactionMilestone(1_500_000, 0)?.action).toBe("compact");
+    expect(nextCompactionMilestone(3_000_000, 1_500_000)?.action).toBe("compact");
+  });
+
+  it("5 MB and 10 MB milestones offer continue-in-new-session", () => {
+    expect(HANDOFF_MILESTONE_MIN_BYTES).toBe(5_000_000);
+    expect(nextCompactionMilestone(5_000_000, 3_000_000)?.action).toBe("continue_in_new");
+    expect(nextCompactionMilestone(12_000_000, 5_000_000)?.action).toBe("continue_in_new");
+  });
+
+  it("the handoff-tier copy points at a new session, not at archiving", () => {
+    // The old 10 MB copy told the user to "archive this session"; the new
+    // flow keeps the session and hands the task over to a fresh one.
+    expect(MILESTONE_MESSAGE[10_000_000]).toMatch(/continue in a new session/i);
+    expect(MILESTONE_MESSAGE[5_000_000]).toMatch(/continue in a new session/i);
   });
 });

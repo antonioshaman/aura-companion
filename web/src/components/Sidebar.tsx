@@ -4,6 +4,7 @@ import { api, type ArchiveInfo } from "../api.js";
 import { ArchiveLinearModal, type LinearTransitionChoice } from "./ArchiveLinearModal.js";
 import { connectAllSessions, disconnectSession } from "../ws.js";
 import { navigateToSession, navigateHome, parseHash } from "../utils/routing.js";
+import { continueInNewSession } from "../use-continue-in-new-session.js";
 import { ProjectGroup } from "./ProjectGroup.js";
 import { GlobalUsageBadge } from "./GlobalUsageBadge.js";
 import { TelemetryNudge } from "./TelemetryNudge.js";
@@ -509,17 +510,13 @@ export function Sidebar() {
   // Continue-in-new-session: spawn a fresh session in the same workspace
   // with a text-only handoff file written to cwd, then navigate the user to
   // the new session with the pickup-prompt draft pre-loaded in the composer.
-  // Designed to recover from wedged sessions (e.g. >2000px image in history
-  // that trips Anthropic's many-image API limit) without losing context.
+  // Designed to recover from wedged sessions (oversized context, or a >2000px
+  // image in history that trips Anthropic's many-image API limit) without
+  // losing context. Shared with the in-chat context-overflow banner.
   const handleContinueInNew = useCallback(async (e: React.MouseEvent, sessionId: string) => {
     e.stopPropagation();
     try {
-      const result = await api.continueInNewSession(sessionId);
-      useStore.getState().setPickupDraft(result.newSessionId, result.draft);
-      navigateToSession(result.newSessionId);
-      if (window.innerWidth < 768) {
-        useStore.getState().setSidebarOpen(false);
-      }
+      await continueInNewSession(sessionId);
     } catch (err) {
       // Surface failure without crashing the sidebar. The handoff endpoint
       // can fail if the session has no cwd or filesystem write is denied;

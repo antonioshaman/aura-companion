@@ -51,9 +51,30 @@ export const COMPACTION_MILESTONE_BYTES: readonly number[] = [
 export const MILESTONE_MESSAGE: Record<number, string> = {
   1_500_000: "Session context is large (~1.5 MB). Consider running `/compact` — long sessions become prone to silent-stdio flares.",
   3_000_000: "Session context is now ~3 MB. Strongly recommend `/compact` — silence flares recur ~hourly above this size.",
-  5_000_000: "Session context is ~5 MB. Please `/compact` OR archive and start fresh — chain-rotation exhaustion originates here.",
-  10_000_000: "Session context is >10 MB. Compaction alone may not be enough — archive this session and start a fresh one.",
+  5_000_000: "Session context is ~5 MB. Run `/compact`, or continue in a new session with a handoff of the current task — chain-rotation exhaustion originates here.",
+  10_000_000: "Session context is >10 MB. Compaction alone may not be enough — continue in a new session with a handoff of the current task.",
 };
+
+/**
+ * From this milestone up the advisory is STRUCTURED: besides the legacy text
+ * it carries `action: "continue_in_new"`, the server records it on the session
+ * state (so it survives a reload), and the browser renders a banner with a
+ * one-click "Continue in a new session" (handoff + fresh session). Below it
+ * the advice is still just "/compact", rendered as a plain system line.
+ *
+ * Why 5 MB: at 10 MB the session observed 2026-10 had already stopped
+ * answering (Interrupted ×10), so the one-click exit must be on offer
+ * BEFORE the session is wedged, not after.
+ */
+export const HANDOFF_MILESTONE_MIN_BYTES = 5_000_000;
+
+/** What the browser should offer for an advisory. */
+export type ContextAdvisoryAction = "compact" | "continue_in_new";
+
+/** Map a milestone to the action the browser offers for it. */
+export function advisoryActionFor(milestoneBytes: number): ContextAdvisoryAction {
+  return milestoneBytes >= HANDOFF_MILESTONE_MIN_BYTES ? "continue_in_new" : "compact";
+}
 
 /**
  * One decision from {@link nextCompactionMilestone}: the new milestone
@@ -63,6 +84,8 @@ export const MILESTONE_MESSAGE: Record<number, string> = {
 export interface MilestoneAdvisory {
   readonly milestoneBytes: number;
   readonly message: string;
+  /** `continue_in_new` from {@link HANDOFF_MILESTONE_MIN_BYTES} up, else `compact`. */
+  readonly action: ContextAdvisoryAction;
 }
 
 /**
@@ -104,5 +127,5 @@ export function nextCompactionMilestone(
     // a matching message entry. Fail silently rather than crash.
     return null;
   }
-  return { milestoneBytes: crossed, message };
+  return { milestoneBytes: crossed, message, action: advisoryActionFor(crossed) };
 }

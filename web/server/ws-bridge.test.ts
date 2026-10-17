@@ -6308,6 +6308,27 @@ describe("session model sync from the main assistant frame", () => {
     expect(frames).toContainEqual(expect.objectContaining({ type: "session_update", session: { model_fallback: null } }));
   });
 
+  // Context-overflow handoff: the >= 5 MB advisory lives on session.state so
+  // the "Continue in a new session" banner survives a reload (session_init
+  // replays it) and live tabs get it as a session_update.
+  it("recordContextAdvisory persists on state and broadcasts a session_update", () => {
+    const browser = makeBrowserSocket("ca1");
+    bridge.handleBrowserOpen(browser, "ca1");
+    browser.send.mockClear();
+    const ok = bridge.recordContextAdvisory("ca1", { milestoneBytes: 10_000_000, message: "too big", action: "continue_in_new" });
+    expect(ok).toBe(true);
+    const record = bridge.getSession("ca1")!.state.context_advisory;
+    expect(record).toMatchObject({ milestoneBytes: 10_000_000, message: "too big", action: "continue_in_new" });
+    expect(typeof record!.at).toBe("number");
+    const frames = browser.send.mock.calls.map((c: unknown[]) => JSON.parse(c[0] as string));
+    expect(frames).toContainEqual(expect.objectContaining({ type: "session_update", session: { context_advisory: record } }));
+  });
+
+  it("recordContextAdvisory never creates a bridge session for an unknown id", () => {
+    expect(bridge.recordContextAdvisory("ghost", { milestoneBytes: 5_000_000, message: "m", action: "continue_in_new" })).toBe(false);
+    expect(bridge.getSession("ghost")).toBeUndefined();
+  });
+
   it("updates session.state.model to the MAIN assistant frame's model", async () => {
     const cli = makeCliSocket("sm1");
     bridge.handleCLIOpen(cli, "sm1");

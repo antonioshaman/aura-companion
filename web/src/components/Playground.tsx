@@ -28,6 +28,7 @@ import type {
 import { AiValidationBadge } from "./AiValidationBadge.js";
 import { AiValidationToggle } from "./AiValidationToggle.js";
 import { ModelFallbackBanner } from "./ModelFallbackBanner.js";
+import { ContextAdvisoryBanner } from "./ContextAdvisoryBanner.js";
 import { AutoResumeBanner } from "./AutoResumeBanner.js";
 import { UpdateAvailableBanner } from "./UpdateAvailableBanner.js";
 import {
@@ -3386,6 +3387,28 @@ function CouncilModeSection() {
           <ObserverProbeMessage role="user" text="[liveness probe] Ответь одной строкой: кто ты?" />
           <ObserverProbeMessage role="assistant" text="Я Observer, независимый ревьюер Council." />
           <MessageBubble message={MSG_OBSERVER_FINDINGS} isObserverSession />
+        </Card>
+
+        {/* Context-overflow handoff banner (mock data only). */}
+        <Card label="ContextAdvisoryBanner — 10 MB, continue in a new session">
+          <ContextAdvisoryBanner
+            milestoneBytes={10_000_000}
+            message="Session context is >10 MB. Compaction alone may not be enough — continue in a new session with a handoff of the current task."
+            onContinue={() => {}}
+            onDismiss={() => {}}
+          />
+        </Card>
+        <Card label="ContextAdvisoryBanner — preparing handoff">
+          <ContextAdvisoryBanner milestoneBytes={5_000_000} message="Session context is ~5 MB." onContinue={() => {}} pending />
+        </Card>
+        <Card label="ContextAdvisoryBanner — handoff failed">
+          <ContextAdvisoryBanner
+            milestoneBytes={10_000_000}
+            message="Session context is >10 MB."
+            onContinue={() => {}}
+            onDismiss={() => {}}
+            error="Cannot write handoff file: EACCES"
+          />
         </Card>
 
         {/* PLAN-aura-model-registry Task 8 — model fallback notice. Warning

@@ -1411,6 +1411,25 @@ function handleParsedMessage(
       // message (session-orchestrator.ts:3267 and :3302 fire
       // legacy "Session keeps crashing" alongside session:relaunch-exhausted).
       if (store.cliFailures.has(sessionId)) break;
+      // Context-overflow handoff (>= 5 MB): rendered as the in-chat
+      // ContextAdvisoryNotice banner with a one-click "Continue in a new
+      // session", not as a plain line. The server also records it on the
+      // session state (session_update / session_init); seed it here too in
+      // case this frame wins the race or the update was missed.
+      if (data.advisory?.kind === "context_advisory" && data.advisory.action === "continue_in_new") {
+        const current = store.sessions.get(sessionId)?.context_advisory;
+        if (!current || current.milestoneBytes < data.advisory.milestoneBytes) {
+          store.updateSession(sessionId, {
+            context_advisory: {
+              milestoneBytes: data.advisory.milestoneBytes,
+              message: data.message,
+              action: "continue_in_new",
+              at: Date.now(),
+            },
+          });
+        }
+        break;
+      }
       store.appendMessage(sessionId, {
         id: nextId(),
         role: "system",
