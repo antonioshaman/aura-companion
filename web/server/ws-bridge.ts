@@ -8,6 +8,7 @@ import type {
   BackendType,
   McpServerConfig,
   ModelFallbackRecord,
+  ContextAdvisoryRecord,
 } from "./session-types.js";
 import type { SessionStore } from "./session-store.js";
 import type { IBackendAdapter, ServerSyntheticSendOutcome } from "./backend-adapter.js";
@@ -346,6 +347,25 @@ export class WsBridge {
     session.state.model_fallback = record;
     this.persistSession(session);
     this.broadcastToBrowsers(session, { type: "session_update", session: { model_fallback: record } });
+  }
+
+  /**
+   * Record a context-size advisory that offers "Continue in a new session"
+   * (context-overflow handoff). Same shape as {@link recordModelFallback}:
+   * lives on `session.state` so it is persisted and replayed in every
+   * `session_init` (a reloaded tab still shows the banner), and is pushed to
+   * live tabs as a `session_update`. Never creates a bridge session — an
+   * advisory for a session the bridge doesn't know has nothing to render on.
+   * Returns false when the session is unknown.
+   */
+  recordContextAdvisory(sessionId: string, advisory: Omit<ContextAdvisoryRecord, "at">): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session) return false;
+    const record: ContextAdvisoryRecord = { ...advisory, at: Date.now() };
+    session.state.context_advisory = record;
+    this.persistSession(session);
+    this.broadcastToBrowsers(session, { type: "session_update", session: { context_advisory: record } });
+    return true;
   }
 
   /** Return all sessions that have a linearSessionId set (for map restoration on startup). */

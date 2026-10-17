@@ -7,7 +7,7 @@ import { log } from "./logger.js";
 import { DEFAULT_LAG_TOLERANCE_MS, resolveJsonlPath, SUBAGENT_LIVENESS_WINDOW_MS } from "./silent-stdio-drift-detector.js";
 import type { SessionRecoveryDeps } from "./session-recovery.js";
 import { ClaudeAdapter } from "./claude-adapter.js";
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -58,6 +58,7 @@ function makeRecovery(
     getSession: vi.fn(() => undefined),
     broadcastToSession: vi.fn(),
     recordModelFallback: vi.fn(),
+    recordContextAdvisory: vi.fn(() => true),
     // #327: the drift tick asks how many user messages are queued for the
     // session before honouring a suppression. Default: none queued.
     getSessionPendingMessageCount: vi.fn(() => 0),
@@ -765,6 +766,89 @@ describe("SessionRecovery.driftDetectorTick — undelivered-output gate (P7/FIX-
       expect((detected?.[2] as { cliWaitChannels?: unknown }).cliWaitChannels).toMatch(/^[\w.]+×\d+(, [\w.]+×\d+)*$/);
     },
   );
+});
+
+// Context-overflow handoff: the drift tick piggybacks a jsonl stat and fires
+// the size advisory. From 5 MB the advisory is STRUCTURED (recorded on the
+// session state + `advisory` payload on the legacy error frame) so the browser
+// can offer a one-click "Continue in a new session"; 1.5/3 MB stay /compact.
+describe("SessionRecovery.driftDetectorTick — context-size advisory", () => {
+  const NOW = Date.parse("2026-10-17T10:00:00.000Z");
+  let home: string;
+  let prevHome: string | undefined;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    prevHome = process.env.HOME;
+    home = mkdtempSync(join(tmpdir(), "ctx-advisory-"));
+    process.env.HOME = home;
+  });
+  afterEach(() => {
+    process.env.HOME = prevHome;
+    rmSync(home, { recursive: true, force: true });
+    vi.useRealTimers();
+    companionBus.clear();
+  });
+
+  /** A live session whose jsonl is `sizeBytes` big (sparse file), CLI fresh. */
+  function setup(sizeBytes: number, persistedMilestone?: number) {
+    const sessions = new Map([["s1", info("s1", { state: "running", cwd: "/root/proj", cliSessionId: "cli-1" })]]);
+    const ctx = makeRecovery(sessions);
+    const adapter = Object.create(ClaudeAdapter.prototype) as ClaudeAdapter;
+    adapter.getLastCliFrameReceivedMs = () => NOW;
+    ctx.wsBridge.getSession.mockReturnValue({
+      backendAdapter: adapter,
+      state: persistedMilestone ? { context_advisory: { milestoneBytes: persistedMilestone } } : {},
+    } as never);
+    const path = resolveJsonlPath(join(home, ".claude"), "/root/proj", "cli-1")!;
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, JSON.stringify({ type: "user", timestamp: new Date(NOW).toISOString() }) + "\n");
+    truncateSync(path, sizeBytes);
+    utimesSync(path, NOW / 1000, NOW / 1000);
+    return ctx;
+  }
+
+  function advisoryFrames(wsBridge: ReturnType<typeof makeRecovery>["wsBridge"]) {
+    return wsBridge.broadcastToSession.mock.calls
+      .map((c: unknown[]) => c[1] as { type: string; advisory?: { action: string; milestoneBytes: number } })
+      .filter((f) => f.type === "error" && f.advisory);
+  }
+
+  it("10 MB: records the handoff advisory and sends the structured error frame", () => {
+    const { recovery, wsBridge } = setup(10_500_000);
+    recovery.driftDetectorTick();
+    expect(wsBridge.recordContextAdvisory).toHaveBeenCalledWith("s1", expect.objectContaining({
+      milestoneBytes: 10_000_000,
+      action: "continue_in_new",
+    }));
+    const frames = advisoryFrames(wsBridge);
+    expect(frames).toHaveLength(1);
+    // Legacy text stays for old browsers; the payload drives the new banner.
+    expect(frames[0]).toMatchObject({
+      message: expect.stringMatching(/10 MB/),
+      advisory: { kind: "context_advisory", milestoneBytes: 10_000_000, action: "continue_in_new" },
+    });
+    // Fires once per milestone.
+    recovery.driftDetectorTick();
+    expect(advisoryFrames(wsBridge)).toHaveLength(1);
+  });
+
+  it("3 MB: plain /compact advisory, nothing recorded on the state", () => {
+    const { recovery, wsBridge } = setup(3_200_000);
+    recovery.driftDetectorTick();
+    expect(wsBridge.recordContextAdvisory).not.toHaveBeenCalled();
+    expect(advisoryFrames(wsBridge)[0]?.advisory).toMatchObject({ action: "compact", milestoneBytes: 3_000_000 });
+  });
+
+  it("after a server restart, an already-recorded tier does not re-fire", () => {
+    // The in-memory map is empty after restart; the persisted record seeds it,
+    // so a dismissed banner is not resurrected with a fresh timestamp.
+    const { recovery, wsBridge } = setup(10_500_000, 10_000_000);
+    recovery.driftDetectorTick();
+    expect(wsBridge.recordContextAdvisory).not.toHaveBeenCalled();
+    expect(advisoryFrames(wsBridge)).toHaveLength(0);
+  });
 });
 
 // ── PLAN Tasks 2-4 + review 2026-10-14-2248 #3/#4/#5 ─────────────────────────

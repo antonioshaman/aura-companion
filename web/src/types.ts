@@ -13,6 +13,8 @@ import type {
   BrowserObserverDowngrade,
   ModelFallbackReason,
   ModelFallbackRecord,
+  ContextAdvisoryRecord,
+  ContextAdvisoryPayload,
   BrowserCheckpointCoverageGap,
 } from "../server/session-types.js";
 
@@ -31,6 +33,8 @@ export type {
   BrowserObserverDowngrade,
   ModelFallbackReason,
   ModelFallbackRecord,
+  ContextAdvisoryRecord,
+  ContextAdvisoryPayload,
   BrowserCheckpointCoverageGap,
 };
 export type { SessionPhase } from "../server/session-state-machine.js";

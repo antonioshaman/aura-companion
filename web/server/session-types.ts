@@ -416,7 +416,18 @@ export type BrowserIncomingMessageBase =
   | { type: "tool_use_summary"; summary: string; tool_use_ids: string[] }
   | { type: "status_change"; status: "compacting" | "idle" | "running" | null }
   | { type: "auth_status"; isAuthenticating: boolean; output: string[]; error?: string }
-  | { type: "error"; message: string }
+  | {
+    type: "error";
+    message: string;
+    /**
+     * Structured context-size advisory (context-overflow handoff). Optional
+     * and additive: an old browser ignores it and renders `message` as the
+     * plain system line it always did; a current browser renders a banner
+     * with a one-click action instead (`continue_in_new` → handoff + fresh
+     * session, `compact` → plain line suggesting /compact).
+     */
+    advisory?: ContextAdvisoryPayload;
+  }
   // Model Registry + Failover Task 5 — proactive pre-send gate decision.
   // The server is the sole substitution-decision owner: when an outgoing
   // `set_model` targets a registry-`retired`/`blocked` model, the server
@@ -885,6 +896,33 @@ export interface SessionState {
    * toast. Absent = the session runs on the model the user picked.
    */
   model_fallback?: ModelFallbackRecord | null;
+  /**
+   * The highest context-size advisory that offered "Continue in a new
+   * session" (>= 5 MB transcript). Persisted with the session state and
+   * replayed in `session_init`, so the handoff banner is still there after a
+   * reload — exactly when the user needs it most (the CLI may already be
+   * unresponsive). Absent/null = no handoff advisory fired.
+   */
+  context_advisory?: ContextAdvisoryRecord | null;
+}
+
+/** Wire payload attached to the `error` frame for a context-size advisory. */
+export interface ContextAdvisoryPayload {
+  kind: "context_advisory";
+  /** The milestone crossed, in bytes of the CLI transcript (jsonl). */
+  milestoneBytes: number;
+  /** What the browser should offer. */
+  action: "compact" | "continue_in_new";
+}
+
+/** Session-state record of the latest `continue_in_new` advisory. */
+export interface ContextAdvisoryRecord {
+  milestoneBytes: number;
+  /** User-visible advisory copy (English, same text as the legacy line). */
+  message: string;
+  action: "continue_in_new";
+  /** Epoch ms when the advisory fired. */
+  at: number;
 }
 
 /**

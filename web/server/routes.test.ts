@@ -6414,3 +6414,73 @@ describe("POST /api/sessions/create — layer flags (P4/C3)", () => {
     expect(res.status).toBe(400);
   });
 });
+
+// ── POST /sessions/:id/continue-in-new — context-overflow handoff ──────────
+// The browser's "Continue in a new session" banner (>= 5 MB transcript) and
+// the sidebar menu both hit this endpoint. It must work from messageHistory
+// alone (the CLI may be dead), write the brief into cwd, spawn a SOLO session
+// and return a reason-aware pickup draft.
+describe("POST /api/sessions/:id/continue-in-new", () => {
+  let tmp: string;
+  beforeEach(async () => {
+    const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const os = await import("node:os");
+    const path = await import("node:path");
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), "handoff-route-"));
+  });
+  afterEach(async () => {
+    const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  function seed(contextAdvisory?: { milestoneBytes: number }) {
+    launcher.getSession.mockReturnValue({ sessionId: "old", cwd: tmp, backendType: "claude", model: "claude-opus-4-8" });
+    bridge.getSession.mockReturnValue({
+      backendType: "claude",
+      state: { cwd: tmp, context_advisory: contextAdvisory ? { ...contextAdvisory, message: "m", action: "continue_in_new", at: 1 } : null },
+      messageHistory: [{ type: "user_message", content: "migrate the billing module", timestamp: 1 }],
+    });
+  }
+
+  it("context_too_large: writes the brief, spawns a solo session, returns the overflow pickup draft", async () => {
+    seed({ milestoneBytes: 10_000_000 });
+    const res = await app.request("/api/sessions/old/continue-in-new", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: "context_too_large" }),
+    });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.newSessionId).toBe("session-1");
+    // Overflow copy with the recorded size; never the image-limit wording.
+    expect(json.draft).toContain("контекст переполнился (>10 MB)");
+    expect(json.draft).not.toContain("2000px");
+    // Solo spawn in the same cwd/backend/model.
+    expect(orchestrator.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd: tmp, backendType: "claude", model: "claude-opus-4-8" }),
+    );
+    // The brief really landed in cwd with the "Current task" section on top.
+    const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const written = fs.readFileSync(json.handoffPath, "utf8");
+    expect(written).toContain("## Current task (read this first)");
+    expect(written).toContain("migrate the billing module");
+    expect(written).toContain("context overflowed (>10 MB)");
+  });
+
+  it("no reason (sidebar menu): generic draft, no image-limit claim without an image error", async () => {
+    seed();
+    const res = await app.request("/api/sessions/old/continue-in-new", { method: "POST" });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.draft).toMatch(/^Pickup с прошлой сессии\./);
+    expect(json.draft).not.toContain("2000px");
+  });
+
+  it("404s for an unknown session and 409s when bridge state is not loaded", async () => {
+    launcher.getSession.mockReturnValue(undefined);
+    expect((await app.request("/api/sessions/nope/continue-in-new", { method: "POST" })).status).toBe(404);
+    launcher.getSession.mockReturnValue({ sessionId: "old", cwd: tmp });
+    bridge.getSession.mockReturnValue(null);
+    expect((await app.request("/api/sessions/old/continue-in-new", { method: "POST" })).status).toBe(409);
+  });
+});

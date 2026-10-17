@@ -1228,12 +1228,16 @@ export function createRoutes(
     const reasonRaw = await c.req.json().catch(() => ({}));
     const reason = typeof reasonRaw?.reason === "string" ? reasonRaw.reason : undefined;
 
+    // Context-overflow handoff: the advisory recorded on the state carries
+    // the transcript size the reason line / pickup draft quote ("> N MB").
+    const contextBytes = bridgeSession.state.context_advisory?.milestoneBytes;
     const { markdown, meta } = extractHandoff({
       sessionId: id,
       messageHistory: bridgeSession.messageHistory,
       cwd,
       backend: bridgeSession.backendType,
       reason,
+      contextBytes,
     });
 
     // Filename uses dot-prefix so it's hidden from casual `ls` and most
@@ -1269,7 +1273,9 @@ export function createRoutes(
       handoffPath,
       handoffFilename: filename,
       handoffMeta: meta,
-      draft: buildPickupDraft(filename),
+      // No explicit reason (sidebar menu) + an image-limit error in history →
+      // keep the image-limit wording that flow was built for.
+      draft: buildPickupDraft(filename, reason ?? (meta.hasImageError ? "image_limit" : undefined), { contextBytes }),
     });
   });
 

@@ -11,6 +11,7 @@ import { SectionErrorBoundary } from "./SectionErrorBoundary.js";
 import { CliFailedBanner } from "./CliFailedBanner.js";
 import { AutoResumeBanner } from "./AutoResumeBanner.js";
 import { ModelFallbackNotice } from "./ModelFallbackNotice.js";
+import { ContextAdvisoryNotice } from "./ContextAdvisoryBanner.js";
 import { ModelSubstitutionDialog } from "./ModelSubstitutionDialog.js";
 import { ModelAvailabilityAnnouncer } from "./ModelAvailabilityAnnouncer.js";
 import { navigateHome } from "../utils/routing.js";
@@ -313,6 +314,11 @@ export function ChatView({ sessionId }: { sessionId: string }) {
           priority-gated like the slot above: infrastructure info, never a
           blocker, so it coexists with the chat. */}
       <ModelFallbackNotice sessionId={sessionId} />
+
+      {/* Context-overflow handoff (>= 5 MB transcript): one-click "Continue
+          in a new session". Server-recorded on the session state, so it
+          survives a reload; works even when the CLI no longer answers. */}
+      <ContextAdvisoryNotice sessionId={sessionId} />
 
       {/* Composer — suppressed for the observer half of a Council pair.
           The toggle's set_permission_mode would be rejected server-side

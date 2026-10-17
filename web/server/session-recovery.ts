@@ -831,14 +831,19 @@ export class SessionRecovery {
   /**
    * Compaction-advisory piggyback: cheap stat on the same jsonl the drift
    * tick tracks. If size crossed a new milestone since last advisory, surface
-   * a browser toast suggesting `/compact`. Prevents silent-stdio flares before
+   * a browser advisory suggesting `/compact` (1.5/3 MB) or a one-click
+   * "Continue in a new session" handoff (5/10 MB). Prevents silent-stdio flares before
    * they happen (empirical pattern: sessions >1.5 MB start flaring, >3 MB
    * flare hourly). Fires at most once per milestone per session lifetime.
    */
   private maybeFireCompactionAdvisory(sessionId: string, jsonlPath: string): void {
     try {
       const jsonlSize = statSync(jsonlPath).size;
-      const lastFired = this.compactionAdvisoryFired.get(sessionId) ?? 0;
+      // Seed from the persisted record too: the in-memory map is empty after
+      // a server restart, and re-firing the same handoff tier would bump the
+      // record's timestamp and resurrect a banner the user already saw.
+      const persisted = this.wsBridge.getSession(sessionId)?.state?.context_advisory?.milestoneBytes ?? 0;
+      const lastFired = Math.max(this.compactionAdvisoryFired.get(sessionId) ?? 0, persisted);
       const advisory = nextCompactionMilestone(jsonlSize, lastFired);
       if (advisory) {
         this.compactionAdvisoryFired.set(sessionId, advisory.milestoneBytes);
@@ -850,11 +855,28 @@ export class SessionRecovery {
             sessionId,
             jsonlSize,
             milestoneBytes: advisory.milestoneBytes,
+            action: advisory.action,
           },
         );
+        // Handoff tier (>= 5 MB): record on the session state FIRST so the
+        // banner survives a reload and reaches tabs that open later.
+        if (advisory.action === "continue_in_new") {
+          this.wsBridge.recordContextAdvisory(sessionId, {
+            milestoneBytes: advisory.milestoneBytes,
+            message: advisory.message,
+            action: "continue_in_new",
+          });
+        }
+        // Legacy text frame + structured payload: old browsers render the
+        // text line, current ones render the banner / a plain line by action.
         this.wsBridge.broadcastToSession(sessionId, {
           type: "error",
           message: advisory.message,
+          advisory: {
+            kind: "context_advisory",
+            milestoneBytes: advisory.milestoneBytes,
+            action: advisory.action,
+          },
         });
       }
     } catch {
