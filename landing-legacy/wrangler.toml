@@ -7,7 +7,11 @@ compatibility_date = "2024-09-23"
 # lost again. The anonymous usage counter (Active/Total installs) reads the
 # opt-in telemetry aggregator at companion-stats.antonshmonin.workers.dev.
 #
-# Deploy:  cd landing-legacy && wrangler deploy
+# PRODUCTION is NOT this Worker any more (2026-10-17): auraco.space is served from
+# the RU Timeweb edge — deploy with landing-legacy/deploy-timeweb.sh. Cloudflare
+# edges are frozen by TSPU for users in Russia. Use this Worker ONLY for previews:
+#   bunx wrangler@3 versions upload   (prints a preview URL)
+# Never `wrangler deploy` here and never re-attach the auraco.space custom domain.
 [assets]
 directory = "./site"
 not_found_handling = "single-page-application"
