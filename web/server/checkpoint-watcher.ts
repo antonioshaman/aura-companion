@@ -1,4 +1,4 @@
-import { readFile, watch } from "node:fs/promises";
+import { readFile, stat, watch } from "node:fs/promises";
 import { join } from "node:path";
 import { type CheckpointPayload, parseCheckpointPayload } from "./council-types.js";
 import { log } from "./logger.js";
@@ -37,7 +37,13 @@ export type CheckpointDropReason =
   | "invalid-schema"
   | "duplicate-checkpoint-id"
   | "read-error"
-  | "handler-error";
+  | "handler-error"
+  /** Two distinct checkpoint writes (differing checkpoint_id/sequence, same
+   *  phase → same inode) landed on the same path within the debounce window;
+   *  the earlier rename's bytes were overwritten on disk before the watcher
+   *  could read them. Honours EC-4's "never silently coalesce" rule — the loss
+   *  is visible, not absorbed. Mirror of review-watcher's `superseded`. */
+  | "superseded";
 
 export interface CheckpointWatcherOptions {
   /** Absolute path to the directory containing checkpoint files. */
@@ -52,6 +58,16 @@ export interface CheckpointWatcherOptions {
   signal: AbortSignal;
   /** Optional logger for invalid/oversized/read-errored/duplicate events. */
   onDropped?: (reason: CheckpointDropReason, filename: string, detail?: string) => void;
+  /**
+   * Debounce window in ms before a settled file is read. Defaults to
+   * {@link DEBOUNCE_MS}. A test seam only: production callers leave it unset.
+   * Tests that exercise the mtime-supersede path raise it so the first
+   * fs.watch event is reliably observed at the intermediate mtime before the
+   * timer flushes — decoupling "time for the event to be seen" from "time
+   * before the timer fires" removes the real-fs.watch timing flake. Mirrors
+   * the identical seam in {@link watchReviews}.
+   */
+  debounceMs?: number;
 }
 
 /**
@@ -69,9 +85,18 @@ export interface CheckpointWatcherOptions {
  * invocations are awaited before the returned promise resolves.
  */
 export async function watchCheckpoints(opts: CheckpointWatcherOptions): Promise<void> {
-  const timers = new Map<string, ReturnType<typeof setTimeout>>();
+  // Map from filename → { timer, mtimeNs from the event that set the timer }.
+  // EC-4: debounce must NOT silently coalesce distinct payloads on the same
+  // path. Pairs sharing a workspace collapse two checkpoints (different
+  // checkpoint_id/sequence, same phase) onto one inode; keying the dedup
+  // decision by `(file, mtimeNs)` means that when a second distinct write
+  // lands within the window its mtime differs from the first's, so the loss
+  // surfaces via `onDropped("superseded", …)` rather than vanishing. Mirror
+  // of {@link watchReviews}.
+  const timers = new Map<string, { timer: ReturnType<typeof setTimeout>; observedMtimeNs: bigint | null }>();
   const inflight = new Set<Promise<void>>();
   const seenCheckpointIds = new Set<string>();
+  const debounceMs = opts.debounceMs ?? DEBOUNCE_MS;
   const onDropped =
     opts.onDropped ??
     ((reason: CheckpointDropReason, file: string, detail?: string) =>
@@ -86,8 +111,32 @@ export async function watchCheckpoints(opts: CheckpointWatcherOptions): Promise<
       // Defence-in-depth: refuse paths with NUL bytes.
       if (file.includes("\0")) continue;
 
+      // Capture the current mtime as the key for THIS debounce window. If a
+      // second event arrives with the same mtime, it's a duplicate FS
+      // notification for the same atomic-write; coalesce. If the mtime differs
+      // (a real second write with a distinct payload), the first rename's bytes
+      // were already overwritten on disk before we could read them — log the
+      // loss explicitly (EC-4: every payload that crossed the rename barrier is
+      // either read-and-emitted OR read-and-dropped-with-reason via onDropped).
+      let observedMtimeNs: bigint | null = null;
+      try {
+        const st = await stat(join(opts.directory, file), { bigint: true });
+        observedMtimeNs = st.mtimeNs;
+      } catch {
+        // Stat may fail under a rename-in-progress race; treat as unknown
+        // mtime and rely on the timer to read on flush.
+      }
+
       const existing = timers.get(file);
-      if (existing) clearTimeout(existing);
+      if (existing) {
+        if (existing.observedMtimeNs !== null && observedMtimeNs !== null
+            && existing.observedMtimeNs !== observedMtimeNs) {
+          clearTimeout(existing.timer);
+          onDropped("superseded", file, `mtime ${existing.observedMtimeNs} → ${observedMtimeNs}`);
+        } else {
+          clearTimeout(existing.timer);
+        }
+      }
       const timer = setTimeout(() => {
         timers.delete(file);
         if (opts.signal.aborted) return;
@@ -95,15 +144,15 @@ export async function watchCheckpoints(opts: CheckpointWatcherOptions): Promise<
         inflight.add(p);
         // Cleanup when handler settles, whether success or failure.
         p.finally(() => inflight.delete(p));
-      }, DEBOUNCE_MS);
-      timers.set(file, timer);
+      }, debounceMs);
+      timers.set(file, { timer, observedMtimeNs });
     }
   } catch (err) {
     if (err instanceof Error && err.name !== "AbortError") {
       throw err;
     }
   } finally {
-    for (const t of timers.values()) clearTimeout(t);
+    for (const entry of timers.values()) clearTimeout(entry.timer);
     timers.clear();
     // Await any in-flight handlers so caller-side teardown after `await
     // watchCheckpoints(...)` resolves does not race late emissions.
