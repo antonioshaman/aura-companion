@@ -216,6 +216,18 @@ export function HomePage() {
 
   // Dropdown states
   const [showModelDropdown, setShowModelDropdown] = useState(false);
+  // Owner bug 2026-10-18: the capped, scrollable model list opens with its
+  // scrollTop at 0, so a selected row near the bottom (e.g. Fable 5.1 in a
+  // 14-row list) would be hidden until the user scrolls. Nudge it into view
+  // once per open — never on every render, so it can't fight user scrolling.
+  const modelListRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!showModelDropdown) return;
+    modelListRef.current
+      ?.querySelector<HTMLElement>('[data-selected="true"]')
+      // jsdom doesn't implement scrollIntoView; production browsers always do.
+      ?.scrollIntoView?.({ block: "nearest" });
+  }, [showModelDropdown]);
   const [showModeDropdown, setShowModeDropdown] = useState(false);
   const [showFolderPicker, setShowFolderPicker] = useState(false);
   const [showBranchingControls, setShowBranchingControls] = useState(false);
@@ -1093,7 +1105,16 @@ export function HomePage() {
                 </svg>
               </button>
               {showModelDropdown && (
-                <div className="absolute left-0 bottom-full mb-1 w-48 bg-cc-card border border-cc-border rounded-[10px] shadow-lg z-10 py-1">
+                // Owner bug 2026-10-18: with 14 Claude models the un-capped list
+                // grew taller than a short viewport and, opening upward, pushed
+                // its first rows (Opus 5.5, Opus 5) above the screen edge where
+                // nothing can scroll to them. Cap + scroll like ModelSwitcher,
+                // and keep the cap below the viewport so no row is unreachable.
+                <div
+                  ref={modelListRef}
+                  data-testid="new-session-model-list"
+                  className="absolute left-0 bottom-full mb-1 w-48 bg-cc-card border border-cc-border rounded-[10px] shadow-lg z-10 py-1 max-h-[min(24rem,70vh)] overflow-y-auto"
+                >
                   {MODELS.map((m) => {
                     // Same honesty as ModelSwitcher: retired/blocked (incl. the
                     // broken-model table) can't start a session; registry-unknown
@@ -1110,6 +1131,7 @@ export function HomePage() {
                     return (
                       <button
                         key={m.value}
+                        data-selected={m.value === model ? "true" : undefined}
                         disabled={unavailable}
                         title={title}
                         onClick={() => { modelTouchedRef.current = true; setModel(m.value); setShowModelDropdown(false); }}

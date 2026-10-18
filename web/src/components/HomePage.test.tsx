@@ -532,6 +532,52 @@ describe("HomePage", () => {
     }
   });
 
+  it("new-session model dropdown: caps its height, scrolls, and brings the selected row into view", async () => {
+    // Owner bug 2026-10-18: the dynamic Claude list grew to 14 rows. The
+    // dropdown opens upward with no height cap, so on a short viewport its
+    // first rows (Opus 5.5, Opus 5) were pushed above the screen edge where
+    // nothing could scroll to them — the owner "didn't see Opus 5.5" even
+    // though the server listed it first. The list must be capped relative to
+    // the viewport and scrollable (like ModelSwitcher), and the selected row
+    // must be nudged into view on open so a bottom-of-list choice such as
+    // Fable 5.1 isn't hidden below the cap either.
+    const scrollIntoView = vi.fn();
+    const original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = scrollIntoView;
+    const fourteen = [
+      "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7",
+      "claude-opus-4-6", "claude-opus-4-5-20251101", "claude-sonnet-5-5", "claude-sonnet-5",
+      "claude-sonnet-4-6", "claude-sonnet-4-5-20250929", "claude-haiku-5-5",
+      "claude-haiku-4-5-20251001", "claude-fable-5-1", "claude-fable-5",
+    ].map((value) => ({ value, label: value, icon: "" }));
+    mockStoreState.dynamicBackendModels = { claude: fourteen };
+    (mockStoreState as Record<string, unknown>).anthropicModel = "claude-fable-5-1";
+    mockStoreGetState.mockReturnValue(buildStoreMock({ anthropicModel: "claude-fable-5-1" }));
+    try {
+      render(<HomePage />);
+      await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
+      fireEvent.click(screen.getByText("claude-fable-5-1"));
+
+      const list = screen.getByTestId("new-session-model-list");
+      // Every row is rendered — nothing is filtered out server- or client-side.
+      expect(within(list).getAllByRole("button")).toHaveLength(14);
+      expect(within(list).getByRole("button", { name: /claude-opus-5-5/ })).toBeInTheDocument();
+      // Capped + scrollable: the cap is viewport-relative so no row can land
+      // off-screen whatever the window height.
+      expect(list.className).toMatch(/overflow-y-auto/);
+      expect(list.className).toMatch(/max-h-\[min\(24rem,70vh\)\]/);
+      // Selected row is nudged into view exactly once per open.
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+      expect(scrollIntoView.mock.instances[0]).toHaveAttribute("data-selected", "true");
+      expect(scrollIntoView.mock.instances[0]).toHaveTextContent("claude-fable-5-1");
+    } finally {
+      Element.prototype.scrollIntoView = original;
+      mockStoreState.dynamicBackendModels = {};
+      delete (mockStoreState as Record<string, unknown>).anthropicModel;
+      mockStoreGetState.mockReturnValue(buildStoreMock());
+    }
+  });
+
   it("Claude fetch rejected: static fallback offers Opus 5.5 and a retry hint re-fetches", async () => {
     // Owner bug 2026-10-16: a failed /v1/models fetch left the dropdown on a
     // stale static list topping out at Opus 4.8 with no way to recover.
