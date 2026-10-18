@@ -783,6 +783,28 @@ describe("SessionRecovery.driftDetectorTick — undelivered-output gate (P7/FIX-
     expect(launcher.kill).toHaveBeenCalledWith("s1");
   });
 
+  it("parallel tool calls: one result landing does NOT release the deferral while siblings run (prod 2026-10-18 18:16:04)", () => {
+    const parallel = { role: "assistant", content: [
+      { type: "tool_use", id: "t1", name: "Bash", input: {} },
+      { type: "tool_use", id: "t2", name: "Bash", input: {} },
+    ] };
+    const { recovery, launcher, path } = setup(
+      [
+        { type: "user", atMs: NOW - 100_000 },
+        { type: "assistant", atMs: NOW - 50_000, message: parallel },
+      ],
+      NOW - 110_000,
+    );
+    recovery.driftDetectorTick();
+    expect(launcher.kill).not.toHaveBeenCalled();
+    append(path, [{ type: "user", atMs: NOW - 2_000, message: TOOL_RESULT("t1") }]);
+    recovery.driftDetectorTick();
+    expect(launcher.kill).not.toHaveBeenCalled(); // t2 still running
+    append(path, [{ type: "user", atMs: NOW - 1_000, message: TOOL_RESULT("t2") }]);
+    recovery.driftDetectorTick();
+    expect(launcher.kill).toHaveBeenCalledWith("s1");
+  });
+
   it("an open call older than the ceiling does not defer (a tool that hung cannot wedge recovery)", () => {
     // 16 min into a Bash call (10 min timeout + margin) the call is presumed
     // dead; the stall is recovered like any other.
