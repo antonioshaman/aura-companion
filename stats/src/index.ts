@@ -24,12 +24,18 @@
  *                    pings without a count fall back to 1.
  *   meta:total     — cumulative monotonic counter, bumped once the first time
  *                    an instance id is ever seen. Never decremented.
+ *   meta:global    — aggregate snapshot of the whole /stats/global payload
+ *                    ({activeInstances30d, onlineNow, totalInstances,
+ *                    generatedAt}), written with a short expirationTtl after
+ *                    each recompute. Lets an edge-cache miss cost ONE KV read
+ *                    instead of two prefix lists — see the free-tier budget
+ *                    note above handleGlobalStats.
  *
- * NOTE on scale: GET /stats/global counts active instances via `STATS_KV.list`
- * over the "instance:" prefix. KV list is paginated (1000 keys/page) and
- * eventually-consistent; this is fine for hundreds–low-thousands of installs.
- * At larger scale, migrate the active count + total to a Durable Object (or a
- * single aggregate KV key updated transactionally) to avoid O(n) list scans.
+ * NOTE on scale: recomputing /stats/global counts active instances via
+ * `STATS_KV.list` over the "instance:" prefix. KV list is paginated (1000
+ * keys/page) and eventually-consistent; this is fine for hundreds–low-thousands
+ * of installs. At larger scale, migrate the active count + total to a Durable
+ * Object (or maintain meta:global transactionally) to avoid O(n) list scans.
  */
 
 export interface Env {
@@ -40,19 +46,27 @@ export interface Env {
 // heartbeat within this window. KV expirationTtl prunes stale keys for us.
 const ACTIVE_TTL_SECONDS = 30 * 24 * 60 * 60;
 
-// 5 minutes in seconds — an instance counts as "online" if it has sent a
-// presence ping within this window. The app pings every ~2 min while a human
-// has the UI open, so this tolerates one missed beat before dropping off.
-const ONLINE_TTL_SECONDS = 5 * 60;
+// 15 minutes in seconds — an instance counts as "online" if it has sent a
+// presence ping within this window. The app pings every ~10 min while a human
+// has the UI open (PRESENCE_INTERVAL_MS in web/server/telemetry.ts), so this
+// tolerates one missed beat before dropping off. The cadence is budget-driven:
+// every ping is a KV write and the free tier allows 1,000 writes/day in total.
+const ONLINE_TTL_SECONDS = 15 * 60;
 
 // Cache the /stats/global response at the edge to bound KV list cost under a
 // burst of landing-page loads. Kept short so the "online now" count stays
 // reasonably fresh (it's the most time-sensitive field in the response).
 const STATS_CACHE_SECONDS = 30;
 
+// Aggregate snapshot of the /stats/global payload, kept in KV (global, unlike
+// the per-colo Cache API) so a cache miss costs one KV read, not two lists.
+// Its TTL is the recompute cadence — see the budget note on handleGlobalStats.
+const SNAPSHOT_TTL_SECONDS = 10 * 60;
+
 const INSTANCE_PREFIX = "instance:";
 const ONLINE_PREFIX = "online:";
 const TOTAL_KEY = "meta:total";
+const SNAPSHOT_KEY = "meta:global";
 
 // Instance ids are opaque random tokens generated client-side. Bound shape to
 // reject junk before it touches KV (length + charset only — no PII parsing).
@@ -130,7 +144,7 @@ async function handleHeartbeat(request: Request, env: Env): Promise<Response> {
 }
 
 /**
- * Presence ping — the app sends this every couple of minutes ONLY while a human
+ * Presence ping — the app sends this every ~10 minutes ONLY while a human
  * has the UI open. It refreshes a short-lived online:<id> key so GET
  * /stats/global can report "people online right now" without any cron sweep.
  * Distinct from the 6-hourly heartbeat (which only proves the install exists).
@@ -194,30 +208,98 @@ async function sumOnlineHeadcount(env: Env): Promise<number> {
   return total;
 }
 
-async function handleGlobalStats(env: Env, ctx: ExecutionContext): Promise<Response> {
-  const cache = caches.default;
-  const cacheKey = new Request("https://stats.invalid/stats/global");
-  const cached = await cache.match(cacheKey);
-  if (cached) return cached;
+// Shape of the meta:global snapshot AND of the /stats/global response body.
+// `generatedAt` is when the counts were computed, not when they were served.
+interface GlobalSnapshot {
+  activeInstances30d: number;
+  onlineNow: number;
+  totalInstances: number;
+  generatedAt: number;
+}
 
+// A snapshot that fails to parse (corrupt / hand-edited / older shape) is
+// treated as absent so the next request simply recomputes and overwrites it.
+function parseSnapshot(raw: string | null): GlobalSnapshot | null {
+  if (raw === null) return null;
+  try {
+    const v = JSON.parse(raw) as Partial<GlobalSnapshot>;
+    if (
+      typeof v.activeInstances30d === "number" &&
+      typeof v.onlineNow === "number" &&
+      typeof v.totalInstances === "number" &&
+      typeof v.generatedAt === "number"
+    ) {
+      return v as GlobalSnapshot;
+    }
+  } catch {
+    // fall through — treat as missing
+  }
+  return null;
+}
+
+// The expensive path: two prefix lists (+1 list per extra 1000-key page) and
+// one read of the cumulative counter.
+async function computeSnapshot(env: Env): Promise<GlobalSnapshot> {
   const [activeInstances30d, onlineNow, totalRaw] = await Promise.all([
     countByPrefix(env, INSTANCE_PREFIX),
     sumOnlineHeadcount(env),
     env.STATS_KV.get(TOTAL_KEY),
   ]);
   const totalInstances = Math.max(parseInt(totalRaw ?? "0", 10) || 0, activeInstances30d);
+  return { activeInstances30d, onlineNow, totalInstances, generatedAt: Date.now() };
+}
 
-  const response = new Response(
-    JSON.stringify({ activeInstances30d, onlineNow, totalInstances, generatedAt: Date.now() }),
-    {
-      status: 200,
-      headers: {
-        "Content-Type": "application/json",
-        "Cache-Control": `public, max-age=${STATS_CACHE_SECONDS}`,
-        ...corsHeaders(),
-      },
+/**
+ * GET /stats/global — three layers, cheapest first:
+ *   1. edge Cache API (per-colo, STATS_CACHE_SECONDS) — free, no KV op at all;
+ *   2. KV snapshot meta:global — one KV read (free tier: 100,000 reads/day);
+ *   3. only if the snapshot is missing/expired: recompute via the two prefix
+ *      lists and write the snapshot back with SNAPSHOT_TTL_SECONDS.
+ *
+ * Free-tier KV budget arithmetic (Workers free plan, per day: 1,000 writes,
+ * 1,000 list operations, 100,000 reads). Before the snapshot every edge-cache
+ * miss ran 2 lists; the Cache API is per-colo with a 30 s TTL and the app +
+ * landing poll every 60 s from every install, so list cost was unbounded —
+ * confirmed 2026-10-18: HTTP 500 "error code: 1101" on /stats/global and CF API
+ * error 10048 "reached the free usage limit for this operation for today".
+ * With the snapshot the lists only run when meta:global is absent, i.e. at most
+ * once per SNAPSHOT_TTL_SECONDS regardless of how many colos/pollers hit us:
+ *   86,400 s / 600 s             = ≤144 recomputes/day
+ *   144 recomputes × 2 lists     = ≤288 list ops/day   (budget 1,000)
+ *   144 recomputes × 1 put       = ≤144 snapshot writes/day
+ *   every other cache miss       = 1 KV read            (budget 100,000)
+ * Presence pings are the other write consumer: PRESENCE_INTERVAL_MS = 10 min in
+ * web/server/telemetry.ts → ≤144 writes/day per install with a UI open, plus 4
+ * heartbeats/day/install. 144 + 148·N ≤ 1,000 holds for ~5 installs online all
+ * day, far more at realistic duty cycles. Caveat: KV is eventually consistent
+ * (cross-colo visibility of a write can lag up to ~60 s), so right after the
+ * snapshot expires a few colos may each recompute once before they see the new
+ * one — a small constant per cycle, not a per-request cost.
+ */
+async function handleGlobalStats(env: Env, ctx: ExecutionContext): Promise<Response> {
+  const cache = caches.default;
+  const cacheKey = new Request("https://stats.invalid/stats/global");
+  const cached = await cache.match(cacheKey);
+  if (cached) return cached;
+
+  let snapshot = parseSnapshot(await env.STATS_KV.get(SNAPSHOT_KEY));
+  if (snapshot === null) {
+    snapshot = await computeSnapshot(env);
+    // Awaited (not waitUntil) so the very next miss — including one racing
+    // this request at the same colo — finds the snapshot already in place.
+    await env.STATS_KV.put(SNAPSHOT_KEY, JSON.stringify(snapshot), {
+      expirationTtl: SNAPSHOT_TTL_SECONDS,
+    });
+  }
+
+  const response = new Response(JSON.stringify(snapshot), {
+    status: 200,
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": `public, max-age=${STATS_CACHE_SECONDS}`,
+      ...corsHeaders(),
     },
-  );
+  });
   ctx.waitUntil(cache.put(cacheKey, response.clone()));
   return response;
 }

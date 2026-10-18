@@ -18,10 +18,14 @@ export const DEFAULT_STATS_URL = "https://companion-stats.antonshmonin.workers.d
 // far more often than needed to stay "active" while surviving daily restarts.
 const HEARTBEAT_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
-// Presence ping every 2 minutes; the Worker's online window is 5 minutes, so a
-// single missed beat (restart, transient network) doesn't flap the "online"
-// count. Only fires while a human actually has the UI open (see startPresencePing).
-const PRESENCE_INTERVAL_MS = 2 * 60 * 1000;
+// Presence ping every 10 minutes; the Worker's online window is 15 minutes
+// (ONLINE_TTL_SECONDS in stats/src/index.ts), so a single missed beat (restart,
+// transient network) doesn't flap the "online" count. Only fires while a human
+// actually has the UI open (see startPresencePing). The cadence is budget-driven:
+// every ping is one KV write on the stats Worker, which runs on the Workers free
+// tier (1,000 writes/day shared by ALL installs) — 10 min = ≤144 writes/day per
+// install, vs 720/day at the old 2-min cadence that exhausted the quota.
+const PRESENCE_INTERVAL_MS = 10 * 60 * 1000;
 
 export function getStatsBaseUrl(): string {
   const raw = process.env.COMPANION_STATS_URL?.trim();

@@ -6,8 +6,12 @@ compatibility_date = "2024-09-23"
 # Self-hosted instances opt-in to POST /telemetry/heartbeat; the landing page
 # and the app read GET /stats/global.
 #
-# KV namespace holds one key per active instance (30d TTL) plus a cumulative
-# total counter. Recreate with: bunx wrangler kv namespace create STATS_KV
+# KV namespace holds one key per active instance (30d TTL), one short-lived
+# online:<id> key per install with a UI open (15 min TTL), a cumulative total
+# counter, and a meta:global aggregate snapshot (10 min TTL) so GET /stats/global
+# costs one KV read per edge-cache miss instead of two list operations — the
+# Workers free tier allows only 1,000 lists/day and 1,000 writes/day.
+# Recreate with: bunx wrangler kv namespace create STATS_KV
 [[kv_namespaces]]
 binding = "STATS_KV"
 id = "23553fab795e45c29bf25e32e5dca178"
