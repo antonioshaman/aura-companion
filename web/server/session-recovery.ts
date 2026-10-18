@@ -19,6 +19,8 @@ import {
   subagentTreeLive,
   SUBAGENT_LAYOUT_VERIFIED_CLI_VERSION,
   type DriftVerdict,
+  mainThreadOpenToolCallStartedAt,
+  SUBAGENT_OPEN_TOOL_CALL_CEILING_MS,
 } from "./silent-stdio-drift-detector.js";
 import {
   CODEX_COMPACTION_LADDER,
@@ -189,15 +191,26 @@ export function waitChannelsShowPipeWrite(waitChannels: string | null): boolean 
 export type DriftKillDecision =
   | { kind: "recover"; pipeWrite: boolean }
   | { kind: "withhold_live" }
+  | { kind: "withhold_open_tool_call" }
   | { kind: "rate_limited"; recentRecoveries: number };
 
 export function decideDriftKill(input: {
   waitChannels: string | null;
   subagentActive: boolean;
   recentRecoveries: number;
+  /**
+   * The main thread is inside the ONE tool call that was open when this stall
+   * was first seen, and that call is younger than
+   * `SUBAGENT_OPEN_TOOL_CALL_CEILING_MS` (owner incident 2026-10-18: every
+   * drift kill landed mid Bash call and lost it — the kill waits for the
+   * tool_result to reach the jsonl, then relaunches from it). Regardless of
+   * `pipe_write`: the tool runs and writes the jsonl whatever stdout does.
+   */
+  mainToolCallOpen?: boolean;
 }): DriftKillDecision {
   const pipeWrite = waitChannelsShowPipeWrite(input.waitChannels);
   if (!pipeWrite && input.subagentActive) return { kind: "withhold_live" };
+  if (input.mainToolCallOpen) return { kind: "withhold_open_tool_call" };
   if (input.recentRecoveries >= DRIFT_RECOVERY_RATE_MAX) {
     return { kind: "rate_limited", recentRecoveries: input.recentRecoveries };
   }
@@ -318,6 +331,13 @@ export class SessionRecovery {
    * and reason, not one every tick (a reason switch mid-stall logs again).
    */
   private readonly driftSuppressedLogged = new Map<string, string>();
+  /**
+   * Per session: the main-thread tool call the drift kill is waiting on
+   * (keyed by the stall's `bunLastFrameMs`). A tick that finds a DIFFERENT
+   * open call under the same stall knows the deferred one completed and
+   * recovers at once — the deferral covers exactly one call.
+   */
+  private readonly driftDeferredToolCall = new Map<string, { bunLastFrameMs: number; toolCallStartedAtMs: number }>();
 
   /** Timestamps of recent drift recoveries per session (rate guard, Task 4b). */
   private readonly driftRecoveryTimes = new Map<string, number[]>();
@@ -610,6 +630,7 @@ export class SessionRecovery {
     const listed = new Set(sessions.map((s) => s.sessionId));
     for (const id of this.driftSuppressedLogged.keys()) if (!listed.has(id)) this.driftSuppressedLogged.delete(id);
     for (const id of this.driftPrevSnapshot.keys()) if (!listed.has(id)) this.driftPrevSnapshot.delete(id);
+    for (const id of this.driftDeferredToolCall.keys()) if (!listed.has(id)) this.driftDeferredToolCall.delete(id);
     for (const info of sessions) {
       if (info.archived) continue;
       if (info.backendType === "codex") continue;
@@ -688,7 +709,20 @@ export class SessionRecovery {
       });
       const recent = pruneDriftRecoveries(this.driftRecoveryTimes.get(info.sessionId) ?? [], now);
       this.driftRecoveryTimes.set(info.sessionId, recent);
-      const kill = decideDriftKill({ waitChannels, subagentActive, recentRecoveries: recent.length });
+      // Owner incident 2026-10-18: wait for the main thread's running tool
+      // call (one call, ≤ ceiling from its own start) before the kill, so the
+      // relaunch resumes from its tool_result instead of losing it.
+      const openStartedAt = mainThreadOpenToolCallStartedAt(jsonlPath);
+      const deferred = this.driftDeferredToolCall.get(info.sessionId);
+      const sameStall = deferred !== undefined && deferred.bunLastFrameMs === bunLastFrameMs;
+      let mainToolCallOpen = false;
+      if (openStartedAt !== null && now - openStartedAt <= SUBAGENT_OPEN_TOOL_CALL_CEILING_MS) {
+        if (!sameStall || deferred.toolCallStartedAtMs === openStartedAt) {
+          mainToolCallOpen = true;
+          this.driftDeferredToolCall.set(info.sessionId, { bunLastFrameMs, toolCallStartedAtMs: openStartedAt });
+        }
+      }
+      const kill = decideDriftKill({ waitChannels, subagentActive, recentRecoveries: recent.length, mainToolCallOpen });
       const evidence = {
         sessionId: info.sessionId,
         trigger: action.trigger,
@@ -703,6 +737,25 @@ export class SessionRecovery {
         subagentActive,
         cliVersion,
       };
+      if (kill.kind === "withhold_open_tool_call") {
+        const key = `${bunLastFrameMs}:withhold_open_tool_call`;
+        if (this.driftSuppressedLogged.get(info.sessionId) !== key) {
+          this.driftSuppressedLogged.set(info.sessionId, key);
+          log.info("session-recovery", "silent-stdio drift kill withheld — main thread is inside a tool call", {
+            event: "silent_stdio_drift.withheld_open_tool_call",
+            ...evidence,
+            toolCallStartedAtMs: openStartedAt,
+          });
+          this.wsBridge.broadcastToSession(info.sessionId, {
+            type: "error",
+            message:
+              "Backend output stalled while a tool call is running — waiting for it to finish before relaunching, " +
+              "so its result is not lost.",
+          });
+        }
+        continue;
+      }
+      this.driftDeferredToolCall.delete(info.sessionId);
       if (kill.kind === "withhold_live") {
         const key = `${bunLastFrameMs}:withhold_live`;
         if (this.driftSuppressedLogged.get(info.sessionId) !== key) {
