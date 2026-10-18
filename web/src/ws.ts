@@ -1,3 +1,4 @@
+import { decodeContextAdvisory } from "./utils/context-advisory.js";
 import { useStore } from "./store.js";
 import type { BrowserIncomingMessage, BrowserOutgoingMessage, ContentBlock, ChatMessage, TaskItem, ProcessItem, ProcessStatus, SdkSessionInfo, McpServerConfig } from "./types.js";
 import { generateUniqueSessionName } from "./utils/names.js";
@@ -1417,10 +1418,16 @@ function handleParsedMessage(
       // session state (session_update / session_init); seed it here too in
       // case this frame wins the race or the update was missed.
       if (data.advisory?.kind === "context_advisory" && data.advisory.action === "continue_in_new") {
+        // The frame is only sent for the bytes ladder (Claude); a Codex
+        // percent advisory arrives solely via session_update. Legacy frames
+        // carry `milestoneBytes` only; newer ones also `milestone` + `signal`.
+        const incoming = decodeContextAdvisory(data.advisory);
         const current = store.sessions.get(sessionId)?.context_advisory;
-        if (!current || current.milestoneBytes < data.advisory.milestoneBytes) {
+        if (!current || decodeContextAdvisory(current).milestone < incoming.milestone) {
           store.updateSession(sessionId, {
             context_advisory: {
+              signal: incoming.signal,
+              milestone: incoming.milestone,
               milestoneBytes: data.advisory.milestoneBytes,
               message: data.message,
               action: "continue_in_new",

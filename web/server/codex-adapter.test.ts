@@ -2667,6 +2667,36 @@ describe("CodexAdapter", () => {
     await new Promise((r) => setTimeout(r, 40));
   });
 
+  // Council review 2026-10-17 (dahl D-1 / ritchie B-1): the Codex
+  // context-size advisory keys on main-thread compactions, so the adapter must
+  // count `thread/compacted` for the MAIN thread only and forward the count as
+  // `codex_compactions`. The legacy `codex/event/context_compacted` duplicate
+  // must not double-count.
+  it("counts main-thread thread/compacted notifications into codex_compactions (subagent threads and legacy duplicates ignored)", async () => {
+    const messages: BrowserIncomingMessage[] = [];
+    const adapter = new CodexAdapter(proc as never, "test-session", { model: "o4-mini" });
+    adapter.onBrowserMessage((msg) => messages.push(msg));
+
+    await new Promise((r) => setTimeout(r, 50));
+    stdout.push(JSON.stringify({ id: 1, result: { userAgent: "codex" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 20));
+    stdout.push(JSON.stringify({ id: 2, result: { thread: { id: "thr_main" } } }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    stdout.push(JSON.stringify({ method: "thread/compacted", params: { threadId: "thr_main", turnId: "t1" } }) + "\n");
+    stdout.push(JSON.stringify({ method: "codex/event/context_compacted", params: { msg: { type: "context_compacted" } } }) + "\n");
+    stdout.push(JSON.stringify({ method: "thread/compacted", params: { threadId: "thr_other_subagent", turnId: "t1" } }) + "\n");
+    stdout.push(JSON.stringify({ method: "thread/compacted", params: { threadId: "thr_main", turnId: "t2" } }) + "\n");
+    await new Promise((r) => setTimeout(r, 50));
+
+    const counts = messages
+      .filter((m) => m.type === "session_update" && (m as { session?: { codex_compactions?: number } }).session?.codex_compactions !== undefined)
+      .map((m) => (m as { session: { codex_compactions: number } }).session.codex_compactions);
+    // Two main-thread compactions → 1 then 2; the subagent thread and the
+    // legacy duplicate add nothing.
+    expect(counts).toEqual([1, 2]);
+  });
+
   it("computes context_used_percent from last turn, not cumulative total", async () => {
     // Regression: cumulative total.inputTokens can far exceed contextWindow
     // (e.g. 1.2M input on a 258k window). The context bar should use

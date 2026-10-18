@@ -3398,6 +3398,15 @@ function CouncilModeSection() {
             onDismiss={() => {}}
           />
         </Card>
+        <Card label="ContextAdvisoryBanner — Codex, compacted twice">
+          <ContextAdvisoryBanner
+            signal="codex_compactions"
+            milestone={2}
+            message="Codex has compacted this thread's context twice — the task is outgrowing the window. Continue in a new session with a handoff of the current task."
+            onContinue={() => {}}
+            onDismiss={() => {}}
+          />
+        </Card>
         <Card label="ContextAdvisoryBanner — preparing handoff">
           <ContextAdvisoryBanner milestoneBytes={5_000_000} message="Session context is ~5 MB." onContinue={() => {}} pending />
         </Card>

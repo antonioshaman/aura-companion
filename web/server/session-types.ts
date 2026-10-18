@@ -818,6 +818,13 @@ export interface SessionState {
   total_cost_usd: number;
   num_turns: number;
   context_used_percent: number;
+  /**
+   * Codex only: how many times the app-server compacted the MAIN thread's
+   * context on the current thread (`thread/compacted`). Monotonic per thread,
+   * reset to 0 on a fresh thread. Drives the Codex context-size advisory —
+   * see `CODEX_COMPACTION_LADDER` in context-size-suggester.ts.
+   */
+  codex_compactions?: number;
   is_compacting: boolean;
   git_branch: string;
   is_worktree: boolean;
@@ -906,18 +913,43 @@ export interface SessionState {
   context_advisory?: ContextAdvisoryRecord | null;
 }
 
+/**
+ * What a context-size advisory measured. Claude sessions are measured by the
+ * CLI transcript size on disk (`transcript_bytes`, milestones in bytes);
+ * Codex sessions by how many times the app-server has compacted the main
+ * thread's context (`codex_compactions`, milestones in compactions) — Codex
+ * rollouts on disk are tiny, so a byte ladder would never fire, and the
+ * context-window percent falls after every compaction, so it cannot drive a
+ * fire-once-per-milestone latch (council review 2026-10-17, dahl D-1 /
+ * ritchie B-1).
+ */
+export type ContextAdvisorySignal = "transcript_bytes" | "codex_compactions";
+
 /** Wire payload attached to the `error` frame for a context-size advisory. */
 export interface ContextAdvisoryPayload {
   kind: "context_advisory";
-  /** The milestone crossed, in bytes of the CLI transcript (jsonl). */
-  milestoneBytes: number;
+  /** Which ladder fired; absent on frames from servers before 2026-10-17 = `transcript_bytes`. */
+  signal?: ContextAdvisorySignal;
+  /** The milestone crossed, in the signal's unit (bytes or compactions). */
+  milestone?: number;
+  /** Bytes-only alias of `milestone`; absent for the compactions signal. Kept for older browsers. */
+  milestoneBytes?: number;
   /** What the browser should offer. */
   action: "compact" | "continue_in_new";
 }
 
 /** Session-state record of the latest `continue_in_new` advisory. */
 export interface ContextAdvisoryRecord {
-  milestoneBytes: number;
+  /** Which ladder fired. Absent on records persisted before 2026-10-17 → read as `transcript_bytes`. */
+  signal?: ContextAdvisorySignal;
+  /** The milestone crossed, in the signal's unit. Absent on legacy records → use `milestoneBytes`. */
+  milestone?: number;
+  /**
+   * Bytes-only: populated for `transcript_bytes`, never for `codex_compactions`
+   * (a count must never travel in a field named bytes — the handoff route
+   * quotes this value as "> N MB").
+   */
+  milestoneBytes?: number;
   /** User-visible advisory copy (English, same text as the legacy line). */
   message: string;
   action: "continue_in_new";
