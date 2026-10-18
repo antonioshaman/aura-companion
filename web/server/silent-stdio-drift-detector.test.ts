@@ -754,6 +754,25 @@ describe("openToolCallStartedAt / mainThreadOpenToolCallStartedAt (main jsonl ta
     expect(openToolCallStartedAt("")).toBeNull();
   });
 
+  it("parallel calls: stays open until EVERY tool_use is answered, bounded by the oldest (prod 18:16:04)", () => {
+    // One assistant message with three tool_use blocks; results land out of order.
+    const T0 = "2026-10-18T18:15:29.375Z";
+    const three = rec({ type: "assistant", timestamp: T0, message: { role: "assistant", content: [
+      { type: "tool_use", id: "a", name: "Bash", input: {} },
+      { type: "tool_use", id: "b", name: "Bash", input: {} },
+      { type: "tool_use", id: "c", name: "Bash", input: {} },
+    ] } });
+    const res = (id: string, ts: string) => rec({ type: "user", timestamp: ts, message: { role: "user", content: [{ type: "tool_result", tool_use_id: id, content: "ok" }] } });
+    const later = rec({ type: "assistant", timestamp: "2026-10-18T18:15:38.524Z", message: { role: "assistant", content: [{ type: "tool_use", id: "d", name: "Bash", input: {} }] } });
+    // first result landed, two still running → still open, since the message that opened them
+    expect(openToolCallStartedAt([three, res("b", "2026-10-18T18:15:57.308Z")].join("\n"))).toBe(Date.parse(T0));
+    // a newer call opened while older ones run → the OLDEST bounds the deferral
+    expect(openToolCallStartedAt([three, later, res("b", "2026-10-18T18:15:57.308Z")].join("\n"))).toBe(Date.parse(T0));
+    // all four answered → closed
+    const all = [three, later, res("a", "2026-10-18T18:16:00Z"), res("b", "2026-10-18T18:16:01Z"), res("c", "2026-10-18T18:16:02Z"), res("d", "2026-10-18T18:16:03Z")];
+    expect(openToolCallStartedAt(all.join("\n"))).toBeNull();
+  });
+
   it("null when the open record has no parseable timestamp (unbounded deferral is never allowed)", () => {
     const noTs = rec({ type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: {} }] } });
     expect(openToolCallStartedAt(noTs)).toBeNull();

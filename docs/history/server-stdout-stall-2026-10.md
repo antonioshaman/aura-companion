@@ -73,3 +73,19 @@ Six drift kills of one working session in a day (af80e149: 03:42, 03:55, 04:14, 
 - **`pipe_write` is not a usable tell on this box.** Bun spawns the CLI's stdio as Unix **socketpairs** (`/proc/<cli>/fd/1 -> socket:[…]`), not pipes; a writer blocked on a full socket does not park in `pipe_write`. A 5 s sampler of `ss -xpe` queues (`/tmp/stdio-queue-monitor.sh`) ran across the 04:32 and 10:49 stalls and saw **no unread bytes** on the CLI→bun socket — kernel-side, the CLI was not writing to stdout while it kept writing its jsonl. Whether the `write(1)` calls stop or Bun's native reader drains them into a buffer the JS pull never sees is decided by `strace -e trace=write` on the CLI (`/tmp/cli-stdout-strace.sh`, follows the pid across relaunches, fd 1 lines in `/tmp/cli-stdout-strace.log.fd1`).
 - **Upstream knows the symptom.** claude-code [#39700](https://github.com/anthropics/claude-code/issues/39700) ("`--output-format stream-json` intermittently hangs — process stops producing output and never exits", non-TTY only, closed *not planned*) and [#17248](https://github.com/anthropics/claude-code/issues/17248) ("stdout under stream-json stops while session continues", closed as duplicate). The workaround those threads converge on is exactly this detector: watch the transcript, force-kill, resume.
 - **Mitigation shipped here: the kill waits for the running tool call.** Every one of the six kills landed while the main thread was inside a Bash call (the command died with exit 137 and the resumed CLI had to redo it). `mainThreadOpenToolCallStartedAt` reads the jsonl tail; if the chain ends in a `tool_use` younger than `SUBAGENT_OPEN_TOOL_CALL_CEILING_MS`, `decideDriftKill` returns `withhold_open_tool_call` (logged + one browser notice per stall). The deferral covers exactly that one call: once its `tool_result` lands — or a *different* call opens, which proves it completed — the next tick kills and `--resume`s, and `deliverStalledReply` hands the records written meanwhile to the browser. A call older than the ceiling never defers.
+
+### 2026-10-18 18:16 — settled: the stall is on bun's side
+
+strace attached to the CLI's own threads (no `-f`; stdout is written through **fd 7**, a dup of fd 1 on 2.1.283) across the 18:07:50–18:16:04 stall of session af80e149:
+
+| | |
+|---|---|
+| CLI `write(7, …)` calls in the window | 1 579, all returned their full length, 674 KB total |
+| `in cli` frames in bun's recording in the window | 0 (last frame 18:07:54) |
+| Unix-socket Recv-Q/Send-Q on the CLI↔bun pair (5 s samples) | 0 throughout |
+
+The CLI wrote; the kernel delivered (queues empty); JS never saw the bytes. That leaves Bun's native stdout reader (`Bun.spawn` → `ReadableStream` over a socketpair, Bun 1.3.11) drained-but-not-surfaced: `reader.read()` in `pumpStdoutLines` stops resolving. Upstream claude-code #39700 / #17248 saw the same picture from the consumer side.
+
+Also seen: the recovery rate guard (3 per 30 min) left the session dead from 18:08:04 to 18:16:04, then the kill hit four parallel tool calls at once — the open-call check only looked at the last record. Fixed by counting unanswered `tool_use` ids (bounded by the oldest).
+
+Next: a reader-restart experiment (release the lock and re-acquire a reader on drift, before the kill) and a Bun upgrade trial on a non-prod checkout. Both need the owner's go.

@@ -428,24 +428,33 @@ export function endsInOpenToolCall(jsonlChunk: string): boolean {
 
 /**
  * Main-thread counterpart of {@link endsInOpenToolCall}: the `timestamp` (ms)
- * of the main chain's last `assistant` `tool_use` record when no `user`
- * record (tool_result / prompt) follows it — i.e. the CLI is executing a tool
- * right now. `null` when the chain ends in a `user` record, the open record
- * has no parseable timestamp, or nothing is parseable. Sidechain records are
- * skipped like everywhere else in this module.
+ * of the OLDEST main-chain `tool_use` that has no matching `tool_result` yet
+ * — i.e. the CLI is executing at least one tool right now. `null` when every
+ * tool_use in the tail is answered, the open record has no parseable
+ * timestamp, or nothing is parseable. Sidechain records are skipped like
+ * everywhere else in this module.
+ *
+ * Why a set difference and not "the last record": the CLI runs parallel tool
+ * calls (one assistant message → several `tool_use` blocks, results landing
+ * in any order). Prod 2026-10-18 18:16:04: three of four parallel calls were
+ * still running when the first result landed, a "last record is a user
+ * record" check said "not open", and the kill lost all three (exit 137).
+ *
+ * Why the oldest: the deferral ceiling is measured from the call's own start
+ * (see `SUBAGENT_OPEN_TOOL_CALL_CEILING_MS`), and a stream of short calls must
+ * not keep pushing the deadline out — the oldest unanswered call bounds it.
  *
  * Owner incident 2026-10-18 (session af80e149, 6 drift kills in one day): the
- * stall (upstream claude-code #39700, stdout stops under stream-json while the
- * session keeps working) always hit during a long Bash call; the kill +
- * `--resume` lost the running command every time ("exit 137"). The kill is
- * still needed — stdout never comes back — but it can wait for the call to
- * close so the tool_result lands in the jsonl first and the resumed CLI
- * continues from it instead of re-running the work.
+ * stall (bun's stdout reader stops delivering while the CLI keeps writing)
+ * always hit during a Bash call; the kill + `--resume` lost the running
+ * command every time. The kill is still needed — stdout never comes back —
+ * but it can wait for the open calls to close so their results land in the
+ * jsonl first and the resumed CLI continues from them instead of redoing
+ * the work.
  */
 export function openToolCallStartedAt(jsonlChunk: string): number | null {
-  const lines = jsonlChunk.split("\n");
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i];
+  const open = new Map<string, number | null>(); // tool_use id → started-at ms
+  for (const line of jsonlChunk.split("\n")) {
     if (!line) continue;
     let rec: { type?: unknown; timestamp?: unknown; isSidechain?: unknown; parentToolUseID?: unknown; message?: { content?: unknown } };
     try {
@@ -454,14 +463,28 @@ export function openToolCallStartedAt(jsonlChunk: string): number | null {
       continue;
     }
     if (rec.isSidechain === true || typeof rec.parentToolUseID === "string") continue;
-    if (rec.type === "user") return null;
-    if (rec.type !== "assistant") continue;
     const content = rec.message?.content;
-    if (!Array.isArray(content) || !content.some((c) => (c as { type?: unknown })?.type === "tool_use")) return null;
-    const t = typeof rec.timestamp === "string" ? Date.parse(rec.timestamp) : Number.NaN;
-    return Number.isFinite(t) ? t : null;
+    if (!Array.isArray(content)) continue;
+    if (rec.type === "assistant") {
+      const t = typeof rec.timestamp === "string" ? Date.parse(rec.timestamp) : Number.NaN;
+      for (const c of content as { type?: unknown; id?: unknown }[]) {
+        if (c?.type === "tool_use" && typeof c.id === "string") open.set(c.id, Number.isFinite(t) ? t : null);
+      }
+    } else if (rec.type === "user") {
+      for (const c of content as { type?: unknown; tool_use_id?: unknown }[]) {
+        if (c?.type === "tool_result" && typeof c.tool_use_id === "string") open.delete(c.tool_use_id);
+      }
+    }
   }
-  return null;
+  if (open.size === 0) return null;
+  let oldest: number | null = null;
+  for (const t of open.values()) {
+    // An open call without a parseable timestamp cannot bound a deferral:
+    // treat the whole set as "not deferrable" (fail toward recovery).
+    if (t === null) return null;
+    if (oldest === null || t < oldest) oldest = t;
+  }
+  return oldest;
 }
 
 /**
