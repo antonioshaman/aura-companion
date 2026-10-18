@@ -86,17 +86,15 @@ jobs:
         run: bun install --frozen-lockfile
 
       # Council Plan docs/history/council/handoffs/PLAN-aura-observer-prompt-bundled-fallback.md P1 #1:
-      # regenerate the bundled observer-prompt and fail if it drifts from
-      # `web/server/observer-prompt-bundled.ts`. Catches edits to the
-      # canonical `.council/prompts/observer-system.md` that didn't re-run
-      # the build script. Without this gate, the bundled artifact (consumed
-      # at runtime as the fresh-workspace fallback) silently diverges from
-      # canonical and ships to npm consumers in that state.
+      # rebuild the observer prompt (SOUL spliced into observer-system.md) and
+      # the bundled fallback, then fail if either committed output differs.
+      # Catches an edited `.council/prompts/OBSERVER-SOUL.md` that was not
+      # spliced, or an edited `observer-system.md` that was not re-bundled.
+      # The same `check-observer-prompt-drift` script runs in the pre-commit
+      # hook and in `prepublishOnly`, so the three gates cannot diverge.
       - name: Observer-prompt bundle drift gate
         working-directory: web
-        run: |
-          bun run build-observer-prompt-bundle
-          git diff --exit-code -- server/observer-prompt-bundled.ts
+        run: bun run check-observer-prompt-drift
 
       - name: Typecheck
         working-directory: web

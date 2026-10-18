@@ -776,6 +776,45 @@ describe("observer prompt — tooling-failure ≠ finding rule", () => {
   });
 });
 
+// Observer identity (handoff 2026-10-18 §4, council review 2026-10-18-1815
+// beck P2 / willison P2). The "Posture" / "What NOT to do" / "Closing rule"
+// sections moved into `.council/prompts/OBSERVER-SOUL.md`, which is spliced
+// into the system prompt at build time. Those rules were written after live
+// incidents (rubber stamp on checkpoint 148, the codex refusal loop) and the
+// SOUL is the highest-churn edit point for observer behaviour, so each
+// load-bearing rule gets a short, distinctive phrase canary on BOTH prompt
+// sources — a SOUL replaced by "You are a helpful reviewer." must go red.
+// The read-scope bound ("do not browse the tree beyond that") lives outside
+// the SOUL and is pinned here too: it is the only thing stopping the observer
+// from walking the repo on every wake.
+describe("observer prompt — identity rules carried by the SOUL (phrase canaries)", () => {
+  const WORKSPACE_PROMPT = fileURLToPath(new URL("../../.council/prompts/observer-system.md", import.meta.url));
+  // Phrases are matched on whitespace-normalised text, so re-wrapping a line
+  // in the prompt does not break the canary — only losing the rule does.
+  const IDENTITY_PHRASES = [
+    "failure-mode independence", // reach your own conclusion from the same inputs
+    "STOP on evidence, never on suspicion",
+    "never invent a finding to earn a STOP",
+    "read-only, always",
+    "chat with the user or the other agent", // no chatting with the user OR the other agent
+    "never `dropped`", // cite only delta / carried
+    "No style bikeshedding",
+    "do not paraphrase the other agent",
+    "one finding = one defect",
+    "Do not browse the tree beyond that", // read scope, outside the SOUL
+  ];
+
+  it.each([
+    ["workspace", () => _readFileSync(WORKSPACE_PROMPT, "utf-8")],
+    ["bundled", () => BUNDLED_OBSERVER_PROMPT],
+  ] as const)("%s prompt carries every load-bearing identity rule", (_label, load) => {
+    const text = load().replace(/\s+/g, " ");
+    for (const phrase of IDENTITY_PHRASES) {
+      expect(text, `prompt lost the identity rule: ${JSON.stringify(phrase)}`).toContain(phrase);
+    }
+  });
+});
+
 // Observer rigor (2026-10-16). Rubber stamp: prod checkpoint 148 — the
 // observer read only the closure note and replied `[]`; the claims were
 // false. Language: Russian-speaking user, English-only claims. Both prompt
