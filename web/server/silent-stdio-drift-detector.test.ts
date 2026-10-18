@@ -9,6 +9,8 @@ import {
   defaultSubagentActivitySince,
   defaultSubagentOpenToolCallSince,
   endsInOpenToolCall,
+  openToolCallStartedAt,
+  mainThreadOpenToolCallStartedAt,
   resolveCliSessionPaths,
   SUBAGENT_OPEN_TOOL_CALL_CEILING_MS,
   resolveJsonlPath,
@@ -715,6 +717,60 @@ describe("endsInOpenToolCall (subagent transcript tail)", () => {
   it("tolerates a tail that starts mid-record and empty input", () => {
     expect(endsInOpenToolCall('tent":"x"}}\n' + toolUse)).toBe(true);
     expect(endsInOpenToolCall("")).toBe(false);
+  });
+});
+
+describe("openToolCallStartedAt / mainThreadOpenToolCallStartedAt (main jsonl tail)", () => {
+  // Owner incident 2026-10-18: drift kills always landed mid Bash call on the
+  // main thread and lost the running command. The recovery tick needs to know
+  // whether the main chain is inside a tool call and since when.
+  const rec = (o: object) => JSON.stringify(o);
+  const T1 = "2026-10-18T04:14:31.318Z";
+  const toolUse = rec({ type: "assistant", timestamp: T1, message: { role: "assistant", content: [{ type: "tool_use", id: "t1", name: "Bash", input: {} }] } });
+  const toolResult = rec({ type: "user", timestamp: "2026-10-18T04:14:36.529Z", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] } });
+  const text = rec({ type: "assistant", timestamp: "2026-10-18T04:14:24.493Z", message: { role: "assistant", content: [{ type: "text", text: "x" }] } });
+  const attachment = rec({ type: "attachment" });
+  const prLink = rec({ type: "pr-link" });
+  const sidechainUse = rec({ type: "assistant", isSidechain: true, timestamp: "2026-10-18T04:14:40.000Z", message: { content: [{ type: "tool_use", id: "s1", name: "Bash", input: {} }] } });
+
+  it("returns the tool_use record's timestamp when the chain ends inside a tool call", () => {
+    expect(openToolCallStartedAt([text, toolUse].join("\n") + "\n")).toBe(Date.parse(T1));
+  });
+
+  it("skips trailing attachment / pr-link records (prod jsonl 04:14:31 → 04:14:36 shape)", () => {
+    expect(openToolCallStartedAt([toolUse, prLink, attachment].join("\n"))).toBe(Date.parse(T1));
+  });
+
+  it("null once the tool_result landed, or when the last assistant record is text", () => {
+    expect(openToolCallStartedAt([toolUse, toolResult].join("\n"))).toBeNull();
+    expect(openToolCallStartedAt([toolUse, toolResult, text].join("\n"))).toBeNull();
+  });
+
+  it("ignores sidechain records and tolerates a tail that starts mid-record", () => {
+    // A subagent's tool_use interleaved in the main jsonl (older layouts) must
+    // not report the main thread as busy; the main chain's own state decides.
+    expect(openToolCallStartedAt([toolUse, toolResult, sidechainUse].join("\n"))).toBeNull();
+    expect(openToolCallStartedAt('tent":"x"}}\n' + toolUse)).toBe(Date.parse(T1));
+    expect(openToolCallStartedAt("")).toBeNull();
+  });
+
+  it("null when the open record has no parseable timestamp (unbounded deferral is never allowed)", () => {
+    const noTs = rec({ type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "Bash", input: {} }] } });
+    expect(openToolCallStartedAt(noTs)).toBeNull();
+  });
+
+  it("mainThreadOpenToolCallStartedAt reads the real file tail and returns null on a missing file", () => {
+    const dir = mkdtempSync(join(tmpdir(), "drift-main-open-"));
+    try {
+      const path = join(dir, "main.jsonl");
+      writeFileSync(path, [text, toolUse].join("\n") + "\n");
+      expect(mainThreadOpenToolCallStartedAt(path)).toBe(Date.parse(T1));
+      writeFileSync(path, [toolUse, toolResult].join("\n") + "\n");
+      expect(mainThreadOpenToolCallStartedAt(path)).toBeNull();
+      expect(mainThreadOpenToolCallStartedAt(join(dir, "missing.jsonl"))).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

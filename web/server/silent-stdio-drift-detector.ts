@@ -427,6 +427,65 @@ export function endsInOpenToolCall(jsonlChunk: string): boolean {
 }
 
 /**
+ * Main-thread counterpart of {@link endsInOpenToolCall}: the `timestamp` (ms)
+ * of the main chain's last `assistant` `tool_use` record when no `user`
+ * record (tool_result / prompt) follows it — i.e. the CLI is executing a tool
+ * right now. `null` when the chain ends in a `user` record, the open record
+ * has no parseable timestamp, or nothing is parseable. Sidechain records are
+ * skipped like everywhere else in this module.
+ *
+ * Owner incident 2026-10-18 (session af80e149, 6 drift kills in one day): the
+ * stall (upstream claude-code #39700, stdout stops under stream-json while the
+ * session keeps working) always hit during a long Bash call; the kill +
+ * `--resume` lost the running command every time ("exit 137"). The kill is
+ * still needed — stdout never comes back — but it can wait for the call to
+ * close so the tool_result lands in the jsonl first and the resumed CLI
+ * continues from it instead of re-running the work.
+ */
+export function openToolCallStartedAt(jsonlChunk: string): number | null {
+  const lines = jsonlChunk.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i];
+    if (!line) continue;
+    let rec: { type?: unknown; timestamp?: unknown; isSidechain?: unknown; parentToolUseID?: unknown; message?: { content?: unknown } };
+    try {
+      rec = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (rec.isSidechain === true || typeof rec.parentToolUseID === "string") continue;
+    if (rec.type === "user") return null;
+    if (rec.type !== "assistant") continue;
+    const content = rec.message?.content;
+    if (!Array.isArray(content) || !content.some((c) => (c as { type?: unknown })?.type === "tool_use")) return null;
+    const t = typeof rec.timestamp === "string" ? Date.parse(rec.timestamp) : Number.NaN;
+    return Number.isFinite(t) ? t : null;
+  }
+  return null;
+}
+
+/**
+ * Reads the main jsonl's tail ({@link SUBAGENT_TAIL_BYTES}) and returns
+ * {@link openToolCallStartedAt}. Runs only for a kill candidate (rare). `null`
+ * on any read error — no evidence, the kill proceeds as before.
+ */
+export function mainThreadOpenToolCallStartedAt(jsonlPath: string): number | null {
+  let fd: number | null = null;
+  try {
+    fd = openSync(jsonlPath, "r");
+    const size = fstatSync(fd).size;
+    const len = Math.min(size, SUBAGENT_TAIL_BYTES);
+    const buf = Buffer.alloc(len);
+    readSync(fd, buf, 0, len, size - len);
+    return openToolCallStartedAt(buf.toString("utf-8"));
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) closeSync(fd);
+  }
+}
+
+/**
  * Default open-tool-call probe: any regular `subagents/*.jsonl` modified after
  * `sinceMs` whose tail ends in an open tool call. Runs only when the cheap
  * mtime probe already said "quiet", after positive undelivered evidence — so

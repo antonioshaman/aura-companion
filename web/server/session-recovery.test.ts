@@ -7,7 +7,7 @@ import { log } from "./logger.js";
 import { DEFAULT_LAG_TOLERANCE_MS, resolveJsonlPath, SUBAGENT_LIVENESS_WINDOW_MS } from "./silent-stdio-drift-detector.js";
 import type { SessionRecoveryDeps } from "./session-recovery.js";
 import { ClaudeAdapter } from "./claude-adapter.js";
-import { mkdirSync, mkdtempSync, rmSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, truncateSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -693,7 +693,7 @@ describe("SessionRecovery.driftDetectorTick — undelivered-output gate (P7/FIX-
     companionBus.clear();
   });
 
-  function setup(records: Array<{ type: string; atMs: number }>, bunLastFrameMs: number, pid?: number) {
+  function setup(records: Array<{ type: string; atMs: number; message?: object }>, bunLastFrameMs: number, pid?: number) {
     const sessions = new Map([["s1", info("s1", { state: "running", cwd: "/root/proj", cliSessionId: "cli-1", pid })]]);
     const ctx = makeRecovery(sessions);
     const adapter = Object.create(ClaudeAdapter.prototype) as ClaudeAdapter;
@@ -701,11 +701,19 @@ describe("SessionRecovery.driftDetectorTick — undelivered-output gate (P7/FIX-
     ctx.wsBridge.getSession.mockReturnValue({ backendAdapter: adapter } as never);
     const path = resolveJsonlPath(join(home, ".claude"), "/root/proj", "cli-1")!;
     mkdirSync(dirname(path), { recursive: true });
-    writeFileSync(path, records.map((r) => JSON.stringify({ type: r.type, timestamp: new Date(r.atMs).toISOString() })).join("\n") + "\n");
+    writeFileSync(path, records.map((r) => JSON.stringify({ type: r.type, timestamp: new Date(r.atMs).toISOString(), ...(r.message ? { message: r.message } : {}) })).join("\n") + "\n");
     const mtime = Math.max(...records.map((r) => r.atMs)) / 1000;
     utimesSync(path, mtime, mtime);
-    return ctx;
+    return { ...ctx, path };
   }
+  /** Append main-chain records to the session jsonl and bump its mtime (the CLI kept working). */
+  function append(path: string, records: Array<{ type: string; atMs: number; message?: object }>) {
+    appendFileSync(path, records.map((r) => JSON.stringify({ type: r.type, timestamp: new Date(r.atMs).toISOString(), ...(r.message ? { message: r.message } : {}) })).join("\n") + "\n");
+    const mtime = Math.max(...records.map((r) => r.atMs)) / 1000;
+    utimesSync(path, mtime, mtime);
+  }
+  const TOOL_USE = (id: string) => ({ role: "assistant", content: [{ type: "tool_use", id, name: "Bash", input: {} }] });
+  const TOOL_RESULT = (id: string) => ({ role: "user", content: [{ type: "tool_result", tool_use_id: id, content: "ok" }] });
 
   it("idle session that just got a prompt: no kill, one suppressed log per stall", () => {
     // Prod shape (2026-10-01T13:10:52): last frame 421 s ago, prompt queued 3 s ago.
@@ -723,6 +731,70 @@ describe("SessionRecovery.driftDetectorTick — undelivered-output gate (P7/FIX-
     const suppressed = info_.mock.calls.filter((c) => (c[2] as { event?: string })?.event === "silent_stdio_drift.suppressed");
     expect(suppressed).toHaveLength(1);
     expect(suppressed[0][2]).toMatchObject({ sessionId: "s1", reason: "no_undelivered_output" });
+  });
+
+  it("open main-thread tool call at detection: withholds the kill (once-logged) until the tool_result lands, then relaunches", () => {
+    // Owner incident 2026-10-18 (af80e149, 04:14:36): bun's last frame 04:14:08,
+    // the CLI wrote thinking/text/tool_use to its jsonl and was executing a
+    // Bash call when the kill fired — the command died with exit 137 and the
+    // resumed CLI had to redo it. Now the kill waits for that one call.
+    const { recovery, launcher, wsBridge, path } = setup(
+      [
+        { type: "user", atMs: NOW - 100_000 },
+        { type: "assistant", atMs: NOW - 60_000, message: { role: "assistant", content: [{ type: "text", text: "x" }] } },
+        { type: "assistant", atMs: NOW - 50_000, message: TOOL_USE("t1") },
+      ],
+      NOW - 110_000,
+    );
+    const info_ = vi.spyOn(log, "info");
+    recovery.driftDetectorTick();
+    recovery.driftDetectorTick();
+    expect(launcher.kill).not.toHaveBeenCalled();
+    const withheld = info_.mock.calls.filter((c) => (c[2] as { event?: string })?.event === "silent_stdio_drift.withheld_open_tool_call");
+    expect(withheld).toHaveLength(1);
+    expect(withheld[0][2]).toMatchObject({ sessionId: "s1", undeliveredAssistantRecords: 2, toolCallStartedAtMs: NOW - 50_000 });
+    // The user learns why nothing moves — once per stall.
+    const notices = wsBridge.broadcastToSession.mock.calls.filter((c) => /waiting for it to finish/.test((c[1] as { message?: string }).message ?? ""));
+    expect(notices).toHaveLength(1);
+
+    // The tool finished: its result is in the jsonl → the next tick recovers.
+    append(path, [{ type: "user", atMs: NOW - 1_000, message: TOOL_RESULT("t1") }]);
+    recovery.driftDetectorTick();
+    expect(launcher.kill).toHaveBeenCalledWith("s1");
+  });
+
+  it("the deferral covers exactly one call: a NEW tool call under the same stall means the deferred one completed → relaunch", () => {
+    // Without this, a CLI that keeps calling tools (dead stdout, working
+    // model) would push the kill out indefinitely, one call at a time.
+    const { recovery, launcher, path } = setup(
+      [
+        { type: "user", atMs: NOW - 100_000 },
+        { type: "assistant", atMs: NOW - 50_000, message: TOOL_USE("t1") },
+      ],
+      NOW - 110_000,
+    );
+    recovery.driftDetectorTick();
+    expect(launcher.kill).not.toHaveBeenCalled();
+    append(path, [
+      { type: "user", atMs: NOW - 2_000, message: TOOL_RESULT("t1") },
+      { type: "assistant", atMs: NOW - 1_000, message: TOOL_USE("t2") },
+    ]);
+    recovery.driftDetectorTick();
+    expect(launcher.kill).toHaveBeenCalledWith("s1");
+  });
+
+  it("an open call older than the ceiling does not defer (a tool that hung cannot wedge recovery)", () => {
+    // 16 min into a Bash call (10 min timeout + margin) the call is presumed
+    // dead; the stall is recovered like any other.
+    const { recovery, launcher } = setup(
+      [
+        { type: "user", atMs: NOW - 20 * 60_000 },
+        { type: "assistant", atMs: NOW - 16 * 60_000, message: TOOL_USE("t1") },
+      ],
+      NOW - 17 * 60_000,
+    );
+    recovery.driftDetectorTick();
+    expect(launcher.kill).toHaveBeenCalledWith("s1");
   });
 
   it("model output stuck in the jsonl past the min age: kills for relaunch", () => {
@@ -1079,6 +1151,23 @@ describe("decideDriftKill — wait-channel guard (PLAN Task 2) + rate guard (PLA
       kind: "rate_limited",
       recentRecoveries: DRIFT_RECOVERY_RATE_MAX,
     });
+  });
+
+  it("main thread inside its tool call → withhold_open_tool_call, even with pipe_write (owner incident 2026-10-18)", () => {
+    // The tool runs and writes the jsonl whatever stdout does; killing now
+    // loses its result. A live subagent tree still wins the ordering (both
+    // withhold). Rate limiting only applies to an actual recovery.
+    expect(decideDriftKill({ waitChannels: STALLED, subagentActive: false, recentRecoveries: 0, mainToolCallOpen: true })).toEqual({
+      kind: "withhold_open_tool_call",
+    });
+    expect(
+      decideDriftKill({ waitChannels: INCIDENT, subagentActive: false, recentRecoveries: DRIFT_RECOVERY_RATE_MAX, mainToolCallOpen: true }),
+    ).toEqual({ kind: "withhold_open_tool_call" });
+    expect(decideDriftKill({ waitChannels: INCIDENT, subagentActive: true, recentRecoveries: 0, mainToolCallOpen: true })).toEqual({
+      kind: "withhold_live",
+    });
+    // Omitted (older call sites) behaves as "not open".
+    expect(decideDriftKill({ waitChannels: INCIDENT, subagentActive: false, recentRecoveries: 0 }).kind).toBe("recover");
   });
 
   it("waitChannelsShowPipeWrite matches the summarizeWaitChannels format exactly", () => {
