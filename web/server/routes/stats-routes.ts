@@ -22,8 +22,9 @@ interface GlobalStats {
 }
 
 // Short proxy cache: the "online now" field is time-sensitive, so we keep this
-// well under the Worker's 5-minute online window rather than the long landing
-// cache. Still long enough to absorb a burst of UI loads.
+// well under the Worker's 15-minute online window (and its 10-minute
+// meta:global snapshot) rather than the long landing cache. Still long enough
+// to absorb a burst of UI loads.
 const CACHE_TTL_MS = 30 * 1000;
 
 let cached: { value: GlobalStats; fetchedAt: number } | null = null;

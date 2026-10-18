@@ -3,18 +3,26 @@ import worker, { type Env } from "./index.js";
 
 // Minimal in-memory KVNamespace fake. Honours expirationTtl only by storing it
 // (we never advance time in these tests, so expiry isn't exercised) and the
-// list/get/put surface the Worker uses.
+// list/get/put surface the Worker uses. `listCalls` counts list operations —
+// the free tier allows only 1,000/day, so tests pin how many each path spends.
 class FakeKV {
   store = new Map<string, string>();
   meta = new Map<string, unknown>();
+  ttl = new Map<string, number>();
+  listCalls = 0;
 
   async get(key: string): Promise<string | null> {
     return this.store.has(key) ? this.store.get(key)! : null;
   }
 
-  async put(key: string, value: string, opts?: { metadata?: unknown }): Promise<void> {
+  async put(
+    key: string,
+    value: string,
+    opts?: { metadata?: unknown; expirationTtl?: number },
+  ): Promise<void> {
     this.store.set(key, value);
     if (opts?.metadata !== undefined) this.meta.set(key, opts.metadata);
+    if (opts?.expirationTtl !== undefined) this.ttl.set(key, opts.expirationTtl);
   }
 
   async list(opts: { prefix?: string; cursor?: string }): Promise<{
@@ -22,6 +30,7 @@ class FakeKV {
     list_complete: boolean;
     cursor?: string;
   }> {
+    this.listCalls += 1;
     const prefix = opts.prefix ?? "";
     const keys = [...this.store.keys()]
       .filter((k) => k.startsWith(prefix))
@@ -189,6 +198,91 @@ describe("stats worker", () => {
     const body = (await res.json()) as { onlineNow: number };
     // 0 -> clamped up to 1; 1e9 -> clamped down to MAX_PRESENCE_COUNT (10000).
     expect(body.onlineNow).toBe(1 + 10000);
+  });
+
+  // ---- meta:global snapshot (free-tier KV budget) -------------------------
+  // Context: the Worker runs on the Workers free tier (1,000 KV list ops/day,
+  // 1,000 writes/day). Before the snapshot every edge-cache miss ran two prefix
+  // lists, which exhausted the quota (HTTP 500 / CF error 10048, 2026-10-18).
+  // These tests pin the contract: lists run ONLY when the snapshot is absent.
+
+  it("on a snapshot miss runs exactly two lists and persists meta:global with a 10-min TTL", async () => {
+    await worker.fetch(heartbeat({ instanceId: "instance_aaaaaa111111" }), env, ctx);
+    await worker.fetch(heartbeat({ instanceId: "instance_bbbbbb222222" }), env, ctx);
+    await worker.fetch(presence({ instanceId: "instance_aaaaaa111111", count: 2 }), env, ctx);
+    expect(kv.listCalls).toBe(0); // heartbeat/presence never list
+
+    const res = await worker.fetch(new Request("https://stats.example/stats/global"), env, ctx);
+    const body = (await res.json()) as {
+      activeInstances30d: number;
+      onlineNow: number;
+      totalInstances: number;
+      generatedAt: number;
+    };
+    // One list per prefix (instance:, online:) — the full recompute cost.
+    expect(kv.listCalls).toBe(2);
+    expect(body).toEqual({
+      activeInstances30d: 2,
+      onlineNow: 2,
+      totalInstances: 2,
+      generatedAt: expect.any(Number),
+    });
+
+    // The snapshot is written back verbatim with the recompute-cadence TTL
+    // (600 s → ≤144 recomputes/day → ≤288 lists, ≤144 snapshot writes).
+    expect(JSON.parse((await kv.get("meta:global"))!)).toEqual(body);
+    expect(kv.ttl.get("meta:global")).toBe(600);
+  });
+
+  it("serves an existing meta:global snapshot with zero list calls", async () => {
+    // Live data deliberately disagrees with the snapshot so we can prove the
+    // response came from the snapshot, not from a recompute.
+    await worker.fetch(heartbeat({ instanceId: "instance_aaaaaa111111" }), env, ctx);
+    const snapshot = { activeInstances30d: 7, onlineNow: 3, totalInstances: 9, generatedAt: 123 };
+    await kv.put("meta:global", JSON.stringify(snapshot));
+
+    const res = await worker.fetch(new Request("https://stats.example/stats/global"), env, ctx);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual(snapshot);
+    expect(kv.listCalls).toBe(0);
+    // Edge-cache headers are kept on the snapshot path too (layer 1 still applies).
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=30");
+  });
+
+  // Staleness contract: a presence ping does NOT invalidate the snapshot. The
+  // "online now" figure may lag by up to the snapshot TTL; that is the price
+  // of fitting the list budget and is documented in handleGlobalStats.
+  it("does not invalidate the snapshot on a new presence ping", async () => {
+    const snapshot = { activeInstances30d: 1, onlineNow: 1, totalInstances: 1, generatedAt: 1 };
+    await kv.put("meta:global", JSON.stringify(snapshot));
+    await worker.fetch(presence({ instanceId: "instance_newcomer1111", count: 5 }), env, ctx);
+
+    const res = await worker.fetch(new Request("https://stats.example/stats/global"), env, ctx);
+    expect(await res.json()).toEqual(snapshot);
+    expect(kv.listCalls).toBe(0);
+  });
+
+  it("treats a corrupt meta:global as a miss: recomputes and overwrites it", async () => {
+    await worker.fetch(heartbeat({ instanceId: "instance_aaaaaa111111" }), env, ctx);
+    await kv.put("meta:global", "not json");
+
+    const res = await worker.fetch(new Request("https://stats.example/stats/global"), env, ctx);
+    const body = (await res.json()) as { activeInstances30d: number; onlineNow: number };
+    expect(body.activeInstances30d).toBe(1);
+    expect(body.onlineNow).toBe(0);
+    expect(kv.listCalls).toBe(2);
+    expect(JSON.parse((await kv.get("meta:global"))!)).toEqual(body);
+  });
+
+  it("treats a snapshot with a missing field as a miss", async () => {
+    // Older/foreign shape (no onlineNow) must not be served as-is — the app
+    // relies on every field being a number.
+    await kv.put("meta:global", JSON.stringify({ activeInstances30d: 1, totalInstances: 1 }));
+
+    const res = await worker.fetch(new Request("https://stats.example/stats/global"), env, ctx);
+    const body = (await res.json()) as { onlineNow: number };
+    expect(body.onlineNow).toBe(0);
+    expect(kv.listCalls).toBe(2);
   });
 
   it("answers CORS preflight with permissive headers", async () => {
