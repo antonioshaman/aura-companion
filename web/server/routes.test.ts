@@ -6535,6 +6535,43 @@ describe("POST /api/sessions/:id/continue-in-new", () => {
     expect(fs.readdirSync(tmp)).toContain(stale);
   });
 
+  // The 500 body must stay generic: the absolute path and errno go to the log
+  // only (review 2026-10-17, beck #3 / hunt). Three attempts are the ceiling.
+  it("three occupied seconds in a row → 500 with a generic body that leaks no path, nothing spawned", async () => {
+    seed();
+    const fixed = Date.UTC(2026, 9, 17, 12, 0, 0);
+    for (const sec of ["00", "01", "02"]) await plantHandoff(`.aura-handoff-2026-10-17T12-00-${sec}.md`, 0);
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(fixed);
+    orchestrator.createSession.mockClear();
+    try {
+      const res = await app.request("/api/sessions/old/continue-in-new", { method: "POST" });
+      expect(res.status).toBe(500);
+      const body = await res.json();
+      expect(body.error).toBe("Cannot write the handoff file into the session workspace");
+      expect(JSON.stringify(body)).not.toContain(tmp);
+      expect(JSON.stringify(body)).not.toMatch(/EEXIST|EACCES/);
+      expect(orchestrator.createSession).not.toHaveBeenCalled();
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it.skipIf(process.getuid?.() === 0)("an unwritable workspace → 500 after one attempt, generic body, no brief created", async () => {
+    seed();
+    const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    fs.chmodSync(tmp, 0o500);
+    try {
+      const res = await app.request("/api/sessions/old/continue-in-new", { method: "POST" });
+      expect(res.status).toBe(500);
+      const body = await res.json();
+      expect(body.error).toBe("Cannot write the handoff file into the session workspace");
+      expect(JSON.stringify(body)).not.toContain(tmp);
+    } finally {
+      fs.chmodSync(tmp, 0o700);
+    }
+    expect(fs.readdirSync(tmp).filter((n) => n.startsWith(".aura-handoff-"))).toEqual([]);
+  });
+
   it("two handoffs in the same second do not overwrite each other (exclusive write → next-second name)", async () => {
     seed();
     const fixed = Date.UTC(2026, 9, 17, 12, 0, 0);

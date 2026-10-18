@@ -9,11 +9,13 @@
  *    (outside newest-N AND older than 7 days by both name-timestamp and mtime);
  *  - the FS wrapper touches only regular files matching the pattern directly
  *    inside cwd — symlinks, nested dirs and operator notes survive — and never throws.
- * Every test here is mutation-resistant (EC-42): loosening the regex, flipping
- * AND to OR, ordering by mtime, or following symlinks each turns one red.
+ * Mutants each named test kills (EC-42, verified by hand during review
+ * 2026-10-17): loosening the regex, AND→OR, ordering by mtime instead of the
+ * embedded timestamp, ageing by mtime alone, ageing by name alone, following
+ * symlinks, dropping the per-file failure isolation.
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { chmodSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -93,18 +95,34 @@ describe("selectHandoffFilesToPrune (pure)", () => {
     expect(selectHandoffFilesToPrune(entries, NOW).prune).toEqual([old]);
   });
 
-  it("ordering is by the embedded timestamp, not mtime: a touched old file is still 'old' for the keep window", () => {
-    // 4 files by name age: 1d, 2d, 3d, 30d. The 30d one was touched today
-    // (mtime fresh) — it stays OUTSIDE the newest-3 by name, but the age rule
-    // (max of name ts and mtime) protects it. Flip ordering to mtime and the
-    // 3d file would be evicted instead; flip the age rule to name-only and the
-    // touched file would be deleted.
+  it("age is the MORE RECENT of name timestamp and mtime: a touched old brief is protected", () => {
+    // 4 files by name age: 1d, 2d, 3d, 30d. The 30d one was touched today —
+    // it is outside the newest-3 by name, but max(name, mtime) = today, so it
+    // is younger than 7 days and stays. Kills the "age by name only" mutant.
     const touched = entry(30 * DAY, 0);
     const entries = [entry(DAY), entry(2 * DAY), entry(3 * DAY), touched];
     expect(selectHandoffFilesToPrune(entries, NOW).prune).toEqual([]);
     // Same set but the 30d file's mtime is also 30d → pruned.
     const stale = entry(30 * DAY);
     expect(selectHandoffFilesToPrune([entry(DAY), entry(2 * DAY), entry(3 * DAY), stale], NOW).prune).toEqual([stale]);
+  });
+
+  it("the keep window is ordered by the embedded timestamp, not mtime", () => {
+    // Names 1d, 2d, 10d, 20d; the 20d file was touched today. By NAME the
+    // newest 3 are 1d/2d/10d, so 20d is the only one outside the window — and
+    // its fresh mtime protects it → nothing pruned. Ordering by mtime would put
+    // 20d inside the window and push 10d (mtime 10d, > 7 days) out → the 10d
+    // brief would be deleted. Kills the "sort by mtime" mutant (beck #1).
+    const entries = [entry(DAY), entry(2 * DAY), entry(10 * DAY), entry(20 * DAY, 0)];
+    expect(selectHandoffFilesToPrune(entries, NOW).prune).toEqual([]);
+  });
+
+  it("a brief whose NAME is recent is kept even if its mtime is old", () => {
+    // Names 1d, 1.2d, 1.5d, 2d; the 2d file's mtime is 10 days old (restored
+    // backup / clock stepped). max(name, mtime) = 2d < 7d → kept. Ageing by
+    // mtime alone would delete it. Kills the "age by mtime only" mutant.
+    const entries = [entry(DAY), entry(1.2 * DAY), entry(1.5 * DAY), entry(2 * DAY, 10 * DAY)];
+    expect(selectHandoffFilesToPrune(entries, NOW).prune).toEqual([]);
   });
 
   it("a future-dated file is kept (it sorts newest and is not older than minAge)", () => {
@@ -204,6 +222,51 @@ describe("pruneHandoffFiles (filesystem)", () => {
     const result = pruneHandoffFiles({ cwd: dir, sessionId: "s1", nowMs: NOW, keep });
     expect(result.deleted).toEqual([]);
     expect(readdirSync(dir)).toContain(keep);
+  });
+
+  it("logs one structured handoff.pruned line per deletion (basename + numeric age, no contents)", async () => {
+    const { log } = await import("./logger.js");
+    const info = vi.spyOn(log, "info");
+    try {
+      const stale = nameAgo(30 * DAY);
+      touch(stale, 30 * DAY, "SECRET CONTENT");
+      for (let i = 1; i <= 3; i++) touch(nameAgo(i * DAY), i * DAY);
+      pruneHandoffFiles({ cwd: dir, sessionId: "s1", nowMs: NOW });
+      const pruned = info.mock.calls.filter((c) => (c[2] as { event?: string })?.event === "handoff.pruned");
+      expect(pruned).toHaveLength(1);
+      expect(pruned[0]![2]).toMatchObject({ event: "handoff.pruned", sessionId: "s1", cwd: dir, file: stale });
+      expect(typeof (pruned[0]![2] as { ageMs: unknown }).ageMs).toBe("number");
+      expect(JSON.stringify(pruned[0])).not.toContain("SECRET CONTENT");
+    } finally {
+      info.mockRestore();
+    }
+  });
+
+  // Per-file isolation: one unlink failing must not stop the rest, must land
+  // in `failed`, and must be logged with its errno (beck P3 / ritchie B-3).
+  // A read-only directory makes every unlink fail with EACCES; root ignores
+  // directory permissions, so the test is skipped when running as root.
+  it.skipIf(process.getuid?.() === 0)("a directory where unlink fails: every candidate is reported failed with an errno, nothing thrown", async () => {
+    const { log } = await import("./logger.js");
+    const warn = vi.spyOn(log, "warn");
+    const a = nameAgo(30 * DAY);
+    const b = nameAgo(40 * DAY);
+    touch(a, 30 * DAY);
+    touch(b, 40 * DAY);
+    for (let i = 1; i <= 3; i++) touch(nameAgo(i * DAY), i * DAY);
+    chmodSync(dir, 0o500);
+    try {
+      const result = pruneHandoffFiles({ cwd: dir, sessionId: "s1", nowMs: NOW });
+      expect(result.deleted).toEqual([]);
+      expect(result.failed.sort()).toEqual([a, b].sort());
+      const failures = warn.mock.calls.filter((c) => (c[2] as { event?: string })?.event === "handoff.prune_failed");
+      expect(failures).toHaveLength(2);
+      expect(failures.every((c) => typeof (c[2] as { code?: unknown }).code === "string")).toBe(true);
+      expect(readdirSync(dir)).toEqual(expect.arrayContaining([a, b]));
+    } finally {
+      chmodSync(dir, 0o700);
+      warn.mockRestore();
+    }
   });
 
   it("never throws: a missing cwd yields an empty result", () => {
