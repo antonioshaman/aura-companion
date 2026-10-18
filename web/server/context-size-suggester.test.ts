@@ -1,11 +1,12 @@
 import { describe, it, expect } from "vitest";
 import {
-  CODEX_CONTEXT_PERCENT_LADDER,
+  CODEX_COMPACTION_LADDER,
   COMPACTION_MILESTONE_BYTES,
   HANDOFF_MILESTONE_MIN_BYTES,
   MILESTONE_MESSAGE,
   TRANSCRIPT_BYTES_LADDER,
   advisoryActionFor,
+  decodeContextAdvisory,
   nextCompactionMilestone,
   nextContextMilestone,
 } from "./context-size-suggester.js";
@@ -132,25 +133,33 @@ describe("nextContextMilestone + ladders", () => {
     }
   });
 
-  it("Codex percent ladder: one rung at 90% → continue_in_new, nothing below, never twice", () => {
-    expect(nextContextMilestone(0, 0, CODEX_CONTEXT_PERCENT_LADDER)).toBeNull();
-    expect(nextContextMilestone(89, 0, CODEX_CONTEXT_PERCENT_LADDER)).toBeNull();
-    const fired = nextContextMilestone(90, 0, CODEX_CONTEXT_PERCENT_LADDER);
-    expect(fired).toMatchObject({ signal: "context_percent", milestone: 90, action: "continue_in_new" });
-    expect(fired?.message).toMatch(/90%/);
+  it("Codex compactions ladder: 2 → continue_in_new, 1 → nothing, same rung never twice, 5 and 10 are fresh rungs", () => {
+    expect(nextContextMilestone(0, 0, CODEX_COMPACTION_LADDER)).toBeNull();
+    expect(nextContextMilestone(1, 0, CODEX_COMPACTION_LADDER)).toBeNull();
+    const fired = nextContextMilestone(2, 0, CODEX_COMPACTION_LADDER);
+    expect(fired).toMatchObject({ signal: "codex_compactions", milestone: 2, action: "continue_in_new" });
+    expect(fired?.message).toMatch(/twice/);
     expect(fired?.message).toMatch(/continue in a new session/i);
-    expect(nextContextMilestone(100, 90, CODEX_CONTEXT_PERCENT_LADDER)).toBeNull();
+    expect(nextContextMilestone(3, 2, CODEX_COMPACTION_LADDER)).toBeNull();
+    expect(nextContextMilestone(5, 2, CODEX_COMPACTION_LADDER)).toMatchObject({ milestone: 5, action: "continue_in_new" });
+    expect(nextContextMilestone(12, 5, CODEX_COMPACTION_LADDER)).toMatchObject({ milestone: 10, action: "continue_in_new" });
   });
 
-  it("the percent ladder's handoff floor is its own, not the 5 MB byte floor", () => {
+  it("the compactions ladder's handoff floor is its own, not the 5 MB byte floor", () => {
     // A mutant that keeps comparing against HANDOFF_MILESTONE_MIN_BYTES would
-    // label 90 (< 5_000_000) as "compact".
-    expect(advisoryActionFor(90, CODEX_CONTEXT_PERCENT_LADDER.handoffMin)).toBe("continue_in_new");
-    expect(advisoryActionFor(90)).toBe("compact");
+    // label 2 (< 5_000_000) as "compact".
+    expect(advisoryActionFor(2, CODEX_COMPACTION_LADDER.handoffMin)).toBe("continue_in_new");
+    expect(advisoryActionFor(2)).toBe("compact");
+  });
+
+  it("decodeContextAdvisory: legacy bytes-only record → transcript_bytes; new record keeps signal + milestone", () => {
+    expect(decodeContextAdvisory({ milestoneBytes: 10_000_000 })).toEqual({ signal: "transcript_bytes", milestone: 10_000_000 });
+    expect(decodeContextAdvisory({ signal: "codex_compactions", milestone: 5 })).toEqual({ signal: "codex_compactions", milestone: 5 });
+    expect(decodeContextAdvisory({})).toEqual({ signal: "transcript_bytes", milestone: 0 });
   });
 
   it("every ladder rung has copy and rungs are ascending", () => {
-    for (const ladder of [TRANSCRIPT_BYTES_LADDER, CODEX_CONTEXT_PERCENT_LADDER]) {
+    for (const ladder of [TRANSCRIPT_BYTES_LADDER, CODEX_COMPACTION_LADDER]) {
       for (let i = 0; i < ladder.milestones.length; i++) {
         const m = ladder.milestones[i]!;
         expect(typeof ladder.messages[m]).toBe("string");

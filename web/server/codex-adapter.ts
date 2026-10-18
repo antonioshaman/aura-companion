@@ -475,6 +475,15 @@ export class CodexAdapter implements IBackendAdapter {
   private readonly turnUsage = new CodexTurnUsageAccumulator();
   /** Set once a v2 thread/tokenUsage/updated arrives; legacy token_count is then ignored. */
   private sawV2TokenUsage = false;
+  /**
+   * Main-thread `thread/compacted` notifications seen on the CURRENT thread.
+   * Persisted on session state as `codex_compactions` and read by the
+   * context-size advisory: Codex rollouts on disk are tiny and the
+   * context-window percent is cyclic (falls after every compaction), so the
+   * count of compactions is the one monotonic "the window overflowed" signal.
+   * Reset to 0 when the adapter starts a fresh thread.
+   */
+  private compactions = 0;
   private observerTurnState: "idle" | "in-flight" = "idle";
   private observerWakeTurnId: string | null = null;
   /** Same-chunk race buffer: a `turn/completed` whose id arrived BEFORE the
@@ -1063,6 +1072,9 @@ export class CodexAdapter implements IBackendAdapter {
     }
     if (!stillOurs()) return;
     this.threadId = freshThreadId;
+    // A fresh thread starts with an empty window: its compaction count is its own.
+    this.compactions = 0;
+    this.emit({ type: "session_update", session: { codex_compactions: 0 } });
     // A later relaunch must resume the fresh thread, not the silent one.
     this.options.threadId = freshThreadId;
     this.sessionMetaCb?.({ cliSessionId: freshThreadId, model: this.options.model, cwd: this.options.cwd });
@@ -1537,6 +1549,7 @@ export class CodexAdapter implements IBackendAdapter {
         total_cost_usd: 0,
         num_turns: 0,
         context_used_percent: 0,
+        codex_compactions: 0,
         is_compacting: false,
         git_branch: "",
         is_worktree: false,
@@ -2091,8 +2104,10 @@ export class CodexAdapter implements IBackendAdapter {
       case "thread/settings/updated":
       case "thread/goal/cleared":
       case "thread/goal/updated":
-      case "thread/compacted":
         // Thread metadata changed upstream; Aura keeps its own session labels.
+        break;
+      case "thread/compacted":
+        this.handleThreadCompacted(params);
         break;
       case "thread/status/changed":
         this.handleThreadStatusChanged(params);
@@ -2149,7 +2164,7 @@ export class CodexAdapter implements IBackendAdapter {
       case "codex/event/task_started":
       case "codex/event/task_complete":
       case "codex/event/mcp_startup_complete":
-      case "codex/event/context_compacted":
+      case "codex/event/context_compacted": // counted once via v2 `thread/compacted`
       case "codex/event/agent_reasoning":
       case "codex/event/agent_reasoning_delta":
       case "codex/event/agent_reasoning_section_break":
@@ -3281,6 +3296,21 @@ export class CodexAdapter implements IBackendAdapter {
     if (threadId === undefined) return true;
     if (this.threadId) return threadId === this.threadId;
     return !this.parentToolUseByThreadId.has(threadId);
+  }
+
+  /**
+   * `thread/compacted` — Codex compacted the thread's context. Counted for the
+   * MAIN thread only (a collab subagent compacting says nothing about the
+   * session's own window) and forwarded as `codex_compactions` so the
+   * context-size advisory can offer a handoff after repeated compactions.
+   * The legacy `codex/event/context_compacted` duplicate is ignored so one
+   * compaction is never counted twice.
+   */
+  private handleThreadCompacted(params: Record<string, unknown>): void {
+    const threadId = typeof params.threadId === "string" ? params.threadId : undefined;
+    if (!this.isMainThread(threadId)) return;
+    this.compactions += 1;
+    this.emit({ type: "session_update", session: { codex_compactions: this.compactions } });
   }
 
   private applyMainThreadTokenUsage(tokenUsage: Record<string, unknown>): void {

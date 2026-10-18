@@ -21,8 +21,9 @@ import {
   type DriftVerdict,
 } from "./silent-stdio-drift-detector.js";
 import {
-  CODEX_CONTEXT_PERCENT_LADDER,
+  CODEX_COMPACTION_LADDER,
   TRANSCRIPT_BYTES_LADDER,
+  decodeContextAdvisory,
   nextContextMilestone,
   type ContextLadder,
 } from "./context-size-suggester.js";
@@ -854,9 +855,10 @@ export class SessionRecovery {
    * Per backend the pass measures ONE number and hands it to the pure ladder:
    *   - Claude → `statSync` of the CLI transcript jsonl (bytes ladder; one
    *     stat per session per tick, skipped once the ceiling tier has fired);
-   *   - Codex → `state.context_used_percent` the adapter already persists
-   *     from `thread/tokenUsage/updated` (percent ladder; no I/O). Codex
-   *     rollouts on disk are tiny, so bytes would never fire.
+   *   - Codex → `state.codex_compactions`, the adapter's count of main-thread
+   *     `thread/compacted` notifications (compactions ladder; no I/O). Codex
+   *     rollouts on disk are tiny, so bytes would never fire, and the window
+   *     percent is cyclic, so it cannot drive a fire-once latch.
    * Each milestone fires at most once per session lifetime; the seed comes
    * from the in-memory map AND the persisted record (same signal only), so a
    * restart never resurrects a banner the user already saw.
@@ -883,10 +885,10 @@ export class SessionRecovery {
 
   /** Highest milestone already advised for `sessionId` on `ladder`'s signal: in-memory ∪ persisted record. */
   private seededLastFired(sessionId: string, persisted: ContextAdvisoryRecord | null | undefined, ladder: ContextLadder): number {
-    // Records persisted before the `signal` field existed were all bytes.
-    const persistedSignal = persisted ? (persisted.signal ?? "transcript_bytes") : null;
-    const persistedValue =
-      persisted && persistedSignal === ladder.signal ? (persisted.milestone ?? persisted.milestoneBytes ?? 0) : 0;
+    // One decoder for the dual-shape record (legacy = bytes); a record on
+    // another signal's axis never seeds this ladder.
+    const decoded = persisted ? decodeContextAdvisory(persisted) : null;
+    const persistedValue = decoded && decoded.signal === ladder.signal ? decoded.milestone : 0;
     return Math.max(this.contextAdvisoryFired.get(sessionId) ?? 0, persistedValue);
   }
 
@@ -897,12 +899,13 @@ export class SessionRecovery {
     let ladder: ContextLadder;
     let measured: number;
     if (info.backendType === "codex") {
-      const pct = bridgeSession?.state?.context_used_percent;
-      // The adapter resets this to 0 at init and after a compaction; with a
-      // monotonic seed the same tier never fires twice, so a reset is safe.
-      if (typeof pct !== "number" || !Number.isFinite(pct)) return;
-      ladder = CODEX_CONTEXT_PERCENT_LADDER;
-      measured = pct;
+      // Compactions of the main thread, counted by the adapter from
+      // `thread/compacted`. Monotonic per thread (reset to 0 on a fresh
+      // thread), so the fire-once-per-milestone latch is exact.
+      const compactions = bridgeSession?.state?.codex_compactions;
+      if (typeof compactions !== "number" || !Number.isFinite(compactions) || compactions < 0) return;
+      ladder = CODEX_COMPACTION_LADDER;
+      measured = compactions;
     } else {
       const paths = resolveCliSessionPaths(`${homedir()}/.claude`, info.cwd, info.cliSessionId);
       if (!paths) return;
@@ -960,9 +963,16 @@ export class SessionRecovery {
         return;
       }
     }
+    // The `/compact` tiers (1.5 / 3 MB) are not persisted, so after a server
+    // restart they would re-fire into every exited session on the first tick —
+    // a "/compact" line nobody can act on (ritchie A-1). Only a session with a
+    // live CLI can run /compact, so only such a session gets that tier, and
+    // the mark is set so it is not retried every tick.
     this.contextAdvisoryFired.set(sessionId, advisory.milestone);
+    const cliLive = info.state === "connected" || info.state === "running";
+    if (advisory.action === "compact" && !cliLive) return;
     // Legacy text frame + structured payload, bytes ladder only: the browser's
-    // frame handler compares `milestoneBytes`, so a percent payload would be
+    // frame handler compares `milestoneBytes`, so a non-bytes payload would be
     // swallowed. For Codex the `session_update` from recordContextAdvisory is
     // the authoritative (and only) path.
     if (isBytes) {

@@ -21,7 +21,7 @@
  * fires once, etc. Sessions never fire the SAME milestone twice —
  * that would spam the browser on every tick.
  */
-import type { ContextAdvisorySignal } from "./session-types.js";
+import type { ContextAdvisoryRecord, ContextAdvisorySignal } from "./session-types.js";
 
 /**
  * Size milestones in bytes. Ordered ascending. Each milestone fires
@@ -98,22 +98,45 @@ export const TRANSCRIPT_BYTES_LADDER: ContextLadder = {
 };
 
 /**
- * Codex: percent of the main thread's context window, as the adapter already
- * persists it in `state.context_used_percent` (`last.inputTokens +
- * outputTokens` over `modelContextWindow`). One rung only: 90 % means the
- * window is nearly full and Codex's own compaction has not brought it down,
- * so the one-click handoff is the right offer. No `/compact` tier — the
- * app-server path for it is not verified, and a tier that promises an
- * unverified action is worse than none.
+ * Codex: number of times the app-server compacted the MAIN thread's context
+ * (`thread/compacted` → `state.codex_compactions`, counted by the adapter).
+ * Why not bytes or percent: Codex rollouts on disk are ~30 KB (a byte ladder
+ * never fires), and the context-window percent is cyclic — it drops after
+ * every compaction — so it cannot drive a fire-once-per-milestone latch and
+ * its reachable maximum depends on Codex's own auto-compaction threshold
+ * (council review 2026-10-17: dahl D-1, ritchie B-1; max observed percent on
+ * prod was 8). A compaction is the one event that literally says "the window
+ * overflowed": the first one is normal, repeated ones mean the task has
+ * outgrown the thread. No `/compact` tier — Codex compacts by itself.
+ * Unverified against live traffic (no compaction has been recorded on prod
+ * yet); the rungs are a data change if real sessions say otherwise.
  */
-export const CODEX_CONTEXT_PERCENT_LADDER: ContextLadder = {
-  signal: "context_percent",
-  milestones: [90],
+export const CODEX_COMPACTION_LADDER: ContextLadder = {
+  signal: "codex_compactions",
+  milestones: [2, 5, 10],
   messages: {
-    90: "Codex context window is 90% full. Continue in a new session with a handoff of the current task — the thread is close to its limit.",
+    2: "Codex has compacted this thread's context twice — the task is outgrowing the window. Continue in a new session with a handoff of the current task.",
+    5: "Codex has compacted this thread's context 5 times. Continue in a new session with a handoff of the current task before the thread degrades further.",
+    10: "Codex has compacted this thread's context 10 times — the thread is far past its window. Continue in a new session with a handoff of the current task.",
   },
-  handoffMin: 90,
+  handoffMin: 2,
 };
+
+/**
+ * The ONE reader of a persisted/wire advisory record. Records written before
+ * 2026-10-17 carry only `milestoneBytes` and no `signal`; they are bytes.
+ * Every server consumer goes through this (the browser has a mirror in
+ * `src/utils/context-advisory.ts`) so retiring `milestoneBytes` or adding a
+ * signal is a one-place change per runtime.
+ */
+export function decodeContextAdvisory(
+  record: Pick<ContextAdvisoryRecord, "signal" | "milestone" | "milestoneBytes">,
+): { signal: ContextAdvisorySignal; milestone: number } {
+  return {
+    signal: record.signal ?? "transcript_bytes",
+    milestone: record.milestone ?? record.milestoneBytes ?? 0,
+  };
+}
 
 /** Map a milestone to the action the browser offers for it. */
 export function advisoryActionFor(

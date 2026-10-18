@@ -18,13 +18,15 @@
 import { useCallback, useState } from "react";
 import { useStore } from "../store.js";
 import { useContinueInNewSession } from "../use-continue-in-new-session.js";
-import type { ContextAdvisoryRecord, ContextAdvisorySignal } from "../types.js";
+import type { ContextAdvisorySignal } from "../types.js";
+import { decodeContextAdvisory } from "../utils/context-advisory.js";
 
 interface ContextAdvisoryBannerProps {
   /**
    * Which ladder fired: `transcript_bytes` (Claude — milestone is bytes of the
-   * CLI transcript) or `context_percent` (Codex — milestone is percent of the
-   * context window). Defaults to bytes for callers/records that predate the field.
+   * CLI transcript) or `codex_compactions` (Codex — milestone is how many times
+   * the thread was compacted). Defaults to bytes for callers/records that
+   * predate the field.
    */
   signal?: ContextAdvisorySignal;
   /** Milestone crossed, in the signal's unit. */
@@ -46,15 +48,10 @@ function formatMb(bytes: number): string {
   return mb >= 10 ? `${Math.round(mb)} MB` : `${Math.round(mb * 10) / 10} MB`;
 }
 
-/** Milestone value of a record in its own unit; legacy records only carry `milestoneBytes`. */
-export function advisoryMilestone(a: Pick<ContextAdvisoryRecord, "milestone" | "milestoneBytes">): number {
-  return a.milestone ?? a.milestoneBytes ?? 0;
-}
-
-/** Header line: "over N MB" for the bytes ladder, "N % full" for the percent ladder. */
+/** Header line: "over N MB" for the bytes ladder, "compacted N times" for the Codex ladder. */
 function headline(signal: ContextAdvisorySignal, milestone: number): string {
-  return signal === "context_percent"
-    ? `Context window is ${Math.round(milestone)}% full`
+  return signal === "codex_compactions"
+    ? `Codex compacted the context ${Math.round(milestone)} times`
     : `Session context is over ${formatMb(milestone)}`;
 }
 
@@ -68,7 +65,7 @@ export function ContextAdvisoryBanner({
   pending = false,
   error,
 }: ContextAdvisoryBannerProps) {
-  const value = advisoryMilestone({ milestone, milestoneBytes });
+  const { milestone: value } = decodeContextAdvisory({ milestone, milestoneBytes });
   return (
     <div
       role="status"
@@ -146,7 +143,7 @@ export function ContextAdvisoryNotice({ sessionId }: { sessionId: string }) {
   // a bytes milestone with a percent milestone.
   const onDismiss = useCallback(() => {
     if (!advisory) return;
-    const value = advisoryMilestone(advisory);
+    const { milestone: value } = decodeContextAdvisory(advisory);
     try {
       localStorage.setItem(dismissKey(sessionId), String(value));
     } catch {
@@ -156,13 +153,14 @@ export function ContextAdvisoryNotice({ sessionId }: { sessionId: string }) {
   }, [advisory, sessionId]);
 
   if (!advisory || advisory.action !== "continue_in_new") return null;
-  if (advisoryMilestone(advisory) <= dismissedMilestone) return null;
+  const decoded = decodeContextAdvisory(advisory);
+  if (decoded.milestone <= dismissedMilestone) return null;
 
   return (
     <div className="shrink-0 border-t border-cc-border bg-cc-card">
       <ContextAdvisoryBanner
-        signal={advisory.signal ?? "transcript_bytes"}
-        milestone={advisoryMilestone(advisory)}
+        signal={decoded.signal}
+        milestone={decoded.milestone}
         message={advisory.message}
         onContinue={onContinue}
         onDismiss={onDismiss}

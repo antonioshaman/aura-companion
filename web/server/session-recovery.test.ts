@@ -796,16 +796,16 @@ describe("SessionRecovery.contextAdvisoryTick — context-size advisory", () => 
     companionBus.clear();
   });
 
-  type Persisted = { signal?: "transcript_bytes" | "context_percent"; milestone?: number; milestoneBytes?: number };
+  type Persisted = { signal?: "transcript_bytes" | "codex_compactions"; milestone?: number; milestoneBytes?: number };
 
   /** A Claude session whose jsonl is `sizeBytes` big (sparse file). `state` picks connected vs exited. */
   function setup(
     sizeBytes: number,
     persisted?: Persisted,
-    opts: { state?: "running" | "exited"; withAdapter?: boolean } = {},
+    opts: { state?: "running" | "exited"; withAdapter?: boolean; archived?: boolean } = {},
   ) {
     const state = opts.state ?? "running";
-    const sessions = new Map([["s1", info("s1", { state, cwd: "/root/proj", cliSessionId: "cli-1" })]]);
+    const sessions = new Map([["s1", info("s1", { state, cwd: "/root/proj", cliSessionId: "cli-1", archived: opts.archived ?? false })]]);
     const ctx = makeRecovery(sessions);
     let adapter: ClaudeAdapter | null = null;
     if (opts.withAdapter ?? state === "running") {
@@ -824,13 +824,13 @@ describe("SessionRecovery.contextAdvisoryTick — context-size advisory", () => 
     return ctx;
   }
 
-  /** A Codex session whose persisted state reports `pct` of the context window used. */
-  function setupCodex(pct: number | undefined, persisted?: Persisted) {
+  /** A Codex session whose persisted state reports `compactions` main-thread compactions. */
+  function setupCodex(compactions: number | undefined, persisted?: Persisted) {
     const sessions = new Map([["c1", info("c1", { state: "running", cwd: "/root/proj", backendType: "codex" })]]);
     const ctx = makeRecovery(sessions);
     ctx.wsBridge.getSession.mockReturnValue({
       backendAdapter: null,
-      state: { ...(pct === undefined ? {} : { context_used_percent: pct }), ...(persisted ? { context_advisory: persisted } : {}) },
+      state: { ...(compactions === undefined ? {} : { codex_compactions: compactions }), ...(persisted ? { context_advisory: persisted } : {}) },
     } as never);
     return ctx;
   }
@@ -921,40 +921,72 @@ describe("SessionRecovery.contextAdvisoryTick — context-size advisory", () => 
     expect(wsBridge.recordContextAdvisory).toHaveBeenCalledTimes(2);
   });
 
-  // AC1 — Codex. Measured by the persisted context-window percent; byte
-  // milestones never apply (rollouts on disk are ~30 KB). No legacy error
-  // frame: its browser handler is bytes-shaped; session_update is the path.
-  it("AC1: a Codex session at 92% records a percent-signal handoff advisory once, without milestoneBytes or a legacy frame", () => {
-    const { recovery, wsBridge } = setupCodex(92);
+  // AC1 — Codex. Measured by the adapter's count of main-thread compactions
+  // (`thread/compacted`); bytes never apply (rollouts on disk are ~30 KB) and
+  // the window percent is cyclic, so it cannot drive a fire-once latch. No
+  // legacy error frame: its browser handler is bytes-shaped; session_update
+  // is the path.
+  it("AC1: a Codex session compacted twice records a codex_compactions handoff advisory once, without milestoneBytes or a legacy frame", () => {
+    const { recovery, wsBridge } = setupCodex(2);
     recovery.contextAdvisoryTick();
     expect(wsBridge.recordContextAdvisory).toHaveBeenCalledTimes(1);
     const [, record] = wsBridge.recordContextAdvisory.mock.calls[0] as unknown as [string, Record<string, unknown>];
-    expect(record).toMatchObject({ signal: "context_percent", milestone: 90, action: "continue_in_new" });
+    expect(record).toMatchObject({ signal: "codex_compactions", milestone: 2, action: "continue_in_new" });
     expect(record).not.toHaveProperty("milestoneBytes");
-    expect(record.message).toMatch(/90%/);
+    expect(record.message).toMatch(/twice/);
     expect(advisoryFrames(wsBridge)).toHaveLength(0);
     recovery.contextAdvisoryTick();
     expect(wsBridge.recordContextAdvisory).toHaveBeenCalledTimes(1);
   });
 
-  it("a Codex session at 50% (or with no percent yet) never fires", () => {
-    const a = setupCodex(50);
+  it("a Codex session compacted once (or never reporting) never fires; the 5th compaction is a fresh rung", () => {
+    const a = setupCodex(1);
     a.recovery.contextAdvisoryTick();
     expect(a.wsBridge.recordContextAdvisory).not.toHaveBeenCalled();
     const b = setupCodex(undefined);
     b.recovery.contextAdvisoryTick();
     expect(b.wsBridge.recordContextAdvisory).not.toHaveBeenCalled();
+    // Already advised at 2 (persisted), now at 5 → the next rung fires once.
+    const c = setupCodex(5, { signal: "codex_compactions", milestone: 2 });
+    c.recovery.contextAdvisoryTick();
+    expect(c.wsBridge.recordContextAdvisory).toHaveBeenCalledTimes(1);
+    expect(c.wsBridge.recordContextAdvisory).toHaveBeenCalledWith("c1", expect.objectContaining({ milestone: 5 }));
   });
 
-  it("Codex seed survives a restart only for the same signal: a percent record seeds, a bytes record does not", () => {
-    const seeded = setupCodex(92, { signal: "context_percent", milestone: 90 });
+  it("Codex seed survives a restart only for the same signal: a compactions record seeds, a bytes record does not", () => {
+    const seeded = setupCodex(2, { signal: "codex_compactions", milestone: 2 });
     seeded.recovery.contextAdvisoryTick();
     expect(seeded.wsBridge.recordContextAdvisory).not.toHaveBeenCalled();
     // A stale bytes record on a Codex session (impossible today, defensive)
-    // is on another axis and must not suppress the percent ladder.
-    const other = setupCodex(92, { signal: "transcript_bytes", milestone: 10_000_000, milestoneBytes: 10_000_000 });
+    // is on another axis and must not suppress the compactions ladder.
+    const other = setupCodex(2, { signal: "transcript_bytes", milestone: 10_000_000, milestoneBytes: 10_000_000 });
     other.recovery.contextAdvisoryTick();
     expect(other.wsBridge.recordContextAdvisory).toHaveBeenCalledTimes(1);
+  });
+
+  // The pass has exactly one gate — `archived` — so it needs exactly one test
+  // (review 2026-10-17, beck #2): delete the gate and this goes red.
+  it("an archived session is skipped even at 10 MB", () => {
+    const { recovery, wsBridge } = setup(10_500_000, undefined, { archived: true });
+    recovery.contextAdvisoryTick();
+    expect(wsBridge.recordContextAdvisory).not.toHaveBeenCalled();
+    expect(advisoryFrames(wsBridge)).toHaveLength(0);
+  });
+
+  // The `/compact` tiers are not persisted; after a restart they would re-fire
+  // into every exited session (a line nobody can act on). Only a live CLI gets
+  // them — but the tier is still marked so it is not retried every tick
+  // (review 2026-10-17, ritchie A-1).
+  it("the /compact tier is not sent to an exited session, and is marked so it does not retry", () => {
+    const { recovery, wsBridge } = setup(3_200_000, undefined, { state: "exited", withAdapter: false });
+    recovery.contextAdvisoryTick();
+    recovery.contextAdvisoryTick();
+    expect(advisoryFrames(wsBridge)).toHaveLength(0);
+    expect(wsBridge.recordContextAdvisory).not.toHaveBeenCalled();
+    // A live session at the same size does get the line (unchanged behaviour).
+    const live = setup(3_200_000);
+    live.recovery.contextAdvisoryTick();
+    expect(advisoryFrames(live.wsBridge)).toHaveLength(1);
   });
 
   it("a transcript path outside the projects root is never stat'ed: a traversal-shaped cliSessionId resolves to null", () => {
