@@ -160,6 +160,23 @@ A missing subagent is NOT a planning gap when the AC the subagent would defend i
 There is NO fixed panel. This `-aura` skill is a thin variant: it holds the
 Aura-stack briefing body, but it carries **no independent selection logic** — who
 sits is decided by the shared `~/.claude/skills/_council-experts/selection-engine.md`,
+
+**Complexity triage — before any roster work (handoff 2026-10-18 §1).** A plan has no
+diff yet, so triage the FEATURE: from Phase 1's context, estimate the files and lines it
+will touch and whether any land on a risk path (auth / persistence / CLI protocol /
+council / deploy — see `RISK_TRIGGERS` in `web/scripts/council-triage.ts`). A risk path
+makes the council mandatory. With no risk path and an expected ≤ 3 files / ≤ 150 lines,
+say so in one line ("Triage: solo — small single-surface change, no risk paths") and
+offer to skip the council and write the plan directly; seat one only if the developer
+insists. Otherwise continue with the economy roster below (`full` only on request /
+release / security audit).
+Whatever is chosen, record it so the gate can be calibrated from real choices later
+(it is a recommendation, not a threshold — the run-stats dataset is still tiny):
+`bun web/scripts/council-triage.ts record --skill council-plan-aura --recommendation <r>
+--decision <solo|economy|full> --reason "<one line>" --files N --lines M
+[--categories a,b] [--mandatory]` (from the Aura repo).
+
+**Economy council by default.** Select the roster with the selection engine's Phase 1 step 5 (economy: domain-matched seats only, budget 2–3, cross-stack lenses hunt/fowler/willison/beck always seated, dropped seats listed in the ledger). Seat the full council only when the developer explicitly asks for a "full council" or for a release/security audit.
 exactly as it is for `/council-plan`. Read the engine and run its flow
 (fingerprint → score → arbitrate fail-closed → brief) to obtain the adaptive
 roster (min 3 / max 11) before dispatching. The catalog IS the panel: any advisor
@@ -204,7 +221,18 @@ For each SELECTED advisor, before dispatch:
    the file-list token, including the role-named ones, so scoping the check does
    not reintroduce dependence on a single literal.
 5. Dispatch via `Task` with `subagent_type=general-purpose` and the substituted
-   body as the prompt
+   body as the prompt.
+
+   **Per-seat model tier (PRO economy — spec `specs/council-pro-economy.md`).**
+   Choose each seat's `Task` `model` fail-closed:
+   - a **guaranteed** cross-stack lens (security `hunt`, LLM `willison`, refactor
+     `fowler`, test `beck`) ALWAYS runs the **top** model — never cheap (Boundary 🚫);
+   - every other seat also defaults to **top** UNTIL the run-stats dataset proves a
+     `(seat, complexity-band)` safe to run cheap (never hand-guess a threshold);
+   - `top` → omit `model`; `cheap` → `model: "haiku"`.
+   Decision logic + data-derived policy live in `web/scripts/tier-policy.ts` /
+   `stats-derive.ts`. Today every seat runs top — cheap-tiering switches on only once
+   data + the guardrail exist.
 
 Refusal template for a surviving placeholder:
 
