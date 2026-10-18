@@ -7,14 +7,26 @@
 // `.council/prompts/observer-system.md`, with its `v1` header sentinel: the
 // build step splices the SOUL body between two markers in the system prompt,
 // so the loader, its header contract, the bundled fallback and the recorder's
-// prompt hash all stay exactly as they were. The CI canary (`bun run
-// build-observer-prompt-bundle && git diff --exit-code`) now covers both files.
+// prompt hash all stay exactly as they were. The drift gate (`bun run
+// check-observer-prompt-drift`) covers both files.
 //
 // Pure and deterministic: same inputs → same output, byte for byte.
 
 export const OBSERVER_SOUL_HEADER = /^<!-- observer-soul v(\d+) -->\s*$/;
-export const SOUL_BEGIN_MARKER = "<!-- soul:begin (from OBSERVER-SOUL.md) -->";
+
+/** The SOUL schema this splice understands. A SOUL with another version is
+ *  rejected (mirrors `OBSERVER_PROMPT_SCHEMA_VERSION` in the loader) — the
+ *  header is a contract, not decoration. */
+export const OBSERVER_SOUL_SUPPORTED_VERSION = 1;
+
+// The begin marker doubles as the in-file notice: the block between the
+// markers is regenerated from OBSERVER-SOUL.md, so an edit made here is lost.
+export const SOUL_BEGIN_MARKER = "<!-- soul:begin (generated from OBSERVER-SOUL.md; edit there) -->";
 export const SOUL_END_MARKER = "<!-- soul:end -->";
+
+/** Product budget for the whole spliced prompt, in UTF-8 bytes
+ *  (specs/aura-meta-diet.md B1; also pinned in observer-prompt.test.ts). */
+export const OBSERVER_PROMPT_BUDGET_BYTES = 5 * 1024;
 
 /** Parsed SOUL schema version (first line), or null when the header is missing/malformed. */
 export function parseObserverSoulHeader(raw: string): number | null {
@@ -25,18 +37,8 @@ export function parseObserverSoulHeader(raw: string): number | null {
   return Number.isInteger(v) && v > 0 ? v : null;
 }
 
-/**
- * Replace everything between the soul markers of `systemMd` with the body of
- * `soulMd` (its header sentinel dropped). Throws on a missing/malformed SOUL
- * header, a missing or duplicated marker pair, or markers out of order — a
- * silent no-op here would let the identity text drift from its source.
- */
-export function spliceObserverSoul(systemMd: string, soulMd: string): string {
-  if (parseObserverSoulHeader(soulMd) === null) {
-    throw new Error("OBSERVER-SOUL.md: first line must be `<!-- observer-soul vN -->`");
-  }
-  const soulBody = soulMd.split("\n").slice(1).join("\n").replace(/^\n+/, "").replace(/\s+$/, "");
-  if (soulBody.length === 0) throw new Error("OBSERVER-SOUL.md: body is empty");
+/** Locate the single ordered marker pair; throws when it is missing, duplicated or reversed. */
+function locateSoulMarkers(systemMd: string): { begin: number; end: number } {
   const begins = indexesOf(systemMd, SOUL_BEGIN_MARKER);
   const ends = indexesOf(systemMd, SOUL_END_MARKER);
   if (begins.length !== 1 || ends.length !== 1) {
@@ -47,6 +49,45 @@ export function spliceObserverSoul(systemMd: string, soulMd: string): string {
   const begin = begins[0]! + SOUL_BEGIN_MARKER.length;
   const end = ends[0]!;
   if (end < begin) throw new Error("observer-system.md: soul:end marker precedes soul:begin");
+  return { begin, end };
+}
+
+/** The text currently between the markers of `systemMd`, trimmed. Throws on a bad marker pair. */
+export function extractSoulBlock(systemMd: string): string {
+  const { begin, end } = locateSoulMarkers(systemMd);
+  return systemMd.slice(begin, end).trim();
+}
+
+/**
+ * Replace everything between the soul markers of `systemMd` with the body of
+ * `soulMd` (its header sentinel dropped, CRLF normalised). Throws on a
+ * missing/malformed/unsupported SOUL header, an empty body, a body that
+ * itself contains a marker (it would poison the next splice), a missing or
+ * duplicated marker pair, or markers out of order — a silent no-op here
+ * would let the identity text drift from its source.
+ */
+export function spliceObserverSoul(systemMd: string, soulMd: string): string {
+  const version = parseObserverSoulHeader(soulMd);
+  if (version === null) {
+    throw new Error("OBSERVER-SOUL.md: first line must be `<!-- observer-soul vN -->`");
+  }
+  if (version !== OBSERVER_SOUL_SUPPORTED_VERSION) {
+    throw new Error(
+      `OBSERVER-SOUL.md: schema v${version} is not supported by this splice (expected v${OBSERVER_SOUL_SUPPORTED_VERSION})`,
+    );
+  }
+  const soulBody = soulMd
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .slice(1)
+    .join("\n")
+    .replace(/^\n+/, "")
+    .replace(/\s+$/, "");
+  if (soulBody.length === 0) throw new Error("OBSERVER-SOUL.md: body is empty");
+  if (soulBody.includes(SOUL_BEGIN_MARKER) || soulBody.includes(SOUL_END_MARKER)) {
+    throw new Error("OBSERVER-SOUL.md: body must not contain a soul marker");
+  }
+  const { begin, end } = locateSoulMarkers(systemMd);
   return systemMd.slice(0, begin) + "\n" + soulBody + "\n" + systemMd.slice(end);
 }
 
