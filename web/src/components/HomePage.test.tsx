@@ -562,10 +562,12 @@ describe("HomePage", () => {
       // Every row is rendered — nothing is filtered out server- or client-side.
       expect(within(list).getAllByRole("button")).toHaveLength(14);
       expect(within(list).getByRole("button", { name: /claude-opus-5-5/ })).toBeInTheDocument();
-      // Capped + scrollable: the cap is viewport-relative so no row can land
-      // off-screen whatever the window height.
+      // Capped + scrollable. The CSS cap is the static fallback; on open the
+      // effect measures the room above the trigger (jsdom: zero rects → the
+      // helper returns null and the CSS cap stands, so no inline height here).
       expect(list.className).toMatch(/overflow-y-auto/);
-      expect(list.className).toMatch(/max-h-\[min\(24rem,70vh\)\]/);
+      expect(list.className).toMatch(/max-h-\[24rem\]/);
+      expect(list.style.maxHeight).toBe("");
       // Selected row is nudged into view exactly once per open.
       expect(scrollIntoView).toHaveBeenCalledTimes(1);
       expect(scrollIntoView.mock.instances[0]).toHaveAttribute("data-selected", "true");
@@ -575,6 +577,29 @@ describe("HomePage", () => {
       mockStoreState.dynamicBackendModels = {};
       delete (mockStoreState as Record<string, unknown>).anthropicModel;
       mockStoreGetState.mockReturnValue(buildStoreMock());
+    }
+  });
+
+  it("new-session model dropdown: caps the list to the measured room above the trigger", async () => {
+    // Owner bug 2026-10-18, second round: even `max-h-[min(24rem,70vh)]`
+    // overflowed the page's scroll container (it starts below the top bar),
+    // so Opus 5.5 was still clipped on a 525px-tall window. The open effect
+    // must set an inline max-height from the trigger's measured position.
+    const spy = vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+      // Only the picker wrapper reports a position; everything else (incl.
+      // any scroll container) sits at the viewport top.
+      const top = this.getAttribute("data-testid") === "new-session-model-picker" ? 300 : 0;
+      return { top, bottom: top, left: 0, right: 0, width: 0, height: 0, x: 0, y: top, toJSON: () => ({}) } as DOMRect;
+    });
+    try {
+      render(<HomePage />);
+      await screen.findByPlaceholderText("Fix a bug, build a feature, refactor code...");
+      fireEvent.click(screen.getByText(DEFAULT_MODEL_LABEL));
+      const list = screen.getByTestId("new-session-model-list");
+      // 300px trigger top − 0 container top − 8px gap
+      expect(list.style.maxHeight).toBe("292px");
+    } finally {
+      spy.mockRestore();
     }
   });
 
