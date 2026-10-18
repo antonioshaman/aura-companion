@@ -6483,4 +6483,108 @@ describe("POST /api/sessions/:id/continue-in-new", () => {
     bridge.getSession.mockReturnValue(null);
     expect((await app.request("/api/sessions/old/continue-in-new", { method: "POST" })).status).toBe(409);
   });
+
+  // ── Handoff-file housekeeping (council plan 2026-10-17, AC3) ──────────────
+  // The route prunes OLD endpoint-format briefs after a successful spawn. The
+  // allow-list is the exact `.aura-handoff-<YYYY-MM-DD>T<HH-MM-SS>.md` shape:
+  // an operator's hand-written `.aura-handoff-2026-10-17.md` (date only) must
+  // survive, and a failed spawn must delete nothing.
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  async function plantHandoff(name: string, ageMs: number) {
+    const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const path = await import("node:path");
+    const p = path.join(tmp, name);
+    fs.writeFileSync(p, "old brief");
+    const t = (Date.now() - ageMs) / 1000;
+    fs.utimesSync(p, t, t);
+    return p;
+  }
+  function endpointName(ageMs: number) {
+    return `.aura-handoff-${new Date(Date.now() - ageMs).toISOString().replace(/[:.]/g, "-").slice(0, 19)}.md`;
+  }
+
+  it("after a successful spawn, prunes a stale endpoint brief but never the operator's date-only note", async () => {
+    seed();
+    const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const stale = endpointName(30 * DAY_MS);
+    await plantHandoff(stale, 30 * DAY_MS);
+    const recent = [endpointName(DAY_MS), endpointName(2 * DAY_MS), endpointName(3 * DAY_MS)];
+    for (const [i, n] of recent.entries()) await plantHandoff(n, (i + 1) * DAY_MS);
+    await plantHandoff(".aura-handoff-2026-01-01.md", 300 * DAY_MS); // operator note
+
+    const res = await app.request("/api/sessions/old/continue-in-new", { method: "POST" });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    const left = fs.readdirSync(tmp);
+    expect(left).toContain(json.handoffFilename); // the new brief
+    expect(left).not.toContain(stale); // 4th-newest AND > 7 days → pruned
+    for (const n of recent) expect(left).toContain(n);
+    expect(left).toContain(".aura-handoff-2026-01-01.md");
+  });
+
+  it("a failed spawn deletes nothing (housekeeping runs only after createSession succeeded)", async () => {
+    seed();
+    const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const stale = endpointName(30 * DAY_MS);
+    await plantHandoff(stale, 30 * DAY_MS);
+    for (let i = 1; i <= 3; i++) await plantHandoff(endpointName(i * DAY_MS), i * DAY_MS);
+    orchestrator.createSession.mockResolvedValueOnce({ ok: false, error: "no cli", status: 500 } as never);
+
+    const res = await app.request("/api/sessions/old/continue-in-new", { method: "POST" });
+    expect(res.status).toBe(500);
+    expect(fs.readdirSync(tmp)).toContain(stale);
+  });
+
+  // The 500 body must stay generic: the absolute path and errno go to the log
+  // only (review 2026-10-17, beck #3 / hunt). Three attempts are the ceiling.
+  it("three occupied seconds in a row → 500 with a generic body that leaks no path, nothing spawned", async () => {
+    seed();
+    const fixed = Date.UTC(2026, 9, 17, 12, 0, 0);
+    for (const sec of ["00", "01", "02"]) await plantHandoff(`.aura-handoff-2026-10-17T12-00-${sec}.md`, 0);
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(fixed);
+    orchestrator.createSession.mockClear();
+    try {
+      const res = await app.request("/api/sessions/old/continue-in-new", { method: "POST" });
+      expect(res.status).toBe(500);
+      const body = await res.json();
+      expect(body.error).toBe("Cannot write the handoff file into the session workspace");
+      expect(JSON.stringify(body)).not.toContain(tmp);
+      expect(JSON.stringify(body)).not.toMatch(/EEXIST|EACCES/);
+      expect(orchestrator.createSession).not.toHaveBeenCalled();
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it.skipIf(process.getuid?.() === 0)("an unwritable workspace → 500 after one attempt, generic body, no brief created", async () => {
+    seed();
+    const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    fs.chmodSync(tmp, 0o500);
+    try {
+      const res = await app.request("/api/sessions/old/continue-in-new", { method: "POST" });
+      expect(res.status).toBe(500);
+      const body = await res.json();
+      expect(body.error).toBe("Cannot write the handoff file into the session workspace");
+      expect(JSON.stringify(body)).not.toContain(tmp);
+    } finally {
+      fs.chmodSync(tmp, 0o700);
+    }
+    expect(fs.readdirSync(tmp).filter((n) => n.startsWith(".aura-handoff-"))).toEqual([]);
+  });
+
+  it("two handoffs in the same second do not overwrite each other (exclusive write → next-second name)", async () => {
+    seed();
+    const fixed = Date.UTC(2026, 9, 17, 12, 0, 0);
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(fixed);
+    try {
+      const first = await (await app.request("/api/sessions/old/continue-in-new", { method: "POST" })).json();
+      const second = await (await app.request("/api/sessions/old/continue-in-new", { method: "POST" })).json();
+      expect(first.handoffFilename).toBe(".aura-handoff-2026-10-17T12-00-00.md");
+      expect(second.handoffFilename).toBe(".aura-handoff-2026-10-17T12-00-01.md");
+      const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+      expect(fs.readdirSync(tmp).filter((n) => n.startsWith(".aura-handoff-"))).toHaveLength(2);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
 });
