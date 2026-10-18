@@ -96,7 +96,7 @@ jobs:
         working-directory: web
         run: |
           bun run build-observer-prompt-bundle
-          git diff --exit-code -- server/observer-prompt-bundled.ts
+          git diff --exit-code -- server/observer-prompt-bundled.ts ../.council/prompts/observer-system.md
 
       - name: Typecheck
         working-directory: web

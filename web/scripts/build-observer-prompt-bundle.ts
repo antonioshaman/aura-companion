@@ -24,14 +24,21 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { spliceObserverSoul } from "./observer-soul-splice.js";
 
 const thisFile = fileURLToPath(import.meta.url);
 // web/scripts/build-observer-prompt-bundle.ts → web/ → repo root.
 const repoRoot = resolve(dirname(thisFile), "..", "..");
 const canonicalPath = join(repoRoot, ".council", "prompts", "observer-system.md");
+const soulPath = join(repoRoot, ".council", "prompts", "OBSERVER-SOUL.md");
 const outputPath = join(repoRoot, "web", "server", "observer-prompt-bundled.ts");
 
-const body = readFileSync(canonicalPath, "utf-8");
+// Handoff 2026-10-18 §4: the observer's identity lives in OBSERVER-SOUL.md and
+// is spliced between the soul markers of the system prompt here, so the
+// loader keeps consuming ONE artifact. Writing the spliced prompt back makes
+// `.council/prompts/observer-system.md` part of the same drift canary.
+const body = spliceObserverSoul(readFileSync(canonicalPath, "utf-8"), readFileSync(soulPath, "utf-8"));
+writeFileSync(canonicalPath, body, "utf-8");
 const sha256 = createHash("sha256").update(body, "utf8").digest("hex");
 
 // JSON.stringify produces a single-line, fully-escaped string literal —
@@ -92,7 +99,7 @@ writeFileSync(outputPath, bundleContent, "utf-8");
 
 console.log(
   `[build-observer-prompt-bundle] wrote ${outputPath}\n` +
-    `  source: ${canonicalPath}\n` +
+    `  source: ${canonicalPath} (soul: ${soulPath})\n` +
     `  bytes:  ${body.length}\n` +
     `  sha256: ${sha256}`,
 );
