@@ -19,6 +19,7 @@ import { generateUniqueSessionName } from "../utils/names.js";
 import { getRecentDirs, addRecentDir } from "../utils/recent-dirs.js";
 import { navigateToSession } from "../utils/routing.js";
 import { getModelsForBackend, getModesForBackend, getDefaultMode, pickSessionDefaultModel } from "../utils/backends.js";
+import { availableHeightAbove } from "../utils/dropdown-fit.js";
 import { ModelListFallbackHint, useModelListAutoRefresh } from "./ModelListFallbackHint.js";
 import type { ModelOption } from "../utils/backends.js";
 import type { BackendType } from "../types.js";
@@ -220,14 +221,6 @@ export function HomePage() {
   // scrollTop at 0, so a selected row near the bottom (e.g. Fable 5.1 in a
   // 14-row list) would be hidden until the user scrolls. Nudge it into view
   // once per open — never on every render, so it can't fight user scrolling.
-  const modelListRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!showModelDropdown) return;
-    modelListRef.current
-      ?.querySelector<HTMLElement>('[data-selected="true"]')
-      // jsdom doesn't implement scrollIntoView; production browsers always do.
-      ?.scrollIntoView?.({ block: "nearest" });
-  }, [showModelDropdown]);
   const [showModeDropdown, setShowModeDropdown] = useState(false);
   const [showFolderPicker, setShowFolderPicker] = useState(false);
   const [showBranchingControls, setShowBranchingControls] = useState(false);
@@ -260,6 +253,23 @@ export function HomePage() {
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
+  // The list opens upward, so its cap is the measured room above the trigger
+  // (see `availableHeightAbove`) — a viewport-relative cap still clipped the
+  // first rows on a short window. jsdom measures nothing → keep the CSS cap.
+  const modelListRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!showModelDropdown) return;
+    const list = modelListRef.current;
+    const wrapper = modelDropdownRef.current;
+    if (list && wrapper) {
+      const cap = availableHeightAbove(wrapper);
+      if (cap !== null) list.style.maxHeight = `${cap}px`;
+    }
+    list
+      ?.querySelector<HTMLElement>('[data-selected="true"]')
+      // jsdom doesn't implement scrollIntoView; production browsers always do.
+      ?.scrollIntoView?.({ block: "nearest" });
+  }, [showModelDropdown]);
   const modeDropdownRef = useRef<HTMLDivElement>(null);
   const envDropdownRef = useRef<HTMLDivElement>(null);
 
@@ -1085,7 +1095,7 @@ export function HomePage() {
           {/* ── Toolbar: all controls in one bar ── */}
           <div className="flex items-center gap-1 px-2.5 sm:px-3 py-2 flex-wrap">
             {/* Model selector */}
-            <div className="relative" ref={modelDropdownRef}>
+            <div className="relative" ref={modelDropdownRef} data-testid="new-session-model-picker">
               <button
                 onClick={() => {
                   if (backend === "codex" && MODELS.length === 0) return;
@@ -1113,7 +1123,7 @@ export function HomePage() {
                 <div
                   ref={modelListRef}
                   data-testid="new-session-model-list"
-                  className="absolute left-0 bottom-full mb-1 w-48 bg-cc-card border border-cc-border rounded-[10px] shadow-lg z-10 py-1 max-h-[min(24rem,70vh)] overflow-y-auto"
+                  className="absolute left-0 bottom-full mb-1 w-48 bg-cc-card border border-cc-border rounded-[10px] shadow-lg z-10 py-1 max-h-[24rem] overflow-y-auto"
                 >
                   {MODELS.map((m) => {
                     // Same honesty as ModelSwitcher: retired/blocked (incl. the
