@@ -32,7 +32,7 @@ import {
   parseAutoProceedOnIdleAtBoundary,
   formatAutoProceedConfigError,
 } from "./auto-proceed-config-validator.js";
-import type { CliLauncher } from "./cli-launcher.js";
+import type { CliLauncher, SdkSessionInfo } from "./cli-launcher.js";
 import type { WsBridge } from "./ws-bridge.js";
 import type { TerminalManager } from "./terminal-manager.js";
 import * as sessionNames from "./session-names.js";
@@ -1247,7 +1247,8 @@ export function createRoutes(
 
   // Continue-in-new-session: extracts a text-only handoff from the prior
   // session's messageHistory (stripping images), writes it as a file in the
-  // workspace, and spawns a fresh session in the same cwd / pairing. The
+  // workspace, and spawns a fresh session in the same cwd — a new Council
+  // pair (same pairing and models) when the source was a pair half. The
   // browser receives the new sessionId + the handoff filename + a draft
   // pickup prompt so it can switch and pre-populate the composer.
   //
@@ -1255,6 +1256,43 @@ export function createRoutes(
   // contains base64 image payloads we deliberately do NOT want to round-trip
   // through the browser — that's exactly the data we're recovering from.
   // Server reads in-memory state and produces a stripped artifact in one hop.
+  /**
+   * Both halves of the Council pair `session` belongs to, from the launcher's
+   * persisted records (works for a dead pair). Null when the session is solo,
+   * a half is missing, or the backend combo is not a supported pairing.
+   */
+  function findCouncilPairForHandoff(session: SdkSessionInfo): {
+    sessionGroupId: string;
+    pairing: "claude+claude" | "claude+codex";
+    primary: SdkSessionInfo;
+    observer: SdkSessionInfo;
+  } | null {
+    const sessionGroupId = session.sessionGroupId;
+    if (!sessionGroupId) return null;
+    const halves = launcher.listSessions().filter((s) => s.sessionGroupId === sessionGroupId);
+    const primary = halves.find((s) => s.sessionGroupRole === "orchestrator");
+    const observer = halves.find((s) => s.sessionGroupRole === "observer");
+    if (!primary || !observer) {
+      log.warn("routes", "handoff: council pair incomplete, continuing solo", {
+        event: "handoff.pair_incomplete",
+        sessionGroupId,
+        sessionId: session.sessionId,
+      });
+      return null;
+    }
+    const pairing = `${primary.backendType ?? "claude"}+${observer.backendType ?? "claude"}`;
+    if (pairing !== "claude+claude" && pairing !== "claude+codex") {
+      log.warn("routes", "handoff: unsupported pairing, continuing solo", {
+        event: "handoff.pair_unsupported",
+        sessionGroupId,
+        sessionId: session.sessionId,
+        pairing,
+      });
+      return null;
+    }
+    return { sessionGroupId, pairing, primary, observer };
+  }
+
   api.post("/sessions/:id/continue-in-new", async (c) => {
     const id = c.req.param("id");
     const launcherSession = launcher.getSession(id);
@@ -1269,14 +1307,25 @@ export function createRoutes(
     const reasonRaw = await c.req.json().catch(() => ({}));
     const reason = typeof reasonRaw?.reason === "string" ? reasonRaw.reason : undefined;
 
+    // A Council pair continues as a pair: find both halves from the launcher's
+    // persisted records (not the live group map — the overflow case is often a
+    // dead pair). Missing half or an unsupported backend combo → solo below.
+    const pair = findCouncilPairForHandoff(launcherSession);
+
+    // The pair's work lives in the orchestrator's transcript, so the brief is
+    // built from it even when the button was pressed on the observer half.
+    const briefSessionId = pair ? pair.primary.sessionId : id;
+    const briefBridge = pair ? (wsBridge.getSession(briefSessionId) ?? bridgeSession) : bridgeSession;
+
     // Context-overflow handoff: the advisory recorded on the state carries
     // the transcript size the reason line / pickup draft quote ("> N MB").
-    const contextBytes = bridgeSession.state.context_advisory?.milestoneBytes;
+    const contextBytes = briefBridge.state.context_advisory?.milestoneBytes
+      ?? bridgeSession.state.context_advisory?.milestoneBytes;
     const { markdown, meta } = extractHandoff({
-      sessionId: id,
-      messageHistory: bridgeSession.messageHistory,
+      sessionId: briefSessionId,
+      messageHistory: briefBridge.messageHistory,
       cwd,
-      backend: bridgeSession.backendType,
+      backend: briefBridge.backendType,
       reason,
       contextBytes,
     });
@@ -1307,19 +1356,38 @@ export function createRoutes(
       return c.json({ error: "Cannot write the handoff file into the session workspace" }, 500);
     }
 
-    // Always spawn a SOLO session in the same cwd. If the source was a
-    // Council pair, the user can manually create a new pair from the New
-    // Session form — the handoff file is the durable recovery artifact, and
-    // a council-pair spawn-on-recovery would silently bind the new
-    // orchestrator+observer to an unintended pairing for callers who haven't
-    // opted in. The handoff file remains readable from either pair half.
-    const createResult = await orchestrator.createSession({
-      cwd,
-      backendType: launcherSession.backendType,
-      model: launcherSession.model,
-    } as Parameters<typeof orchestrator.createSession>[0]);
-    if (!createResult.ok) {
-      return c.json({ error: `Handoff written but session create failed: ${createResult.error}` }, createResult.status as any);
+    // Spawn what the user had: a Council pair with the same pairing and the
+    // same model on each half, or a solo session on the same backend/model,
+    // in the same cwd. The new orchestrator (or the solo session) is the one
+    // the browser switches to and pre-fills.
+    let newSessionId: string;
+    let newSessionGroupId: string | undefined;
+    if (pair) {
+      const groupResult = await orchestrator.createCouncilGroup({
+        pairing: pair.pairing,
+        base: { cwd, ...(pair.primary.model ? { model: pair.primary.model } : {}) },
+        ...(pair.observer.model ? { observerModel: pair.observer.model } : {}),
+      });
+      if (!groupResult.ok) {
+        return c.json({ error: `Handoff written but council pair create failed: ${groupResult.error}` }, groupResult.status as any);
+      }
+      // Keep the old pair's own second-opinion choice (a global default needs no copy).
+      const secondReviewer = orchestrator.getGroupSecondReviewer(pair.sessionGroupId);
+      if (secondReviewer.ok && secondReviewer.source === "group") {
+        applyCreateSecondReviewer(groupResult.sessionGroupId, secondReviewer.config);
+      }
+      newSessionId = groupResult.primary.sessionId;
+      newSessionGroupId = groupResult.sessionGroupId;
+    } else {
+      const createResult = await orchestrator.createSession({
+        cwd,
+        ...(launcherSession.backendType ? { backend: launcherSession.backendType } : {}),
+        ...(launcherSession.model ? { model: launcherSession.model } : {}),
+      });
+      if (!createResult.ok) {
+        return c.json({ error: `Handoff written but session create failed: ${createResult.error}` }, createResult.status as any);
+      }
+      newSessionId = createResult.session.sessionId;
     }
 
     // Housekeeping AFTER the spawn succeeded (a failed handoff deletes
@@ -1339,7 +1407,8 @@ export function createRoutes(
     }
 
     return c.json({
-      newSessionId: createResult.session.sessionId,
+      newSessionId,
+      ...(newSessionGroupId ? { sessionGroupId: newSessionGroupId } : {}),
       handoffPath,
       handoffFilename: filename,
       handoffMeta: meta,

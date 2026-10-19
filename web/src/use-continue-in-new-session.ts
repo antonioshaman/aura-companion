@@ -4,10 +4,12 @@
  *
  * The server (`POST /sessions/:id/continue-in-new`) extracts a text-only
  * handoff brief from the old session's persisted messageHistory, writes it as
- * `.aura-handoff-<ts>.md` into the workspace and spawns a fresh SOLO session
- * in the same cwd. It never talks to the old CLI, so this works even when
- * that CLI is dead or unresponsive (the overflow case). The browser then
- * pre-fills the new session's composer with the pickup draft and switches.
+ * `.aura-handoff-<ts>.md` into the workspace and spawns a fresh session in the
+ * same cwd — a new Council pair (same pairing and models) when the source was
+ * a pair half, otherwise a solo session on the same backend and model. It
+ * never talks to the old CLI, so this works even when that CLI is dead or
+ * unresponsive (the overflow case). The browser then pre-fills the new
+ * (orchestrator) session's composer with the pickup draft and switches.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "./api.js";
