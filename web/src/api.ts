@@ -82,6 +82,22 @@ async function post<T = unknown>(path: string, body?: object): Promise<T> {
   }
 }
 
+/**
+ * POST that resolves with `{ status, body }` for any HTTP status (it throws
+ * only on a network failure). Used where a 409 / 202 is an expected outcome
+ * carrying data, not an error (Diagnostics run + decisions).
+ */
+async function postWithStatus<T>(path: string, body?: object): Promise<{ status: number; body: T }> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  handle401(res.status);
+  const json = (await res.json().catch(() => ({}))) as T;
+  return { status: res.status, body: json };
+}
+
 async function get<T = unknown>(path: string): Promise<T> {
   const startedAt = nowMs();
   let failureTracked = false;
@@ -974,6 +990,39 @@ export async function verifyAuthToken(token: string): Promise<boolean> {
 // ── Sweep orphans (manual cleanup of server-owned lost resources) ──────────
 export type SweepReason = "orphan" | "archived-leak" | "stale-session" | "orphan-timer";
 
+// ─── Diagnostics (shared with the server, type-only) ──────────────────────────
+export type {
+  AccumulationProgress,
+  CardSource,
+  ContextAdvisoryView,
+  Decision,
+  DiagnosticsOverview,
+  DriftEventView,
+  KbAnalysisReport,
+  KbAnalysisStatus,
+  KbFinding,
+  MemoryFinding,
+  PairView,
+  RuntimeSnapshotView,
+  UpstreamStatus,
+} from "../server/diagnostics/diagnostics-types.js";
+import type { Decision, DiagnosticsOverview, KbAnalysisStatus } from "../server/diagnostics/diagnostics-types.js";
+
+export interface KbAnalysisRunResponse {
+  runId?: string;
+  startedAt?: number;
+  error?: string;
+  message?: string;
+  retryAfterMs?: number;
+}
+
+export interface KbDecisionsResponse {
+  applied?: { entryId: string; decision: Decision; archive?: string; archivedTo?: string }[];
+  recorded?: boolean;
+  error?: string;
+  message?: string;
+}
+
 /** One reap candidate as returned by `GET /sweep/preview` — decision-justifying
  *  fields ONLY (the server withholds argv/internal anchors from the wire). */
 export interface SweepCandidate {
@@ -1162,6 +1211,14 @@ export const api = {
 
   // Sweep orphans — preview is read-only; execute must echo the preview token.
   sweepPreview: () => get<SweepPreview>("/sweep/preview"),
+  // Diagnostics page (plan Tasks 13–15). Run / decisions return status + body
+  // without throwing on 4xx: 409 / 202 carry data the page acts on.
+  diagnosticsOverview: () => get<DiagnosticsOverview>("/diagnostics/overview"),
+  kbAnalysisLatest: () => get<KbAnalysisStatus>("/diagnostics/kb-analysis/latest"),
+  kbAnalysisRun: (includeMemory: boolean) =>
+    postWithStatus<KbAnalysisRunResponse>("/diagnostics/kb-analysis/run", { includeMemory }),
+  kbAnalysisDecide: (runId: string, decisions: { entryId: string; decision: Decision; mergeInto?: string }[]) =>
+    postWithStatus<KbDecisionsResponse>("/diagnostics/kb-analysis/decisions", { runId, decisions }),
   sweepExecute: (token: string) => post<SweepResult>("/sweep/execute", { token }),
 
   // Sandboxes

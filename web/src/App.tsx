@@ -34,6 +34,7 @@ const PromptsPage = lazy(() => import("./components/PromptsPage.js").then((m) =>
 const EnvManager = lazy(() => import("./components/EnvManager.js").then((m) => ({ default: m.EnvManager })));
 const SandboxManager = lazy(() => import("./components/SandboxManager.js").then((m) => ({ default: m.SandboxManager })));
 const SweepPage = lazy(() => import("./components/SweepPage.js").then((m) => ({ default: m.SweepPage })));
+const DiagnosticsPage = lazy(() => import("./components/diagnostics/DiagnosticsPage.js").then((m) => ({ default: m.DiagnosticsPage })));
 const CronManager = lazy(() => import("./components/CronManager.js").then((m) => ({ default: m.CronManager })));
 const AgentsPage = lazy(() => import("./components/AgentsPage.js").then((m) => ({ default: m.AgentsPage })));
 const RunsPage = lazy(() => import("./components/RunsPage.js").then((m) => ({ default: m.RunsPage })));
@@ -79,6 +80,7 @@ export default function App() {
   const isEnvironmentsPage = route.page === "environments";
   const isSandboxesPage = route.page === "sandboxes";
   const isSweepPage = route.page === "sweep";
+  const isDiagnosticsPage = route.page === "diagnostics";
   const isScheduledPage = route.page === "scheduled";
   const isAgentsPage = route.page === "agents" || route.page === "agent-detail";
   const isRunsPage = route.page === "runs";
@@ -381,6 +383,12 @@ export default function App() {
           {isSweepPage && (
             <div className="absolute inset-0">
               <Suspense fallback={<LazyFallback />}><SweepPage embedded /></Suspense>
+            </div>
+          )}
+
+          {isDiagnosticsPage && (
+            <div className="absolute inset-0">
+              <Suspense fallback={<LazyFallback />}><DiagnosticsPage embedded /></Suspense>
             </div>
           )}
 
