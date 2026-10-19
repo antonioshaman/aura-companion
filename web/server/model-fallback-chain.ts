@@ -48,17 +48,101 @@ export const CLAUDE_MODEL_FALLBACK_CHAIN: readonly string[] = [
 export function nextModelInChain(
   current: string | undefined | null,
   substitutions: readonly BrokenModelSubstitution[] = BROKEN_MODEL_SUBSTITUTIONS,
+  chain: readonly string[] = CLAUDE_MODEL_FALLBACK_CHAIN,
 ): string | null {
   if (!current) return null;
-  const idx = CLAUDE_MODEL_FALLBACK_CHAIN.indexOf(current);
+  const idx = chain.indexOf(current);
   if (idx < 0) return null;
-  for (const candidate of CLAUDE_MODEL_FALLBACK_CHAIN.slice(idx + 1)) {
+  for (const candidate of chain.slice(idx + 1)) {
     if (resolveModelSubstitution(candidate, substitutions) === null) {
       return candidate;
     }
   }
   return null;
 }
+
+/**
+ * Cross-check the two hand-maintained model tables — the fallback chain
+ * (this file) and {@link BROKEN_MODEL_SUBSTITUTIONS} — and return one
+ * human-readable problem per violated invariant (empty = in sync).
+ *
+ * Invariants (each one, if broken, reopens a known failure mode):
+ *  1. The chain has no duplicate ids (an `indexOf`-based successor lookup
+ *     would loop back to the first occurrence).
+ *  2. Each substitution `from` appears once and never maps to itself.
+ *  3. A substitution `to` is not itself a substituted `from` — the spawn
+ *     rewrite is single-hop, so a chained entry would spawn the broken model.
+ *  4. `nextModelInChain` only ever yields a strictly-later, NON-substituted
+ *     model. A substituted successor is rewritten on relaunch, often straight
+ *     back to the model that just failed — a rotation that never terminates
+ *     (2026-09-09 Silent Cliff, default model). The skip in
+ *     `nextModelInChain` guarantees this today; the check keeps a future
+ *     edit to either table (or to the skip) from regressing it silently.
+ */
+export function findModelTableInconsistencies(
+  chain: readonly string[] = CLAUDE_MODEL_FALLBACK_CHAIN,
+  substitutions: readonly BrokenModelSubstitution[] = BROKEN_MODEL_SUBSTITUTIONS,
+): string[] {
+  const problems: string[] = [];
+
+  const seenChain = new Set<string>();
+  for (const model of chain) {
+    if (seenChain.has(model)) problems.push(`fallback chain lists ${model} more than once`);
+    seenChain.add(model);
+  }
+
+  const froms = new Set<string>();
+  for (const sub of substitutions) {
+    if (froms.has(sub.from)) problems.push(`substitution table lists ${sub.from} more than once`);
+    froms.add(sub.from);
+    if (sub.from === sub.to) problems.push(`substitution ${sub.from} -> ${sub.to} maps a model to itself`);
+  }
+  for (const sub of substitutions) {
+    if (sub.from !== sub.to && froms.has(sub.to)) {
+      problems.push(
+        `substitution ${sub.from} -> ${sub.to} targets another substituted model ` +
+          `(the spawn rewrite is single-hop, so ${sub.to} would launch broken)`,
+      );
+    }
+  }
+
+  chain.forEach((model, idx) => {
+    const next = nextModelInChain(model, substitutions, chain);
+    if (next === null) return;
+    if (chain.indexOf(next) <= idx) {
+      problems.push(`nextModelInChain(${model}) -> ${next} does not move down the chain`);
+    }
+    if (resolveModelSubstitution(next, substitutions) !== null) {
+      problems.push(
+        `nextModelInChain(${model}) -> ${next}, which BROKEN_MODEL_SUBSTITUTIONS rewrites on relaunch ` +
+          `(the downgrade would bounce back instead of terminating)`,
+      );
+    }
+  });
+
+  return problems;
+}
+
+/**
+ * Throw when the live tables are out of sync — run once at module load so a
+ * bad edit fails the first test that imports this module (and server start)
+ * with a named error, instead of silently reopening the non-terminating
+ * rotation. Exported for tests with injected tables.
+ */
+export function assertModelTablesInSync(
+  chain: readonly string[] = CLAUDE_MODEL_FALLBACK_CHAIN,
+  substitutions: readonly BrokenModelSubstitution[] = BROKEN_MODEL_SUBSTITUTIONS,
+): void {
+  const problems = findModelTableInconsistencies(chain, substitutions);
+  if (problems.length > 0) {
+    throw new Error(
+      "CLAUDE_MODEL_FALLBACK_CHAIN and BROKEN_MODEL_SUBSTITUTIONS are out of sync:\n  - " +
+        problems.join("\n  - "),
+    );
+  }
+}
+
+assertModelTablesInSync();
 
 /** One session's silence-recurrence bookkeeping — see `session-orchestrator.ts:silenceRecurrenceCounts`. */
 export interface SilenceRecurrenceRecord {
