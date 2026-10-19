@@ -37,6 +37,7 @@ import {
   argvSha256,
   readRuntimeSidecar,
   writeRuntimeSidecar,
+  deleteRuntimeSidecar,
 } from "./cli-runtime-sidecar.js";
 import {
   OBSERVER_ALLOWED_TOOLS,
@@ -2913,8 +2914,23 @@ export class CliLauncher {
         try { process.kill(pid, "SIGTERM"); } catch {}
         const exited = await this.waitForPidExit(pid, 5_000);
         if (!exited) {
-          console.log(`[cli-launcher] Force-killing restart-survived session ${sessionId} (pid ${pid})`);
-          try { process.kill(pid, "SIGKILL"); } catch {}
+          // PR #188 finding #2 — re-verify identity before the UNBLOCKABLE
+          // SIGKILL. `waitForPidExit` only observes liveness: if the CLI
+          // exited during the 5s grace and the kernel handed its PID to an
+          // unrelated process, the PID reads as "still alive". Re-run the
+          // three-factor probe (re-reads /proc starttime + argv hash) and
+          // only escalate on a positive identity; a stray SIGTERM can be
+          // ignored by its target, a stray SIGKILL cannot.
+          if (this.shouldSignalPreviousInstancePid(session)) {
+            console.log(`[cli-launcher] Force-killing restart-survived session ${sessionId} (pid ${pid})`);
+            try { process.kill(pid, "SIGKILL"); } catch {}
+          } else {
+            log.warn("cli-launcher", "declined SIGKILL escalation — PID identity no longer matches after grace", {
+              event: "kill.sigkill_declined",
+              sessionId,
+              pid,
+            });
+          }
         }
         session.state = "exited";
         session.exitCode = -1;
@@ -2999,6 +3015,10 @@ export class CliLauncher {
     info.state = "exited";
     info.archived = true;
     if (info.exitCode == null) info.exitCode = -1;
+    // PR #188 finding #16: the process is gone for good — drop its
+    // spawn-time identity sidecar so they don't pile up. A later unarchive
+    // + relaunch writes a fresh one at spawn.
+    if (this.store) deleteRuntimeSidecar(this.store.directory, sessionId);
     this.persistState();
   }
 
@@ -3045,6 +3065,8 @@ export class CliLauncher {
     this.processes.delete(sessionId);
     this.codexWsProxies.delete(sessionId);
     this.sessionEnvs.delete(sessionId);
+    // PR #188 finding #16: session record is gone → its sidecar is garbage.
+    if (this.store) deleteRuntimeSidecar(this.store.directory, sessionId);
     this.persistState();
   }
 
@@ -3059,6 +3081,8 @@ export class CliLauncher {
         this.sessions.delete(id);
         this.sessionEnvs.delete(id);
         this.codexWsProxies.delete(id);
+        // PR #188 finding #16: pruned record → delete its sidecar too.
+        if (this.store) deleteRuntimeSidecar(this.store.directory, id);
         pruned++;
       }
     }

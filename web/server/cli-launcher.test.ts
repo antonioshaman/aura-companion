@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import { mkdtempSync, rmSync, realpathSync, writeFileSync, mkdirSync, readFileSync, utimesSync, lstatSync, renameSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, realpathSync, writeFileSync, mkdirSync, readFileSync, utimesSync, lstatSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -951,6 +951,57 @@ describe("state management", () => {
     });
   });
 
+  // PR #188 finding #16: `<sessionId>.runtime.json` sidecars used to be
+  // written at every spawn and never deleted, piling up one file per session
+  // ever created. These tests pin that every DEFINITIVE terminal point
+  // (removeSession on delete, pruneExited, markSweptTerminal) removes it.
+  // The sidecar is written explicitly so the assertion doesn't depend on the
+  // mocked spawn path having reached writeRuntimeSidecarForSpawn.
+  function seedSidecar(sessionId: string): string {
+    writeRuntimeSidecar(store.directory, sessionId, {
+      schemaVersion: SIDECAR_SCHEMA_VERSION,
+      pid: 12345,
+      processStartMs: Date.now(),
+      argvSha256: argvSha256(["claude", "--print"]),
+    });
+    const p = sidecarPath(store.directory, sessionId);
+    expect(existsSync(p)).toBe(true);
+    return p;
+  }
+
+  describe("runtime sidecar cleanup at terminal points (#188 finding #16)", () => {
+    it("removeSession deletes the session's runtime sidecar", () => {
+      launcher.launch({ cwd: "/tmp" });
+      const p = seedSidecar("test-session-id");
+      launcher.removeSession("test-session-id");
+      expect(existsSync(p)).toBe(false);
+    });
+
+    it("pruneExited deletes the sidecars of pruned sessions", async () => {
+      launcher.launch({ cwd: "/tmp" });
+      const p = seedSidecar("test-session-id");
+      exitResolve(0);
+      await new Promise((r) => setTimeout(r, 10));
+      expect(launcher.pruneExited()).toBe(1);
+      expect(existsSync(p)).toBe(false);
+    });
+
+    it("markSweptTerminal deletes the sidecar of the swept session", () => {
+      launcher.launch({ cwd: "/tmp" });
+      const p = seedSidecar("test-session-id");
+      launcher.markSweptTerminal("test-session-id");
+      expect(existsSync(p)).toBe(false);
+    });
+
+    it("does not touch other sessions' sidecars and tolerates an already-missing file", () => {
+      launcher.launch({ cwd: "/tmp" });
+      const other = seedSidecar("some-other-session");
+      // No sidecar for test-session-id → ENOENT path must not throw.
+      expect(() => launcher.removeSession("test-session-id")).not.toThrow();
+      expect(existsSync(other)).toBe(true);
+    });
+  });
+
   describe("removeSession", () => {
     it("deletes session from internal maps", () => {
       launcher.launch({ cwd: "/tmp" });
@@ -1379,6 +1430,87 @@ describe("kill: restart-survived processes", () => {
     // Critically: the reused PID was never SIGTERM'd.
     expect(killSpy).not.toHaveBeenCalledWith(88888, "SIGTERM");
 
+    killSpy.mockRestore();
+  });
+
+  // PR #188 finding #2: the restart-survived kill path is SIGTERM → 5s grace
+  // → SIGKILL against a bare PID (no Bun.Subprocess handle). If the CLI exits
+  // during the grace and the kernel reuses its PID for an unrelated process,
+  // the liveness poll still says "alive". These two tests pin that identity
+  // is RE-VERIFIED right before the SIGKILL: a reused PID must never get the
+  // unblockable signal, while our own stuck process still does.
+  async function restoreSurvivor(sessionId: string, pid: number) {
+    process.env.COMPANION_CLAUDE_TRANSPORT = "ws";
+    store.saveLauncher([
+      {
+        sessionId,
+        pid,
+        state: "connected" as const,
+        cwd: "/tmp/project",
+        createdAt: Date.now(),
+        cliSessionId: `cli-${sessionId}`,
+      },
+    ]);
+    const procIdentity = await import("./process-identity.js");
+    procIdentity.setProcReaderForTests({
+      platform: () => "linux",
+      killCheck: () => true,
+      readCmdline: () =>
+        ["claude", "--sdk-url", `ws://localhost:3456/ws/cli/${sessionId}`].join("\0") + "\0",
+    });
+    const newLauncher = new CliLauncher(3456);
+    newLauncher.setStore(store);
+    expect(newLauncher.restoreFromDisk()).toBe(1);
+    return { newLauncher, procIdentity };
+  }
+
+  it("does NOT SIGKILL when the PID was reused by another process during the SIGTERM grace", async () => {
+    const { newLauncher, procIdentity } = await restoreSurvivor("survived-reuse", 66666);
+    // Simulate the grace window elapsing with the PID still "alive" — but by
+    // then the kernel has handed it to an unrelated process (argv changed).
+    (newLauncher as any).waitForPidExit = async () => {
+      procIdentity.setProcReaderForTests({
+        platform: () => "linux",
+        killCheck: () => true,
+        readCmdline: () => ["/usr/bin/vim", "notes.txt"].join("\0") + "\0",
+      });
+      return false;
+    };
+    const signals: Array<string | number | undefined> = [];
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(((
+      pid: number,
+      signal?: string | number,
+    ) => {
+      if (pid === 66666) signals.push(signal);
+      return true;
+    }) as any);
+
+    await newLauncher.kill("survived-reuse");
+    // SIGTERM went to our verified process; the escalation was declined.
+    expect(signals).toContain("SIGTERM");
+    expect(signals).not.toContain("SIGKILL");
+    // The session is still finalised (pid cleared, exited) — the leak, if
+    // any, is the reused PID's owner, which is not ours to kill.
+    expect(newLauncher.getSession("survived-reuse")?.pid).toBeUndefined();
+    expect(newLauncher.getSession("survived-reuse")?.state).toBe("exited");
+    killSpy.mockRestore();
+  });
+
+  it("still SIGKILLs our own process when it ignores SIGTERM and identity still verifies", async () => {
+    const { newLauncher } = await restoreSurvivor("survived-stuck", 66667);
+    // Grace elapses, the PID is still ours (reader unchanged → match).
+    (newLauncher as any).waitForPidExit = async () => false;
+    const signals: Array<string | number | undefined> = [];
+    const killSpy = vi.spyOn(process, "kill").mockImplementation(((
+      pid: number,
+      signal?: string | number,
+    ) => {
+      if (pid === 66667) signals.push(signal);
+      return true;
+    }) as any);
+
+    await newLauncher.kill("survived-stuck");
+    expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
     killSpy.mockRestore();
   });
 
