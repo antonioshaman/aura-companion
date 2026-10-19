@@ -67,6 +67,21 @@ export function clearAnnouncerScope(scope: string): void {
  * Exported so the same labels appear in BlockerBanner without drift.
  * Beck F4: each branch (recent / minutes / hours / days) has its own test.
  */
+/**
+ * Absolute local time for a finding or checkpoint ("14:05", or "18 Oct 14:05"
+ * when it is not from today) — owner request 2026-10-19: show WHEN each check
+ * and review happened, not only how long ago.
+ */
+export function formatClockTime(atMs: number, nowMs: number): string {
+  const d = new Date(atMs);
+  const now = new Date(nowMs);
+  const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  if (sameDay) return hm;
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  return `${d.getDate()} ${months[d.getMonth()]} ${hm}`;
+}
+
 export function formatRelativeTime(toMs: number, fromMs: number): string {
   const delta = Math.max(0, fromMs - toMs);
   if (delta < 30_000) return "just now";
@@ -357,9 +372,13 @@ function FindingRow({
       {isDismissed && <DismissedChip />}
       {alsoFlaggedBy && alsoFlaggedBy.length > 0 && <AlsoFlaggedChip by={alsoFlaggedBy} />}
       {showReviewer && <ReviewerBadge finding={finding} />}
-      <span className="text-[10px] text-cc-muted shrink-0 font-mono-code">
-        {formatRelativeTime(finding.receivedAt, nowMs)}
-      </span>
+      <time
+        dateTime={new Date(finding.receivedAt).toISOString()}
+        title={new Date(finding.receivedAt).toLocaleString()}
+        className="text-[10px] text-cc-muted shrink-0 font-mono-code"
+      >
+        {formatClockTime(finding.receivedAt, nowMs)} · {formatRelativeTime(finding.receivedAt, nowMs)}
+      </time>
       {canDismiss && (
         <button
           type="button"

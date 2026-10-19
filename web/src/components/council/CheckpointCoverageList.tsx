@@ -17,6 +17,7 @@
 import { useState } from "react";
 import type { BrowserCheckpointCoverageGap } from "../../types.js";
 import { COVERAGE_KIND_LABEL, coverageGapExplanation } from "../../utils/checkpoint-coverage.js";
+import { formatClockTime } from "./FindingsLog.js";
 
 export const COLLAPSED_LIMIT = 3;
 
@@ -69,6 +70,11 @@ export function CheckpointCoverageList({ gaps }: CheckpointCoverageListProps) {
                 {COVERAGE_KIND_LABEL[g.kind]}
               </span>
               <span className="min-w-0 flex-1">
+                {g.emittedAt !== undefined && (
+                  <time dateTime={new Date(g.emittedAt).toISOString()} className="text-cc-muted font-mono-code mr-1">
+                    {formatClockTime(g.emittedAt, Date.now())}
+                  </time>
+                )}
                 {g.phase && <span className="text-cc-fg">{g.phase} </span>}
                 <span className="font-mono-code text-cc-muted break-all">{g.checkpointId}</span>
                 <span className="sr-only"> — {explanation}</span>

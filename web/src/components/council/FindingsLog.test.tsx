@@ -6,6 +6,7 @@ import {
   FindingsLog,
   formatRelativeTime,
   severityClass,
+  formatClockTime,
 } from "./FindingsLog.js";
 import type { ObserverFinding } from "../../types.js";
 
@@ -462,5 +463,16 @@ describe("FindingsLog — second opinion", () => {
     const { axe } = await import("vitest-axe");
     const { container } = render(<FindingsLog findings={[observer, dup, second]} onDismissStop={() => {}} />);
     expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
+// Owner request 2026-10-19: each finding shows WHEN it arrived (absolute
+// clock time, with the date when it is not today) next to the relative age,
+// as a <time> element with a machine-readable datetime.
+describe("formatClockTime", () => {
+  it("shows HH:MM for today and the date for older items", () => {
+    const now = new Date(2026, 9, 19, 15, 30).getTime();
+    expect(formatClockTime(new Date(2026, 9, 19, 9, 5).getTime(), now)).toBe("09:05");
+    expect(formatClockTime(new Date(2026, 9, 18, 23, 59).getTime(), now)).toBe("18 Oct 23:59");
   });
 });

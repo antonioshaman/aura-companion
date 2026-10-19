@@ -6058,6 +6058,30 @@ describe("POST /api/sessions/:id/council/checkpoint", () => {
     const path = await import("node:path");
     tmpCwd = path.join(os.tmpdir(), `aura-checkpoint-test-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
     fs.mkdirSync(tmpCwd, { recursive: true });
+    // The route now requires every artifact to exist in the pair's workspace.
+    fs.mkdirSync(path.join(tmpCwd, "docs"), { recursive: true });
+    fs.writeFileSync(path.join(tmpCwd, "docs", "plan.md"), "# plan\n");
+  });
+
+  // 2026-10-19: an orchestrator working in a /tmp worktree emitted paths that
+  // existed only there; the observer woke, could not read them and filed an
+  // OBSERVER-BLOCKED INFO. The route must reject such a checkpoint up front,
+  // name the missing paths, and write nothing.
+  it("returns 400 naming the artifact paths that do not exist in the pair's workspace, and writes nothing", async () => {
+    const fsp = await import("node:fs/promises");
+    const path = await import("node:path");
+    launcher.getSession.mockReturnValue({ sessionId: "s_orch", state: "running", cwd: tmpCwd });
+    orchestrator.getCouncilGroupBySessionId.mockReturnValue({ sessionGroupId: "grp_test", role: "orchestrator" });
+    const res = await app.request("/api/sessions/s_orch/council/checkpoint", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(validPayload({ artifact_paths: ["docs/plan.md", "web/server/only-in-worktree.ts"] })),
+    });
+    expect(res.status).toBe(400);
+    const json = await res.json();
+    expect(json.error).toBe("validation_failed");
+    expect(json.missingPaths).toEqual(["web/server/only-in-worktree.ts"]);
+    await expect(fsp.access(path.join(tmpCwd, ".council", "checkpoints", "council-plan.grp_test.json"))).rejects.toThrow();
   });
 
   // Schema-valid payload. Tests mutate copies of this base to exercise

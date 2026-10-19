@@ -662,6 +662,8 @@ export interface BrowserCheckpointCoverageGap {
   sequence?: number;
   kind: "unreviewed" | "unverified";
   reason?: "superseded" | "degraded" | "no_review" | "probe_reply";
+  /** When the orchestrator emitted the checkpoint (epoch ms), when known. */
+  emittedAt?: number;
 }
 
 export interface BrowserObserverFinding {

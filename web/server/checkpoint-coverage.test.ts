@@ -8,6 +8,7 @@ import { collectCheckpointCoverageGaps } from "./checkpoint-coverage.js";
 // leave no trace (prod grp_1af4cd: plan-147 never reviewed, panel silent),
 // and an unverified empty review looked clean (checkpoint 148). The coverage
 // list makes both explicit, from the files on disk.
+const EMITTED = "2026-10-15T10:00:00Z";
 const GROUP = "grp_cov";
 let cwd: string;
 
@@ -39,8 +40,9 @@ describe("collectCheckpointCoverageGaps", () => {
     writeCheckpoint("council-implement", "council-implement-149", 149);
     writeReview("council-implement", "council-implement-149"); // a real review: covered
     expect(collectCheckpointCoverageGaps({ cwd, sessionGroupId: GROUP })).toEqual([
-      { checkpointId: "council-plan-147", phase: "council-plan", sequence: 147, kind: "unreviewed", reason: "no_review" },
-      { checkpointId: "council-review-148", phase: "council-review", sequence: 148, kind: "unverified" },
+      // emittedAt (owner request 2026-10-19): the panel shows WHEN each checkpoint was emitted.
+      { checkpointId: "council-plan-147", phase: "council-plan", sequence: 147, kind: "unreviewed", reason: "no_review", emittedAt: Date.parse(EMITTED) },
+      { checkpointId: "council-review-148", phase: "council-review", sequence: 148, kind: "unverified", emittedAt: Date.parse(EMITTED) },
     ]);
   });
 
