@@ -54,6 +54,10 @@ else
   echo "release.json: GitHub unreachable, keeping the committed copy" >&2
 fi
 
+# 2c. npm downloads for the footer counter: same-origin /downloads.json, for the
+#     same TSPU reason. Also refreshed daily from the auracomp crontab.
+"$(dirname "$0")/refresh-npm-downloads.sh"
+
 # 3. Verify the live origin serves exactly what we shipped.
 want="$(sha256sum "$SITE_DIR/index.html" | cut -d' ' -f1)"
 have="$(curl -fsS --resolve "auraco.space:443:$RU_IP" https://auraco.space/ | sha256sum | cut -d' ' -f1)"

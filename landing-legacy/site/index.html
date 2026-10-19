@@ -500,6 +500,9 @@
   @media (max-width: 720px) { .footer-about { grid-column: 1 / -1; } }
   .footer-about p { color: var(--text-mute); font-size: 14px; margin-top: 14px; max-width: 340px; line-height: 1.6; }
   .footer-bottom { display: flex; justify-content: space-between; align-items: center; padding-top: 24px; border-top: 1px solid var(--border); color: var(--text-dim); font-size: 13px; flex-wrap: wrap; gap: 12px; }
+  .footer-stat { color: inherit; text-decoration: none; transition: color 0.18s ease; }
+  .footer-stat:hover { color: var(--amber); }
+  #npm-downloads-n { color: var(--amber); font-weight: 600; }
 
   /* ─────────────── 90s machine / Matrix terminal retheme ─────────────── */
   body { font-family: 'JetBrains Mono', ui-monospace, 'Courier New', monospace; letter-spacing: 0.01em; }
@@ -1234,6 +1237,7 @@
     </div>
     <div class="footer-bottom">
       <div>© 2026 auraco.space · Aura Companion работает на MIT-лицензии</div>
+      <div><a class="footer-stat" href="https://www.npmjs.com/package/aura-companion" target="_blank" rel="noopener">npm: <span id="npm-downloads-n">756</span> <span id="npm-downloads-w">скачиваний</span> за 30 дней</a></div>
       <div>Сделано с теплом для пост-советского пространства</div>
     </div>
   </div>
@@ -1272,6 +1276,28 @@
         var b = document.getElementById('release-version-term');
         if (a) a.textContent = v;
         if (b) b.textContent = v;
+      }).catch(function(){});
+  } catch (e) {}
+})();
+</script>
+<script>
+(function(){
+  // npm downloads (last 30 days) from same-origin /downloads.json, refreshed daily
+  // by refresh-npm-downloads.sh — no request to a foreign host. The baked-in
+  // number is the fallback.
+  try {
+    var WORDS = { one: 'скачивание', few: 'скачивания', many: 'скачиваний', other: 'скачивания' };
+    var ctrl = new AbortController();
+    setTimeout(function(){ ctrl.abort(); }, 4000);
+    fetch('/downloads.json', { signal: ctrl.signal, cache: 'no-cache' })
+      .then(function(r){ return r.ok ? r.json() : null; })
+      .then(function(j){
+        if (!j || typeof j.downloads !== 'number' || !(j.downloads >= 0)) return;
+        var n = Math.floor(j.downloads);
+        var a = document.getElementById('npm-downloads-n');
+        var w = document.getElementById('npm-downloads-w');
+        if (a) a.textContent = n.toLocaleString('ru-RU');
+        if (w) w.textContent = WORDS[new Intl.PluralRules('ru-RU').select(n)] || WORDS.many;
       }).catch(function(){});
   } catch (e) {}
 })();
