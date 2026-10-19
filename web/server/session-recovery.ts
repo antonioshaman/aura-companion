@@ -81,6 +81,20 @@ export interface RelaunchOutcome {
   /** Set when an automatic caller found a relaunch already settling. */
   skipped?: "recently_relaunched";
 }
+/** Why the auto-relaunch path gave up (`session.relaunch.aborted` → `reason`). */
+export type AutoRelaunchAbortReason = "budget_exhausted" | "failed" | "launcher_refused" | "threw";
+
+/** How {@link SessionRecovery.handleAutoRelaunch} ended, after it claimed the session. */
+type AutoRelaunchExit =
+  | { kind: "skipped"; message: string; fields: Record<string, unknown> }
+  | { kind: "exhausted" }
+  | { kind: "relaunched"; count: number; result: RelaunchOutcome }
+  | { kind: "aborted"; reason: "threw"; error: string; attempted: boolean };
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 export const RECONNECT_GRACE_MS = Number(process.env.COMPANION_RECONNECT_GRACE_MS || "30000");
 
 /**
@@ -272,6 +286,8 @@ export class SessionRecovery {
 
   // Auto-relaunch state
   private relaunchingSet = new Set<string>();
+  /** Cooldown timers that release a `relaunchingSet` claim after an attempted auto-relaunch. */
+  private readonly relaunchCooldowns = new Map<string, ReturnType<typeof setTimeout>>();
   private autoRelaunchCounts = new Map<string, number>();
   /** P4/FIX-AUTOHEAL-1: the one `launcher.relaunch` running per session. */
   private readonly relaunchInFlight = new Map<string, Promise<RelaunchOutcome>>();
@@ -437,6 +453,7 @@ export class SessionRecovery {
     this.autoRelaunchCounts.delete(sessionId);
     this.relaunchExhaustedNotified.delete(sessionId);
     this.relaunchingSet.delete(sessionId);
+    this.cancelRelaunchCooldown(sessionId);
     this.lastRelaunchOkAt.delete(sessionId);
     this.cancelSettleRecheck(sessionId);
     this.driftRecoveryTimes.delete(sessionId);
@@ -1070,6 +1087,15 @@ export class SessionRecovery {
     }
   }
 
+  /**
+   * Auto-relaunch (keepalive, boot resume, a returning browser, a transport
+   * drop, the settle re-check). The pre-claim guards below return before any
+   * state is taken. After `relaunchingSet.add` every outcome — skip, budget
+   * exhaustion, success, failure, a throw anywhere in the body — leaves
+   * through {@link finishAutoRelaunch}, which releases the claim; failures go
+   * through {@link abortRelaunch}. This method never rejects: its callers are
+   * fire-and-forget timers, and an unhandled rejection exits the Bun server.
+   */
   async handleAutoRelaunch(sessionId: string): Promise<void> {
     if (this.relaunchingSet.has(sessionId)) return;
     const info = this.launcher.getSession(sessionId);
@@ -1090,35 +1116,43 @@ export class SessionRecovery {
     if (this.relaunchExhaustedNotified.has(sessionId)) return;
 
     this.relaunchingSet.add(sessionId);
+    let exit: AutoRelaunchExit;
+    try {
+      exit = await this.runAutoRelaunch(sessionId, info);
+    } catch (err) {
+      // A guard threw before any relaunch started (e.g. `isContainerAlive`
+      // on an invalid persisted containerId). Nothing was spawned.
+      exit = { kind: "aborted", reason: "threw", error: errorMessage(err), attempted: false };
+    }
+    this.finishAutoRelaunch(sessionId, info, exit);
+  }
 
+  /**
+   * The body of {@link handleAutoRelaunch} after the claim: it decides and
+   * acts, and returns how it ended. It releases nothing itself.
+   */
+  private async runAutoRelaunch(sessionId: string, info: SdkSessionInfo | undefined): Promise<AutoRelaunchExit> {
     await new Promise((r) => setTimeout(r, RELAUNCH_GRACE_MS));
     // P4/FIX-RECONNECT-RELAUNCH: every "alive, not relaunching" exit below is
     // logged (EC-9) — a silent return here is how a deaf observer sat dead for
     // 12 h while each returning browser logged "requesting relaunch".
-    const skipAlive = (reason: string, extra: Record<string, unknown> = {}) => {
-      log.info("orchestrator", "auto-relaunch skipped: backend considered alive", {
-        event: "session.relaunch.skipped_alive",
-        sessionId,
-        role: info?.sessionGroupRole,
-        reason,
-        ...extra,
-      });
-      this.relaunchingSet.delete(sessionId);
-    };
-    if (this.wsBridge.isCliConnected(sessionId)) { skipAlive("cli_connected"); return; }
+    const skipAlive = (reason: string, extra: Record<string, unknown> = {}): AutoRelaunchExit => ({
+      kind: "skipped",
+      message: "auto-relaunch skipped: backend considered alive",
+      fields: { event: "session.relaunch.skipped_alive", sessionId, role: info?.sessionGroupRole, reason, ...extra },
+    });
+    if (this.wsBridge.isCliConnected(sessionId)) return skipAlive("cli_connected");
     // P4/FIX-AUTOHEAL-1: another path (manual, observer auto-heal, boot
     // watchdog) is relaunching this session or just did — a fresh CLI sits in
     // `starting` with no adapter for up to ~16 s (Codex), which the deaf
     // check below would read as "relaunch again". Leave it to settle.
     if (this.isRelaunchSettling(sessionId)) {
-      log.info("orchestrator", "auto-relaunch skipped: another relaunch in flight or settling", {
-        event: "session.relaunch.skipped_settling",
-        sessionId,
-        source: "auto_relaunch",
-      });
       this.scheduleSettleRecheck(sessionId);
-      this.relaunchingSet.delete(sessionId);
-      return;
+      return {
+        kind: "skipped",
+        message: "auto-relaunch skipped: another relaunch in flight or settling",
+        fields: { event: "session.relaunch.skipped_settling", sessionId, source: "auto_relaunch" },
+      };
     }
     const freshInfo = this.launcher.getSession(sessionId);
     // W2 review Q1: the guards at the top ran BEFORE the grace pause. A user
@@ -1126,13 +1160,15 @@ export class SessionRecovery {
     // pause spawns a CLI for a session the user just stopped. (A deleted
     // session has no record and ends in `unknown_session` below.)
     if (freshInfo?.archived || this.stoppedByUser.has(sessionId)) {
-      log.info("orchestrator", "auto-relaunch skipped: stopped or archived during grace", {
-        event: "session.relaunch.skipped_during_grace",
-        sessionId,
-        reason: freshInfo?.archived ? "archived" : "stopped_by_user",
-      });
-      this.relaunchingSet.delete(sessionId);
-      return;
+      return {
+        kind: "skipped",
+        message: "auto-relaunch skipped: stopped or archived during grace",
+        fields: {
+          event: "session.relaunch.skipped_during_grace",
+          sessionId,
+          reason: freshInfo?.archived ? "archived" : "stopped_by_user",
+        },
+      };
     }
     // Only check PID liveness if the session is NOT already "exited".
     // After idle-kill or explicit kill(), the PID field stays set but the
@@ -1158,64 +1194,97 @@ export class SessionRecovery {
     // silently, on every returning browser. Only an attached adapter makes
     // that state believable.
     if (freshInfo && (freshInfo.state === "connected" || freshInfo.state === "running") && adapterAttached) {
-      skipAlive("launcher_state", { state: freshInfo.state });
-      return;
+      return skipAlive("launcher_state", { state: freshInfo.state });
     }
     if (freshInfo && freshInfo.state !== "exited") {
       if (freshInfo.containerId) {
         const containerState = containerManager.isContainerAlive(freshInfo.containerId);
-        if (containerState === "running") {
-          skipAlive("container_running", { adapterAttached });
-          return;
-        }
+        if (containerState === "running") return skipAlive("container_running", { adapterAttached });
       } else if (freshInfo.pid && adapterAttached) {
-        try { process.kill(freshInfo.pid, 0); skipAlive("pid_alive"); return; } catch {}
+        try { process.kill(freshInfo.pid, 0); return skipAlive("pid_alive"); } catch {}
       }
     }
 
     const count = this.autoRelaunchCounts.get(sessionId) ?? 0;
-    if (count >= MAX_AUTO_RELAUNCHES) {
-      metricsCollector.recordRelaunchExhausted();
-      log.warn("orchestrator", "Auto-relaunch limit reached", { sessionId, maxAttempts: MAX_AUTO_RELAUNCHES });
-      this.wsBridge.broadcastToSession(sessionId, {
-        type: "error",
-        message: "Session keeps crashing. Please relaunch manually.",
-      });
-      this.relaunchExhaustedNotified.add(sessionId);
-      // PLAN Task 5: signal council reconnect listeners that this session's
-      // budget is spent — they can short-circuit `reconnecting → degraded`
-      // without waiting for the 45s timer.
-      companionBus.emit("session:relaunch-failed", { sessionId, reason: "budget_exhausted" });
-      this.relaunchingSet.delete(sessionId);
-      return;
-    }
+    if (count >= MAX_AUTO_RELAUNCHES) return { kind: "exhausted" };
 
     // A `starting` session is normally mid-spawn and must not be double-
     // relaunched — EXCEPT the surviving-but-deaf case above: a session stuck
     // in `starting` after a Bun restart, whose PID lives but whose adapter
     // died, will never leave `starting` on its own. Allow it to relaunch.
-    if (freshInfo && (freshInfo.state !== "starting" || !adapterAttached)) {
-      this.autoRelaunchCounts.set(sessionId, count + 1);
-      metricsCollector.recordRelaunchAttempted();
-      log.info("orchestrator", "Auto-relaunching CLI", { sessionId, attempt: count + 1, maxAttempts: MAX_AUTO_RELAUNCHES });
-      const session = this.wsBridge.getSession(sessionId);
-      if (session?.stateMachine) {
-        session.stateMachine.transition("starting", "relaunch_initiated");
-      }
-      // Council Review 2026-05-15-1015 CR-12 (Subprocess P2): the session is
-      // marked intentional BEFORE the launcher's SIGTERM on the old proc, so
-      // its `session:exited` does not arm the council reconnect timer
-      // (transient `reconnecting → active` flicker). `relaunchOnce` owns that
-      // mark and releases it in ALL paths — a stale mark would lock
-      // `scheduleProactiveRelaunch` out of recovery — unless archive/delete
-      // claimed it meanwhile (P4/FIX-AUTOHEAL-1, EC-2).
-      try {
-        const result = await this.relaunchOnce(sessionId, "auto_relaunch");
+    if (!freshInfo || (freshInfo.state === "starting" && adapterAttached)) {
+      return skipAlive(freshInfo ? "starting" : "unknown_session");
+    }
+
+    this.autoRelaunchCounts.set(sessionId, count + 1);
+    metricsCollector.recordRelaunchAttempted();
+    log.info("orchestrator", "Auto-relaunching CLI", { sessionId, attempt: count + 1, maxAttempts: MAX_AUTO_RELAUNCHES });
+    // Council Review 2026-05-15-1015 CR-12 (Subprocess P2): the session is
+    // marked intentional BEFORE the launcher's SIGTERM on the old proc, so
+    // its `session:exited` does not arm the council reconnect timer
+    // (transient `reconnecting → active` flicker). `relaunchOnce` owns that
+    // mark and releases it in ALL paths — a stale mark would lock
+    // `scheduleProactiveRelaunch` out of recovery — unless archive/delete
+    // claimed it meanwhile (P4/FIX-AUTOHEAL-1, EC-2).
+    try {
+      this.wsBridge.getSession(sessionId)?.stateMachine?.transition("starting", "relaunch_initiated");
+      const result = await this.relaunchOnce(sessionId, "auto_relaunch");
+      return { kind: "relaunched", count, result };
+    } catch (err) {
+      // Bun.spawn throws synchronously (ENOENT) when the session cwd is gone.
+      // The attempt counts against the budget like any failed relaunch.
+      return { kind: "aborted", reason: "threw", error: errorMessage(err), attempted: true };
+    }
+  }
+
+  /** The single exit of {@link handleAutoRelaunch}: every claim is released here. */
+  private finishAutoRelaunch(sessionId: string, info: SdkSessionInfo | undefined, exit: AutoRelaunchExit): void {
+    switch (exit.kind) {
+      case "skipped":
+        log.info("orchestrator", exit.message, exit.fields);
+        this.releaseRelaunchClaim(sessionId, false);
+        return;
+      case "exhausted":
+        metricsCollector.recordRelaunchExhausted();
+        log.warn("orchestrator", "Auto-relaunch limit reached", { sessionId, maxAttempts: MAX_AUTO_RELAUNCHES });
+        this.relaunchExhaustedNotified.add(sessionId);
+        // PLAN Task 5: signal council reconnect listeners that this session's
+        // budget is spent — they can short-circuit `reconnecting → degraded`
+        // without waiting for the 45s timer.
+        this.abortRelaunch(sessionId, info, {
+          reason: "budget_exhausted",
+          error: "Session keeps crashing. Please relaunch manually.",
+          attempted: false,
+          failedReason: "budget_exhausted",
+        });
+        return;
+      case "aborted":
+        this.abortRelaunch(sessionId, info, {
+          reason: exit.reason,
+          error: exit.error,
+          attempted: exit.attempted,
+          // A throw before the relaunch started proves nothing about the CLI:
+          // log it, tell no one.
+          notify: exit.attempted,
+          failedReason: exit.attempted ? exit.error : undefined,
+        });
+        return;
+      case "relaunched": {
+        const { count, result } = exit;
         if (result.skipped) {
           // Another relaunch just finished — not an attempt of ours.
           this.autoRelaunchCounts.set(sessionId, count);
-        } else if (!result.ok && result.error) {
-          this.wsBridge.broadcastToSession(sessionId, { type: "error", message: result.error });
+          this.releaseRelaunchClaim(sessionId, true);
+        } else if (result.ok) {
+          metricsCollector.recordRelaunchSucceeded();
+          this.autoRelaunchCounts.delete(sessionId);
+          this.relaunchExhaustedNotified.delete(sessionId);
+          // Council review 2026-09-08 #2: the got-050 spawn-checkpoint re-arm
+          // fires on EVERY successful relaunch — `relaunchOnce` runs
+          // `onRelaunchSucceeded` for this automatic path too (it is the one
+          // that runs after a codex init failure).
+          this.releaseRelaunchClaim(sessionId, true);
+        } else if (result.error) {
           // Council Review 2026-05-15-1015 CR-2 + CR-17: errors the
           // launcher emitted on the typed channel itself — skip the
           // duplicate orchestrator emit + rollback the retry counter
@@ -1226,27 +1295,84 @@ export class SessionRecovery {
           const isLauncherEmittedFailure =
             result.error.startsWith("observer spawn config load failed") ||
             result.error.startsWith("observer-prompt-source-drift-refused:");
-          if (isLauncherEmittedFailure) {
-            this.autoRelaunchCounts.set(sessionId, count);
-          } else {
-            companionBus.emit("session:relaunch-failed", { sessionId, reason: result.error });
-          }
-        } else if (result.ok) {
-          metricsCollector.recordRelaunchSucceeded();
-          this.autoRelaunchCounts.delete(sessionId);
-          this.relaunchExhaustedNotified.delete(sessionId);
-          // Council review 2026-09-08 #2: the got-050 spawn-checkpoint re-arm
-          // fires on EVERY successful relaunch — `relaunchOnce` runs
-          // `onRelaunchSucceeded` for this automatic path too (it is the one
-          // that runs after a codex init failure).
+          if (isLauncherEmittedFailure) this.autoRelaunchCounts.set(sessionId, count);
+          this.abortRelaunch(sessionId, info, {
+            reason: isLauncherEmittedFailure ? "launcher_refused" : "failed",
+            error: result.error,
+            attempted: true,
+            failedReason: isLauncherEmittedFailure ? undefined : result.error,
+          });
+        } else {
+          // ok=false without error: keep count to preserve the retry budget.
+          this.abortRelaunch(sessionId, info, { reason: "failed", attempted: true, notify: false });
         }
-        // ok=false without error: keep count to preserve the retry budget
-      } finally {
-        setTimeout(() => this.relaunchingSet.delete(sessionId), RELAUNCH_COOLDOWN_MS);
+        return;
       }
-    } else {
-      skipAlive(freshInfo ? "starting" : "unknown_session");
     }
+  }
+
+  /**
+   * Every failure branch of the auto-relaunch path releases its state here,
+   * the same way: one structured log line (EC-9), the browser error, the
+   * `session:relaunch-failed` signal for council reconnect listeners (when
+   * `failedReason` is set), and the claim — after {@link RELAUNCH_COOLDOWN_MS}
+   * when a relaunch was attempted, at once when nothing was spawned.
+   */
+  private abortRelaunch(
+    sessionId: string,
+    info: SdkSessionInfo | undefined,
+    abort: {
+      reason: AutoRelaunchAbortReason;
+      error?: string;
+      attempted: boolean;
+      /** Broadcast `error` to the browser. Default: when `error` is set. */
+      notify?: boolean;
+      failedReason?: string;
+    },
+  ): void {
+    log.warn("orchestrator", "auto-relaunch aborted", {
+      event: "session.relaunch.aborted",
+      sessionId,
+      ...(info?.sessionGroupId ? { sessionGroupId: info.sessionGroupId } : {}),
+      role: info?.sessionGroupRole,
+      reason: abort.reason,
+      error: abort.error,
+      attempted: abort.attempted,
+    });
+    if ((abort.notify ?? true) && abort.error) {
+      this.wsBridge.broadcastToSession(sessionId, { type: "error", message: abort.error });
+    }
+    if (abort.failedReason !== undefined) {
+      companionBus.emit("session:relaunch-failed", { sessionId, reason: abort.failedReason });
+    }
+    this.releaseRelaunchClaim(sessionId, abort.attempted);
+  }
+
+  /**
+   * Drop the auto-relaunch claim. After an attempted relaunch it is held for
+   * {@link RELAUNCH_COOLDOWN_MS} so a burst of triggers does not respawn at
+   * once; the cooldown timer is tracked so {@link forgetSession} cancels it
+   * and a stale timer can never release a later claim.
+   */
+  private releaseRelaunchClaim(sessionId: string, afterCooldown: boolean): void {
+    this.cancelRelaunchCooldown(sessionId);
+    if (!afterCooldown) {
+      this.relaunchingSet.delete(sessionId);
+      return;
+    }
+    const timer = setTimeout(() => {
+      if (this.relaunchCooldowns.get(sessionId) !== timer) return;
+      this.relaunchCooldowns.delete(sessionId);
+      this.relaunchingSet.delete(sessionId);
+    }, RELAUNCH_COOLDOWN_MS);
+    this.relaunchCooldowns.set(sessionId, timer);
+  }
+
+  private cancelRelaunchCooldown(sessionId: string): void {
+    const timer = this.relaunchCooldowns.get(sessionId);
+    if (timer === undefined) return;
+    clearTimeout(timer);
+    this.relaunchCooldowns.delete(sessionId);
   }
 
   // ── Private: Proactive keepalive ────────────────────────────────────────────
@@ -1536,7 +1662,21 @@ export class SessionRecovery {
           // spawn-checkpoint poll (via `relaunchOnce` → `onRelaunchSucceeded`)
           // — a server restart that catches a council observer mid-spawn
           // lands here.
-          await this.relaunchOnce(info.sessionId, "boot_watchdog");
+          // A throw (Bun.spawn ENOENT on a deleted cwd) must neither escape
+          // this timer — an unhandled rejection exits the Bun server — nor
+          // skip the remaining stuck sessions.
+          try {
+            await this.relaunchOnce(info.sessionId, "boot_watchdog");
+          } catch (err) {
+            log.warn("orchestrator", "boot watchdog relaunch failed", {
+              event: "session.relaunch.boot_watchdog_failed",
+              sessionId: info.sessionId,
+              ...(info.sessionGroupId ? { sessionGroupId: info.sessionGroupId } : {}),
+              role: info.sessionGroupRole,
+              error: errorMessage(err),
+            });
+            this.wsBridge.broadcastToSession(info.sessionId, { type: "error", message: errorMessage(err) });
+          }
         }
       }, RECONNECT_GRACE_MS);
     }
