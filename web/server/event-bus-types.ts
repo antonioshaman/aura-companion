@@ -20,6 +20,7 @@ export type RelaunchExhaustedReason =
   | "container_missing"
   | "container_start_failed"
   | "container_binary_missing"
+  | "host_binary_missing"
   | "observer_prompt_config_failed"
   | "observer_prompt_source_drift_refused";
 

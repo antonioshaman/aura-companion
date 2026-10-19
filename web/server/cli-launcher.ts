@@ -1687,6 +1687,7 @@ export class CliLauncher {
         );
       }
     }
+    this.binaryNotFound.delete(sessionId);
     if (info.backendType === "codex") {
       this.spawnCodex(sessionId, info, effectiveRelaunchOptions);
     } else {
@@ -1695,6 +1696,10 @@ export class CliLauncher {
       } else {
         this.spawnCLI(sessionId, info, effectiveRelaunchOptions);
       }
+    }
+    if (this.binaryNotFound.delete(sessionId)) {
+      this.clearPidAndPersist(sessionId, "host_binary_missing");
+      return { ok: false, error: `${info.backendType === "codex" ? "Codex" : "Claude"} CLI binary not found in PATH` };
     }
     return { ok: true };
   }
@@ -1891,6 +1896,23 @@ export class CliLauncher {
     return { spawnCmd, spawnEnv, spawnCwd };
   }
 
+  /**
+   * Sessions whose most recent spawn attempt found no CLI binary. Every spawn
+   * function checks the binary before its first await, so a caller can read
+   * this right after the (sync-started) spawn call. `relaunch` uses it to
+   * return `ok: false` — reporting success here reset the crash budget and
+   * let a missing binary retry forever.
+   */
+  private readonly binaryNotFound = new Set<string>();
+
+  private markBinaryNotFound(sessionId: string, info: SdkSessionInfo, binary: string): void {
+    console.error(`[cli-launcher] Binary "${binary}" not found in PATH`);
+    this.binaryNotFound.add(sessionId);
+    info.state = "exited";
+    info.exitCode = 127;
+    this.persistState();
+  }
+
   private spawnCLI(sessionId: string, info: SdkSessionInfo, options: LaunchOptions): void {
     const isContainerized = !!options.containerId;
 
@@ -1902,10 +1924,7 @@ export class CliLauncher {
       if (resolved) {
         binary = resolved;
       } else {
-        console.error(`[cli-launcher] Binary "${binary}" not found in PATH`);
-        info.state = "exited";
-        info.exitCode = 127;
-        this.persistState();
+        this.markBinaryNotFound(sessionId, info, binary);
         return;
       }
     }
@@ -2006,10 +2025,7 @@ export class CliLauncher {
       if (resolved) {
         binary = resolved;
       } else {
-        console.error(`[cli-launcher] Binary "${binary}" not found in PATH`);
-        info.state = "exited";
-        info.exitCode = 127;
-        this.persistState();
+        this.markBinaryNotFound(sessionId, info, binary);
         return;
       }
     }
@@ -2265,10 +2281,7 @@ export class CliLauncher {
       if (resolved) {
         binary = resolved;
       } else {
-        console.error(`[cli-launcher] Binary "${binary}" not found in PATH`);
-        info.state = "exited";
-        info.exitCode = 127;
-        this.persistState();
+        this.markBinaryNotFound(sessionId, info, binary);
         return;
       }
     }
@@ -2619,10 +2632,7 @@ export class CliLauncher {
       if (resolved) {
         binary = resolved;
       } else {
-        console.error(`[cli-launcher] Binary "${binary}" not found in PATH`);
-        info.state = "exited";
-        info.exitCode = 127;
-        this.persistState();
+        this.markBinaryNotFound(sessionId, info, binary);
         return;
       }
     }
