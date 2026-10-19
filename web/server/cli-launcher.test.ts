@@ -1656,6 +1656,34 @@ describe("relaunch", () => {
     expect(session?.state).toBe("starting");
   });
 
+  // A relaunch whose CLI binary has vanished from PATH must report failure.
+  // It used to return { ok: true } after marking the session exited (127),
+  // so recovery counted it as a success, reset the crash budget and retried
+  // forever instead of ending in "Session keeps crashing".
+  it("returns ok:false when the CLI binary is no longer found on relaunch", async () => {
+    let resolveFirst: (code: number) => void;
+    const firstProc = {
+      pid: 12345,
+      kill: vi.fn(() => { resolveFirst(0); }),
+      exited: new Promise<number>((r) => { resolveFirst = r; }),
+      stdout: null,
+      stderr: null,
+    };
+    mockSpawn.mockReturnValueOnce(firstProc);
+    launcher.launch({ cwd: "/tmp/project" });
+
+    mockResolveBinary.mockReturnValue(null);
+    const result = await launcher.relaunch("test-session-id");
+    expect(result).toEqual({ ok: false, error: "Claude CLI binary not found in PATH" });
+    expect(launcher.getSession("test-session-id")?.exitCode).toBe(127);
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+
+    // Binary back → the next relaunch succeeds (the marker does not stick).
+    mockResolveBinary.mockReturnValue("/usr/bin/claude");
+    mockSpawn.mockReturnValueOnce(createMockProc(54321));
+    expect(await launcher.relaunch("test-session-id")).toEqual({ ok: true });
+  });
+
   // Non-auth launch env vars must survive relaunch untouched. (Claude AUTH
   // vars are deliberately NOT reused — they are reconciled from global settings
   // at relaunch, covered separately. We assert a neutral var here so this test

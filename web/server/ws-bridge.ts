@@ -118,6 +118,7 @@ function mapClearReasonToCliFailedReason(reason: RelaunchExhaustedReason): CliFa
     case "container_missing": return "container_missing";
     case "container_start_failed": return "container_stopped";
     case "container_binary_missing": return "binary_missing";
+    case "host_binary_missing": return "binary_missing";
     // Both observer-prompt failure paths surface the same operator
     // affordance as a spent retry budget ("CLI permanently dead, start
     // a new session"), so they intentionally fold into relaunch_exhausted.
