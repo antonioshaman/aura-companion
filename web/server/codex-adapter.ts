@@ -311,6 +311,14 @@ export class StdioTransport implements ICodexTransport {
   }
 
   private dispatch(msg: JsonRpcMessage): void {
+    // EC-5 (PR #188 review finding #17): `JSON.parse` can yield any JSON
+    // value. A non-object frame (number, string, null, array/batch) is not a
+    // JSON-RPC message we understand — and `"id" in 5` would THROW out of the
+    // stdout reader. Reject it as protocol drift instead.
+    if (msg === null || typeof msg !== "object" || Array.isArray(msg)) {
+      this.reportUnmatchedFrame(msg, Array.isArray(msg) ? "array" : msg === null ? "null" : typeof msg);
+      return;
+    }
     if ("id" in msg && msg.id !== undefined) {
       if ("method" in msg && msg.method) {
         // This is a request FROM the server (e.g., approval request)
@@ -336,7 +344,7 @@ export class StdioTransport implements ICodexTransport {
           }
         }
       }
-    } else if ("method" in msg) {
+    } else if ("method" in msg && typeof msg.method === "string" && msg.method.length > 0) {
       // When the WS proxy reconnects to Codex, all pending RPC calls are
       // orphaned (Codex sees a fresh connection and won't respond to them).
       // Reject them immediately so callers don't hang until timeout.
@@ -358,7 +366,33 @@ export class StdioTransport implements ICodexTransport {
       }
       // Notification (no id)
       this.notificationHandler?.(msg.method, (msg as JsonRpcNotification).params || {});
+    } else {
+      // EC-5: an object frame matching NONE of the JSON-RPC shapes (no
+      // id+method request, no id-only response, no string-method
+      // notification) used to vanish silently. Surface it as protocol drift,
+      // mirroring the parse-error path in processBuffer, so upstream Codex
+      // frame-shape drift is visible from the first offending frame.
+      this.reportUnmatchedFrame(msg, "object");
     }
+  }
+
+  /** Report a frame that matches no JSON-RPC shape (deduped per transport). */
+  private reportUnmatchedFrame(msg: unknown, shape: string): void {
+    let rawPreview: string | undefined;
+    try { rawPreview = JSON.stringify(msg); } catch { rawPreview = undefined; }
+    reportProtocolDrift(
+      this.protocolDriftSeen,
+      {
+        backend: "codex",
+        sessionId: this.sessionId,
+        direction: "incoming",
+        messageKind: "message",
+        messageName: `unmatched-frame:${shape}`,
+        keys: shape === "object" ? Object.keys(msg as Record<string, unknown>) : undefined,
+        rawPreview,
+      },
+      (message) => this.parseErrorCb?.(message),
+    );
   }
 
   /** Send a request and wait for the matching response.

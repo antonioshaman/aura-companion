@@ -25,6 +25,7 @@ import {
   SIDECAR_SCHEMA_VERSION,
   SIDECAR_FILE_SUFFIX,
   argvSha256,
+  deleteRuntimeSidecar,
   parseRuntimeSidecarPayload,
   readRuntimeSidecar,
   sidecarPath,
@@ -248,5 +249,39 @@ describe("writeRuntimeSidecar — producer-side guard", () => {
     expect(() => writeRuntimeSidecar(tmpRoot, "sess_bad", badPayload)).toThrow(/invalid pid/);
     // Verify no partial write landed.
     expect(existsSync(sidecarPath(tmpRoot, "sess_bad"))).toBe(false);
+  });
+});
+
+// PR #188 finding #16: sidecars are deleted at a session's terminal points.
+// The helper must remove exactly the named session's file, report whether it
+// removed anything, and never throw (it runs inside delete/prune/sweep paths
+// that must not be broken by best-effort cleanup).
+describe("deleteRuntimeSidecar — best-effort terminal cleanup", () => {
+  const payload = {
+    schemaVersion: SIDECAR_SCHEMA_VERSION,
+    pid: 4242,
+    processStartMs: 1_700_000_000_000,
+    argvSha256: "a".repeat(64),
+  } as const;
+
+  it("removes an existing sidecar and leaves sibling sessions' sidecars alone", () => {
+    const mine = writeRuntimeSidecar(tmpRoot, "sess_del", payload);
+    const other = writeRuntimeSidecar(tmpRoot, "sess_keep", payload);
+    expect(deleteRuntimeSidecar(tmpRoot, "sess_del")).toBe(true);
+    expect(existsSync(mine)).toBe(false);
+    expect(existsSync(other)).toBe(true);
+    // After deletion the reader reports the documented `absent` state.
+    expect(readRuntimeSidecar(tmpRoot, "sess_del").kind).toBe("absent");
+  });
+
+  it("is a silent no-op (returns false) when the sidecar is already gone", () => {
+    expect(() => deleteRuntimeSidecar(tmpRoot, "never-written")).not.toThrow();
+    expect(deleteRuntimeSidecar(tmpRoot, "never-written")).toBe(false);
+  });
+
+  it("never throws on a path-escape sessionId (resolver violation is swallowed)", () => {
+    // sidecarPath routes through resolveCleanupPath, which rejects escapes;
+    // cleanup must swallow that rather than break the caller.
+    expect(() => deleteRuntimeSidecar(tmpRoot, "../../etc/passwd")).not.toThrow();
   });
 });

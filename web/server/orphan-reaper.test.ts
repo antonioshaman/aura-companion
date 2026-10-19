@@ -793,3 +793,115 @@ describe("reapOrphans — SIGTERM-ignoring orphan escalates to SIGKILL (W10a)", 
     expect(sum.killAbortedDrift).toBe(1);
   });
 });
+
+// ─── PR #188 finding #3: stdio shape alone is NOT ownership proof ────────────
+//
+// The Claude stdio triple (`--print --output-format stream-json
+// --input-format stream-json`) is public CLI usage: a human on this shared
+// host can run exactly that headless invocation in their own script, and if
+// it is reparented to init (nohup / closed terminal) it looks identical to a
+// Companion-spawned orphan. These tests pin that the reaper only SIGTERMs a
+// stdio-shaped orphan when its argv hash matches a runtime sidecar the
+// server wrote at spawn, while `--sdk-url` / `app-server` orphans keep their
+// existing (provable-marker) behaviour.
+describe("reapOrphans — stdio-shaped orphans require server-written sidecar ownership (#188 finding #3)", () => {
+  const stdioArgv = [
+    "/home/auracomp/.local/bin/claude",
+    "--print",
+    "--output-format", "stream-json",
+    "--input-format", "stream-json",
+    "--verbose",
+  ];
+  const stdioCmdline = stdioArgv.join("\0") + "\0";
+
+  function stdioDeps(over: Partial<OrphanReaperDeps> = {}): OrphanReaperDeps {
+    let alive = true;
+    return {
+      loadedSessions: [],
+      sentinelRoot: tmpRoot,
+      sessionsRoot: tmpRoot,
+      platform: () => "linux",
+      listProcPids: () => [6100],
+      readStat: () => fakeStat("claude", 1),
+      readCmdline: () => stdioCmdline,
+      killCheck: () => alive,
+      kill: vi.fn(() => { alive = false; }),
+      sleep: async () => {},
+      now: () => 1_700_000_001_000,
+      ...over,
+    };
+  }
+
+  it("classifyArgv flags the stdio triple as stdioShapeOnly, but not --sdk-url / app-server argv", () => {
+    // The flag is what the reap branch keys the extra ownership check on.
+    expect(classifyArgv(stdioArgv).stdioShapeOnly).toBe(true);
+    expect(classifyArgv(splitCmdline(claudeCmdline("s1"))).stdioShapeOnly).toBe(false);
+    expect(classifyArgv(["/usr/bin/codex", "app-server"]).stdioShapeOnly).toBe(false);
+    // A bare interactive claude is not server-managed at all → not stdio-only either.
+    expect(classifyArgv(["/usr/bin/claude"]).stdioShapeOnly).toBe(false);
+  });
+
+  it("a human's own headless `claude -p` (no sidecar anywhere) is NOT signalled", async () => {
+    // No loaded session has a sidecar → nothing proves the server spawned it.
+    const kill = vi.fn();
+    const sum = await reapOrphans(stdioDeps({ kill }));
+    expect(kill).not.toHaveBeenCalled();
+    expect(sum.reaped).toBe(0);
+    expect(sum.skippedNoSessionMatch).toBe(1);
+    // No sentinel is written for a process we decided not to touch.
+    expect(existsSync(join(tmpRoot, REAPING_SENTINEL_SUBDIR, "6100.json"))).toBe(false);
+    expect(warnSpy).toHaveBeenCalledWith(
+      "orphan-reaper",
+      expect.any(String),
+      expect.objectContaining({ event: "orphan_reaper.skipped_unowned_stdio_shape", pid: 6100 }),
+    );
+  });
+
+  it("a stdio orphan whose argv differs from every server sidecar is NOT signalled", async () => {
+    // A loaded session has a sidecar, but for a DIFFERENT argv (different
+    // --resume id) — same shape, no ownership match.
+    writeRuntimeSidecar(tmpRoot, "sess-other", {
+      schemaVersion: SIDECAR_SCHEMA_VERSION,
+      pid: 1234,
+      processStartMs: 1_700_000_000_000,
+      argvSha256: argvSha256([...stdioArgv, "--resume", "someone-else"]),
+    });
+    const kill = vi.fn();
+    const sum = await reapOrphans(stdioDeps({ kill, loadedSessions: [{ sessionId: "sess-other", pid: 1234 }] }));
+    expect(kill).not.toHaveBeenCalled();
+    expect(sum.reaped).toBe(0);
+  });
+
+  it("a stdio orphan whose argv hash matches a server-written sidecar IS reaped", async () => {
+    // The session's tracked pid is different (it was relaunched / the pid is
+    // stale), but the sidecar anchor proves the server spawned this argv.
+    writeRuntimeSidecar(tmpRoot, "sess-owned", {
+      schemaVersion: SIDECAR_SCHEMA_VERSION,
+      pid: 5000,
+      processStartMs: 1_700_000_000_000,
+      argvSha256: argvSha256(stdioArgv),
+    });
+    const kill = vi.fn();
+    let alive = true;
+    kill.mockImplementation(() => { alive = false; });
+    const sum = await reapOrphans(stdioDeps({
+      kill,
+      killCheck: () => alive,
+      loadedSessions: [{ sessionId: "sess-owned", pid: undefined }],
+    }));
+    expect(kill).toHaveBeenCalledWith(6100, "SIGTERM");
+    expect(sum.reaped).toBe(1);
+  });
+
+  it("the readOwnedArgvShas seam is honoured (ownership comes from the injected set)", async () => {
+    const kill = vi.fn();
+    let alive = true;
+    kill.mockImplementation(() => { alive = false; });
+    const sum = await reapOrphans(stdioDeps({
+      kill,
+      killCheck: () => alive,
+      readOwnedArgvShas: () => new Set([argvSha256(stdioArgv)]),
+    }));
+    expect(sum.reaped).toBe(1);
+  });
+});

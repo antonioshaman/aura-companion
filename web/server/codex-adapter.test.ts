@@ -5392,6 +5392,89 @@ describe("StdioTransport RPC timeout", () => {
     void transport;
   });
 
+  // EC-5 / PR #188 review finding #17: frames matching no JSON-RPC shape
+  // used to be dropped silently by StdioTransport.dispatch (and a non-object
+  // JSON value like `42` made `"id" in msg` throw out of the reader). They
+  // must now surface as deduped protocol drift via the parse-error callback,
+  // and must NOT be delivered to the notification/request handlers.
+  it("reports an object frame with neither id nor method as unmatched-frame drift", async () => {
+    const streams = createStreams();
+    const transport = new StdioTransport(streams.stdin, streams.stdout, "sess-unmatched-1");
+    const spy = vi.spyOn(log, "warn").mockImplementation(() => {});
+    const parseErrors: string[] = [];
+    transport.onParseError((m) => parseErrors.push(m));
+    const notifications: string[] = [];
+    transport.onNotification((method) => notifications.push(method));
+
+    streams.pushRaw(JSON.stringify({ jsonrpc: "2.0", error: { code: -1, message: "x" } }));
+    streams.pushRaw(JSON.stringify({ foo: 1 })); // same shape bucket → deduped
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledWith(
+      "protocol-monitor",
+      "Backend protocol drift detected",
+      expect.objectContaining({
+        backend: "codex",
+        sessionId: "sess-unmatched-1",
+        direction: "incoming",
+        messageKind: "message",
+        messageName: "unmatched-frame:object",
+        keys: ["jsonrpc", "error"],
+      }),
+    );
+    expect(parseErrors).toHaveLength(1);
+    expect(notifications).toEqual([]);
+    spy.mockRestore();
+  });
+
+  it("reports non-object JSON frames as drift instead of throwing, and keeps processing later frames", async () => {
+    const streams = createStreams();
+    const transport = new StdioTransport(streams.stdin, streams.stdout, "sess-unmatched-2");
+    const spy = vi.spyOn(log, "warn").mockImplementation(() => {});
+    const notifications: string[] = [];
+    transport.onNotification((method) => notifications.push(method));
+
+    streams.pushRaw("42");
+    streams.pushRaw("null");
+    streams.pushRaw("[1,2]");
+    // A valid notification after the junk must still be delivered — proves
+    // the reader did not die on the bad frames.
+    streams.pushRaw(JSON.stringify({ method: "turn/started", params: {} }));
+    await new Promise((r) => setTimeout(r, 20));
+
+    const names = spy.mock.calls.map((c) => (c[2] as { messageName?: string }).messageName);
+    expect(names).toEqual([
+      "unmatched-frame:number",
+      "unmatched-frame:null",
+      "unmatched-frame:array",
+    ]);
+    expect(notifications).toEqual(["turn/started"]);
+    spy.mockRestore();
+  });
+
+  it("does not deliver a notification whose method is not a non-empty string", async () => {
+    // `{ method: 5 }` used to reach the notification handler with a number
+    // as the method name; it is now an unmatched frame.
+    const streams = createStreams();
+    const transport = new StdioTransport(streams.stdin, streams.stdout, "sess-unmatched-3");
+    const spy = vi.spyOn(log, "warn").mockImplementation(() => {});
+    const notifications: unknown[] = [];
+    transport.onNotification((method) => notifications.push(method));
+
+    streams.pushRaw(JSON.stringify({ method: 5, params: {} }));
+    streams.pushRaw(JSON.stringify({ method: "", params: {} }));
+    await new Promise((r) => setTimeout(r, 20));
+
+    expect(notifications).toEqual([]);
+    expect(spy).toHaveBeenCalledWith(
+      "protocol-monitor",
+      "Backend protocol drift detected",
+      expect.objectContaining({ messageName: "unmatched-frame:object" }),
+    );
+    spy.mockRestore();
+  });
+
   it("rejects pending RPC calls when companion/wsReconnected notification arrives", async () => {
     // When the WS proxy reconnects to Codex, it sends a companion/wsReconnected
     // notification. Any pending RPC calls should be immediately rejected because

@@ -164,6 +164,28 @@ export interface OrphanReaperDeps {
   readonly sleep?: (ms: number) => Promise<void>;
   /** Test seam — clock reader. */
   readonly now?: () => number;
+  /**
+   * Test seam — set of `argvSha256` anchors from server-written runtime
+   * sidecars. Defaults to reading `<sessionsRoot>/<sessionId>.runtime.json`
+   * for every loaded session.
+   */
+  readonly readOwnedArgvShas?: () => ReadonlySet<string>;
+}
+
+/**
+ * Collect the spawn-time `argvSha256` anchors from the runtime sidecars of
+ * every loaded session. Corrupt/absent sidecars contribute nothing (the
+ * session simply cannot prove ownership of a stdio-shaped orphan).
+ */
+function buildOwnedArgvShas(sessions: readonly ReaperKnownSession[], sessionsRoot: string): Set<string> {
+  const owned = new Set<string>();
+  for (const s of sessions) {
+    try {
+      const sc = readRuntimeSidecar(sessionsRoot, s.sessionId);
+      if (sc.kind === "present" && sc.payload.argvSha256) owned.add(sc.payload.argvSha256);
+    } catch { /* corrupt sidecar → no ownership proof from this session */ }
+  }
+  return owned;
 }
 
 /**
@@ -210,6 +232,16 @@ interface ArgvClassification {
    * never SIGTERMs an unrelated user CLI that merely shares the basename.
    */
   readonly isServerManagedShape: boolean;
+  /**
+   * True when `isServerManagedShape` was set SOLELY by the Claude stdio
+   * triple (`--print --output-format stream-json --input-format stream-json`)
+   * with no `--sdk-url` / `app-server` marker. That triple is a legitimate
+   * PUBLIC headless invocation (any user's `claude -p --output-format
+   * stream-json --input-format stream-json` script has it), so a shape match
+   * alone is not ownership proof. The `no_known_session` reap additionally
+   * requires the argv hash to match a runtime sidecar this server wrote.
+   */
+  readonly stdioShapeOnly: boolean;
   /** Extracted `sessionId` from the --sdk-url URL path (Claude). */
   readonly sessionId: string | null;
   /** Categorical argv shape for EC-23 redacted logging. */
@@ -289,6 +321,16 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
   for (const s of deps.loadedSessions) {
     if (typeof s.pid === "number" && s.pid > 0) trackedPids.add(s.pid);
   }
+
+  // Ownership proof for the stdio shape (PR #188 review finding #3). The
+  // stdio triple is a public headless invocation, so `isServerManagedShape`
+  // alone also matches a human's own `claude -p` that got reparented to init
+  // (nohup / closed terminal) on this shared host. A stdio-shaped orphan is
+  // only reapable when its argv hashes to the `argvSha256` anchor in a
+  // runtime sidecar THIS server wrote at spawn (`<sessionId>.runtime.json`,
+  // see docs/architecture/session-lifecycle.md). Mirrors sweep-orphans'
+  // `buildOwnedFromSidecars`.
+  const ownedArgvShas = deps.readOwnedArgvShas?.() ?? buildOwnedArgvShas(deps.loadedSessions, deps.sessionsRoot);
 
   let pids: number[];
   try {
@@ -448,6 +490,22 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
       skippedNoMatch++;
       log.warn("orphan-reaper", "companion-basename orphan lacks server-spawn marker — not reaping", {
         event: "orphan_reaper.skipped_unmanaged_shape",
+        pid,
+        argvSha256: classification.argvSha256,
+        argvShape: classification.argvShape,
+      });
+      continue;
+    }
+    // PR #188 finding #3: a stdio-shaped orphan (no --sdk-url / app-server
+    // marker) must ADDITIONALLY prove ownership through a server-written
+    // sidecar argv hash. Reaping on the shape alone is a cross-tenant SIGTERM
+    // of a human's own headless `claude` on the shared prod host. Leaving an
+    // unproven process alive is the safe direction (worst case: a leaked
+    // orphan, visible in the Sweep page), killing a stranger's is not.
+    if (!known && classification.stdioShapeOnly && !ownedArgvShas.has(classification.argvSha256)) {
+      skippedNoMatch++;
+      log.warn("orphan-reaper", "stdio-shaped orphan has no server-written sidecar ownership — not reaping", {
+        event: "orphan_reaper.skipped_unowned_stdio_shape",
         pid,
         argvSha256: classification.argvSha256,
         argvShape: classification.argvShape,
@@ -732,6 +790,10 @@ export function classifyArgv(argv: readonly string[]): ArgvClassification {
   const shape: string[] = [];
   let isCompanionShape = false;
   let isServerManagedShape = false;
+  // A marker only a server-spawned process carries: `--sdk-url` (Claude WS
+  // transport, URL points at this server) or `app-server` (Codex). The stdio
+  // triple, by contrast, is public CLI usage — see `stdioShapeOnly`.
+  let hasServerSpawnMarker = false;
   let sessionId: string | null = null;
   let cwdDepth = 0;
 
@@ -788,6 +850,7 @@ export function classifyArgv(argv: readonly string[]): ArgvClassification {
       // Extract sessionId from --sdk-url ws://.../<sessionId>
       if (i > 0 && argv[i - 1] === "--sdk-url") {
         isServerManagedShape = true; // Claude: --sdk-url is server-spawn-only
+        hasServerSpawnMarker = true;
         try {
           const url = new URL(tok);
           const segs = url.pathname.split("/").filter((s) => s.length > 0);
@@ -799,7 +862,10 @@ export function classifyArgv(argv: readonly string[]): ArgvClassification {
     }
     // Codex: the `app-server` subcommand is present only on Companion-spawned
     // Codex processes; a bare interactive `codex` never carries it.
-    if (tok === "app-server") isServerManagedShape = true;
+    if (tok === "app-server") {
+      isServerManagedShape = true;
+      hasServerSpawnMarker = true;
+    }
     if (tok.includes("/") || tok.includes("\\")) {
       shape.push("<PATH>");
       // Track depth of the deepest path token for cwd-depth-ish forensic.
@@ -822,6 +888,7 @@ export function classifyArgv(argv: readonly string[]): ArgvClassification {
   return {
     isCompanionShape,
     isServerManagedShape,
+    stdioShapeOnly: isServerManagedShape && !hasServerSpawnMarker,
     sessionId,
     argvShape: shape,
     argvSha256: computeArgvSha(argv),
