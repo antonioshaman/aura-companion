@@ -1,6 +1,7 @@
 # Spec: Council PRO Economy — adaptive, self-learning cost reduction for the Carmack-Council pipelines
 
 **Tier:** Feature
+**Status:** Implemented — Stories 1–4 shipped in #206–#210 (2026-09-27/28), economy routes follow-up in #211.
 **Problem:** The council pipelines (`council-plan/review/implement` + the RC-2 adaptive advisor engine) were tuned for a Claude MAX subscription. On PRO (tight 5h + weekly limits) the same MAX-era fan-out — up to 11 parallel subagents, each on the top model with a wide context — exhausts the window fast. We need the *same output quality* at a fraction of the token/limit cost, and the system should *learn* where cheap effort is safe rather than relying on hand-guessed constants.
 **Context:** RC-2 (in prod) already seats an adaptive **3–11** roster from capability profiles instead of a fixed panel — a first economy layer. This spec adds the larger levers on top: per-seat model tiering, a persistent skip-if-unchanged cache, and data-derived review-depth thresholds — all governed by a non-negotiable quality floor.
 
