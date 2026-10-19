@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.7.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.6.0...aura-companion-v2.7.0) (2026-10-19)
+
+
+### Features
+
+* **sidebar:** show a muted "Usage unavailable" link instead of hiding the usage badge on failure ([#400](https://github.com/antonioshaman/aura-companion/issues/400)) ([73fc803](https://github.com/antonioshaman/aura-companion/commit/73fc803e37d0656a197bd8040120edbae2ed6823))
+
+
+### Bug Fixes
+
+* **council:** land the PR [#188](https://github.com/antonioshaman/aura-companion/issues/188) UI review fixes on current main ([#404](https://github.com/antonioshaman/aura-companion/issues/404)) ([1581228](https://github.com/antonioshaman/aura-companion/commit/1581228fe95d3c7a081933d77ae6f75e8287f973))
+* **images:** sniff real media type from magic bytes on upload ([#140](https://github.com/antonioshaman/aura-companion/issues/140)) ([6d3acd4](https://github.com/antonioshaman/aura-companion/commit/6d3acd4b6771785971da9820fb1ce35f34dbaded))
+* **server:** compute context_used_percent with the same formula as the browser meter ([#405](https://github.com/antonioshaman/aura-companion/issues/405)) ([1907124](https://github.com/antonioshaman/aura-companion/commit/1907124f9d6e23b534eaa24e5da4ab78e0ade452))
+* **server:** only reap provably server-spawned CLIs and re-verify before SIGKILL ([#403](https://github.com/antonioshaman/aura-companion/issues/403)) ([f2b2976](https://github.com/antonioshaman/aura-companion/commit/f2b2976772776fcca1979d1e08c717d1553d5ed4))
+* **sessions:** continue a Council pair as a pair, and keep the backend on solo handoff ([#401](https://github.com/antonioshaman/aura-companion/issues/401)) ([369c06e](https://github.com/antonioshaman/aura-companion/commit/369c06e204d1ce6ebb35ee5d8c79aca7204eb11f))
+
 ## [2.6.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.5.0...aura-companion-v2.6.0) (2026-10-19)
 
 
