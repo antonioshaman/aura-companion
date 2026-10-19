@@ -1431,15 +1431,21 @@ export function createRoutes(
       });
     }
 
+    // No explicit reason (sidebar menu) + an image-limit error in history →
+    // keep the image-limit wording that flow was built for.
+    const draft = buildPickupDraft(filename, reason ?? (meta.hasImageError ? "image_limit" : undefined), { contextBytes });
+    // Held on the new session's state too: the browser's in-memory copy is
+    // lost on a reload (e.g. a service-worker update right after navigation),
+    // which left a new pair idle with an empty composer.
+    wsBridge.setPickupDraft(newSessionId, draft, pair ? pair.primary.backendType : launcherSession.backendType);
+
     return c.json({
       newSessionId,
       ...(newSessionGroupId ? { sessionGroupId: newSessionGroupId } : {}),
       handoffPath,
       handoffFilename: filename,
       handoffMeta: meta,
-      // No explicit reason (sidebar menu) + an image-limit error in history →
-      // keep the image-limit wording that flow was built for.
-      draft: buildPickupDraft(filename, reason ?? (meta.hasImageError ? "image_limit" : undefined), { contextBytes }),
+      draft,
     });
   });
 

@@ -165,6 +165,50 @@ describe("Composer basic rendering", () => {
   });
 });
 
+// ─── Server-held continue-in-new draft ───────────────────────────────────────
+// Owner report 2026-10-19: a handoff to a new Council pair left the composer
+// empty — the pickup prompt lived only in the tab's memory and a reload
+// (service-worker update) dropped it. The server now holds it on the session
+// state as `pickup_draft`; Composer must install it into an empty composer
+// and never overwrite what the user already typed.
+describe("Composer server-held pickup draft", () => {
+  it("installs session.pickup_draft into an empty composer", () => {
+    setupMockStore({ session: { pickup_draft: "Pickup с прошлой сессии. Прочитай .aura-handoff-x.md" } });
+    const { container } = render(<Composer sessionId="s1" />);
+    expect(container.querySelector("textarea")!.value).toBe("Pickup с прошлой сессии. Прочитай .aura-handoff-x.md");
+  });
+
+  it("does not overwrite text the user typed before the draft arrived", () => {
+    setupMockStore();
+    const { container, rerender } = render(<Composer sessionId="s1" />);
+    const textarea = container.querySelector("textarea")!;
+    fireEvent.change(textarea, { target: { value: "my own words" } });
+    // The draft lands later (session_update after a reconnect).
+    setupMockStore({ session: { pickup_draft: "Pickup draft" } });
+    rerender(<Composer sessionId="s1" />);
+    expect(textarea.value).toBe("my own words");
+  });
+
+  it("the in-memory draft (same text) is not installed twice", () => {
+    setupMockStore({ session: { pickup_draft: "Pickup draft" } });
+    (mockStoreState.consumePickupDraft as ReturnType<typeof vi.fn>).mockReturnValueOnce("Pickup draft");
+    const { container, rerender } = render(<Composer sessionId="s1" />);
+    const textarea = container.querySelector("textarea")!;
+    expect(textarea.value).toBe("Pickup draft");
+    // User clears it on purpose; a re-render with the same server draft must not bring it back.
+    fireEvent.change(textarea, { target: { value: "" } });
+    rerender(<Composer sessionId="s1" />);
+    expect(textarea.value).toBe("");
+  });
+
+  it("passes axe with a pickup draft installed", async () => {
+    setupMockStore({ session: { pickup_draft: "Pickup draft" } });
+    const { axe } = await import("vitest-axe");
+    const { container } = render(<Composer sessionId="s1" />);
+    expect(await axe(container)).toHaveNoViolations();
+  });
+});
+
 // ─── Send button disabled state ──────────────────────────────────────────────
 
 describe("Composer send button state", () => {

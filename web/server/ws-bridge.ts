@@ -376,6 +376,18 @@ export class WsBridge {
     return true;
   }
 
+  /**
+   * Hold a continue-in-new pickup prompt on the new session's state (see
+   * `SessionState.pickup_draft`). Created with the right backend if the
+   * bridge session doesn't exist yet, so a Codex session is never made Claude.
+   */
+  setPickupDraft(sessionId: string, draft: string, backendType?: BackendType): void {
+    const session = this.getOrCreateSession(sessionId, backendType);
+    session.state.pickup_draft = draft;
+    this.persistSession(session);
+    this.broadcastToBrowsers(session, { type: "session_update", session: { pickup_draft: draft } });
+  }
+
   /** Return all sessions that have a linearSessionId set (for map restoration on startup). */
   getLinearSessionMappings(): Array<{ sessionId: string; linearSessionId: string }> {
     const mappings: Array<{ sessionId: string; linearSessionId: string }> = [];
@@ -2630,6 +2642,13 @@ export class WsBridge {
         ...(origin === "server:auto-resume" ? { origin: "auto_resume" as const } : {}),
       };
       this.appendHistory(session, userMessage);
+      // The user sent something: a held continue-in-new draft is used up
+      // (server-injected messages leave it for the user).
+      if (!origin && session.state.pickup_draft) {
+        session.state.pickup_draft = null;
+        this.persistSession(session);
+        this.broadcastToBrowsers(session, { type: "session_update", session: { pickup_draft: null } });
+      }
       // Observer rigor: a liveness probe to a council observer is not review
       // traffic — the orchestrator keeps its turn off the findings channel.
       if (session.state.sessionGroupRole === "observer" && isObserverProbeText(msg.content)) {

@@ -3688,6 +3688,38 @@ describe("onUserFrameObserved (Task 11.6)", () => {
     expect(session.messageHistory.some((m) => m.type === "user_message")).toBe(true);
   });
 
+  // Continue-in-new pickup draft (owner report 2026-10-19): the server holds
+  // it on the new session's state so a reload can't lose it; the user's first
+  // message uses it up, a server injection (cron, auto-resume…) does not.
+  it("setPickupDraft holds the draft on state; a browser user_message clears it, a server injection doesn't", () => {
+    const cli = makeCliSocket("s-pickup-1");
+    const browser = makeBrowserSocket("s-pickup-1");
+    bridge.handleCLIOpen(cli, "s-pickup-1");
+    bridge.handleBrowserOpen(browser, "s-pickup-1");
+
+    const broadcast = vi.spyOn(bridge as unknown as { broadcastToBrowsers: (...a: unknown[]) => void }, "broadcastToBrowsers");
+    const updates = () => broadcast.mock.calls.map((c) => c[1]).filter((m) => (m as { type: string }).type === "session_update");
+    bridge.setPickupDraft("s-pickup-1", "Pickup draft");
+    const session = bridge.getSession("s-pickup-1")!;
+    expect(session.state.pickup_draft).toBe("Pickup draft");
+    expect(updates()).toContainEqual({ type: "session_update", session: { pickup_draft: "Pickup draft" } });
+
+    bridge.injectUserMessage("s-pickup-1", "cron prompt", "server:cron");
+    expect(session.state.pickup_draft).toBe("Pickup draft");
+
+    bridge.handleBrowserMessage(browser, JSON.stringify({ type: "user_message", content: "Pickup draft" }));
+    expect(session.state.pickup_draft).toBeNull();
+    expect(updates()).toContainEqual({ type: "session_update", session: { pickup_draft: null } });
+    broadcast.mockRestore();
+  });
+
+  it("setPickupDraft on a not-yet-known session creates it with the given backend", () => {
+    bridge.setPickupDraft("s-pickup-codex", "Pickup draft", "codex");
+    const session = bridge.getSession("s-pickup-codex")!;
+    expect(session.backendType).toBe("codex");
+    expect(session.state.pickup_draft).toBe("Pickup draft");
+  });
+
   // Council Review #12 (EC-16) — server-driven user_message injection
   // MUST skip the userFrameObservers fanout. Cron / agent / REST origins
   // are not user activity; advancing the synthetic-turn token on them

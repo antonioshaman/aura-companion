@@ -360,6 +360,7 @@ function createMockBridge() {
     prePopulateCommands: vi.fn(),
     broadcastNameUpdate: vi.fn(),
     injectSystemPrompt: vi.fn(),
+    setPickupDraft: vi.fn(),
   } as any;
 }
 
@@ -6636,6 +6637,16 @@ describe("POST /api/sessions/:id/continue-in-new", () => {
     expect(written).toContain("context overflowed (>10 MB)");
   });
 
+  // The draft is also held server-side on the NEW session so a tab reload
+  // between the click and the new composer can't lose it (owner report
+  // 2026-10-19: a new pair sat idle with an empty composer).
+  it("holds the pickup draft on the new session's state with its backend", async () => {
+    seed();
+    const res = await app.request("/api/sessions/old/continue-in-new", { method: "POST" });
+    const json = await res.json();
+    expect(bridge.setPickupDraft).toHaveBeenCalledWith("session-1", json.draft, "claude");
+  });
+
   it("no reason (sidebar menu): generic draft, no image-limit claim without an image error", async () => {
     seed();
     const res = await app.request("/api/sessions/old/continue-in-new", { method: "POST" });
@@ -6688,8 +6699,9 @@ describe("POST /api/sessions/:id/continue-in-new", () => {
       observerModel: "gpt-6.1-sol",
     });
     expect(orchestrator.createSession).not.toHaveBeenCalled();
-    // The browser switches to the new orchestrator.
+    // The browser switches to the new orchestrator, whose state holds the draft.
     expect(json.newSessionId).toBe("sess_orch");
+    expect(bridge.setPickupDraft).toHaveBeenCalledWith("sess_orch", json.draft, "claude");
     expect(json.sessionGroupId).toBe("grp_test_council");
   });
 

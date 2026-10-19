@@ -913,6 +913,12 @@ export interface SessionState {
    * unresponsive). Absent/null = no handoff advisory fired.
    */
   context_advisory?: ContextAdvisoryRecord | null;
+  /**
+   * Continue-in-new pickup prompt waiting in this (new) session's composer.
+   * Server-held so it survives a tab reload, a service-worker update or
+   * another device; cleared when the user sends the first message.
+   */
+  pickup_draft?: string | null;
 }
 
 /**
