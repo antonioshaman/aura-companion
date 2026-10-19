@@ -5,8 +5,10 @@ import { fetchGlobalStats, type GlobalUsageStats } from "../api.js";
  * Compact footer badge showing the global, anonymous usage count for Aura
  * Companion ("X online · N active · M total installs"). Fed by the opt-in
  * telemetry aggregator via the server's /stats/global proxy. Renders nothing
- * until a count is available, so a missing/unreachable aggregator is invisible
- * rather than an error.
+ * until the first answer arrives. If that answer carries no count (the proxy
+ * returns nulls with 200 on any upstream failure), it shows a muted "Usage
+ * unavailable" link to the Diagnostics page, whose Usage card names the cause
+ * (e.g. the stats Worker's KV quota) — the badge used to vanish silently.
  *
  * Two DIFFERENT units share the badge, so they are grouped and labelled
  * distinctly: `online` is a headcount of PEOPLE currently using the app (summed
@@ -26,12 +28,26 @@ const POLL_INTERVAL_MS = 60 * 1000;
 
 export function GlobalUsageBadge() {
   const [stats, setStats] = useState<GlobalUsageStats | null>(null);
+  // True once a poll has answered without any count; reset by the next good poll.
+  const [unavailable, setUnavailable] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     const load = () => {
       fetchGlobalStats().then((s) => {
-        if (!cancelled && s) setStats(s);
+        if (cancelled) return;
+        const hasAny =
+          !!s &&
+          (typeof s.onlineNow === "number" ||
+            typeof s.activeInstances30d === "number" ||
+            typeof s.totalInstances === "number");
+        if (hasAny) {
+          setStats(s);
+          setUnavailable(false);
+        } else {
+          setStats(null);
+          setUnavailable(true);
+        }
       });
     };
     load();
@@ -59,7 +75,21 @@ export function GlobalUsageBadge() {
     installSegments.push({ key: "total", value: total, label: "total" });
   }
 
-  if (!hasOnline && installSegments.length === 0) return null;
+  if (!hasOnline && installSegments.length === 0) {
+    if (!unavailable) return null;
+    return (
+      <a
+        href="#/diagnostics"
+        className="mt-1.5 rounded-lg border border-cc-border/30 px-2 py-1 flex items-center gap-2 text-[11px] leading-tight text-cc-muted hover:text-cc-fg transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cc-primary/60"
+        title="The global usage counter did not answer. Open Diagnostics → Usage upstream to see why."
+      >
+        <svg viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" className="w-3 h-3 shrink-0 text-cc-muted/60">
+          <path d="M8 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM7.25 4.5h1.5v4.25h-1.5V4.5zm0 5.5h1.5v1.5h-1.5V10z" />
+        </svg>
+        Usage unavailable
+      </a>
+    );
+  }
 
   return (
     <div
