@@ -129,6 +129,8 @@ export interface SessionOrchestratorDeps {
    * the feature is not wired (tests that don't exercise it).
    */
   autoResume?: { filePath: string };
+  /** Diagnostics drift feed sink (plan Task 4) — handed to SessionRecovery. */
+  onDriftEvent?: (payload: Record<string, unknown>) => void;
 }
 
 export interface CreateSessionRequest {
@@ -507,6 +509,7 @@ export class SessionOrchestrator {
       intentionalKills: this.intentionalKills,
       onRelaunchSucceeded: (sessionId) => this.rearmSpawnCheckpointAfterObserverRelaunch(sessionId),
       noteApiLimitReached: (sessionId) => this.autoProceed.noteApiLimitReached(sessionId),
+      onDriftEvent: deps.onDriftEvent,
     });
     this.councilLifecycle = new CouncilLifecycle({
       launcher: this.launcher,

@@ -6682,3 +6682,45 @@ describe("POST /api/sessions/:id/continue-in-new", () => {
     }
   });
 });
+
+// Diagnostics plan Task 13 (hunt 1): the four Diagnostics routes sit BEHIND
+// the auth middleware — the overview exposes process topology and the POSTs
+// move KB lines, so an unauthenticated request must get 401 and never reach
+// the handler.
+describe("Diagnostics routes — auth", () => {
+  it("answers 401 on all four routes without a valid token and never calls the handlers", async () => {
+    const { verifyToken } = await import("./auth-manager.js");
+    const diag = {
+      overview: vi.fn(),
+      status: vi.fn(),
+      requestRun: vi.fn(),
+      isRunning: vi.fn(() => false),
+      currentReport: vi.fn(() => null),
+      validate: vi.fn(),
+      apply: vi.fn(),
+      afterDecisions: vi.fn(),
+    };
+    const protectedApp = new Hono();
+    protectedApp.route(
+      "/api",
+      createRoutes(orchestrator, launcher, bridge, terminalManager as any, undefined, undefined, undefined, undefined, undefined, undefined, diag as any),
+    );
+    (verifyToken as ReturnType<typeof vi.fn>).mockReturnValue(false);
+    try {
+      for (const [method, path] of [
+        ["GET", "/api/diagnostics/overview"],
+        ["GET", "/api/diagnostics/kb-analysis/latest"],
+        ["POST", "/api/diagnostics/kb-analysis/run"],
+        ["POST", "/api/diagnostics/kb-analysis/decisions"],
+      ] as const) {
+        const res = await protectedApp.request(path, { method, headers: { "Content-Type": "application/json" }, body: method === "POST" ? "{}" : undefined });
+        expect(res.status, `${method} ${path}`).toBe(401);
+      }
+    } finally {
+      (verifyToken as ReturnType<typeof vi.fn>).mockReturnValue(true);
+    }
+    expect(diag.overview).not.toHaveBeenCalled();
+    expect(diag.requestRun).not.toHaveBeenCalled();
+    expect(diag.apply).not.toHaveBeenCalled();
+  });
+});

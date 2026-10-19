@@ -46,6 +46,7 @@ import { registerSandboxRoutes } from "./routes/sandbox-routes.js";
 import { registerCronRoutes } from "./routes/cron-routes.js";
 import { registerAgentRoutes } from "./routes/agent-routes.js";
 import { registerMetricsRoutes } from "./routes/metrics-routes.js";
+import { registerDiagnosticsRoutes } from "./routes/diagnostics-routes.js";
 import { registerLinearAgentWebhookRoute, registerLinearAgentProtectedRoutes } from "./routes/linear-agent-routes.js";
 import { registerPromptRoutes } from "./routes/prompt-routes.js";
 import { registerSettingsRoutes } from "./routes/settings-routes.js";
@@ -310,6 +311,7 @@ export function createRoutes(
   agentExecutor?: import("./agent-executor.js").AgentExecutor,
   linearAgentBridge?: import("./linear-agent-bridge.js").LinearAgentBridge,
   port?: number,
+  diagnostics?: import("./routes/diagnostics-routes.js").DiagnosticsRoutesDeps,
 ) {
   const api = new Hono();
 
@@ -2445,6 +2447,8 @@ export function createRoutes(
   registerCronRoutes(api, cronScheduler);
   registerAgentRoutes(api, agentExecutor);
   registerMetricsRoutes(api, { gaugeProvider: wsBridge });
+  // Diagnostics page (plan Task 13) — behind the auth middleware above.
+  if (diagnostics) registerDiagnosticsRoutes(api, diagnostics);
 
   // ─── Recording Hub (hidden feature: COMPANION_RECORDING_HUB=1) ──────
   if (isRecordingHubEnabled()) {

@@ -103,9 +103,14 @@ const linearAgentBridge = new LinearAgentBridge(agentExecutor, wsBridge);
   if (!isDefaultLayerFlags(flags)) console.log(`[layer-flags] server defaults: ${JSON.stringify(flags)}`);
 }
 
+// Diagnostics drift feed (plan Task 4): created before the orchestrator so its
+// SessionRecovery can hand every silent_stdio_drift.* payload to it.
+const diagnosticsDriftFeed = new DriftFeed();
+
 const orchestrator = new SessionOrchestrator({
   launcher, wsBridge, sessionStore, worktreeTracker,
   prPoller, agentExecutor,
+  onDriftEvent: (payload) => diagnosticsDriftFeed.record(payload),
   // Usage-limit auto-resume schedules survive restarts in this file.
   autoResume: { filePath: join(COMPANION_HOME, "auto-resume.json") },
 });
@@ -398,7 +403,25 @@ app.use("/*", securityHeaders());
 app.use("/*", requestBodyLimit());
 
 app.use("/api/*", apiCors());
-app.route("/api", createRoutes(orchestrator, launcher, wsBridge, terminalManager, prPoller, recorder, cronScheduler, agentExecutor, linearAgentBridge, port));
+const runtimeSnapshotDeps: RuntimeSnapshotDeps = {
+  metrics: metricsCollector,
+  gauges: wsBridge,
+  activeTerminalCount: () => terminalManager.activeTerminalIds().length,
+  scheduler: cleanupScheduler,
+};
+
+// Diagnostics page + background KB analyzer (plan Task 13): one wiring seam.
+const diagnosticsService = createDiagnosticsService({
+  launcher,
+  wsBridge,
+  orchestrator,
+  runtime: runtimeSnapshotDeps,
+  driftFeed: diagnosticsDriftFeed,
+  settings: getSettings,
+  version: readPackageVersion(),
+});
+
+app.route("/api", createRoutes(orchestrator, launcher, wsBridge, terminalManager, prPoller, recorder, cronScheduler, agentExecutor, linearAgentBridge, port, diagnosticsService.routes));
 
 // Dynamic manifest — embeds auth token in start_url so PWA auto-authenticates
 // on first launch. iOS gives standalone PWAs isolated storage from Safari,
@@ -702,6 +725,8 @@ import { getSettings } from "./settings-manager.js";
 import { installEventLoopLagMonitor, formatTopOperations, trackSync } from "./event-loop-lag-monitor.js";
 import { metricsCollector } from "./metrics-collector.js";
 import { buildRuntimeSnapshot, noteRuntimeSnapshotLogged, type RuntimeSnapshotDeps } from "./diagnostics/runtime-snapshot.js";
+import { DriftFeed } from "./diagnostics/drift-feed.js";
+import { createDiagnosticsService } from "./diagnostics/diagnostics-service.js";
 // AURA-LOCAL: cleanup-subsystem diagnostic surfaces. PLAN T6 (Phase C).
 import { loadCleanupConfig } from "./cleanup/cleanup-config.js";
 import {
@@ -726,12 +751,6 @@ import { readdirSync as nodeReaddirSync, statSync as nodeStatSync, unlinkSync as
 
 const DIAGNOSTICS_INTERVAL_MS = 5 * 60_000; // every 5 minutes
 
-const runtimeSnapshotDeps: RuntimeSnapshotDeps = {
-  metrics: metricsCollector,
-  gauges: wsBridge,
-  activeTerminalCount: () => terminalManager.activeTerminalIds().length,
-  scheduler: cleanupScheduler,
-};
 
 // AURA-LOCAL: cleanup-subsystem config snapshot used by the 5-min
 // diagnostic tick's memory-pressure WARN. Loaded ONCE at module
@@ -1046,6 +1065,8 @@ async function gracefulShutdown() {
   // callback cannot race the teardown below (it reads wsBridge state that
   // shutdown is actively dismantling).
   clearInterval(diagnosticsTimer);
+  // Abort a running KB analysis (no report, lastRun unchanged) and stop its hourly check.
+  await diagnosticsService.dispose().catch(() => {});
   eventLoopLagMonitor.stop();
   try {
     const coordinator = orchestrator.getCouncilCoordinator();
