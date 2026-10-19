@@ -211,6 +211,41 @@ describe("SettingsPage", () => {
       expect(sw).toHaveAttribute("aria-checked", "false");
     });
 
+    // Diagnostics Knowledge analysis block (review beck #7, abramov P2-1):
+    // saves send the documented payload; a failed save rolls back to the last
+    // server-confirmed value and shows the error; only the latest save wins.
+    it("persists thresholds and the memory switch, and rolls back a failed save", async () => {
+      mockApi.getSettings.mockResolvedValueOnce({
+        anthropicApiKeyConfigured: true,
+        anthropicModel: "claude-sonnet-4-6",
+        kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+        diagnosticsMemoryReport: false,
+      });
+      render(<SettingsPage />);
+      const days = await screen.findByLabelText("Maximum days between analyses");
+      await waitFor(() => expect(days).not.toBeDisabled());
+
+      mockApi.updateSettings.mockResolvedValueOnce({ kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 7 } });
+      fireEvent.change(days, { target: { value: "7" } });
+      fireEvent.blur(days);
+      await waitFor(() =>
+        expect(mockApi.updateSettings).toHaveBeenCalledWith({ kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 7 } }),
+      );
+      await waitFor(() => expect(days).toHaveValue(7));
+
+      mockApi.updateSettings.mockRejectedValueOnce(new Error("disk full"));
+      fireEvent.change(days, { target: { value: "3" } });
+      fireEvent.blur(days);
+      await waitFor(() => expect(days).toHaveValue(7)); // last confirmed, not the 14 from page load
+      expect(await screen.findByText(/disk full/)).toBeInTheDocument();
+
+      const sw = screen.getByRole("switch", { name: "Memory report on the Diagnostics page" });
+      mockApi.updateSettings.mockRejectedValueOnce(new Error("nope"));
+      fireEvent.click(sw);
+      await waitFor(() => expect(mockApi.updateSettings).toHaveBeenCalledWith({ diagnosticsMemoryReport: true }));
+      await waitFor(() => expect(sw).toHaveAttribute("aria-checked", "false"));
+    });
+
     it("hydrates auto-resume off from the server", async () => {
       mockApi.getSettings.mockResolvedValueOnce({
         anthropicApiKeyConfigured: true,

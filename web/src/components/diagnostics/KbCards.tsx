@@ -9,7 +9,15 @@ import { ago, clock, dateTime } from "./format.js";
  * the server applies them (archive is the only KB write; memory is read-only).
  */
 
-export type RunUi = { tag: "idle" } | { tag: "starting" } | { tag: "failed"; message: string };
+/**
+ * idle → starting (POST sent) → accepted (202, or 409 = someone else's run;
+ * we remember which run) → idle once a status shows that run finished.
+ */
+export type RunUi =
+  | { tag: "idle" }
+  | { tag: "starting" }
+  | { tag: "accepted"; runId: string | null; startedAt: number }
+  | { tag: "failed"; message: string };
 export type FindingUi = { tag: "posting"; decision: Decision } | { tag: "rejected"; message: string };
 
 /** The exact AC4 card string — mirrors `formatProgress` on the server. */
@@ -52,7 +60,7 @@ export function KbHealthCard({
   run: RunUi;
   onRun: (includeMemory: boolean) => void;
 }) {
-  const running = status.inFlight !== null || run.tag === "starting";
+  const running = status.inFlight !== null || run.tag === "starting" || run.tag === "accepted";
   const runningMemory = status.inFlight?.includeMemory === true;
   const h = status.health;
   const p = status.progress;
@@ -171,7 +179,10 @@ function FindingCard({
 }) {
   const [mergeOpen, setMergeOpen] = useState(false);
   const partners = [...new Set(f.signals.filter((s) => s.signal === "duplicate" && s.partnerId).map((s) => s.partnerId!))];
-  const [target, setTarget] = useState(partners[0] ?? "");
+  const [picked, setPicked] = useState(partners[0] ?? "");
+  // Review P2-2: a newer report may change the partners; never post a choice
+  // the select is not showing.
+  const target = partners.includes(picked) ? picked : (partners[0] ?? "");
   const posting = ui?.tag === "posting";
   const headingId = `finding-${f.entryId}`;
   const heuristicOnly = f.signals.every((s) => HEURISTIC.has(s.signal));
@@ -237,7 +248,7 @@ function FindingCard({
             <select
               id={`merge-${f.entryId}`}
               value={target}
-              onChange={(e) => setTarget(e.target.value)}
+              onChange={(e) => setPicked(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Escape") setMergeOpen(false);
               }}

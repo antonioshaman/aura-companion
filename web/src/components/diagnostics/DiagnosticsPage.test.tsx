@@ -67,6 +67,30 @@ describe("DiagnosticsPage", () => {
     expect(mocks.kbAnalysisRun).toHaveBeenCalledWith(false);
   });
 
+  // Review P1 (abramov) + beck #6: the run usually finishes before the next
+  // poll, so the page never sees inFlight. The button must still come back.
+  it("returns from 'running…' when the first status after 202 already shows the run finished", async () => {
+    render(<DiagnosticsPage />);
+    const btn = await screen.findByRole("button", { name: "Run analysis now" });
+    mocks.kbAnalysisRun.mockResolvedValue({ status: 202, body: { runId: "r7", startedAt: NOW } });
+    mocks.kbAnalysisLatest.mockResolvedValue(kbStatus({ inFlight: null, lastRun: { runId: "r7", at: NOW + 50, trigger: "manual" } }));
+    fireEvent.click(btn);
+    expect(await screen.findByRole("button", { name: "Run analysis now" })).not.toHaveAttribute("aria-disabled");
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("Analysis finished: 2 findings."));
+  });
+
+  it("stays 'running…' while the accepted run is still in flight, then settles", async () => {
+    render(<DiagnosticsPage />);
+    const btn = await screen.findByRole("button", { name: "Run analysis now" });
+    mocks.kbAnalysisRun.mockResolvedValue({ status: 202, body: { runId: "r8", startedAt: NOW } });
+    mocks.kbAnalysisLatest.mockResolvedValue(kbStatus({ inFlight: { runId: "r8", startedAt: NOW, trigger: "manual", includeMemory: false } }));
+    fireEvent.click(btn);
+    await screen.findByRole("button", { name: "running…" });
+    mocks.kbAnalysisLatest.mockResolvedValue(kbStatus({ inFlight: null, lastRun: { runId: "r8", at: NOW + 10, trigger: "manual" } }));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    expect(await screen.findByRole("button", { name: "Run analysis now" })).toBeInTheDocument();
+  });
+
   it("a decision rejected with 409 shows the reason on that card and reloads the status", async () => {
     render(<DiagnosticsPage />);
     const archive = await screen.findByRole("button", { name: "Archive got-017" });

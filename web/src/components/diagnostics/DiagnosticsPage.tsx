@@ -43,7 +43,7 @@ type Action =
   | { type: "kb:ok"; data: KbAnalysisStatus; at: number }
   | { type: "kb:fail"; message: string; at: number }
   | { type: "run:starting" }
-  | { type: "run:settled" }
+  | { type: "run:accepted"; runId: string | null; startedAt: number }
   | { type: "run:failed"; message: string }
   | { type: "finding:posting"; id: string; decision: Decision }
   | { type: "finding:rejected"; id: string; message: string }
@@ -56,6 +56,23 @@ function fail<T>(prev: Src<T>, message: string, at: number): Src<T> {
   return prev.tag === "ready" ? { ...prev, failedAt: at } : { tag: "failed", message };
 }
 
+/**
+ * Review P1 (abramov): the run is usually over before the next status poll,
+ * so "running" may never be observed. Settle from server state instead: the
+ * accepted run is done once it is no longer in flight and a run (or failure)
+ * at/after its start is on record.
+ */
+export function settleRun(run: RunUi, st: KbAnalysisStatus): RunUi {
+  if (run.tag !== "accepted") return run;
+  const stillRunning = st.inFlight !== null && (run.runId === null || st.inFlight.runId === run.runId);
+  if (stillRunning) return run;
+  const finished =
+    (run.runId !== null && st.lastRun?.runId === run.runId) ||
+    (st.lastRun?.at ?? 0) >= run.startedAt ||
+    (st.lastFailure?.at ?? 0) >= run.startedAt;
+  return finished ? { tag: "idle" } : run;
+}
+
 function reducer(s: State, a: Action): State {
   switch (a.type) {
     case "overview:ok":
@@ -63,13 +80,13 @@ function reducer(s: State, a: Action): State {
     case "overview:fail":
       return { ...s, overview: fail(s.overview, a.message, a.at) };
     case "kb:ok":
-      return { ...s, kb: ok(a.data, a.at) };
+      return { ...s, kb: ok(a.data, a.at), run: settleRun(s.run, a.data) };
     case "kb:fail":
       return { ...s, kb: fail(s.kb, a.message, a.at) };
     case "run:starting":
       return { ...s, run: { tag: "starting" } };
-    case "run:settled":
-      return { ...s, run: { tag: "idle" } };
+    case "run:accepted":
+      return { ...s, run: { tag: "accepted", runId: a.runId, startedAt: a.startedAt } };
     case "run:failed":
       return { ...s, run: { tag: "failed", message: a.message } };
     case "finding:posting":
@@ -167,7 +184,7 @@ export function DiagnosticsPage({ embedded = false }: { embedded?: boolean }) {
   // Faster status polling while an analysis runs (any tab may have started it).
   const inFlight = state.kb.tag === "ready" ? state.kb.data.inFlight : null;
   useEffect(() => {
-    if (!inFlight && state.run.tag !== "starting") return;
+    if (!inFlight && state.run.tag !== "starting" && state.run.tag !== "accepted") return;
     const t = setInterval(() => {
       setNow(Date.now());
       void loadKb();
@@ -192,19 +209,18 @@ export function DiagnosticsPage({ embedded = false }: { embedded?: boolean }) {
     }
   }, [state.overview]);
 
-  const prevRunning = useRef<boolean | null>(null);
+  // Announce the end of OUR run once settleRun returns it to idle.
+  const prevRunTag = useRef(state.run.tag);
   useEffect(() => {
-    if (state.kb.tag !== "ready") return;
-    const running = state.kb.data.inFlight !== null;
-    if (prevRunning.current === true && !running) {
-      const r = state.kb.data.report;
-      const n = r?.status === "available" ? r.data.findings.length : 0;
-      setAnnouncement(state.kb.data.lastFailure ? `Analysis failed: ${state.kb.data.lastFailure.reason}.` : `Analysis finished: ${n} findings.`);
-      if (state.run.tag === "starting") dispatch({ type: "run:settled" });
-    }
-    if (prevRunning.current === false && running) setAnnouncement("Analysis started.");
-    prevRunning.current = running;
-  }, [state.kb, state.run.tag]);
+    const was = prevRunTag.current;
+    prevRunTag.current = state.run.tag;
+    if (was !== "accepted" || state.run.tag !== "idle" || state.kb.tag !== "ready") return;
+    const st = state.kb.data;
+    const r = st.report;
+    const n = r?.status === "available" ? r.data.findings.length : 0;
+    const failedAfterRun = st.lastFailure && (!st.lastRun || st.lastFailure.at >= st.lastRun.at);
+    setAnnouncement(failedAfterRun ? `Analysis failed: ${st.lastFailure!.reason}.` : `Analysis finished: ${n} findings.`);
+  }, [state.run.tag, state.kb]);
 
   const onRun = useCallback(
     (includeMemory: boolean) => {
@@ -215,6 +231,8 @@ export function DiagnosticsPage({ embedded = false }: { embedded?: boolean }) {
           // 202 (we started it) and 409 (someone else did) land in the same
           // running state — a 409 is not an error for the operator.
           if (status === 202 || status === 409) {
+            dispatch({ type: "run:accepted", runId: body.runId ?? null, startedAt: body.startedAt ?? Date.now() });
+            setAnnouncement("Analysis started.");
             void loadKb();
             return;
           }

@@ -90,6 +90,36 @@ describe("KbFindingsCard", () => {
     expect(onDecide).toHaveBeenCalledWith("got-040", "merge", "got-041");
   });
 
+  // Review beck #6: axe in the interactive states, not only the first render.
+  it("open merge picker and a rejected alert pass an axe accessibility scan", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(
+      <KbFindingsCard status={kbStatus()} findingUi={{ "got-017": { tag: "rejected", message: "The report changed — reloading." } }} onDecide={vi.fn()} />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Mark for merge got-040" }));
+    expect(screen.getByLabelText("Merge got-040 into")).toBeInTheDocument();
+    expect(await axe(container)).toHaveNoViolations();
+  });
+
+  // Review abramov P2-2: a newer report with different partners must not post
+  // a merge target the picker is no longer showing.
+  it("never posts a merge target the picker does not show after the partners change", () => {
+    const onDecide = vi.fn();
+    const { rerender } = render(<KbFindingsCard status={kbStatus()} findingUi={{}} onDecide={onDecide} />);
+    fireEvent.click(screen.getByRole("button", { name: "Mark for merge got-040" }));
+    const next = kbStatus();
+    if (next.report?.status === "available") {
+      next.report.data.findings[1] = {
+        ...next.report.data.findings[1],
+        signals: [{ signal: "duplicate", criterion: "c", partnerId: "got-099", similarity: 1 }],
+      };
+    }
+    rerender(<KbFindingsCard status={next} findingUi={{}} onDecide={onDecide} />);
+    expect((screen.getByLabelText("Merge got-040 into") as HTMLSelectElement).value).toBe("got-099");
+    fireEvent.click(screen.getByRole("button", { name: "Confirm" }));
+    expect(onDecide).toHaveBeenCalledWith("got-040", "merge", "got-099");
+  });
+
   it("a posting card says 'archiving…' and ignores clicks; a rejected one shows its reason", () => {
     const onDecide = vi.fn();
     const { rerender } = render(<KbFindingsCard status={kbStatus()} findingUi={{ "got-017": { tag: "posting", decision: "archive" } }} onDecide={onDecide} />);
@@ -101,10 +131,12 @@ describe("KbFindingsCard", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("The report changed — reloading.");
   });
 
-  it("a decided finding collapses to a decided row instead of vanishing", () => {
-    render(<KbFindingsCard status={kbStatus({ decisions: { "got-017": { decision: "archive", ts: NOW } } })} findingUi={{}} onDecide={vi.fn()} />);
+  it("a decided finding collapses to a decided row instead of vanishing (and passes an axe accessibility scan)", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(<KbFindingsCard status={kbStatus({ decisions: { "got-017": { decision: "archive", ts: NOW } } })} findingUi={{}} onDecide={vi.fn()} />);
     expect(screen.getByText(/archived → \.agents\/knowledge\/archive\//)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Archive got-017" })).toBeNull();
+    expect(await axe(container)).toHaveNoViolations();
   });
 
   it("no report yet is explained", () => {

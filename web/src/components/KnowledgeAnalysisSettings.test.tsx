@@ -60,6 +60,26 @@ describe("KnowledgeAnalysisSettings", () => {
     expect(onThresholdsChange).toHaveBeenCalledWith({ newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 7 });
   });
 
+  // Review abramov P2-3: another field's save must not clobber a half-typed value.
+  it("keeps a half-typed field when another field's confirmed value changes", () => {
+    const onThresholdsChange = vi.fn();
+    const { rerender } = render(
+      <KnowledgeAnalysisSettings thresholds={T} memoryReport={false} onThresholdsChange={onThresholdsChange} onMemoryReportChange={vi.fn()} />,
+    );
+    const sessions = screen.getByLabelText("Finished sessions since the last run");
+    fireEvent.change(sessions, { target: { value: "4" } }); // typing, not blurred
+    rerender(
+      <KnowledgeAnalysisSettings
+        thresholds={{ ...T, maxAgeDays: 7 }}
+        memoryReport={false}
+        onThresholdsChange={onThresholdsChange}
+        onMemoryReportChange={vi.fn()}
+      />,
+    );
+    expect(sessions).toHaveValue(4);
+    expect(screen.getByLabelText("Maximum days between analyses")).toHaveValue(7);
+  });
+
   it("toggles the report-only memory switch", () => {
     const { onMemoryReportChange } = setup();
     const sw = screen.getByRole("switch", { name: "Memory report on the Diagnostics page" });

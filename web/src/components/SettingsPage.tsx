@@ -61,6 +61,10 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
   const [kbAutoPrime, setKbAutoPrime] = useState(false);
   const [kbAnalysis, setKbAnalysis] = useState<KbAnalysisThresholds>({ newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 });
   const [diagnosticsMemoryReport, setDiagnosticsMemoryReport] = useState(false);
+  const kbSaveSeq = useRef(0);
+  const memSaveSeq = useRef(0);
+  const kbConfirmed = useRef<KbAnalysisThresholds>({ newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 });
+  const memConfirmed = useRef(false);
   const [secondReviewer, setSecondReviewer] = useState<SecondReviewerConfig>({ reviewer: "off", scope: "review-implement" });
   const [autoResumeAfterLimit, setAutoResumeAfterLimit] = useState(true);
   const [aiValidationEnabled, setAiValidationEnabled] = useState(false);
@@ -202,8 +206,14 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
         if (typeof s.telemetryEnabled === "boolean") setUsageCounterEnabled(s.telemetryEnabled);
         if (s.defaultSessionMode === "solo" || s.defaultSessionMode === "council") setDefaultSessionMode(s.defaultSessionMode);
         if (typeof s.kbAutoPrime === "boolean") setKbAutoPrime(s.kbAutoPrime);
-        if (s.kbAnalysis) setKbAnalysis(s.kbAnalysis);
-        if (typeof s.diagnosticsMemoryReport === "boolean") setDiagnosticsMemoryReport(s.diagnosticsMemoryReport);
+        if (s.kbAnalysis) {
+          setKbAnalysis(s.kbAnalysis);
+          kbConfirmed.current = s.kbAnalysis;
+        }
+        if (typeof s.diagnosticsMemoryReport === "boolean") {
+          setDiagnosticsMemoryReport(s.diagnosticsMemoryReport);
+          memConfirmed.current = s.diagnosticsMemoryReport;
+        }
         if (s.councilSecondReviewer) setSecondReviewer(s.councilSecondReviewer);
         if (typeof s.autoResumeAfterLimit === "boolean") setAutoResumeAfterLimit(s.autoResumeAfterLimit);
         if (typeof s.aiValidationEnabled === "boolean") setAiValidationEnabled(s.aiValidationEnabled);
@@ -546,22 +556,27 @@ export function SettingsPage({ embedded = false }: SettingsPageProps) {
                   memoryReport={diagnosticsMemoryReport}
                   disabled={loading}
                   onThresholdsChange={async (next) => {
-                    const prev = kbAnalysis;
+                    // Review P2-1: only the LATEST save may set the value, and a
+                    // failure rolls back to the last server-confirmed value.
+                    const mine = ++kbSaveSeq.current;
                     setKbAnalysis(next);
                     try {
                       const saved = await api.updateSettings({ kbAnalysis: next });
-                      if (saved.kbAnalysis) setKbAnalysis(saved.kbAnalysis);
+                      if (saved.kbAnalysis) kbConfirmed.current = saved.kbAnalysis;
+                      if (mine === kbSaveSeq.current && saved.kbAnalysis) setKbAnalysis(saved.kbAnalysis);
                     } catch (e: unknown) {
-                      setKbAnalysis(prev);
+                      if (mine === kbSaveSeq.current) setKbAnalysis(kbConfirmed.current);
                       setError(e instanceof Error ? e.message : String(e));
                     }
                   }}
                   onMemoryReportChange={async (next) => {
+                    const mine = ++memSaveSeq.current;
                     setDiagnosticsMemoryReport(next);
                     try {
-                      await api.updateSettings({ diagnosticsMemoryReport: next });
+                      const saved = await api.updateSettings({ diagnosticsMemoryReport: next });
+                      if (typeof saved.diagnosticsMemoryReport === "boolean") memConfirmed.current = saved.diagnosticsMemoryReport;
                     } catch (e: unknown) {
-                      setDiagnosticsMemoryReport(!next);
+                      if (mine === memSaveSeq.current) setDiagnosticsMemoryReport(memConfirmed.current);
                       setError(e instanceof Error ? e.message : String(e));
                     }
                   }}

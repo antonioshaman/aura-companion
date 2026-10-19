@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 /**
  * KnowledgeAnalysisSettings — the "Knowledge analysis" block under Session
@@ -39,9 +39,18 @@ export function KnowledgeAnalysisSettings({
 }) {
   const [draft, setDraft] = useState<Record<keyof KbAnalysisThresholds, string>>(() => toDraft(thresholds));
   const [errors, setErrors] = useState<Partial<Record<keyof KbAnalysisThresholds, string>>>({});
+  // Fields the user has typed in and not committed yet (review P2-3): a save
+  // or rollback of ANOTHER field must not overwrite them.
+  const dirty = useRef(new Set<keyof KbAnalysisThresholds>());
+  const { newEntriesThreshold, sessionsThreshold, maxAgeDays } = thresholds;
   useEffect(() => {
-    setDraft(toDraft(thresholds));
-  }, [thresholds.newEntriesThreshold, thresholds.sessionsThreshold, thresholds.maxAgeDays]); // eslint-disable-line react-hooks/exhaustive-deps
+    const confirmed = toDraft({ newEntriesThreshold, sessionsThreshold, maxAgeDays });
+    setDraft((d) => {
+      const next = { ...d };
+      for (const f of FIELDS) if (!dirty.current.has(f.key)) next[f.key] = confirmed[f.key];
+      return next;
+    });
+  }, [newEntriesThreshold, sessionsThreshold, maxAgeDays]);
 
   function commit(key: keyof KbAnalysisThresholds) {
     const f = FIELDS.find((x) => x.key === key)!;
@@ -51,6 +60,7 @@ export function KnowledgeAnalysisSettings({
       return;
     }
     setErrors((e) => ({ ...e, [key]: undefined }));
+    dirty.current.delete(key);
     if (n !== thresholds[key]) onThresholdsChange({ ...thresholds, [key]: n });
   }
 
@@ -81,7 +91,10 @@ export function KnowledgeAnalysisSettings({
                 value={draft[f.key]}
                 aria-invalid={err ? true : undefined}
                 aria-describedby={`${id}-help${err ? ` ${id}-error` : ""}`}
-                onChange={(e) => setDraft((d) => ({ ...d, [f.key]: e.target.value }))}
+                onChange={(e) => {
+                  dirty.current.add(f.key);
+                  setDraft((d) => ({ ...d, [f.key]: e.target.value }));
+                }}
                 onBlur={() => commit(f.key)}
                 className="mt-1 w-32 rounded-lg border border-cc-border bg-cc-bg px-3 py-2 text-sm text-cc-fg"
               />
