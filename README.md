@@ -6,6 +6,8 @@
 <p align="center"><strong>Self-learning web UI for Claude Code & Codex with Council Mode.</strong></p>
 
 <p align="center">
+  <a href="https://www.npmjs.com/package/aura-companion"><img src="https://img.shields.io/npm/v/aura-companion?label=npm&color=e05d2c" alt="npm version" /></a>
+  <a href="https://www.npmjs.com/package/aura-companion"><img src="https://img.shields.io/npm/dm/aura-companion?label=downloads" alt="npm downloads per month" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="MIT License" /></a>
   <a href="https://github.com/antonioshaman/aura-companion/stargazers"><img src="https://img.shields.io/github/stars/antonioshaman/aura-companion?style=social" alt="GitHub stars" /></a>
 </p>
