@@ -1,5 +1,31 @@
 # Changelog
 
+## [2.6.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.5.0...aura-companion-v2.6.0) (2026-10-19)
+
+
+### Features
+
+* **council:** complexity triage gate — solo / economy / full before any roster ([#389](https://github.com/antonioshaman/aura-companion/issues/389)) ([fe85084](https://github.com/antonioshaman/aura-companion/commit/fe850840ac3c246ff33ee0d293276d430f3c962e))
+* **council:** OBSERVER-SOUL.md — observer identity split out of the system prompt ([#391](https://github.com/antonioshaman/aura-companion/issues/391)) ([96f9ab4](https://github.com/antonioshaman/aura-companion/commit/96f9ab45748c96d98f2c62dbc1d5676dde659c3d))
+* **diagnostics:** Diagnostics page and background KB / memory analyzer ([#396](https://github.com/antonioshaman/aura-companion/issues/396)) ([81db267](https://github.com/antonioshaman/aura-companion/commit/81db26760eab465d25cc78ff691257dce12348e8))
+* **landing:** answer "why not just Claude Code/Codex" and add English page ([#376](https://github.com/antonioshaman/aura-companion/issues/376)) ([ea515df](https://github.com/antonioshaman/aura-companion/commit/ea515dfe9fb75d47c14a8f599cf298b74de61b64))
+* **sessions:** offer one-click handoff to a new session when context overflows ([#381](https://github.com/antonioshaman/aura-companion/issues/381)) ([4c72e0a](https://github.com/antonioshaman/aura-companion/commit/4c72e0a5493c19386c45376294d006ed477d764f))
+
+
+### Bug Fixes
+
+* **council:** reject checkpoints with missing artifacts; show when checks and reviews happened ([#397](https://github.com/antonioshaman/aura-companion/issues/397)) ([34ff012](https://github.com/antonioshaman/aura-companion/commit/34ff0128ca38f7b7c7fa7fffd1db6a06062c727e))
+* **home:** cap the new-session model list so Opus 5.5 isn't pushed off-screen ([#386](https://github.com/antonioshaman/aura-companion/issues/386)) ([605f49d](https://github.com/antonioshaman/aura-companion/commit/605f49d493127e124f659e5ef6fd5d9bbd5ac37a))
+* **home:** size the new-session model list to the room above the trigger ([#387](https://github.com/antonioshaman/aura-companion/issues/387)) ([4a23591](https://github.com/antonioshaman/aura-companion/commit/4a23591718ce3aa32ae911a019e9170cbc8e3c11))
+* **landing:** stop scroll flicker by dropping the blend mode on the fixed scanline overlay ([#399](https://github.com/antonioshaman/aura-companion/issues/399)) ([e809c86](https://github.com/antonioshaman/aura-companion/commit/e809c86fde521a8c1d4396716e2544c3c646c5c6))
+* **models:** stop labelling verified models "Untested" ([#379](https://github.com/antonioshaman/aura-companion/issues/379)) ([9730490](https://github.com/antonioshaman/aura-companion/commit/9730490cf19277b030fe69eb9c98c75b3ba9a79f))
+* **server:** defer the drift kill until every parallel tool call is answered ([#392](https://github.com/antonioshaman/aura-companion/issues/392)) ([8344fe4](https://github.com/antonioshaman/aura-companion/commit/8344fe4c07dd22dd878e29d34a8d5d9ab0e6fc92))
+* **server:** key checkpoint-watcher debounce by (file, mtimeNs) so a superseded checkpoint is never silently lost ([#382](https://github.com/antonioshaman/aura-companion/issues/382)) ([6a0ed1b](https://github.com/antonioshaman/aura-companion/commit/6a0ed1b77a318b77120b184ae488c0f9a0205d59))
+* **server:** let the drift kill wait for the main thread's running tool call ([#388](https://github.com/antonioshaman/aura-companion/issues/388)) ([78ec29b](https://github.com/antonioshaman/aura-companion/commit/78ec29b707ce88a75563a52c1e7e4628df27bc57))
+* **sessions:** offer the context-overflow handoff to Codex sessions and to sessions whose CLI is dead ([#384](https://github.com/antonioshaman/aura-companion/issues/384)) ([9a58919](https://github.com/antonioshaman/aura-companion/commit/9a58919addb7bfcf653dc1d9fcaa17f190e7f751))
+* **sessions:** prune stale handoff briefs after a successful continue-in-new, never the operator's notes ([#383](https://github.com/antonioshaman/aura-companion/issues/383)) ([19b70c8](https://github.com/antonioshaman/aura-companion/commit/19b70c8b2504f7aefe9ea139364346ad74ae18db))
+* **stats:** fit the companion-stats Worker in the KV free-tier budget ([#393](https://github.com/antonioshaman/aura-companion/issues/393)) ([52a9f7e](https://github.com/antonioshaman/aura-companion/commit/52a9f7e9ece68eadd2b14b0fbb6ecdaa6228d551))
+
 ## [2.5.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.4.0...aura-companion-v2.5.0) (2026-10-16)
 
 
