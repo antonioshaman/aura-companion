@@ -76,6 +76,8 @@ export interface DriftFeedView {
   windowStart: number;
   wrapped: boolean;
   capacity: number;
+  /** Events in the window before the overview's list cap (the card shows "newest N of total"). */
+  totalInWindow?: number;
 }
 
 // ─── Context advisory card ───────────────────────────────────────────────────
