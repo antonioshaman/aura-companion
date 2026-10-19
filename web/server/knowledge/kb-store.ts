@@ -368,7 +368,7 @@ export class KbStoreConflictError extends Error {
   }
 }
 
-function archivedIds(archivePath: string): Set<string> {
+export function archivedIds(archivePath: string): Set<string> {
   if (!existsSync(archivePath)) return new Set();
   const ids = new Set<string>();
   for (const text of readFileSync(archivePath, "utf8").split("\n")) {
