@@ -27,7 +27,7 @@ afterEach(() => {
   rmSync(base, { recursive: true, force: true });
 });
 
-function service() {
+function service(extra: { groups?: unknown[]; bridgeSessions?: unknown[]; launcherSession?: (id: string) => unknown } = {}) {
   const sessions: Record<string, { state: { num_turns: number; backend_type: string } }> = {
     "claude-1": { state: { num_turns: 2, backend_type: "claude" } },
     "codex-1": { state: { num_turns: 1, backend_type: "codex" } },
@@ -35,9 +35,16 @@ function service() {
   };
   const feed = new DriftFeed();
   const svc = createDiagnosticsService({
-    launcher: { getSession: () => undefined } as never,
-    wsBridge: { getSession: (id: string) => sessions[id], getAllSessions: () => [] } as never,
-    orchestrator: { getAllGroupsForBootstrap: () => [], getGroupLastCheckpointAt: () => null },
+    launcher: { getSession: extra.launcherSession ?? (() => undefined) } as never,
+    wsBridge: {
+      getSession: (id: string) =>
+        sessions[id] ?? (id.startsWith("orch") || id.startsWith("obs") ? { backendAdapter: { getLastCliFrameReceivedMs: () => 1234 } } : undefined),
+      getAllSessions: () => extra.bridgeSessions ?? [],
+    } as never,
+    orchestrator: {
+      getAllGroupsForBootstrap: () => (extra.groups ?? []) as never,
+      getGroupLastCheckpointAt: () => 999,
+    },
     runtime: {
       metrics: {
         getSnapshot: () => ({ gauges: { memory: { rss: 1, heapUsed: 1, heapTotal: 1, external: 1 }, totalActiveSessions: 0, connectedBrowsers: 0, totalHistoryMessages: 0, totalPendingMessages: 0, totalEventBufferSize: 0 }, counters: { errors: {} } }) as never,
@@ -80,6 +87,69 @@ describe("createDiagnosticsService", () => {
       expect(ov.drift.status === "available" && ov.drift.data.events.map((e) => e.event)).toEqual(["silent_stdio_drift.detected"]);
       expect(ov.backend.status).toBe("available");
       expect(ov.usage.status).toBe("available");
+    } finally {
+      await svc.dispose();
+    }
+  });
+});
+
+describe("createDiagnosticsService — suppliers and routes", () => {
+  it("builds pairs (frame time, checkpoint, wake sentinel) and context advisories from the real wiring", async () => {
+    const { svc } = service({
+      groups: [{ sessionGroupId: "grp_1", primarySessionId: "orch-1", observerSessionId: "obs-1", pairing: "claude+codex", status: "active" }],
+      launcherSession: (id) => ({ backendType: id === "obs-1" ? "codex" : "claude", state: "connected", pid: 7, exitCode: null, cwd: base }),
+      bridgeSessions: [
+        { session_id: "s1", backend_type: "codex", context_advisory: { tier: "handoff", signal: "codex_compactions", milestone: 2, at: 1 } },
+        { session_id: "s2", context_advisory: null },
+      ],
+    });
+    try {
+      const ov = svc.routes.overview();
+      if (ov.pairs.status !== "available") throw new Error("pairs unavailable");
+      expect(ov.pairs.data[0]).toMatchObject({ sessionGroupId: "grp_1", lastCheckpointAt: 999, lastWakeAt: null });
+      expect(ov.pairs.data[0].halves.map((h) => [h.role, h.backendType, h.lastInboundFrameAt])).toEqual([
+        ["orchestrator", "claude", 1234],
+        ["observer", "codex", 1234],
+      ]);
+      expect(ov.contextAdvisory.status === "available" && ov.contextAdvisory.data).toEqual([
+        { sessionId: "s1", backendType: "codex", advisory: { tier: "handoff", signal: "codex_compactions", milestone: 2, at: 1 } },
+      ]);
+      expect(ov.backend.status === "available" && ov.backend.data.version).toBe("test");
+    } finally {
+      await svc.dispose();
+    }
+  });
+
+  it("a supplier that throws marks only its card unavailable", async () => {
+    const { svc } = service({
+      groups: [{ sessionGroupId: "grp_1", primarySessionId: "orch-1", observerSessionId: "obs-1", pairing: "x", status: "active" }],
+      launcherSession: () => {
+        throw new Error("launcher down");
+      },
+    });
+    try {
+      const ov = svc.routes.overview();
+      expect(ov.pairs).toMatchObject({ status: "unavailable", reason: "source-error" });
+      expect(ov.drift.status).toBe("available");
+    } finally {
+      await svc.dispose();
+    }
+  });
+
+  it("runs an analysis and applies a keep decision through the route deps", async () => {
+    writeFileSync(join(base, "kb", "gotchas.jsonl"), JSON.stringify({ id: "got-old", fact: "old fact", usageCount: 0, createdAt: "2026-01-01T00:00:00Z" }) + "\n");
+    const { svc } = service();
+    try {
+      expect(svc.routes.requestRun({ includeMemory: false }).kind).toBe("started");
+      await svc.runner._waitForRun();
+      expect(svc.routes.isRunning()).toBe(false);
+      const report = svc.routes.currentReport();
+      expect(report?.findings.map((f) => f.entryId)).toEqual(["got-old"]);
+      const v = svc.routes.validate({ runId: report!.runId, decisions: [{ entryId: "got-old", decision: "keep" }] }, report);
+      if (!v.ok) throw new Error(v.error);
+      expect(svc.routes.apply(v)).toEqual({ ok: true, applied: [{ entryId: "got-old", decision: "keep" }] });
+      svc.routes.afterDecisions();
+      expect(svc.routes.status().decisions["got-old"]).toMatchObject({ decision: "keep" });
     } finally {
       await svc.dispose();
     }
