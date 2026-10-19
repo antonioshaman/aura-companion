@@ -31,6 +31,8 @@ import {
   splitCmdline,
   parsePpidFromStat,
   resolveOrphanReaperGate,
+  codexHomeFromEnviron,
+  isCompanionCodexSessionHome,
   type OrphanReaperDeps,
   type ReaperKnownSession,
 } from "./orphan-reaper.js";
@@ -731,6 +733,11 @@ describe("reapOrphans — SIGTERM-ignoring orphan escalates to SIGKILL (W10a)", 
       listProcPids: () => [4502],
       readStat: () => fakeStat("node", 1),
       readCmdline: () => codexCmdline(),
+      // Ownership proof (required for codex app-server orphans since the
+      // VS Code extension also runs `codex app-server`): the per-session
+      // CODEX_HOME the launcher sets on spawn.
+      codexHomeRoot: "/home/auracomp/.companion/codex-home",
+      readEnviron: () => "PATH=/usr/bin\0CODEX_HOME=/home/auracomp/.companion/codex-home/sess-w10a\0",
       sleep: async (ms: number) => { t += ms; },
       now: () => t,
       ...over,
@@ -903,5 +910,164 @@ describe("reapOrphans — stdio-shaped orphans require server-written sidecar ow
       readOwnedArgvShas: () => new Set([argvSha256(stdioArgv)]),
     }));
     expect(sum.reaped).toBe(1);
+  });
+});
+
+// ─── Codex app-server ownership (follow-up to PR #403) ───────────────────────
+//
+// The `app-server` subcommand is NOT ownership: the Codex VS Code extension
+// and the root-owned Codex app-server daemon run `codex app-server` too. The
+// server spawns Codex as `node .../codex.js app-server --listen ws://...`
+// (the argv the runtime sidecar hashes), and that wrapper execs a native child
+// `.../vendor/<triple>/bin/codex app-server --listen ws://...` whose argv
+// hashes differently. Both inherit the per-session
+// `CODEX_HOME=<COMPANION_HOME>/codex-home/<sessionId>` env the launcher sets.
+// Observed on the prod box 2026-10-19 (wrapper pid 343478 → native child
+// 343496, both with that CODEX_HOME; the sidecar argvSha256 equals the
+// wrapper's cmdline hash, not the child's).
+describe("reapOrphans — codex app-server requires server ownership proof", () => {
+  const CODEX_HOME_ROOT = "/home/auracomp/.companion/codex-home";
+  const wrapperArgv = [
+    "/usr/bin/node",
+    "/usr/lib/node_modules/@openai/codex/bin/codex.js",
+    "app-server", "--listen", "ws://127.0.0.1:4500",
+    "--enable", "multi_agent", "-c", "tools.web_search=true",
+  ];
+  const nativeArgv = [
+    "/usr/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex",
+    "app-server", "--listen", "ws://127.0.0.1:4500",
+    "--enable", "multi_agent", "-c", "tools.web_search=true",
+  ];
+  const environ = (codexHome?: string) =>
+    ["PATH=/usr/bin", ...(codexHome ? [`CODEX_HOME=${codexHome}`] : [])].join("\0") + "\0";
+
+  function codexDeps(argv: string[], over: Partial<OrphanReaperDeps> = {}): { deps: OrphanReaperDeps; kill: ReturnType<typeof vi.fn> } {
+    let alive = true;
+    const kill = vi.fn(() => { alive = false; });
+    return {
+      kill,
+      deps: {
+        loadedSessions: [],
+        sentinelRoot: tmpRoot,
+        sessionsRoot: tmpRoot,
+        platform: () => "linux",
+        listProcPids: () => [7100],
+        readStat: () => fakeStat("codex", 1),
+        readCmdline: () => argv.join("\0") + "\0",
+        killCheck: () => alive,
+        kill,
+        sleep: async () => {},
+        now: () => 1_700_000_001_000,
+        codexHomeRoot: CODEX_HOME_ROOT,
+        readEnviron: () => environ(),
+        ...over,
+      },
+    };
+  }
+  const skippedUnownedCodex = () =>
+    warnSpy.mock.calls.filter((c: unknown[]) => (c[2] as { event?: string } | undefined)?.event === "orphan_reaper.skipped_unowned_codex");
+
+  it("classifyArgv marks both the node wrapper and the native binary as codex app-server", () => {
+    expect(classifyArgv(wrapperArgv).isCodexAppServer).toBe(true);
+    expect(classifyArgv(nativeArgv).isCodexAppServer).toBe(true);
+    // An unrelated binary that merely has an `app-server` token is not codex.
+    expect(classifyArgv(["/usr/bin/python3", "app-server"]).isCodexAppServer).toBe(false);
+  });
+
+  it("a foreign `codex app-server` (VS Code extension: no sidecar, no Companion CODEX_HOME) is NOT signalled", async () => {
+    // The extension's process has no CODEX_HOME or the user's ~/.codex.
+    const { deps, kill } = codexDeps(["/home/dev/.vscode-server/extensions/openai.chatgpt/bin/codex", "app-server"], {
+      readEnviron: () => environ("/home/auracomp/.codex"),
+    });
+    const sum = await reapOrphans(deps);
+    expect(kill).not.toHaveBeenCalled();
+    expect(sum.reaped).toBe(0);
+    expect(sum.skippedNoSessionMatch).toBe(1);
+    // No sentinel for a process we decided not to touch.
+    expect(existsSync(join(tmpRoot, REAPING_SENTINEL_SUBDIR, "7100.json"))).toBe(false);
+    expect(skippedUnownedCodex()).toHaveLength(1);
+    expect(skippedUnownedCodex()[0][2]).toMatchObject({ pid: 7100 });
+  });
+
+  it("another user's `codex app-server` (environ unreadable → EACCES) is NOT signalled", async () => {
+    // Mirrors the root-owned app-server daemon on the prod box: the service
+    // user cannot read its environ; an unreadable environ is no proof.
+    const { deps, kill } = codexDeps(nativeArgv, {
+      readEnviron: () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); },
+    });
+    const sum = await reapOrphans(deps);
+    expect(kill).not.toHaveBeenCalled();
+    expect(sum.reaped).toBe(0);
+    expect(skippedUnownedCodex()).toHaveLength(1);
+  });
+
+  it("a CODEX_HOME that only looks similar (outside our codex-home root, unknown session) is NOT proof", async () => {
+    const { deps, kill } = codexDeps(nativeArgv, {
+      readEnviron: () => environ("/tmp/elsewhere/codex-home/some-session"),
+    });
+    await reapOrphans(deps);
+    expect(kill).not.toHaveBeenCalled();
+  });
+
+  it("our orphaned node wrapper is reaped via the sidecar argv hash", async () => {
+    // The sidecar written at spawn hashes exactly the wrapper argv.
+    writeRuntimeSidecar(tmpRoot, "sess-codex", {
+      schemaVersion: SIDECAR_SCHEMA_VERSION,
+      pid: 5000,
+      processStartMs: 1_700_000_000_000,
+      argvSha256: argvSha256(wrapperArgv),
+    });
+    const { deps, kill } = codexDeps(wrapperArgv, {
+      loadedSessions: [{ sessionId: "sess-codex", pid: undefined }],
+    });
+    const sum = await reapOrphans(deps);
+    expect(kill).toHaveBeenCalledWith(7100, "SIGTERM");
+    expect(sum.reaped).toBe(1);
+    const reaped = infoSpy.mock.calls.find((c: unknown[]) => (c[2] as { event?: string } | undefined)?.event === "orphan_reaped");
+    expect(reaped?.[2]).toMatchObject({ codexOwnershipProof: "sidecar_argv" });
+  });
+
+  it("our orphaned native child (wrapper gone, argv matches no sidecar) is reaped via its per-session CODEX_HOME", async () => {
+    // The sidecar exists but hashes the WRAPPER argv, so the native child
+    // can only prove ownership through the inherited CODEX_HOME. The session
+    // was since deleted (not loaded) — still ours: the home is under our root.
+    writeRuntimeSidecar(tmpRoot, "sess-codex", {
+      schemaVersion: SIDECAR_SCHEMA_VERSION,
+      pid: 5000,
+      processStartMs: 1_700_000_000_000,
+      argvSha256: argvSha256(wrapperArgv),
+    });
+    const { deps, kill } = codexDeps(nativeArgv, {
+      loadedSessions: [{ sessionId: "sess-codex", pid: undefined }],
+      readEnviron: () => environ(`${CODEX_HOME_ROOT}/f1a26243-bb3a-41cf-b9ae-7e301bfec91d`),
+    });
+    const sum = await reapOrphans(deps);
+    expect(kill).toHaveBeenCalledWith(7100, "SIGTERM");
+    expect(sum.reaped).toBe(1);
+    const reaped = infoSpy.mock.calls.find((c: unknown[]) => (c[2] as { event?: string } | undefined)?.event === "orphan_reaped");
+    expect(reaped?.[2]).toMatchObject({ codexOwnershipProof: "codex_home_env" });
+  });
+
+  it("a per-launch codexHome override still proves ownership when the dir is named after a loaded session", async () => {
+    const { deps, kill } = codexDeps(nativeArgv, {
+      loadedSessions: [{ sessionId: "sess-override", pid: undefined }],
+      readEnviron: () => environ("/srv/custom-codex/sess-override"),
+    });
+    const sum = await reapOrphans(deps);
+    expect(kill).toHaveBeenCalledWith(7100, "SIGTERM");
+    expect(sum.reaped).toBe(1);
+  });
+
+  it("codexHomeFromEnviron / isCompanionCodexSessionHome parse and match exactly", () => {
+    expect(codexHomeFromEnviron("A=1\0CODEX_HOME=/x/y\0B=2\0")).toBe("/x/y");
+    expect(codexHomeFromEnviron("A=1\0")).toBeNull();
+    expect(codexHomeFromEnviron("CODEX_HOME=\0")).toBeNull();
+    const none = new Set<string>();
+    expect(isCompanionCodexSessionHome(`${CODEX_HOME_ROOT}/abc`, CODEX_HOME_ROOT, none)).toBe(true);
+    // The root itself, or a nested path, is not a per-session home.
+    expect(isCompanionCodexSessionHome(CODEX_HOME_ROOT, CODEX_HOME_ROOT, none)).toBe(false);
+    expect(isCompanionCodexSessionHome(`${CODEX_HOME_ROOT}/abc/def`, CODEX_HOME_ROOT, none)).toBe(false);
+    // `..` traversal resolves out of the root.
+    expect(isCompanionCodexSessionHome(`${CODEX_HOME_ROOT}/../other`, CODEX_HOME_ROOT, none)).toBe(false);
   });
 });

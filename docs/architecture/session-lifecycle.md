@@ -42,6 +42,15 @@ token for WS sessions. stdio argv carries no sessionId at all, so the spawn-time
 `argvSha256` is the equivalent anchor — without it a healthy stdio CLI reads as `mismatch`
 and the orphan-reaper kills it.
 
+**Orphan-reaper ownership.** A PPID=1 orphan with no known session is reaped only with proof
+this server spawned it: `--sdk-url`, or (stdio Claude) an argv hash matching a runtime
+sidecar. Codex `app-server` is not proof on its own (the Codex VS Code extension and the
+Codex daemon run it too). A Codex orphan needs a sidecar argv-hash match (the
+`node .../codex.js` wrapper the launcher spawns) or the per-session
+`CODEX_HOME=<COMPANION_HOME>/codex-home/<sessionId>` in `/proc/<pid>/environ`, which the
+wrapper's native child inherits. Without either it is skipped
+(`orphan_reaper.skipped_unowned_codex`).
+
 
 **User stop** (`POST /api/sessions/:id/kill`, the UI kill button) is not a crash. Before
 any kill runs, `killSession` marks the session intentional and "stopped by user". For a

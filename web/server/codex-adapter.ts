@@ -207,6 +207,13 @@ export interface CodexAdapterOptions {
 
 // ─── Stdio JSON-RPC Transport ────────────────────────────────────────────────
 
+/** JSON-RPC 2.0 error object: `{ code, message, data? }` (lenient on code). */
+function isJsonRpcErrorObject(v: unknown): v is { message?: unknown; code?: unknown } {
+  if (v === null || typeof v !== "object" || Array.isArray(v)) return false;
+  const e = v as Record<string, unknown>;
+  return typeof e.message === "string" || typeof e.code === "number";
+}
+
 export class StdioTransport implements ICodexTransport {
   private nextId = 1;
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
@@ -319,6 +326,19 @@ export class StdioTransport implements ICodexTransport {
       this.reportUnmatchedFrame(msg, Array.isArray(msg) ? "array" : msg === null ? "null" : typeof msg);
       return;
     }
+    // A JSON-RPC error response with no / null id and no method — e.g. a
+    // parse error or an auth failure the server could not tie to a request
+    // id. It is a well-formed frame carrying the REAL cause, so surface its
+    // message as an error instead of (a) the generic "protocol drift" banner
+    // (id absent) or (b) silently dropping it as an unmatched response
+    // (id: null). Truly unknown shapes still fall through to drift below.
+    const frame = msg as unknown as Record<string, unknown>;
+    const idless = !("id" in frame) || frame.id === undefined || frame.id === null;
+    const hasMethod = typeof frame.method === "string" && frame.method.length > 0;
+    if (idless && !hasMethod && isJsonRpcErrorObject(frame.error)) {
+      this.reportIdlessError(frame.error);
+      return;
+    }
     if ("id" in msg && msg.id !== undefined) {
       if ("method" in msg && msg.method) {
         // This is a request FROM the server (e.g., approval request)
@@ -374,6 +394,25 @@ export class StdioTransport implements ICodexTransport {
       // frame-shape drift is visible from the first offending frame.
       this.reportUnmatchedFrame(msg, "object");
     }
+  }
+
+  /**
+   * Surface an id-less JSON-RPC error to the browser through the same
+   * `type: "error"` channel the adapter uses for other Codex errors. Not
+   * deduped: each one is a real failure (e.g. every turn hitting expired auth).
+   */
+  private reportIdlessError(error: { message?: unknown; code?: unknown }): void {
+    const text = typeof error.message === "string" ? error.message.trim() : "";
+    const code = typeof error.code === "number" || typeof error.code === "string" ? error.code : null;
+    let message = text.length > 0 ? `Codex error: ${text}` : "Codex reported an error without a message.";
+    if (code !== null) message += ` (code ${code})`;
+    log.error("codex-adapter", "Codex sent an error response without a request id", {
+      event: "codex.idless_error",
+      sessionId: this.sessionId,
+      code,
+      message: text.slice(0, 500),
+    });
+    this.parseErrorCb?.(message);
   }
 
   /** Report a frame that matches no JSON-RPC shape (deduped per transport). */
