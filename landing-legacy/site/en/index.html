@@ -74,7 +74,7 @@
   .ambient { position: fixed; inset: 0; pointer-events: none; z-index: 0; overflow: hidden; }
   .ambient::before, .ambient::after {
     content: ''; position: absolute; width: 80vmax; height: 80vmax;
-    border-radius: 50%; filter: blur(120px); opacity: 0.5;
+    border-radius: 50%; opacity: 0.5; /* no filter: blur() — the radial gradient already fades to transparent, and a 120px blur on an ~80vmax layer is a huge GPU texture that flickers on scroll in Chrome/macOS */
   }
   .ambient::before {
     background: radial-gradient(circle, rgba(255, 140, 66, 0.18), transparent 60%);
@@ -90,9 +90,7 @@
   /* Header */
   header {
     position: sticky; top: 0; z-index: 100;
-    backdrop-filter: blur(20px) saturate(150%);
-    -webkit-backdrop-filter: blur(20px) saturate(150%);
-    background: rgba(0, 6, 2, 0.82);
+    background: rgb(0, 6, 2); /* opaque instead of backdrop-filter: blurring the page that scrolls under a sticky header is redone every frame and flickers in Chrome/macOS */
     border-bottom: 1px solid var(--border);
   }
   .nav { display: flex; align-items: center; justify-content: space-between; padding-top: 16px; padding-bottom: 16px; gap: 16px; } /* keep .wrap's side gutters (was padding: 18px 0 → logo/lang switch flush to the screen edge on mobile) */
