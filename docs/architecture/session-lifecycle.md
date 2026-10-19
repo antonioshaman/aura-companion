@@ -82,6 +82,15 @@ still picking its port when the session is killed, archived, deleted or relaunch
 not start at all (it was not in the process table yet, so there was nothing to kill). The observer auto-heal
 does not reset the auto-relaunch crash budget; only a manual relaunch does.
 
+**One exit for the auto-relaunch.** After `handleAutoRelaunch` claims a session, every outcome
+(skip, budget exhausted, success, failure, a throw anywhere in it) leaves through one place that
+releases the claim; failures go through `abortRelaunch`, which logs `session.relaunch.aborted`
+(EC-9 fields), tells the browser, and emits `session:relaunch-failed` for council listeners. The
+claim is held for the 5 s cooldown after an attempted relaunch and dropped at once when nothing was
+spawned. A relaunch that throws (Bun.spawn throws ENOENT when the session cwd was deleted) counts as
+a failed attempt: before, the rejection escaped the keepalive / boot-resume / settle timers, and an
+unhandled rejection exits the Bun server. The boot watchdog catches the same throw per session.
+
 **Init probe (Claude only).** The Claude CLI emits `system.init` only in response to a `user`
 frame, so on every CLI attach with no queued message the bridge writes a probe `user` frame
 (`AURA_INIT_PROBE_MARKER`) and interrupts it 200 ms later (`sendInitializeKickoff`). The probe

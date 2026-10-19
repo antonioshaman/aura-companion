@@ -1663,3 +1663,152 @@ describe("SessionRecovery.scheduleBootResume (W2)", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 });
+
+// Single exit for the auto-relaunch path. Before it, handleAutoRelaunch had
+// eleven hand-written exits, each releasing its own subset of state. Two kinds
+// of exit released nothing:
+//  - a THROWN relaunch (Bun.spawn throws ENOENT synchronously when the session
+//    cwd was deleted, e.g. a removed worktree) skipped the browser error and
+//    `session:relaunch-failed`, and the rejection escaped to the keepalive /
+//    boot-resume / settle-recheck timers, where it is an unhandled rejection —
+//    and Bun 1.4 exits the whole server on one;
+//  - a guard that THREW after the session was claimed (an invalid persisted
+//    containerId makes `isContainerAlive` throw) left the session in
+//    `relaunchingSet` forever, so every later auto-relaunch and keepalive was
+//    refused and graceful shutdown kept marking it pending.
+// These tests pin that every exit goes through `abortRelaunch` / the success
+// tail and releases the claim.
+describe("SessionRecovery.handleAutoRelaunch — single exit (abortRelaunch)", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    companionBus.clear();
+  });
+
+  it("a relaunch that throws resolves, tells the browser and council, spends one attempt, and frees the claim after the cooldown", async () => {
+    const sessions = new Map([["s1", info("s1", { sessionGroupId: "grp_1", sessionGroupRole: "observer" })]]);
+    const { recovery, launcher, wsBridge } = makeRecovery(sessions);
+    launcher.relaunch.mockRejectedValue(new Error("ENOENT: no such file or directory, posix_spawn 'claude'"));
+    const failed: Array<{ sessionId: string; reason: string }> = [];
+    companionBus.on("session:relaunch-failed", (p) => {
+      failed.push(p);
+    });
+    const warnSpy = vi.spyOn(log, "warn");
+
+    const p = recovery.handleAutoRelaunch("s1");
+    await vi.advanceTimersByTimeAsync(RELAUNCH_GRACE_MS);
+    // Must resolve: callers are fire-and-forget timers.
+    await expect(p).resolves.toBeUndefined();
+
+    expect(wsBridge.broadcastToSession).toHaveBeenCalledWith("s1", {
+      type: "error",
+      message: expect.stringContaining("ENOENT"),
+    });
+    expect(failed).toEqual([{ sessionId: "s1", reason: expect.stringContaining("ENOENT") }]);
+    // EC-9: structured line with event + sessionGroupId + sessionId + role.
+    const aborted = warnSpy.mock.calls.find((c) => (c[2] as { event?: string } | undefined)?.event === "session.relaunch.aborted");
+    expect(aborted?.[2]).toMatchObject({ sessionId: "s1", sessionGroupId: "grp_1", role: "observer", reason: "threw" });
+
+    // Claim held through the cooldown (same as any attempted relaunch) …
+    expect(recovery.pendingRelaunchSessionIds()).toEqual(["s1"]);
+    await vi.advanceTimersByTimeAsync(RELAUNCH_COOLDOWN_MS);
+    // … then released; the next request is evaluated afresh.
+    expect(recovery.pendingRelaunchSessionIds()).toEqual([]);
+    // Each throw spent one attempt: a CLI that can never spawn ends in the
+    // budget-exhausted message instead of retrying forever.
+    for (let i = 1; i <= MAX_AUTO_RELAUNCHES; i++) {
+      const next = recovery.handleAutoRelaunch("s1");
+      await vi.advanceTimersByTimeAsync(RELAUNCH_GRACE_MS);
+      await next;
+      await vi.advanceTimersByTimeAsync(RELAUNCH_COOLDOWN_MS);
+    }
+    expect(launcher.relaunch).toHaveBeenCalledTimes(MAX_AUTO_RELAUNCHES);
+    expect(recovery.isRelaunchExhausted("s1")).toBe(true);
+    expect(failed.at(-1)).toEqual({ sessionId: "s1", reason: "budget_exhausted" });
+    expect(recovery.pendingRelaunchSessionIds()).toEqual([]);
+  });
+
+  it("forgetSession cancels a pending cooldown so it cannot release a later claim", async () => {
+    // The cooldown used to be an untracked setTimeout: after a delete +
+    // re-trigger inside the 5 s window, the stale timer dropped the NEW
+    // claim, letting a third trigger start a second concurrent auto-relaunch.
+    const sessions = new Map([["s1", info("s1")]]);
+    const { recovery, launcher } = makeRecovery(sessions);
+    const p = recovery.handleAutoRelaunch("s1");
+    await vi.advanceTimersByTimeAsync(RELAUNCH_GRACE_MS);
+    await p;
+    expect(recovery.pendingRelaunchSessionIds()).toEqual(["s1"]); // cooling down
+
+    recovery.forgetSession("s1");
+    expect(recovery.pendingRelaunchSessionIds()).toEqual([]);
+    const second = recovery.handleAutoRelaunch("s1"); // new claim, in its grace pause
+    await vi.advanceTimersByTimeAsync(RELAUNCH_COOLDOWN_MS); // old cooldown would fire here
+    expect(recovery.pendingRelaunchSessionIds()).toEqual(["s1"]);
+    await vi.advanceTimersByTimeAsync(RELAUNCH_GRACE_MS);
+    await second;
+    expect(launcher.relaunch).toHaveBeenCalledTimes(2);
+  });
+
+  it("a keepalive whose relaunch throws does not reject out of its timer", async () => {
+    // The keepalive timer callback awaits handleAutoRelaunch with no catch;
+    // a rejection there is unhandled (vitest fails the run on it, Bun 1.4
+    // exits the server).
+    const sessions = new Map([["s1", info("s1")]]);
+    const { recovery, launcher, wsBridge } = makeRecovery(sessions);
+    launcher.relaunch.mockRejectedValue(new Error("spawn threw"));
+
+    recovery.scheduleProactiveRelaunch("s1");
+    await vi.advanceTimersByTimeAsync(KEEPALIVE_BASE_DELAY_MS + RELAUNCH_GRACE_MS);
+
+    expect(launcher.relaunch).toHaveBeenCalledWith("s1");
+    expect(wsBridge.broadcastToSession).toHaveBeenCalledWith("s1", { type: "error", message: "spawn threw" });
+  });
+
+  it("a guard that throws after the claim releases it at once and spends no attempt", async () => {
+    // `connected` with no adapter falls through to the container probe; an
+    // invalid persisted containerId makes `validateContainerId` throw there.
+    const sessions = new Map([["s1", info("s1", { state: "connected", containerId: "bad id; rm" })]]);
+    const { recovery, launcher, wsBridge } = makeRecovery(sessions);
+    wsBridge.getSession.mockReturnValue({ backendAdapter: null } as never);
+    const warnSpy = vi.spyOn(log, "warn");
+
+    const p = recovery.handleAutoRelaunch("s1");
+    await vi.advanceTimersByTimeAsync(RELAUNCH_GRACE_MS);
+    await expect(p).resolves.toBeUndefined();
+
+    expect(launcher.relaunch).not.toHaveBeenCalled();
+    expect(warnSpy.mock.calls.some((c) => (c[2] as { event?: string } | undefined)?.event === "session.relaunch.aborted")).toBe(true);
+    // No cooldown for an exit that spawned nothing: the claim is gone now.
+    expect(recovery.pendingRelaunchSessionIds()).toEqual([]);
+
+    // Fix the record: the next trigger relaunches (budget untouched).
+    sessions.set("s1", info("s1", { state: "exited" }));
+    const p2 = recovery.handleAutoRelaunch("s1");
+    await vi.advanceTimersByTimeAsync(RELAUNCH_GRACE_MS);
+    await p2;
+    expect(launcher.relaunch).toHaveBeenCalledTimes(1);
+  });
+
+  it("the boot watchdog survives a throwing relaunch and still relaunches the next stuck session", async () => {
+    const sessions = new Map([
+      ["s1", info("s1", { state: "starting" })],
+      ["s2", info("s2", { state: "starting" })],
+    ]);
+    const { recovery, launcher } = makeRecovery(sessions);
+    launcher.relaunch.mockImplementation(async (id: string) => {
+      if (id === "s1") throw new Error("spawn threw");
+      return { ok: true };
+    });
+    const warnSpy = vi.spyOn(log, "warn");
+
+    recovery.startReconnectionWatchdog();
+    await vi.advanceTimersByTimeAsync(RECONNECT_GRACE_MS);
+
+    expect(launcher.relaunch.mock.calls.map((c) => c[0])).toEqual(["s1", "s2"]);
+    const failed = warnSpy.mock.calls.find((c) => (c[2] as { event?: string } | undefined)?.event === "session.relaunch.boot_watchdog_failed");
+    expect(failed?.[2]).toMatchObject({ sessionId: "s1", error: "spawn threw" });
+  });
+});
