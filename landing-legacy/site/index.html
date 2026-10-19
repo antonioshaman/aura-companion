@@ -459,7 +459,7 @@
   .carousel { position: relative; z-index: 1; max-width: 1100px; margin: 0 0 48px; }
   .carousel:focus-visible { outline: 2px solid var(--amber); outline-offset: 6px; border-radius: 14px; }
   .carousel-viewport { overflow: hidden; border: 1px solid var(--border-hi); border-radius: 12px; background: var(--ground-deep); box-shadow: 0 0 24px rgba(0, 255, 110, 0.08), 0 20px 60px -20px rgba(0, 0, 0, 0.9); touch-action: pan-y; }
-  .carousel-track { display: flex; transition: transform 0.5s var(--ease-out); will-change: transform; }
+  .carousel-track { display: flex; transition: transform 0.5s var(--ease-out); } /* no will-change: it pins the whole 6-slide strip (~6600px wide, ~80MB at 2x) as a permanent GPU layer; Chrome/macOS then evicts tiles mid-scroll and the page flashes grey. The transition still promotes it for the 0.5s it runs */
   .carousel-slide { flex: 0 0 100%; min-width: 0; margin: 0; }
   .carousel-slide .carousel-img { aspect-ratio: 1400 / 853; background: #1e1e1e; }
   .carousel-slide img { display: block; width: 100%; height: 100%; object-fit: contain; }
