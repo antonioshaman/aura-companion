@@ -701,6 +701,7 @@ import { warmAnthropicModelsCache } from "./anthropic-models-cache.js";
 import { getSettings } from "./settings-manager.js";
 import { installEventLoopLagMonitor, formatTopOperations, trackSync } from "./event-loop-lag-monitor.js";
 import { metricsCollector } from "./metrics-collector.js";
+import { buildRuntimeSnapshot, noteRuntimeSnapshotLogged, type RuntimeSnapshotDeps } from "./diagnostics/runtime-snapshot.js";
 // AURA-LOCAL: cleanup-subsystem diagnostic surfaces. PLAN T6 (Phase C).
 import { loadCleanupConfig } from "./cleanup/cleanup-config.js";
 import {
@@ -724,6 +725,13 @@ import { reconcileStaleReapingMarkers } from "./cleanup/sentinel-markers.js";
 import { readdirSync as nodeReaddirSync, statSync as nodeStatSync, unlinkSync as nodeUnlinkSync } from "node:fs";
 
 const DIAGNOSTICS_INTERVAL_MS = 5 * 60_000; // every 5 minutes
+
+const runtimeSnapshotDeps: RuntimeSnapshotDeps = {
+  metrics: metricsCollector,
+  gauges: wsBridge,
+  activeTerminalCount: () => terminalManager.activeTerminalIds().length,
+  scheduler: cleanupScheduler,
+};
 
 // AURA-LOCAL: cleanup-subsystem config snapshot used by the 5-min
 // diagnostic tick's memory-pressure WARN. Loaded ONCE at module
@@ -944,55 +952,12 @@ let lastMemoryPressureWarnAt: number | null = null;
 // timer for the rest of the process lifetime.
 const diagnosticsTimer = setInterval(() => trackSync("diagnostics.tick", () => {
   try {
-  const snap = metricsCollector.getSnapshot(wsBridge);
-  const mem = snap.gauges.memory;
-  const mb = (bytes: number) => (bytes / 1024 / 1024).toFixed(1);
-  const sessionStats = wsBridge.getSessionMemoryStats();
-  const topSessions = sessionStats
-    .sort((a, b) => b.historyLen - a.historyLen)
-    .slice(0, 3)
-    .map((s) => `${s.id.slice(0, 8)}(h=${s.historyLen},b=${s.browsers})`)
-    .join(", ");
-
-  // PLAN T6: proxy for "archived rows still in the wsBridge.sessions
-  // Map that Phase H eviction will reclaim." totalActiveSessions counts
-  // phase != "terminated"; the Map total includes terminated/archived
-  // rows the bridge still holds. Until Phase H ships, this delta is the
-  // most direct surface of the memory-leak symptom this PLAN targets.
-  const unevictedArchivedCount = Math.max(0, sessionStats.length - snap.gauges.totalActiveSessions);
-
-  log.info("diagnostics", "Runtime snapshot", {
-    rss: `${mb(mem.rss)}MB`,
-    heap: `${mb(mem.heapUsed)}/${mb(mem.heapTotal)}MB`,
-    external: `${mb(mem.external)}MB`,
-    sessions: snap.gauges.totalActiveSessions,
-    browsers: snap.gauges.connectedBrowsers,
-    historyMsgs: snap.gauges.totalHistoryMessages,
-    pendingMsgs: snap.gauges.totalPendingMessages,
-    eventBuffer: snap.gauges.totalEventBufferSize,
-    errors: Object.values(snap.counters.errors).reduce((a, b) => a + b, 0),
-    topSessions: topSessions || "none",
-    // ── PLAN T6: cleanup-subsystem counters (Phase B projection methods) ──
-    // Operator-facing API — pinned literally by the EC-19 canary in
-    // `index.diagnostics-emit.test.ts`. Renames without canary update
-    // are a structural failure.
-    evictedLastHour: metricsCollector.getEvictedLastHour(),
-    orphanReapedLastHour: metricsCollector.getOrphanReapedLastHour(),
-    drainedPendingLastHour: metricsCollector.getDrainedPendingLastHour(),
-    recordingsSoftArchivedLastHour: metricsCollector.getRecordingsSoftArchivedLastHour(),
-    recordingsHardDeletedLastHour: metricsCollector.getRecordingsHardDeletedLastHour(),
-    // ── reclamation plan T8: PTY-terminal observability ──
-    // `terminalCount` is the live gauge (in-memory Map size); the reaped
-    // counter rides the same EC-21 store as the sweeps above. Both pinned
-    // by the EC-19 canary alongside the cleanup counters.
-    terminalCount: terminalManager.activeTerminalIds().length,
-    terminalReapedLastHour: metricsCollector.getTerminalReapedLastHour(),
-    archivedProcessReclaimedLastHour: metricsCollector.getArchivedProcessReclaimedLastHour(),
-    // ── PLAN T6: sweep-status fields (Phase C accessors on the scheduler) ──
-    lastSweepCompletedAt: cleanupScheduler.getLastSweepCompletedAt(),
-    lastSweepDurationMs: cleanupScheduler.getLastSweepDurationMs(),
-    sweepInFlight: cleanupScheduler.getSweepInFlight(),
-  });
+  // Plan Task 5: one builder for the log line and the Diagnostics Backend card
+  // (EC-19 key names pinned in diagnostics/runtime-snapshot.ts).
+  const runtime = buildRuntimeSnapshot(runtimeSnapshotDeps);
+  const unevictedArchivedCount = runtime.unevictedArchivedCount;
+  log.info("diagnostics", "Runtime snapshot", runtime.payload);
+  noteRuntimeSnapshotLogged(Date.now());
 
   // ── PLAN T6: memory-pressure WARN with 30-min rate limit ──────────────
   // Folded into the 5-min diagnostic tick (per master HANDOFF Phase C
@@ -1023,7 +988,7 @@ const diagnosticsTimer = setInterval(() => trackSync("diagnostics.tick", () => {
       event: "cli.cleanup.memory_pressure",
       fullAvg300Us: pressureReading.fullAvg300Us,
       thresholdUs: warnCfg.us,
-      sessions: snap.gauges.totalActiveSessions,
+      sessions: runtime.totalActiveSessions,
       unevictedArchivedCount,
     });
     lastMemoryPressureWarnAt = pressureNowMs;
