@@ -70,8 +70,8 @@ __pycache__/
 # Council diet / review scratch inputs
 .council/diet-review/
 .council/review-input/
-# Session handoff + scope scratch docs (repo-root only)
-/.aura-handoff-*.md
+# Session handoff dumps (written into the session cwd, so any depth) + repo-root scope scratch docs
+.aura-handoff-*.md
 /SCOPE-*.md
 # `node_modules/` (dir pattern) does not match a symlinked node_modules in a worktree
 web/node_modules
