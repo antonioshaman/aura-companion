@@ -61,7 +61,7 @@
     --shadow-lift: 0 20px 60px -20px rgba(0, 0, 0, 0.9), 0 0 0 1px rgba(0, 255, 90, 0.06) inset;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html { scroll-behavior: smooth; }
+  html { scroll-behavior: smooth; scroll-padding-top: 88px; } /* anchor jumps land below the sticky header */
   body {
     font-family: 'Manrope', -apple-system, BlinkMacSystemFont, sans-serif;
     background: var(--bg-0);
@@ -133,8 +133,8 @@
     .logo-co { padding-left: 10px; gap: 4px; }
     .co-c, .co-o { width: 20px; height: 20px; }
   }
-  .nav-links { display: flex; gap: 28px; align-items: center; }
-  .nav-links a { color: var(--text-mute); text-decoration: none; font-size: 14px; font-weight: 500; transition: color 0.18s ease; }
+  .nav-links { display: flex; gap: 22px; align-items: center; }
+  .nav-links a { color: var(--text-mute); text-decoration: none; font-size: 14px; font-weight: 500; white-space: nowrap; transition: color 0.18s ease; }
   .nav-links a:hover { color: var(--amber); }
   .nav-right { display: flex; gap: 10px; align-items: center; }
   .gh-badge {
@@ -153,10 +153,9 @@
   .lang-switch a.on { background: var(--amber); color: var(--bg-0); }
   .nav-cta { background: linear-gradient(135deg, var(--amber), var(--ember)); color: #fff; padding: 10px 20px; border-radius: 999px; text-decoration: none; font-weight: 600; font-size: 14px; transition: transform 0.2s, box-shadow 0.2s; box-shadow: 0 4px 20px rgba(232, 93, 44, 0.35); }
   .nav-cta:hover { filter: brightness(1.08); }
-  @media (max-width: 980px) {
-    .nav-links { display: none; }
-    .gh-badge span { display: none; }
-  }
+  /* the 7 links need ~1180px of row; below that they collapse (anchors stay in the footer) instead of wrapping */
+  @media (max-width: 1240px) { .nav-links { display: none; } }
+  @media (max-width: 980px) { .gh-badge span { display: none; } }
   .nav-cta { white-space: nowrap; }
   @media (max-width: 520px) { .nav-cta { display: none; } }
   /* 390px: badge + switch overflowed the right edge (EN was cut off) */
