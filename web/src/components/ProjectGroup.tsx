@@ -23,6 +23,9 @@ interface ProjectGroupProps {
   onArchive: (e: React.MouseEvent, id: string) => void;
   onUnarchive: (e: React.MouseEvent, id: string) => void;
   onDelete: (e: React.MouseEvent, id: string) => void;
+  /** "Continue in new session" menu item. Was never forwarded here, so the
+   *  item was missing for every project-grouped (i.e. every active) session. */
+  onContinueInNew?: (e: React.MouseEvent, id: string) => void;
   onClearRecentlyRenamed: (id: string) => void;
   editingSessionId: string | null;
   editingName: string;
@@ -46,6 +49,7 @@ export function ProjectGroup({
   onArchive,
   onUnarchive,
   onDelete,
+  onContinueInNew,
   onClearRecentlyRenamed,
   editingSessionId,
   editingName,
@@ -132,6 +136,7 @@ export function ProjectGroup({
                 onArchive={onArchive}
                 onUnarchive={onUnarchive}
                 onDelete={onDelete}
+                onContinueInNew={onContinueInNew}
                 onClearRecentlyRenamed={onClearRecentlyRenamed}
                 editingSessionId={editingSessionId}
                 editingName={editingName}

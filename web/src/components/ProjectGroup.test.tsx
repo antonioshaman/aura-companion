@@ -99,6 +99,17 @@ describe("ProjectGroup", () => {
     expect(modelLabels).toHaveLength(2);
   });
 
+  // Owner report 2026-10-19: the row menu showed only Rename / Archive for
+  // every active session — ProjectGroup never forwarded `onContinueInNew`, so
+  // SessionItem hid "Continue in new session". Pin the plumbing.
+  it("forwards onContinueInNew: the row menu offers 'Continue in new session' and calls it with the session id", () => {
+    const onContinueInNew = vi.fn();
+    render(<ProjectGroup {...makeProps({ onContinueInNew })} />);
+    fireEvent.click(screen.getAllByRole("button", { name: "Session actions" })[0]);
+    fireEvent.click(screen.getByRole("menuitem", { name: /continue in new session/i }));
+    expect(onContinueInNew).toHaveBeenCalledWith(expect.anything(), "orch_pg");
+  });
+
   it("collapses the session list when `isCollapsed` is true", () => {
     render(<ProjectGroup {...makeProps({ isCollapsed: true })} />);
     // Collapsed preview shows the first 2 session model fallbacks joined by ", "
