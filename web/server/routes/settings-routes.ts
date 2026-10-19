@@ -9,6 +9,7 @@ import { hasContainerCodexAuth } from "../codex-container-auth.js";
 import { COMPANION_HOME } from "../paths.js";
 import { companionBus } from "../event-bus.js";
 import { getAnthropicModels, readAnthropicCacheFileMeta } from "../anthropic-models-cache.js";
+import { parseKbAnalysisSettings, type KbAnalysisSettings } from "../diagnostics/kb-analysis-settings.js";
 import { parseSecondReviewerSetting, parseSecondReviewScope, type SecondReviewerConfig } from "../second-reviewer-config.js";
 
 /** Path to the Codex CLI's own model cache — mirrors routes.ts:/backends/:id/models. */
@@ -46,6 +47,8 @@ export function registerSettingsRoutes(api: Hono): void {
       kbAutoPrime: settings.kbAutoPrime,
       autoResumeAfterLimit: settings.autoResumeAfterLimit,
       councilSecondReviewer: settings.councilSecondReviewer,
+      kbAnalysis: settings.kbAnalysis,
+      diagnosticsMemoryReport: settings.diagnosticsMemoryReport,
     });
   });
 
@@ -147,6 +150,15 @@ export function registerSettingsRoutes(api: Hono): void {
       if (!scope.ok) return c.json({ error: scope.error }, 400);
       councilSecondReviewer = { reviewer: reviewer.value, scope: scope.value };
     }
+    let kbAnalysis: KbAnalysisSettings | undefined;
+    if (body.kbAnalysis !== undefined) {
+      const parsed = parseKbAnalysisSettings(body.kbAnalysis);
+      if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+      kbAnalysis = parsed.value;
+    }
+    if (body.diagnosticsMemoryReport !== undefined && typeof body.diagnosticsMemoryReport !== "boolean") {
+      return c.json({ error: "diagnosticsMemoryReport must be a boolean" }, 400);
+    }
     const hasAnyField = body.anthropicApiKey !== undefined || body.anthropicModel !== undefined
       || body.claudeCodeOAuthToken !== undefined || body.openaiApiKey !== undefined
       || body.onboardingCompleted !== undefined
@@ -165,7 +177,9 @@ export function registerSettingsRoutes(api: Hono): void {
       || body.defaultSessionMode !== undefined
       || body.kbAutoPrime !== undefined
       || body.autoResumeAfterLimit !== undefined
-      || councilSecondReviewer !== undefined;
+      || councilSecondReviewer !== undefined
+      || kbAnalysis !== undefined
+      || body.diagnosticsMemoryReport !== undefined;
     if (!hasAnyField) {
       return c.json({ error: "At least one settings field is required" }, 400);
     }
@@ -276,6 +290,11 @@ export function registerSettingsRoutes(api: Hono): void {
           ? body.autoResumeAfterLimit
           : undefined,
       councilSecondReviewer,
+      kbAnalysis,
+      diagnosticsMemoryReport:
+        typeof body.diagnosticsMemoryReport === "boolean"
+          ? body.diagnosticsMemoryReport
+          : undefined,
     });
     if (typeof body.autoResumeAfterLimit === "boolean") {
       // Lets the orchestrator drop pending auto-resumes the moment the user
@@ -310,6 +329,8 @@ export function registerSettingsRoutes(api: Hono): void {
       kbAutoPrime: settings.kbAutoPrime,
       autoResumeAfterLimit: settings.autoResumeAfterLimit,
       councilSecondReviewer: settings.councilSecondReviewer,
+      kbAnalysis: settings.kbAnalysis,
+      diagnosticsMemoryReport: settings.diagnosticsMemoryReport,
     });
   });
 

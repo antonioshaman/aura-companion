@@ -43,7 +43,7 @@ function info(sessionId: string, overrides: Partial<SdkSessionInfo> = {}): SdkSe
 
 function makeRecovery(
   sessions: Map<string, SdkSessionInfo>,
-  extraDeps: Pick<SessionRecoveryDeps, "readWaitChannels" | "subagentActivitySince"> = {},
+  extraDeps: Pick<SessionRecoveryDeps, "readWaitChannels" | "subagentActivitySince" | "onDriftEvent"> = {},
 ) {
   const launcher = {
     getSession: vi.fn((id: string) => sessions.get(id)),
@@ -693,9 +693,14 @@ describe("SessionRecovery.driftDetectorTick — undelivered-output gate (P7/FIX-
     companionBus.clear();
   });
 
-  function setup(records: Array<{ type: string; atMs: number; message?: object }>, bunLastFrameMs: number, pid?: number) {
+  function setup(
+    records: Array<{ type: string; atMs: number; message?: object }>,
+    bunLastFrameMs: number,
+    pid?: number,
+    onDriftEvent?: (payload: Record<string, unknown>) => void,
+  ) {
     const sessions = new Map([["s1", info("s1", { state: "running", cwd: "/root/proj", cliSessionId: "cli-1", pid })]]);
-    const ctx = makeRecovery(sessions);
+    const ctx = makeRecovery(sessions, onDriftEvent ? { onDriftEvent } : {});
     const adapter = Object.create(ClaudeAdapter.prototype) as ClaudeAdapter;
     adapter.getLastCliFrameReceivedMs = () => bunLastFrameMs;
     ctx.wsBridge.getSession.mockReturnValue({ backendAdapter: adapter } as never);
@@ -760,6 +765,57 @@ describe("SessionRecovery.driftDetectorTick — undelivered-output gate (P7/FIX-
     // The tool finished: its result is in the jsonl → the next tick recovers.
     append(path, [{ type: "user", atMs: NOW - 1_000, message: TOOL_RESULT("t1") }]);
     recovery.driftDetectorTick();
+    expect(launcher.kill).toHaveBeenCalledWith("s1");
+  });
+
+  // Diagnostics AC2: the drift feed receives the SAME payload the log line
+  // carries — withheld first, then detected after the tool call finishes —
+  // so the Diagnostics card and journalctl can never disagree.
+  it("hands every drift log payload to the diagnostics sink (withheld, then detected)", () => {
+    const sink = vi.fn();
+    const { recovery, path } = setup(
+      [
+        { type: "user", atMs: NOW - 100_000 },
+        { type: "assistant", atMs: NOW - 60_000, message: { role: "assistant", content: [{ type: "text", text: "x" }] } },
+        { type: "assistant", atMs: NOW - 50_000, message: TOOL_USE("t1") },
+      ],
+      NOW - 110_000,
+      undefined,
+      sink,
+    );
+    const info_ = vi.spyOn(log, "info");
+    const warn = vi.spyOn(log, "warn");
+    recovery.driftDetectorTick();
+    append(path, [{ type: "user", atMs: NOW - 1_000, message: TOOL_RESULT("t1") }]);
+    recovery.driftDetectorTick();
+
+    const events = sink.mock.calls.map((c) => (c[0] as { event: string }).event);
+    expect(events).toContain("silent_stdio_drift.withheld_open_tool_call");
+    expect(events).toContain("silent_stdio_drift.detected");
+    const withheldLog = [...info_.mock.calls].reverse().find((c) => (c[2] as { event?: string })?.event === "silent_stdio_drift.withheld_open_tool_call");
+    const detectedLog = [...warn.mock.calls].reverse().find((c) => (c[2] as { event?: string })?.event === "silent_stdio_drift.detected");
+    // Same object, not a copy assembled twice.
+    expect(sink.mock.calls.map((c) => c[0])).toContain(withheldLog![2]);
+    expect(sink.mock.calls.map((c) => c[0])).toContain(detectedLog![2]);
+    // Sibling tests re-spy the logger and read calls[0]; leave no calls behind.
+    info_.mockRestore();
+    warn.mockRestore();
+  });
+
+  it("a throwing diagnostics sink never breaks recovery", () => {
+    const { recovery, launcher, path } = setup(
+      [
+        { type: "user", atMs: NOW - 100_000 },
+        { type: "assistant", atMs: NOW - 60_000, message: { role: "assistant", content: [{ type: "text", text: "x" }] } },
+      ],
+      NOW - 110_000,
+      undefined,
+      () => {
+        throw new Error("sink down");
+      },
+    );
+    void path;
+    expect(() => recovery.driftDetectorTick()).not.toThrow();
     expect(launcher.kill).toHaveBeenCalledWith("s1");
   });
 

@@ -60,6 +60,14 @@ export interface IBackendAdapter {
   // ── Optional capabilities (not all backends support these) ──
 
   /**
+   * Epoch ms of the last frame received from the CLI (0 = none yet). Read by
+   * the Diagnostics Pairs card for "observer silent Nm" (plan Task 6). Claude
+   * stamps every stdout frame; Codex stamps every inbound notification and
+   * server request.
+   */
+  getLastCliFrameReceivedMs?(): number;
+
+  /**
    * Register the idle-kill activity hook (#12). The Claude adapter wires the
    * equivalent at construction; Codex wires it here at attach time so a
    * server-synthesized wake counts as group liveness even when gated `busy`.

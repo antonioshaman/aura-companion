@@ -347,6 +347,19 @@ describe("fetchUsageLimits", () => {
     expect(result).toBeNull();
   });
 
+  // Diagnostics AC3 (plan Task 7): failures are recorded for the Usage card
+  // (closed kind + status only, never the response body).
+  it("records the upstream outcome for Diagnostics: 401 → oauth-expired, then ok", async () => {
+    const { usageLimitsUpstream } = await import("./diagnostics/upstream-status.js");
+    usageLimitsUpstream.reset();
+    mockFetch.mockReturnValue(Promise.resolve({ ok: false, status: 401, json: () => Promise.resolve({}) }));
+    await mod.fetchUsageLimits(SAMPLE_TOKEN);
+    expect(usageLimitsUpstream.view().failure).toMatchObject({ kind: "oauth-expired", httpStatus: 401 });
+    mockFetch.mockReturnValue(makeFetchResponse(SAMPLE_LIMITS));
+    await mod.fetchUsageLimits(SAMPLE_TOKEN);
+    expect(usageLimitsUpstream.view()).toMatchObject({ ok: true, failure: null });
+  });
+
   it("normalizes missing fields to null", async () => {
     mockFetch.mockReturnValue(
       makeFetchResponse({ five_hour: { utilization: 10, resets_at: null } }),

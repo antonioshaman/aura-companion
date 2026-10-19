@@ -12,6 +12,7 @@ export type Route =
   | { page: "environments" }
   | { page: "sandboxes" }
   | { page: "sweep" }
+  | { page: "diagnostics" }
   | { page: "scheduled" }
   | { page: "agents" }
   | { page: "agent-detail"; agentId: string }
@@ -43,6 +44,7 @@ export function parseHash(hash: string): Route {
   if (hash === "#/environments") return { page: "environments" };
   if (hash === "#/sandboxes") return { page: "sandboxes" };
   if (hash === "#/sweep") return { page: "sweep" };
+  if (hash === "#/diagnostics" || hash.startsWith("#/diagnostics?")) return { page: "diagnostics" };
   // #/scheduled redirects to #/agents (cron absorbed into agents)
   if (hash === "#/scheduled") return { page: "agents" };
   if (hash === "#/runs") return { page: "runs" };

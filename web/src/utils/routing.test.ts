@@ -12,6 +12,12 @@ describe("parseHash", () => {
     expect(parseHash("")).toEqual({ page: "home" });
   });
 
+  // Diagnostics page (plan Task 14); a ?card= suffix still lands on the page.
+  it("returns diagnostics for #/diagnostics", () => {
+    expect(parseHash("#/diagnostics")).toEqual({ page: "diagnostics" });
+    expect(parseHash("#/diagnostics?card=drift")).toEqual({ page: "diagnostics" });
+  });
+
   it("returns home for bare hash", () => {
     expect(parseHash("#/")).toEqual({ page: "home" });
   });

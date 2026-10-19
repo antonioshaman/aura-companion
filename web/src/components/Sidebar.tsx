@@ -92,6 +92,14 @@ const NAV_ITEMS: NavItem[] = [
     activePages: ["sweep"],
   },
   {
+    id: "diagnostics",
+    label: "Diagnostics",
+    hash: "#/diagnostics",
+    viewBox: "0 0 16 16",
+    iconPath: "M1.5 8a.75.75 0 01.75-.75h2.04l1.52-3.8a.75.75 0 011.4.02l2.3 6.6 1.17-2.34A.75.75 0 0111.36 7.3h2.39a.75.75 0 010 1.5h-1.93l-1.6 3.2a.75.75 0 01-1.38-.09L6.6 5.6 5.45 8.48a.75.75 0 01-.7.47h-2.5A.75.75 0 011.5 8z",
+    activePages: ["diagnostics"],
+  },
+  {
     id: "agents",
     label: "Agents",
     hash: "#/agents",
@@ -119,7 +127,7 @@ const NAV_ITEMS: NavItem[] = [
 
 const NAV_SECTIONS = [
   { id: "workbench", label: "Workbench", itemIds: ["prompts", "integrations"], defaultCollapsed: true },
-  { id: "workspace", label: "Workspace", itemIds: ["environments", "sandboxes", "sweep", "agents", "settings"], defaultCollapsed: false },
+  { id: "workspace", label: "Workspace", itemIds: ["environments", "sandboxes", "sweep", "diagnostics", "agents", "settings"], defaultCollapsed: false },
 ] as const;
 
 const SIDEBAR_NAV_COLLAPSED_KEY = "aura-sidebar-nav-collapsed";

@@ -42,6 +42,8 @@ beforeEach(() => {
     kbAutoPrime: false,
     autoResumeAfterLimit: true,
     councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+    kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+    diagnosticsMemoryReport: false,
     updatedAt: 0,
   });
 });
@@ -90,6 +92,8 @@ describe("generateSessionTitle", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
 
@@ -145,6 +149,8 @@ describe("generateSessionTitle", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
     mockFetch.mockResolvedValueOnce({
@@ -229,6 +235,8 @@ describe("generateSessionTitle", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
     mockFetch.mockResolvedValueOnce({
