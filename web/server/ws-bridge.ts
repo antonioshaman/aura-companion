@@ -9,6 +9,7 @@ import type {
   McpServerConfig,
   ModelFallbackRecord,
   ContextAdvisoryRecord,
+  ContextAdvisoryRecordInput,
 } from "./session-types.js";
 import type { SessionStore } from "./session-store.js";
 import type { IBackendAdapter, ServerSyntheticSendOutcome } from "./backend-adapter.js";
@@ -364,7 +365,7 @@ export class WsBridge {
    * advisory for a session the bridge doesn't know has nothing to render on.
    * Returns false when the session is unknown.
    */
-  recordContextAdvisory(sessionId: string, advisory: Omit<ContextAdvisoryRecord, "at">): boolean {
+  recordContextAdvisory(sessionId: string, advisory: ContextAdvisoryRecordInput): boolean {
     const session = this.sessions.get(sessionId);
     if (!session) return false;
     const record: ContextAdvisoryRecord = { ...advisory, at: Date.now() };

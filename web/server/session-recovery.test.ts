@@ -1012,6 +1012,32 @@ describe("SessionRecovery.contextAdvisoryTick — context-size advisory", () => 
     expect(advisoryFrames(wsBridge)).toHaveLength(1);
   });
 
+  // Review 2026-10-17 (ritchie A-2): a session whose advisory pass throws on
+  // every tick used to log `tick_session_failed` every tick forever. It now
+  // logs once per (session, message); a different message logs again, and a
+  // pass that succeeds re-arms the warning.
+  it("a persistently failing session logs tick_session_failed once per distinct error", () => {
+    const { recovery, wsBridge } = setup(10_500_000);
+    const warn = vi.spyOn(log, "warn");
+    const failures = () => warn.mock.calls.filter((c) => (c[2] as { event?: string } | undefined)?.event === "context_advisory.tick_session_failed");
+    wsBridge.getSession.mockImplementation(() => { throw new Error("boom"); });
+    recovery.contextAdvisoryTick();
+    recovery.contextAdvisoryTick();
+    recovery.contextAdvisoryTick();
+    expect(failures()).toHaveLength(1);
+    // A new failure message is news — log it.
+    wsBridge.getSession.mockImplementation(() => { throw new Error("other"); });
+    recovery.contextAdvisoryTick();
+    expect(failures()).toHaveLength(2);
+    // Recovery clears the memo, so a later relapse is logged again.
+    wsBridge.getSession.mockReturnValue({ backendAdapter: null, state: {} } as never);
+    recovery.contextAdvisoryTick();
+    wsBridge.getSession.mockImplementation(() => { throw new Error("other"); });
+    recovery.contextAdvisoryTick();
+    expect(failures()).toHaveLength(3);
+    warn.mockRestore();
+  });
+
   it("3 MB: plain /compact advisory, nothing recorded on the state", () => {
     const { recovery, wsBridge } = setup(3_200_000);
     recovery.contextAdvisoryTick();

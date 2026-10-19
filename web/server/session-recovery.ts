@@ -365,6 +365,8 @@ export class SessionRecovery {
   private contextAdvisoryFired = new Map<string, number>();
   /** Sessions already warned once about an advisory that could not be recorded (no bridge session). */
   private readonly contextAdvisoryUnrecordedLogged = new Set<string>();
+  /** Last `tick_session_failed` message logged per session — dedups repeats (ritchie A-2). */
+  private readonly contextAdvisoryFailureLogged = new Map<string, string>();
 
   constructor(deps: SessionRecoveryDeps) {
     this.launcher = deps.launcher;
@@ -948,18 +950,28 @@ export class SessionRecovery {
     const listed = new Set(sessions.map((s) => s.sessionId));
     for (const id of this.contextAdvisoryFired.keys()) if (!listed.has(id)) this.contextAdvisoryFired.delete(id);
     for (const id of this.contextAdvisoryUnrecordedLogged) if (!listed.has(id)) this.contextAdvisoryUnrecordedLogged.delete(id);
+    for (const id of this.contextAdvisoryFailureLogged.keys()) if (!listed.has(id)) this.contextAdvisoryFailureLogged.delete(id);
     for (const info of sessions) {
       if (info.archived) continue;
       try {
         this.maybeFireContextAdvisory(info);
       } catch (err) {
         // One bad session must not starve the rest of the list this tick.
-        log.warn("session-orchestrator", "context advisory pass failed for a session", {
-          event: "context_advisory.tick_session_failed",
-          sessionId: info.sessionId,
-          error: err instanceof Error ? err.message : String(err),
-        });
+        // Logged once per (session, message): a persistent failure would
+        // otherwise repeat every tick for the process lifetime (review
+        // 2026-10-17, ritchie A-2). A new message logs again.
+        const error = err instanceof Error ? err.message : String(err);
+        if (this.contextAdvisoryFailureLogged.get(info.sessionId) !== error) {
+          this.contextAdvisoryFailureLogged.set(info.sessionId, error);
+          log.warn("session-orchestrator", "context advisory pass failed for a session", {
+            event: "context_advisory.tick_session_failed",
+            sessionId: info.sessionId,
+            error,
+          });
+        }
+        continue;
       }
+      this.contextAdvisoryFailureLogged.delete(info.sessionId);
     }
   }
 
@@ -1022,13 +1034,13 @@ export class SessionRecovery {
       // fired only once the record committed — a session without a bridge
       // twin (restored launcher row, mid-restart race) retries next tick
       // instead of silently never showing the banner for the process lifetime.
-      const recorded = this.wsBridge.recordContextAdvisory(sessionId, {
-        signal: advisory.signal,
-        milestone: advisory.milestone,
-        ...(isBytes ? { milestoneBytes: advisory.milestone } : {}),
-        message: advisory.message,
-        action: "continue_in_new",
-      });
+      const fields = { message: advisory.message, action: "continue_in_new" as const };
+      const recorded = this.wsBridge.recordContextAdvisory(
+        sessionId,
+        isBytes
+          ? { ...fields, signal: "transcript_bytes", milestone: advisory.milestone, milestoneBytes: advisory.milestone }
+          : { ...fields, signal: "codex_compactions", milestone: advisory.milestone },
+      );
       if (!recorded) {
         if (!this.contextAdvisoryUnrecordedLogged.has(sessionId)) {
           this.contextAdvisoryUnrecordedLogged.add(sessionId);

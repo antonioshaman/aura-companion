@@ -1411,15 +1411,11 @@ function handleParsedMessage(
         const incoming = decodeContextAdvisory(data.advisory);
         const current = store.sessions.get(sessionId)?.context_advisory;
         if (!current || decodeContextAdvisory(current).milestone < incoming.milestone) {
+          const fields = { message: data.message, action: "continue_in_new" as const, at: Date.now() };
           store.updateSession(sessionId, {
-            context_advisory: {
-              signal: incoming.signal,
-              milestone: incoming.milestone,
-              milestoneBytes: data.advisory.milestoneBytes,
-              message: data.message,
-              action: "continue_in_new",
-              at: Date.now(),
-            },
+            context_advisory: incoming.signal === "transcript_bytes"
+              ? { ...fields, signal: "transcript_bytes", milestone: incoming.milestone, milestoneBytes: incoming.milestone }
+              : { ...fields, signal: "codex_compactions", milestone: incoming.milestone },
           });
         }
         break;

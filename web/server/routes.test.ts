@@ -6728,6 +6728,16 @@ describe("POST /api/sessions/:id/continue-in-new", () => {
     expect(orchestrator.createSession).toHaveBeenCalledWith(expect.objectContaining({ backend: "claude", model: "claude-opus-5-5" }));
   });
 
+  // Review 2026-10-17 (hunt): the brief is transcript text, so on a shared
+  // host it is written owner-only (0o600), not world-readable.
+  it("writes the handoff brief owner-only (0o600)", async () => {
+    seed();
+    const res = await app.request("/api/sessions/old/continue-in-new", { method: "POST" });
+    const json = await res.json();
+    const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    expect(fs.statSync(json.handoffPath).mode & 0o777).toBe(0o600);
+  });
+
   it("404s for an unknown session and 409s when bridge state is not loaded", async () => {
     launcher.getSession.mockReturnValue(undefined);
     expect((await app.request("/api/sessions/nope/continue-in-new", { method: "POST" })).status).toBe(404);
