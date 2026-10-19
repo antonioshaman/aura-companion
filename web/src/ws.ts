@@ -8,6 +8,13 @@ import { isDriftRecoveryMessage } from "./utils/drift-recovery-message.js";
 import { getPreview } from "./components/ToolBlock.js";
 import type { ToolActivityEntry } from "./store/tasks-slice.js";
 import { api } from "./api.js";
+import {
+  contextTokensFromUsage,
+  contextUsedPercent,
+  largestContextWindow,
+  shouldTrackContextUsage,
+  type ContextUsageCounters,
+} from "../server/context-occupancy.js";
 
 const WS_RECONNECT_DELAY_MS = 2000;
 /**
@@ -55,32 +62,15 @@ const contextTokensBySession = new Map<string, number>();
 /** Model-declared context window, captured from result-frame `modelUsage`. */
 const contextWindowBySession = new Map<string, number>();
 
-/** Per-turn tokens actually resident in the model's context window. */
-function contextTokensFromUsage(u: {
-  input_tokens?: number;
-  cache_read_input_tokens?: number;
-  cache_creation_input_tokens?: number;
-}): number {
-  return (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
-}
-
 /**
  * Capture the model's declared context window from a result frame's
- * `modelUsage`. Takes the largest window across models so a small-window
- * side-model (e.g. a title-generation Haiku) can't shrink the denominator
- * below the main model's window.
+ * `modelUsage` (largest window across models — see `largestContextWindow`).
  */
 function captureContextWindow(
   sessionId: string,
   modelUsage?: Record<string, { contextWindow?: number }>,
 ): void {
-  if (!modelUsage) return;
-  let maxWindow = 0;
-  for (const u of Object.values(modelUsage)) {
-    if (typeof u.contextWindow === "number" && u.contextWindow > maxWindow) {
-      maxWindow = u.contextWindow;
-    }
-  }
+  const maxWindow = largestContextWindow(modelUsage);
   if (maxWindow > 0) contextWindowBySession.set(sessionId, maxWindow);
 }
 
@@ -88,27 +78,29 @@ function captureContextWindow(
  * Recompute and store `context_used_percent` from the last per-turn occupancy
  * and the declared window. No-op until BOTH are known — the assistant frame
  * (numerator) and the result frame (denominator) can arrive in either order
- * within a turn, and a partial value would flash a wrong reading.
+ * within a turn, and a partial value would flash a wrong reading. The formula
+ * is shared with the server (`server/context-occupancy.ts`).
  */
 function recomputeContextPct(sessionId: string): void {
-  const window = contextWindowBySession.get(sessionId);
-  const tokens = contextTokensBySession.get(sessionId);
-  if (!window || window <= 0 || tokens == null) return;
-  const pct = Math.max(0, Math.min(Math.round((tokens / window) * 100), 100));
+  const pct = contextUsedPercent(
+    contextTokensBySession.get(sessionId),
+    contextWindowBySession.get(sessionId),
+  );
+  if (pct === null) return;
   useStore.getState().updateSession(sessionId, { context_used_percent: pct });
 }
 
-/** Record a per-turn usage sample and refresh the meter if the window is known. */
+/**
+ * Record a per-turn usage sample from an assistant frame and refresh the meter
+ * if the window is known. Synthetic/empty, interrupted and subagent frames are
+ * ignored (`shouldTrackContextUsage`).
+ */
 function trackContextUsage(
   sessionId: string,
-  usage?: {
-    input_tokens?: number;
-    cache_read_input_tokens?: number;
-    cache_creation_input_tokens?: number;
-  },
+  frame: { usage?: ContextUsageCounters | null; parentToolUseId?: string | null; streamStatus?: string },
 ): void {
-  if (!usage) return;
-  contextTokensBySession.set(sessionId, contextTokensFromUsage(usage));
+  if (!shouldTrackContextUsage(frame) || !frame.usage) return;
+  contextTokensBySession.set(sessionId, contextTokensFromUsage(frame.usage));
   recomputeContextPct(sessionId);
 }
 
@@ -1025,20 +1017,15 @@ function handleParsedMessage(
       clearStreamingDraftMessage(sessionId);
       upsertAssistantMessage(sessionId, chatMsg);
       // Refresh the context meter from this turn's real occupancy so it drops
-      // immediately after a /compact (see contextTokensFromUsage rationale).
-      // WS-3 A-3 (prompt-cache audit C-7): the server synthesizes an
-      // interrupted-stream assistant frame with usage {0,0,0,0} — tracking it
-      // zeroed the meter until the next real turn. Skip synthetic/empty usage.
-      const u = msg.usage;
-      const usageIsEmpty =
-        !u ||
-        ((u.input_tokens ?? 0) === 0 &&
-          (u.output_tokens ?? 0) === 0 &&
-          (u.cache_read_input_tokens ?? 0) === 0 &&
-          (u.cache_creation_input_tokens ?? 0) === 0);
-      if (data.streamStatus !== "interrupted" && !usageIsEmpty) {
-        trackContextUsage(sessionId, msg.usage);
-      }
+      // immediately after a /compact. WS-3 A-3 (prompt-cache audit C-7): the
+      // server synthesizes an interrupted-stream assistant frame with usage
+      // {0,0,0,0} — tracking it zeroed the meter until the next real turn, so
+      // synthetic/empty, interrupted and subagent frames are skipped.
+      trackContextUsage(sessionId, {
+        usage: msg.usage,
+        parentToolUseId: data.parent_tool_use_id,
+        streamStatus: data.streamStatus,
+      });
       store.setStreaming(sessionId, null);
       streamingPhaseBySession.delete(sessionId);
       // Reset streaming text accumulators so subsequent deltas in the same
@@ -1609,7 +1596,11 @@ function handleParsedMessage(
           }
           // Track per-turn context occupancy during replay so the restored
           // meter matches the live one (drops after a /compact, not cumulative).
-          trackContextUsage(sessionId, msg.usage);
+          trackContextUsage(sessionId, {
+            usage: msg.usage,
+            parentToolUseId: histMsg.parent_tool_use_id,
+            streamStatus: histMsg.streamStatus,
+          });
           // Also extract tasks, changed files, and background processes from history
           if (msg.content?.length) {
             const baseTimestamp = histMsg.timestamp || Date.now();

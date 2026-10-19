@@ -148,6 +148,15 @@ export interface Session {
    * main assistant frame never reuses a stale model as evidence.
    */
   turnObservedModel?: string;
+  /**
+   * Context meter inputs, in-memory only (see `context-occupancy.ts`): the
+   * latest MAIN-thread per-turn occupancy (input + cache_read + cache_write)
+   * and the largest declared `contextWindow` from a result's `modelUsage`.
+   * `state.context_used_percent` is recomputed whenever either changes, with
+   * the same formula the browser meter uses.
+   */
+  contextTokens?: number;
+  contextWindow?: number;
 }
 
 export type GitSessionKey =
