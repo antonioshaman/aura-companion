@@ -79,6 +79,12 @@ import { recordCleanupEvent } from "./cleanup/cleanup-events.js";
 import type { CliFailedReason } from "./cli-failed-frame.js";
 import type { RelaunchExhaustedReason } from "./event-bus-types.js";
 import { buildTurnUsageLogLine, describeCachePrefixChange, promptTokensOf } from "./turn-usage-telemetry.js";
+import {
+  contextTokensFromUsage,
+  contextUsedPercent,
+  largestContextWindow,
+  shouldTrackContextUsage,
+} from "./context-occupancy.js";
 
 // ─── Bridge ───────────────────────────────────────────────────────────────────
 
@@ -1202,21 +1208,18 @@ export class WsBridge {
         if (typeof resultData.total_lines_removed === "number") {
           session.state.total_lines_removed = resultData.total_lines_removed;
         }
-        if (resultData.modelUsage) {
-          // Context-window usage only. NOTE: the session's MODEL is NOT derived
-          // here — modelUsage aggregates every model the turn touched (including
-          // a Task subagent on a different model), so token-dominance could pick
-          // a subagent's model. The authoritative "model the session is on" is
-          // the main assistant frame (parent_tool_use_id === null), handled in
-          // the `assistant` branch above.
-          for (const usage of Object.values(resultData.modelUsage)) {
-            if (usage.contextWindow > 0) {
-              const pct = Math.round(
-                ((usage.inputTokens + usage.outputTokens) / usage.contextWindow) * 100
-              );
-              session.state.context_used_percent = Math.max(0, Math.min(pct, 100));
-            }
-          }
+        // Context-window usage only. NOTE: the session's MODEL is NOT derived
+        // here — modelUsage aggregates every model the turn touched (including
+        // a Task subagent on a different model), so token-dominance could pick
+        // a subagent's model. The authoritative "model the session is on" is
+        // the main assistant frame (parent_tool_use_id === null), handled in
+        // the `assistant` branch above. Only the declared window is taken from
+        // modelUsage — its token counters are session-cumulative and would
+        // overshoot (see context-occupancy.ts).
+        const contextWindow = largestContextWindow(resultData.modelUsage);
+        if (contextWindow > 0) {
+          session.contextWindow = contextWindow;
+          this.recomputeContextUsedPercent(session);
         }
         // WS-3 A-2 (prompt-cache audit C-6) + W6/W7: per-turn cache telemetry
         // as a structured line. Counters only, никакого контента. Error and
@@ -2051,6 +2054,16 @@ export class WsBridge {
   }
 
   /**
+   * Recompute `state.context_used_percent` from the session's last main-thread
+   * occupancy and declared window. No-op until both are known, so a partial
+   * turn never clobbers the persisted value.
+   */
+  private recomputeContextUsedPercent(session: Session): void {
+    const pct = contextUsedPercent(session.contextTokens, session.contextWindow);
+    if (pct !== null) session.state.context_used_percent = pct;
+  }
+
+  /**
    * The `assistant` branch of the backend → browser pipeline: stamp, append
    * to history, persist, notify, and keep the session's model in sync.
    * Shared by the live adapter path and {@link deliverRecoveredAssistantRecords}.
@@ -2101,6 +2114,17 @@ export class WsBridge {
     if (msg.parent_tool_use_id === null && msg.message?.usage) {
       const prompt = promptTokensOf(msg.message.usage);
       if (prompt > 0) session.state.last_context_tokens = prompt;
+    }
+    // Context meter numerator — same predicate + formula as the browser
+    // (context-occupancy.ts): main-thread, non-interrupted, non-empty usage.
+    const usage = msg.message?.usage;
+    if (shouldTrackContextUsage({
+      usage,
+      parentToolUseId: msg.parent_tool_use_id,
+      streamStatus: msg.streamStatus,
+    }) && usage) {
+      session.contextTokens = contextTokensFromUsage(usage);
+      this.recomputeContextUsedPercent(session);
     }
 
     const mainModel = msg.message?.model;

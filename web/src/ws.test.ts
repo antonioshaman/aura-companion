@@ -1034,6 +1034,34 @@ describe("handleMessage: context meter", () => {
     // 500000/200000 = 250% → clamped to 100.
     expect(useStore.getState().sessions.get("s1")!.context_used_percent).toBe(100);
   });
+
+  it("ignores Task subagent frames — a subagent's own context never moves the main meter", () => {
+    // Same predicate the server uses (server/context-occupancy.ts): only
+    // MAIN-thread frames (parent_tool_use_id === null) feed the occupancy, so
+    // the browser meter and the server's persisted context_used_percent agree.
+    wsModule.connectSession("s1");
+    fireMessage({ type: "session_init", session: makeSession("s1") });
+
+    fireAssistantTurn({ input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 50000 }, "msg-main");
+    fireResultWithWindow({ "claude-opus-4-8": 200000 });
+    expect(useStore.getState().sessions.get("s1")!.context_used_percent).toBe(25);
+
+    // A subagent frame at 190k would read 95% if it were counted.
+    fireMessage({
+      type: "assistant",
+      message: {
+        id: "msg-sub",
+        type: "message",
+        role: "assistant",
+        model: "claude-haiku-4-5",
+        content: [{ type: "text", text: "sub" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 190000, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      },
+      parent_tool_use_id: "toolu_task_1",
+    });
+    expect(useStore.getState().sessions.get("s1")!.context_used_percent).toBe(25);
+  });
 });
 
 // ===========================================================================

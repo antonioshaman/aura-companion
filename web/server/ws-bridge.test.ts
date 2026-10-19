@@ -1789,8 +1789,52 @@ describe("CLI message routing", () => {
     expect(bridge.getSession("s1")!.state.git_branch).toBe("feat/new-branch");
   });
 
-  it("result: computes context_used_percent from modelUsage", async () => {
-    const msg = JSON.stringify({
+  // ── context_used_percent: server mirrors the browser meter ───────────────
+  // The server's persisted `context_used_percent` (seen by /api/sessions and a
+  // reconnecting browser's session_init) must use the SAME formula as the
+  // browser meter (#196, shared via context-occupancy.ts): numerator = the
+  // main thread's latest per-turn occupancy (input + cache_read + cache_write),
+  // denominator = the LARGEST contextWindow in the result's modelUsage. The old
+  // server formula was (inputTokens + outputTokens) / window per modelUsage
+  // entry, cache-blind and overwritten by whichever model came last.
+
+  /** Main-thread (or subagent) assistant frame carrying a per-turn usage. */
+  function assistantWithUsage(
+    id: string,
+    usage: Record<string, number>,
+    parentToolUseId: string | null = null,
+  ): string {
+    return JSON.stringify({
+      type: "assistant",
+      message: {
+        id,
+        type: "message",
+        role: "assistant",
+        model: "claude-sonnet-4-6",
+        content: [{ type: "text", text: "ok" }],
+        stop_reason: "end_turn",
+        usage: {
+          input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0,
+          ...usage,
+        },
+      },
+      parent_tool_use_id: parentToolUseId,
+      uuid: `uuid-${id}`,
+      session_id: "s1",
+    });
+  }
+
+  /** Result frame whose modelUsage carries the given per-model entries. */
+  function resultWithModelUsage(modelUsage: Record<string, Record<string, number>>): string {
+    const full: Record<string, Record<string, number>> = {};
+    for (const [model, partial] of Object.entries(modelUsage)) {
+      full[model] = {
+        inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0,
+        contextWindow: 0, maxOutputTokens: 16384, costUSD: 0.01,
+        ...partial,
+      };
+    }
+    return JSON.stringify({
       type: "result",
       subtype: "success",
       is_error: false,
@@ -1800,26 +1844,93 @@ describe("CLI message routing", () => {
       total_cost_usd: 0.02,
       stop_reason: "end_turn",
       usage: { input_tokens: 500, output_tokens: 200, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
-      modelUsage: {
-        "claude-sonnet-4-6": {
-          inputTokens: 8000,
-          outputTokens: 2000,
-          cacheReadInputTokens: 0,
-          cacheCreationInputTokens: 0,
-          contextWindow: 200000,
-          maxOutputTokens: 16384,
-          costUSD: 0.02,
-        },
-      },
+      modelUsage: full,
       uuid: "uuid-5",
       session_id: "s1",
     });
+  }
 
-    await bridge.handleCLIMessage(cli, msg);
+  it("result: computes context_used_percent from the turn's occupancy over the declared window", async () => {
+    // Per-turn occupancy 9_000 fresh + 1_000 cache-write = 10_000 of a 200k
+    // window → 5%. Output tokens (2_000) are not resident and don't count.
+    await bridge.handleCLIMessage(cli, assistantWithUsage("m-ctx-1", {
+      input_tokens: 9000, output_tokens: 2000, cache_creation_input_tokens: 1000,
+    }));
+    await bridge.handleCLIMessage(cli, resultWithModelUsage({
+      "claude-sonnet-4-6": { inputTokens: 8000, outputTokens: 2000, contextWindow: 200000 },
+    }));
 
-    const state = bridge.getSession("s1")!.state;
-    // (8000 + 2000) / 200000 * 100 = 5
-    expect(state.context_used_percent).toBe(5);
+    expect(bridge.getSession("s1")!.state.context_used_percent).toBe(5);
+  });
+
+  it("result: counts cache-read tokens (a cache-heavy resumed session is NOT ~0%)", async () => {
+    // The regression this fixes: a resumed session whose prompt is almost all
+    // cache-read read ~0% under the old (inputTokens+outputTokens)/window.
+    // 2_000 fresh + 158_000 cache-read = 160k of 200k → 80%.
+    await bridge.handleCLIMessage(cli, assistantWithUsage("m-ctx-2", {
+      input_tokens: 2000, cache_read_input_tokens: 158000,
+    }));
+    await bridge.handleCLIMessage(cli, resultWithModelUsage({
+      // modelUsage counters are session-cumulative (cache-read here is many
+      // times the window) — summing them would overshoot to 100%; they must
+      // not feed the numerator.
+      "claude-sonnet-4-6": {
+        inputTokens: 2000, cacheReadInputTokens: 3_000_000, contextWindow: 200000,
+      },
+    }));
+
+    expect(bridge.getSession("s1")!.state.context_used_percent).toBe(80);
+  });
+
+  it("result: uses the largest contextWindow regardless of modelUsage key order", async () => {
+    // A small-window side model (title Haiku) listed LAST used to overwrite the
+    // value with its own fraction. 300k of the main model's 1M window → 30%.
+    await bridge.handleCLIMessage(cli, assistantWithUsage("m-ctx-3", {
+      cache_read_input_tokens: 300000,
+    }));
+    await bridge.handleCLIMessage(cli, resultWithModelUsage({
+      "claude-opus-4-8": { cacheReadInputTokens: 300000, contextWindow: 1_000_000 },
+      "claude-haiku-4-5": { inputTokens: 190000, contextWindow: 200000 },
+    }));
+
+    expect(bridge.getSession("s1")!.state.context_used_percent).toBe(30);
+  });
+
+  it("result: ignores subagent and empty-usage assistant frames for the meter", async () => {
+    // Main thread at 50k; then a Task subagent frame (its own, unrelated
+    // context) and a synthetic all-zero frame arrive. Neither may move the
+    // meter: 50k of 200k → 25%.
+    await bridge.handleCLIMessage(cli, assistantWithUsage("m-ctx-4", { input_tokens: 50000 }));
+    await bridge.handleCLIMessage(cli, assistantWithUsage("m-ctx-5", { input_tokens: 190000 }, "toolu_task_1"));
+    await bridge.handleCLIMessage(cli, assistantWithUsage("m-ctx-6", {}));
+    await bridge.handleCLIMessage(cli, resultWithModelUsage({
+      "claude-sonnet-4-6": { contextWindow: 200000 },
+    }));
+
+    expect(bridge.getSession("s1")!.state.context_used_percent).toBe(25);
+  });
+
+  it("result: the meter drops after a /compact (per-turn, not cumulative)", async () => {
+    // Turn 1 at 180k (90%), then a compacted turn at 20k → 10%. A cumulative
+    // modelUsage-based formula could only ever climb.
+    await bridge.handleCLIMessage(cli, assistantWithUsage("m-ctx-7", { cache_read_input_tokens: 180000 }));
+    await bridge.handleCLIMessage(cli, resultWithModelUsage({ "claude-sonnet-4-6": { contextWindow: 200000 } }));
+    expect(bridge.getSession("s1")!.state.context_used_percent).toBe(90);
+
+    await bridge.handleCLIMessage(cli, assistantWithUsage("m-ctx-8", { input_tokens: 20000 }));
+    await bridge.handleCLIMessage(cli, resultWithModelUsage({ "claude-sonnet-4-6": { contextWindow: 200000 } }));
+    expect(bridge.getSession("s1")!.state.context_used_percent).toBe(10);
+  });
+
+  it("result: leaves context_used_percent untouched until an occupancy sample exists", async () => {
+    // A result with a window but no prior main-thread usage must not clobber
+    // the (possibly persisted) value with a bogus 0 or a cumulative figure.
+    bridge.getSession("s1")!.state.context_used_percent = 42;
+    await bridge.handleCLIMessage(cli, resultWithModelUsage({
+      "claude-sonnet-4-6": { inputTokens: 8000, outputTokens: 2000, contextWindow: 200000 },
+    }));
+
+    expect(bridge.getSession("s1")!.state.context_used_percent).toBe(42);
   });
 
   it("stream_event: broadcasts without storing", async () => {
@@ -6360,6 +6471,18 @@ describe("session model sync from the main assistant frame", () => {
     const cli = makeCliSocket("sm4");
     bridge.handleCLIOpen(cli, "sm4");
     await bridge.handleCLIMessage(cli, makeInitMsg({ session_id: "sm4", model: "claude-opus-4-8" }));
+    // Main-thread occupancy (20k of the 200k window below → 10%): context%
+    // takes its numerator from the main assistant frame's per-turn usage and
+    // only the declared window from result.modelUsage (context-occupancy.ts).
+    await bridge.handleCLIMessage(cli, JSON.stringify({
+      type: "assistant",
+      message: {
+        id: "a4", type: "message", role: "assistant", model: "claude-opus-4-8",
+        content: [{ type: "text", text: "hi" }], stop_reason: "end_turn",
+        usage: { input_tokens: 20000, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      },
+      parent_tool_use_id: null, uuid: "a4", session_id: "sm4",
+    }));
     await bridge.handleCLIMessage(cli, JSON.stringify({
       type: "result", subtype: "success", is_error: false,
       duration_ms: 1, duration_api_ms: 1, num_turns: 1, total_cost_usd: 0,
@@ -6373,7 +6496,7 @@ describe("session model sync from the main assistant frame", () => {
     }));
     const s = bridge.getSession("sm4")!;
     expect(s.state.model).toBe("claude-opus-4-8");
-    expect(s.state.context_used_percent).toBeGreaterThan(0);
+    expect(s.state.context_used_percent).toBe(10);
   });
 
   // ── Observed-working models (verified-models.ts) ──────────────────────
