@@ -31,6 +31,8 @@ Scale concerns (sharding, read replicas, multi-region) are premature. aiogram ha
 
 Council selection is **adaptive and universal** — it is defined once, for every
 `/council-*` skill, in `~/.claude/skills/_council-experts/selection-engine.md`.
+
+**Economy council by default.** Select the roster with the selection engine's Phase 1 step 5 (economy: domain-matched seats only, budget 2–3, cross-stack lenses hunt/fowler/willison/beck always seated, dropped seats listed in the ledger). Seat the full council only when the developer explicitly asks for a "full council" or for a release/security audit.
 Read it and run its flow before Phase 1 below. It replaces the old two-stack
 detect-or-refuse router: rather than refusing any workspace that is not one of
 two hardcoded stacks, the engine fingerprints the workspace, scores every advisor
@@ -208,7 +210,18 @@ For each SELECTED advisor, before dispatch:
    the file-list token, including the role-named ones, so scoping the check does
    not reintroduce dependence on a single literal.
 5. Dispatch via `Task` with `subagent_type=general-purpose` and the substituted
-   body as the prompt
+   body as the prompt.
+
+   **Per-seat model tier (PRO economy — spec `specs/council-pro-economy.md`).**
+   Choose each seat's `Task` `model` fail-closed:
+   - a **guaranteed** cross-stack lens (security `hunt`, LLM `willison`, refactor
+     `fowler`, test `beck`) ALWAYS runs the **top** model — never cheap (Boundary 🚫);
+   - every other seat also defaults to **top** UNTIL the run-stats dataset proves a
+     `(seat, complexity-band)` safe to run cheap (never hand-guess a threshold);
+   - `top` → omit `model`; `cheap` → `model: "haiku"`.
+   Decision logic + data-derived policy live in the aura-companion engine
+   (`web/scripts/tier-policy.ts` / `stats-derive.ts`) when it is checked out. Today
+   every seat runs top — cheap-tiering switches on only once data + the guardrail exist.
 
 Refusal template for a surviving placeholder:
 
