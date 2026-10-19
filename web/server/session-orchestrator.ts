@@ -2200,6 +2200,11 @@ export class SessionOrchestrator {
   }
 
   /** REST bootstrap of live council group records (Sidebar hydration). */
+  /** Diagnostics Pairs card: when the latest checkpoint reached this group (null = none yet / unknown group). */
+  getGroupLastCheckpointAt(sessionGroupId: string): number | null {
+    return this.councilGroupMeta.get(sessionGroupId)?.lastCheckpointReceivedAt ?? null;
+  }
+
   getAllGroupsForBootstrap(): BrowserGroupRecord[] {
     return this.councilLifecycle.getAllGroupsForBootstrap();
   }

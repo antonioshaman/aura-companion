@@ -50,6 +50,9 @@ export interface PairView {
   sessionGroupId: string;
   /** Group status straight from the state machine (AP-2). */
   status: string;
+  /** Present only when status is "degraded". */
+  deadRole?: string;
+  degradedReason?: string;
   pairing: string;
   lastCheckpointAt: number | null;
   lastWakeAt: number | null;

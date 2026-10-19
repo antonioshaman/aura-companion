@@ -3513,6 +3513,22 @@ describe("CodexAdapter with ICodexTransport", () => {
     expect(mock.calls[0].method).toBe("initialize");
   });
 
+  // Diagnostics Pairs card (plan Task 6): codex reports when it last heard
+  // from the CLI, so a silent codex observer shows "silent Nm" instead of
+  // being invisible. 0 = nothing received yet.
+  it("stamps the last inbound frame time on notifications and server requests", async () => {
+    const mock = createMockTransport();
+    const adapter = new CodexAdapter(mock.transport, "test-session-frame", { model: "o4-mini" });
+    expect(adapter.getLastCliFrameReceivedMs()).toBe(0);
+    const t0 = Date.now();
+    mock.pushNotification("thread/started", { thread: { id: "th-1" } });
+    expect(adapter.getLastCliFrameReceivedMs()).toBeGreaterThanOrEqual(t0);
+    const t1 = adapter.getLastCliFrameReceivedMs();
+    await new Promise((r) => setTimeout(r, 5));
+    mock.pushRequest("item/commandExecution/requestApproval", 7, {});
+    expect(adapter.getLastCliFrameReceivedMs()).toBeGreaterThan(t1);
+  });
+
   it("disconnect calls killProcess callback when using transport", async () => {
     const killProcess = vi.fn(async () => {});
     const mock = createMockTransport();

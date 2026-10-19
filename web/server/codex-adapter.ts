@@ -445,6 +445,14 @@ export class StdioTransport implements ICodexTransport {
 // ─── Codex Adapter ────────────────────────────────────────────────────────────
 
 export class CodexAdapter implements IBackendAdapter {
+  /** Epoch ms of the last inbound notification/request from codex (0 = none yet). */
+  private lastCliFrameReceivedMs = 0;
+
+  /** See {@link IBackendAdapter.getLastCliFrameReceivedMs}. */
+  getLastCliFrameReceivedMs(): number {
+    return this.lastCliFrameReceivedMs;
+  }
+
   private transport: ICodexTransport;
   private sessionId: string;
   private options: CodexAdapterOptions;
@@ -2024,6 +2032,7 @@ export class CodexAdapter implements IBackendAdapter {
   // ── Incoming notification handlers ──────────────────────────────────────
 
   private handleNotification(method: string, params: Record<string, unknown>): void {
+    this.lastCliFrameReceivedMs = Date.now();
     // W14: any inbound frame proves the wake turn's stream is alive.
     this.observerWakeSilence.onFrame();
     this.trackObserverCommandHold(method, params);
@@ -2282,6 +2291,7 @@ export class CodexAdapter implements IBackendAdapter {
   // ── Incoming request handlers (approval requests) ───────────────────────
 
   private handleRequest(method: string, id: number, params: Record<string, unknown>): void {
+    this.lastCliFrameReceivedMs = Date.now();
     this.observerWakeSilence.onFrame();
     try {
       switch (method) {
