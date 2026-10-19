@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.7.1](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.7.0...aura-companion-v2.7.1) (2026-10-19)
+
+
+### Bug Fixes
+
+* **server:** fail a relaunch whose CLI binary is missing instead of reporting success ([#410](https://github.com/antonioshaman/aura-companion/issues/410)) ([d2ddb6f](https://github.com/antonioshaman/aura-companion/commit/d2ddb6facf02db0c80544c118439d7331bc20995))
+* **server:** require ownership proof before reaping codex app-server orphans; surface id-less codex errors ([#408](https://github.com/antonioshaman/aura-companion/issues/408)) ([328c13a](https://github.com/antonioshaman/aura-companion/commit/328c13a1b36f75666ddf44ff0174cb40eb5bcb15))
+* **server:** route every auto-relaunch exit through one abortRelaunch tail ([#409](https://github.com/antonioshaman/aura-companion/issues/409)) ([c398c98](https://github.com/antonioshaman/aura-companion/commit/c398c98d7c4e23c6ee7cef73c85afd28124c9870))
+* **sessions:** close the deferred handoff review items ([#407](https://github.com/antonioshaman/aura-companion/issues/407)) ([50c2bf9](https://github.com/antonioshaman/aura-companion/commit/50c2bf96091275d47fd7ed71ff8116924ef408a4))
+
 ## [2.7.0](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.6.0...aura-companion-v2.7.0) (2026-10-19)
 
 
