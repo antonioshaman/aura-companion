@@ -1,3 +1,4 @@
+import { DEFAULT_KB_ANALYSIS_SETTINGS, normalizeKbAnalysisSettings, type KbAnalysisSettings } from "./diagnostics/kb-analysis-settings.js";
 import {
   readFileSync,
   existsSync,
@@ -80,6 +81,10 @@ export interface CompanionSettings {
    * wins. Default off. See `second-reviewer-config.ts`.
    */
   councilSecondReviewer: SecondReviewerConfig;
+  /** Accumulation thresholds for the background KB analyzer (diagnostics spec §3.2). */
+  kbAnalysis: KbAnalysisSettings;
+  /** Report-only memory analysis on the Diagnostics page. Default off; manual runs only. */
+  diagnosticsMemoryReport: boolean;
   updatedAt: number;
 }
 
@@ -116,6 +121,8 @@ let settings: CompanionSettings = {
   kbAutoPrime: false,
   autoResumeAfterLimit: true,
   councilSecondReviewer: { ...DEFAULT_SECOND_REVIEWER_CONFIG },
+  kbAnalysis: { ...DEFAULT_KB_ANALYSIS_SETTINGS },
+  diagnosticsMemoryReport: false,
   updatedAt: 0,
 };
 
@@ -152,6 +159,8 @@ function normalize(raw: Partial<CompanionSettings> | null | undefined): Companio
     kbAutoPrime: typeof raw?.kbAutoPrime === "boolean" ? raw.kbAutoPrime : false,
     autoResumeAfterLimit: typeof raw?.autoResumeAfterLimit === "boolean" ? raw.autoResumeAfterLimit : true,
     councilSecondReviewer: normalizeSecondReviewerConfig(raw?.councilSecondReviewer),
+    kbAnalysis: normalizeKbAnalysisSettings(raw?.kbAnalysis),
+    diagnosticsMemoryReport: raw?.diagnosticsMemoryReport === true,
     updatedAt: typeof raw?.updatedAt === "number" ? raw.updatedAt : 0,
   };
 }
@@ -182,7 +191,7 @@ export function getSettings(): CompanionSettings {
 }
 
 export function updateSettings(
-  patch: Partial<Pick<CompanionSettings, "anthropicApiKey" | "anthropicModel" | "claudeCodeOAuthToken" | "openaiApiKey" | "onboardingCompleted" | "linearApiKey" | "linearAutoTransition" | "linearAutoTransitionStateId" | "linearAutoTransitionStateName" | "linearArchiveTransition" | "linearArchiveTransitionStateId" | "linearArchiveTransitionStateName" | "linearOAuthClientId" | "linearOAuthClientSecret" | "linearOAuthWebhookSecret" | "linearOAuthAccessToken" | "linearOAuthRefreshToken" | "aiValidationEnabled" | "aiValidationAutoApprove" | "aiValidationAutoDeny" | "publicUrl" | "updateChannel" | "dockerAutoUpdate" | "telemetryEnabled" | "defaultSessionMode" | "kbAutoPrime" | "autoResumeAfterLimit" | "councilSecondReviewer">>,
+  patch: Partial<Pick<CompanionSettings, "anthropicApiKey" | "anthropicModel" | "claudeCodeOAuthToken" | "openaiApiKey" | "onboardingCompleted" | "linearApiKey" | "linearAutoTransition" | "linearAutoTransitionStateId" | "linearAutoTransitionStateName" | "linearArchiveTransition" | "linearArchiveTransitionStateId" | "linearArchiveTransitionStateName" | "linearOAuthClientId" | "linearOAuthClientSecret" | "linearOAuthWebhookSecret" | "linearOAuthAccessToken" | "linearOAuthRefreshToken" | "aiValidationEnabled" | "aiValidationAutoApprove" | "aiValidationAutoDeny" | "publicUrl" | "updateChannel" | "dockerAutoUpdate" | "telemetryEnabled" | "defaultSessionMode" | "kbAutoPrime" | "autoResumeAfterLimit" | "councilSecondReviewer" | "kbAnalysis" | "diagnosticsMemoryReport">>,
 ): CompanionSettings {
   ensureLoaded();
   settings = normalize({
@@ -214,6 +223,8 @@ export function updateSettings(
     kbAutoPrime: patch.kbAutoPrime ?? settings.kbAutoPrime,
     autoResumeAfterLimit: patch.autoResumeAfterLimit ?? settings.autoResumeAfterLimit,
     councilSecondReviewer: patch.councilSecondReviewer ?? settings.councilSecondReviewer,
+    kbAnalysis: patch.kbAnalysis ?? settings.kbAnalysis,
+    diagnosticsMemoryReport: patch.diagnosticsMemoryReport ?? settings.diagnosticsMemoryReport,
     updatedAt: Date.now(),
   });
   persist();

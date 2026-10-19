@@ -53,6 +53,8 @@ describe("settings-manager", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off", scope: "review-implement" },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
   });
@@ -154,6 +156,8 @@ describe("settings-manager", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off", scope: "review-implement" },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 123,
     });
   });
@@ -238,6 +242,8 @@ describe("settings-manager", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off", scope: "review-implement" },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
   });

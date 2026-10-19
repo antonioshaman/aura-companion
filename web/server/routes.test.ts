@@ -148,6 +148,8 @@ vi.mock("./settings-manager.js", () => ({
     kbAutoPrime: false,
     autoResumeAfterLimit: true,
     councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+    kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+    diagnosticsMemoryReport: false,
     updatedAt: 0,
   })),
   updateSettings: vi.fn((patch) => ({
@@ -176,6 +178,8 @@ vi.mock("./settings-manager.js", () => ({
     kbAutoPrime: patch.kbAutoPrime ?? false,
     autoResumeAfterLimit: patch.autoResumeAfterLimit ?? true,
     councilSecondReviewer: patch.councilSecondReviewer ?? { reviewer: "off" as const, scope: "review-implement" as const },
+    kbAnalysis: patch.kbAnalysis ?? { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+    diagnosticsMemoryReport: patch.diagnosticsMemoryReport ?? false,
     updatedAt: Date.now(),
   })),
 }));
@@ -986,6 +990,42 @@ describe("council second-opinion reviewer routes", () => {
     expect(ok.status).toBe(200);
     expect((await ok.json()).councilSecondReviewer).toEqual({ reviewer: "auto", scope: "all" });
   });
+
+  // Diagnostics spec §3.2: KB-analysis thresholds are strict at the boundary —
+  // a 0 threshold (analysis due every hour) or a non-boolean memory flag is a
+  // 400, and a valid object round-trips.
+  it("PUT /api/settings validates kbAnalysis and diagnosticsMemoryReport strictly", async () => {
+    for (const body of [
+      { kbAnalysis: { newEntriesThreshold: 0, sessionsThreshold: 25, maxAgeDays: 14 } },
+      { kbAnalysis: { newEntriesThreshold: 10 } },
+      { diagnosticsMemoryReport: "yes" },
+    ]) {
+      const bad = await app.request("/api/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(bad.status).toBe(400);
+    }
+    vi.mocked(settingsManager.updateSettings).mockImplementationOnce((patch) => ({
+      ...settingsManager.getSettings(),
+      claudeCodeOAuthToken: "",
+      openaiApiKey: "",
+      ...Object.fromEntries(Object.entries(patch).filter(([, v]) => v !== undefined)),
+    }) as never);
+    const ok = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        kbAnalysis: { newEntriesThreshold: 5, sessionsThreshold: 40, maxAgeDays: 7 },
+        diagnosticsMemoryReport: true,
+      }),
+    });
+    expect(ok.status).toBe(200);
+    const json = await ok.json();
+    expect(json.kbAnalysis).toEqual({ newEntriesThreshold: 5, sessionsThreshold: 40, maxAgeDays: 7 });
+    expect(json.diagnosticsMemoryReport).toBe(true);
+  });
 });
 
 // FIX-AP-1: "Dismiss for now" releases a STOP's hold on auto-proceed. The
@@ -1763,6 +1803,8 @@ describe("GET /api/sessions/:id/archive-info", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
     const res = await app.request("/api/sessions/s1/archive-info", { method: "GET" });
@@ -2138,6 +2180,8 @@ describe("GET /api/settings", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 123,
     });
 
@@ -2171,6 +2215,8 @@ describe("GET /api/settings", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
     });
   });
 
@@ -2204,6 +2250,8 @@ describe("GET /api/settings", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 123,
     });
 
@@ -2237,6 +2285,8 @@ describe("GET /api/settings", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
     });
   });
 
@@ -2271,6 +2321,8 @@ describe("GET /api/settings", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 100,
     });
 
@@ -2313,6 +2365,8 @@ describe("PUT /api/settings", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 456,
     });
 
@@ -2368,6 +2422,8 @@ describe("PUT /api/settings", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
     });
   });
 
@@ -2401,6 +2457,8 @@ describe("PUT /api/settings", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 789,
     });
 
@@ -2511,6 +2569,8 @@ describe("PUT /api/settings", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 999,
     });
 
@@ -2612,6 +2672,8 @@ describe("PUT /api/settings", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 500,
     });
 
@@ -2843,6 +2905,8 @@ describe("GET /api/linear/issues", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -2883,6 +2947,8 @@ describe("GET /api/linear/issues", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
 
@@ -2976,6 +3042,8 @@ describe("GET /api/linear/issues", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
 
@@ -3076,6 +3144,8 @@ describe("GET /api/linear/issues", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
 
@@ -3141,6 +3211,8 @@ describe("GET /api/linear/connection", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -3181,6 +3253,8 @@ describe("GET /api/linear/connection", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
 
@@ -3243,6 +3317,8 @@ describe("POST /api/linear/issues/:id/transition", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
 
@@ -3287,6 +3363,8 @@ describe("POST /api/linear/issues/:id/transition", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
 
@@ -3330,6 +3408,8 @@ describe("POST /api/linear/issues/:id/transition", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -3375,6 +3455,8 @@ describe("POST /api/linear/issues/:id/transition", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
 
@@ -3454,6 +3536,8 @@ describe("POST /api/linear/issues/:id/transition", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
 
@@ -3512,6 +3596,8 @@ describe("GET /api/linear/projects", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -3552,6 +3638,8 @@ describe("GET /api/linear/projects", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
 
@@ -3622,6 +3710,8 @@ describe("GET /api/linear/project-issues", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
     vi.mocked(resolveApiKey).mockReturnValue(null);
@@ -3662,6 +3752,8 @@ describe("GET /api/linear/project-issues", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
 
@@ -3747,6 +3839,8 @@ describe("GET /api/linear/project-issues", () => {
       kbAutoPrime: false,
       autoResumeAfterLimit: true,
       councilSecondReviewer: { reviewer: "off" as const, scope: "review-implement" as const },
+      kbAnalysis: { newEntriesThreshold: 10, sessionsThreshold: 25, maxAgeDays: 14 },
+      diagnosticsMemoryReport: false,
       updatedAt: 0,
     });
 
