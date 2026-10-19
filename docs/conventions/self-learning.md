@@ -43,6 +43,7 @@ The knowledge base grows organically. Over time:
 
 ## Lifecycle tooling
 
+- **Diagnostics page (`#/diagnostics`)** — a background analyzer proposes keep / archive / mark-for-merge for never-used, dead-reference, duplicate, outdated and heuristic (contradiction, "model may do this already") entries once enough has accumulated (thresholds in Settings → Knowledge analysis). Nothing is archived or edited until the owner decides on the page; archive moves the line to `archive/<store>.jsonl` and is logged in `~/.companion/diagnostics/kb-analysis/decisions.jsonl`. "never used" stays noisy until `/prime` records usage (`kb:record`).
 - `bun run --cwd web kb:health` — lifecycle report (used / helpful / promoted / stale / never-surfaced / idle); corrupt lines reported with `file:line`, exit 1.
 - `bun run --cwd web kb:record -- <id>…` — called by `/prime` step 5; appends one line to the gitignored `.agents/knowledge/usage.log` (telemetry kept out of the content-only `*.jsonl` stores).
 - `bun run --cwd web kb:prune [--dry-run]` — moves entries idle for 20 consecutive sessions to `.agents/knowledge/archive/` (never deletes; promoted entries exempt).
