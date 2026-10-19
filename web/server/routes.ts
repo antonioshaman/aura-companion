@@ -1366,7 +1366,9 @@ export function createRoutes(
       filename = buildHandoffFilename(new Date(Date.now() + attempt * 1000));
       handoffPath = join(cwd, filename);
       try {
-        writeFileSync(handoffPath, markdown, { encoding: "utf8", mode: 0o644, flag: "wx" });
+        // 0o600: the brief is transcript text; on a shared host other users
+        // must not read it (review 2026-10-17, hunt). Same-user agents still can.
+        writeFileSync(handoffPath, markdown, { encoding: "utf8", mode: 0o600, flag: "wx" });
         written = true;
       } catch (err) {
         lastErr = err;
@@ -1375,7 +1377,7 @@ export function createRoutes(
     }
     if (!written) {
       // Detail (absolute path, errno) goes to the log, not to the browser.
-      log.error("routes", "Failed to write handoff file", { sessionId: id, cwd, err: String(lastErr) });
+      log.error("routes", "Failed to write handoff file", { event: "handoff.write_failed", sessionId: id, cwd, err: String(lastErr) });
       return c.json({ error: "Cannot write the handoff file into the session workspace" }, 500);
     }
 

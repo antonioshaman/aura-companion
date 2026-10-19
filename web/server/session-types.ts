@@ -940,24 +940,46 @@ export interface ContextAdvisoryPayload {
   action: "compact" | "continue_in_new";
 }
 
-/** Session-state record of the latest `continue_in_new` advisory. */
-export interface ContextAdvisoryRecord {
-  /** Which ladder fired. Absent on records persisted before 2026-10-17 → read as `transcript_bytes`. */
-  signal?: ContextAdvisorySignal;
-  /** The milestone crossed, in the signal's unit. Absent on legacy records → use `milestoneBytes`. */
-  milestone?: number;
-  /**
-   * Bytes-only: populated for `transcript_bytes`, never for `codex_compactions`
-   * (a count must never travel in a field named bytes — the handoff route
-   * quotes this value as "> N MB").
-   */
-  milestoneBytes?: number;
+/** Fields every `continue_in_new` advisory record carries. */
+interface ContextAdvisoryRecordBase {
   /** User-visible advisory copy (English, same text as the legacy line). */
   message: string;
   action: "continue_in_new";
   /** Epoch ms when the advisory fired. */
   at: number;
 }
+
+/**
+ * Session-state record of the latest `continue_in_new` advisory. A union so
+ * the type carries the invariant: `milestoneBytes` exists only for bytes
+ * (a compaction count must never travel in a field named bytes — the handoff
+ * route quotes it as "> N MB"). Read through `decodeContextAdvisory`.
+ */
+export type ContextAdvisoryRecord =
+  | (ContextAdvisoryRecordBase & {
+    signal: "transcript_bytes";
+    /** Bytes crossed. */
+    milestone: number;
+    /** Same value as `milestone`; kept for older browsers. */
+    milestoneBytes: number;
+  })
+  | (ContextAdvisoryRecordBase & {
+    signal: "codex_compactions";
+    /** Compactions counted. */
+    milestone: number;
+    milestoneBytes?: never;
+  })
+  | (ContextAdvisoryRecordBase & {
+    /** Persisted before 2026-10-17: no `signal`, bytes only. */
+    signal?: undefined;
+    milestone?: undefined;
+    milestoneBytes: number;
+  });
+
+/** A {@link ContextAdvisoryRecord} before its `at` stamp (union-preserving). */
+export type ContextAdvisoryRecordInput = ContextAdvisoryRecord extends infer R
+  ? R extends ContextAdvisoryRecord ? Omit<R, "at"> : never
+  : never;
 
 /**
  * Why the session is running on a different model than the one chosen.
