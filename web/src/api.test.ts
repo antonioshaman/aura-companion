@@ -2107,6 +2107,47 @@ describe("sweep orphans", () => {
 });
 
 // ===========================================================================
+// Diagnostics page (plan Tasks 13–15). The two GETs return the body; the two
+// POSTs resolve with { status, body } for ANY status — a 409 (run already in
+// flight / report changed) and a 202 (archive recorded but not applied) are
+// outcomes the page acts on, not exceptions.
+// ===========================================================================
+describe("diagnostics page API", () => {
+  it("diagnosticsOverview and kbAnalysisLatest GET their endpoints", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ generatedAt: 1 }));
+    expect(await api.diagnosticsOverview()).toEqual({ generatedAt: 1 });
+    expect(mockFetch.mock.calls[0][0]).toBe("/api/diagnostics/overview");
+    mockFetch.mockResolvedValueOnce(mockResponse({ inFlight: null }));
+    expect(await api.kbAnalysisLatest()).toEqual({ inFlight: null });
+    expect(mockFetch.mock.calls[1][0]).toBe("/api/diagnostics/kb-analysis/latest");
+  });
+
+  it("kbAnalysisRun POSTs includeMemory and resolves a 409 with its body instead of throwing", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ error: "conflict", runId: "r1", startedAt: 5 }, 409));
+    const r = await api.kbAnalysisRun(true);
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/diagnostics/kb-analysis/run");
+    expect(opts.method).toBe("POST");
+    expect(JSON.parse(opts.body)).toEqual({ includeMemory: true });
+    expect(r).toEqual({ status: 409, body: { error: "conflict", runId: "r1", startedAt: 5 } });
+  });
+
+  it("kbAnalysisDecide POSTs runId + decisions and resolves a 202 with its body", async () => {
+    mockFetch.mockResolvedValueOnce(mockResponse({ recorded: true, message: "retry" }, 202));
+    const r = await api.kbAnalysisDecide("run-1", [{ entryId: "got-1", decision: "archive" }]);
+    const [url, opts] = mockFetch.mock.calls[0];
+    expect(url).toBe("/api/diagnostics/kb-analysis/decisions");
+    expect(JSON.parse(opts.body)).toEqual({ runId: "run-1", decisions: [{ entryId: "got-1", decision: "archive" }] });
+    expect(r).toEqual({ status: 202, body: { recorded: true, message: "retry" } });
+  });
+
+  it("a non-JSON error body resolves with an empty body, not a throw", async () => {
+    mockFetch.mockResolvedValueOnce({ ok: false, status: 502, statusText: "Bad Gateway", json: () => Promise.reject(new SyntaxError("x")) });
+    expect(await api.kbAnalysisRun(false)).toEqual({ status: 502, body: {} });
+  });
+});
+
+// ===========================================================================
 // Simple diagnostic GETs — each must hit its own endpoint and return the body
 // unchanged. getDeliveryMetrics feeds the reply-delivery health indicator
 // (server/delivery-metrics.ts); a wrong path would silently blank it.
