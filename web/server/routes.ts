@@ -924,7 +924,7 @@ export function createRoutes(
         module: "sweep", detail: { reason: "session store not attached" },
       });
     }
-    const body = (await c.req.json().catch(() => null)) as { token?: unknown } | null;
+    const body = (await c.req.json().catch(() => null)) as { token?: unknown; ids?: unknown } | null;
     const token = body && typeof body.token === "string" ? body.token : null;
     if (!token) {
       // Refuse a bare confirm / client PID list — the token is the only
@@ -932,6 +932,19 @@ export function createRoutes(
       return respondError(c, 400, "bad_request", {
         module: "sweep", detail: { reason: "missing preview token" },
       });
+    }
+    // Optional partial selection: `ids` narrows the sweep to a subset of the
+    // previewed set. It can only ever NARROW — every id must belong to the
+    // recomputed, token-validated set (checked below), so a client can never
+    // name a PID or a candidate the operator did not see.
+    let selectedIds: Set<string> | null = null;
+    if (body && body.ids !== undefined) {
+      if (!Array.isArray(body.ids) || body.ids.length === 0 || !body.ids.every((x) => typeof x === "string")) {
+        return respondError(c, 400, "bad_request", {
+          module: "sweep", detail: { reason: "ids must be a non-empty array of candidate ids" },
+        });
+      }
+      selectedIds = new Set(body.ids as string[]);
     }
     const now = Date.now();
     if (sweepExecuteInFlight) {
@@ -960,6 +973,16 @@ export function createRoutes(
       return respondError(c, 409, "conflict", {
         module: "sweep", detail: { reason: "preview token stale — candidate set changed" },
       });
+    }
+    if (selectedIds) {
+      const known = new Set(candidates.map((cand) => cand.id));
+      const unknown = [...selectedIds].filter((id) => !known.has(id));
+      if (unknown.length > 0) {
+        return respondError(c, 400, "bad_request", {
+          module: "sweep", detail: { reason: "ids not in the previewed set", unknown },
+        });
+      }
+      candidates = candidates.filter((cand) => selectedIds.has(cand.id));
     }
     sweepExecuteInFlight = true;
     lastSweepExecuteAt = now;

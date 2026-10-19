@@ -457,10 +457,14 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
       groups.set(sessionGroupId, next);
       const findings = new Map(s.findings);
       const prior = findings.get(sessionGroupId) ?? [];
-      // Build a mutable index so we can do O(1) upgrade lookups without
-      // a second linear scan. Keys are finding ids; values are their
-      // indices in the `prior` array.
-      const priorIdxById = new Map<string, number>(prior.map((f, i) => [f.id, i]));
+      // `prior` IS the live store array that React already rendered from, so
+      // it must never be written to. Attribution upgrades below go into a
+      // clone (`nextPrior`); `prior` stays untouched even on the no-op path.
+      const nextPrior = [...prior];
+      // Build an index so we can do O(1) upgrade lookups without a second
+      // linear scan. Keys are finding ids; values are their indices in the
+      // `nextPrior` array.
+      const priorIdxById = new Map<string, number>(nextPrior.map((f, i) => [f.id, i]));
       const newOnes: ObserverFinding[] = [];
       const newIdsInBatch = new Set<string>();
       // Track whether an attribution upgrade occurred so we can decide
@@ -484,13 +488,13 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
         // be upgraded when the incoming call carries non-empty attribution.
         // Empty never overwrites non-empty (e.g. a second bootstrap with ""
         // must NOT downgrade a live event that arrived with real attribution).
-        const stored = prior[existingIdx]!;
+        const stored = nextPrior[existingIdx]!;
         const incomingHasAttribution = observerProvider !== "" || observerModel !== "";
         const storedLacksAttribution = stored.observerProvider === "" || stored.observerModel === "";
         if (incomingHasAttribution && storedLacksAttribution) {
-          // Upgrade the stored finding in-place (preserving array position
-          // and all other hydrated fields) with the now-known attribution.
-          prior[existingIdx] = {
+          // Upgrade the finding in the CLONE (preserving array position and
+          // all other hydrated fields) with the now-known attribution.
+          nextPrior[existingIdx] = {
             ...stored,
             observerProvider,
             observerModel,
@@ -507,7 +511,7 @@ export const createCouncilSlice: StateCreator<AppState, [], [], CouncilSlice> = 
       // subscribed to findings to re-render, including the FindingsLog
       // summary announcer's effect.
       if (newOnes.length > 0 || upgraded) {
-        findings.set(sessionGroupId, [...prior, ...newOnes]);
+        findings.set(sessionGroupId, [...nextPrior, ...newOnes]);
       }
       const groundingDowngrades = new Map(s.groundingDowngrades);
       const priorDowngrades = groundingDowngrades.get(sessionGroupId) ?? [];

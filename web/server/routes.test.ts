@@ -6423,6 +6423,56 @@ describe("GET /api/sweep/preview + POST /api/sweep/execute", () => {
     expect(body.candidates).toHaveLength(0);
   });
 
+  // Partial selection (PR #188 review item #13): the Sweep page lets the
+  // operator untick candidates. `ids` must NARROW the token-validated set —
+  // only the named candidates are reaped, the rest are left untouched.
+  it("execute with ids reaps only the selected subset of the previewed set", async () => {
+    launcher.listSessions.mockReturnValue([
+      { sessionId: "sess_a", state: "exited", createdAt: 0 } as any,
+      { sessionId: "sess_b", state: "exited", createdAt: 0 } as any,
+    ]);
+    const pv = await (await app.request("/api/sweep/preview")).json();
+    expect(pv.candidates).toHaveLength(2);
+    const res = await app.request("/api/sweep/execute", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ token: pv.token, ids: ["stale-session:sess_a"] }),
+    });
+    expect(res.status).toBe(200);
+    const result = await res.json();
+    expect(result).toMatchObject({ requested: 1, swept: 1 });
+    expect(orchestrator.killSession).toHaveBeenCalledWith("sess_a");
+    expect(orchestrator.killSession).not.toHaveBeenCalledWith("sess_b");
+  });
+
+  // `ids` can never widen the sweep: an id outside the recomputed set (e.g. a
+  // forged candidate for some other session) rejects the whole request.
+  it("execute rejects ids that are not in the previewed set (400, nothing killed)", async () => {
+    launcher.listSessions.mockReturnValue([
+      { sessionId: "sess_a", state: "exited", createdAt: 0 } as any,
+    ]);
+    const pv = await (await app.request("/api/sweep/preview")).json();
+    const res = await app.request("/api/sweep/execute", {
+      method: "POST",
+      headers: JSON_HEADERS,
+      body: JSON.stringify({ token: pv.token, ids: ["stale-session:sess_a", "stale-session:sess_other"] }),
+    });
+    expect(res.status).toBe(400);
+    expect(orchestrator.killSession).not.toHaveBeenCalled();
+  });
+
+  it("execute rejects an empty or malformed ids list (400)", async () => {
+    for (const ids of [[], "stale-session:sess_a", [42]]) {
+      const res = await app.request("/api/sweep/execute", {
+        method: "POST",
+        headers: JSON_HEADERS,
+        body: JSON.stringify({ token: "whatever", ids }),
+      });
+      expect(res.status).toBe(400);
+    }
+    expect(orchestrator.killSession).not.toHaveBeenCalled();
+  });
+
   it("empty preview → execute is a safe no-op (AC6)", async () => {
     launcher.listSessions.mockReturnValue([]);
     const pv = await (await app.request("/api/sweep/preview")).json();

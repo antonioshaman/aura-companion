@@ -1223,7 +1223,10 @@ export const api = {
     postWithStatus<KbAnalysisRunResponse>("/diagnostics/kb-analysis/run", { includeMemory }),
   kbAnalysisDecide: (runId: string, decisions: { entryId: string; decision: Decision; mergeInto?: string }[]) =>
     postWithStatus<KbDecisionsResponse>("/diagnostics/kb-analysis/decisions", { runId, decisions }),
-  sweepExecute: (token: string) => post<SweepResult>("/sweep/execute", { token }),
+  // `ids` (optional) narrows the sweep to a subset of the previewed set; the
+  // server still validates `token` against the full recomputed set first.
+  sweepExecute: (token: string, ids?: string[]) =>
+    post<SweepResult>("/sweep/execute", ids ? { token, ids } : { token }),
 
   // Sandboxes
   listSandboxes: () => get<CompanionSandbox[]>("/sandboxes"),

@@ -99,11 +99,13 @@ vi.mock("./api.js", () => ({
     // PR #68: App.tsx fires fetchGroups() on auth flip. Mocked to a
     // resolved-empty shape so authenticated tests don't hit `undefined`.
     fetchGroups: vi.fn().mockResolvedValue({ groups: [] }),
+    relaunchSession: vi.fn().mockResolvedValue({ ok: true }),
   },
 }));
 
 vi.mock("./analytics.js", () => ({
   capturePageView: vi.fn(),
+  captureException: vi.fn(),
 }));
 
 vi.mock("./utils/routing.js", () => ({
@@ -136,6 +138,19 @@ vi.mock("./components/ChatView.js", () => ({
   ChatView: ({ sessionId }: { sessionId: string }) => (
     <div data-testid="chat-view">ChatView:{sessionId}</div>
   ),
+}));
+
+// ObserverPanel stand-in: exposes the recovery callback App wires in, so a
+// test can prove the real app (not just the Playground) hands the panel a
+// working `onRespawnHalf`. Renders nothing when the prop is missing — the
+// real panel hides every recovery button in that case.
+vi.mock("./components/council/index.js", () => ({
+  ObserverPanel: ({ onRespawnHalf }: { sessionId: string; onRespawnHalf?: (groupId: string) => Promise<void> | void }) =>
+    onRespawnHalf ? (
+      <button type="button" data-testid="observer-respawn" onClick={() => void onRespawnHalf("grp_dead")}>
+        Respawn
+      </button>
+    ) : null,
 }));
 
 vi.mock("./components/TaskPanel.js", () => ({
@@ -273,6 +288,33 @@ describe("App", () => {
 
       expect(screen.getByTestId("chat-view")).toBeInTheDocument();
       expect(screen.getByText("ChatView:s1")).toBeInTheDocument();
+    });
+
+    // PR #188 review item #5: App used to render <ObserverPanel> without
+    // `onRespawnHalf`, so the degraded/stalled recovery buttons never showed
+    // in the real app. The callback must relaunch the dead half of the pair
+    // through the existing per-session relaunch API.
+    it("wires ObserverPanel recovery to relaunch the dead half of the pair", async () => {
+      (parseHash as ReturnType<typeof vi.fn>).mockReturnValue({ page: "session", sessionId: "s1" });
+      setStoreValues({
+        currentSessionId: "s1",
+        groups: new Map([
+          ["grp_dead", {
+            sessionGroupId: "grp_dead",
+            primarySessionId: "s1",
+            observerSessionId: "s1-observer",
+            status: "degraded",
+            pairing: "claude+codex",
+            deadRole: "observer",
+          }],
+        ]),
+      });
+      render(<App />);
+      act(() => {
+        screen.getByTestId("observer-respawn").click();
+      });
+      await waitFor(() => expect(api.relaunchSession).toHaveBeenCalledWith("s1-observer"));
+      setStoreValues({ groups: new Map() });
     });
 
     it("renders DiffPanel when activeTab is diff", () => {

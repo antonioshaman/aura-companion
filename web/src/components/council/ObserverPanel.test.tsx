@@ -290,7 +290,7 @@ describe("ObserverPanel — state pills (5 explicit states)", () => {
 
   // P3/CONV-HONEST: the converged pill states what was measured (N reviews in
   // a row without blockers) and disclaims readiness; "ready to ship" is gone.
-  it("renders converged pill with honest streak copy, disclaimer + emerald token", async () => {
+  it("renders converged pill with honest streak copy, disclaimer + theme-aware success token", async () => {
     seedGroup();
     act(() => {
       useStore.getState().applyConvergence({
@@ -310,8 +310,11 @@ describe("ObserverPanel — state pills (5 explicit states)", () => {
     expect(pill.getAttribute("title")).toContain("Not a readiness guarantee");
     expect(pill.textContent).not.toMatch(/ready to ship/i);
     expect(pill.getAttribute("aria-label")).not.toMatch(/ready to ship/i);
-    // Emerald token signals "streak reached" per Story 4.1.5
-    expect(pill.className).toContain("text-emerald-500");
+    // The success token signals "streak reached" per Story 4.1.5. It must be
+    // the theme-aware `text-cc-success` (darkened in light mode): the raw
+    // `text-emerald-500` it replaced failed WCAG AA contrast on the light card.
+    expect(pill.className).toContain("text-cc-success");
+    expect(pill.className).not.toContain("text-emerald-500");
     const { axe } = await import("vitest-axe");
     expect(await axe(container)).toHaveNoViolations();
   });

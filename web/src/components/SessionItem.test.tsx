@@ -115,12 +115,48 @@ describe("SessionItem", () => {
     expect(container.querySelector(".bg-cc-muted\\/40")).toBeTruthy();
   });
 
-  it("shows exited status dot when not connected", () => {
-    // Disconnected sessions show an outlined ring instead of a filled dot.
+  it("shows completed (neutral outline) status dot for a gracefully exited session", () => {
+    // PR #188 review item #12: a session that finished cleanly
+    // (sdkState === "exited") keeps the neutral muted outline ring. The input
+    // now sets sdkState explicitly — the default fixture says "connected",
+    // which (when not connected) now means the process dropped.
     const { container } = render(
-      <SessionItem {...buildProps({ session: makeSession({ isConnected: false }) })} />,
+      <SessionItem {...buildProps({ session: makeSession({ isConnected: false, sdkState: "exited" }) })} />,
     );
     expect(container.querySelector(".border-cc-muted\\/25")).toBeTruthy();
+    expect(screen.getByTestId("session-item-completed-dot")).toHaveAttribute("aria-label", "Completed");
+    // Must NOT be the disconnected (dropped) treatment.
+    expect(screen.queryByTestId("session-item-disconnected-dot")).toBeNull();
+  });
+
+  it("shows a red-tinted disconnected dot + label when the process dropped unexpectedly", () => {
+    // PR #188 review item #12: not connected, not reconnecting, and NOT a
+    // graceful terminal (sdkState !== "exited") = the CLI process is gone.
+    // It must read differently from a clean finish, visually and for AT.
+    const { container } = render(
+      <SessionItem {...buildProps({ session: makeSession({ isConnected: false, sdkState: "connected" }) })} />,
+    );
+    const dot = screen.getByTestId("session-item-disconnected-dot");
+    expect(dot.className).toMatch(/border-cc-error/);
+    expect(dot).toHaveAttribute("aria-label", "Disconnected — process gone");
+    expect(dot).toHaveAttribute("title", "Disconnected — process gone");
+    // Must not collapse onto the neutral "completed" outline.
+    expect(container.querySelector(".border-cc-muted\\/25")).toBeNull();
+  });
+
+  it("treats a null sdkState while disconnected as a dropped process", () => {
+    // Sessions known only to the bridge (no SDK record) have sdkState null;
+    // with no graceful-exit signal they must not be shown as completed.
+    render(<SessionItem {...buildProps({ session: makeSession({ isConnected: false, sdkState: null }) })} />);
+    expect(screen.getByTestId("session-item-disconnected-dot")).toBeInTheDocument();
+  });
+
+  it("passes axe a11y checks in the disconnected state (labelled role=img dot)", async () => {
+    const { axe } = await import("vitest-axe");
+    const { container } = render(
+      <SessionItem {...buildProps({ session: makeSession({ isConnected: false, sdkState: null }) })} />,
+    );
+    expect(await axe(container)).toHaveNoViolations();
   });
 
   // --- Backend badge ---
@@ -431,8 +467,10 @@ describe("SessionItem", () => {
         })}
       />,
     );
-    // Should show exited dot (border only, no fill)
+    // Should show the neutral "completed" dot (border only, no fill), never
+    // the red-tinted disconnected ring — archiving is a graceful terminal.
     expect(container.querySelector(".border-cc-muted\\/25")).toBeTruthy();
+    expect(screen.queryByTestId("session-item-disconnected-dot")).toBeNull();
   });
 
   // --- Click outside closes menu ---
@@ -804,6 +842,10 @@ describe("SessionItem", () => {
     const badge = screen.getByTestId("council-convergence-badge");
     expect(badge).toHaveAttribute("data-state", "converged");
     expect(badge.textContent).toContain("3× no blockers");
+    // Theme-aware success token (AA in light AND dark); raw emerald-500 failed
+    // contrast on the light sidebar (PR #188 review, same issue as item #4).
+    expect(badge.className).toContain("text-cc-success");
+    expect(badge.className).not.toContain("emerald-500");
     expect(badge.getAttribute("aria-label")).toMatch(/^3 reviews in a row without blockers\. Not a readiness guarantee/);
     expect(badge.getAttribute("title")).toContain("Not a readiness guarantee");
     expect(badge.textContent).not.toMatch(/ready to ship|converged/i);

@@ -3667,7 +3667,7 @@ function CouncilModeSection() {
 //
 // Story 4.1.5 mandates badge variants live in the same panel as the existing
 // status pills. Two mocks: a mid-cycle pair and a fully-converged pair so
-// designers can sanity-check the emerald-500 token + emoji + accessible-label
+// designers can sanity-check the cc-success token + emoji + accessible-label
 // triad without driving a real Council session.
 
 const COUNCIL_CYCLE_PROGRESS_SESSION = "playground-council-cycle-progress-orch";
@@ -4001,13 +4001,29 @@ function PlaygroundSessionItems() {
         </div>
       </Card>
 
-      {/* Exited */}
-      <Card label="Exited — session stopped">
+      {/* Completed — graceful terminal (sdkState "exited"): neutral outline dot */}
+      <Card label="Completed — finished cleanly (neutral outline dot)">
         <div className="bg-cc-sidebar rounded-lg p-1">
           <SessionItem
             session={mockSession({ sdkState: "exited", backendType: "codex" })}
             isActive={false}
             sessionName="Deploy to staging"
+            permCount={0}
+            isRecentlyRenamed={false}
+            {...noopSessionItemProps}
+          />
+        </div>
+      </Card>
+
+      {/* Disconnected — process dropped (PR #188 item #12): not connected, not
+          reconnecting, and NOT a graceful terminal → red-tinted hollow ring,
+          distinct from the neutral "completed" outline. */}
+      <Card label="Disconnected — process gone (red-tinted ring)">
+        <div className="bg-cc-sidebar rounded-lg p-1">
+          <SessionItem
+            session={mockSession({ isConnected: false, isReconnecting: false, sdkState: null, backendType: "claude" })}
+            isActive={false}
+            sessionName="Long-running build (adapter died)"
             permCount={0}
             isRecentlyRenamed={false}
             {...noopSessionItemProps}
