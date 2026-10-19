@@ -38,8 +38,9 @@ interface SessionItemProps {
    * PLAN T12 (Phase G) — when present, this session has a terminal
    * CLI failure (cli_failed wire frame landed). Renders a destructive
    * `✕` glyph next to the status dot + tooltip with the cause headline.
-   * Distinct from `derivedStatus === "exited"` (a graceful close where
-   * the agent finished its work; that uses an outline dot, not ✕).
+   * Distinct from `derivedStatus === "completed"` (a graceful close where
+   * the agent finished its work; that uses an outline dot, not ✕) and from
+   * `"disconnected"` (process dropped; red-tinted hollow ring).
    */
   cliFailedReason?: CliFailedReason;
   onSelect: (id: string) => void;
@@ -62,41 +63,90 @@ interface SessionItemProps {
   editInputRef: RefObject<HTMLInputElement | null>;
 }
 
-type DerivedStatus = "awaiting" | "running" | "reconnecting" | "idle" | "exited";
+// PR #188 review item #12: a single `exited` state used to cover BOTH a
+// graceful finish and an unexpected process drop with the same outline dot.
+// Split them so the sidebar tells the truth:
+//   completed    = the agent finished / the session is archived (neutral)
+//   disconnected = the CLI process is gone without a graceful terminal
+//                  (not the terminal `cli_failed`, which owns the ✕ glyph)
+// Every dot also carries a label (title + aria-label) so the difference is
+// announced, not only coloured.
+type DerivedStatus =
+  | "awaiting"
+  | "running"
+  | "reconnecting"
+  | "idle"
+  | "completed"
+  | "disconnected";
+
+const STATUS_LABEL: Record<DerivedStatus, string> = {
+  awaiting: "Awaiting permission",
+  running: "Running",
+  reconnecting: "Reconnecting",
+  idle: "Idle",
+  completed: "Completed",
+  disconnected: "Disconnected — process gone",
+};
 
 function deriveStatus(s: SessionItemType, permCount: number): DerivedStatus {
   if (permCount > 0) return "awaiting";
   if ((s.status === "running" || s.status === "compacting") && s.isConnected) return "running";
   if (s.isReconnecting) return "reconnecting";
   if (s.isConnected) return "idle";
-  return "exited";
+  // Not connected and not reconnecting. `sdkState === "exited"` is the only
+  // graceful-terminal signal the row carries; anything else here is a process
+  // that dropped without finishing (dead adapter / killed CLI).
+  if (s.sdkState === "exited") return "completed";
+  return "disconnected";
 }
 
 function StatusDot({ status }: { status: DerivedStatus }) {
+  const label = STATUS_LABEL[status];
   switch (status) {
     case "running":
       return (
-        <span className="relative shrink-0 w-2 h-2">
-          <span className="absolute inset-0 rounded-full bg-cc-success animate-[pulse-dot_1.5s_ease-in-out_infinite]" />
-          <span className="w-2 h-2 rounded-full bg-cc-success block" />
+        <span role="img" aria-label={label} title={label} className="relative shrink-0 w-2 h-2">
+          <span aria-hidden="true" className="absolute inset-0 rounded-full bg-cc-success animate-[pulse-dot_1.5s_ease-in-out_infinite]" />
+          <span aria-hidden="true" className="w-2 h-2 rounded-full bg-cc-success block" />
         </span>
       );
     case "awaiting":
       return (
-        <span className="relative shrink-0 w-2 h-2">
-          <span className="w-2 h-2 rounded-full bg-cc-warning block animate-[ring-pulse_1.5s_ease-out_infinite]" />
+        <span role="img" aria-label={label} title={label} className="relative shrink-0 w-2 h-2">
+          <span aria-hidden="true" className="w-2 h-2 rounded-full bg-cc-warning block animate-[ring-pulse_1.5s_ease-out_infinite]" />
         </span>
       );
     case "reconnecting":
       return (
-        <span className="relative shrink-0 w-2 h-2">
-          <span className="w-2 h-2 rounded-full border border-cc-warning/40 border-t-cc-warning block animate-spin" />
+        <span role="img" aria-label={label} title={label} className="relative shrink-0 w-2 h-2">
+          <span aria-hidden="true" className="w-2 h-2 rounded-full border border-cc-warning/40 border-t-cc-warning block animate-spin" />
         </span>
       );
     case "idle":
-      return <span className="w-2 h-2 rounded-full bg-cc-muted/40 shrink-0" />;
-    case "exited":
-      return <span className="w-2 h-2 rounded-full border border-cc-muted/25 shrink-0" />;
+      return <span role="img" aria-label={label} title={label} className="w-2 h-2 rounded-full bg-cc-muted/40 shrink-0" />;
+    case "completed":
+      return (
+        <span
+          role="img"
+          aria-label={label}
+          title={label}
+          data-testid="session-item-completed-dot"
+          className="w-2 h-2 rounded-full border border-cc-muted/25 shrink-0"
+        />
+      );
+    case "disconnected":
+      // Red-tinted hollow ring: the process dropped rather than finished.
+      // Still hollow (not the solid ✕ cli-failed glyph) so it reads as
+      // "gone", not "hard error".
+      return (
+        <span
+          role="img"
+          aria-label={label}
+          title={label}
+          data-testid="session-item-disconnected-dot"
+          className="w-2 h-2 rounded-full border border-cc-error/40 shrink-0"
+        />
+      );
   }
 }
 
@@ -111,11 +161,13 @@ function StatusDot({ status }: { status: DerivedStatus }) {
  * council pairs — solo sessions never carry this prop. This matches the
  * already-shipped, unconditional convergence rendering in `ObserverPanel`.
  *
- * Priority ladder mirrors AC 191-193:
- *   degraded            →  ⚠️ Degraded   (amber-500, counter frozen)
- *   converged           →  ✅ N× no blockers (emerald-500) — a streak, never
+ * Priority ladder mirrors AC 191-193. Colours are the theme-aware cc- tokens
+ * (darkened in light mode); raw amber-500 / emerald-500 / sky-400 failed
+ * WCAG AA 4.5:1 contrast on the light sidebar.
+ *   degraded            →  ⚠️ Degraded   (cc-warning, counter frozen)
+ *   converged           →  ✅ N× no blockers (cc-success) — a streak, never
  *                          "ready to ship" (P3/CONV-HONEST)
- *   cycleNumber > 0     →  🔄 N/T        (mid-cycle progress)
+ *   cycleNumber > 0     →  🔄 N/T        (cc-info, mid-cycle progress)
  *   notCounted, cycle 0 →  ∅ not counted (muted; latest review read nothing)
  *   otherwise           →  nothing (cycle 0, no progress yet — no clutter)
  *
@@ -142,7 +194,7 @@ function CouncilConvergenceBadge({ info }: { info: CouncilConvergenceInfo }) {
         data-state="degraded"
         aria-label="Convergence frozen — pair degraded"
         title="Convergence frozen — pair degraded"
-        className="flex items-center gap-0.5 text-[9px] font-semibold px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-500 leading-none shrink-0"
+        className="flex items-center gap-0.5 text-[9px] font-semibold px-1.5 py-0.5 rounded bg-cc-warning/15 text-cc-warning leading-none shrink-0"
       >
         <span aria-hidden="true">⚠️</span>
         <span>Degraded</span>
@@ -159,7 +211,7 @@ function CouncilConvergenceBadge({ info }: { info: CouncilConvergenceInfo }) {
         data-state="converged"
         aria-label={label}
         title={label}
-        className="flex items-center gap-0.5 text-[9px] font-semibold px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-500 leading-none shrink-0"
+        className="flex items-center gap-0.5 text-[9px] font-semibold px-1.5 py-0.5 rounded bg-cc-success/15 text-cc-success leading-none shrink-0"
       >
         <span aria-hidden="true">✅</span>
         <span>{n}× no blockers</span>
@@ -173,7 +225,7 @@ function CouncilConvergenceBadge({ info }: { info: CouncilConvergenceInfo }) {
         data-state="cycle-progress"
         aria-label={`Convergence cycle ${info.cycleNumber} of ${info.threshold} clean cycles`}
         title={`${info.cycleNumber} of ${info.threshold} reviews in a row without blockers. ${CONVERGENCE_DISCLAIMER}${notCountedNote}`}
-        className="flex items-center gap-0.5 text-[9px] font-semibold px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-400 leading-none shrink-0"
+        className="flex items-center gap-0.5 text-[9px] font-semibold px-1.5 py-0.5 rounded bg-cc-info/10 text-cc-info leading-none shrink-0"
       >
         <span aria-hidden="true">🔄</span>
         <span>{info.cycleNumber}/{info.threshold}</span>
@@ -245,7 +297,9 @@ export function SessionItem({
   const menuRef = useRef<HTMLDivElement>(null);
   const menuBtnRef = useRef<HTMLButtonElement>(null);
 
-  const derivedStatus = archived ? ("exited" as DerivedStatus) : deriveStatus(s, permCount);
+  // Archived sessions are a graceful terminal state → `completed` (neutral
+  // outline dot), never the red-tinted `disconnected` ring.
+  const derivedStatus = archived ? ("completed" as DerivedStatus) : deriveStatus(s, permCount);
 
   // Show the full cwd path below the session name
   const cwdTail = s.cwd || "";
@@ -348,7 +402,7 @@ export function SessionItem({
         )}
 
         {/* PLAN T12 (Phase G) - terminal CLI-failure glyph. Distinct
-            from the `exited` outline dot (graceful close) — ✕ is the
+            from the `completed` outline dot (graceful close) — ✕ is the
             destructive token for "this session can no longer run".
             Tooltip carries the user-facing headline from
             cliFailedCopy so hover discovery beats opening the chat. */}

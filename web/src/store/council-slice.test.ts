@@ -678,6 +678,48 @@ describe("appendObserverReview", () => {
     expect(afterLive[0]?.observerModel).toBe("codex-1");
   });
 
+  // Immutability (PR #188 review item #10): the attribution upgrade used to
+  // write into the live store array by index (`prior[i] = …`). That mutated
+  // the array React had already rendered from, so a component holding the old
+  // reference would silently see the new value and memo/selector equality
+  // checks could not detect the change. The upgrade must produce a NEW array
+  // and leave the previous array and its finding objects untouched.
+  it("attribution upgrade does not mutate the previously stored findings array", () => {
+    useStore.getState().upsertGroup(group());
+    useStore.getState().appendObserverReview({
+      sessionGroupId: "grp_abc",
+      checkpointId: "chk_1",
+      phase: "council-plan",
+      findings: [wireFinding({ id: "fnd_immutable" })],
+      downgrades: [],
+      observerModel: "",
+      observerProvider: "",
+      timestamp: 1_000,
+    });
+    const before = useStore.getState().findings.get("grp_abc")!;
+    const beforeFinding = before[0]!;
+
+    useStore.getState().appendObserverReview({
+      sessionGroupId: "grp_abc",
+      checkpointId: "chk_1",
+      phase: "council-plan",
+      findings: [wireFinding({ id: "fnd_immutable" })],
+      downgrades: [],
+      observerModel: "codex-1",
+      observerProvider: "codex",
+      timestamp: 2_000,
+    });
+
+    const after = useStore.getState().findings.get("grp_abc")!;
+    // A fresh array reference so subscribers re-render…
+    expect(after).not.toBe(before);
+    expect(after[0]?.observerProvider).toBe("codex");
+    // …while the old array and old finding object still hold the old values.
+    expect(before[0]).toBe(beforeFinding);
+    expect(before[0]?.observerProvider).toBe("");
+    expect(beforeFinding.observerModel).toBe("");
+  });
+
   // Attribution downgrade guard: non-empty attribution must never be
   // overwritten by a later empty-attribution arrival.
   //

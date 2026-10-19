@@ -247,6 +247,8 @@ function StatusPill({ state }: { state: ObserverPanelState }) {
       // P3/CONV-HONEST: the copy states what was measured — N observer
       // reviews in a row without a blocker — and the tooltip says it is NOT
       // a readiness guarantee. It never says "ready to ship".
+      // Colour: theme-aware `text-cc-success` (darkened in light mode), NOT
+      // raw `text-emerald-500`, which fails WCAG AA 4.5:1 on the light card.
       const summary = `${state.cycleNumber} reviews in a row without blockers`;
       const accessibleLabel = `${summary}. ${CONVERGENCE_DISCLAIMER}`;
       return (
@@ -257,7 +259,7 @@ function StatusPill({ state }: { state: ObserverPanelState }) {
           aria-atomic="true"
           aria-label={accessibleLabel}
           title={accessibleLabel}
-          className="flex items-center gap-2 text-emerald-500"
+          className="flex items-center gap-2 text-cc-success"
         >
           <span aria-hidden="true">✅</span>
           <span className="text-xs font-medium">

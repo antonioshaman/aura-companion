@@ -2,11 +2,12 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useS
 import { useStore } from "./store.js";
 import { connectSession, disconnectSession } from "./ws.js";
 import { api } from "./api.js";
-import { capturePageView } from "./analytics.js";
+import { capturePageView, captureException } from "./analytics.js";
 import { parseHash, navigateToSession, navigateHome } from "./utils/routing.js";
 import { decideRestoreBounce, isReloadNavigation, type ArmedRestore } from "./utils/restore-bounce.js";
 import { useBrowserTitleAlert } from "./use-browser-title-alert.js";
 import { useCouncilShortcuts } from "./use-council-shortcuts.js";
+import { respawnCouncilHalf } from "./utils/council-respawn.js";
 import { useSwUpdate } from "./use-sw-update.js";
 import { applyUpdate } from "./sw-register.js";
 import { UpdateAvailableBanner } from "./components/UpdateAvailableBanner.js";
@@ -287,6 +288,30 @@ export default function App() {
     };
   }, [isAuthenticated, bootstrapGroups]);
 
+  // ObserverPanel recovery wiring (PR #188 review item #5). Every recovery
+  // button in the panel (DegradedBanner "Respawn", reviewing-stalled
+  // "Relaunch observer") only renders when `onRespawnHalf` is passed, so
+  // without this the whole recovery UI was dead outside the Playground.
+  // Relaunch the dead half (observer by default) via the existing
+  // `POST /sessions/:id/relaunch` route. Failures are logged rather than
+  // thrown — the banner stays up, so the user can simply retry.
+  const handleRespawnHalf = useCallback(async (sessionGroupId: string) => {
+    try {
+      await respawnCouncilHalf(
+        sessionGroupId,
+        (id) => useStore.getState().groups.get(id),
+        (sessionId) => api.relaunchSession(sessionId),
+      );
+    } catch (err) {
+      captureException(err);
+      console.warn("[app] council respawn failed", {
+        event: "council.respawn.failed",
+        sessionGroupId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }, []);
+
   // Auth gate: show login page when not authenticated
   if (!isAuthenticated) {
     return <LoginPage />;
@@ -447,7 +472,7 @@ export default function App() {
               group:checkpoint / group:review update) to this rail rather than
               letting it escape to the root AppErrorBoundary (RC-1 T13 / RC-5). */}
           <SectionErrorBoundary label="Observer">
-            <ObserverPanel sessionId={currentSessionId} />
+            <ObserverPanel sessionId={currentSessionId} onRespawnHalf={handleRespawnHalf} />
           </SectionErrorBoundary>
         </div>
       )}
