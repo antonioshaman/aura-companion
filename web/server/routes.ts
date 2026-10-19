@@ -22,11 +22,11 @@ import {
 } from "./sweep-orphans.js";
 import { log } from "./logger.js";
 import { respondError } from "./respond-error.js";
-import { join, dirname } from "node:path";
+import { join, dirname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { COMPANION_HOME } from "./paths.js";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import type { SessionOrchestrator } from "./session-orchestrator.js";
 import {
   parseAutoProceedOnIdleAtBoundary,
@@ -298,6 +298,21 @@ function toSessionWorktree(m: WorktreeMapping | null) {
     isolated: m.isolated === true,
     ...(m.retained ? { retained: m.retained } : {}),
   };
+}
+
+/**
+ * EC-7: does workspace-relative `rel` name an existing regular file or dir
+ * inside `cwd`? Resolves through realpath and rejects anything escaping the
+ * workspace (the payload parser already rejects absolute / `..` paths).
+ */
+function workspaceFileExists(cwd: string, rel: string): boolean {
+  try {
+    const root = realpathSync(cwd);
+    const real = realpathSync(join(root, rel));
+    return real === root || real.startsWith(root + sep);
+  } catch {
+    return false;
+  }
 }
 
 export function createRoutes(
@@ -782,6 +797,29 @@ export function createRoutes(
           payloadGroupId: payload.session_group_id,
         },
       });
+    }
+    // Every artifact must exist in THIS pair's workspace, or the observer is
+    // woken to read files it cannot see and files an OBSERVER-BLOCKED INFO
+    // (seen 2026-10-19: an orchestrator implementing in a /tmp worktree sent
+    // paths that existed only there). Reject up front and name the missing
+    // paths so the caller can fix the checkpoint instead of waking the
+    // observer for nothing. The paths are the caller's own relative strings.
+    const missingPaths = payload.artifact_paths.filter((rel) => !workspaceFileExists(session.cwd, rel));
+    if (missingPaths.length > 0) {
+      log.warn("routes", "council checkpoint rejected: artifacts missing in the pair's workspace", {
+        event: "council.checkpoint.missing_artifacts",
+        sessionId,
+        sessionGroupId: group.sessionGroupId,
+        missing: missingPaths.length,
+      });
+      return c.json(
+        {
+          error: "validation_failed",
+          reason: "artifact_paths not found in the pair's workspace — commit/merge them there (or run the pair in the worktree) before emitting",
+          missingPaths,
+        },
+        400,
+      );
     }
     // Council review 2026-09-08 #1: group-scoped filename so two pairs sharing
     // a workspace don't overwrite each other's same-phase checkpoint.

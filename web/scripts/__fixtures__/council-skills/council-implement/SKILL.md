@@ -286,6 +286,8 @@ In the implementation log, each fix-pass task adds: `**Finding:** #N — <recomm
 
    `artifact_paths` is the **list of modified/created files** from the implementation log's "Ready for Review" section — these are exactly the files the observer needs to read to review the implementation. Cap at 50 paths (schema limit `MAX_ARTIFACT_PATHS`); if you exceeded that count, list the top-50 most-changed and add a NOTE to the log that observer cannot see the rest this cycle.
 
+   **The files must exist in the pair's workspace (the orchestrator session's cwd) at the moment you POST.** The observer reads that directory, not your git worktree. If you implemented in a separate worktree (e.g. `/tmp/wt-*`), emit the checkpoint only after the branch is merged/pulled into the pair's workspace — or run the whole pair inside the worktree. The server rejects a checkpoint whose paths are missing there with `400 {"missingPaths": [...]}` (Aura ≥ 2026-10-19); fix the list rather than retrying blindly. Waking the observer on unreadable paths only produces an `OBSERVER-BLOCKED` INFO.
+
 5. **POST.** Use the Bash tool:
 
    ```bash

@@ -34,7 +34,7 @@ import {
   type ObserverFinding,
   type ObserverPanelState,
 } from "../../types.js";
-import { FindingsLog, formatRelativeTime } from "./FindingsLog.js";
+import { FindingsLog, formatClockTime, formatRelativeTime } from "./FindingsLog.js";
 import { DegradedBanner } from "./DegradedBanner.js";
 import { AutoProceedRestoreNotice } from "./AutoProceedRestoreNotice.js";
 import { ProviderBadges } from "./ProviderBadges.js";
@@ -413,10 +413,11 @@ export function ObserverPanel({
         <StatusPill state={state} />
         {(state.name === "sleeping" || state.name === "reviewing") && (
           <span className="text-[10px] text-cc-muted font-mono-code" data-testid="header-timestamp">
-            {formatRelativeTime(
-              state.name === "sleeping" ? state.lastCheckpointAt : state.reviewingSince,
-              typeof nowMs === "number" ? nowMs : Date.now(),
-            )}
+            {(() => {
+              const at = state.name === "sleeping" ? state.lastCheckpointAt : state.reviewingSince;
+              const now = typeof nowMs === "number" ? nowMs : Date.now();
+              return `${state.name === "sleeping" ? "last checkpoint" : "reviewing since"} ${formatClockTime(at, now)} · ${formatRelativeTime(at, now)}`;
+            })()}
           </span>
         )}
       </div>

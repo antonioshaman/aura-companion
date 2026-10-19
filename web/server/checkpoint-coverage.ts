@@ -97,9 +97,11 @@ export function collectCheckpointCoverageGaps(opts: {
     if (cp.phase === "spawn" || seen.has(cp.checkpoint_id)) continue;
     seen.add(cp.checkpoint_id);
     const review = reviewed.get(cp.checkpoint_id);
+    const emitted = Date.parse(cp.emitted_at);
+    const emittedAt = Number.isFinite(emitted) ? { emittedAt: emitted } : {};
     if (review) {
       if (review.unverified) {
-        gaps.push({ checkpointId: cp.checkpoint_id, phase: cp.phase, sequence: cp.sequence, kind: "unverified" });
+        gaps.push({ checkpointId: cp.checkpoint_id, phase: cp.phase, sequence: cp.sequence, kind: "unverified", ...emittedAt });
       }
       continue;
     }
@@ -110,6 +112,7 @@ export function collectCheckpointCoverageGaps(opts: {
       sequence: cp.sequence,
       kind: "unreviewed",
       reason: opts.degraded ? "degraded" : "no_review",
+      ...emittedAt,
     });
   }
   // Unverified reviews whose checkpoint file was already overwritten still
