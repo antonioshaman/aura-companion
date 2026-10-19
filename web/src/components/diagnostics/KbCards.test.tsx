@@ -21,7 +21,7 @@ import { KbFindingsCard, KbHealthCard, MemoryReportCard } from "./KbCards.js";
 import { kbStatus, NOW } from "./fixtures.js";
 
 describe("KbHealthCard", () => {
-  it("AC4: shows the accumulation string and passes axe", async () => {
+  it("AC4: shows the accumulation string and passes an axe accessibility scan", async () => {
     const { axe } = await import("vitest-axe");
     const { container } = render(<KbHealthCard status={kbStatus()} now={NOW} run={{ tag: "idle" }} onRun={vi.fn()} />);
     expect(screen.getByText("3/10 entries · 7/25 sessions · due in ≤12 days")).toBeInTheDocument();
@@ -62,7 +62,7 @@ describe("KbHealthCard", () => {
 });
 
 describe("KbFindingsCard", () => {
-  it("renders decision cards, names buttons with the entry id, and passes axe", async () => {
+  it("renders decision cards, names buttons with the entry id, and passes an axe accessibility scan", async () => {
     const { axe } = await import("vitest-axe");
     const onDecide = vi.fn();
     const { container } = render(<KbFindingsCard status={kbStatus()} findingUi={{}} onDecide={onDecide} />);
@@ -78,6 +78,8 @@ describe("KbFindingsCard", () => {
     const onDecide = vi.fn();
     render(<KbFindingsCard status={kbStatus()} findingUi={{}} onDecide={onDecide} />);
     expect(screen.queryByRole("button", { name: "Mark for merge got-017" })).toBeNull();
+    // The merge consequence is explained only where a merge is possible.
+    expect(screen.getAllByText(/Mark for merge only records the pair/)).toHaveLength(1);
     fireEvent.click(screen.getByRole("button", { name: "Mark for merge got-040" }));
     const select = screen.getByLabelText("Merge got-040 into");
     expect([...(select as HTMLSelectElement).options].map((o) => o.value)).toEqual(["got-041"]);
@@ -127,7 +129,7 @@ describe("MemoryReportCard", () => {
     return s;
   };
 
-  it("AC9: only 'Mark as seen', one per finding, framed read-only, axe-clean", async () => {
+  it("AC9: only 'Mark as seen', one per finding, framed read-only, passes an axe accessibility scan", async () => {
     const { axe } = await import("vitest-axe");
     const onSeen = vi.fn();
     const { container } = render(<MemoryReportCard status={withMemory()} findingUi={{}} onSeen={onSeen} />);

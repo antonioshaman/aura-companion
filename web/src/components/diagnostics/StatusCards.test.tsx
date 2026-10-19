@@ -22,7 +22,7 @@ import { NOW, overview } from "./fixtures.js";
 const ready = <K extends "backend" | "pairs" | "drift" | "contextAdvisory" | "usage">(k: K) => ({ tag: "source" as const, source: overview()[k] }) as never;
 
 describe("status cards", () => {
-  it("render ready state and pass axe", async () => {
+  it("render ready state and pass an axe accessibility scan", async () => {
     const { axe } = await import("vitest-axe");
     const { container } = render(
       <div>
@@ -42,7 +42,7 @@ describe("status cards", () => {
     ["loading", { tag: "loading" }, /Loading/],
     ["page-failed", { tag: "page-failed", message: "HTTP 500" }, /Source unavailable: the diagnostics request failed \(HTTP 500\)/],
     ["unavailable", { tag: "source", source: { status: "unavailable", reason: "source-error", since: NOW } }, /Source unavailable since \d\d:\d\d: the source failed to answer/],
-  ])("never renders nothing — %s state is explicit and axe-clean", async (_l, frame, text) => {
+  ])("never renders nothing — %s state is explicit and passes an axe accessibility scan", async (_l, frame, text) => {
     const { axe } = await import("vitest-axe");
     const { container } = render(<PairsCard frame={frame as never} now={NOW} />);
     expect(screen.getByRole("heading", { name: "Council pairs" })).toBeInTheDocument();

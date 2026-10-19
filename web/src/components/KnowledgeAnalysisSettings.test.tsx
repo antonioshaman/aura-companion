@@ -28,7 +28,7 @@ function setup(over: Partial<Parameters<typeof KnowledgeAnalysisSettings>[0]> = 
 }
 
 describe("KnowledgeAnalysisSettings", () => {
-  it("renders labelled inputs and passes axe", async () => {
+  it("renders labelled inputs and passes an axe accessibility scan", async () => {
     const { axe } = await import("vitest-axe");
     const { container } = setup();
     expect(screen.getByLabelText("Finished sessions since the last run")).toHaveValue(25);

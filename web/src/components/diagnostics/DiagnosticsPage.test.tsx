@@ -42,7 +42,7 @@ afterEach(() => {
 });
 
 describe("DiagnosticsPage", () => {
-  it("renders all cards, has one page announcer, and passes axe", async () => {
+  it("renders all cards, has one page announcer, and passes an axe accessibility scan", async () => {
     const { axe } = await import("vitest-axe");
     const { container } = render(<DiagnosticsPage />);
     await screen.findByText(/1 with a silent observer/);

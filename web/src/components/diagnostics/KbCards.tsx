@@ -258,7 +258,8 @@ function FindingCard({
           </div>
         )}
         <p className="mt-2 text-[11px] text-cc-muted">
-          Keep hides it for 90 days unless it changes. Archive moves this line to .agents/knowledge/archive/{f.entry.file}; nothing is deleted. Mark for merge only records the pair — no text is changed.
+          Keep hides it for 90 days unless it changes. Archive moves this line to .agents/knowledge/archive/{f.entry.file}; nothing is deleted.
+          {partners.length > 0 ? " Mark for merge only records the pair — no text is changed." : ""}
         </p>
         {ui?.tag === "rejected" && (
           <p role="alert" className="mt-1 text-[11px] text-cc-error">
