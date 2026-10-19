@@ -65,10 +65,22 @@ export function Composer({ sessionId, onTextChange }: ComposerProps) {
   // Continue-in-new-session flow, install it as the initial composer text
   // and clear the store entry. Re-renders won't re-apply (consume is
   // atomic) and a remount on a different session won't carry it over.
+  //
+  // The server also holds the draft on the session state (`pickup_draft`,
+  // replayed in session_init) so it survives a reload, a service-worker
+  // update or another device — the in-memory copy alone was lost that way and
+  // left a fresh Council pair idle. It is installed once per (session, draft)
+  // and only into an empty composer, never over what the user typed.
+  const serverPickupDraft = sessionData?.pickup_draft ?? null;
+  const appliedPickupRef = useRef<string | null>(null);
   useEffect(() => {
-    const draft = consumePickupDraft(sessionId);
-    if (draft) setText(draft);
-  }, [sessionId, consumePickupDraft]);
+    const draft = consumePickupDraft(sessionId) ?? serverPickupDraft;
+    if (!draft) return;
+    const key = `${sessionId}\u0000${draft}`;
+    if (appliedPickupRef.current === key) return;
+    appliedPickupRef.current = key;
+    setText((current) => (current.trim() === "" ? draft : current));
+  }, [sessionId, consumePickupDraft, serverPickupDraft]);
 
   // PLAN T12 (Phase G) - mirror the current text up to ChatView
   // so CliFailedBanner can carry it forward to a new session.
