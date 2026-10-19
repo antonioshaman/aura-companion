@@ -5406,8 +5406,12 @@ describe("StdioTransport RPC timeout", () => {
     const notifications: string[] = [];
     transport.onNotification((method) => notifications.push(method));
 
-    streams.pushRaw(JSON.stringify({ jsonrpc: "2.0", error: { code: -1, message: "x" } }));
-    streams.pushRaw(JSON.stringify({ foo: 1 })); // same shape bucket → deduped
+    // NOTE: this used `{ jsonrpc, error: {...} }` before; an id-less frame
+    // carrying a JSON-RPC error object is now surfaced as a real error (see
+    // the "id-less JSON-RPC error" tests below), so drift is pinned with a
+    // genuinely unknown shape instead.
+    streams.pushRaw(JSON.stringify({ jsonrpc: "2.0", foo: 1 }));
+    streams.pushRaw(JSON.stringify({ bar: 1 })); // same shape bucket → deduped
     await new Promise((r) => setTimeout(r, 20));
 
     expect(spy).toHaveBeenCalledTimes(1);
@@ -5420,12 +5424,137 @@ describe("StdioTransport RPC timeout", () => {
         direction: "incoming",
         messageKind: "message",
         messageName: "unmatched-frame:object",
-        keys: ["jsonrpc", "error"],
+        keys: ["jsonrpc", "foo"],
       }),
     );
     expect(parseErrors).toHaveLength(1);
     expect(notifications).toEqual([]);
     spy.mockRestore();
+  });
+
+  // Follow-up to PR #403: an id-less (or `id: null`) JSON-RPC error frame —
+  // e.g. a parse error or an auth failure Codex cannot tie to a request id —
+  // used to surface as the generic "protocol drift" banner (id absent) or be
+  // dropped silently as an unmatched response (id null), hiding the real
+  // cause (known trap: "Codex protocol drift masks auth error"). It must now
+  // reach the browser as an error carrying the upstream message.
+  describe("id-less JSON-RPC error frames", () => {
+    const AUTH_MSG = "Your access token could not be refreshed because your refresh token was already used.";
+
+    it("surfaces an id-less error's real message (with code), not protocol drift", async () => {
+      const streams = createStreams();
+      const transport = new StdioTransport(streams.stdin, streams.stdout, "sess-idless-1");
+      const warnSpy = vi.spyOn(log, "warn").mockImplementation(() => {});
+      const errorSpy = vi.spyOn(log, "error").mockImplementation(() => {});
+      const surfaced: string[] = [];
+      transport.onParseError((m) => surfaced.push(m));
+      const notifications: string[] = [];
+      transport.onNotification((method) => notifications.push(method));
+
+      streams.pushRaw(JSON.stringify({ jsonrpc: "2.0", error: { code: -32001, message: AUTH_MSG } }));
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(surfaced).toEqual([`Codex error: ${AUTH_MSG} (code -32001)`]);
+      // Not routed through the drift monitor, not delivered as a notification.
+      expect(warnSpy).not.toHaveBeenCalledWith("protocol-monitor", "Backend protocol drift detected", expect.anything());
+      expect(notifications).toEqual([]);
+      // Structured log for operators.
+      expect(errorSpy).toHaveBeenCalledWith(
+        "codex-adapter",
+        expect.any(String),
+        expect.objectContaining({ event: "codex.idless_error", sessionId: "sess-idless-1", code: -32001 }),
+      );
+      warnSpy.mockRestore();
+      errorSpy.mockRestore();
+    });
+
+    it("surfaces an `id: null` error (JSON-RPC parse error) instead of dropping it silently", async () => {
+      const streams = createStreams();
+      const transport = new StdioTransport(streams.stdin, streams.stdout, "sess-idless-2");
+      const errorSpy = vi.spyOn(log, "error").mockImplementation(() => {});
+      const surfaced: string[] = [];
+      transport.onParseError((m) => surfaced.push(m));
+
+      streams.pushRaw(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } }));
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(surfaced).toEqual(["Codex error: Parse error (code -32700)"]);
+      errorSpy.mockRestore();
+    });
+
+    it("is NOT deduplicated — every real error reaches the user", async () => {
+      // Drift is deduped per shape; real errors (e.g. auth failing on every
+      // turn) must each be visible.
+      const streams = createStreams();
+      const transport = new StdioTransport(streams.stdin, streams.stdout, "sess-idless-3");
+      const errorSpy = vi.spyOn(log, "error").mockImplementation(() => {});
+      const surfaced: string[] = [];
+      transport.onParseError((m) => surfaced.push(m));
+
+      streams.pushRaw(JSON.stringify({ error: { message: "first" } }));
+      streams.pushRaw(JSON.stringify({ error: { message: "second" } }));
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(surfaced).toEqual(["Codex error: first", "Codex error: second"]);
+      errorSpy.mockRestore();
+    });
+
+    it("keeps drift for an `error` field that is not a JSON-RPC error object", async () => {
+      // `{ error: "oops" }` is not a JSON-RPC error shape — unknown frame.
+      const streams = createStreams();
+      const transport = new StdioTransport(streams.stdin, streams.stdout, "sess-idless-4");
+      const warnSpy = vi.spyOn(log, "warn").mockImplementation(() => {});
+      const surfaced: string[] = [];
+      transport.onParseError((m) => surfaced.push(m));
+
+      streams.pushRaw(JSON.stringify({ error: "oops" }));
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        "protocol-monitor",
+        "Backend protocol drift detected",
+        expect.objectContaining({ messageName: "unmatched-frame:object", keys: ["error"] }),
+      );
+      expect(surfaced).toHaveLength(1);
+      expect(surfaced[0]).not.toContain("Codex error:");
+      warnSpy.mockRestore();
+    });
+
+    it("an error frame with a method is still a notification, not an id-less error", async () => {
+      // The v2 `error` notification has method "error"; it keeps its own path
+      // (handleErrorNotification) and must not be intercepted here.
+      const streams = createStreams();
+      const transport = new StdioTransport(streams.stdin, streams.stdout, "sess-idless-5");
+      const surfaced: string[] = [];
+      transport.onParseError((m) => surfaced.push(m));
+      const notifications: string[] = [];
+      transport.onNotification((method) => notifications.push(method));
+
+      streams.pushRaw(JSON.stringify({ method: "error", params: { error: { message: "x" } }, error: { message: "y" } }));
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(notifications).toEqual(["error"]);
+      expect(surfaced).toEqual([]);
+    });
+
+    it("end-to-end: the adapter delivers the id-less error to the browser as type 'error'", async () => {
+      // Real StdioTransport wired into a CodexAdapter — proves the message
+      // reaches the browser channel, not just the transport callback.
+      const streams = createStreams();
+      const transport = new StdioTransport(streams.stdin, streams.stdout, "sess-idless-e2e");
+      const errorSpy = vi.spyOn(log, "error").mockImplementation(() => {});
+      const adapter = new CodexAdapter(transport, "sess-idless-e2e", { model: "o4-mini", cwd: "/tmp" });
+      const messages: BrowserIncomingMessage[] = [];
+      adapter.onBrowserMessage((msg) => messages.push(msg));
+
+      streams.pushRaw(JSON.stringify({ jsonrpc: "2.0", error: { code: 401, message: AUTH_MSG } }));
+      await new Promise((r) => setTimeout(r, 30));
+
+      const errors = messages.filter((m) => m.type === "error") as Array<{ message: string }>;
+      expect(errors.some((e) => e.message.includes(AUTH_MSG))).toBe(true);
+      expect(errors.some((e) => e.message.includes("protocol drift"))).toBe(false);
+      errorSpy.mockRestore();
+    });
   });
 
   it("reports non-object JSON frames as drift instead of throwing, and keeps processing later frames", async () => {

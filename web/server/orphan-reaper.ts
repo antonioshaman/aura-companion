@@ -66,7 +66,7 @@
 
 import { existsSync, readdirSync, readFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { homedir, platform as osPlatform } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join, resolve as resolvePath } from "node:path";
 import { log } from "./logger.js";
 import { verifyProcessIdentity } from "./process-identity.js";
 import {
@@ -78,6 +78,7 @@ import {
   deleteReapingMarker,
 } from "./cleanup/sentinel-markers.js";
 import { ageMs, nowMs } from "./cleanup/age-ms.js";
+import { resolveCompanionCodexHome } from "./codex-home.js";
 
 /** Hard cap on reaper total work — preserves systemd readiness window. */
 export const REAPER_BUDGET_MS = 5_000;
@@ -170,6 +171,68 @@ export interface OrphanReaperDeps {
    * for every loaded session.
    */
   readonly readOwnedArgvShas?: () => ReadonlySet<string>;
+  /**
+   * Test seam — read /proc/<pid>/environ (NUL-separated `KEY=value`). Throws
+   * when unreadable (EACCES for another user's process, ENOENT when gone);
+   * an unreadable environ is "no ownership proof", never a reap.
+   */
+  readonly readEnviron?: (pid: number) => string;
+  /**
+   * Root of the per-session Codex homes THIS install writes
+   * (`<COMPANION_HOME>/codex-home`). Defaults to `resolveCompanionCodexHome()`.
+   */
+  readonly codexHomeRoot?: string;
+}
+
+/**
+ * How a Codex `app-server` orphan proved that THIS server spawned it.
+ *
+ * Why not the `app-server` subcommand alone: the Codex VS Code extension and
+ * the root-owned Codex app-server daemon run `codex app-server` too, so the
+ * marker is not ownership. Why not only the sidecar argv hash: the server
+ * spawns Codex through the node wrapper (`node .../codex.js app-server ...`),
+ * the sidecar hashes THAT argv, but the wrapper execs a native child
+ * (`.../vendor/.../bin/codex app-server ...`) whose argv differs. If the
+ * wrapper dies, the native child is the orphan and its argv matches nothing.
+ *
+ *   - `sidecar_argv`   — argv hashes to a server-written runtime sidecar
+ *                        (covers the wrapper itself, and direct-binary spawns).
+ *   - `codex_home_env` — `/proc/<pid>/environ` carries the per-session
+ *                        `CODEX_HOME=<codexHomeRoot>/<sessionId>` the launcher
+ *                        sets on every host-mode Codex spawn (stdio + WS). The
+ *                        wrapper and the native child both inherit it, and a
+ *                        foreign `codex app-server` never has it (and another
+ *                        user's environ is unreadable → no proof).
+ */
+export type CodexOwnershipProof = "sidecar_argv" | "codex_home_env";
+
+/** Extract `CODEX_HOME` from a raw NUL-separated environ blob. */
+export function codexHomeFromEnviron(raw: string): string | null {
+  for (const entry of raw.split("\0")) {
+    if (entry.startsWith("CODEX_HOME=")) {
+      const v = entry.slice("CODEX_HOME=".length);
+      return v.length > 0 ? v : null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Decide whether `codexHome` is a per-session Codex home this install wrote:
+ * either a direct child of `codexHomeRoot` (any session, including ones
+ * deleted since — their orphans are still ours), or a dir named after a
+ * currently loaded session (covers a per-launch `codexHome` override).
+ */
+export function isCompanionCodexSessionHome(
+  codexHome: string,
+  codexHomeRoot: string,
+  knownSessionIds: ReadonlySet<string>,
+): boolean {
+  const abs = resolvePath(codexHome);
+  const name = basename(abs);
+  if (name.length === 0 || name === "." || name === "..") return false;
+  if (dirname(abs) === resolvePath(codexHomeRoot)) return true;
+  return knownSessionIds.has(name);
 }
 
 /**
@@ -242,6 +305,11 @@ interface ArgvClassification {
    * requires the argv hash to match a runtime sidecar this server wrote.
    */
   readonly stdioShapeOnly: boolean;
+  /**
+   * True for a Codex `app-server` process (wrapper or native binary). The
+   * subcommand is NOT ownership proof on its own — see CodexOwnershipProof.
+   */
+  readonly isCodexAppServer: boolean;
   /** Extracted `sessionId` from the --sdk-url URL path (Claude). */
   readonly sessionId: string | null;
   /** Categorical argv shape for EC-23 redacted logging. */
@@ -331,6 +399,22 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
   // see docs/architecture/session-lifecycle.md). Mirrors sweep-orphans'
   // `buildOwnedFromSidecars`.
   const ownedArgvShas = deps.readOwnedArgvShas?.() ?? buildOwnedArgvShas(deps.loadedSessions, deps.sessionsRoot);
+  const readEnviron = deps.readEnviron ?? defaultReadEnviron;
+  const codexHomeRoot = deps.codexHomeRoot ?? resolveCompanionCodexHome();
+  const knownSessionIds = new Set(knownById.keys());
+  const proveCodexOwnership = (pid: number, argvSha: string): CodexOwnershipProof | null => {
+    if (ownedArgvShas.has(argvSha)) return "sidecar_argv";
+    let codexHome: string | null;
+    try {
+      codexHome = codexHomeFromEnviron(readEnviron(pid));
+    } catch {
+      return null; // EACCES (another user's process) / ENOENT (gone) → no proof
+    }
+    if (codexHome && isCompanionCodexSessionHome(codexHome, codexHomeRoot, knownSessionIds)) {
+      return "codex_home_env";
+    }
+    return null;
+  };
 
   let pids: number[];
   try {
@@ -512,6 +596,24 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
       });
       continue;
     }
+    // Codex `app-server` is also run by the Codex VS Code extension and the
+    // root-owned app-server daemon, so the subcommand is not ownership. Reap
+    // only with a server-written proof (sidecar argv hash or our per-session
+    // CODEX_HOME in the process environment) — see CodexOwnershipProof.
+    let codexProof: CodexOwnershipProof | null = null;
+    if (!known && classification.isCodexAppServer) {
+      codexProof = proveCodexOwnership(pid, classification.argvSha256);
+      if (codexProof === null) {
+        skippedNoMatch++;
+        log.warn("orphan-reaper", "codex app-server orphan has no server ownership proof — not reaping", {
+          event: "orphan_reaper.skipped_unowned_codex",
+          pid,
+          argvSha256: classification.argvSha256,
+          argvShape: classification.argvShape,
+        });
+        continue;
+      }
+    }
     if (!known) skippedNoMatch++;
     const reason = known ? "identity_mismatch" : "no_known_session";
     try {
@@ -684,6 +786,7 @@ export async function reapOrphans(deps: OrphanReaperDeps): Promise<ReapSummary> 
         cwdDepth: classification.cwdDepth,
         sessionIdPresent: classification.sessionId !== null,
         reason,
+        ...(codexProof ? { codexOwnershipProof: codexProof } : {}),
       });
       if (rawArgvLogEnabled) appendRawDebug({ event: "orphan_reaped", pid, argv });
     }
@@ -747,6 +850,13 @@ function defaultReadCmdline(pid: number): string {
   return readFileSync(`/proc/${pid}/cmdline`, "utf8");
 }
 
+function defaultReadEnviron(pid: number): string {
+  // Readable only for our own uid (mode 0400) — exactly the processes the
+  // reaper could signal anyway. Throws otherwise; the caller treats that as
+  // "no ownership proof".
+  return readFileSync(`/proc/${pid}/environ`, "utf8");
+}
+
 function defaultKillCheck(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -777,9 +887,10 @@ function defaultSleep(ms: number): Promise<void> {
  *
  * Codex's sessionId is NOT in argv (Codex transport routes via a port
  * the launcher picks at spawn). Codex orphans therefore return
- * `sessionId: null` and fall through to the REAP branch by default —
- * the launcher's internal map can still hold an entry, but the reaper
- * can't cross-check. Subprocess R5 floor (pure mutation) is preserved
+ * `sessionId: null` and go to the REAP branch, which additionally requires
+ * a CodexOwnershipProof (sidecar argv hash or our per-session CODEX_HOME in
+ * the environment) — `app-server` alone also matches a user's VS Code
+ * extension / daemon. Subprocess R5 floor (pure mutation) is preserved
  * because the re-attach branch never fires without a sessionId match.
  *
  * EC-23: argvShape categorises tokens into labels — `<URL>`, `<PATH>`,
@@ -794,6 +905,7 @@ export function classifyArgv(argv: readonly string[]): ArgvClassification {
   // transport, URL points at this server) or `app-server` (Codex). The stdio
   // triple, by contrast, is public CLI usage — see `stdioShapeOnly`.
   let hasServerSpawnMarker = false;
+  let isCodexAppServer = false;
   let sessionId: string | null = null;
   let cwdDepth = 0;
 
@@ -865,6 +977,7 @@ export function classifyArgv(argv: readonly string[]): ArgvClassification {
     if (tok === "app-server") {
       isServerManagedShape = true;
       hasServerSpawnMarker = true;
+      if (isCompanionShape) isCodexAppServer = true;
     }
     if (tok.includes("/") || tok.includes("\\")) {
       shape.push("<PATH>");
@@ -889,6 +1002,7 @@ export function classifyArgv(argv: readonly string[]): ArgvClassification {
     isCompanionShape,
     isServerManagedShape,
     stdioShapeOnly: isServerManagedShape && !hasServerSpawnMarker,
+    isCodexAppServer,
     sessionId,
     argvShape: shape,
     argvSha256: computeArgvSha(argv),
