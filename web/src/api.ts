@@ -1161,11 +1161,14 @@ export const api = {
   // Continue-in-new-session: server extracts a text-only handoff from the
   // prior session's messageHistory (stripping images that wedged the API),
   // writes it as `.aura-handoff-<ts>.md` in the workspace, spawns a fresh
-  // solo session in the same cwd, and returns both ids + a draft pickup
-  // prompt for the composer.
+  // session in the same cwd (a new Council pair when the source was a pair
+  // half — `newSessionId` is then its orchestrator), and returns both ids + a
+  // draft pickup prompt for the composer.
   continueInNewSession: (sessionId: string, opts?: { reason?: string }) =>
     post<{
       newSessionId: string;
+      /** Set when a new Council pair was spawned. */
+      sessionGroupId?: string;
       handoffPath: string;
       handoffFilename: string;
       handoffMeta: {

@@ -6573,9 +6573,10 @@ describe("POST /api/sessions/:id/continue-in-new", () => {
     // Overflow copy with the recorded size; never the image-limit wording.
     expect(json.draft).toContain("контекст переполнился (>10 MB)");
     expect(json.draft).not.toContain("2000px");
-    // Solo spawn in the same cwd/backend/model.
+    // Solo spawn in the same cwd/backend/model. The field is `backend` — the
+    // orchestrator ignores `backendType`, which used to turn Codex handoffs into Claude.
     expect(orchestrator.createSession).toHaveBeenCalledWith(
-      expect.objectContaining({ cwd: tmp, backendType: "claude", model: "claude-opus-4-8" }),
+      expect.objectContaining({ cwd: tmp, backend: "claude", model: "claude-opus-4-8" }),
     );
     // The brief really landed in cwd with the "Current task" section on top.
     const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
@@ -6592,6 +6593,89 @@ describe("POST /api/sessions/:id/continue-in-new", () => {
     const json = await res.json();
     expect(json.draft).toMatch(/^Pickup с прошлой сессии\./);
     expect(json.draft).not.toContain("2000px");
+  });
+
+  // Regression: the route passed `backendType`, which CreateSessionRequest does
+  // not read, so a Codex session continued as a Claude one.
+  it("a solo Codex session continues as Codex", async () => {
+    launcher.getSession.mockReturnValue({ sessionId: "old", cwd: tmp, backendType: "codex", model: "gpt-6.1-sol" });
+    bridge.getSession.mockReturnValue({ backendType: "codex", state: { cwd: tmp, context_advisory: null }, messageHistory: [] });
+    const res = await app.request("/api/sessions/old/continue-in-new", { method: "POST" });
+    expect(res.status).toBe(200);
+    expect(orchestrator.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd: tmp, backend: "codex", model: "gpt-6.1-sol" }),
+    );
+  });
+
+  // ── Council pairs continue as pairs (owner report 2026-10-19) ─────────────
+  // A handoff from either half of an orchestrator+observer pair must spawn a
+  // new pair with the same pairing and the same model per half, not a solo
+  // session. Halves are found from the launcher's persisted records, so a
+  // dead pair (the usual overflow case) works too.
+  function seedPair(clickedId: "orch" | "obs", opts: { observer?: boolean } = {}) {
+    const orch = { sessionId: "orch", cwd: tmp, backendType: "claude", model: "claude-opus-5-5", sessionGroupId: "grp_old", sessionGroupRole: "orchestrator" };
+    const obs = { sessionId: "obs", cwd: tmp, backendType: "codex", model: "gpt-6.1-sol", sessionGroupId: "grp_old", sessionGroupRole: "observer" };
+    launcher.getSession.mockImplementation((sid: string) => (sid === "orch" ? orch : sid === "obs" ? obs : undefined));
+    launcher.listSessions.mockReturnValue(opts.observer === false ? [orch] : [orch, obs]);
+    bridge.getSession.mockImplementation((sid: string) => ({
+      backendType: sid === "orch" ? "claude" : "codex",
+      state: { cwd: tmp, context_advisory: null },
+      messageHistory: [{ type: "user_message", content: sid === "orch" ? "ship the payments refactor" : "observer review notes", timestamp: 1 }],
+    }));
+    orchestrator.getGroupSecondReviewer.mockReturnValue({ ok: true, config: { reviewer: "off", scope: "stop" }, source: "global" });
+    return clickedId;
+  }
+
+  it("from the orchestrator half: spawns a new pair with the same pairing and per-half models", async () => {
+    seedPair("orch");
+    orchestrator.createSession.mockClear();
+    const res = await app.request("/api/sessions/orch/continue-in-new", { method: "POST" });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(orchestrator.createCouncilGroup).toHaveBeenCalledWith({
+      pairing: "claude+codex",
+      base: { cwd: tmp, model: "claude-opus-5-5" },
+      observerModel: "gpt-6.1-sol",
+    });
+    expect(orchestrator.createSession).not.toHaveBeenCalled();
+    // The browser switches to the new orchestrator.
+    expect(json.newSessionId).toBe("sess_orch");
+    expect(json.sessionGroupId).toBe("grp_test_council");
+  });
+
+  it("from the observer half: still a pair, and the brief comes from the orchestrator's transcript", async () => {
+    seedPair("obs");
+    const res = await app.request("/api/sessions/obs/continue-in-new", { method: "POST" });
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(orchestrator.createCouncilGroup).toHaveBeenCalledWith(expect.objectContaining({ pairing: "claude+codex" }));
+    const fs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const written = fs.readFileSync(json.handoffPath, "utf8");
+    expect(written).toContain("ship the payments refactor");
+    expect(written).not.toContain("observer review notes");
+  });
+
+  it("carries the old pair's own second-reviewer choice, but not a global default", async () => {
+    seedPair("orch");
+    orchestrator.setGroupSecondReviewer.mockClear();
+    const own = { reviewer: { backend: "codex", model: "gpt-6.1-sol" }, scope: "stop" };
+    orchestrator.getGroupSecondReviewer.mockReturnValue({ ok: true, config: own, source: "group" });
+    await app.request("/api/sessions/orch/continue-in-new", { method: "POST" });
+    expect(orchestrator.setGroupSecondReviewer).toHaveBeenCalledWith("grp_test_council", own);
+
+    orchestrator.setGroupSecondReviewer.mockClear();
+    orchestrator.getGroupSecondReviewer.mockReturnValue({ ok: true, config: own, source: "global" });
+    await app.request("/api/sessions/orch/continue-in-new", { method: "POST" });
+    expect(orchestrator.setGroupSecondReviewer).not.toHaveBeenCalled();
+  });
+
+  it("a pair with a missing half falls back to a solo session", async () => {
+    seedPair("orch", { observer: false });
+    orchestrator.createCouncilGroup.mockClear();
+    const res = await app.request("/api/sessions/orch/continue-in-new", { method: "POST" });
+    expect(res.status).toBe(200);
+    expect(orchestrator.createCouncilGroup).not.toHaveBeenCalled();
+    expect(orchestrator.createSession).toHaveBeenCalledWith(expect.objectContaining({ backend: "claude", model: "claude-opus-5-5" }));
   });
 
   it("404s for an unknown session and 409s when bridge state is not loaded", async () => {
