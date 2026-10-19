@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.7.2](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.7.1...aura-companion-v2.7.2) (2026-10-19)
+
+
+### Bug Fixes
+
+* **sessions:** hold the continue-in-new draft on the server so a reload can't lose it ([#412](https://github.com/antonioshaman/aura-companion/issues/412)) ([eb2afa0](https://github.com/antonioshaman/aura-companion/commit/eb2afa0a9049645c580c3788c643fd8969ab4f87))
+
 ## [2.7.1](https://github.com/antonioshaman/aura-companion/compare/aura-companion-v2.7.0...aura-companion-v2.7.1) (2026-10-19)
 
 
