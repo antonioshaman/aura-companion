@@ -134,7 +134,9 @@
       "id": "saarinen",
       "signals": [
         "browser-spa",
-        "react"
+        "react",
+        "telegram-bot",
+        "telegram-mini-app"
       ],
       "domains": [
         "ui-visual-quality"
