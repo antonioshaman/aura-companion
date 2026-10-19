@@ -251,6 +251,12 @@ export interface SessionRecoveryDeps {
   subagentActivitySince?: (sessionDir: string, sinceMs: number) => boolean;
   /** Open-subagent-tool-call probe (tests inject; default tails `subagents/*.jsonl`). */
   subagentOpenToolCallSince?: (sessionDir: string, sinceMs: number) => boolean;
+  /**
+   * Diagnostics drift feed (plan Task 4): receives the SAME payload object the
+   * `silent_stdio_drift.*` log line carries, so the page and journalctl can
+   * never disagree. Optional; default no-op.
+   */
+  onDriftEvent?: (payload: Record<string, unknown>) => void;
 }
 
 export class SessionRecovery {
@@ -262,6 +268,7 @@ export class SessionRecovery {
   private readonly readWaitChannels: (pid: number) => string | null;
   private readonly subagentActivitySince: (sessionDir: string, sinceMs: number) => boolean;
   private readonly subagentOpenToolCallSince: (sessionDir: string, sinceMs: number) => boolean;
+  private readonly onDriftEvent: (payload: Record<string, unknown>) => void;
 
   // Auto-relaunch state
   private relaunchingSet = new Set<string>();
@@ -368,6 +375,26 @@ export class SessionRecovery {
     this.readWaitChannels = deps.readWaitChannels ?? ((pid) => summarizeWaitChannels(pid));
     this.subagentActivitySince = deps.subagentActivitySince ?? defaultSubagentActivitySince;
     this.subagentOpenToolCallSince = deps.subagentOpenToolCallSince ?? defaultSubagentOpenToolCallSince;
+    this.onDriftEvent = deps.onDriftEvent ?? (() => {});
+  }
+
+  /**
+   * One assembly site for every `silent_stdio_drift.*` line: log it exactly as
+   * before, then hand the same payload to the diagnostics sink. A throwing
+   * sink must never break recovery.
+   */
+  private emitDriftEvent(
+    level: "warn" | "info",
+    module: string,
+    message: string,
+    payload: Record<string, unknown>,
+  ): void {
+    log[level](module, message, payload);
+    try {
+      this.onDriftEvent(payload);
+    } catch {
+      /* diagnostics are best-effort */
+    }
   }
 
   stopDriftDetector(): void {
@@ -593,7 +620,7 @@ export class SessionRecovery {
       try {
         trackSync("drift-detector.tick", () => this.driftDetectorTick());
       } catch (err) {
-        log.warn("session-orchestrator", "silent-stdio drift detector tick failed", {
+        this.emitDriftEvent("warn", "session-orchestrator", "silent-stdio drift detector tick failed", {
           event: "silent_stdio_drift.tick_failed",
           error: err instanceof Error ? err.message : String(err),
         });
@@ -678,7 +705,7 @@ export class SessionRecovery {
         const key = `${bunLastFrameMs}:${action.reason}`;
         if (this.driftSuppressedLogged.get(info.sessionId) !== key) {
           this.driftSuppressedLogged.set(info.sessionId, key);
-          log.info(
+          this.emitDriftEvent("info",
             "session-recovery",
             action.reason === "live_subagent_activity"
               ? "silent-stdio drift kill suppressed — CLI alive mid subagent fan-out"
@@ -741,7 +768,7 @@ export class SessionRecovery {
         const key = `${bunLastFrameMs}:withhold_open_tool_call`;
         if (this.driftSuppressedLogged.get(info.sessionId) !== key) {
           this.driftSuppressedLogged.set(info.sessionId, key);
-          log.info("session-recovery", "silent-stdio drift kill withheld — main thread is inside a tool call", {
+          this.emitDriftEvent("info", "session-recovery", "silent-stdio drift kill withheld — main thread is inside a tool call", {
             event: "silent_stdio_drift.withheld_open_tool_call",
             ...evidence,
             toolCallStartedAtMs: openStartedAt,
@@ -760,7 +787,7 @@ export class SessionRecovery {
         const key = `${bunLastFrameMs}:withhold_live`;
         if (this.driftSuppressedLogged.get(info.sessionId) !== key) {
           this.driftSuppressedLogged.set(info.sessionId, key);
-          log.info("session-recovery", "silent-stdio drift kill withheld — CLI busy (no pipe_write) with live subagents", {
+          this.emitDriftEvent("info", "session-recovery", "silent-stdio drift kill withheld — CLI busy (no pipe_write) with live subagents", {
             event: "silent_stdio_drift.withheld_live",
             ...evidence,
           });
@@ -770,7 +797,7 @@ export class SessionRecovery {
       if (kill.kind === "rate_limited") {
         if (this.driftRateLimitNotified.get(info.sessionId) !== recent[0]) {
           this.driftRateLimitNotified.set(info.sessionId, recent[0]);
-          log.warn("session-recovery", "silent-stdio drift recovery rate-limited — detector may be misfiring", {
+          this.emitDriftEvent("warn", "session-recovery", "silent-stdio drift recovery rate-limited — detector may be misfiring", {
             event: "silent_stdio_drift.rate_limited",
             ...evidence,
             recentRecoveries: kill.recentRecoveries,
@@ -786,7 +813,7 @@ export class SessionRecovery {
         }
         continue;
       }
-      log.warn("session-recovery", "silent-stdio drift detected — relaunching subprocess to recover", {
+      this.emitDriftEvent("warn", "session-recovery", "silent-stdio drift detected — relaunching subprocess to recover", {
         event: "silent_stdio_drift.detected",
         ...evidence,
       });
@@ -839,7 +866,7 @@ export class SessionRecovery {
       this.driftRecoveryInFlight.delete(sessionId);
     }
     if (outcome && !outcome.ok) {
-      log.warn("session-recovery", "drift recovery relaunch failed — falling back to keepalive", {
+      this.emitDriftEvent("warn", "session-recovery", "drift recovery relaunch failed — falling back to keepalive", {
         event: "silent_stdio_drift.relaunch_failed",
         sessionId,
         error: outcome.error,
@@ -864,7 +891,7 @@ export class SessionRecovery {
       const records = readUndeliveredAssistantRecords(stall.jsonlPath, stall.bunLastFrameMs - RECOVERY_LOOKBACK_MS);
       if (records.length === 0) return;
       const { delivered, alreadyDelivered } = this.wsBridge.deliverRecoveredAssistantRecords(sessionId, records);
-      log.warn("session-recovery", "silent-stdio drift: delivered the reply the CLI wrote only to its jsonl", {
+      this.emitDriftEvent("warn", "session-recovery", "silent-stdio drift: delivered the reply the CLI wrote only to its jsonl", {
         event: "silent_stdio_drift.reply_recovered",
         sessionId,
         records: records.length,
@@ -872,7 +899,7 @@ export class SessionRecovery {
         alreadyDelivered,
       });
     } catch (err) {
-      log.warn("session-recovery", "silent-stdio drift: could not deliver the stalled reply", {
+      this.emitDriftEvent("warn", "session-recovery", "silent-stdio drift: could not deliver the stalled reply", {
         event: "silent_stdio_drift.reply_recovery_failed",
         sessionId,
         error: err instanceof Error ? err.message : String(err),
@@ -890,7 +917,7 @@ export class SessionRecovery {
     if (!cliVersion || cliVersion === SUBAGENT_LAYOUT_VERIFIED_CLI_VERSION) return;
     if (this.driftLayoutUnverifiedLogged.has(sessionId)) return;
     this.driftLayoutUnverifiedLogged.add(sessionId);
-    log.warn("session-recovery", "drift liveness gate running on an unverified CLI layout", {
+    this.emitDriftEvent("warn", "session-recovery", "drift liveness gate running on an unverified CLI layout", {
       event: "silent_stdio_drift.cli_layout_unverified",
       sessionId,
       cliVersion,
